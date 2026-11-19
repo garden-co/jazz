@@ -469,7 +469,7 @@ jobs:
       needs.examples-e2e.result == 'success' &&
       needs.rn-device-acceptance.result == 'success' &&
       needs.preview.result == 'success' &&
-      needs.adopter-verdict.result == 'success'
+      needs.adopter-verdict.outputs.status == 'PASS'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
