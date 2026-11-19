@@ -156,9 +156,10 @@ gh workflow run release-publish.yml --ref main \
   -f version=2.0.0-alpha.N -f sha=<release merge commit> -f mode=dry-run
 ```
 
-- Before the approval it resolves the prebuilt artifacts for the commit's tree
-  (`release-artifacts.yml`, or `legacy-run-ids` naming runs of the old
-  workflows), checks them, runs `cargo package` on every crate, embeds and
+- Before the approval it takes the prebuilt artifacts of the
+  `release-artifacts.yml` run that built exactly the published commit (the
+  push to `release`: wait for it to succeed; a dry run may name old
+  workflows' runs with `legacy-run-ids` instead), checks them, runs `cargo package` on every crate, embeds and
   tests the Go module, and attaches every asset to the draft release (create
   the draft with its notes first, with `github-release.yml`).
 - Every publish leg (npm, crates.io, Maven Central, Go tag, Swift mirror)

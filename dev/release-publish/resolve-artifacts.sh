@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Finds the prebuilt artifacts for a release, for release-publish.yml.
 #
-#   SHA=<commit> VERSION=<version> [ARTIFACTS_RUN_ID=<id>] [LEGACY_RUN_IDS="<id> <id> …"] \
+#   SHA=<commit> VERSION=<version> MODE=<publish|dry-run> [ARTIFACTS_RUN_ID=<id>] [LEGACY_RUN_IDS="<id> <id> …"] \
 #     dev/release-publish/resolve-artifacts.sh
 #
-# Prefers a successful release-artifacts.yml run whose release-manifest has
-# this commit's tree and version: a run on <sha> itself, or the run on a
-# `release` push that predicted the Version Packages tree (its manifest's
-# `tree`). ARTIFACTS_RUN_ID names one run instead of searching.
+# Takes the newest successful release-artifacts.yml run that built <sha>
+# itself (head_sha), whose release-manifest names the same commit, tree and
+# version (dev/release-publish/producer-run.mjs). ARTIFACTS_RUN_ID names one
+# run instead of searching; it is held to the same rule.
 #
-# Until release-artifacts.yml exists, LEGACY_RUN_IDS names the runs of the
+# Dry runs only: LEGACY_RUN_IDS names the runs of the
 # existing workflows that hold the same files under their old names (a
 # preview-jazz-tools-alpha-release run, attach-language-artifacts dry run,
 # swift-mirror dry run, publish-jazz-kotlin dry run): the workflow repacks
@@ -26,52 +26,50 @@ tree="$(gh api "repos/${GH_REPO}/git/commits/${SHA}" --jq .tree.sha)"
 echo "tree=${tree}" >> "${out}"
 echo "release ${VERSION} at ${SHA}, tree ${tree}"
 
-manifest_matches() { # <run id> -> prints source_sha when its manifest matches
+# Supply-chain rule: only a successful release-artifacts.yml run of this
+# repository that built exactly ${SHA} (head_sha), with a release-manifest
+# naming the same commit, tree and version (dev/release-publish/producer-run.mjs).
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+producer_ok() { # <run id>
   local dir
   dir="$(mktemp -d)"
-  gh run download "$1" -R "${GH_REPO}" -n release-manifest -D "${dir}" >/dev/null 2>&1 || return 1
-  local m="${dir}/manifest.json"
-  [ -f "${m}" ] || return 1
-  [ "$(jq -r .tree "${m}")" = "${tree}" ] || return 1
-  [ "$(jq -r .version "${m}")" = "${VERSION}" ] || return 1
-  jq -r '.source_sha // .sha' "${m}"
+  gh api "repos/${GH_REPO}/actions/runs/$1" > "${dir}/run.json" || return 1
+  gh run download "$1" -R "${GH_REPO}" -n release-manifest -D "${dir}" >/dev/null 2>&1 ||
+    { echo "run $1: no release-manifest"; return 1; }
+  SHA="${SHA}" TREE="${tree}" VERSION="${VERSION}" GH_REPO="${GH_REPO}" \
+    node "${here}/producer-run.mjs" "${dir}/run.json" "${dir}/manifest.json"
 }
 
 candidates=()
 if [ -n "${ARTIFACTS_RUN_ID:-}" ]; then
   candidates=("${ARTIFACTS_RUN_ID}")
-elif runs="$(gh api "repos/${GH_REPO}/actions/workflows/release-artifacts.yml/runs?status=success&per_page=50" 2>/dev/null)"; then
-  mapfile -t candidates < <(jq -r --arg sha "${SHA}" '.workflow_runs[]
-    | select(.head_sha == $sha or .head_branch == "release" or (.head_branch | startswith("changeset-release/")))
-    | .id' <<<"${runs}")
+elif runs="$(gh api "repos/${GH_REPO}/actions/workflows/release-artifacts.yml/runs?head_sha=${SHA}&status=success&per_page=50" 2>/dev/null)"; then
+  mapfile -t candidates < <(jq -r --arg sha "${SHA}" '.workflow_runs | sort_by(.created_at) | reverse | .[]
+    | select(.head_sha == $sha) | .id' <<<"${runs}")
 fi
 for run in "${candidates[@]}"; do
-  if source_sha="$(manifest_matches "${run}")"; then
-    echo "release-artifacts run ${run} (built from ${source_sha}) matches"
-    # The Inspector's provenance check takes only a run that built a real
-    # commit with this tree: the dispatch on the Version Packages head.
-    inspector_run="${run}"
-    if [ -n "${runs:-}" ]; then
-      while read -r id head; do
-        if [ "$(gh api "repos/${GH_REPO}/git/commits/${head}" --jq .tree.sha)" = "${tree}" ]; then
-          inspector_run="${id}"
-          break
-        fi
-      done < <(jq -r '.workflow_runs[] | select(.event == "workflow_dispatch" and (.head_branch | startswith("changeset-release/"))) | "\(.id) \(.head_sha)"' <<<"${runs}")
-    fi
-    echo "inspector-prebuilt from run ${inspector_run}"
+  if producer_ok "${run}"; then
+    echo "release-artifacts run ${run} built ${SHA}: its artifacts, and its inspector-prebuilt"
     {
       echo "mode=release-artifacts"
       echo "run_id=${run}"
-      echo "source_sha=${source_sha}"
-      echo "inspector_run_id=${inspector_run}"
+      echo "source_sha=${SHA}"
+      echo "inspector_run_id=${run}"
       echo "legacy={}"
     } >> "${out}"
     exit 0
   fi
 done
 if [ -n "${ARTIFACTS_RUN_ID:-}" ]; then
-  echo "::error::release-artifacts run ${ARTIFACTS_RUN_ID} has no release-manifest for tree ${tree} at ${VERSION}"
+  echo "::error::release-artifacts run ${ARTIFACTS_RUN_ID} may not be published for ${SHA} (see above)"
+  exit 1
+fi
+
+# The legacy runs were dispatched from main with a `ref` input, so their
+# head_sha is never the commit they built: they can't meet the rule, and only
+# a dry run takes them.
+if [ -n "${LEGACY_RUN_IDS:-}" ] && [ "${MODE:-}" = publish ]; then
+  echo "::error::legacy-run-ids is for dry runs only: a publish takes a release-artifacts.yml run that built ${SHA}."
   exit 1
 fi
 
