@@ -459,9 +459,18 @@ jobs:
   publish:
     name: Publish the prerelease
     # Public only after every gate that doesn't need a public release passed
-    # (the adopter gate with PASS): a NO-GO or held candidate is never
-    # published. Only the install-by-URL smoke runs after it.
-    needs: [resolve, attach-server, rc-tarballs, examples-e2e, rn-device-acceptance, preview, adopter-verdict]
+    # (the adopter gate PASS or NEEDS_REVIEW, a hold): a NO-GO candidate is
+    # never published. Only the install-by-URL smoke runs after it.
+    needs:
+      [
+        resolve,
+        attach-server,
+        rc-tarballs,
+        examples-e2e,
+        rn-device-acceptance,
+        preview,
+        adopter-verdict,
+      ]
     if: >-
       !cancelled() &&
       needs.attach-server.result == 'success' &&
@@ -469,7 +478,7 @@ jobs:
       needs.examples-e2e.result == 'success' &&
       needs.rn-device-acceptance.result == 'success' &&
       needs.preview.result == 'success' &&
-      needs.adopter-verdict.outputs.status == 'PASS'
+      (needs.adopter-verdict.outputs.status == 'PASS' || needs.adopter-verdict.outputs.status == 'NEEDS_REVIEW')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -634,6 +643,7 @@ jobs:
       actions: read
     outputs:
       status: ${{ steps.read.outputs.status }}
+      attention: ${{ steps.read.outputs.attention }}
     steps:
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with: { name: verdict, path: adopter }
@@ -643,6 +653,7 @@ jobs:
           status=$(jq -r .status adopter/verdict.json)
           jq '{status, counts, attention}' adopter/verdict.json
           echo "status=${status}" >> "$GITHUB_OUTPUT"
+          echo "attention=$(jq -c '[.attention[]? | tostring]' adopter/verdict.json)" >> "$GITHUB_OUTPUT"
           case "${status}" in
             PASS) ;;
             NEEDS_REVIEW) echo "::warning::Adopter gate: NEEDS_REVIEW (hold: a person reviews it)" ;;
@@ -722,41 +733,33 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      verdict: ${{ steps.verdict.outputs.verdict }}
     steps:
-      - name: Go / no-go
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/scripts
+          persist-credentials: false
+
+      # NO-GO fails the run. HOLD passes it, listing each hold and its owner:
+      # a person clears holds before go, and release-publish.yml shows them
+      # with the publish approval (rc-verdict.json).
+      - name: Go / hold / no-go
+        id: verdict
         env:
           RESULTS: ${{ toJSON(needs) }}
           DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
+          # The probe and the adopter gate run from the artifacts, dry run or not.
+          DRY_RUN_SKIPPABLE: attach-server,publish
           PROBE: ${{ needs.cloud-rc-probe.outputs.verdict }}
           ADOPTER: ${{ needs.adopter-verdict.outputs.status }}
+          ADOPTER_ATTENTION: ${{ needs.adopter-verdict.outputs.attention }}
           PROBE_ONLY: ${{ inputs.probe-tag != '' }}
-        run: |
-          node -e '
-            const needs = JSON.parse(process.env.RESULTS);
-            const dryRun = process.env.DRY_RUN === "true";
-            // A dry run publishes nothing, so it has no draft to probe either.
-            const probeOnly = process.env.PROBE_ONLY === "true";
-            const skippable = probeOnly
-              ? new Set(Object.keys(needs).filter((job) => !["resolve", "cloud-rc-probe"].includes(job)))
-              : dryRun
-                ? new Set(["attach-server", "publish"])
-                : new Set();
-            let go = true, hold = false;
-            for (const [job, { result }] of Object.entries(needs)) {
-              const ok = result === "success" || (skippable.has(job) && result === "skipped");
-              let note = result;
-              if (job === "cloud-rc-probe" && process.env.PROBE) note += ` (${process.env.PROBE})`;
-              if (job === "adopter-verdict" && process.env.ADOPTER) note += ` (${process.env.ADOPTER})`;
-              console.log(`${ok ? "✅" : "❌"} ${job}: ${note}`);
-              go &&= ok;
-            }
-            if (process.env.PROBE === "needs-infra") hold = true;
-            if (process.env.ADOPTER === "NEEDS_REVIEW") hold = true;
-            const holds = [
-              process.env.PROBE === "needs-infra" && "Cloud RC probe needs-infra",
-              process.env.ADOPTER === "NEEDS_REVIEW" && "adopter gate NEEDS_REVIEW",
-            ].filter(Boolean);
-            const verdict = !go ? "NO-GO" : hold ? `HOLD (${holds.join(", ")}: a person resolves it)` : "GO";
-            console.log(verdict);
-            require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, `## Release candidate: ${verdict}\n`);
-            if (verdict !== "GO") process.exit(1);'
+        run: node dev/scripts/rc-verdict.mjs
+
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rc-verdict
+          path: rc-verdict.json
+          if-no-files-found: error
