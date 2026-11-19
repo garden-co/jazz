@@ -271,9 +271,9 @@ fn an_app_without_encryption_deploys_as_before() {
 ///
 /// ```text
 /// registry: alice's account founded by an external login (app)
-/// alice's account, from a local-first session:
+/// alice's account, from a device-account session:
 ///   device request ──► ✓
-///   identity + root "local-first" ──► ✗ (founded by the app)
+///   identity + root "device-account" ──► ✗ (founded by the app)
 ///   identity + root "app"         ──► ✓
 /// ```
 #[test]
@@ -409,8 +409,9 @@ fn an_account_root_of_the_wrong_kind_is_refused() {
         commit(vec![(system_tables::DEVICE_REQUESTS, device, request)])
             .unwrap_or_else(|error| panic!("the device request: {error}"));
         // Without the registry the session's issuer would decide, and a
-        // local-first session's root would have to say "local-first".
-        commit(identity_and_root("local-first"))
+        // device-account session's root would have to say
+        // "device-account".
+        commit(identity_and_root("device-account"))
             .expect_err("the registry says the app founded the account");
         commit(identity_and_root("app"))
             .unwrap_or_else(|error| panic!("the root the registry names: {error}"));
@@ -446,7 +447,7 @@ fn the_founders_view_reads_on_the_objects_connection_inside_a_scope() {
     assert_eq!(view.founded_by_device_account(stranger), Ok(None));
     registry
         .scope("core scope", |_| {
-            // Founded by an external login: not by a local-first identity.
+            // Founded by an external login: not by a device-account identity.
             assert_eq!(view.founded_by_device_account(alice), Ok(Some(false)));
             // A device account founded inside the scope is seen at once.
             let device = accounts::execute(
@@ -676,7 +677,8 @@ fn an_unreadable_registry_refuses_the_account_checks() {
     let handle = object.handle();
     for result in [
         view.founded_by_device_account(account).map(drop),
-        view.founded_by_device_account_on(&handle, account).map(drop),
+        view.founded_by_device_account_on(&handle, account)
+            .map(drop),
         view.founded_for_another_audience(account).map(drop),
         view.founded_for_another_audience_on(&handle, account)
             .map(drop),

@@ -697,7 +697,7 @@ test("an encrypted app deploys to a Durable Object core, which keeps its declara
     assert.equal(retyped.status, 422);
     assert.match((await retyped.json()).error, /deployed with other encryption declarations/);
 
-    // A local-first account founded for another audience is refused by an
+    // A device account founded for another audience is refused by an
     // encrypting app; one in the app's own namespace is founded.
     const foreign = await post(
       mf,

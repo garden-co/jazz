@@ -784,7 +784,7 @@ pub fn revoke_sessions_route(
     })
 }
 
-/// The rule that an encrypting app serves only local-first accounts founded
+/// The rule that an encrypting app serves only device accounts founded
 /// in its own namespace (E2EE protocol R5, R6): the registry keeps no record
 /// of which namespace founded an account, so an account founded for another
 /// audience could not be told from the app's own, and no account record is
@@ -802,7 +802,7 @@ pub fn refuse_foreign_founding(
     if founding == own || !encrypts() {
         return Ok(());
     }
-    Err("an app that encrypts columns serves local-first accounts founded for its own app id only")
+    Err("an app that encrypts columns serves device accounts founded for its own app id only")
 }
 
 /// What a host needs besides the store to [`serve`] an account route.
@@ -1026,7 +1026,7 @@ fn identities_of(
     rows.collect::<Result<Vec<_>, _>>().map_err(storage_error)
 }
 
-/// How many identities of `account` are not local-first.
+/// How many identities of `account` are not device-account identities.
 fn external_identities_of(conn: &Storage, account: AccountId) -> Result<i64, jazz::db::Error> {
     let mut statement = conn
         .prepare_cached(
@@ -1052,8 +1052,8 @@ impl<R: RegistryRead> RegistryFounders<R> {
         Self { reader, app }
     }
 
-    /// An account was founded by a local-first identity when one of its
-    /// local-first identities derives its id: linking a local-first
+    /// An account was founded by a device-account identity when one of its
+    /// device-account identities derives its id: linking a device-account
     /// identity into another account keeps that account's id.
     fn founded(
         &self,
@@ -1091,10 +1091,10 @@ impl<R: RegistryRead> jazz::db::AccountRegistryView for RegistryFounders<R> {
         self.founded(account, identities_of(store, account))
     }
 
-    /// An account whose identities are all local-first and none of which
-    /// derives its id in this app's namespace was founded for another
-    /// audience (`found-local-first` and a guest's first admission may name
-    /// one). An encrypting app does not serve such accounts: this rule is
+    /// An account whose identities are all device-account identities and
+    /// none of which derives its id in this app's namespace was founded for
+    /// another audience (`found-local-first` and a guest's first admission
+    /// may name one). An encrypting app does not serve such accounts: this rule is
     /// the documented one (E2EE protocol R5, R6), and the founding routes
     /// refuse to create them. An account with an external identity is not
     /// told apart from one the app founded, so it reads as the app's.
@@ -1590,7 +1590,7 @@ mod tests {
     /// another namespace's app id; the app's own namespace, and any
     /// namespace of an app that does not encrypt, are founded.
     #[test]
-    fn found_local_first_in_another_namespace_is_refused_by_an_encrypting_app() {
+    fn found_device_account_in_another_namespace_is_refused_by_an_encrypting_app() {
         let storage = Storage::open_in_memory().unwrap();
         open(&storage).unwrap();
         let identity = |byte: u8| serde_json::json!({ "issuer": jazz::identity::DEVICE_ACCOUNT_ISSUER, "subject": Uuid::from_bytes([byte; 16]).to_string() });

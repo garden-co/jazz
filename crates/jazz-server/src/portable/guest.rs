@@ -691,7 +691,7 @@ mod tests {
             .unwrap_err();
             assert_eq!(
                 denied(refused),
-                "an app that encrypts columns serves local-first accounts founded for its own app id only",
+                "an app that encrypts columns serves device accounts founded for its own app id only",
                 "{name}"
             );
             let principal = Principal {
