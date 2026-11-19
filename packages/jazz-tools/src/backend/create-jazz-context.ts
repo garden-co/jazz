@@ -2,13 +2,7 @@ import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import { clientScope } from "../runtime/client-scope.js";
 import { isWhitespaceOnlySecret, WHITESPACE_BACKEND_SECRET } from "../accounts/registry-client.js";
-import {
-  NapiDb,
-  captureTextAnchor,
-  captureTextRange,
-  resolveTextAnchor,
-  resolveTextRange,
-} from "jazz-napi";
+import { backendNative } from "./backend-native.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissionsMap as CompiledPermissions } from "../schema-permissions.js";
@@ -128,10 +122,10 @@ interface BackendMutationErrorSink {
 class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   override textAnchors(): TextAnchors {
     return textAnchorsFrom({
-      captureTextAnchor,
-      captureTextRange,
-      resolveTextAnchor,
-      resolveTextRange,
+      captureTextAnchor: backendNative().captureTextAnchor,
+      captureTextRange: backendNative().captureTextRange,
+      resolveTextAnchor: backendNative().resolveTextAnchor,
+      resolveTextRange: backendNative().resolveTextRange,
     });
   }
 
@@ -245,7 +239,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`);
     const persistent = this.config.driver.type === "persistent";
     this.runtime = new NativeRuntimeAdapter(
-      NapiDb,
+      backendNative().Db,
       schema,
       persistent ? systemNode : (this.nodeClock?.node.slice() ?? randomNodeUuidBytes()),
       authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),

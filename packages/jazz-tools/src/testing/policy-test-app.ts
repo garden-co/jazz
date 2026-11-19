@@ -1,3 +1,4 @@
+import { installNodeEngine } from "../backend/node-native.js";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import { Db } from "../runtime/db.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
@@ -10,6 +11,9 @@ import type { WasmSchema } from "../drivers/types.js";
 import { loadTestPermissions, type TestPermissionsFile } from "./test-app.js";
 import { deployApp } from "../dev/catalogue.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
+
+// Node's engine, by direct reference (see node-native.ts).
+installNodeEngine();
 
 type PolicyTestAppSchema = { wasmSchema: WasmSchema };
 export type PolicyTestAppOptions = {
