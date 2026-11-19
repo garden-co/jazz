@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="3" skipped="0" failures="1" errors="0" timestamp="2026-11-19T04:10:36.314+00:00" time="0.028">
+    <testsuite name="flk" tests="3" skipped="0" errors="0" failures="1">
+        <testcase name="t::flaky_once" classname="flk" timestamp="2026-11-19T04:10:36.331+00:00" time="0.005">
+            <flakyFailure timestamp="2026-11-19T04:10:36.315+00:00" time="0.015" message="thread &apos;t::flaky_once&apos; (8910) panicked at src/lib.rs:6:60" type="test failure with exit code 101">thread &apos;t::flaky_once&apos; (8910) panicked at src/lib.rs:6:60:
+first attempt fails
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+                <system-out>
+running 1 test
+test t::flaky_once ... FAILED
+
+failures:
+
+failures:
+    t::flaky_once
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+
+</system-out>
+                <system-err>
+thread &apos;t::flaky_once&apos; (8910) panicked at src/lib.rs:6:60:
+first attempt fails
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+            </flakyFailure>
+        </testcase>
+        <testcase name="t::always_fails" classname="flk" timestamp="2026-11-19T04:10:36.315+00:00" time="0.009">
+            <failure message="thread &apos;t::always_fails&apos; (8911) panicked at src/lib.rs:9:25" type="test failure with exit code 101">thread &apos;t::always_fails&apos; (8911) panicked at src/lib.rs:9:25:
+real
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</failure>
+            <rerunFailure timestamp="2026-11-19T04:10:36.325+00:00" time="0.010" message="thread &apos;t::always_fails&apos; (8913) panicked at src/lib.rs:9:25" type="test failure with exit code 101">thread &apos;t::always_fails&apos; (8913) panicked at src/lib.rs:9:25:
+real
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+                <system-out>
+running 1 test
+test t::always_fails ... FAILED
+
+failures:
+
+failures:
+    t::always_fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+
+</system-out>
+                <system-err>
+thread &apos;t::always_fails&apos; (8913) panicked at src/lib.rs:9:25:
+real
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+            </rerunFailure>
+            <rerunFailure timestamp="2026-11-19T04:10:36.336+00:00" time="0.006" message="thread &apos;t::always_fails&apos; (8917) panicked at src/lib.rs:9:25" type="test failure with exit code 101">thread &apos;t::always_fails&apos; (8917) panicked at src/lib.rs:9:25:
+real
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+                <system-out>
+running 1 test
+test t::always_fails ... FAILED
+
+failures:
+
+failures:
+    t::always_fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+</system-out>
+                <system-err>
+thread &apos;t::always_fails&apos; (8917) panicked at src/lib.rs:9:25:
+real
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+            </rerunFailure>
+            <system-out>
+running 1 test
+test t::always_fails ... FAILED
+
+failures:
+
+failures:
+    t::always_fails
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+</system-out>
+            <system-err>
+thread &apos;t::always_fails&apos; (8911) panicked at src/lib.rs:9:25:
+real
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+</system-err>
+        </testcase>
+        <testcase name="t::passes" classname="flk" timestamp="2026-11-19T04:10:36.339+00:00" time="0.003"/>
+    </testsuite>
+</testsuites>
