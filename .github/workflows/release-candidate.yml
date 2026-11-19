@@ -230,7 +230,20 @@ jobs:
 
       # The run must have built exactly this commit: its manifest's sha and
       # tree, not only the run's head_sha.
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dl1
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          {
+            name: release-manifest,
+            path: manifest,
+            run-id: "${{ env.RUN_ID }}",
+            github-token: "${{ github.token }}",
+          }
+
+      - if: steps.dl1.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           {
             name: release-manifest,
@@ -341,7 +354,10 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dl2
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           {
             name: pkg-jazz-tools,
@@ -349,7 +365,20 @@ jobs:
             run-id: "${{ env.RUN_ID }}",
             github-token: "${{ github.token }}",
           }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+
+      - if: steps.dl2.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          {
+            name: pkg-jazz-tools,
+            path: packages/jazz-tools,
+            run-id: "${{ env.RUN_ID }}",
+            github-token: "${{ github.token }}",
+          }
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dl3
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           {
             name: pkg-jazz-wasm,
@@ -357,7 +386,20 @@ jobs:
             run-id: "${{ env.RUN_ID }}",
             github-token: "${{ github.token }}",
           }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+
+      - if: steps.dl3.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          {
+            name: pkg-jazz-wasm,
+            path: crates/jazz-wasm,
+            run-id: "${{ env.RUN_ID }}",
+            github-token: "${{ github.token }}",
+          }
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dl4
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           {
             name: pkg-jazz-napi,
@@ -365,7 +407,20 @@ jobs:
             run-id: "${{ env.RUN_ID }}",
             github-token: "${{ github.token }}",
           }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+
+      - if: steps.dl4.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          {
+            name: pkg-jazz-napi,
+            path: crates/jazz-napi,
+            run-id: "${{ env.RUN_ID }}",
+            github-token: "${{ github.token }}",
+          }
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dl5
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           {
             name: pkg-jazz-rn,
@@ -373,7 +428,30 @@ jobs:
             run-id: "${{ env.RUN_ID }}",
             github-token: "${{ github.token }}",
           }
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+
+      - if: steps.dl5.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          {
+            name: pkg-jazz-rn,
+            path: crates/jazz-rn,
+            run-id: "${{ env.RUN_ID }}",
+            github-token: "${{ github.token }}",
+          }
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dl6
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          {
+            name: pkg-create-jazz,
+            path: packages/create-jazz,
+            run-id: "${{ env.RUN_ID }}",
+            github-token: "${{ github.token }}",
+          }
+
+      - if: steps.dl6.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           {
             name: pkg-create-jazz,
@@ -501,7 +579,21 @@ jobs:
     steps:
       # The build's own server binaries (release-server bundles the same files
       # with SHA256SUMS, but only once every package check has finished).
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dl7
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          {
+            pattern: "jazz-tools-linux-*",
+            merge-multiple: true,
+            path: server,
+            run-id: "${{ needs.artifacts.outputs.run_id }}",
+            github-token: "${{ github.token }}",
+          }
+
+      - if: steps.dl7.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           {
             pattern: "jazz-tools-linux-*",
@@ -554,10 +646,24 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.resolve.outputs.version }}
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dl8
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with: { name: rc-npm, path: npm }
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      - if: steps.dl8.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: rc-npm, path: npm }
+
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dl9
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: rc-npm-rn, path: npm }
+
+      - if: steps.dl9.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with: { name: rc-npm-rn, path: npm }
 
       - name: Publish
@@ -715,7 +821,14 @@ jobs:
       status: ${{ steps.read.outputs.status }}
       attention: ${{ steps.read.outputs.attention }}
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dla1
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: verdict, path: adopter }
+
+      - if: steps.dla1.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with: { name: verdict, path: adopter }
       - id: read
         run: |
@@ -761,8 +874,15 @@ jobs:
             sleep 15
           done
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dl10
+        continue-on-error: true
         if: env.DRY_RUN == 'true'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: rc-npm, path: /tmp/jazz-rc-npm }
+
+      - if: steps.dl10.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with: { name: rc-npm, path: /tmp/jazz-rc-npm }
 
       - name: npm install and load
