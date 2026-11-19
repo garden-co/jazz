@@ -23,7 +23,7 @@ function fixture() {
     linkWithBackend: vi.fn(async () => makeFakeAccount()),
     logout: vi.fn(),
   };
-  const client = makeFakeClient({ authMode: "local-first", userId: "test", claims: {} });
+  const client = makeFakeClient({ authMode: "device-account", userId: "test", claims: {} });
   client.shutdown = vi.fn(async () => {});
   // Who the app's backend names; a stand-in for the browser's backend watch.
   const backend = { signedIn: true };

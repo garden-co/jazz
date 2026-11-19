@@ -42,7 +42,7 @@ it("provides signOut in the data tree without an application auth context", asyn
     createJazzSessionOwner({
       accounts,
       openClient: async () =>
-        makeFakeClient({ authMode: "local-first", userId: "test", claims: {} }),
+        makeFakeClient({ authMode: "device-account", userId: "test", claims: {} }),
     }),
   );
   function Data() {

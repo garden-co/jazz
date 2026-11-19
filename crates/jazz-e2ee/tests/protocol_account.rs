@@ -579,7 +579,7 @@ fn reset_starts_a_new_generation() {
     let phone = env.device(&mut rng);
     ledger.request(&phone, &mut rng);
     let policy = ResetPolicy {
-        local_first: false,
+        device_account: false,
         allow_account_reset: true,
     };
     // A still-active device needs no reset.
@@ -631,11 +631,11 @@ fn reset_starts_a_new_generation() {
 
     for refused_policy in [
         ResetPolicy {
-            local_first: true,
+            device_account: true,
             allow_account_reset: true,
         },
         ResetPolicy {
-            local_first: false,
+            device_account: false,
             allow_account_reset: false,
         },
     ] {
@@ -673,8 +673,8 @@ fn a_generation_counts_only_after_the_previous_one() {
         device_id: phone.id.clone(),
         epoch_id: ids::random_v4(&mut rng).unwrap(),
         kind: AccountKind::App,
-        local_first_public_key: None,
-        local_first_signature: None,
+        device_account_public_key: None,
+        device_account_signature: None,
     };
     let at = ledger.next();
     ledger.public.roots.push(Accepted::new(at, early));

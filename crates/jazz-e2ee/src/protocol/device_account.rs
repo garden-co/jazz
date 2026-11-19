@@ -1,4 +1,4 @@
-//! The local-first identity (`E2EE_PROTOCOL.md` §2.3), as
+//! The device-account identity (`E2EE_PROTOCOL.md` §2.3), as
 //! `packages/jazz-tools/src/local-first-auth` and Jazz's account registry
 //! derive it from the 32-byte account secret:
 //!
@@ -9,7 +9,7 @@
 //! - account ID: UUIDv5 of `UTF8("jazz-account-founder-v1") ‖ 0x00 ‖
 //!   UTF8(subject)` in the namespace of the application's UUID.
 //!
-//! A local-first account's root is signed with this key, and replay checks
+//! A device account's root is signed with this key, and replay checks
 //! that the key derives the account ID, so nobody without the secret, the
 //! server included, can write or substitute it.
 
@@ -30,7 +30,7 @@ const SIGN_DOMAIN: &[u8] = b"jazz-auth-sign-v1";
 const SUBJECT_NAMESPACE: &[u8; 16] = b"jazz-auth-key-v1";
 const FOUNDER_LABEL: &[u8] = b"jazz-account-founder-v1\0";
 
-/// Length of a local-first public key: a raw Ed25519 key.
+/// Length of a device-account public key: a raw Ed25519 key.
 pub const PUBLIC_KEY_BYTES: usize = 32;
 
 fn uuid_v5(namespace: &[u8; 16], name: &[&[u8]]) -> String {
@@ -60,20 +60,20 @@ fn parse_uuid(value: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
-/// The subject of a local-first public key, or `None` unless it is 32
+/// The subject of a device-account public key, or `None` unless it is 32
 /// bytes.
 pub fn subject(public_key: &[u8]) -> Option<String> {
     (public_key.len() == PUBLIC_KEY_BYTES).then(|| uuid_v5(SUBJECT_NAMESPACE, &[public_key]))
 }
 
-/// The Jazz account ID a local-first identity with `subject` founds in the
+/// The Jazz account ID a device-account identity with `subject` founds in the
 /// application `app_id` (a UUID), or `None` if `app_id` is not one.
 pub fn founder_account_id(app_id: &str, subject: &str) -> Option<String> {
     let namespace = parse_uuid(app_id)?;
     Some(uuid_v5(&namespace, &[FOUNDER_LABEL, subject.as_bytes()]))
 }
 
-/// Whether `public_key` is the local-first key of `account_id` in `domain`'s
+/// Whether `public_key` is the device-account key of `account_id` in `domain`'s
 /// application.
 pub fn derives_account(domain: &AppDomain, public_key: &[u8], account_id: &str) -> bool {
     subject(public_key)
@@ -81,7 +81,7 @@ pub fn derives_account(domain: &AppDomain, public_key: &[u8], account_id: &str) 
         .is_some_and(|derived| derived == account_id)
 }
 
-/// The signature key of a local-first public key, under the built-in
+/// The signature key of a device-account public key, under the built-in
 /// Ed25519 mechanism its signatures use.
 pub fn verifying_key(public_key: &[u8]) -> PublicKey {
     PublicKey {
@@ -90,7 +90,7 @@ pub fn verifying_key(public_key: &[u8]) -> PublicKey {
     }
 }
 
-/// Verifies a local-first signature (a `jazz.sodium.sign` v1 envelope).
+/// Verifies a device-account signature (a `jazz.sodium.sign` v1 envelope).
 pub fn verify(
     registry: &Registry,
     public_key: &[u8],
@@ -100,26 +100,26 @@ pub fn verify(
     signing::verify(registry, &verifying_key(public_key), bytes, signature)
 }
 
-/// A local-first identity's signing key, derived from the account secret.
+/// A device-account identity's signing key, derived from the account secret.
 /// The secret is not kept; the key pair is cleared on drop and never
 /// printed.
 #[derive(Clone)]
-pub struct LocalFirstIdentity {
+pub struct DeviceAccountIdentity {
     signing: KeyPair,
 }
 
-impl core::fmt::Debug for LocalFirstIdentity {
+impl core::fmt::Debug for DeviceAccountIdentity {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("LocalFirstIdentity")
+        f.debug_struct("DeviceAccountIdentity")
             .field("public_key", &self.signing.public.bytes)
             .field("signing", &"..")
             .finish()
     }
 }
 
-impl LocalFirstIdentity {
+impl DeviceAccountIdentity {
     /// The identity of an account secret (`jazz-auth-v1:` …, parsed as a
-    /// [`RecoverySecret`], which is the same 32 bytes for a local-first
+    /// [`RecoverySecret`], which is the same 32 bytes for a device
     /// account, §2.9).
     pub fn from_secret(secret: &RecoverySecret) -> ProtocolResult<Self> {
         let mut hasher = sha2::Sha512::new();
