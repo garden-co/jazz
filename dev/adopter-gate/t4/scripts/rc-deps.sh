@@ -29,6 +29,6 @@ overrides:
 """
 open(f"{app}/pnpm-workspace.yaml", "w").write(w)
 PY
-(cd "$APP" && pnpm install > "$T4_WORK/install.log" 2>&1) || { echo "FAIL pnpm install (see $T4_WORK/install.log)"; exit 1; }
+(cd "$APP" && pnpm install --no-frozen-lockfile > "$T4_WORK/install.log" 2>&1) || { echo "FAIL pnpm install (see $T4_WORK/install.log)"; exit 1; }
 other=$(grep -E "^  '?(@garden-co/jazz-napi-linux-x64-gnu|jazz-(tools|wasm|napi))@" "$APP/pnpm-lock.yaml" | grep -c -v -- "-$V.tgz")
 [ "$other" = 0 ] && echo "PASS lockfile: every jazz package on $V" || { echo "FAIL lockfile: $other jazz entries not on $V"; exit 1; }

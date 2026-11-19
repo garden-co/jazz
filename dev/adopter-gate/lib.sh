@@ -23,7 +23,7 @@ use_rc_pnpm() {
   printf 'blockExoticSubdeps: false\nstrictDepBuilds: false\noverrides:\n  jazz-wasm: file:%s/jazz-wasm-%s.tgz\n  jazz-napi: file:%s/jazz-napi-%s.tgz\n  "@garden-co/jazz-napi-linux-x64-gnu": file:%s/garden-co-jazz-napi-linux-x64-gnu-%s.tgz\n' \
     "$AG_TGZ" "$V" "$AG_TGZ" "$V" "$AG_TGZ" "$V" > pnpm-workspace.yaml
   rm -rf node_modules pnpm-lock.yaml
-  pnpm install > install-rc.log 2>&1 || { echo "FAIL rc install ($(basename "$PWD"))"; tail -5 install-rc.log; return 1; }
+  pnpm install --no-frozen-lockfile > install-rc.log 2>&1 || { echo "FAIL rc install ($(basename "$PWD"))"; tail -5 install-rc.log; return 1; }
   local stray; stray=$(grep -oE "(jazz-tools|jazz-wasm|jazz-napi[a-z0-9-]*)@2\.0[^:'( ]*" pnpm-lock.yaml | grep -vc "$V")
   [ "$stray" = 0 ] && echo "PASS lockfile all $V ($(basename "$PWD"))" || echo "FAIL lockfile has $stray non-RC jazz entries ($(basename "$PWD"))"
 }
