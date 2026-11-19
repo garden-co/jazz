@@ -29,9 +29,13 @@ body() {
   if [ -n "$cur" ] && newer "$cur" "$(ag_version)"; then
     echo "FAIL t4 vercel: can't run, $(ag_version) sorts below the eval core's $cur (a dry-run or older version; use t4_mode preview); not deploying"; return; fi
   "$AG/t4/scripts/run-t4.sh" "$(ag_version)" > "$AG_RESULTS/t4-full.log" 2>&1; local rc=$?
+  # A seeded baseline means the core had no data before. A preview's per-run core is empty by design (NOTE); the
+  # production core should carry over, so there it's REVIEW (#ci-release-speed's call). A failed seeding FAILs.
+  local seeded=REVIEW; [ "$T4_MODE" = preview ] && seeded=NOTE
   cat "$AG_RESULTS/t4-full.log" \
     | grep -E "^(PASS|FAIL|REVIEW|NOTE|FINDING|SEEDED)" \
-    | sed 's/^FINDING:\{0,1\} */FAIL t4 known bug jazz#5615 (wrong-region fall-through, fails until fixed): /; s/^SEEDED/REVIEW t4 first run: seeded/'
+    | sed 's/^FINDING:\{0,1\} */FAIL t4 known bug jazz#5615 (wrong-region fall-through, fails until fixed): /' \
+    | sed "/^SEEDED.*FAILED$/s/^SEEDED/FAIL t4 first run: seeding/; s/^SEEDED/$seeded t4 first run: seeded/"
   local links; links=$(grep -c "invalid_link_challenge" "$AG_RESULTS/t4-full.log")
   [ "$links" -gt 0 ] && echo "FAIL t4 smoke hit invalid_link_challenge $links× (jazz#5553: vercel() signs guest-link challenges per function instance)"
   # Per-step wall time (run-t4.sh stamps each "=== step @epoch"), for the release-gate budget.
