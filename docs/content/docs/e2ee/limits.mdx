@@ -1,0 +1,20 @@
+---
+title: Encryption Limits
+description: "What encrypted columns do not do yet, and what is left to the app."
+languageTabs: backend
+---
+
+- **Equality only.** Encrypted columns can be filtered by equality when they are listed in `equality`.
+  Ordering, ranges, aggregates and text search on an encrypted column fail with an error naming the
+  pattern.
+- **The backend cannot compute on encrypted content.** It relays it and works on plain columns.
+- **Keys follow members.** A member's device gets a key from another member's device; if no member
+  device that holds it is online, a new member waits, and a write waits ten seconds before it fails
+  `key-pending`.
+- **Removing a member** stops later reads through permissions and a rotation; it cannot take back what
+  the member could already read.
+- **A stale held key may seal.** A device that has not yet seen a removal keeps sealing under the key it
+  holds until it updates.
+- **No default store.** The app supplies the private store and its protection.
+- **Node first.** This is the Node client (`createJazzClient` from `jazz-tools/backend`). The browser and
+  native clients follow.

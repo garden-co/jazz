@@ -136,6 +136,8 @@ import { toError } from "./util.js";
 import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
+import { notDeclaredEncryption, type Encryption } from "../encryption/index.js";
+import { plainSchema } from "../encryption/plain-schema.js";
 
 /** `getDeviceAccountProof` hands out a session's sync proof only with this long left. */
 const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
@@ -822,7 +824,7 @@ function toWriteRecordForOperation(
   tableName: string,
 ) {
   try {
-    return toWriteRecord(data, schema, tableName);
+    return toWriteRecord(data, plainSchema(schema), tableName);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`${operation} failed: WriteError("${escapeWriteErrorReason(message)}")`);
@@ -2432,6 +2434,24 @@ export class Db {
   private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
   #authenticatedInspectorPhysicalDbName: string | null = null;
+
+  /**
+   * End-to-end encryption: device approval, recovery and the reports of rows
+   * that could not be read. Present on every `Db`; for an app that declares
+   * no encryption, using it throws `EncryptionNotDeclaredError`. Reading and
+   * writing encrypted columns needs nothing from it.
+   */
+  /**
+   * @internal Opens the runtime client for `schema` now rather than at the
+   * first query: an encrypted app starts verifying its account at open.
+   */
+  openClientFor(schema: WasmSchema): void {
+    this.getClient(schema);
+  }
+
+  get encryption(): Encryption {
+    return this.runtimeSource.encryptionHandle() ?? notDeclaredEncryption();
+  }
 
   /**
    * Protected constructor - use {@link createDb} in regular app code.

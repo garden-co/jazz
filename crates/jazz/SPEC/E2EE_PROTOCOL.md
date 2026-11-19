@@ -1226,6 +1226,9 @@ that provably fails to open (malformed, or failed authentication) is skipped
 and the next tried; a crypto provider failure fails the operation. A key is
 accepted only after it authenticates the chain (§2.7). Recovery-key
 acquisition (§2.9) and the possession check (§2.5) follow the same rule.
+Account key acquisition skips a candidate of an unregistered mechanism or
+version and reports `account-key-envelope` if it skipped such a candidate
+and none yields an authenticated key.
 
 ### 2.7 Required and optional proofs
 
@@ -2878,7 +2881,7 @@ names the table, column, space and pending count.
 | Unsupported format          | `unsupported-format`                                                                                                                                                                             | Report                                                                                              | Treat as invalid ciphertext                                                                    |
 | Encryption failed           | `encryption-failed`                                                                                                                                                                              | Fail the write                                                                                      | Submit plaintext                                                                               |
 | Provider failure            | The mechanism's `CryptoFailure` (distinct from `InvalidCiphertext`, `InvalidInput`, `NoKeyForMechanism` and a `false` verification), and a writer's failure to read back output it just produced | Fail the operation loudly; preserve the error                                                       | Report it as key unavailable, corrupted ciphertext or an invalid proof; try the next candidate |
-| Unsupported capability      | `ledger-version`, `signing-mechanism`, `signing-version`                                                                                                                                         | Leave the dependent state unresolved                                                                | Treat the record as invalid                                                                    |
+| Unsupported capability      | `ledger-version`, `signing-mechanism`, `signing-version`, `account-key-envelope`                                                                                                                 | Leave the dependent state unresolved                                                                | Treat the record as invalid                                                                    |
 | Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `missing-root-key`, `missing-signer-key`                                                                                                         | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
 | Unknown publication outcome | Publication outcome `unknown`                                                                                                                                                                    | Reconcile the original operation by its record IDs                                                  | Resubmit blindly or replay a callback or source                                                |
 | Recovery failures           | `recovery-cancelled`, `recovery-material-unusable`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                                          | Only candidate failures permit trying another delivery                                              | Attach private material to the error                                                           |
@@ -2989,11 +2992,25 @@ Limits:
   later record does not replace it. In that window a delivery that was
   deliberately broken is also attributed to the record, not to its sender.
   Removing the signing device ends the window.
+- **A copy of an unapproved device's store can answer one more challenge.**
+  A copy of an unapproved device's store taken while its protection travels
+  with it (an app-supplied file protector, a VM snapshot) can answer one more
+  challenge with an already revealed nonce, which lets a server that
+  substitutes keys pass the approval code for that one approval. Where the
+  protection is bound to the device, a copy opens nothing and answers none
+  (§2.5, §6.1).
 - **Older clients may miss a removal.** A client that cannot read a
   member's account history (a newer format) does not rotate when that
   member's device is removed, and does not deliver to it (§3.4). Clients
   that can read it do. If every updater of a space runs such an older
   client, the space is not rotated for that removal until one updates.
+- **A client that cannot read a key change keeps sealing under the key it
+  holds.** A client that cannot read a newer successor of a space (a newer
+  format, or a signing mechanism it lacks) seals new content under the
+  newest key it holds; a held key neither permits nor forbids a write
+  (§5.1). If that successor rotated the key away from a removed member, the
+  removed member may read the content such a client writes until the client
+  updates.
 - **Removal is detected from member rows; rotation is lazy.** Deleting a
   member's rows marks the space as needing rotation (§3.5); no `rotate`
   call is needed. The new key is made before the next encrypted write by an

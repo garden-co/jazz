@@ -1,0 +1,10 @@
+{
+  "title": "End-to-end Encryption",
+  "pages": [
+    "getting-started",
+    "private-store",
+    "sharing-and-keys",
+    "devices-and-recovery",
+    "limits"
+  ]
+}

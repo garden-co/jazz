@@ -1,0 +1,97 @@
+---
+title: Getting Started with Encryption
+description: "Encrypt columns so only your users' devices can read them: declare them, give each device a private store, and read and write as usual."
+languageTabs: backend
+---
+
+With end-to-end encryption, the content of some columns is sealed on your users' devices before it
+leaves them. Your server and your backend store and relay it but cannot read it. Everything else
+about Jazz stays the same: permissions decide who may read and write a row, and encryption keeps the
+content unreadable to anyone outside Jazz's permissions.
+
+## Declare the encrypted columns
+
+Encryption is declared in `jazz.app.json`. A table names the column that holds its **space** (the row
+whose members share one key), the table of those spaces, and the columns to seal:
+
+```json
+{
+  "tables": {
+    "projects": { "columns": { "name": "string", "ownerId": "uuid" } },
+    "tasks": {
+      "columns": { "projectId": "uuid", "title": "bytes", "__e2ee_eq_title": "bytes" },
+      "relations": { "project": { "rel": "projects", "column": "projectId" } },
+      "encryption": {
+        "space": "projectId",
+        "scope": "projects",
+        "columns": { "title": "string" },
+        "equality": ["title"]
+      }
+    }
+  }
+}
+```
+
+Each encrypted column is stored as `bytes`. Your code never sees that: the generated types and the
+values you write and read are the plaintext type (`title` is a string). `equality` lists the columns you
+may filter by equality; each needs a token column (`__e2ee_eq_title`) beside it.
+
+Your permissions decide who is a member of a space: members are the rows of the `__e2ee_members` table,
+and a space's rows are readable to them. See [Sharing and keys](/docs/e2ee/sharing-and-keys).
+
+## Give each device a private store
+
+A device keeps its private keys in a store that **your app supplies**: Jazz has no default, because
+protecting the keys is your decision. An app that declares encryption and opens without one fails,
+naming the option:
+
+```ts
+import { createJazzClient } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
+
+const session = await createJazzClient({
+  serverUrl,
+  app,
+  permissions,
+  store: accountStore,
+  initial: "device",
+  encryption: { store: privateStore },
+});
+```
+
+[Private store](/docs/e2ee/private-store) says what the store holds and gives a starting point.
+
+## Read and write
+
+```ts
+await session.db.insert(app.tasks, { projectId, title: "Call the venue" }).wait({ tier: "global" });
+const tasks = await session.db.all(app.tasks.where({ projectId, title: "Call the venue" }));
+```
+
+An equality filter on an `equality` column works like any other. Other filters, ordering and joins on
+an encrypted column fail with an error that names the pattern (for example "Reading encrypted table
+`tasks` with an aggregate is not supported yet"); they are never answered by scanning everything.
+
+A write to a space whose key this device does not hold yet waits for it (up to ten seconds, for a
+member waiting on another member's delivery) before it fails with the reason `key-pending`.
+
+Rows a device cannot read are left out and reported, never read as empty:
+
+```ts
+session.db.encryption.onUnreadable((report) => {
+  console.warn(report.code, report.table, report.id);
+});
+```
+
+## The backend holds no keys
+
+Your backend (`createJazz`) starts for an encrypted app and relays its clients as usual. It is not an
+encryption participant: it has no account, no identity and no keys. Its own database reads plain tables
+and the plain columns of an encrypted table as normal, never sees an encrypted column (the rows come
+back without it), refuses a write that names one ("the backend holds no encryption keys; encrypted
+columns are written by clients") and refuses a filter, ordering or selection of one. A server
+that needs to compute on encrypted content cannot; do that on a client.
+
+`db.encryption` exists on every `Db`; for an app that declares no encryption, using it throws
+`EncryptionNotDeclaredError`.
