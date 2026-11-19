@@ -4,6 +4,10 @@ export { getSubscriptionStore } from "../subscription-store-internal.js";
 export type { CacheEntryHandle, UseAllState } from "../subscription-store-internal.js";
 
 export * from "../accounts/exports.js";
+export {
+  EncryptionNeedsLocalFirstError,
+  type EncryptionNeedsLocalFirstReason,
+} from "../runtime/encryption-needs-local-first.js";
 
 export { accountRegistryUrl } from "../accounts/context.js";
 

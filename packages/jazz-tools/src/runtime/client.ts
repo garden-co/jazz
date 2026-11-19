@@ -200,6 +200,12 @@ export interface Runtime {
    * when this runtime can't tell (the transaction then commits as asked).
    */
   hasStagedTransactionWrites?(id: OpenTransactionId): boolean | undefined;
+  /**
+   * @internal Why open transaction `id` can only roll back: an operation in
+   * it was refused (a thin runtime's, touching an end-to-end encrypted
+   * column), even if the app caught that.
+   */
+  transactionRefusal?(id: OpenTransactionId): Error | undefined;
   /** Capture behind earlier owner operations without waiting for server acceptance. */
   captureSnapshot?(): Promise<SnapshotRef>;
   /** @internal A thin session's transaction request, served by its backend's client (NAPI). */
@@ -981,7 +987,58 @@ function copyWriteWaitReadiness<T extends WriteHandle<unknown, unknown>>(
 ): T {
   const ready = writeWaitReadiness.get(source);
   if (ready) writeWaitReadiness.set(target, ready);
+  const written = heldBackWrites.get(source);
+  if (written) heldBackWrites.set(target, written);
   return target;
+}
+
+/** Held-back writes: the handle each returns once it ran, and whether a wait took it. */
+const heldBackWrites = new WeakMap<
+  object,
+  { handle: Promise<WriteHandle<unknown, unknown>>; observed: boolean }
+>();
+
+/**
+ * @internal `handle` is for a write held back behind earlier ones, which may
+ * run on another client than the one `handle` was made with (the local-first
+ * one, after waiting for it). Its wait is the wait of the handle `written`
+ * resolves to. A failure before the write ran that no wait takes goes to
+ * `unobserved`, once.
+ */
+export function waitAsWritten<T extends WriteHandle<unknown, unknown>>(
+  handle: T,
+  written: Promise<WriteHandle<unknown, unknown>>,
+  unobserved: (error: unknown) => void,
+): T {
+  const entry = { handle: written, observed: false };
+  heldBackWrites.set(handle, entry);
+  written.catch((error: unknown) =>
+    queueMicrotask(() => {
+      if (!entry.observed) unobserved(error);
+    }),
+  );
+  return handle;
+}
+
+/** Wait for a held-back write: for it to run, then as the handle it returned. */
+async function waitForWritten(
+  written: Promise<WriteHandle<unknown, unknown>>,
+  tier: DurabilityTier,
+  timeoutMs: number | undefined,
+): Promise<unknown> {
+  if (timeoutMs === undefined) return (await written).wait({ tier });
+  const deadline = Date.now() + timeoutMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new WriteWaitTimeoutError(tier, timeoutMs)), timeoutMs);
+  });
+  let handle: WriteHandle<unknown, unknown>;
+  try {
+    handle = await Promise.race([written, timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+  return handle.wait({ tier, timeoutMs: Math.max(0, deadline - Date.now()) });
 }
 
 /** Validate JavaScript callers before passing a wait tier to the runtime. */
@@ -1024,6 +1081,11 @@ export class WriteHandle<T = void, WaitResult = void> {
   async wait(options: WriteWaitOptions): Promise<WaitResult> {
     const tier = resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
+    const heldBack = heldBackWrites.get(this);
+    if (heldBack) {
+      heldBack.observed = true;
+      return (await waitForWritten(heldBack.handle, tier, options.timeoutMs)) as WaitResult;
+    }
     const ready = writeWaitReadiness.get(this)?.(tier);
     return (await this.#client.waitForTransaction(
       this.txId,
@@ -1553,6 +1615,11 @@ export class JazzClient {
   hasStagedTransactionWrites(id: OpenTransactionId): boolean | undefined {
     if (this.transactionPreparations.get(id)?.unopened) return false;
     return this.runtime.hasStagedTransactionWrites?.(id);
+  }
+
+  /** @internal See {@link Runtime.transactionRefusal}. */
+  transactionRefusal(id: OpenTransactionId): Error | undefined {
+    return this.runtime.transactionRefusal?.(id);
   }
 
   rollbackTransaction(id: OpenTransactionId): Promise<boolean> {

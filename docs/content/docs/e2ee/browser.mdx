@@ -1,0 +1,169 @@
+---
+title: Encryption in the Browser
+description: "Encrypted columns in a web app: nothing to configure for the keys, what happens in a second tab, and how an app's own users back up their recovery key."
+languageTabs: backend
+---
+
+In a browser the client keeps the device's keys for you. You pass your app and encryption works (for now with in-page storage, `driver: { type: "memory" }`; see [limits](/docs/e2ee/limits)):
+
+```ts
+import { createJazzClient } from "jazz-tools/client";
+import { app } from "./jazz.generated";
+
+const session = await createJazzClient({
+  serverUrl: "/jazz",
+  driver: { type: "memory" },
+  encryption: { app },
+  client: () => import("jazz-tools/local-first"),
+});
+```
+
+Passing `app` is how the client learns which columns are encrypted before the first query, so the
+device's keys are ready when your code reads. A plain app leaves `encryption` out and opens as before.
+Reads, writes and equality filters are the ones in [Getting started](/docs/e2ee/getting-started);
+`db.encryption` is the same handle as on Node once the local-first client has loaded (see below for before).
+
+`client` is the loader for the local-first client. Without it the app runs on the thin client, which
+holds no keys and so cannot read or write an encrypted column (see the next section).
+
+## Before the local-first client has loaded
+
+With `client`, the app starts on the thin client and upgrades to the local-first client in the
+background. The thin client holds no keys, so it never sends or reads the plaintext of an encrypted
+column. Until the upgrade has finished:
+
+- **Plain data works at once.** Queries and writes that touch no encrypted column run on the thin
+  client, as in an app without encryption. Deleting a row never touches one.
+- **Anything that touches an encrypted column waits.** Inserting into a table with encrypted columns,
+  updating or filtering on an encrypted column, and selecting one all wait for the local-first client,
+  for up to 30 seconds, and start loading it if it has not started. The 30 seconds cover the load and
+  the new client verifying the account. After the wait they run as they would on a local-first
+  client, including its own refusals. If the client fails to load, or has not finished in 30 seconds,
+  the call rejects with an `EncryptionNeedsLocalFirstError` (its `reason` is `"load-failed"`, with the
+  loader's error as `cause`, or `"timeout"`). Signing out ends every waiting call with
+  `DbClosedError`: the client shuts down first. A call you make on that `Db` afterwards, such as one
+  on a handle you kept, gets `DbReplacedError`.
+- **Plain reads do not see queued plain writes.** While a write waits for the local-first client, a
+  plain read on the thin client answers at once, from what the thin client has. It does not see the
+  plain writes queued behind the waiting one: they are not sent until the wait ends.
+- **A plain read can wait behind a streaming write that waits.** A streaming write
+  (`insertStreaming`, `updateStreaming`, `upsertStreaming`) that touches an encrypted column waits for
+  the local-first client, and a plain read made meanwhile can wait behind it, for up to 30 seconds.
+  It loses nothing: it runs when the wait ends.
+- **Writes made meanwhile are kept in memory and run in order.** A write that waits holds back the
+  writes after it, plain ones too, so they take effect in the order you made them. They are lost if the
+  page closes before the upgrade: a write that has not been sent is not saved. If the wait fails, the
+  writes queued behind it fail with the same error, and a write nobody awaited is reported to
+  `db.onMutationError`. A write that waits is not run after the account changes.
+- **Writes wait for a refused callback transaction.** While a callback transaction that the thin
+  client refused waits for the local-first client, writes you make run after the load, in the order
+  you made them, and after the transaction's rerun starts. During the rerun, other writes behave as
+  they do beside any pending transaction.
+- **A transaction callback may run twice.** `db.transaction(...)` and `db.serializableTransaction(...)`
+  start on the thin client. If an operation inside one touches an encrypted column, Jazz rolls the
+  transaction back (even if your callback catches the error), waits for the local-first client and runs
+  the callback once more on it. Before the full client has loaded, therefore, a callback may run twice,
+  so keep side effects (network calls, analytics, counters outside the database) outside it. While
+  such a transaction waits, the writes you make after its callback has finished wait with it, and run
+  in the order you made them when the wait ends (on the local-first client, once it has loaded).
+  Nothing is held while the callback runs again: writes then behave as beside any pending transaction
+  on the local-first client. A
+  transaction that begins with `beginTransaction()` is not rerun: it fails with reason
+  `"transaction"` and starts the load, and you begin it again once `db.upgradeToLocalFirst(loader)` has
+  resolved. Such a transaction is also not held behind a callback transaction that is waiting for the
+  local-first client, so it can begin and fail before it; begin it again after the load.
+- **Live queries wait.** A live query on encrypted columns emits nothing until the local-first client
+  has loaded, then opens. If that takes 30 seconds, Jazz logs one warning naming the table and the query
+  stays loading; it opens if the client loads later. A failed load, a sign-out or closing the `Db`
+  ends it with an error instead.
+- **Without a loader** the same operations fail at once with an `EncryptionNeedsLocalFirstError`
+  (reason `"no-loader"`) that says to pass `client`, and Jazz also logs it to the console once per page.
+  A thin `Db` opened directly, outside a Jazz session, fails with reason `"direct-thin"`.
+
+### `db.encryption` before the client has loaded
+
+In an app that declares encryption, `db.encryption` on a thin `Db` is a stand-in for the real handle,
+which only the local-first client has:
+
+- **Async calls wait like any other operation**: `ready()`, `deviceId()`, `devices.*`, `recovery.*`,
+  `keys.*` and `members.*` wait up to 30 seconds for the local-first client, start loading it if it
+  has not started, then run on the real handle. The 30 seconds cover the load and the new client
+  verifying the account. While the `Db` is thin, `ready({ timeoutMs })` waits for the shorter of
+  your `timeoutMs` and those 30 seconds, then rejects with reason `"timeout"`. They reject with the same `EncryptionNeedsLocalFirstError` as
+  above (reason `"no-loader"` without a loader). `await db.encryption.ready()` is the way to wait for
+  the keys: on a thin `Db` it waits for the upgrade first, then for the device's keys to be ready.
+- **A handle you took while thin keeps working** after the upgrade; you do not need to read
+  `db.encryption` again. After a sign-out its calls reject with `DbReplacedError`, and a call still
+  waiting at the sign-out with `DbClosedError`.
+- **`onReport`, `onUnreadable` and `onChallenge` attach after the upgrade, and do not start it.**
+  Attach them at start-up as you would anywhere: they register at once and begin to fire when the
+  local-first client arrives for any other reason. They return a function that stops the listener at
+  any time, before or after it attached.
+- **`recovery.create()` throws** an `EncryptionNeedsLocalFirstError` with reason `"not-loaded"`,
+  because it is synchronous and cannot wait. It starts the load: call it again after
+  `await db.encryption.ready()`.
+
+An app that declares no encryption still gets `EncryptionNotDeclaredError` from `db.encryption`.
+
+## Where the keys live
+
+The device's keys are saved in the browser's IndexedDB and protected by a key that scripts on your
+page can use but can never read out (a non-extractable WebCrypto key). Clearing the site's data clears
+the keys; the device then enrols again as a new device, like any other new device (see
+[Devices and recovery](/docs/e2ee/devices-and-recovery)). To keep keys somewhere else, pass your own
+`store` next to `app`: it is the [private store](/docs/e2ee/private-store) every platform uses.
+
+## Tabs
+
+Every tab of your app is one device. Each tab opens the same saved keys and does its own reading and
+writing, so a tab needs nothing from another tab to work.
+
+- **Saving is safe.** Each change to the saved keys is one IndexedDB transaction that checks what it
+  replaces. If two tabs save at once, one wins and the other reads the winner's state again and merges
+  it; neither drops the other's keys, and a device's one-time approval secret is never used twice.
+- **The first tab makes the key.** The key that protects the saved keys is made under a Web Lock, so a
+  second tab that opens at the same moment waits for the first tab's key and uses it. Where the browser
+  has no Web Locks, the tab that loses the race uses the key that won.
+- **Background work may run in every tab.** Each tab checks for keys to hand to new members and
+  devices. When tabs do the same pass, the first one to commit wins and the others find nothing left to
+  do, so doing it twice is harmless. It costs one more pass of reads per open tab; if that matters to
+  you, call `db.encryption.keys.deliver()` only from the tab you pick.
+- **Deleting is visible.** If the device's saved state is deleted while another tab has it open, that
+  tab stops writing keys instead of making the state again.
+
+## Backing up the recovery key of your own users
+
+When your app signs its users in, there is no account secret to restore, so an account needs a recovery
+key made for it. When `db.encryption.ready()` returns `"active"` and `db.encryption.recovery.list()` is
+empty, offer a backup from a button (creating a passkey needs a click):
+
+```ts
+const result = await session.db.encryption.recovery.enable({
+  appName: "My app",
+  accountName: user.email,
+});
+if (result.method === "phrase") showToKeep(result.phrase);
+```
+
+With a passkey available the recovery key is kept in a passkey on the user's device, named as the
+encryption recovery key of the account. Where there is none, or the user declines it, `enable` returns
+the 24-word phrase to keep. Either way the recovery key is registered. After losing every device, the
+user signs in on a new one, which is `awaiting-approval`, and recovers with their passkey or their phrase:
+
+```ts
+await session.db.encryption.recovery.restoreFromPasskey({ appName: "My app" });
+// or
+await session.db.encryption.recovery.restore(phrase);
+```
+
+The passkey is the backup: the recovery secret is stored in the passkey's user handle, which is what lets a
+new device read it back, and passkey providers (a platform account, a password manager) may sync passkeys
+to the user's other devices, so the secret is readable wherever the provider syncs the passkey. Treat the
+passkey's account like the recovery phrase. `enable` creates the passkey before it registers the recovery
+key (creating one needs the click), so a call that fails part way, for example when the server is not
+reachable, can leave a passkey for a recovery key that was never registered; call `enable` again, and the
+user may see the unused passkey in their picker and can delete it.
+
+The phrase is a different phrase from a local-first account's own recovery phrase: entering the wrong
+one fails. Accounts that are local-first device accounts need none of this: restoring the account
+restores encryption with it.

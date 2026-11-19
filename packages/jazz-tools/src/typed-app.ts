@@ -1467,6 +1467,16 @@ export interface CompiledAppSchema {
   readonly computed?: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>;
   /** Transformed columns: table → column → transform name. */
   readonly transforms?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /** Encrypted columns: schema hash → table → the declaration of its encryption. */
+  readonly encryption?: {
+    /** The app-wide settings (Rust `EncryptionSettings`). */
+    readonly settings?: {
+      readonly allowAccountReset?: boolean;
+      /** The mechanism selection and allow-list, as written in the app file. */
+      readonly mechanisms?: unknown;
+    };
+    readonly versions?: Readonly<Record<string, object>>;
+  };
 }
 
 /** Relations as the generator may emit them beside `schema`. */

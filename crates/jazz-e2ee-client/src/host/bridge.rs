@@ -48,6 +48,13 @@ impl JsStore {
         *self.wake.borrow_mut() = Some(wake);
     }
 
+    /// Asks the host to tick now (the same call as when a request is queued).
+    pub fn request_wake(&self) {
+        if let Some(wake) = self.wake.borrow().as_ref() {
+            wake();
+        }
+    }
+
     /// The requests queued since the last call, as JSON texts
     /// `{ "id", "op", ... }`.
     pub fn take_requests(&self) -> Vec<String> {
