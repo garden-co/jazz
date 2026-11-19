@@ -9,7 +9,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { expectedProblems, manifestProblems, producerRunProblems } from "./producer-run.mjs";
+import {
+  TRUSTED_CACHE_GUARD,
+  expectedProblems,
+  hasTrustedCacheGuard,
+  manifestProblems,
+  producerRunProblems,
+} from "./producer-run.mjs";
 
 const repo = "garden-co/jazz";
 const sha = "a".repeat(40);
@@ -29,7 +35,8 @@ const run = (overrides = {}) => ({
   ...overrides,
 });
 const manifest = (overrides = {}) => ({ sha, tree, version, ...overrides });
-const ok = (r, headTree = tree) => producerRunProblems(r, { tree, repo, headTree });
+const ok = (r, headTree = tree, guarded = true) =>
+  producerRunProblems(r, { tree, repo, headTree, guarded });
 
 test("the published commit's own run on release is accepted", () => {
   assert.deepEqual(ok(run()), []);
@@ -192,4 +199,75 @@ test("changeset-release reuse rests on the trusted-cache control", () => {
     "utf8",
   );
   assert.match(source, /dev\/gates\/test\/release-artifacts-trusted-caches\.test\.mjs/);
+});
+
+const guarded = `name: Release artifacts\non: push\nenv:\n  # Fail closed.\n  ${TRUSTED_CACHE_GUARD}\n  OTHER: x\njobs: {}\n`;
+
+test("the trusted-cache guard is read from release-artifacts.yml's top-level env", () => {
+  assert.equal(hasTrustedCacheGuard(guarded), true);
+  assert.equal(hasTrustedCacheGuard("name: x\nenv:\n  OTHER: x\njobs: {}\n"), false);
+  assert.equal(hasTrustedCacheGuard(""), false);
+  // Not the exact expression, or not at the top level: no guard.
+  assert.equal(hasTrustedCacheGuard(guarded.replace("merge-group/", "anything/")), false);
+  assert.equal(
+    hasTrustedCacheGuard(`env:\n  OTHER: x\njobs:\n  a:\n    env:\n      ${TRUSTED_CACHE_GUARD}\n`),
+    false,
+  );
+});
+
+test("a tree-equal changeset-release run whose published tree lacks the guard is refused", () => {
+  const vp = run({
+    event: "workflow_dispatch",
+    head_branch: "changeset-release/release",
+    head_sha: vpHead,
+  });
+  assert.deepEqual(ok(vp, tree, true), []);
+  assert.match(ok(vp, tree, false).join(";"), /trusted-cache guard/);
+});
+
+test("the same run on release is accepted without the guard", () => {
+  assert.deepEqual(ok(run({ head_sha: vpHead }), tree, false), []);
+});
+
+test("the CLI takes the guard from RELEASE_ARTIFACTS_WORKFLOW", () => {
+  const dir = mkdtempSync(join(tmpdir(), "producer-guard-"));
+  const script = fileURLToPath(new URL("./producer-run.mjs", import.meta.url));
+  writeFileSync(
+    join(dir, "run.json"),
+    JSON.stringify(run({ head_branch: "changeset-release/release", head_sha: vpHead })),
+  );
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest({ sha: vpHead })));
+  writeFileSync(join(dir, "guarded.yml"), guarded);
+  writeFileSync(join(dir, "old.yml"), "env:\n  OTHER: x\n");
+  const env = {
+    ...process.env,
+    SHA: sha,
+    TREE: tree,
+    VERSION: version,
+    GH_REPO: repo,
+    HEAD_TREE: tree,
+  };
+  const cli = (workflow) =>
+    execFileSync("node", [script, join(dir, "run.json"), join(dir, "manifest.json")], {
+      env: { ...env, RELEASE_ARTIFACTS_WORKFLOW: join(dir, workflow) },
+      encoding: "utf8",
+    });
+  cli("guarded.yml");
+  assert.throws(
+    () => cli("old.yml"),
+    (error) => error.status === 1 && /trusted-cache guard/.test(error.stdout),
+  );
+});
+
+test("the guard constant is jazz#6168's expression, as resolve-artifacts.sh checks it", () => {
+  assert.equal(
+    TRUSTED_CACHE_GUARD,
+    "JAZZ_TRUSTED_CACHE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) && 'true' || 'false' }}",
+  );
+  const script = readFileSync(
+    fileURLToPath(new URL("./resolve-artifacts.sh", import.meta.url)),
+    "utf8",
+  );
+  assert.match(script, /contents\/\.github\/workflows\/release-artifacts\.yml\?ref=\$\{SHA\}/);
+  assert.match(script, /RELEASE_ARTIFACTS_WORKFLOW="\$\{workflow_at_sha\}"/);
 });

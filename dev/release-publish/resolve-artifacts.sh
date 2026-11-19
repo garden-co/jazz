@@ -32,6 +32,11 @@ echo "release ${VERSION} at ${SHA}, tree ${tree}"
 # `changeset-release/*` (push or dispatch) that built a commit with this tree, and whose release-manifest
 # names that commit, tree and version. A run of ${SHA} itself comes first.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# release-artifacts.yml as the published commit has it: a changeset-release/*
+# producer counts only if it carries the trusted-cache guard (jazz#6168).
+workflow_at_sha="$(mktemp)"
+gh api "repos/${GH_REPO}/contents/.github/workflows/release-artifacts.yml?ref=${SHA}" --jq .content 2>/dev/null |
+  base64 -d > "${workflow_at_sha}" 2>/dev/null || : > "${workflow_at_sha}"
 producer_ok() { # <run id> -> prints the run's head_sha when it may be imported
   local dir head head_tree
   dir="$(mktemp -d)"
@@ -41,6 +46,7 @@ producer_ok() { # <run id> -> prints the run's head_sha when it may be imported
   gh run download "$1" -R "${GH_REPO}" -n release-manifest -D "${dir}" >/dev/null 2>&1 ||
     { echo "run $1: no release-manifest" >&2; return 1; }
   SHA="${SHA}" TREE="${tree}" VERSION="${VERSION}" GH_REPO="${GH_REPO}" HEAD_TREE="${head_tree}" \
+    RELEASE_ARTIFACTS_WORKFLOW="${workflow_at_sha}" \
     node "${here}/producer-run.mjs" "${dir}/run.json" "${dir}/manifest.json" >&2 || return 1
   echo "${head}"
 }

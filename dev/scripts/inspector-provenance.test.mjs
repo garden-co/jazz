@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { TRUSTED_CACHE_GUARD } from "../release-publish/producer-run.mjs";
 import {
   inspectorRunSource,
   inspectorBranchRefPath,
@@ -209,4 +210,60 @@ test("rejects an unapproved producer before querying commits or branch", () => {
     /unapproved producer/,
   );
   assert.equal(requests, 1);
+});
+
+test("a changeset-release release-artifacts run needs the guard in the deployed tree", () => {
+  const vpRun = run({ event: "workflow_dispatch", head_branch: "changeset-release/release" });
+  const guardedWorkflow = `name: x\nenv:\n  ${TRUSTED_CACHE_GUARD}\njobs: {}\n`;
+  assert.equal(
+    verifyInspectorHandoff(
+      handoff({ run: vpRun, deploymentReleaseArtifactsWorkflow: guardedWorkflow }),
+    ),
+    artifactSha,
+  );
+  assert.throws(
+    () =>
+      verifyInspectorHandoff(
+        handoff({ run: vpRun, deploymentReleaseArtifactsWorkflow: "env:\n  X: y\n" }),
+      ),
+    /trusted-cache guard/,
+  );
+  // A release run needs no guard.
+  assert.equal(verifyInspectorHandoff(handoff()), artifactSha);
+});
+
+test("GitHub orchestration reads release-artifacts.yml at the deployed commit for a changeset-release run", () => {
+  const vpRun = run({ event: "workflow_dispatch", head_branch: "changeset-release/release" });
+  for (const [workflow, ok] of [
+    [`env:\n  ${TRUSTED_CACHE_GUARD}\n`, true],
+    ["env:\n  X: y\n", false],
+  ]) {
+    const paths = [];
+    const responses = [
+      vpRun,
+      handoff().artifactCommit,
+      handoff().deploymentCommit,
+      handoff().branchRef,
+      { content: Buffer.from(workflow).toString("base64"), encoding: "base64" },
+    ];
+    const verify = () =>
+      verifyInspectorRunFromGitHub(
+        {
+          GITHUB_REPOSITORY: repository,
+          SOURCE_BRANCH: "release",
+          SOURCE_SHA: deploySha,
+          ARTIFACT_RUN_ID: "123",
+        },
+        (path) => {
+          paths.push(path);
+          return responses.shift();
+        },
+      );
+    if (ok) assert.equal(verify(), artifactSha);
+    else assert.throws(verify, /trusted-cache guard/);
+    assert.equal(
+      paths[4],
+      `repos/${repository}/contents/.github/workflows/release-artifacts.yml?ref=${deploySha}`,
+    );
+  }
 });
