@@ -102,6 +102,7 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-storage-compat",
     "test-ts",
     "test-react-native",
+    "warm-native-builds",
   ].includes(jobName)
     ? 16
     : 4;
@@ -249,9 +250,27 @@ const assertEntryCacheTrustBoundary = (source) => {
       "test-rust",
       "trusted",
       "untrusted",
+      "warm",
     ],
     "the credential boundary must account for every entry-workflow job",
   );
+  // A covered main push (the only push that skips the suite) still warms
+  // main's native build cache: main's own trusted credentials, warm scope only.
+  const warm = entryJobs.warm;
+  assert.deepEqual(
+    Object.keys(warm).sort(),
+    ["if", "needs", "permissions", "secrets", "uses", "with"],
+    "warm caller credential surface must stay explicit",
+  );
+  assert.equal(
+    warm.if,
+    "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-coverage.outputs.covered == 'true'",
+  );
+  assert.deepEqual(warm.needs, ["main-coverage"]);
+  assert.deepEqual(warm.permissions, { contents: "read", "id-token": "write", packages: "read" });
+  assert.equal(warm.uses, "./.github/workflows/ci-suite.yml");
+  assert.deepEqual(warm.with, { "trusted-cache": true, "sccache-write": true, scope: "warm" });
+  assert.equal(warm.secrets, "inherit");
   const {
     untrusted,
     trusted,
@@ -2054,12 +2073,14 @@ test("CI rejects inherited live-log timing overrides", () => {
 test("ready PRs run only the lint partition and drafts run nothing", () => {
   const suite = parse(workflowSuite);
   assert.deepEqual(suite.on.workflow_call.inputs.scope, {
-    description: "Which partitions to run, full, fast or none.",
+    description: "Which partitions to run, full, fast, warm or none.",
     required: false,
     type: "string",
     default: "full",
   });
-  assert.equal(suite.jobs.lint.if, "inputs.scope != 'none'");
+  assert.equal(suite.jobs.lint.if, "inputs.scope == 'full' || inputs.scope == 'fast'");
+  // The warm scope (covered main pushes) runs nothing but the cache warm-up.
+  assert.equal(suite.jobs["warm-native-builds"].if, "inputs.scope == 'warm'");
   for (const name of [
     "test-rust-workspace",
     "test-storage-compat",
@@ -2096,6 +2117,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
       "test-rust-workspace",
       "test-storage-compat",
       "test-ts",
+      "warm-native-builds",
     ],
     "a new suite job must declare which scope runs it",
   );

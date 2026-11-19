@@ -52,6 +52,7 @@ export const ciPartitionJobs = Object.freeze({
   go: "test-go",
   kotlin: "test-kotlin",
   "kotlin-android": "test-kotlin-android",
+  "warm-native-builds": "warm-native-builds",
 });
 
 /** The published API crates whose docs CI builds with warnings denied (`Rust API rustdoc`). */
@@ -421,6 +422,17 @@ export const ciPartitions = Object.freeze({
     command("Go bindings", "bash", ["dev/gates/go-bindings.sh"], {
       env: { JAZZ_GO_TS_MAIN_BACKEND: "1" },
     }),
+  ]),
+  // Fills the native build cache (dev/artifacts/native-build-cache.mjs) for
+  // main's tree: the sealed napi/wasm pair and the Durable Object host. It
+  // checks nothing new; the producer still validates and seals what it built.
+  "warm-native-builds": Object.freeze([
+    command("native correctness-artifact producer", "node", [
+      "dev/gates/ensure-correctness-artifacts.mjs",
+    ]),
+    command("Durable Object host", "node", [
+      "packages/jazz-tools/scripts/ensure-durable-object-host.mjs",
+    ]),
   ]),
   // jazz-kotlin over jazz-ffi, and the StagePlan Kotlin CLI and the docs todo
   // app's Kotlin snippets end to end against `jazz-tools server`, on the JVM.

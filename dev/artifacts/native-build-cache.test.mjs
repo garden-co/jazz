@@ -151,4 +151,11 @@ test("only producer builds from a clean checkout use the cache", () => {
   });
   assert.equal(cache.key, keyFor({ args: [], env: { JAZZ_ARTIFACT_BUILD_LEASE: "lease" } }));
   assert.equal(NATIVE_BUILD_CACHE_DIR, "node_modules/.cache/jazz-native-builds");
+  // The Durable Object host build runs under the TS consumer, not the
+  // producer's lease; it opts out of the lease, never out of the clean check.
+  assert.ok(nativeBuildCache(root, build, { env: {}, clean: () => true, requireLease: false }));
+  assert.equal(
+    nativeBuildCache(root, build, { env: {}, clean: () => false, requireLease: false }),
+    undefined,
+  );
 });

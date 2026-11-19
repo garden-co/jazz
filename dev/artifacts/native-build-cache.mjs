@@ -208,8 +208,12 @@ export function storeNativeBuild(cacheRoot, key, staging) {
  * under the correctness producer's lease, or from a checkout whose tracked
  * files are not the whole input set.
  */
-export function nativeBuildCache(root, build, { env = process.env, clean = isCleanCheckout } = {}) {
-  if (!env.JAZZ_ARTIFACT_BUILD_LEASE) return undefined;
+export function nativeBuildCache(
+  root,
+  build,
+  { env = process.env, clean = isCleanCheckout, requireLease = true } = {},
+) {
+  if (requireLease && !env.JAZZ_ARTIFACT_BUILD_LEASE) return undefined;
   if (!clean(root)) {
     console.log("native build cache: checkout has uncommitted changes; building without it");
     return undefined;
