@@ -7,7 +7,7 @@
 // scenario's `prepare` (untimed), then times `run`: from the user action until
 // the awaited content is visible. `finish` runs untimed after each iteration.
 import assert from "node:assert/strict";
-import { afterAll, beforeAll, bench } from "vitest";
+import { afterAll, beforeAll, test } from "vitest";
 import {
   cpuByGroup,
   eventsSince,
@@ -26,6 +26,8 @@ const filter = process.env.BENCH_FILTER || "";
 export function defineLoadTimeBenchmarks(appId, load) {
   const cases = loadTimeCases.filter((c) => c.app === appId);
   assert.ok(cases.length, `${appId} has no cases in metadata.ts`);
+  const selected = cases.filter((c) => benchmarkName(c).includes(filter));
+  if (!selected.length) return;
   let server, browser, app;
 
   const trace = (line) => tracing && console.log(`[trace ${new Date().toISOString()}] ${line}`);
@@ -64,52 +66,48 @@ export function defineLoadTimeBenchmarks(appId, load) {
     await server?.stop();
   }, 120_000);
 
-  for (const c of cases) {
-    const name = benchmarkName(c);
-    if (!name.includes(filter)) continue;
-    let ctx,
-      round = 0,
-      phase;
-    bench(
-      name,
-      async () => {
-        if (!tracing) return app.scenarios[c.scenario].run(ctx);
-        const t0 = now();
-        const cpu0 = cpuByGroup();
-        await app.scenarios[c.scenario].run(ctx);
-        const ms = now() - t0;
-        const cpu1 = cpuByGroup();
-        const used = Object.keys(cpu1)
-          .map((k) => [k, cpu1[k] - (cpu0[k] ?? 0)])
-          .filter(([, v]) => v >= 0.05)
-          .map(([k, v]) => `${k}=${v.toFixed(2)}s`)
-          .join(" ");
-        phase.push(`run ${Math.round(ms)} ms (cpu ${used})`);
-        for (const e of eventsSince(t0)) phase.push(`  +${Math.round(e.t - t0)} ms ${e.what}`);
-      },
-      {
-        iterations: rounds,
-        time: 0,
-        warmupIterations: 0,
-        warmupTime: 0,
-        setup(task) {
-          // Vitest passes options to Bench, so install per-sample hooks on its Task.
-          const scenario = () => app.scenarios[c.scenario];
-          task.opts.beforeEach = async () => {
+  // CodSpeed includes the test name in its benchmark URI. An unnamed group
+  // preserves the existing file::scenario identifiers across the Vitest upgrade.
+  test("", { timeout: 600_000 * selected.length }, async ({ bench }) => {
+    for (const c of selected) {
+      const name = benchmarkName(c);
+      const scenario = app.scenarios[c.scenario];
+      let ctx,
+        phase,
+        round = 0;
+      await bench(
+        name,
+        {
+          async beforeEach() {
             phase = [];
             const t0 = now();
-            ctx = (await scenario().prepare?.()) ?? {};
+            ctx = (await scenario.prepare?.()) ?? {};
             phase.push(`prepare ${Math.round(now() - t0)} ms`);
-          };
-          task.opts.afterEach = async () => {
+          },
+          async afterEach() {
             const t0 = now();
-            await scenario().finish?.(ctx);
+            await scenario.finish?.(ctx);
             ctx = undefined;
             phase.push(`finish ${Math.round(now() - t0)} ms`);
             trace(`${name} #${++round}\n    ${phase.join("\n    ")}`);
-          };
+          },
         },
-      },
-    );
-  }
+        async () => {
+          if (!tracing) return scenario.run(ctx);
+          const t0 = now();
+          const cpu0 = cpuByGroup();
+          await scenario.run(ctx);
+          const ms = now() - t0;
+          const cpu1 = cpuByGroup();
+          const used = Object.keys(cpu1)
+            .map((k) => [k, cpu1[k] - (cpu0[k] ?? 0)])
+            .filter(([, v]) => v >= 0.05)
+            .map(([k, v]) => `${k}=${v.toFixed(2)}s`)
+            .join(" ");
+          phase.push(`run ${Math.round(ms)} ms (cpu ${used})`);
+          for (const e of eventsSince(t0)) phase.push(`  +${Math.round(e.t - t0)} ms ${e.what}`);
+        },
+      ).run({ iterations: rounds, time: 0, warmup: false });
+    }
+  });
 }

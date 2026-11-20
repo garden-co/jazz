@@ -10,7 +10,7 @@
     "test": "pnpm test:config-security && pnpm test:e2e",
     "test:e2e": "playwright test",
     "test:config-security": "tsx --test e2e/config-security.spec.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "jazz-napi": "workspace:*",

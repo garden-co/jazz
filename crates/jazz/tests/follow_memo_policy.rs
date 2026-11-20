@@ -118,27 +118,31 @@ fn two_identities_follow_one_key(alice_first: bool) {
     let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
     let (alice_subject, bob_subject) = (alice.principal_parts().1, bob.principal_parts().1);
     for (n, owner) in [(1, &alice_subject), (2, &bob_subject), (3, &alice_subject)] {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "users",
-                id(1, n),
-                AuthorSubject::SYSTEM,
-                cells(&[("name", text(&format!("u{n}"))), ("owner", text(owner))]),
-            )
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            "users",
+            cells(&[("name", text(&format!("u{n}"))), ("owner", text(owner))]),
+            jazz::db::InsertOptions {
+                row_id: Some(id(1, n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     }
     for (n, sender) in [(1, 1), (2, 2)] {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "messages",
-                id(2, n),
-                AuthorSubject::SYSTEM,
-                cells(&[
-                    ("senderId", Value::Uuid(id(1, sender).0)),
-                    ("body", text(&format!("m{n}"))),
-                ]),
-            )
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            "messages",
+            cells(&[
+                ("senderId", Value::Uuid(id(1, sender).0)),
+                ("body", text(&format!("m{n}"))),
+            ]),
+            jazz::db::InsertOptions {
+                row_id: Some(id(2, n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     }
     // Sessions are served in the order they were accepted.
     let order = if alice_first {

@@ -57,7 +57,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-21`: Wire messages MUST name nodes by UUID, authors by identity and schemas by version id; node-local codes never leave their database.
 - `INV-SYNC-24`: A fresh subscription MUST receive its whole result; only a resumed one may be sent just the rows changed after the seq it held.
 - `INV-SYNC-25`: A resumed subscription MUST leave the replica with the same rows as a fresh subscription to the same query.
-- `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect.
+- `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect. A hibernating host MAY keep admission and active query registrations on their live socket.
 - `INV-SYNC-28`: Results MUST travel as rows and be assembled into result trees by the receiver.
 - `INV-SYNC-30`: A replica MUST treat a subscription as settled only once an upstream has confirmed that subscription with its own `Settled`, and reports the last such confirmation, at its tier, until another replaces it (through an outage too); what waits for the server (a first load, a `Remote` opening, a relay settling its own sessions' reads) waits for the current connection's `Settled`. A node with no upstream settles locally.
 - `INV-SYNC-44`: The read protocol MUST be rows plus settlement.
@@ -198,6 +198,48 @@ it on every link and drops the frame before the runtime sees it. The native
 Rust transport (NAPI `remote()`, React Native) does not ask yet and has no
 silence timeout of its own.
 
+##### Typed error reasons
+
+A server refusing a credential says why: `expired`, `missing`, `invalid`,
+`disabled` or `revoked`, or `reauthenticate` for a planned re-authentication
+(`WireErrorReason`). A client that advertises `FEATURE_TYPED_ERROR_REASON`
+(`1 << 14`) in its Hello gets the reason at the end of the `WireFrame::Error`
+body, after the message: same tag (1), then the reason's postcard enum tag
+(encoding `wire-error-reason-v1`, pinned by
+`crates/jazz/layers/protocol/fixtures/wire_reasoned_error_v1.json`). There is
+no new frame tag: after its hello a server's frames are told apart from sync
+messages by their first byte, and every tag past 1 is a sync message's. The
+bit is one-sided: only a client advertises it, the server never does, and
+it is not part of the negotiated features. The server decides by what the
+client offered, so it names the reason before its own hello too. Every
+other client gets the `Error` bytes it always got and reads the reason from
+the message, which is diagnostic text, not a contract
+(`AuthFailureReason::from_message`, `mapAuthReason`).
+
+Compatibility:
+
+- Old client, new server: an old client does not offer the bit, so the server
+  sends the plain `Error` frame. Unchanged.
+- New client, old server: an old server never appends a reason, so the client
+  reads the message as before. Unchanged.
+- New client, new server: the client takes the named reason over the message.
+  A reason tag it does not know (a newer server) is ignored and the message
+  decides.
+- A receiver that did not offer the bit decodes with `decode_frame`, which
+  rejects the extra byte (`INV-WIRE-1` holds for it); only a client that
+  offered it decodes with `decode_frame_with_error_reason`.
+
+An app's backend that relays its clients (`createJazz`, the Rust app
+endpoint) answers them the same way: it reads the client's Hello as it
+passes, and a refusal it sends before the Hello (a sign-in it cannot admit)
+waits for it briefly (up to 1 s), since a client sends it right behind its
+prelude. A refusal that finds no Hello in time goes out plain.
+
+The TypeScript carrier (browsers, Node, workers, the thin client) offers it
+on every link. The native Rust transport does not offer it yet: after its
+hello it does not read error frames at all (they reach the sync decoder), so
+it reads the reason from the message.
+
 In-process links (a worker and its tab, tests) carry `SyncMessage` values
 directly (`sync::duplex`); a byte link frames them with postcard
 (`WireTransportAdapter`).
@@ -290,10 +332,10 @@ an encoded message, so a change to how commits travel never strands a
 write a user made offline:
 
 - `_jazz_pending (tx, node, seq, clock, snapshot, own, acting, author,
-claims)`: the commit's writer and HLC, a serializable commit's snapshot
+  claims)`: the commit's writer and HLC, a serializable commit's snapshot
   and own commits (NULL when mergeable), and who it acts as.
 - `_jazz_pending_ops (tx, n, op, tbl, id, target, move_from, move_to, at,
-has_cells, bases, proof_key, proof_seq)`: each op, by position `n`.
+  has_cells, bases, proof_key, proof_seq)`: each op, by position `n`.
 - `_jazz_pending_cells (tx, n, list, col, ty, nulls, value)`: each cell an op
   writes (`list` 0) or an upsert creates its row with (`list` 1): the kind
   of value (`ty`), how many present-nullable wrappers hold it (`nulls`), and
@@ -406,8 +448,8 @@ only if all of these hold:
    writes build on it as on any pending commit. A miss therefore costs one fetch
    of the row, never a divergent cache. A replica whose configured author is not
    the identity its link was accepted as has every row stamped otherwise, so each
-   of its writes costs that fetch. Mismatches are counted per replica
-   (`as_written_mismatches`); tests of honest writers assert there are none.
+   of its writes costs that fetch. Tests of honest writers assert that no
+   whole-row fetch is needed.
 
 `Stored { id }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a
@@ -462,7 +504,7 @@ for one query's result:
   in the view its effective row is the head's version, which the reader's
   policy denies, so the view leaves the row out, as the authority's own
   evaluation of the view does. The server sends `AccessLost { hidden: true
-}` for it (§8.6) once: a later write to either version sends nothing
+  }` for it (§8.6) once: a later write to either version sends nothing
   while the reader still may not read the head's, so the reader learns that
   the row is hidden, not when it is edited. The replica keeps a marker of it in
   `_jazz_withheld` that masks the base's row of the id in every branch view

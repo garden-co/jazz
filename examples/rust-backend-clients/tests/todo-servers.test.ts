@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { SCOPED_SUB, startMainBackend, type MainBackend } from "../main-backend.ts";
 import { cargoBin, examples } from "./cargo.ts";
 
@@ -78,8 +78,14 @@ describe.each([
   ["todo-server", "todo-server-rs"],
   ["todo-server-docs", "docs/todo-server-rs"],
 ])("%s as a scoped backend client", (pkg, dir) => {
+  // A cold cargo build takes minutes: build under the hook timeout, not
+  // inside the first test's.
+  let bin: string;
+  beforeAll(() => {
+    bin = cargoBin(pkg, pkg);
+  });
+
   it("writes through its REST API to the TypeScript main backend", async () => {
-    const bin = cargoBin(pkg, pkg);
     const backend = await startMainBackend(join(examples, dir));
     cleanups.push(() => backend.close());
     const url = await runServer(bin, backend);
@@ -102,7 +108,6 @@ describe.each([
   });
 
   it("sees the main backend's writes through its REST API", async () => {
-    const bin = cargoBin(pkg, pkg);
     const backend = await startMainBackend(join(examples, dir));
     cleanups.push(() => backend.close());
     const url = await runServer(bin, backend);

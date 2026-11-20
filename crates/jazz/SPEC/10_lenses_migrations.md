@@ -1136,9 +1136,9 @@ Meaning:
   `exists`. `session.__jazz_outer_row…` is not a session value: the reader
   refuses it.
 - **Session values.** `session.user` (the account: `$createdBy =
-session.user` matches rows written through any identity linked to it),
+  session.user` matches rows written through any identity linked to it),
   `session.identity` (the exact login: `$createdBy.identity =
-session.identity` matches only rows it wrote), `session.claims.<path>`,
+  session.identity` matches only rows it wrote), `session.claims.<path>`,
   `session.identity.subject`, `session.identity.issuer` and
   `session.authMode`; any other path is refused as a typo.
 - **Comparisons.** A comparison compares a column with a value, a column
@@ -1174,7 +1174,7 @@ session.identity` matches only rows it wrote), `session.claims.<path>`,
   `Project`, `distinct on` is `Distinct`, `order by` is `OrderBy` (`asc` is
   the default), `limit`/`offset` are `Limit`/`Offset`, `union(label: q, …)` is
   `Union` and `recursive(seed: …, step: …, frontier: …, dedupe: (…), maxDepth:
-n | fixpoint)` is `Gather`. In a predicate, a column is `scope.col` or
+  n | fixpoint)` is `Gather`. In a predicate, a column is `scope.col` or
   `col`; `outer.col` and `frontier.col` are the outer and frontier rows'
   columns, `id(row)`, `id(outer)` and `id(frontier)` their row ids,
   `param.name` a query parameter, `session.…` a session value, and
@@ -1285,6 +1285,13 @@ lenses and permission bundle ship with the binary, are admitted at startup
 (`prepare_catalogue_change`), and sessions write by the bundle they pin. No
 production path (deploy, HTTP or admin endpoint, sync) activates a schema,
 bumps a revision or switches policies at runtime.
+
+Opening under a version newer than any the store admitted installs it: along
+the app's lenses when they lead to it (all or nothing), else named against the
+latest admitted version. Either way its declaration order becomes tag order
+(§10.8), and a version that drops a branch column of the one it follows is
+refused. Opening under an older admitted version (an older client, a server
+under its genesis) installs nothing.
 
 Admitting a schema never makes it current, and older clients keep their own
 local schema view: a client reads and writes by its version's names through

@@ -196,18 +196,24 @@ fn transaction_read_orders_by_an_unselected_column() {
     let prepared = db
         .prepare_query(&by_rank(OrderDirection::Asc))
         .expect("prepare query");
-    let (read, _) = block_on(db.transaction(async |tx| {
-        tx.insert(
-            "tasks",
-            task_cells("e", 0),
-            InsertOptions {
-                row_id: Some(RowUuid::from_bytes([5; 16])),
-                ..Default::default()
-            },
-        )
-        .await?;
-        tx.all_prepared(&prepared).await
-    }))
+    let (read, _) = block_on(async {
+        let tx = db.mergeable_tx().await?;
+        let result: Result<_, jazz::db::Error> = {
+            tx.insert(
+                "tasks",
+                task_cells("e", 0),
+                InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([5; 16])),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            tx.all_prepared(&prepared).await
+        };
+        let value = result?;
+        let receipt = tx.commit().await?;
+        Ok::<_, jazz::db::Error>((value, receipt))
+    })
     .expect("transaction");
     assert_eq!(titles(read), ["e", "a", "b", "c", "d"]);
 }

@@ -209,3 +209,93 @@ async fn opens_sockets_only_for_the_trusted_workload() {
         .expect("the workload opens a socket");
     assert_eq!(response.status(), 101);
 }
+
+/// `GET admin/backend-signing-key` with the workload's token stating `access`.
+async fn signing_key(
+    http: &reqwest::Client,
+    server: &JazzServer,
+    credential: Option<&str>,
+    access: Option<&str>,
+) -> (u16, Option<String>, String) {
+    let mut request = http.get(format!(
+        "{}/apps/{}/admin/backend-signing-key",
+        server.base_url(),
+        server.app_id()
+    ));
+    if let Some(credential) = credential {
+        request = request.header("X-Jazz-Backend-Credential", credential);
+    }
+    if let Some(access) = access {
+        request = request.header("X-Jazz-Backend-Access", access);
+    }
+    let response = request.send().await.unwrap();
+    let status = response.status().as_u16();
+    let cache = response
+        .headers()
+        .get("cache-control")
+        .map(|value| value.to_str().unwrap().to_owned());
+    (status, cache, response.text().await.unwrap())
+}
+
+// jazz#5553: a core that trusts a workload holds only random per-process
+// secrets, so the backend signing key it hands the workload is generated
+// once and kept in the store: every backend instance gets the same key,
+// across core restarts too, and concurrent first requests keep one key.
+#[tokio::test]
+async fn hands_the_workload_one_backend_signing_key_that_outlives_the_core() {
+    let issuer = start_issuer().await;
+    let directory = tempfile::tempdir().unwrap();
+    let start = || {
+        JazzServer::builder()
+            .with_trusted_workload(TrustedWorkload {
+                issuer: issuer.clone(),
+                audience: "https://vercel.com/garden-co".to_owned(),
+                subject: SUBJECT.to_owned(),
+            })
+            .with_persistent_storage()
+            .with_data_dir(directory.path())
+            .start()
+    };
+    let http = reqwest::Client::new();
+    let good = token(&issuer, SUBJECT);
+    let server = start().await.expect("server starts");
+
+    // Only the workload stating admin access gets it: not a session it
+    // relays (no access), not backend access, not another workload, and
+    // not a request without the token (a user's or guest's own).
+    for (credential, access) in [
+        (None, None),
+        (None, Some("admin")),
+        (Some(good.as_str()), None),
+        (Some(good.as_str()), Some("backend")),
+        (
+            Some(token(&issuer, "owner:garden-co:project:app:environment:preview").as_str()),
+            Some("admin"),
+        ),
+    ] {
+        let (status, _, body) = signing_key(&http, &server, credential, access).await;
+        assert_eq!(status, 401, "{credential:?} {access:?}");
+        assert!(!body.contains("\"key\""), "{body}");
+    }
+
+    let first = futures::future::join_all(
+        (0..8).map(|_| signing_key(&http, &server, Some(&good), Some("admin"))),
+    )
+    .await;
+    let (status, cache, key) = first[0].clone();
+    assert_eq!(status, 200, "{key}");
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    let parsed: serde_json::Value = serde_json::from_str(&key).unwrap();
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parsed["key"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(bytes.len(), 32);
+    for (status, _, other) in &first {
+        assert_eq!((*status, other), (200, &key), "concurrent first requests");
+    }
+
+    server.shutdown().await;
+    let restarted = start().await.expect("server restarts");
+    let (status, _, again) = signing_key(&http, &restarted, Some(&good), Some("admin")).await;
+    assert_eq!((status, again), (200, key), "the key outlives the process");
+}

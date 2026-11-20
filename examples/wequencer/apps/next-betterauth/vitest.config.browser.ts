@@ -6,6 +6,7 @@ import wasm from "vite-plugin-wasm";
 
 import {
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   jazzServerTransportControlCommands,
   jazzAppFront,
   jazzTestDeployment,
@@ -27,11 +28,10 @@ export default defineConfig({
   define: {
     __JAZZ_EXAMPLE_TOPOLOGY_SEED__: JSON.stringify(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? "61"),
   },
-  plugins: [wasm(), topLevelAwait(), react()],
+  plugins: [jazzBrowserServerLifecycle, wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
     include: ["tests/browser/**/*.test.ts"],
-    globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
       provider: playwright(),

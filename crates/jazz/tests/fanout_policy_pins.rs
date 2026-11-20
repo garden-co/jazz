@@ -353,7 +353,8 @@ fn two_writes_of_a_membership_in_one_transaction() {
             .map(|(k, v)| ((*k).to_owned(), v.clone()))
             .collect()
     };
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
         tx.update(
             "members",
             id(MEMBER, mine),
@@ -368,8 +369,8 @@ fn two_writes_of_a_membership_in_one_transaction() {
             Default::default(),
         )
         .await?;
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
     let now = check(
         &db,
@@ -692,11 +693,12 @@ fn cells(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
 /// Two updates of one row in one transaction.
 fn update_twice(db: &Db, table: &str, row: RowUuid, a: &[(&str, Value)], b: &[(&str, Value)]) {
     let (a, b) = (cells(a), cells(b));
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
         tx.update(table, row, a, Default::default()).await?;
         tx.update(table, row, b, Default::default()).await?;
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
 }
 
@@ -2064,7 +2066,8 @@ fn linked_seed(db: &Db, array: bool) -> Writer {
             let post = next_post;
             next_post += 1;
             posts.push(post);
-            block_on(db.transaction(async |tx| {
+            block_on(async {
+                let tx = db.mergeable_tx().await?;
                 tx.update(
                     table,
                     id(L_SOURCE, s),
@@ -2091,8 +2094,8 @@ fn linked_seed(db: &Db, array: bool) -> Writer {
                     },
                 )
                 .await?;
-                Ok(())
-            }))
+                tx.commit().await
+            })
             .unwrap();
             format!("tx: source {s} retargeted twice, post {post} by {p}")
         }
@@ -2108,7 +2111,8 @@ fn linked_seed(db: &Db, array: bool) -> Writer {
             next_post += 1;
             sources.push(source);
             posts.push(post);
-            block_on(db.transaction(async |tx| {
+            block_on(async {
+                let tx = db.mergeable_tx().await?;
                 tx.insert(
                     "posts",
                     cells(&[
@@ -2130,8 +2134,8 @@ fn linked_seed(db: &Db, array: bool) -> Writer {
                     },
                 )
                 .await?;
-                Ok(())
-            }))
+                tx.commit().await
+            })
             .unwrap();
             format!("tx: source {source} inserted with post {post} by {p}")
         }
@@ -2165,7 +2169,8 @@ fn grant_with_its_parent_in_one_transaction(array: bool) {
     } else {
         ("members", "person", uuid(l_person(4)))
     };
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
         tx.insert(
             "posts",
             cells(&[("author", uuid(l_person(4))), ("body", text("post 0"))]),
@@ -2184,8 +2189,8 @@ fn grant_with_its_parent_in_one_transaction(array: bool) {
             },
         )
         .await?;
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
     let now = check(
         &db,

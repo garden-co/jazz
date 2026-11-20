@@ -10,6 +10,7 @@ import type {
 } from "../../packages/jazz-tools/tests/browser/browser-commands.js";
 import {
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   jazzAppFront,
   jazzTestDeployment,
   jazzAppRequest,
@@ -46,11 +47,10 @@ const jazzBrowserCommands = {
 } satisfies JazzBrowserCommandHandlers;
 
 export default defineConfig({
-  plugins: [wasm(), topLevelAwait(), react()],
+  plugins: [jazzBrowserServerLifecycle, wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
     include: ["tests/browser/**/*.test.ts"],
-    globalSetup: ["../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
       provider: playwright(),

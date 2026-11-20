@@ -325,10 +325,10 @@ fn assert_page_uses_composite_index(db: &Db, owner: &str) {
     assert!(!plan.contains("TEMP B-TREE FOR ORDER BY"), "{plan}");
 }
 
-/// Publish `composite` as the identity-lens descendant of `plain` and make it
-/// the write schema: the catalogue migration path for a schema change to a
-/// live store.
-fn publish_composite_descendant(db: &Db, plain: &JazzSchema, composite: &JazzSchema) {
+/// Admit `composite` as the identity-lens descendant of `plain`, as a
+/// deploy does: the store builds its indexes now and installs it as the
+/// write schema when it next opens under it.
+fn admit_composite_descendant(db: &Db, plain: &JazzSchema, composite: &JazzSchema) {
     let target = SchemaVersion::new(composite.clone());
     let lens = MigrationLens::new(
         plain.version_id(),
@@ -340,14 +340,14 @@ fn publish_composite_descendant(db: &Db, plain: &JazzSchema, composite: &JazzSch
         }],
     )
     .unwrap();
-    block_on(db.activate_schema_with_lenses(target.schema.clone(), &[lens])).unwrap();
+    block_on(db.admit_schema_with_lenses(target.schema.clone(), &[lens])).unwrap();
 }
 
 /// Adding a composite index to an existing app is a schema change: the
 /// composite schema is a new schema version. A store written under the
 /// plain schema takes the index whether the composite schema arrives by
-/// reopening the file with it or by publishing it to the live store through
-/// an identity lens. Either way the index is backfilled with the rows written
+/// reopening the file with it or by a deploy admitting it through an
+/// identity lens first. Either way the index is backfilled with the rows written
 /// before it existed and maintained for rows written after, across a
 /// reopen, in `(owner, rank)` order.
 ///
@@ -357,8 +357,8 @@ fn publish_composite_descendant(db: &Db, plain: &JazzSchema, composite: &JazzSch
 /// open(plain + composite) ──insert r4 bob/0──► close
 ///     index order = [r3 alice/1, r1 alice/2, r4 bob/0, r2 bob/1]
 ///
-/// open(plain) ──insert r1, r2──► publish composite via identity lens
-///     ──insert r3──► close ──► open(plain + composite) ──insert r4──► same order
+/// open(plain) ──insert r1, r2──► admit composite via identity lens ──► close
+///     ──► open(plain + composite) ──insert r3, r4──► same order
 /// ```
 #[test]
 fn adding_composite_index_to_existing_store_maintains_and_backfills_it() {
@@ -397,13 +397,16 @@ fn adding_composite_index_to_existing_store_maintains_and_backfills_it() {
     }
     assert_eq!(composite_index_row_order(reopened.path()), [3, 1, 4, 2]);
 
-    // The composite schema reaches the live store as a published descendant.
+    // The composite schema reaches the store as an admitted descendant.
     let published = tempfile::tempdir().unwrap();
     {
         let db = open_file_db(published.path(), &plain);
         insert_task(&db, row(1), "alice", 2, "plan");
         insert_task(&db, row(2), "bob", 1, "review");
-        publish_composite_descendant(&db, &plain, &composite);
+        admit_composite_descendant(&db, &plain, &composite);
+    }
+    {
+        let db = open_file_db(published.path(), &composite);
         insert_task(&db, row(3), "alice", 1, "draft");
         assert_page_uses_composite_index(&db, "alice");
         assert_eq!(top_two_titles(&db, "alice"), ["plan", "draft"]);
@@ -547,16 +550,19 @@ fn settled_rows_are_served_by_the_composite_index() {
         },
     )))
     .unwrap();
-    db.seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(db.insert(
         "tasks",
-        row(0x0a),
-        AuthorSubject::SYSTEM,
         BTreeMap::from([
             ("owner".to_owned(), Value::String("alice".to_owned())),
             ("rank".to_owned(), Value::I32(7)),
             ("title".to_owned(), Value::String("ship".to_owned())),
         ]),
-    )
+        jazz::db::InsertOptions {
+            row_id: Some(row(0x0a)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
     .unwrap();
     insert_task(&db, row(0x0b), "alice", 3, "plan");
     insert_task(&db, row(0x0c), "bob", 9, "review");

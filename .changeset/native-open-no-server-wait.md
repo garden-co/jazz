@@ -1,0 +1,5 @@
+---
+"jazz-tools": patch
+---
+
+**Native clients (Rust, Swift, Kotlin) open without waiting for the server, as the web client does.** Opening a client with a server used to wait for the first connection attempt: up to about 5 s, or up to about 20 s with the HTTP-stream fallback. Now it returns once the local store is open, local-first reads are served from it at once, and the link connects in the background. A refusal from the server now shows up the same way however fast it comes: as the link's status (`upstream_status`, `sync_status`) and `auth_refusals`. Before, a refusal within the handshake deadline failed the open and a slower one did not. Waits on the server (`wait_for_sync`, `GlobalServer` durability) now fail with a connection error once the link has stopped for good (stopped, or refused a credential that can't be renewed), instead of staying pending. A refusal a new token can fix still holds them until the token is updated. Checks this side makes itself still fail the open: a missing transport, a `backend_session` without `bundle`, and the backend sign-in.

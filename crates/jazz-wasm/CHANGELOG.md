@@ -1,5 +1,27 @@
 # jazz-wasm
 
+## 2.0.0-alpha.69
+
+### Patch Changes
+
+- b4bb4b9: A Jazz core on a Cloudflare Durable Object can keep large values in R2. Bind an R2 bucket to the core's Worker as `JAZZ_BLOBS`, now the recommended setup: the bytes of large values then live in the bucket, under `jazz/<app id>/` (or `JAZZ_BLOBS_PREFIX`), and the object's SQLite keeps only their index. Every upload carries the chunk's SHA-256, so R2 rejects a corrupted one. A failed upload keeps the value in SQLite and is retried with backoff. The first core to use a prefix claims it, and any other core there is refused: its `/ready` answers 503 and names the owning app. A core that already holds large values in SQLite moves them to the bucket once the binding is added, and from then on refuses to start without the binding. Without the binding nothing changes. The `s3()` docs now say it reaches R2 only through R2's S3 API from a native server.
+
+## 2.0.0-alpha.68
+
+### Patch Changes
+
+- 47af91a: Mergeable transaction reads now fetch as reads outside a transaction do.
+  A cold foreground loads them from its durable local relay, even while its
+  server is offline, and a Remote read waits for the server, on any client.
+  Branch-view reads fetch too, including over a frozen base the foreground has
+  not synced yet. Preserve staged writes, cancellation and mergeable conflict
+  semantics instead of returning an empty foreground cache. Inside a
+  transaction, a Remote read still shows other writers' unsettled rows, as a
+  serializable read does. These reads now go through the same synced query-shape
+  check as reads outside a transaction, so a shape the relay cannot answer is
+  refused there too.
+- fc76843: The browser build no longer carries what only a backend's `createJazz` uses (about 300 KB gzip less for every browser). A backend in a Cloudflare Worker now runs on jazz-wasm's own backend build, `jazz-wasm/backend`, which `jazz-tools/backend` picks under the `workerd` condition: nothing changes for apps.
+
 ## 2.0.0-alpha.67
 
 ## 2.0.0-alpha.66

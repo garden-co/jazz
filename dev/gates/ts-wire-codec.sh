@@ -22,7 +22,7 @@ if [[ "$rust_protocol_version" != "$ts_protocol_version" ]]; then
   exit 1
 fi
 
-pnpm --dir packages/jazz-tools exec tsc --project tsconfig.tests.json
+pnpm --dir packages/jazz-tools exec tsrs --project tsconfig.tests.json
 
 pnpm --dir packages/jazz-tools exec vitest run \
   --config vitest.config.ts \

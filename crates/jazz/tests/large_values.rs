@@ -605,6 +605,57 @@ fn many_versions_with_small_edits_share_one_epoch() {
     assert_eq!(db.large_value_epochs_for_test().unwrap().0, 1);
 }
 
+/// SQLite rolling back by itself (a full disk, an I/O error) a transaction
+/// that appended to a committed chunked value leaves the committed value
+/// readable: the rolled-back append's edits are gone, the committed ones
+/// stay. On an in-memory store the chunk cache is the only copy of the
+/// value's epoch, so the rollback must not drop the committed epoch the
+/// append extended.
+///
+/// ```text
+/// insert 300 KiB ── append ×3 (committed) ── tx { append; SQLite rolls back } ── read
+/// ```
+#[test]
+fn sqlite_rolling_back_an_append_keeps_the_committed_value() {
+    let db = db();
+    let mut expected = text(36, LARGE);
+    insert(&db, 1, &expected, b"");
+    for n in 0..3 {
+        let more = format!("[{n}]");
+        block_on(db.append_value("docs", row(1), "body", more.clone().into_bytes())).unwrap();
+        expected.push_str(&more);
+    }
+    let end = expected.len() as u64;
+    let batch = OpenTransactionId::new();
+    let failed: Result<(), jazz::db::Error> = block_on(async {
+        db.begin_mergeable(batch).await?;
+        db.tx_ref(batch)
+            .update_with_large_value_mutations(
+                "docs",
+                row(1),
+                BTreeMap::new(),
+                vec![LargeValueUpdate::Splice {
+                    column: "body".into(),
+                    within: LargeValueUpdatePage::TextUtf8 { from: end, to: end },
+                    splices: vec![LargeValueUpdateSplice {
+                        at: 0,
+                        delete: 0,
+                        insert: b"[lost]".to_vec(),
+                    }],
+                }],
+                Default::default(),
+            )
+            .await?;
+        db.rollback_sqlite_transaction_for_test();
+        Err(jazz::db::Error::new(
+            jazz::db::ErrorCode::Storage,
+            "disk I/O error".to_owned(),
+        ))
+    });
+    assert!(failed.is_err());
+    assert_eq!(body(&db, 1), expected);
+}
+
 #[test]
 fn an_inline_value_grown_past_the_threshold_is_chunked() {
     let db = db();

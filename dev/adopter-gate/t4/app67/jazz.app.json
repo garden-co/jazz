@@ -1,0 +1,126 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "5bf5cb6fd3e54ce45eafc78fecbf29520683ec4a12aa1f7199bf38c78cef1225"
+  },
+  "tables": {
+    "better_auth_account": {
+      "columns": {
+        "accountId": "string",
+        "providerId": "string",
+        "userId": "uuid",
+        "accessToken": "string?",
+        "refreshToken": "string?",
+        "idToken": "string?",
+        "accessTokenExpiresAt": "timestamp?",
+        "refreshTokenExpiresAt": "timestamp?",
+        "scope": "string?",
+        "password": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      },
+      "relations": { "userIdRelation": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_session": {
+      "columns": {
+        "expiresAt": "timestamp",
+        "token": "string",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp",
+        "ipAddress": "string?",
+        "userAgent": "string?",
+        "userId": "uuid"
+      },
+      "relations": { "userIdRelation": { "rel": "better_auth_user", "column": "userId" } }
+    },
+    "better_auth_user": {
+      "columns": {
+        "name": "string",
+        "email": "string",
+        "emailVerified": "boolean",
+        "image": "string?",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "better_auth_verification": {
+      "columns": {
+        "identifier": "string",
+        "value": "string",
+        "expiresAt": "timestamp",
+        "createdAt": "timestamp",
+        "updatedAt": "timestamp"
+      }
+    },
+    "private_notes": { "columns": { "text": "string", "sent_at": "timestamp" } },
+    "team_notes": {
+      "columns": {
+        "team": "string",
+        "author_name": "string",
+        "text": "string",
+        "sent_at": "timestamp"
+      }
+    }
+  },
+  "history": {
+    "3c6e476b058b": {
+      "tables": {
+        "better_auth_account": {
+          "columns": {
+            "accountId": "string",
+            "providerId": "string",
+            "userId": { "type": "uuid", "references": "better_auth_user" },
+            "accessToken": "string?",
+            "refreshToken": "string?",
+            "idToken": "string?",
+            "accessTokenExpiresAt": "timestamp?",
+            "refreshTokenExpiresAt": "timestamp?",
+            "scope": "string?",
+            "password": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_session": {
+          "columns": {
+            "expiresAt": "timestamp",
+            "token": "string",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp",
+            "ipAddress": "string?",
+            "userAgent": "string?",
+            "userId": { "type": "uuid", "references": "better_auth_user" }
+          }
+        },
+        "better_auth_user": {
+          "columns": {
+            "name": "string",
+            "email": "string",
+            "emailVerified": "boolean",
+            "image": "string?",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "better_auth_verification": {
+          "columns": {
+            "identifier": "string",
+            "value": "string",
+            "expiresAt": "timestamp",
+            "createdAt": "timestamp",
+            "updatedAt": "timestamp"
+          }
+        },
+        "private_notes": { "columns": { "text": "string", "sent_at": "timestamp" } },
+        "team_notes": { "columns": { "team": "string", "text": "string", "sent_at": "timestamp" } }
+      }
+    }
+  },
+  "migrations": [
+    {
+      "from": "3c6e476b058b",
+      "migrate": { "team_notes": { "author_name": { "add": "string", "default": "unknown" } } }
+    }
+  ]
+}

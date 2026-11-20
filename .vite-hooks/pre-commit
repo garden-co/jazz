@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+guard="$HOME/jazz-private/dev/gates/no-sensitive-data.sh"
+if [ -x "$guard" ]; then
+  "$guard"
+else
+  echo "WARNING - sensitive-data guard NOT RUN. $guard is missing, so commits are not scanned for customer-identifying strings. Clone jazz-private to enable it." >&2
+fi
+
+# Formatting and lint fixes can touch the same staged file.
+exec pnpm exec vp staged --no-concurrent

@@ -15,7 +15,7 @@ use std::sync::{Arc, mpsc};
 
 use jazz::host::HostReader;
 use jazz::host::{HostPair, HostTable, HostTables};
-use rusqlite::Connection;
+use jazz::storage::Storage;
 
 /// Errors are reported as text: callers wrap them in their own error types.
 pub(crate) type KvResult<T> = Result<T, String>;
@@ -109,7 +109,7 @@ impl HostSql {
     /// when it began.
     pub(crate) fn read<T>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<T, jazz::db::Error>,
+        f: impl FnOnce(&Storage) -> Result<T, jazz::db::Error>,
     ) -> KvResult<T> {
         #[cfg(test)]
         if self
@@ -126,7 +126,7 @@ impl HostSql {
     /// `f` fails.
     pub(crate) fn write<T: Send + 'static>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<T, jazz::db::Error> + Send + 'static,
+        f: impl FnOnce(&Storage) -> Result<T, jazz::db::Error> + Send + 'static,
     ) -> KvResult<T> {
         let (reply, answer) = mpsc::sync_channel(1);
         self.store.send(Box::new(move |tables| {

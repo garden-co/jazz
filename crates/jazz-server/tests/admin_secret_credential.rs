@@ -97,3 +97,69 @@ async fn sockets_take_the_access_their_upgrade_states() {
         .expect("a plain socket opens");
     assert_eq!(response.status(), 101);
 }
+
+// jazz#5553: a core configured with an admin secret derives the backend
+// signing key from it, so it is the same on every core process; only the
+// app's backend (the admin secret, or it as the credential stating admin
+// access) gets it.
+#[tokio::test]
+async fn derives_the_backend_signing_key_from_the_admin_secret() {
+    use base64::Engine as _;
+    use hmac::{Hmac, Mac};
+    let server = JazzServer::builder().start().await.expect("server starts");
+    let http = reqwest::Client::new();
+    let url = format!(
+        "{}/apps/{}/admin/backend-signing-key",
+        server.base_url(),
+        server.app_id()
+    );
+    let admin = server.admin_secret().to_owned();
+    let get = |headers: Vec<(&'static str, String)>| {
+        let mut request = http.get(&url);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        async move {
+            let response = request.send().await.unwrap();
+            let status = response.status().as_u16();
+            let cache = response
+                .headers()
+                .get("cache-control")
+                .map(|value| value.to_str().unwrap().to_owned());
+            (status, cache, response.text().await.unwrap())
+        }
+    };
+
+    let mut expected = Hmac::<sha2::Sha256>::new_from_slice(admin.as_bytes()).unwrap();
+    expected.update(format!("jazz-backend-signing-v1\0{}", server.app_id()).as_bytes());
+    let expected = serde_json::json!({
+        "key": base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(expected.finalize().into_bytes())
+    })
+    .to_string();
+    for headers in [
+        vec![("X-Jazz-Admin-Secret", admin.clone())],
+        vec![
+            ("X-Jazz-Backend-Credential", admin.clone()),
+            ("X-Jazz-Backend-Access", "admin".to_owned()),
+        ],
+    ] {
+        let (status, cache, body) = get(headers).await;
+        assert_eq!((status, body.as_str()), (200, expected.as_str()));
+        assert_eq!(cache.as_deref(), Some("no-store"));
+    }
+    for headers in [
+        vec![],
+        vec![("X-Jazz-Backend-Secret", server.backend_secret().to_owned())],
+        vec![("X-Jazz-Admin-Secret", "not-the-secret".to_owned())],
+        vec![
+            ("X-Jazz-Backend-Credential", admin.clone()),
+            ("X-Jazz-Backend-Access", "backend".to_owned()),
+        ],
+        vec![("X-Jazz-Backend-Credential", admin.clone())],
+    ] {
+        let (status, _, body) = get(headers.clone()).await;
+        assert_eq!(status, 401, "{headers:?}");
+        assert!(!body.contains("\"key\""), "{body}");
+    }
+}

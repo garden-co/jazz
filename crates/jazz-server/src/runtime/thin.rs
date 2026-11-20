@@ -59,7 +59,18 @@ struct ThinStream {
     transaction: Option<OpenTransactionId>,
 }
 
+/// Observes a thin session's registration changes (see [`ThinRegistration`]).
+pub type ThinRegistrationObserver = std::rc::Rc<dyn Fn(ThinRegistration)>;
+
+/// Changes to thin session state that can survive an idle host.
+pub enum ThinRegistration<'a> {
+    Schema(SchemaVersionId),
+    Subscribe { id: u64, op: &'a ThinOp },
+    Remove(u64),
+}
+
 pub(super) struct ThinSession {
+    pub(super) observer: Option<ThinRegistrationObserver>,
     identity: AuthorSubject,
     /// The identity's claims, bound to every read; `None` for SYSTEM.
     claims: Option<BTreeMap<String, Value>>,
@@ -97,6 +108,7 @@ impl ThinSession {
         egress: Arc<Egress>,
     ) -> Self {
         Self {
+            observer: None,
             identity,
             claims,
             bundle,
@@ -117,7 +129,7 @@ impl ThinSession {
     /// at the budget, if it is ([`super::ReadClock`]).
     pub(super) fn stalled_for(
         &self,
-        now: std::time::Instant,
+        now: web_time::Instant,
         min_rate: u64,
     ) -> Option<std::time::Duration> {
         self.clock.check(&self.egress, now, min_rate)
@@ -168,6 +180,13 @@ impl ThinSession {
         self.egress.fetch_add(bytes, Ordering::AcqRel);
         self.clock.handed(bytes);
         self.output.send((Ok(frames), bytes)).is_ok()
+    }
+
+    pub(super) fn has_unfinished_work(&self) -> bool {
+        !self.transactions.is_empty()
+            || !self.streams.is_empty()
+            || !self.parked.is_empty()
+            || !self.held.is_empty()
     }
 
     /// End what the session left open: its transactions roll back, its
@@ -434,7 +453,7 @@ impl Owner {
     /// Thin-client transactions open on this core, across its sessions:
     /// the only thing it may hold between the calls it serves, until the
     /// core stops running them (the app's backend runs them instead).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native"))]
     pub(super) fn open_thin_transactions(&self) -> usize {
         self.thin.values().map(|thin| thin.transactions.len()).sum()
     }
@@ -580,6 +599,9 @@ impl Owner {
                 Err(error) => error_body(&error),
                 Ok(Some(_)) => {
                     thin.version = Some(version);
+                    if let Some(observe) = &thin.observer {
+                        observe(ThinRegistration::Schema(version));
+                    }
                     ThinBody::Ok
                 }
                 Ok(None) => ThinBody::Error {
@@ -592,6 +614,9 @@ impl Owner {
         if let &ThinOp::Unsubscribe { subscription } = op {
             let removed = thin.subscriptions.remove(&subscription).is_some();
             // The live query's own id hears that it ended.
+            if removed && let Some(observe) = &thin.observer {
+                observe(ThinRegistration::Remove(subscription));
+            }
             if removed && subscription != id {
                 thin.held.push(ThinResponse {
                     id: subscription,
@@ -620,6 +645,15 @@ impl Owner {
         } else {
             db
         };
+        if let ThinOp::Subscribe { query, options } = op {
+            if let Err(error) = open_subscription(&db, thin, id, query, options, false) {
+                return Some(error);
+            }
+            if let Some(observe) = &thin.observer {
+                observe(ThinRegistration::Subscribe { id, op });
+            }
+            return None;
+        }
         match serve_thin_op(&db, thin, id, op, missing) {
             Ok(body) => body,
             Err(body) => Some(body),
@@ -704,6 +738,9 @@ fn drain_thin(thin: &mut ThinSession) -> Option<Vec<Vec<u8>>> {
     }
     for id in ended {
         thin.subscriptions.remove(&id);
+        if let Some(observe) = &thin.observer {
+            observe(ThinRegistration::Remove(id));
+        }
     }
     Some(frames)
 }
@@ -819,6 +856,66 @@ fn session_transaction<'a>(
     }
 }
 
+fn open_subscription(
+    db: &Db,
+    thin: &mut ThinSession,
+    id: u64,
+    query: &[u8],
+    options: &[u8],
+    dormant: bool,
+) -> Result<(), ThinBody> {
+    if thin.subscriptions.contains_key(&id) {
+        return Err(argument("a live query with this id is already open"));
+    }
+    let opts = read_opts(&options_json(options)?).map_err(host_error)?;
+    let query = jazz::query::decode_client_query_postcard(query)
+        .map_err(|error| argument(format!("undecodable query: {error}")))?;
+    let mut prepared = db.prepare_query(&query).map_err(|e| error_body(&e))?;
+    if let Some(claims) = &thin.claims {
+        prepared = prepared.with_identity_claims(thin.identity, claims.clone());
+    }
+    let stream = if dormant {
+        db.restore_subscription_for_identity(&prepared, opts, thin.identity)
+    } else {
+        block_on(db.subscribe_for_identity(&prepared, opts, thin.identity))
+    }
+    .map_err(|e| error_body(&e))?;
+    thin.subscriptions.insert(id, stream);
+    Ok(())
+}
+
+impl Owner {
+    pub(super) fn restore_thin(
+        &mut self,
+        session: ServerSession,
+        version: Option<SchemaVersionId>,
+        reads: Vec<ThinRequest>,
+    ) -> Result<(), String> {
+        let thin = self.thin.get_mut(&session).ok_or("unknown thin session")?;
+        let Some(version) = version else {
+            return if reads.is_empty() {
+                Ok(())
+            } else {
+                Err("missing thin schema".into())
+            };
+        };
+        let db = self
+            .db
+            .pinned_view(version, thin.bundle.as_ref())
+            .map_err(|e| e.to_string())?
+            .ok_or("thin schema no longer deployed")?;
+        thin.version = Some(version);
+        for request in reads {
+            let ThinOp::Subscribe { query, options } = request.op else {
+                return Err("invalid saved thin subscription".into());
+            };
+            open_subscription(&db, thin, request.id, &query, &options, true)
+                .map_err(|_| "cannot restore thin subscription")?;
+        }
+        Ok(())
+    }
+}
+
 /// One request against the session's governed view; `Ok(None)` when a live
 /// query answers later.
 fn serve_thin_op(
@@ -838,27 +935,8 @@ fn serve_thin_op(
     let identity = thin.identity;
     let scope = thin.claims.clone().map(|claims| (identity, claims));
     let body = match op {
-        ThinOp::Schema { .. } | ThinOp::Unsubscribe { .. } => unreachable!("served by the owner"),
-        ThinOp::Subscribe { query, options } => {
-            if thin.subscriptions.contains_key(&id) {
-                return Err(argument("a live query with this id is already open"));
-            }
-            let opts = read_opts(&options_json(options)?).map_err(host_error)?;
-            let query = jazz::query::decode_client_query_postcard(query)
-                .map_err(|error| argument(format!("undecodable query: {error}")))?;
-            let opened = db.prepare_query(&query).and_then(|mut prepared| {
-                if let Some((author, claims)) = scope {
-                    prepared = prepared.with_identity_claims(author, claims);
-                }
-                block_on(db.subscribe_for_identity(&prepared, opts, identity))
-            });
-            match opened {
-                Ok(stream) => {
-                    thin.subscriptions.insert(id, stream);
-                    return Ok(None);
-                }
-                Err(error) => error_body(&error),
-            }
+        ThinOp::Schema { .. } | ThinOp::Unsubscribe { .. } | ThinOp::Subscribe { .. } => {
+            unreachable!("served by the owner")
         }
         ThinOp::Query {
             query,

@@ -100,6 +100,27 @@ fn snapshot_until(session: &Session, done: impl Fn(&Value) -> bool) -> Value {
     }
 }
 
+/// Watched states up to and including the first for which `done` holds.
+/// A watch delivers the latest snapshot, so a state the session passes
+/// through quickly may be skipped: wait for it here before moving on.
+fn watched_until(states: &mpsc::Receiver<Value>, done: impl Fn(&Value) -> bool) -> Vec<Value> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match states.recv_timeout(left) {
+            Ok(state) => {
+                let found = done(&state);
+                seen.push(state);
+                if found {
+                    return seen;
+                }
+            }
+            Err(error) => panic!("watch: {error}; saw {seen:?}"),
+        }
+    }
+}
+
 /// The session follows the bearer: alice, then bob (a new client, the old
 /// handle `Replaced`), then no one (`NoUser`); the watch sees each and a
 /// last `closed`.
@@ -115,6 +136,10 @@ async fn a_session_follows_the_bearer_from_user_to_user() {
         let alice = snapshot_until(&session, |s| s["status"] == "ready");
         assert_eq!(alice["user"]["subject"], "alice", "{alice}");
         let epoch = alice["clientEpoch"].as_u64().unwrap();
+        let is_ready = |subject: &'static str| {
+            move |s: &Value| s["status"] == "ready" && s["user"]["subject"] == subject
+        };
+        let mut seen = watched_until(&states, is_ready("alice"));
 
         let as_alice = session.jazz().unwrap();
         let account = as_alice.account().unwrap().expect("alice's account");
@@ -128,6 +153,7 @@ async fn a_session_follows_the_bearer_from_user_to_user() {
             s["status"] == "ready" && s["user"]["subject"] == "bob"
         });
         assert!(bob["clientEpoch"].as_u64().unwrap() > epoch, "{bob}");
+        seen.extend(watched_until(&states, is_ready("bob")));
         // Alice's handle was replaced; bob's is fresh and sees none of hers.
         let replaced = as_alice.all(json!({ "table": "shows" }).to_string());
         assert!(
@@ -153,23 +179,19 @@ async fn a_session_follows_the_bearer_from_user_to_user() {
 
         session.shutdown().unwrap();
         assert!(matches!(session.snapshot(), Err(JazzError::Closed)));
-        // The watch saw alice, bob, then a last closed.
-        let mut seen = Vec::new();
-        loop {
-            let state = states.recv_timeout(Duration::from_secs(5)).unwrap();
-            if state["kind"] == "closed" {
-                break;
-            }
-            seen.push(state);
-        }
+        // The watch saw alice, bob (each waited for above), then a last
+        // closed. (A watch delivers the latest snapshot: signing out and
+        // closing in quick succession may skip the one between.)
+        seen.extend(watched_until(&states, |s| s["kind"] == "closed"));
         let subjects: Vec<_> = seen
             .iter()
             .filter(|s| s["status"] == "ready")
             .map(|s| s["user"]["subject"].clone())
             .collect();
-        assert!(subjects.contains(&json!("alice")) && subjects.contains(&json!("bob")));
-        // (A watch delivers the latest snapshot: signing out and closing in
-        // quick succession may skip the one between.)
+        assert!(
+            subjects.contains(&json!("alice")) && subjects.contains(&json!("bob")),
+            "{seen:?}"
+        );
         watch.cancel();
     })
     .await

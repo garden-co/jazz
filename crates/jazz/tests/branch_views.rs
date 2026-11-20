@@ -2749,17 +2749,15 @@ fn widening_a_stored_enum_column_is_not_supported_yet() {
     let db = open_history_complete_db_with_schema(v1.clone());
     let v2 = todos_with_status(&["open", "closed"]);
     let target = jazz::protocol::SchemaVersion::new(v2);
-    let error =
-        block_on(db.activate_schema_with_lenses(
-            target.schema.clone(),
-            &[status_widening_lens(&v1, &target)],
-        ))
-        .unwrap_err();
+    let error = block_on(
+        db.admit_schema_with_lenses(target.schema.clone(), &[status_widening_lens(&v1, &target)]),
+    )
+    .unwrap_err();
     assert!(
         error.to_string().contains("is not supported yet"),
         "{error}"
     );
-    let error = block_on(db.activate_schema(target.schema.clone())).unwrap_err();
+    let error = block_on(db.admit_schema_with_lenses(target.schema.clone(), &[])).unwrap_err();
     assert!(
         error.to_string().contains("is not supported yet"),
         "{error}"
@@ -2814,10 +2812,7 @@ fn branch_view_head_row_an_older_reader_omits_still_masks_the_base() {
     let v2 = schema(&["open", "closed"]);
     let target = jazz::protocol::SchemaVersion::new(v2.clone());
     block_on(
-        db.activate_schema_with_lenses(
-            target.schema.clone(),
-            &[status_widening_lens(&v1, &target)],
-        ),
+        db.admit_schema_with_lenses(target.schema.clone(), &[status_widening_lens(&v1, &target)]),
     )
     .unwrap();
     let new = block_on(db.register_schema_view(v2.clone())).unwrap();

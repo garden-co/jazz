@@ -298,7 +298,6 @@ fn held_for_test_sees_what_a_transaction_handle_keeps_between_calls() {
     let held = db.db.held_for_test();
     assert!(held.overlay, "staging leaves the overlay applied");
     assert!(held.sqlite_transaction, "in its savepoint");
-    assert!(!held.callback_transaction);
 
     assert!(titles(&db).is_empty());
     let held = db.db.held_for_test();
@@ -686,17 +685,17 @@ fn a_relation_read_nests_each_relation_in_its_parents_cells() {
     );
 }
 
-/// A local-first account's proof for app `app`, and the canonical author it
+/// A device account's proof for app `app`, and the canonical author it
 /// proves.
 fn local_first_proof(seed: u8, app: &str) -> (String, String) {
-    use jazz::identity::{LOCAL_FIRST_ISSUER, derive_user_id, mint_jazz_self_signed_token};
+    use jazz::identity::{DEVICE_ACCOUNT_ISSUER, derive_user_id, mint_jazz_self_signed_token};
     let seed = [seed; 32];
-    let token = mint_jazz_self_signed_token(&seed, LOCAL_FIRST_ISSUER, app, 600).unwrap();
+    let token = mint_jazz_self_signed_token(&seed, DEVICE_ACCOUNT_ISSUER, app, 600).unwrap();
     let user = derive_user_id(&seed).to_string();
     let app = jazz::app_id::AppId::from_name(app);
-    let author = AuthorSubject::reserved(LOCAL_FIRST_ISSUER, &user)
+    let author = AuthorSubject::reserved(DEVICE_ACCOUNT_ISSUER, &user)
         .unwrap()
-        .with_account(jazz::account_registry::local_first_account_id(
+        .with_account(jazz::account_registry::device_account_id(
             *app.uuid(),
             &user,
         ));
@@ -713,7 +712,7 @@ fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
     argument(backend.insert("notes", &title("before"), &as_account));
 
     backend
-        .admit_local_first_session(&token, "app", &author)
+        .admit_device_account_session(&token, "app", &author)
         .unwrap();
     let write = backend
         .insert("notes", &title("after"), &as_account)
@@ -723,15 +722,15 @@ fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
 
     // Only a backend admits, and only the author its proof derives.
     let (other_token, other_author) = local_first_proof(8, "app");
-    argument(open(1).admit_local_first_session(&other_token, "app", &other_author));
-    argument(backend.admit_local_first_session(&other_token, "app", &author));
-    argument(backend.admit_local_first_session(&token, "other-app", &author));
+    argument(open(1).admit_device_account_session(&other_token, "app", &other_author));
+    argument(backend.admit_device_account_session(&other_token, "app", &author));
+    argument(backend.admit_device_account_session(&token, "other-app", &author));
 }
 
-/// A local-first account's proof for app `app` that expires `seconds` from
+/// A device account's proof for app `app` that expires `seconds` from
 /// now, and the canonical author it proves.
 fn local_first_proof_expiring(seed: u8, app: &str, seconds: u64) -> (String, String) {
-    use jazz::identity::{LOCAL_FIRST_ISSUER, mint_jazz_self_signed_token_at};
+    use jazz::identity::{DEVICE_ACCOUNT_ISSUER, mint_jazz_self_signed_token_at};
     let (_, author) = local_first_proof(seed, app);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -740,7 +739,7 @@ fn local_first_proof_expiring(seed: u8, app: &str, seconds: u64) -> (String, Str
     // Issued in the past, so a short remaining lifetime needs no long ttl.
     let token = mint_jazz_self_signed_token_at(
         &[seed; 32],
-        LOCAL_FIRST_ISSUER,
+        DEVICE_ACCOUNT_ISSUER,
         app,
         600,
         now + seconds - 600,
@@ -765,16 +764,16 @@ fn a_backend_drops_local_first_admissions_whose_proof_expired() {
     let backend = authority();
     let (alice_token, alice) = local_first_proof_expiring(7, "app", 2);
     backend
-        .admit_local_first_session(&alice_token, "app", &alice)
+        .admit_device_account_session(&alice_token, "app", &alice)
         .unwrap();
-    assert_eq!(backend.admitted_local_first_accounts(), 1);
+    assert_eq!(backend.admitted_device_accounts(), 1);
     std::thread::sleep(std::time::Duration::from_secs(3));
 
     let (bob_token, bob) = local_first_proof(8, "app");
     backend
-        .admit_local_first_session(&bob_token, "app", &bob)
+        .admit_device_account_session(&bob_token, "app", &bob)
         .unwrap();
-    assert_eq!(backend.admitted_local_first_accounts(), 1);
+    assert_eq!(backend.admitted_device_accounts(), 1);
     let as_alice = json!({ "author": alice.as_bytes() });
     argument(backend.insert("notes", &title("alice, expired"), &as_alice));
     let as_bob = json!({ "author": bob.as_bytes() });
@@ -804,10 +803,10 @@ fn a_later_admission_never_shortens_a_local_first_account_s_admission() {
     let (short_token, same_alice) = local_first_proof_expiring(7, "app", 2);
     assert_eq!(alice, same_alice);
     backend
-        .admit_local_first_session(&long_token, "app", &alice)
+        .admit_device_account_session(&long_token, "app", &alice)
         .unwrap();
     backend
-        .admit_local_first_session(&short_token, "app", &alice)
+        .admit_device_account_session(&short_token, "app", &alice)
         .unwrap();
     std::thread::sleep(std::time::Duration::from_secs(3));
     let as_alice = json!({ "author": alice.as_bytes() });
@@ -1102,6 +1101,50 @@ fn a_tab_read_asks_for_the_tick_that_fetches_its_large_values() {
     let rows = jazz::binding_codec::decode_rows(&drive_on_demand(&links, read).unwrap()).unwrap();
     assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 1);
     assert_eq!(titles(&tab), [large]);
+}
+
+#[test]
+fn a_tab_asks_for_the_tick_that_sends_the_next_read_of_its_serializable_transaction() {
+    // The first read of a serializable transaction goes out with the tick its
+    // call asks for. The next is asked once the first one's answer is
+    // applied, inside that tick, after the tick's send: nothing else is in
+    // flight to tick the tab, so it must ask for one itself.
+    let server = authority();
+    server.insert("notes", &title("one"), &none()).unwrap();
+    server
+        .insert(
+            "comments",
+            &comment(RowUuid(uuid::Uuid::from_bytes([7; 16])), "two"),
+            &none(),
+        )
+        .unwrap();
+    let worker = open(0xd4);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xd5));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let tx = &OpenTransactionId::new().to_string();
+    tab.begin_transaction(tx, "serializable", None, None)
+        .unwrap();
+    let read = |table: &str| {
+        let query = postcard::to_allocvec(&Query::from(table)).unwrap();
+        tab.all(query, &none(), Some(tx), None, None).unwrap()
+    };
+    // Both asked now; the transaction runs them one after the other.
+    let (notes, comments) = (read("notes"), read("comments"));
+    let (notes, comments) = drive_on_demand(&links, futures::future::join(notes, comments));
+    let count = |bytes: Vec<u8>| {
+        jazz::binding_codec::decode_rows(&bytes)
+            .unwrap()
+            .iter()
+            .map(|batch| batch.rows.len())
+            .sum::<usize>()
+    };
+    assert_eq!(count(notes.unwrap()), 1);
+    assert_eq!(count(comments.unwrap()), 1);
 }
 
 #[test]

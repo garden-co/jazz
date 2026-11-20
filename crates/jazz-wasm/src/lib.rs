@@ -30,13 +30,23 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
 
+// What a backend's `createJazz` needs to run on this build; never in the
+// Durable Object core's build, which is sized for the Workers Free plan.
+#[cfg(all(feature = "backend", feature = "durable-object"))]
+compile_error!("the `backend` and `durable-object` features are separate builds; enable one");
+#[cfg(feature = "backend")]
+mod backend;
 #[cfg(target_arch = "wasm32")]
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
+#[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+mod durable_object;
 #[cfg(target_arch = "wasm32")]
 mod idb_vfs;
 mod identity;
+#[cfg(all(feature = "durable-object", any(target_arch = "wasm32", test)))]
+mod socket_attachment;
 mod text;
 
 #[cfg(feature = "bench-probes")]
@@ -288,7 +298,7 @@ fn decode_seed(seed_b64: &str) -> Result<[u8; 32], JsValue> {
         .map_err(|_| JsValue::from_str("seed must be exactly 32 bytes"))
 }
 
-/// Mint a local-first identity JWT from a base64url-encoded 32-byte seed.
+/// Mint a device-account identity JWT from a base64url-encoded 32-byte seed.
 #[wasm_bindgen(js_name = mintLocalFirstToken)]
 pub fn mint_local_first_token(
     seed_b64: String,
@@ -299,7 +309,7 @@ pub fn mint_local_first_token(
     let seed = decode_seed(&seed_b64)?;
     identity::mint_jazz_self_signed_token_at(
         &seed,
-        identity::LOCAL_FIRST_ISSUER,
+        identity::DEVICE_ACCOUNT_ISSUER,
         &audience,
         ttl_seconds as u64,
         now_seconds,
@@ -307,7 +317,7 @@ pub fn mint_local_first_token(
     .map_err(|e| JsValue::from_str(&e))
 }
 
-/// Derive a stable local-first user id from a base64url-encoded 32-byte seed.
+/// Derive a stable device-account user id from a base64url-encoded 32-byte seed.
 #[wasm_bindgen(js_name = deriveUserId)]
 pub fn derive_user_id(seed_b64: String) -> Result<String, JsValue> {
     let seed = decode_seed(&seed_b64)?;
@@ -410,6 +420,10 @@ fn not_supported(what: &str) -> JsValue {
 #[derive(Default)]
 struct Host {
     tick_scheduler: RefCell<Option<js_sys::Function>>,
+    /// A thin session's transactions, when this database serves them as
+    /// the backend's client (`serveThinTransaction`).
+    #[cfg(feature = "backend")]
+    thin: Rc<RefCell<Option<backend::ThinState>>>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<js_sys::Function>>,
     #[cfg(target_arch = "wasm32")]
@@ -1252,6 +1266,35 @@ impl WasmDb {
             inner: Rc::new(RefCell::new(Some(WasmDbInner::new(binding)))),
             owns_runtime: true,
         }
+    }
+
+    /// Open the backend store a Durable Object owns, on its SQL
+    /// (`ctx.storage`): chunks and host tables live in that store, so it
+    /// survives the object's restarts. A core there accepts finished
+    /// transactions only (see `jazz::storage`).
+    #[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+    #[wasm_bindgen(js_name = openDurableObject)]
+    pub fn open_durable_object(
+        storage: durable_object::ObjectStorage,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+    ) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
+        let (schema, mut config) =
+            binding_host::decode_open(&schema, &config).map_err(host_error)?;
+        let (identity, trusted) =
+            binding_host::open_identity(&mut config, OpenAs::Backend).map_err(host_error)?;
+        let db_config = jazz::tools::deployment::published::with_client_migrations(
+            binding_host::db_config(schema, &config, identity),
+            config.migrations.as_deref(),
+        )
+        .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        let db = block_on(jazz::db::Db::open_storage(
+            db_config,
+            durable_object::durable_object_storage(storage),
+        ))
+        .map_err(to_js_error)?;
+        Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
     }
 
     fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {

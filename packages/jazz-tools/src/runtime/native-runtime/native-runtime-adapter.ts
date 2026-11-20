@@ -6,7 +6,7 @@ import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
 import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
 import { CoreTickFailedError, isCoreTickFailedError } from "../core-tick-failed-error.js";
-import { formatUuid, formatUuidAt, parseUuidBytes } from "../hex.js";
+import { formatUuid, parseUuidBytes } from "../hex.js";
 
 export { formatUuid };
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
@@ -252,9 +252,9 @@ type NativeRestoreOptions = NativeWriteOptions & {
 
 type NativeDb = {
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
-  /** NAPI: a thin session's transaction request, as its backend's client serves it. */
+  /** A thin session's transaction request, as its backend's client serves it. */
   serveThinTransaction?(request: Uint8Array): NativeReadResult;
-  /** NAPI: end the thin session's open transactions. */
+  /** End the thin session's open transactions. */
   releaseThinTransactions?(): NativeReadResult;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
@@ -271,6 +271,8 @@ type NativeDb = {
   waitForSync?(
     tier: string,
     writer?: Uint8Array | null,
+    /** WASM: settling it stops the wait (napi ignores it). */
+    cancelled?: Promise<void>,
   ): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
@@ -3515,6 +3517,7 @@ export class NativeRuntimeAdapter implements Runtime {
           ? this.db.waitForSync(
               tier,
               this.trustedWriteIdentity(sessionFromWriteContext(sync.writeContext)) ?? null,
+              cancelled,
             )
           : this.db.waitForPendingWrites(tier, cancelled, true);
       const wait = this.awaitNativeRead(
@@ -3990,10 +3993,10 @@ export class NativeRuntimeAdapter implements Runtime {
       !session.account_id ||
       !isTrustedReservedSession(session, trustedReservedSessionToken(session))
     ) {
-      throw new Error("Local-first native admission requires a verified account session");
+      throw new Error("Device account native admission requires a verified account session");
     }
     if (!this.db.admitLocalFirstSession)
-      throw new Error("Native runtime lacks local-first session admission");
+      throw new Error("Native runtime lacks device account session admission");
     this.db.admitLocalFirstSession(
       token,
       appId,
@@ -5221,7 +5224,7 @@ function assertPublicSessionIssuer(
   if (
     isReservedJazzIssuer(issuer) &&
     !(
-      (authMode === "local-first" || authMode === "anonymous" || authMode === "external") &&
+      (authMode === "device-account" || authMode === "anonymous" || authMode === "external") &&
       isTrustedReservedSession(
         { issuer, user_id: userId, authMode, account_id: accountId },
         trustedToken,
