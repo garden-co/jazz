@@ -1383,3 +1383,58 @@ describe("Large values through the Inspector (#5202)", () => {
     ).toBe("photo.jpg");
   });
 });
+
+describe("explain through an inherited clause", () => {
+  const nestedApp = s.defineApp(
+    {
+      projects: s.table({ owner: s.uuid() }, {}),
+      tasks: s.table(
+        { title: s.string(), projectId: s.uuid() },
+        { project: s.rel("projects", "projectId") },
+      ),
+    },
+    { migrations: "none" },
+  );
+  const nestedPermissions = s.definePermissions(nestedApp, ({ policy, session, allowedTo }) => {
+    policy.projects.allowRead.where({ owner: session.user });
+    policy.tasks.allowRead.where(allowedTo.read("project"));
+  });
+
+  it("names the parent row each row points to, and its own verdict", async () => {
+    const jazz = await createJazz({
+      app: nestedApp,
+      permissions: nestedPermissions,
+      store: memory(),
+      authenticate,
+      inspect: staffOnly,
+    });
+    cleanups.push(() => jazz.close());
+    const alice = await accountOf(jazz, "alice");
+    const bob = await accountOf(jazz, "bob");
+    const mine = await jazz.db
+      .insert(nestedApp.projects, { owner: alice })
+      .wait({ tier: "global" });
+    const theirs = await jazz.db
+      .insert(nestedApp.projects, { owner: bob })
+      .wait({ tier: "global" });
+    await jazz.db
+      .insert(nestedApp.tasks, { title: "mine", projectId: mine.id })
+      .wait({ tier: "global" });
+    await jazz.db
+      .insert(nestedApp.tasks, { title: "theirs", projectId: theirs.id })
+      .wait({ tier: "global" });
+
+    const answer = await ok(
+      api(
+        jazz,
+        { op: "explain", query: { table: "tasks", orderBy: [["title", "asc"]] }, as: "alice" },
+        STAFF,
+      ),
+    );
+    expect(answer.inherited[0]).toMatchObject({ table: "projects", column: "projectId" });
+    expect(answer.rows.map((row: any) => [row.row.title, row.allowed, row.via[0]])).toEqual([
+      ["mine", true, { id: mine.id, allowed: true, by: [0] }],
+      ["theirs", false, { id: theirs.id, allowed: false, by: [] }],
+    ]);
+  });
+});
