@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { TRUSTED_CACHE_GUARD } from "../release-publish/producer-run.mjs";
 import {
   inspectorRunSource,
   inspectorBranchRefPath,
@@ -44,6 +45,8 @@ for (const [path, event, head_branch] of [
   ["publish-jazz-tools-alpha.yml", "workflow_dispatch", "release"],
   ["release-artifacts.yml", "workflow_dispatch", "release"],
   ["release-artifacts.yml", "push", "release"],
+  ["release-artifacts.yml", "workflow_dispatch", "changeset-release/release"],
+  ["release-artifacts.yml", "push", "changeset-release/release"],
 ]) {
   test(`accepts approved caller ${path} on ${event}`, () => {
     assert.equal(
@@ -107,22 +110,6 @@ for (const [name, changes] of [
     "release preview pushed on the Version Packages branch (cache scope)",
     {
       path: ".github/workflows/preview-jazz-tools-alpha-release.yml",
-      event: "push",
-      head_branch: "changeset-release/release",
-    },
-  ],
-  [
-    "release artifacts dispatched on the Version Packages branch (cache scope)",
-    {
-      path: ".github/workflows/release-artifacts.yml",
-      event: "workflow_dispatch",
-      head_branch: "changeset-release/release",
-    },
-  ],
-  [
-    "release artifacts pushed on the Version Packages branch (cache scope)",
-    {
-      path: ".github/workflows/release-artifacts.yml",
       event: "push",
       head_branch: "changeset-release/release",
     },
@@ -223,4 +210,77 @@ test("rejects an unapproved producer before querying commits or branch", () => {
     /unapproved producer/,
   );
   assert.equal(requests, 1);
+});
+
+test("a changeset-release release-artifacts run needs the guard in the deployed tree", () => {
+  const vpRun = run({ event: "workflow_dispatch", head_branch: "changeset-release/release" });
+  const guardedWorkflow = `name: x\nenv:\n  ${TRUSTED_CACHE_GUARD}\njobs: {}\n`;
+  assert.equal(
+    verifyInspectorHandoff(
+      handoff({
+        run: vpRun,
+        deploymentReleaseArtifactsWorkflow: guardedWorkflow,
+        deploymentHasTrustedCacheTest: true,
+      }),
+    ),
+    artifactSha,
+  );
+  // The guard without its contract test in the deployed tree: refused.
+  assert.throws(
+    () =>
+      verifyInspectorHandoff(
+        handoff({ run: vpRun, deploymentReleaseArtifactsWorkflow: guardedWorkflow }),
+      ),
+    /contract test/,
+  );
+  assert.throws(
+    () =>
+      verifyInspectorHandoff(
+        handoff({ run: vpRun, deploymentReleaseArtifactsWorkflow: "env:\n  X: y\n" }),
+      ),
+    /trusted-cache guard/,
+  );
+  // A release run needs no guard.
+  assert.equal(verifyInspectorHandoff(handoff()), artifactSha);
+});
+
+test("GitHub orchestration reads release-artifacts.yml at the deployed commit for a changeset-release run", () => {
+  const vpRun = run({ event: "workflow_dispatch", head_branch: "changeset-release/release" });
+  for (const [workflow, ok] of [
+    [`env:\n  ${TRUSTED_CACHE_GUARD}\n`, true],
+    ["env:\n  X: y\n", false],
+  ]) {
+    const paths = [];
+    const responses = [
+      vpRun,
+      handoff().artifactCommit,
+      handoff().deploymentCommit,
+      handoff().branchRef,
+      { content: Buffer.from(workflow).toString("base64"), encoding: "base64" },
+      { content: "", encoding: "base64" },
+    ];
+    const verify = () =>
+      verifyInspectorRunFromGitHub(
+        {
+          GITHUB_REPOSITORY: repository,
+          SOURCE_BRANCH: "release",
+          SOURCE_SHA: deploySha,
+          ARTIFACT_RUN_ID: "123",
+        },
+        (path) => {
+          paths.push(path);
+          return responses.shift();
+        },
+      );
+    if (ok) assert.equal(verify(), artifactSha);
+    else assert.throws(verify, /trusted-cache guard/);
+    assert.equal(
+      paths[4],
+      `repos/${repository}/contents/.github/workflows/release-artifacts.yml?ref=${deploySha}`,
+    );
+    assert.equal(
+      paths[5],
+      `repos/${repository}/contents/dev/gates/test/release-artifacts-trusted-caches.test.mjs?ref=${deploySha}`,
+    );
+  }
 });
