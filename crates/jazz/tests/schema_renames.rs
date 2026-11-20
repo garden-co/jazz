@@ -1625,3 +1625,183 @@ fn an_upsert_creating_its_row_takes_its_writers_defaults() {
         "the echo keeps the client's value"
     );
 }
+
+/// Alice's backend executes every mutation through renamed schema views:
+/// updates preserve omitted cells, while restore and creating upserts use
+/// that view's defaults. Bob's older view observes the same stored rows.
+#[test]
+fn renamed_write_views_preserve_defaults_and_restore_semantics() {
+    let db = block_on(Db::open(config(v3(), 1, AuthorSubject::SYSTEM))).unwrap();
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+
+    block_on(db.upsert(
+        "tasks",
+        row(1),
+        BTreeMap::from([
+            ("name".into(), text("first")),
+            ("rank".into(), Value::I64(7)),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(old.upsert(
+        "todos",
+        row(1),
+        BTreeMap::from([("rank".into(), Value::I64(8))]),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(read(&db, "tasks", "name"), texts(&["first"]));
+    assert_eq!(read(&old, "todos", "rank"), vec![Value::I64(8)]);
+
+    block_on(old.delete("todos", row(1), Default::default())).unwrap();
+    block_on(db.restore(
+        "tasks",
+        row(1),
+        Some(BTreeMap::from([("name".into(), text("restored"))])),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(read(&old, "todos", "title"), texts(&["restored"]));
+    assert_eq!(read(&db, "tasks", "rank"), vec![Value::I64(0)]);
+
+    block_on(old.upsert(
+        "todos",
+        row(2),
+        BTreeMap::from([("title".into(), text("second"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(read(&db, "tasks", "name"), texts(&["restored", "second"]));
+    assert_eq!(
+        read(&db, "tasks", "rank"),
+        vec![Value::I64(0), Value::I64(0)]
+    );
+}
+
+/// Alice may name only her schema's columns. Knowing a physical column's
+/// identity does not let her submit it as an undeclared alias. The test hook
+/// supplies the exact internal name; the assertion uses the public write API.
+#[test]
+fn storage_column_names_are_not_public_write_aliases() {
+    let db = block_on(Db::open(config(v3(), 1, AuthorSubject::SYSTEM))).unwrap();
+    let (_, stored) = db.stored_column_for_test("tasks", "name");
+    assert_ne!(stored, "name");
+    let error = block_on(db.insert(
+        "tasks",
+        BTreeMap::from([(stored, text("undeclared"))]),
+        Default::default(),
+    ))
+    .unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected);
+    assert!(error.message.contains("unknown column"), "{error}");
+    assert!(read(&db, "tasks", "name").is_empty());
+}
+
+/// Alice queues writes through an old view while Bob reads through the current
+/// view. Queued operations retain their column identities and defaults.
+#[test]
+fn queued_writes_keep_their_prepared_names_across_schema_renames() {
+    let db = block_on(Db::open(config(v3(), 1, AuthorSubject::SYSTEM))).unwrap();
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    let tx = block_on(old.mergeable_tx()).unwrap();
+    block_on(tx.upsert(
+        "todos",
+        row(1),
+        BTreeMap::from([("title".into(), text("queued"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(tx.update(
+        "todos",
+        row(1),
+        BTreeMap::from([("rank".into(), Value::I64(9))]),
+        Default::default(),
+    ))
+    .unwrap();
+    assert!(read(&db, "tasks", "name").is_empty());
+    block_on(tx.commit()).unwrap();
+    assert_eq!(read(&db, "tasks", "name"), texts(&["queued"]));
+    assert_eq!(read(&db, "tasks", "rank"), vec![Value::I64(9)]);
+}
+
+/// Alice subscribes through an older prepared query while Bob writes through
+/// renamed tables and columns. Splice validation and delivery use Alice's
+/// query vocabulary even when the current Db opens or refreshes her stream.
+#[test]
+fn subscription_splices_use_the_prepared_querys_schema() {
+    let db = block_on(Db::open(config(v3(), 1, AuthorSubject::SYSTEM))).unwrap();
+    insert(&db, "tasks", 1, "name", "before");
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    let prepared = old
+        .prepare_query(&Query::from("todos").select(["title"]))
+        .unwrap();
+    let mut stream =
+        block_on(db.subscribe(&prepared, ReadOpts::default().with_splices(["title"]))).unwrap();
+    while stream.try_next_event().is_some() {}
+    update(&db, "tasks", 1, "name", "after");
+    let mut observed = false;
+    while let Some(event) = stream.try_next_event() {
+        match event {
+            SubscriptionEvent::Delta { updated, .. } => {
+                for row in updated {
+                    assert_eq!(row.cell("title"), Some(text("after")));
+                    let (_, splices) = row
+                        .splices
+                        .iter()
+                        .find(|(column, _)| column == "title")
+                        .expect("the old view receives splices under its column name");
+                    let mut value = b"before".to_vec();
+                    for splice in splices.iter().rev() {
+                        value.splice(
+                            splice.at as usize..(splice.at + splice.delete) as usize,
+                            splice.insert.clone(),
+                        );
+                    }
+                    assert_eq!(value, b"after");
+                    observed = true;
+                }
+            }
+            SubscriptionEvent::Rejected { message, .. } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    assert!(observed, "the old subscription receives Bob's update");
+}
+
+/// Alice's old view and Bob's renamed view read and edit the same chunked
+/// text. Prepared cell reads keep the view's column metadata and SQL names.
+#[test]
+fn large_value_reads_and_edits_keep_the_source_views_names() {
+    let db = block_on(Db::open(config(v3(), 1, AuthorSubject::SYSTEM))).unwrap();
+    let original = "aé🦀".repeat(2000);
+    insert(&db, "tasks", 1, "name", &original);
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    assert_eq!(
+        block_on(old.read_text_utf16_range("todos", row(1), "title", 1..4)).unwrap(),
+        "é🦀"
+    );
+    block_on(old.append_value("todos", row(1), "title", b"!".to_vec())).unwrap();
+    block_on(db.update_with_large_value_mutations(
+        "tasks",
+        row(1),
+        BTreeMap::new(),
+        vec![jazz::db::LargeValueUpdate::Splice {
+            column: "name".into(),
+            within: jazz::db::LargeValueUpdatePage::TextUtf8 { from: 0, to: 1 },
+            splices: vec![jazz::db::LargeValueUpdateSplice {
+                at: 0,
+                delete: 1,
+                insert: b"b".to_vec(),
+            }],
+        }],
+        Default::default(),
+    ))
+    .unwrap();
+    let expected = format!("b{}!", &original[1..]);
+    assert_eq!(
+        block_on(old.read_value_range("todos", row(1), "title", 0..expected.len() as u64)).unwrap(),
+        expected.as_bytes()
+    );
+    assert_eq!(read(&db, "tasks", "name"), texts(&[&expected]));
+}
