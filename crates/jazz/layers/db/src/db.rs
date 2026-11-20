@@ -403,6 +403,12 @@ pub enum SubscriptionEvent {
         /// [`Db::set_subscription_backlog_limit`]): the current result,
         /// which supersedes them. Always `false` on other deltas.
         coalesced: bool,
+        /// The rows the result leaves out because the client's encryption
+        /// hooks could not open them (protocol §4.3), replacing the list
+        /// the reader was told before: always set on an opening or a reset,
+        /// and on a delta when the list changed (a key arrived, or a row
+        /// became unreadable). `None`: unchanged. Empty without hooks.
+        unreadable: Option<Arc<[UnreadableRow]>>,
     },
     /// The subscription ended with an error: `code` says what kind,
     /// `message` is the error's own message, `reason` the error as text
@@ -610,7 +616,8 @@ impl SubscriptionStream {
             self.gate = None;
             self.queue.borrow_mut().clear();
             let group = self.group.upgrade()?;
-            let mut event = fanout::opening(&group.borrow().rows);
+            let group = group.borrow();
+            let mut event = fanout::opening(&group.rows, &group.unreadable);
             if let SubscriptionEvent::Delta {
                 settled: flag,
                 tier,
@@ -634,7 +641,11 @@ impl SubscriptionStream {
         let group = self.group.upgrade();
         let group = group.as_ref().and_then(|group| group.try_borrow().ok());
         debug_assert!(group.is_some(), "a reader reads outside dispatch");
-        queue.pop_front(group.as_ref().map(|group| group.rows.as_slice()))
+        queue.pop_front(
+            group
+                .as_ref()
+                .map(|group| (group.rows.as_slice(), &group.unreadable)),
+        )
     }
 
     /// Changed rows its undelivered deltas hold: at most its backlog limit
@@ -5151,6 +5162,7 @@ fn delta(
         settled: true,
         tier: DurabilityTier::Local,
         coalesced: false,
+        unreadable: None,
     }
 }
 

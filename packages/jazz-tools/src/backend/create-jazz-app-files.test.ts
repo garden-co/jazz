@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testApp, type TestAppFile } from "../testing/test-app.js";
 import { createJazz, memory, remote, sqlite } from "./create-jazz.js";
+import { keyless } from "../encryption/keyless-types.js";
 
 const notes: TestAppFile = { format: 1, tables: { notes: { columns: { body: "string" } } } };
 const notesWithDone: TestAppFile = {
@@ -106,7 +107,7 @@ describe("createJazz takes jazz.permissions.json in every form a project may hol
 describe("createJazz validates and opens encrypted apps with keyless hooks", () => {
   // Projects are spaces; a task's title is encrypted in its project's space,
   // and its notes are being decrypted into `notesText`.
-  const encrypted: TestAppFile = {
+  const encrypted = {
     format: 1,
     tables: {
       projects: { columns: { name: "string", ownerId: "uuid" } },
@@ -125,7 +126,7 @@ describe("createJazz validates and opens encrypted apps with keyless hooks", () 
         },
       },
     },
-  };
+  } as const satisfies TestAppFile;
   const members =
     "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)";
   const permissions = {
@@ -160,13 +161,16 @@ describe("createJazz validates and opens encrypted apps with keyless hooks", () 
     const jazz = await startEncrypted(sqlite({ path: join(process.cwd(), "store") }), [
       "tasks.notes",
     ]);
-    const app = testApp(encrypted);
+    // The backend's types have no encrypted column: its reads never carry
+    // one, and writing one is refused at runtime too.
+    const app = keyless(testApp(encrypted));
     expect(() =>
       jazz.db.insert(app.tasks, {
         projectId: crypto.randomUUID(),
+        // @ts-expect-error a keyless backend's insert has no encrypted column
         title: "typed by the backend",
         notes: "x",
-      } as never),
+      }),
     ).toThrow(
       "the backend holds no encryption keys; encrypted columns are written by clients (`tasks.notes`)",
     );

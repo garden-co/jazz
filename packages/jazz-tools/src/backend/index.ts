@@ -10,6 +10,13 @@ export {
   type BackendSchemaInput,
   type BackendSchemaSource,
 } from "./create-jazz-context.js";
+export {
+  keyless,
+  type EncryptedColumnName,
+  type KeylessApp,
+  type KeylessRow,
+  type KeylessTypes,
+} from "../encryption/keyless-types.js";
 export { isRequestAuthenticationError, RequestAuthenticationError } from "./request-auth.js";
 export { isNoJazzAccountError, NoJazzAccountError } from "./no-account-error.js";
 export type { WasmSchema } from "../drivers/types.js";
