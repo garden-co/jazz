@@ -77,9 +77,13 @@ export class NativeForegroundDb {
   private uploadStatusUnsupported = false;
   /**
    * A tick failure met while an encryption call waited. The call is not its
-   * owner, so the next `tick()` (the core's own driver) throws it.
+   * owner, so the next `tick()` (the core's own driver) throws it, or the
+   * next tick of an operation that was already pending when it happened
+   * (`at`): one admitted after it never sees it.
    */
-  private heldTickFailure: { error: unknown } | undefined;
+  private heldTickFailure: { error: unknown; at: number } | undefined;
+  /** Counts held tick failures; an operation notes it when admitted. */
+  private tickFailures = 0;
 
   constructor(
     private readonly runtime: NativeForegroundRuntime,
@@ -187,9 +191,18 @@ export class NativeForegroundDb {
   }
 
   tick(): void {
+    this.tickSince(-1);
+  }
+
+  /**
+   * A tick for an operation admitted when `since` tick failures had been
+   * held: a held failure is thrown only if it happened after that, while
+   * the operation was pending. One from before it began stays held.
+   */
+  private tickSince(since: number): void {
     this.assertOpen();
     const held = this.heldTickFailure;
-    if (held) {
+    if (held && held.at > since) {
       this.heldTickFailure = undefined;
       throw held.error;
     }
@@ -505,7 +518,7 @@ export class NativeForegroundDb {
     // its core cleanup for the following ordinary turn. Drive that turn here:
     // after the JS reader stops polling there may be no unrelated operation
     // to do it for us.
-    if (response.closed) this.tick();
+    if (response.closed) this.tickSince(this.tickFailures);
     return response.closed;
   }
 
@@ -526,6 +539,7 @@ export class NativeForegroundDb {
   }
 
   private requestPermissionAdvice(action: Relay.NativeForegroundPermissionAdviceAction) {
+    const since = this.tickFailures;
     let response = this.execute({ type: "permissionAdvice", action });
     if (response.type === "permissionAdvice") return response.advice;
     if (response.type === "operationError") throw foregroundOperationError(response);
@@ -535,7 +549,7 @@ export class NativeForegroundDb {
     return {
       poll: (): string | null => {
         if (completed || this.closed) return "unknown";
-        this.tick();
+        this.tickSince(since);
         response = this.execute({ type: "poll", operation });
         if (response.type === "pending") return null;
         completed = true;
@@ -563,6 +577,7 @@ export class NativeForegroundDb {
   waitForPendingWrites(
     tier: string,
   ): Uint8Array | { poll(): Uint8Array | null; cancel(): boolean } {
+    const since = this.tickFailures;
     let response = this.execute({ type: "waitForPendingWrites", tier });
     const settle = (): Uint8Array => {
       if (response.type === "operationError") throw foregroundOperationError(response);
@@ -576,7 +591,7 @@ export class NativeForegroundDb {
     return {
       poll: (): Uint8Array | null => {
         if (completed || this.closed) throw new Error("waitForPendingWrites was cancelled");
-        this.tick();
+        this.tickSince(since);
         response = this.execute({ type: "poll", operation });
         if (response.type === "pending") return null;
         completed = true;
@@ -597,11 +612,12 @@ export class NativeForegroundDb {
     if (!["local", "global"].includes(tier)) {
       throw new Error(`Unsupported write durability tier: ${tier}`);
     }
+    const since = this.tickFailures;
     let response = this.execute({ type: "waitForTransaction", txId, tier, observeOnly });
     while (response.type === "pending") {
       const operation = response.operation;
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      this.tick();
+      this.tickSince(since);
       response = this.execute({ type: "poll", operation });
     }
     if (response.type === "operationError") throw foregroundOperationError(response);
@@ -615,11 +631,13 @@ export class NativeForegroundDb {
   }
 
   private pendingRows(operation: number): { poll(): Uint8Array | null; cancel(): void } {
+    // Admitted just now, by the caller's `execute`.
+    const since = this.tickFailures;
     let completed = false;
     return {
       poll: () => {
         if (completed) throw new Error("Native foreground read is already complete");
-        this.tick();
+        this.tickSince(since);
         const response = this.execute({ type: "poll", operation });
         if (response.type === "pending") return null;
         completed = true;
@@ -913,13 +931,14 @@ export class NativeForegroundDb {
       },
       finish: async (): Promise<NativeForegroundWrite> => {
         assertOpen();
+        const since = this.tickFailures;
         let finished = this.execute({ type: "finishStreamingMutation", upload });
         if (finished.type === "operationError") throw foregroundOperationError(finished);
         closed = true;
         while (finished.type === "pending") {
           const operation = finished.operation;
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
-          this.tick();
+          this.tickSince(since);
           finished = this.execute({ type: "poll", operation });
         }
         if (finished.type === "operationError") throw foregroundOperationError(finished);
@@ -945,7 +964,9 @@ export class NativeForegroundDb {
    * Polls an admitted operation to its result. `drive` says how the wait
    * treats the core tick:
    * - `ownTick`: ticks, and a tick failure is the operation's (streaming
-   *   mutations run through the core), so it cancels the operation;
+   *   mutations run through the core), so it cancels the operation; a held
+   *   failure is its own only if it happened while the operation was
+   *   pending (the response was admitted just before this call);
    * - `sharedTick`: ticks, but the relay runs the operation (encryption
    *   calls), so a tick failure is not its own. Cancelling would drop work
    *   that may not be repeatable (a spent approval). The operation keeps
@@ -958,11 +979,12 @@ export class NativeForegroundDb {
     response: ForegroundResponse,
     drive: "ownTick" | "sharedTick" | "pollOnly" = "ownTick",
   ): Promise<ForegroundResponse> {
+    const since = this.tickFailures;
     while (response.type === "pending") {
       const operation = response.operation;
       try {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        if (drive === "ownTick") this.tick();
+        if (drive === "ownTick") this.tickSince(since);
         if (drive === "sharedTick") this.tickAlongside();
         response = this.execute({ type: "poll", operation });
       } catch (error) {
@@ -978,7 +1000,7 @@ export class NativeForegroundDb {
     try {
       this.driveTick();
     } catch (error) {
-      this.heldTickFailure ??= { error };
+      this.heldTickFailure ??= { error, at: ++this.tickFailures };
     }
   }
 

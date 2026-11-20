@@ -184,3 +184,56 @@ it("polls a pending readiness call without a synchronous tick", async () => {
   expect(tick).not.toHaveBeenCalled();
   expect(commands.slice(1)).toEqual([{ type: "poll", operation: 13 }]);
 });
+
+// A core failure held while an encryption call waited belongs to the core's
+// driver, or to an operation that was already pending when it happened: one
+// that began after it must not fail with it.
+function heldFailureFixture() {
+  const failure = new Error("core tick failed");
+  const tick = vi.fn<() => void>().mockImplementationOnce(() => {
+    throw failure;
+  });
+  let callPolls = 0;
+  const { db, commands } = fixture((command) => {
+    if (typeof command !== "object") throw new Error(`unexpected command ${command}`);
+    if (command.type === "encryptionCall") return { type: "pending", operation: 14 };
+    if (command.type === "waitForTransaction") return { type: "pending", operation: 20 };
+    if (command.type === "unsubscribe") return { type: "unsubscribed", closed: true };
+    if (command.type === "poll" && command.operation === 14) {
+      callPolls += 1;
+      return callPolls < 3
+        ? { type: "pending", operation: 14 }
+        : { type: "encryptionResult", json: '"done"' };
+    }
+    if (command.type === "poll" && command.operation === 20) {
+      return { type: "transactionSettled", txId: new Uint8Array(16) };
+    }
+    throw new Error(`unexpected command ${JSON.stringify(command)}`);
+  }, tick);
+  return { db, commands, failure, tick };
+}
+
+it("does not fail an operation that began after a held tick failure", async () => {
+  const { db, failure } = heldFailureFixture();
+  await expect(db.encryptionCall("answer")).resolves.toBe('"done"');
+
+  db.unsubscribe(3);
+  await expect(db.waitForTransaction(new Uint8Array(16), "local")).resolves.toBeUndefined();
+  // Still held for the core's own driver.
+  expect(() => db.tick()).toThrow(failure);
+  db.tick();
+});
+
+it("fails an operation that was pending when the held tick failure happened", async () => {
+  const { db, failure } = heldFailureFixture();
+  const call = db.encryptionCall("answer");
+  const waiting = db.waitForTransaction(new Uint8Array(16), "local").then(
+    () => "settled",
+    (error: unknown) => error,
+  );
+
+  await expect(call).resolves.toBe('"done"');
+  await expect(waiting).resolves.toBe(failure);
+  // It was the operation's to see, once.
+  db.tick();
+});
