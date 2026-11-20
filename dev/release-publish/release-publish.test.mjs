@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkManifest, publishLevels } from "./npm-publish.mjs";
+import { checkManifest, npmAnswer, publishLevels } from "./npm-publish.mjs";
 import { isPayload, requiredFiles } from "./maven-central.mjs";
 import { pickGateRun, summarize } from "./rc-verdict.mjs";
 
@@ -129,4 +129,19 @@ test("verify-trust checks every package npm-publish publishes, named as npm esca
   );
   assert.equal(escapedName("@garden-co/jazz-napi-darwin-x64"), "@garden-co%2fjazz-napi-darwin-x64");
   assert.equal(escapedName("jazz-tools"), "jazz-tools");
+});
+
+test("npm's answer is kept, without the tarball listing", () => {
+  const out = [
+    "npm notice 📦  jazz-rn-android@2.0.0-alpha.68",
+    "npm notice Tarball Contents",
+    "npm notice 101.2MB android/libjazz.so",
+    "npm notice Publishing to https://registry.npmjs.org/ with tag latest and public access",
+    "npm notice publish Signed provenance statement",
+    "+ jazz-rn-android@2.0.0-alpha.68",
+  ].join("\n");
+  const answer = npmAnswer(out);
+  assert.match(answer, /\+ jazz-rn-android@2\.0\.0-alpha\.68/);
+  assert.match(answer, /Publishing to/);
+  assert.doesNotMatch(answer, /Tarball|101\.2MB/);
 });

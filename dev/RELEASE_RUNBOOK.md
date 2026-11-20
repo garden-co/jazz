@@ -107,9 +107,11 @@ this document or public receipts.
   packaging, then retry through the publisher's existing-version handling. Never
   republish different bytes under an existing version.
 - Verify every expected npm package/version, native payload, dependency and dist-tag
-  using registry reads and installation. Since alpha.60 the publisher moves both
-  `alpha` and `latest` to the new version for every v2 package, so a plain
-  `npm install jazz-tools` gets v2 and Classic is `jazz-tools@0`. To roll `latest`
+  using registry reads and installation. Since alpha.61 the publishers (trusted
+  publishing) publish every v2 package straight to `latest`, so a plain
+  `npm install jazz-tools` gets v2 and Classic is `jazz-tools@0`. They can't
+  move any other dist-tag: `alpha` has stayed at 2.0.0-alpha.60 and only a
+  maintainer's `npm dist-tag add <pkg>@<version> alpha` (or `rm`) changes it. To roll `latest`
   back, run `npm dist-tag add <pkg>@<previous> latest` for each package. Confirm the source tag matches the exact
   released source. Build artifacts alone are not proof of npm publication.
 - Promote the verified docs deployment. The publisher stages and promotes the
