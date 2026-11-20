@@ -201,6 +201,8 @@ mod session_policy_values;
 mod session_write_checks;
 #[path = "../shard_role.rs"]
 mod shard_role;
+#[path = "../shared_sqlite.rs"]
+mod shared_sqlite;
 #[path = "../slow_queries.rs"]
 mod slow_queries;
 #[path = "../snapshots.rs"]

@@ -876,10 +876,6 @@ struct Inner {
     /// clock too, so a reopened file never hands out a transaction id it
     /// may already have uploaded (see [`Inner::next_seq`]).
     pub(crate) reopenable: bool,
-    /// Rows the authority named as written for this replica's own commits
-    /// whose version was not this replica's image of them (see
-    /// `Inner::as_written_images`), asked for whole instead.
-    pub(crate) as_written_mismatches: u64,
     /// Pending commits a rebase replayed (see `Db::rebase`).
     pub(crate) replayed_commits: u64,
     /// Echoes a serving pass examined to match its images (see
@@ -1456,32 +1452,27 @@ pub fn take_vm_steps_for_test() -> u64 {
 }
 
 /// The application tables a store holds, by their stored columns.
-fn stored_schema(conn: &Storage, jazz: &JazzSchema) -> Result<Schema, Error> {
-    let names: Vec<String> = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-        .and_then(|mut statement| {
-            statement
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<_, _>>()
-        })
-        .map_err(storage)?;
+fn stored_schema(
+    conn: &Storage,
+    jazz: &JazzSchema,
+    names: &BTreeSet<String>,
+) -> Result<Schema, Error> {
     let mut tables = BTreeMap::new();
     for name in names {
-        if name.starts_with("_jazz")
-            || name.starts_with("_cf_")
-            || name.starts_with("sqlite_")
-            || name.ends_with("__h")
-        {
-            continue;
-        }
         let columns: Vec<String> = conn
-            .prepare(&format!("PRAGMA table_info({})", quote(&name)))
+            .prepare(&format!("PRAGMA table_info({})", quote(name)))
             .and_then(|mut statement| {
                 statement
                     .query_map([], |row| row.get(1))?
                     .collect::<Result<_, _>>()
             })
             .map_err(storage)?;
+        if columns.is_empty() {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                format!("Jazz catalogue references missing table {name}"),
+            ));
+        }
         let columns = columns
             .into_iter()
             .filter(|column| {
@@ -1493,13 +1484,13 @@ fn stored_schema(conn: &Storage, jazz: &JazzSchema) -> Result<Schema, Error> {
         // A large-capable column is one the large-value refcount triggers
         // watch (`large::triggers`): its kind comes from the schemas unioned
         // in.
-        let large = crate::large::stored_large_columns(conn, &name)?;
+        let large = crate::large::stored_large_columns(conn, name)?;
         for column in &mut table.columns {
             if large.contains(&column.stored) {
                 column.ty = ValueType::Nullable(Box::new(ValueType::String));
             }
         }
-        tables.insert(name, table);
+        tables.insert(name.clone(), table);
     }
     Ok(Schema {
         tables,
@@ -1957,7 +1948,6 @@ impl Db {
     /// Open on `storage` (a host's SQL: [`Storage::from_backend`]), with
     /// no file: chunks live in the store itself.
     pub async fn open_storage(config: DbConfig, storage: Storage) -> Result<Self, Error> {
-        crate::format::admit(&storage)?;
         Self::open_on(config, storage, None)
     }
 
@@ -1995,8 +1985,20 @@ impl Db {
     }
 
     fn open_on(
-        mut config: DbConfig,
+        config: DbConfig,
         conn: crate::storage::Storage,
+        path: Option<(&std::path::Path, Option<&'static str>)>,
+    ) -> Result<Self, Error> {
+        let conn = Rc::new(conn);
+        conn.scope("jazz_initialize", |_| {
+            crate::format::admit(&conn)?;
+            Self::open_initialized(config, conn.clone(), path)
+        })
+    }
+
+    fn open_initialized(
+        mut config: DbConfig,
+        conn: Rc<crate::storage::Storage>,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement is prepared: the flag is read at
@@ -2083,7 +2085,7 @@ impl Db {
 
     fn open_named(
         config: DbConfig,
-        conn: crate::storage::Storage,
+        conn: Rc<crate::storage::Storage>,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement, so both see all of them.
@@ -2155,13 +2157,11 @@ impl Db {
             crate::values::note_rollback(rollback_key);
         }))
         .map_err(storage)?;
-        let fresh: i64 = conn
-            // Durable Object SQLite keeps its own `_cf_*` tables in the file.
-            .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'", [], |r| r.get(0))
-            .map_err(storage)?;
+        let owned_tables = names.stored_tables();
+        let fresh = owned_tables.is_empty();
         // A reopened store keeps every column earlier schemas added; bring
         // it up to this schema without touching what is already there.
-        let physical = if fresh == 0 {
+        let physical = if fresh {
             execute_script(&conn, &schema.ddl())?;
             let mut physical = Schema {
                 tables: BTreeMap::new(),
@@ -2180,7 +2180,7 @@ impl Db {
             // store's union grew: the opening schema is not always the
             // newest (a server core reopens under its genesis while later
             // versions' tables and columns take writes, #4769).
-            let mut physical = stored_schema(&conn, &config.schema)?;
+            let mut physical = stored_schema(&conn, &config.schema, &owned_tables)?;
             let mut ddl = String::new();
             for (version, earlier) in &admitted {
                 if *version == config.schema.version_id() {
@@ -2242,7 +2242,7 @@ impl Db {
             view: None,
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
-                conn: Rc::new(conn),
+                conn,
                 validated_shapes: HashSet::new(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
@@ -2321,7 +2321,6 @@ impl Db {
                 client: None,
                 non_durable: false,
                 reopenable: path.is_some(),
-                as_written_mismatches: 0,
                 replayed_commits: 0,
                 echo_probes: 0,
                 authority: false,

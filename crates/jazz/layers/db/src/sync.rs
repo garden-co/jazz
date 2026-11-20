@@ -6555,13 +6555,12 @@ impl Inner {
         seq: u64,
         accepted_at: Option<u64>,
         as_written: &[AsWritten],
-    ) -> Result<(Vec<Image>, Vec<WholeRow>, u64), Error> {
+    ) -> Result<(Vec<Image>, Vec<WholeRow>), Error> {
         let client = self.client.as_ref().expect("client");
         let mut images = Vec::new();
         let mut whole = Vec::new();
-        let mut mismatched = 0;
         let Some(pending) = client.pending.get(tx) else {
-            return Ok((images, whole, mismatched));
+            return Ok((images, whole));
         };
         for written in as_written {
             let row = pending
@@ -6592,7 +6591,6 @@ impl Inner {
                         )));
                     };
                     let same = echo_digest(&entry.image) == written.digest;
-                    mismatched += u64::from(!same);
                     same.then_some(entry)
                 }
                 None => None,
@@ -6612,7 +6610,7 @@ impl Inner {
                 None => whole.push((table.clone(), *row.0.as_bytes(), key.clone())),
             }
         }
-        Ok((images, whole, mismatched))
+        Ok((images, whole))
     }
 
     /// The `$createdAt` of a row's settled version beneath pending writes:
@@ -10807,7 +10805,7 @@ impl Db {
                                 as_written,
                                 ..
                             } => {
-                                let (images, whole, mismatched) = inner.as_written_images(
+                                let (images, whole) = inner.as_written_images(
                                     tx,
                                     through,
                                     *accepted_at,
@@ -10818,7 +10816,6 @@ impl Db {
                                 // and the commit stays pending until they
                                 // arrive: its writes never drop out here.
                                 if !whole.is_empty() && !arrived {
-                                    inner.as_written_mismatches += mismatched;
                                     for row in &whole {
                                         inner.ask_whole(row.clone(), through)?;
                                     }
@@ -12620,15 +12617,6 @@ impl Db {
         }
     }
 
-    /// Rows the authority named as written for this replica's own commits
-    /// that were not this replica's image of them, and were asked for
-    /// whole instead (for tests and metrics): each is a case the
-    /// authority's inference that its writer holds the row missed, at the
-    /// cost of one round trip (SPEC 8 §8.3).
-    pub fn as_written_mismatches(&self) -> u64 {
-        self.inner.borrow().as_written_mismatches
-    }
-
     /// Pending commits replayed over restored baselines since this store
     /// opened (for tests and metrics): settling a commit replays the
     /// pending commits sharing its rows, not every one still pending.
@@ -12685,26 +12673,6 @@ impl Db {
             .iter()
             .filter(|session| session.open)
             .count()
-    }
-
-    /// Seed a row as settled server state, written by `made_by`.
-    pub fn seed_settled_mergeable_for_bootstrap(
-        &self,
-        table: &str,
-        row: RowUuid,
-        made_by: AuthorSubject,
-        cells: BTreeMap<String, Value>,
-    ) -> Result<u64, Error> {
-        let handle = block_on(self.insert(
-            table,
-            cells,
-            InsertOptions {
-                row_id: Some(row),
-                identity: WriteIdentity::Attribution(made_by),
-                ..Default::default()
-            },
-        ))?;
-        Ok(handle.tx)
     }
 
     /// Sessions the server ended since the last call, with why: for what
