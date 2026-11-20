@@ -3,11 +3,10 @@
 //! file-backed storage.
 
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::pin::pin;
-use std::task::{Context, Poll, Waker};
 
-use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, UpdateOptions};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, UpdateOptions, block_on,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{MigrationLens, SchemaVersion, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
@@ -18,18 +17,6 @@ use jazz::tools::{ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchemaBuil
 use crate::common;
 
 use common::{allow_all_policies, physical_column, unhashed};
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    let mut future = pin!(future);
-    loop {
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(value) => return value,
-            Poll::Pending => std::thread::yield_now(),
-        }
-    }
-}
 
 fn row(byte: u8) -> RowUuid {
     RowUuid::from_bytes([byte; 16])

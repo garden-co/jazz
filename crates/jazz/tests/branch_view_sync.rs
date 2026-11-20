@@ -12,7 +12,7 @@ use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, ExactWriteTarget, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
-    SubscriptionEvent, SyncMessage, Transport, TransportError,
+    SubscriptionEvent, SyncMessage, Transport, TransportError, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{BranchSelector, BranchViewBase, ReadViewSourceSpec};
@@ -22,17 +22,6 @@ use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 
 use crate::common::{allow_all_policies, compile_schema};
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    let mut context = Context::from_waker(Waker::noop());
-    let mut future = pin!(future);
-    loop {
-        if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
-            return value;
-        }
-        std::thread::yield_now();
-    }
-}
 
 /// Todos anyone reads unless they have an owner: then their owner, or
 /// whoever holds a grant.
