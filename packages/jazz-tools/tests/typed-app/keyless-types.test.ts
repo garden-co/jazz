@@ -4,7 +4,7 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { keyless, type KeylessApp, type KeylessRow } from "../../src/backend/index.js";
 import { testApp } from "../../src/testing/test-app.js";
-import type { App, AppTypes, InsertOf, RowOf } from "../../src/typed-app.js";
+import type { AppTypes, InsertOf, RowOf } from "../../src/typed-app.js";
 
 // The type map of crates/jazz-codegen/tests/apps/encrypted/jazz.generated.ts.
 type Task = {
@@ -25,6 +25,12 @@ interface Types extends AppTypes {
       notes: { kind: "string"; nullable: true; value: string; encrypted: true };
       done: { kind: "boolean"; nullable: false; value: boolean };
     };
+    relations: { project: { one: "projects"; nullable: false } };
+  };
+  projects: {
+    row: { readonly id: string; name: string };
+    insert: { name: string };
+    columns: { name: { kind: "string"; nullable: false; value: string } };
     relations: {};
   };
   notes: {
@@ -34,22 +40,31 @@ interface Types extends AppTypes {
     relations: {};
   };
 }
-declare const generated: App<Types>;
-
 // The same app inline, as a test defines one.
 const file = {
   tables: {
+    projects: { columns: { name: "string" } },
     tasks: {
-      columns: { projectId: "uuid", title: "bytes", __e2ee_eq_title: "bytes", done: "boolean" },
+      columns: {
+        projectId: "uuid",
+        title: "bytes",
+        __e2ee_eq_title: "bytes",
+        notes: "bytes",
+        done: "boolean",
+      },
+      relations: { project: { rel: "projects", column: "projectId" } },
       encryption: {
         space: "projectId",
-        scope: "tasks",
-        columns: { title: "string" },
+        scope: "projects",
+        columns: { title: "string", notes: "string?" },
         equality: ["title"],
       },
     },
+    notes: { columns: { body: "string" } },
   },
 } as const;
+// Bound as the app is, typed as its generated bindings type it.
+const generated = testApp<Types>(file);
 
 describe("keyless backend types", () => {
   it("drop a generated app's encrypted columns from rows, inserts and filters", () => {
@@ -89,18 +104,11 @@ describe("keyless backend types", () => {
 
   it("type an inline encrypted app as its bindings do", () => {
     const app = testApp(file);
-    expectTypeOf<RowOf<typeof app.tasks>>().toEqualTypeOf<{
-      id: string;
-      projectId: string;
-      title: string;
-      done: boolean;
-    }>();
-    expectTypeOf<RowOf<KeylessApp<typeof app>["tasks"]>>().toEqualTypeOf<{
-      id: string;
-      projectId: string;
-      done: boolean;
-      title?: undefined;
-    }>();
+    // The inferred types are the generated ones, so keyless maps them alike.
+    expectTypeOf<RowOf<typeof app.tasks>>().toEqualTypeOf<RowOf<typeof generated.tasks>>();
+    expectTypeOf<RowOf<KeylessApp<typeof app>["tasks"]>>().toEqualTypeOf<
+      RowOf<KeylessApp<typeof generated>["tasks"]>
+    >();
   });
 
   it("KeylessRow leaves a row with no encrypted column unchanged", () => {
