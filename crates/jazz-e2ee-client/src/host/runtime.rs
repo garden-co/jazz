@@ -516,12 +516,16 @@ impl Encryption {
             return Ok(Some(status));
         };
         match status {
-            AccountStatus::Active => {
-                self.client
-                    .register_recovery_at_start(&self.db, &secret)
-                    .await?;
-                Ok(Some(status))
-            }
+            // The start-up registration of the device account's own secret
+            // (the runtime was opened with the identity that secret derives).
+            AccountStatus::Active => self
+                .client
+                .start_device_account(&self.db, &secret)
+                .await
+                .map(Some),
+            // Not what `start_device_account` does: a device awaiting
+            // approval recovers with the secret when the root and its
+            // delivery are there, and waits (`None`) while they are not.
             AccountStatus::AwaitingApproval => {
                 match self
                     .client
