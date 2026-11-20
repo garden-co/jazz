@@ -24,6 +24,7 @@ export {
   useSession,
 } from "./provider.js";
 export { useAll, useAllSuspense, type UseAllResult, type UseAllSuspenseResult } from "./use-all.js";
+export { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
 export { useOne, useOneSuspense, type UseOneResult, type UseOneSuspenseResult } from "./use-one.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 // jazz.generated.ts imports bindApp from "jazz-tools", which resolves here on React Native.
