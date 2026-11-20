@@ -16,7 +16,11 @@ import { DbReplacedError } from "../runtime/db-replaced-error.js";
 import { DbClosedError } from "../runtime/graceful-shutdown-error.js";
 import { RuntimeClosedError } from "../runtime/runtime-closed-error.js";
 import { EncryptionNeedsLocalFirstError } from "../runtime/encryption-needs-local-first.js";
-import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
+import {
+  isThinDb,
+  setLocalFirstUpgrader,
+  type LocalFirstLoader,
+} from "../runtime/local-first-upgrade.js";
 import type { MutationErrorEvent } from "../runtime/client.js";
 import { testApp } from "../testing/index.js";
 import { openBrowserSessionCore, type BrowserJazzSession } from "./create-jazz-session.js";
@@ -251,6 +255,23 @@ function settled<T>(promise: Promise<T>): Promise<{ value?: T; error?: unknown }
     (value) => ({ value }),
     (error: unknown) => ({ error }),
   );
+}
+
+/**
+ * Give the local-first Db that `thin` handed over to an upgrader of its own,
+ * counting its calls: a rerun that could itself rerun would wait on it, so
+ * a second rerun shows as a call (and fails the wait).
+ */
+function watchForSecondRerun(thin: Db) {
+  const watch = { calls: 0 };
+  setLocalFirstUpgrader(
+    thin.current(),
+    async () => {
+      watch.calls++;
+    },
+    loadLocalFirst,
+  );
+  return watch;
 }
 
 describe("a thin session of an app with encrypted columns", () => {
@@ -652,10 +673,14 @@ describe("a thin session of an app with encrypted columns", () => {
       table: "tasks",
     });
     let runs = 0;
+    let watch: { calls: number } | undefined;
     const result = settled(
       kept.transaction((tx) => {
         runs++;
-        if (runs > 1) throw again;
+        if (runs > 1) {
+          watch = watchForSecondRerun(kept);
+          throw again;
+        }
         tx.insert(app.tasks, { projectId: crypto.randomUUID(), title: "x" } as never);
       }),
     );
@@ -663,6 +688,7 @@ describe("a thin session of an app with encrypted columns", () => {
 
     expect((await result).error).toBe(again);
     expect(runs).toBe(2);
+    expect(watch!.calls).toBe(0);
   }, 60_000);
 
   // The refusal marks the transaction so it can never commit, even when the
@@ -855,16 +881,21 @@ describe("a thin session of an app with encrypted columns", () => {
     // hand-over. Its rerun is refused as if it were on a thin client.
     kept.insert(app.tasks, { projectId: crypto.randomUUID(), title: "x" } as never);
     let runs = 0;
+    let watch: { calls: number } | undefined;
     const result = settled(
       kept.transaction((tx) => {
         runs++;
-        if (runs > 1) throw refused;
+        if (runs > 1) {
+          watch = watchForSecondRerun(kept);
+          throw refused;
+        }
         tx.insert(app.notes, { text: "plain" } as never);
       }),
     );
     gate.release();
     expect((await result).error).toBe(refused);
     expect(runs).toBe(2);
+    expect(watch!.calls).toBe(0);
   }, 60_000);
 
   describe("db.encryption while thin", () => {
