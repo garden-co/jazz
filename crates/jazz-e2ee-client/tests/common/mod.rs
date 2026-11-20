@@ -465,7 +465,7 @@ pub fn new_space_key(device: &LocalDevice, address: &SpaceAddress) -> HeldSpace 
 /// Keeps a new key for project `space`, as an accepted creation would,
 /// and returns its root's ID.
 pub fn hold_new_space(client: &E2eeClient, db: &Db, space: uuid::Uuid) -> String {
-    let held = new_space_key(&client.device(), &address(db, space));
+    let held = new_space_key(&client.device().unwrap(), &address(db, space));
     let root_id = held.root_id().to_owned();
     block_on(client.keep(held)).unwrap();
     root_id

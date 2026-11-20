@@ -192,7 +192,7 @@ impl E2eeClient {
             domain,
             account_id,
             plans,
-            device: device.into(),
+            device: Some(device).into(),
             keys: KeyState {
                 online: true,
                 ..KeyState::default()
@@ -343,7 +343,7 @@ impl E2eeClient {
             return Ok(None);
         };
         let loaded = {
-            let device = self.shared.device.borrow();
+            let device = self.shared.device()?;
             Self::owner_of(&self.shared, &device).load(&decoded)?
         };
         for rejected in &loaded.rejected {
@@ -387,7 +387,7 @@ impl E2eeClient {
         };
         let floor = match FloorRecord::decode(&stored.bytes) {
             Ok(record) => {
-                let device = self.shared.device.borrow();
+                let device = self.shared.device()?;
                 match Self::owner_of(&self.shared, &device).load_floor(account_id, &record)? {
                     Ok(floor) => Some(floor),
                     Err(reason) => {
@@ -443,9 +443,11 @@ impl E2eeClient {
         self.shared.keys.borrow_mut().online = online;
     }
 
-    /// This device: its ID and key pairs.
-    pub fn device(&self) -> std::cell::Ref<'_, LocalDevice> {
-        self.shared.device.borrow()
+    /// This device: its ID and key pairs. [`ClientError::Closed`] once the
+    /// store was wiped, here or by another writer: the device's secrets
+    /// are dropped then.
+    pub fn device(&self) -> Result<std::cell::Ref<'_, LocalDevice>, ClientError> {
+        self.shared.device()
     }
 
     /// The account this runtime is for.
@@ -465,11 +467,10 @@ impl E2eeClient {
     }
 
     /// Closes the runtime after finding its scope wiped by another writer:
-    /// the held keys are dropped and nothing more is written.
+    /// the device's secrets and the held keys are dropped and nothing more
+    /// is written.
     fn close(&self) -> ClientError {
-        let mut keys = self.shared.keys.borrow_mut();
-        keys.closed = true;
-        keys.held = Default::default();
+        self.shared.forget_secrets();
         ClientError::Closed
     }
 
@@ -519,7 +520,7 @@ impl E2eeClient {
             self.ensure_open()?;
             let state = documents.held.entry(root_id.clone()).or_default();
             let bytes = {
-                let device = self.shared.device.borrow();
+                let device = self.shared.device()?;
                 Self::owner_of(&self.shared, &device)
                     .seal_document(
                         &staged,
@@ -601,7 +602,7 @@ impl E2eeClient {
                 return Err(ProtocolError::StaleState.into());
             }
             let bytes = {
-                let device = self.shared.device.borrow();
+                let device = self.shared.device()?;
                 Self::owner_of(&self.shared, &device)
                     .seal_floor(account_id, floor)?
                     .encode()?
@@ -631,14 +632,13 @@ impl E2eeClient {
     /// Wipes this account's private state from the store: the device, every
     /// held key and every floor (§6.4). The runtime is closed first, so no
     /// write still in flight or made later recreates the store; it waits
-    /// for writes in flight, then deletes. A failed deletion is returned:
-    /// the wipe is unfinished, and the runtime stays closed.
+    /// for writes in flight, then deletes. Closing drops the device's
+    /// secrets, its approval nonce and the held keys from memory (each
+    /// zeroed on drop), and [`E2eeClient::device`] fails from then on. A
+    /// failed deletion is returned: the wipe is unfinished, and the runtime
+    /// stays closed.
     pub async fn wipe(&self) -> Result<(), ClientError> {
-        {
-            let mut keys = self.shared.keys.borrow_mut();
-            keys.closed = true;
-            keys.held = Default::default();
-        }
+        self.shared.forget_secrets();
         let mut documents = self.documents.lock().await;
         *documents = Documents::default();
         self.store.delete(&self.scope).await?;
