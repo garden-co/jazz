@@ -6,6 +6,8 @@ import { startTestJazz, testApp, type TestJazz } from "../testing/index.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import { createOpenTransactionId } from "../runtime/client.js";
 import type { ThinRuntime } from "../thin/thin-runtime.js";
+import type { ThinOp } from "../thin/wire.js";
+import { encodeCellsForRow, parseUuid } from "../runtime/native-runtime/native-runtime-adapter.js";
 import {
   openBrowserSessionCore as createJazzClient,
   type BrowserJazzSession,
@@ -232,22 +234,33 @@ it("refuses a thin transaction's write of an encrypted column in the backend, wh
   const db = session.getSnapshot().client!.db;
   expect(isThinDb(db)).toBe(true);
 
-  // Plaintext bytes in the sealed column, as a thin client that skips its
-  // own checks could send them: the runtime encodes the cells as stored.
+  // Plaintext bytes in the sealed column, as a thin client without the
+  // client's guard would send them: the request is encoded raw
+  // (`encodeThinRequest`) and handed to the runtime's sender, past the guard
+  // that now refuses it first. The server must refuse it itself.
   // (A first read binds the connection to the app's schema.)
-  expect(await db.all(encryptedApp.tasks)).toEqual([]);
+  expect(await db.all(encryptedApp.notes)).toEqual([]);
   const runtime = db.currentRuntime() as ThinRuntime;
+  const raw = runtime as unknown as {
+    definition(table: string): never;
+    requestWith(op: ThinOp): { answer: Promise<unknown> };
+  };
   const tx = runtime.beginTransaction("mergeable", createOpenTransactionId());
-  runtime.insert(
-    "tasks",
-    {
-      projectId: { type: "Uuid", value: crypto.randomUUID() },
-      title: { type: "Bytea", value: new TextEncoder().encode("PLAINTEXT") },
-    },
-    JSON.stringify({ transaction_id: tx }),
-  );
-  await expect(runtime.commitTransaction(tx)).rejects.toThrow(
+  const sent = raw.requestWith({
+    type: "insert",
+    table: "tasks",
+    cells: encodeCellsForRow(
+      raw.definition("tasks"),
+      {
+        projectId: { type: "Uuid", value: crypto.randomUUID() },
+        title: { type: "Bytea", value: new TextEncoder().encode("PLAINTEXT") },
+      },
+      "tasks",
+    ),
+    options: { rowId: parseUuid(crypto.randomUUID()) },
+    transaction: tx,
+  } as ThinOp).answer;
+  await expect(sent.then(() => runtime.commitTransaction(tx))).rejects.toThrow(
     /holds no encryption keys.*tasks\.title/,
   );
-  expect(await db.all(encryptedApp.tasks)).toEqual([]);
 }, 60_000);
