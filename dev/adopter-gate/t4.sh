@@ -8,7 +8,11 @@ body() {
   case "${T4_MODE:=production}" in
     skip) echo "NOTE t4 not run: dry run (t4_mode skip)"; return;;
     # The eval project's previews are public (Anselm, 2026-11-19); a T4_VERCEL_BYPASS_SECRET, if one is ever set, is sent.
-    preview) ;;
+    preview)
+      # In CI, previews run side by side (adopter-gate.yml's t4 concurrency group is per run), so each needs its own
+      # core: without T4_TEARDOWN=1 it would share cli-previews with every other preview run.
+      [ -n "${GITHUB_RUN_ID:-}" ] && [ "${T4_TEARDOWN:-}" != 1 ] && { echo "FAIL t4 preview can't run: in CI it needs T4_TEARDOWN=1 (its own per-run core), else it would share cli-previews with concurrent runs"; return; }
+      ;;
     production)
       # Fail closed: production deploys to the long-lived eval core, so only for a real RC (its release may still be a draft).
       local tag=${T4_RC_TAG:-}
