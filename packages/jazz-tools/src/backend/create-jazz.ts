@@ -290,6 +290,10 @@ const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
  * that stays the same across deployments. The object keeps its own app id,
  * which this backend asks it for when the store opens.
  *
+ * Large values' bytes go where the core's Worker puts them, so there is no
+ * `blobs` option here: bind an R2 bucket to that Worker as `JAZZ_BLOBS`
+ * (recommended), or they stay in the object's SQLite.
+ *
  * The core admits only this backend, which holds the secret; browsers keep
  * talking to your backend. A Durable Object core doesn't run thin-client
  * transactions (your backend runs them, as with any core) and has no

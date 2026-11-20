@@ -17,4 +17,4 @@ wasm-pack build "$here/../.." --target web --dev --out-dir "$here/do/pkg" \
   --out-name jazz_wasm_do --no-pack -- --features durable-object-tests
 node "$here/../../durable-object/reinstantiable.mjs" "$here/do/pkg/jazz_wasm_do.js"
 cd "$here/../.."
-node --test "$here/smoke.test.mjs" "$here/host.test.mjs"
+node --test "$here/smoke.test.mjs" "$here/host.test.mjs" "$here/r2.test.mjs"

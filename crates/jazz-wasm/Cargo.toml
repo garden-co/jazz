@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 base64 = "0.22"
+bytes = { version = "1", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 ed25519-dalek = "2"
 futures-util = "0.3.31"
@@ -50,7 +51,7 @@ bench-probes = []
 # A Durable Object's SQL (`ctx.storage.sql`) as a store
 # (`WasmDb.openDurableObject`), and the Jazz core a Durable Object hosts
 # (`DurableObjectCore`, on jazz-server's engine without its native host).
-durable-object = ["dep:jazz-server"]
+durable-object = ["dep:jazz-server", "dep:bytes"]
 # What a backend's `createJazz` needs on this WASM build (`src/backend.rs`:
 # `serveThinTransaction`, `WasmThinRouter`, ...), for the workerd backend
 # (`backend/pkg`). Off by default, so browsers never download it.

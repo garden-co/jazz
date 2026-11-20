@@ -73,8 +73,34 @@ impl ServerCore {
         any_stored_catalogue: bool,
         app: Option<String>,
     ) -> Result<Self, String> {
+        Self::open_with_chunk_store(schema, file, any_stored_catalogue, app, None)
+    }
+
+    /// [`Self::open`], with settled large-value bytes moving out of the
+    /// store's file to `chunk_store`, whose I/O the host runs
+    /// ([`jazz::db::DbConfig::with_host_chunk_io`]): it takes each batch
+    /// with [`Db::take_chunk_io`] (and the reads waiting beside it with
+    /// [`Db::take_chunk_fetches`]), runs it, hands the outcome back and
+    /// ticks. The engine never calls `chunk_store` itself for a batch; a
+    /// read outside a session that needs an offloaded node asks it inline,
+    /// so a host whose store cannot answer synchronously refuses that read.
+    /// A store that holds large values inline moves them out on its first
+    /// open with a chunk store; one that has moved them is refused without
+    /// one.
+    pub fn open_with_chunk_store(
+        schema: JazzSchema,
+        file: StoreFile,
+        any_stored_catalogue: bool,
+        app: Option<String>,
+        chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
+    ) -> Result<Self, String> {
         Ok(Self {
-            owner: Owner::open_on(schema, file, any_stored_catalogue, app, |config| config)?,
+            owner: Owner::open_on(schema, file, any_stored_catalogue, app, |config| {
+                match chunk_store {
+                    Some(store) => config.with_chunk_store(store).with_host_chunk_io(),
+                    None => config,
+                }
+            })?,
             next_session: 1,
             edges: HashMap::new(),
             thin_ingress: Arc::new(tokio::sync::Semaphore::new(THIN_INGRESS_SERVER_BUDGET)),
