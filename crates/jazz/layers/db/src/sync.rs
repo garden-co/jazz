@@ -8313,6 +8313,12 @@ impl Inner {
     /// of the session's read context the client resumes from), a `since`
     /// past what this store serves (a reset store), or one at or before the
     /// current schema's activation (its policies may read differently).
+    ///
+    /// A store with encryption hooks never resumes: the rows it shipped
+    /// were the ones its hooks could open (and its residual kept), which
+    /// neither the result as of `since` nor a row's seq records. A key
+    /// that arrived since makes unchanged rows readable, and a resumed
+    /// read would take them for rows the client holds.
     fn resume_from(
         &self,
         prepared: &PreparedQuery,
@@ -8322,6 +8328,10 @@ impl Inner {
         since: u64,
         request_claims: bool,
     ) -> Result<Option<Resume>, Error> {
+        #[cfg(feature = "e2ee-client")]
+        if self.e2ee.is_some() {
+            return Ok(None);
+        }
         let query = &prepared.query;
         if self.client.is_some()
             || request_claims

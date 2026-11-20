@@ -332,7 +332,7 @@ impl Encryption {
                 .ok_or_else(|| format!("`{name}` is missing"))
         };
         Ok(match op {
-            "deviceId" => json!(client.device().id.clone()),
+            "deviceId" => json!(client.device().map_err(describe)?.id.clone()),
             "ready" => {
                 let status = client.ensure_account(db).await.map_err(describe)?;
                 self.status.set(Some(status));
