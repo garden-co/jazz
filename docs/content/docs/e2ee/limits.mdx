@@ -54,3 +54,7 @@ languageTabs: backend
   suspected injection, check the account's device list from a trusted device and remove the affected
   device and any device you do not recognise (each removal rotates the account);
   keep your page free of untrusted scripts as you would for anything else sensitive.
+- **A sign-out keeps the device's keys unless you pass `clearOnSignOut`.** Until they are wiped, a later
+  user of the same browser profile or a script on your origin can use them as above. With
+  `clearOnSignOut: true` (and the default persistent storage) a sign-out wipes them with the account's
+  local data; see [Signing out](/docs/e2ee/browser#signing-out).

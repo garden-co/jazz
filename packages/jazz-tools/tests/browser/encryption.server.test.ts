@@ -1,5 +1,7 @@
 import { afterEach, expect, it } from "vitest";
 import { createJazzClient } from "../../src/session/create-jazz-session.js";
+import { browserPrivateStore } from "../../src/encryption/browser-store.js";
+import { encryptionStoreScope } from "../../src/encryption/browser-host.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { EncryptionNeedsLocalFirstError } from "../../src/runtime/encryption-needs-local-first.js";
 import { isThinDb, type LocalFirstLoader } from "../../src/runtime/local-first-upgrade.js";
@@ -8,8 +10,10 @@ import {
   deploy,
   getJazzServerInfo,
   jazzAppFetch,
+  jazzAppUserUrl,
   jazzAppVisitor,
   jazzServerStoreHolds,
+  signOutOfJazzApp,
   startJazzApp,
 } from "./testing-server.js";
 
@@ -370,3 +374,64 @@ it("a thin load without a loader refuses an encrypted write with EncryptionNeeds
   );
   expect(isThinDb(thin)).toBe(true);
 }, 120_000);
+
+it("with clearOnSignOut, a sign-out wipes the account's keys from the browser's private store", async () => {
+  // A shared computer: once alice is signed out, no one using this browser
+  // (the next user, a script on the origin) may unprotect her device's keys.
+  const name = uniqueDbName("encryption-clear-on-sign-out");
+  const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(name);
+  await deploy({ appId, serverUrl: coreUrl, adminSecret, app, permissions });
+  const backend = await startJazzApp(
+    { appId, serverUrl: coreUrl, adminSecret },
+    { schema: app, permissions },
+  );
+  const aliceUrl = await jazzAppUserUrl(backend, "alice");
+  const pageFetch = globalThis.fetch;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    return url.startsWith(aliceUrl) ? jazzAppFetch(input, init) : pageFetch(input, init);
+  }) as typeof fetch;
+  cleanups.push(async () => {
+    globalThis.fetch = pageFetch;
+  });
+  const load = async () => {
+    const session = await createJazzClient({
+      scope: appId,
+      serverUrl: aliceUrl,
+      fetch: jazzAppFetch,
+      clearOnSignOut: true,
+      client: async () => ({ createClient: createLocalFirstDb }),
+      encryption: { app },
+    } as never);
+    cleanups.push(() => session.close());
+    return session;
+  };
+
+  const first = await step("load", load(), 40_000);
+  if (first.getSnapshot().status !== "ready") await first.reauthenticate();
+  await waitForCondition(
+    async () => {
+      const client = first.getSnapshot().client;
+      return !!client && !isThinDb(client.db);
+    },
+    30_000,
+    "Alice's page should upgrade to local-first",
+  );
+  const db = first.getSnapshot().client!.db;
+  expect(await step("ready", db.encryption.ready({ timeoutMs: 40_000 }), 45_000)).toBe("active");
+  const alice = first.getSnapshot().user!.accountId;
+  const keys = encryptionStoreScope(appId, "dev", alice);
+  expect(await browserPrivateStore().list(keys)).toContain("device");
+
+  // Her page goes away and the app's backend signs her out; the next page
+  // load wipes what she left, her keys with her replica.
+  await first.close();
+  await signOutOfJazzApp(backend, aliceUrl);
+  const next = await step("next load", load(), 40_000);
+  expect(next.getSnapshot().status).toBe("signed-out");
+  await waitForCondition(
+    async () => (await browserPrivateStore().list(keys)).length === 0,
+    30_000,
+    "The next load should wipe the signed-out user's keys",
+  );
+}, 180_000);

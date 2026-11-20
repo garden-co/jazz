@@ -45,7 +45,7 @@ import {
   ownJazzSession,
   type JazzSession,
 } from "./jazz-session.js";
-import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
+import { clientScope, DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
 import {
   backendAnswered,
@@ -118,8 +118,9 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
     /**
      * On sign-out (or a switch to another user), wipe the account's local
-     * storage instead of keeping it for that user's next sign-in. For shared
-     * devices. Jazz first waits up to 5 seconds for pending writes to upload;
+     * storage instead of keeping it for that user's next sign-in, and, in an
+     * app with end-to-end encryption, its keys in the private store. For
+     * shared devices. Jazz first waits up to 5 seconds for pending writes to upload;
      * writes still unsynced then are lost. A sign-out the page doesn't see
      * (on your server, or another user signing in, before a reload) is
      * wiped on the next page load, once your backend names someone else or
@@ -297,11 +298,24 @@ export async function openBrowserSessionCore(
     const deleteLocalFirstStore =
       (await loadLocalFirst!()).deleteLocalFirstStore ??
       (await import("../runtime/delete-local-first-store.js")).deleteLocalFirstStore;
-    return deleteLocalFirstStore({
+    const outcome = await deleteLocalFirstStore({
       ...clientConfig,
       accountId: account,
       accountRegistryAuthority: registry,
     });
+    // The account's encryption keys go with its data: on a shared device the
+    // next user, or any script on the origin, could otherwise still use them.
+    // Only once the store is gone: a tab that still holds it keeps its keys.
+    if (outcome === "deleted" && clientConfig.encryption) {
+      const { wipeBrowserEncryption } = await import("../encryption/browser-host.js");
+      await wipeBrowserEncryption({
+        config: clientConfig.encryption,
+        appId: clientScope(clientConfig),
+        environment: clientConfig.env ?? "dev",
+        accountId: account,
+      });
+    }
+    return outcome;
   };
   // The lifecycle of this device's per-account stores (see `replicaLifecycle`).
   const replicas = wipesOnSignOut && loadLocalFirst ? openReplicaLifecycle() : undefined;

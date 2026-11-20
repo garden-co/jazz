@@ -112,6 +112,21 @@ the keys; the device then enrols again as a new device, like any other new devic
 [Devices and recovery](/docs/e2ee/devices-and-recovery)). To keep keys somewhere else, pass your own
 `store` next to `app`: it is the [private store](/docs/e2ee/private-store) every platform uses.
 
+### Signing out
+
+By default a sign-out keeps the device's keys, as it keeps the account's local data and, for a device
+account, its key: the user's next sign-in on this browser reads at once, with no new approval. While
+they are kept, a later user of the same browser profile, or any script on your origin, can still ask
+the browser to unprotect them (see [limits](/docs/e2ee/limits)).
+
+On a shared computer, open the client with `clearOnSignOut: true`. A sign-out then wipes the account's
+keys from the private store (yours, if you passed `store`) together with its local data, once no other
+tab of the app holds that account open, and a sign-out the page did not see (on your server, or a tab
+that closed) is wiped on the next page load. The device can no longer read the account's encrypted
+rows: when the user signs in again it is a new device, approved by another device or recovered (see
+[Devices and recovery](/docs/e2ee/devices-and-recovery)). Wiping takes the persistent storage (the
+default); with `driver: { type: "memory" }`, `clearOnSignOut` wipes nothing, keys included.
+
 ## Tabs
 
 Every tab of your app is one device. Each tab opens the same saved keys and does its own reading and
