@@ -115,7 +115,7 @@ internal class PrivateStoreBridge(private val store: PrivateStore) {
             StoreReply(false, "conflict")
         } catch (e: PrivateStoreException.Wiped) {
             StoreReply(false, "wiped")
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             StoreReply(false, e.message ?: e.toString())
         }
     }
@@ -155,7 +155,11 @@ public class Encryption internal constructor(
      * Verifies the account and enrols or recovers this device, waiting up to [timeoutMs]:
      * `active`, `awaiting-approval` or `reenrolled`.
      */
-    public suspend fun ready(timeoutMs: Long = 30_000): String = blocking { native.encryptionReady(timeoutMs) }
+    public suspend fun ready(timeoutMs: Long = 30_000): String {
+        // A negative timeout would be read as an unsigned number, a wait of centuries.
+        if (timeoutMs < 0) throw JazzException.Refused("the readiness timeout must not be negative")
+        return blocking { native.encryptionReady(timeoutMs) }
+    }
 
     /** What the runtime's loop is doing now, as JSON (`status`, `error`, `stage`). */
     public suspend fun state(): JsonObject = jazzJson.parseToJsonElement(blocking { native.encryptionState() }).jsonObject

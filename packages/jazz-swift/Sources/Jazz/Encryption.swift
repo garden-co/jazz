@@ -165,9 +165,13 @@ public struct Encryption: Sendable {
     /// The code of an encryption failure (`approval-code-mismatch`,
     /// `no-challenge`, `invalid-checksum`, ...), or `nil` for any other error.
     public static func code(of error: any Error) -> String? {
-        guard case JazzError.refused(let message) = error, message.hasPrefix("encryption (") else {
-            return nil
+        // A `store` or `database` failure arrives as `.io`, the rest as `.refused`.
+        let message: String
+        switch error as? JazzError {
+        case .refused(let text), .io(let text): message = text
+        default: return nil
         }
+        guard message.hasPrefix("encryption (") else { return nil }
         return message.dropFirst("encryption (".count).prefix { $0 != ")" }.description
     }
 
@@ -190,7 +194,11 @@ public struct Encryption: Sendable {
     /// Verifies the account and enrols or recovers this device, waiting up to
     /// `timeout` seconds: `active`, `awaiting-approval` or `reenrolled`.
     public func ready(timeout: TimeInterval = 30) async throws -> String {
-        try await Client.typed {
+        // A negative, NaN or too large timeout would trap in the conversion.
+        guard timeout >= 0, timeout * 1000 < Double(UInt64.max) else {
+            throw JazzError.refused("the readiness timeout must be a non-negative number of seconds")
+        }
+        return try await Client.typed {
             let status = try await Client.run {
                 try self.client.handle.encryptionReady(timeoutMs: UInt64(timeout * 1000))
             }
