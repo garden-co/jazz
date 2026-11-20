@@ -925,3 +925,75 @@ async fn an_encrypted_write_reports_a_failure_to_store_its_space_key() {
     alice.shutdown().await.unwrap();
     app.stop().await;
 }
+
+/// Contract: a private store that never answers fails the call waiting on
+/// it at the store-call deadline (30 s) instead of holding the runtime for
+/// good: preparing a space reports a `store` failure, and the client then
+/// closes.
+///
+/// ```text
+/// alice ──prepareSpace──► runtime ──save the space key──► store (silent)
+///       ◄── store: the private store did not answer `save` in time
+/// alice ──shutdown──► closed
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_store_that_never_answers_fails_the_call_and_the_client_closes() {
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    let app = App::start().await;
+    let entered = Arc::new(Notify::new());
+    let store = store_with_hook({
+        let entered = entered.clone();
+        move |request| {
+            let entered = entered.clone();
+            Box::pin(async move {
+                if request["op"] == "save"
+                    && request["doc"]
+                        .as_str()
+                        .is_some_and(|doc| doc.starts_with("held-"))
+                {
+                    entered.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                None
+            })
+        }
+    });
+    let config = app.user(DeviceKey::generate().unwrap()).encryption(store);
+    let alice = Jazz::open(client_files(), config).await.unwrap();
+    alice
+        .encryption()
+        .ready(Duration::from_secs(30))
+        .await
+        .unwrap();
+    let project = make_project(&alice, "plans").await;
+    let space = alice
+        .encryption()
+        .call("spaceRow", json!({ "table": "projects", "id": project }))
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(
+        Duration::from_secs(150),
+        alice.encryption().call("prepareSpace", space),
+    )
+    .await
+    .expect("the store call ends at its deadline")
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::Encryption { code, message }
+                if code == "store" && message.contains("did not answer")
+        ),
+        "{error:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("the preparation reached the silent store");
+    tokio::time::timeout(Duration::from_secs(30), alice.shutdown())
+        .await
+        .expect("the client closes")
+        .unwrap();
+    app.stop().await;
+}

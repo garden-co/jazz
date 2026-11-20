@@ -26,11 +26,14 @@ use futures::future::LocalBoxFuture;
 use jazz_e2ee::Zeroizing;
 use serde_json::{Value, json};
 
-/// How long a store call may wait for JavaScript's answer.
+/// How long a store call may wait for its answer (JavaScript's, or a
+/// [`Handler`]'s).
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Answers a request text on the spot: `ok` and the JSON payload, or the
-/// error text, as [`JsStore::reply`] takes them.
+/// error text, as [`JsStore::reply`] takes them. An answer that has not come
+/// by the deadline fails the call; one that is synchronous cannot be cut
+/// short, so a handler that never returns blocks its thread.
 pub type Handler = Rc<dyn Fn(String) -> LocalBoxFuture<'static, (bool, String)>>;
 
 /// A store call waiting for JavaScript.
@@ -120,10 +123,32 @@ impl JsStore {
                 self.0.replies.borrow_mut().remove(&self.1);
             }
         }
+        let late = || {
+            Err(StoreError::Failed(format!(
+                "the private store did not answer `{op}` in time"
+            )))
+        };
         if let Some(handler) = &self.handler {
             args["op"] = json!(op);
-            let (ok, payload) = handler(args.to_string()).await;
-            return decode(ok, &payload);
+            // The same deadline as a queued request. A handler that runs
+            // synchronously (a foreign callback) has answered before this
+            // point and cannot be interrupted; an asynchronous one that never
+            // answers, or never wakes its task, fails here, its late answer
+            // dropped with its future.
+            let deadline = Instant::now() + self.timeout.get().unwrap_or(ANSWER_TIMEOUT);
+            let mut answer = handler(args.to_string());
+            return std::future::poll_fn(|context| {
+                if let Poll::Ready((ok, payload)) = answer.as_mut().poll(context) {
+                    return Poll::Ready(decode(ok, &payload));
+                }
+                if Instant::now() >= deadline {
+                    return Poll::Ready(late());
+                }
+                // Nothing else is bound to wake this call at its deadline.
+                context.waker().wake_by_ref();
+                Poll::Pending
+            })
+            .await;
         }
         let id = self.next.get() + 1;
         self.next.set(id);
@@ -141,9 +166,7 @@ impl JsStore {
         let deadline = Instant::now() + self.timeout.get().unwrap_or(ANSWER_TIMEOUT);
         std::future::poll_fn(|_| match self.replies.borrow_mut().remove(&id) {
             Some(result) => Poll::Ready(result),
-            None if Instant::now() >= deadline => Poll::Ready(Err(StoreError::Failed(format!(
-                "the private store did not answer `{op}` in time"
-            )))),
+            None if Instant::now() >= deadline => Poll::Ready(late()),
             None => Poll::Pending,
         })
         .await
@@ -406,6 +429,29 @@ mod tests {
         assert!(
             !store.reply(id_of(&sent[0]), true, "null"),
             "late answer refused"
+        );
+    }
+
+    /// Contract: a handler that never answers fails the call at the same
+    /// deadline, even under an executor that polls only when woken and a
+    /// handler that never wakes it.
+    #[test]
+    fn a_silent_handler_fails_the_call_in_time() {
+        let (done, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let store = JsStore::served_by(Rc::new(|_| Box::pin(std::future::pending())));
+            store.set_timeout(Duration::from_millis(20));
+            let result = futures::executor::block_on(
+                store.call("load", json!({ "scope": "s", "doc": "d" })),
+            );
+            let _ = done.send(result);
+        });
+        let result = outcome
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the call ends at its deadline");
+        assert!(
+            matches!(&result, Err(StoreError::Failed(message)) if message.contains("did not answer")),
+            "{result:?}"
         );
     }
 

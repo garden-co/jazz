@@ -49,7 +49,9 @@ pub(crate) enum StoreSource {
     /// contract: `{ "op", ... }`, bytes as base64, numbers as decimal text)
     /// answered with `ok` and a JSON payload, or the error text (`conflict`,
     /// `wiped`, or a message). It runs on the client's thread and blocks it
-    /// while it works.
+    /// while it works: the store-call deadline cannot cut it short, so a
+    /// callback that never returns blocks the client thread for good,
+    /// closing included.
     Calls(std::sync::Arc<dyn Fn(String) -> (bool, String) + Send + Sync>),
 }
 
@@ -67,6 +69,9 @@ impl EncryptionConfig {
 
     /// A private store of a foreign language, answered request by request.
     /// See the [store callback contract](jazz_e2ee_client::host::bridge).
+    /// `call` runs synchronously on the client's thread: one that never
+    /// returns blocks that thread, closing included, as no deadline can
+    /// interrupt it.
     pub fn store_calls(call: impl Fn(String) -> (bool, String) + Send + Sync + 'static) -> Self {
         Self {
             environment: "dev".to_owned(),
