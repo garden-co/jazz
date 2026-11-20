@@ -2172,6 +2172,11 @@ pub enum EventChunk {
         settled: bool,
         /// The durability tier, as `Debug`-spelled.
         tier: String,
+        /// The rows the result leaves out because the encryption hooks
+        /// could not open them, as [`unreadable_json`] spells them, when
+        /// the reader is told them (an opening, a reset, or a change):
+        /// they replace the list told before.
+        unreadable: Option<String>,
     },
     /// `{ type: "closed" }`.
     Closed,
@@ -2187,6 +2192,25 @@ pub enum EventChunk {
     },
 }
 
+/// Rows a read or a subscription left out because the encryption hooks
+/// could not open them, as the JSON array of `{ table, id, column, code }`
+/// a host hands to JavaScript.
+pub fn unreadable_json(rows: &[UnreadableRow]) -> String {
+    serde_json::Value::Array(
+        rows.iter()
+            .map(|row| {
+                serde_json::json!({
+                    "table": row.table,
+                    "id": row.id.0.to_string(),
+                    "column": row.column,
+                    "code": row.code,
+                })
+            })
+            .collect(),
+    )
+    .to_string()
+}
+
 /// Encode one subscription event.
 pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
     Ok(match event {
@@ -2198,6 +2222,7 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             settled,
             tier,
             coalesced,
+            unreadable,
             ..
         } => EventChunk::Delta {
             delta: crate::binding_codec::encode_subscription_delta(&added, &updated, &removed)?,
@@ -2205,6 +2230,7 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             coalesced,
             settled,
             tier: format!("{tier:?}"),
+            unreadable: unreadable.map(|rows| unreadable_json(&rows)),
         },
         SubscriptionEvent::Closed => EventChunk::Closed,
         SubscriptionEvent::Rejected { code, reason, .. } => EventChunk::Rejected {

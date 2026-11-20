@@ -115,6 +115,22 @@ can come back shorter than its limit, or empty, and still not be the last one: t
 filters on an encrypted column, they may include rows that would not have matched.) A `key-pending` row
 comes back once its key arrives; read again, or use a subscription, which updates by itself.
 
+A subscription's results say the same. Each result it delivers carries the rows it leaves out, and
+`unreadableRows` works on it as on a read's:
+
+```ts
+const stop = session.db.subscribe(app.tasks.where({ projectId }), (tasks) => {
+  render(tasks);
+  showIncomplete(unreadableRows(tasks));
+});
+```
+
+The list stays current: a new row this device cannot open is named in the next result (even when the
+visible rows did not change), a row whose key arrives joins the result and leaves the list in the same
+update, and a row that leaves the query (deleted, or moved out of a page) is no longer named. A
+subscription with `limit` counts these rows toward its page, as a read does. Framework hooks (`useAll`
+and its counterparts) build their own arrays, so they do not carry the list yet.
+
 The runtime also reports each row it could not read, as it happens:
 
 ```ts
