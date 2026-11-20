@@ -165,7 +165,10 @@ Jazz asks your backend who is signed in at these moments; the identity always co
 
 - when the app starts;
 - when the page regains focus or becomes visible again;
-- when another tab of the same browser changes account (signs in, out, or as someone else);
+- when the page moves to another URL without loading anew (a client-side route change, or a server
+  action that calls `redirect()`), at most once every ten seconds plus once after the last move;
+- when another tab of the same browser changes account (signs in, out, or as someone else), or gets
+  a different answer than the last one any tab got (say, the page a sign-out redirect lands on);
 - when the sync server refuses the connection's sign-in, for example once `expiresAt` or
   `sessionTtlSeconds` has passed and `authenticate` no longer names the user, or after
   `jazz.revokeUser`;
@@ -217,16 +220,28 @@ supabase.auth.onAuthStateChange(() => void session.refresh());
 
 ### Signing out in every tab
 
-`refresh()` is what makes the browser's other tabs follow: once this tab's session changes account,
-it tells the others, and they ask your backend at once. A sign-out that redirects skips it. That
-includes AuthKit's `signOut()`, a Next.js server action that calls `redirect()`, and Auth.js's
-default sign-out. The tab leaves before Jazz hears of it, and unless the page it lands on opens Jazz
-(AuthKit's goes through WorkOS's own sign-out page first), nothing tells the other tabs: they follow
-only when they're in front again, or when their connection's session ends (`expiresAt`, or
-`sessionTtlSeconds`, an hour by default).
+A sign-out that redirects never calls Jazz. That includes AuthKit's `signOut()`, a Next.js server
+action that calls `redirect()`, and Auth.js's default sign-out. The other tabs still follow within a
+few seconds when:
 
-So sign out in three steps: clear your session without redirecting, call `refresh()`, then
-navigate:
+- **the page the redirect lands on opens Jazz**, signed-out pages included. Its first check finds no
+  one signed in where the last answer named someone, so it tells the browser's other tabs, and they
+  ask your backend at once;
+- **the redirect stays within the page** (a client-side navigation, as a server action's
+  `redirect()` to your own route is). The tab checks after the move, signs out, and tells the others.
+
+Jazz keeps that last answer in `localStorage` as a hash, never the user's id, and only a page in
+front notes it. Browsers without the Navigation API (Chrome before 102, Safari before 26.2, Firefox
+before 147) don't check after a client-side move: the tab follows on focus.
+
+When the redirect lands on a page that doesn't open Jazz (AuthKit's goes through WorkOS's own
+sign-out page first, then to your `returnTo`), nothing tells the other tabs: they follow only when
+they're in front again, or when their connection's session ends (`expiresAt`, or
+`sessionTtlSeconds`, an hour by default). Point `returnTo` at a page that opens Jazz, or sign out
+without the redirect.
+
+To have every tab follow at once, wherever you navigate after, sign out in three steps: clear your
+session without redirecting, call `refresh()`, then navigate:
 
 ```tsx title="SignOutButton.tsx"
 "use client";
@@ -480,7 +495,8 @@ On a computer several people use, such as a family laptop or a library terminal:
   `identity.subject` in `$createdBy` and history (see [Metadata](/docs/reading/metadata)), and
   without `clearOnSignOut` the device remembers the user's claims.
 - **After your own sign-out, call `refresh()`** rather than only redirecting, so Jazz
-  follows your backend's signed-out answer straight away.
+  follows your backend's signed-out answer straight away, even when the page you land on doesn't
+  open Jazz.
 
 ## Lifecycle
 
