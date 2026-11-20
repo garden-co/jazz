@@ -1,0 +1,6 @@
+# jazz-ffi's C ABI (crates/jazz-ffi/include/jazz_ffi.h, the one jazz-go uses),
+# for Kotlin/Native. build.gradle.kts adds the include path and the static
+# library (libjazz_ffi.a for the target), which the klib then carries.
+headers = jazz_ffi.h
+package = tools.jazz.cabi
+
