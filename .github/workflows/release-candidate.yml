@@ -832,8 +832,10 @@ jobs:
   # status maps PASS -> green, NEEDS_REVIEW -> HOLD, FAIL -> NO-GO.
   adopter-gate:
     name: Adopter gate
-    needs: [resolve, artifacts, rc-tarballs]
-    if: "!cancelled() && needs.rc-tarballs.result == 'success'"
+    # Not after rc-tarballs: its jobs set up while rc-tarballs packs, and
+    # fetch-rc.sh waits for this run's rc-npm (AG_NPM_WAIT_S).
+    needs: [resolve, artifacts]
+    if: "!cancelled() && needs.artifacts.result == 'success'"
     uses: ./.github/workflows/adopter-gate.yml
     permissions:
       contents: read
