@@ -2,7 +2,7 @@
 //! device, the held keys, the catalogue identities the cell contexts name,
 //! and the reports reads leave for the runtime.
 
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
@@ -361,7 +361,9 @@ pub(crate) struct Shared {
     pub(crate) content: SharedDomain,
     pub(crate) account_id: String,
     pub(crate) plans: BTreeMap<String, TablePlan>,
-    pub(crate) device: RefCell<LocalDevice>,
+    /// This device; `None` once the store is wiped, its secrets and
+    /// approval nonce dropped (and zeroed) with it (§6.4).
+    pub(crate) device: RefCell<Option<LocalDevice>>,
     pub(crate) keys: RefCell<KeyState>,
     pub(crate) random: RefCell<Box<dyn RandomSource>>,
     pub(crate) reports: RefCell<VecDeque<Report>>,
@@ -376,6 +378,20 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    /// This device, or [`ClientError::Closed`] once the store was wiped.
+    pub(crate) fn device(&self) -> Result<Ref<'_, LocalDevice>, ClientError> {
+        Ref::filter_map(self.device.borrow(), Option::as_ref).map_err(|_| ClientError::Closed)
+    }
+
+    /// Drops the device's secrets and approval nonce (each zeroed on drop)
+    /// and every held key: the store was wiped (§6.4).
+    pub(crate) fn forget_secrets(&self) {
+        let mut keys = self.keys.borrow_mut();
+        keys.closed = true;
+        keys.held = Default::default();
+        self.device.borrow_mut().take();
+    }
+
     pub(crate) fn report(&self, report: Report) {
         {
             let mut outbox = self.outbox.borrow_mut();
