@@ -633,9 +633,9 @@ jobs:
 
   publish:
     name: Publish the prerelease
-    # Public only after every gate that doesn't need a public release passed:
-    # a NO-GO candidate is never published. Only the install-by-URL smoke and
-    # the Cloud RC probe (which installs the tarball by URL) run after it.
+    # Public only after every gate that doesn't need a public release passed
+    # (the adopter gate PASS or NEEDS_REVIEW, a hold): a NO-GO candidate is
+    # never published. Only the install-by-URL smoke runs after it.
     needs:
       [
         resolve,
@@ -645,6 +645,7 @@ jobs:
         rn-device-acceptance,
         rn-device-acceptance-built,
         preview,
+        adopter-verdict,
       ]
     # Exactly one of the two device acceptance calls runs, and it must pass.
     if: >-
@@ -654,7 +655,8 @@ jobs:
       needs.examples-e2e.result == 'success' &&
       ((needs.rn-device-acceptance.result == 'success' && needs.rn-device-acceptance-built.result == 'skipped') ||
        (needs.rn-device-acceptance.result == 'skipped' && needs.rn-device-acceptance-built.result == 'success')) &&
-      needs.preview.result == 'success'
+      needs.preview.result == 'success' &&
+      (needs.adopter-verdict.outputs.status == 'PASS' || needs.adopter-verdict.outputs.status == 'NEEDS_REVIEW')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -723,13 +725,19 @@ jobs:
   # server binary the way Jazz Cloud does and answers green, red or
   # needs-infra (a hold a person resolves). Dispatching it needs
   # INFRA_RC_PROBE_TOKEN (actions: read/write on garden-co/infra); without it
-  # the leg reports "skipped: token pending". A dry run has no draft to probe.
+  # the leg reports "skipped: token pending".
   cloud-rc-probe:
     name: Cloud RC probe
-    # After publish: the RC-client checks install the published tarball.
-    needs: [resolve, publish]
-    if: "!cancelled() && (needs.publish.result == 'success' || inputs.probe-tag != '')"
+    # From the workflow artifacts, as soon as the rc tarballs exist: the probe
+    # downloads jazz-tools-linux-x64 (+ SHA256SUMS) from the release-artifacts
+    # run and rc-npm from this run (jazz is public), so it runs in dry runs
+    # too and never waits for publish.
+    needs: [resolve, artifacts, rc-tarballs]
+    if: "!cancelled() && (needs.rc-tarballs.result == 'success' || inputs.probe-tag != '')"
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     timeout-minutes: 25
     outputs:
       verdict: ${{ steps.probe.outputs.verdict }}
@@ -738,7 +746,27 @@ jobs:
       VERSION: ${{ needs.resolve.outputs.version }}
       SHA: ${{ needs.resolve.outputs.sha }}
       PROBE_TAG: ${{ inputs.probe-tag }}
+      ARTIFACTS_RUN_ID: ${{ needs.artifacts.outputs.run_id }}
+      DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
     steps:
+      # Supply-chain rule: the probe only checks its inputs' SHA256SUMS against
+      # each other, so prove here that both runs it gets built this commit.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: inputs.probe-tag == ''
+        with:
+          sparse-checkout: dev/scripts
+          persist-credentials: false
+      - name: Require the probe's input runs to have built this commit
+        if: inputs.probe-tag == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EXPECTED_SHA: ${{ needs.resolve.outputs.sha }}
+          WORKFLOWS: release-artifacts.yml,release-candidate.yml
+        run: |
+          set -euo pipefail
+          RUN_ID="${ARTIFACTS_RUN_ID}" node dev/scripts/require-run-commit.mjs
+          RUN_ID="${GITHUB_RUN_ID}" node dev/scripts/require-run-commit.mjs
       - id: probe
         run: |
           set -euo pipefail
@@ -759,12 +787,20 @@ jobs:
           since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base="repos/${repo}/actions/workflows/cloud-rc-probe.yml"
           branch=$(gh api "repos/${repo}" --jq .default_branch)
-          # Candidates are release assets, never on npm: the RC-client checks
-          # install the published candidate's jazz-tools tarball by URL.
-          tarball="https://github.com/${GH_REPO}/releases/download/v${VERSION}/jazz-tools-${VERSION}.tgz"
-          jq -n --arg ref "${branch}" --arg tag "v${VERSION}" --arg sha "${SHA}" --arg tgz "${tarball}" \
-            '{ref: $ref, inputs: {rc_tag: $tag, jazz_sha: $sha, rc_tarball_url: $tgz}}' |
-            gh api -X POST "${base}/dispatches" --input -
+          if [ -n "${PROBE_TAG}" ]; then
+            # An existing release: its assets, by URL.
+            tarball="https://github.com/${GH_REPO}/releases/download/v${VERSION}/jazz-tools-${VERSION}.tgz"
+            payload=$(jq -n --arg ref "${branch}" --arg tag "v${VERSION}" --arg sha "${SHA}" --arg tgz "${tarball}" \
+              '{ref: $ref, inputs: {rc_tag: $tag, jazz_sha: $sha, rc_tarball_url: $tgz}}')
+          else
+            # This candidate: the release-artifacts run (server binaries) and
+            # this run (rc-npm, the rc-stamped tarballs).
+            # rc_tag is only a label here: the real tag, or dryrun-<sha8>.
+            if [ "${DRY_RUN}" = true ]; then label="dryrun-${SHA:0:8}"; else label="v${VERSION}"; fi
+            payload=$(jq -n --arg ref "${branch}" --arg sha "${SHA}" --arg runs "${ARTIFACTS_RUN_ID},${GITHUB_RUN_ID}" --arg tag "${label}" \
+              '{ref: $ref, inputs: {rc_tag: $tag, jazz_sha: $sha, jazz_artifacts_run_ids: $runs}}')
+          fi
+          gh api -X POST "${base}/dispatches" --input - <<<"${payload}"
           run_id=""
           for _ in $(seq 1 30); do
             run_id=$(gh api "${base}/runs?event=workflow_dispatch&per_page=20" \
@@ -790,9 +826,62 @@ jobs:
             *) echo "::error::Cloud RC probe: ${verdict}"; exit 1 ;;
           esac
 
-  # Slot: adopter-gate.yml (#adopter-evals) joins as `uses:
-  # ./.github/workflows/adopter-gate.yml` with rc_tag once it is on main
-  # (a `uses:` of a missing file fails the whole workflow).
+  # The adopter gate (adopter-gate.yml): example apps, bindings and a deployed
+  # app against the rc tarballs, from the artifacts (release-artifacts run:
+  # server binary, language libraries; this run: rc-npm). Its verdict.json
+  # status maps PASS -> green, NEEDS_REVIEW -> HOLD, FAIL -> NO-GO.
+  adopter-gate:
+    name: Adopter gate
+    needs: [resolve, artifacts, rc-tarballs]
+    if: "!cancelled() && needs.rc-tarballs.result == 'success'"
+    uses: ./.github/workflows/adopter-gate.yml
+    permissions:
+      contents: read
+      actions: read
+    secrets: inherit
+    with:
+      artifacts_run_id: ${{ needs.artifacts.outputs.run_id }}
+      rc_npm_run_id: ${{ github.run_id }}
+      jazz_sha: ${{ needs.resolve.outputs.sha }}
+      # Never production from a dry run: a dry run's version (the VP head's
+      # final 2.0.0-alpha.N, or <version>-rc.0) would move the long-lived eval
+      # core. Derived here, with no input to override it.
+      t4_mode: ${{ needs.resolve.outputs.dry_run == 'true' && 'preview' || 'production' }}
+      rc_tag: ${{ needs.resolve.outputs.dry_run != 'true' && format('v{0}', needs.resolve.outputs.version) || '' }}
+
+  adopter-verdict:
+    name: Adopter gate verdict
+    needs: adopter-gate
+    if: "!cancelled() && (needs.adopter-gate.result == 'success' || needs.adopter-gate.result == 'failure')"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      status: ${{ steps.read.outputs.status }}
+      attention: ${{ steps.read.outputs.attention }}
+    steps:
+      # Retried once: the artifact service sometimes answers "Server Error".
+      - id: dla1
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: verdict, path: adopter }
+
+      - if: steps.dla1.outcome == 'failure'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { name: verdict, path: adopter }
+      - id: read
+        run: |
+          set -euo pipefail
+          status=$(jq -r .status adopter/verdict.json)
+          jq '{status, counts, attention}' adopter/verdict.json
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          echo "attention=$(jq -c '[.attention[]? | tostring]' adopter/verdict.json)" >> "$GITHUB_OUTPUT"
+          case "${status}" in
+            PASS) ;;
+            NEEDS_REVIEW) echo "::warning::Adopter gate: NEEDS_REVIEW (hold: a person reviews it)" ;;
+            *) echo "::error::Adopter gate: ${status}"; exit 1 ;;
+          esac
 
   smoke:
     name: Install jazz-tools from the rc tarballs (${{ matrix.os }})
@@ -869,6 +958,8 @@ jobs:
         attach-server,
         publish,
         cloud-rc-probe,
+        adopter-gate,
+        adopter-verdict,
       ]
     if: always()
     runs-on: ubuntu-latest
@@ -889,11 +980,13 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
           DRY_RUN: ${{ needs.resolve.outputs.dry_run }}
-          # A dry run has no draft to probe.
-          DRY_RUN_SKIPPABLE: attach-server,publish,cloud-rc-probe
+          # The probe and the adopter gate run from the artifacts, dry run or not.
+          DRY_RUN_SKIPPABLE: attach-server,publish
           # Exactly one of the two device acceptance calls runs.
           ALTERNATIVES: rn-device-acceptance|rn-device-acceptance-built
           PROBE: ${{ needs.cloud-rc-probe.outputs.verdict }}
+          ADOPTER: ${{ needs.adopter-verdict.outputs.status }}
+          ADOPTER_ATTENTION: ${{ needs.adopter-verdict.outputs.attention }}
           PROBE_ONLY: ${{ inputs.probe-tag != '' }}
         run: node dev/scripts/rc-verdict.mjs
 
