@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { checkManifest, npmAnswer, publishLevels } from "./npm-publish.mjs";
-import { isPayload, requiredFiles } from "./maven-central.mjs";
+import { isPayload, requiredFiles, servedUrls } from "./maven-central.mjs";
 import { pickGateRun, summarize } from "./rc-verdict.mjs";
 
 const pkg = (name, deps = []) => ({ name, deps });
@@ -144,4 +144,11 @@ test("npm's answer is kept, without the tarball listing", () => {
   assert.match(answer, /\+ jazz-rn-android@2\.0\.0-alpha\.68/);
   assert.match(answer, /Publishing to/);
   assert.doesNotMatch(answer, /Tarball|101\.2MB/);
+});
+
+test("Maven Central counts as served when repo1 has both POMs", () => {
+  assert.deepEqual(servedUrls("2.0.0-alpha.69"), [
+    "https://repo1.maven.org/maven2/tools/jazz/jazz-kotlin/2.0.0-alpha.69/jazz-kotlin-2.0.0-alpha.69.pom",
+    "https://repo1.maven.org/maven2/tools/jazz/jazz-kotlin-android/2.0.0-alpha.69/jazz-kotlin-android-2.0.0-alpha.69.pom",
+  ]);
 });
