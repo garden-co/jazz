@@ -759,19 +759,34 @@ impl WasmUpstreamLink {
 
 type WasmReadFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, JsValue>> + 'static>>;
 
+/// A read waiting for the server, driven by the adapter after its peer
+/// transport makes progress.
+///
+/// A one-shot read that left rows out because the encryption runtime could
+/// not open them comes back as one of these even when it is done at once:
+/// `unreadable()` names those rows, as napi's `PendingNativeRead` does.
 #[wasm_bindgen(js_name = PendingNativeRead)]
 pub struct WasmPendingNativeRead {
     future: Rc<RefCell<Option<WasmReadFuture>>>,
+    /// The answer of a read that was done when it was returned.
+    done: RefCell<Option<Vec<u8>>>,
+    /// The rows the read left out, as JSON, once it is done.
+    unreadable: Rc<RefCell<Option<String>>>,
 }
 
 impl WasmPendingNativeRead {
     fn new(future: WasmReadFuture) -> Self {
         Self {
             future: Rc::new(RefCell::new(Some(future))),
+            done: RefCell::default(),
+            unreadable: Rc::default(),
         }
     }
 
     fn poll_once(&self) -> Result<Option<Vec<u8>>, JsValue> {
+        if let Some(bytes) = self.done.borrow_mut().take() {
+            return Ok(Some(bytes));
+        }
         let Some(mut future) = self.future.borrow_mut().take() else {
             return Err(JsValue::from_str("native pending read is already complete"));
         };
@@ -797,6 +812,14 @@ impl WasmPendingNativeRead {
 
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
+        self.done.borrow_mut().take();
+    }
+
+    /// Once the read is done: the rows it left out because they could not
+    /// be opened, as a JSON array of `{ table, id, column, code }`; `null`
+    /// when it left none out.
+    pub fn unreadable(&self) -> Option<String> {
+        self.unreadable.borrow().clone()
     }
 }
 
@@ -1591,7 +1614,7 @@ impl WasmDb {
     ) -> Result<JsValue, JsValue> {
         let read = self
             .binding()?
-            .all(
+            .all_reporting(
                 query,
                 &options(opts),
                 open_transaction_id.as_deref(),
@@ -1599,7 +1622,7 @@ impl WasmDb {
                 json(claims)?,
             )
             .map_err(host_error)?;
-        wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
+        wasm_reporting_read_or_pending(read)
     }
 
     /// Bind correlation claims to this already-open client's own identity.
@@ -2201,6 +2224,35 @@ fn wasm_read_or_pending(future: WasmReadFuture) -> Result<JsValue, JsValue> {
     let pending = WasmPendingNativeRead::new(future);
     match pending.poll_once()? {
         Some(bytes) => bytes_to_js(bytes),
+        None => Ok(pending.into()),
+    }
+}
+
+/// [`wasm_read_or_pending`] for a read that reports the rows it left out:
+/// such a read is answered as a [`WasmPendingNativeRead`] even when done at
+/// once, so the rows reach JS with it.
+fn wasm_reporting_read_or_pending(
+    future: binding_host::HostFuture<(Vec<u8>, Vec<jazz::db::UnreadableRow>)>,
+) -> Result<JsValue, JsValue> {
+    let unreadable = Rc::<RefCell<Option<String>>>::default();
+    let slot = Rc::clone(&unreadable);
+    let future: WasmReadFuture = Box::pin(async move {
+        let (bytes, rows) = future.await.map_err(host_error)?;
+        if !rows.is_empty() {
+            *slot.borrow_mut() = Some(binding_host::unreadable_json(&rows));
+        }
+        Ok(bytes)
+    });
+    let pending = WasmPendingNativeRead {
+        unreadable,
+        ..WasmPendingNativeRead::new(future)
+    };
+    match pending.poll_once()? {
+        Some(bytes) if pending.unreadable.borrow().is_none() => bytes_to_js(bytes),
+        Some(bytes) => {
+            *pending.done.borrow_mut() = Some(bytes);
+            Ok(pending.into())
+        }
         None => Ok(pending.into()),
     }
 }
