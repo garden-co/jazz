@@ -16,6 +16,7 @@ export {
   useSession,
 } from "./provider.js";
 export { useAll, useAllSuspense, type UseAllResult, type UseAllSuspenseResult } from "./use-all.js";
+export { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
 export { useOne, useOneSuspense, type UseOneResult, type UseOneSuspenseResult } from "./use-one.js";
 export { useAuthState, type AuthStateInfo } from "../react-core/use-auth-state.js";
 export { useSyncStatus } from "../react-core/use-sync-status.js";

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { flushSync } from "svelte";
 import type { QueryBuilder } from "../shared/index.js";
 import "./test-helpers.svelte.js";
+import { withUnreadable, type UnreadableRow } from "../encryption/unreadable.js";
 
 const mocks = vi.hoisted(() => {
   const unsubscribe = vi.fn();
@@ -340,6 +341,67 @@ describe("svelte/QuerySubscription", () => {
     callbacks.onError("subscription failed");
     await settle();
     expect(ref.isLoading).toBe(false);
+
+    cleanup();
+  });
+
+  it("exposes the rows each delivery leaves out undecrypted, reactively", async () => {
+    type Todo = { id: string; title: string };
+    const pending = (id: string): UnreadableRow => ({
+      table: "todos",
+      id,
+      column: "title",
+      code: "key-pending",
+    });
+    const first = { id: "1", title: "first" };
+    let listener: any;
+    // Stands in for the orchestrator: the entry's data carries the list.
+    const entry: { state: any; subscribe: (callbacks: any) => () => void } = {
+      state: { status: "fulfilled", data: withUnreadable([first], [pending("2")]), error: null },
+      subscribe: (callbacks: any) => {
+        listener = callbacks;
+        return mocks.unsubscribe;
+      },
+    };
+    mocks.getCacheEntry.mockReturnValue(entry as any);
+    const deliver = async (all: Todo[]) => {
+      entry.state = { status: "fulfilled", data: all, error: null };
+      listener.onDelta({ all, delta: [] });
+      await settle();
+    };
+
+    let ref!: InstanceType<typeof QuerySubscription<Todo>>;
+    const seen: string[][] = [];
+    const cleanup = $effect.root(() => {
+      ref = new QuerySubscription<Todo>(makeQuery());
+      $effect(() => {
+        seen.push(ref.unreadable.map((row) => row.id));
+      });
+    });
+    await settle();
+
+    expect(ref.unreadable).toEqual([pending("2")]);
+
+    // A delivery that changes only the list.
+    await deliver(withUnreadable([first], [pending("2"), pending("3")]));
+    expect(ref.unreadable).toEqual([pending("2"), pending("3")]);
+
+    // The key arrives: the row joins the result and leaves the list.
+    await deliver(withUnreadable([first, { id: "2", title: "second" }], [pending("3")]));
+    expect(ref.current).toEqual([first, { id: "2", title: "second" }]);
+    expect(ref.unreadable).toEqual([pending("3")]);
+
+    await deliver([first, { id: "2", title: "second" }]);
+    expect(ref.unreadable).toEqual([]);
+
+    await deliver(withUnreadable([first], [pending("4")]));
+    listener.onReset();
+    await settle();
+    expect(ref.unreadable).toEqual([]);
+
+    expect(seen.at(-1)).toEqual([]);
+    expect(seen).toContainEqual(["2", "3"]);
+    expect(seen).toContainEqual(["4"]);
 
     cleanup();
   });
