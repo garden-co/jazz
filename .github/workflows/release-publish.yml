@@ -46,13 +46,14 @@ on:
         required: true
         type: string
       mode:
-        description: "dry-run publishes nothing; publish waits for the publish environment's approval."
+        description: "dry-run publishes nothing; publish waits for the publish environment's approval; verify-trust only checks the npm and crates.io trusted publishers (in the publish environment), publishing nothing (version and sha are ignored)."
         required: true
         default: dry-run
         type: choice
         options:
           - dry-run
           - publish
+          - verify-trust
       maven-publishing-type:
         description: "Central Portal publishingType: AUTOMATIC publishes once validated (waits for PUBLISHED); USER_MANAGED leaves it validated for Publish in the Portal."
         required: true
@@ -95,8 +96,31 @@ env:
 
 jobs:
   # ---------------------------------------------------------------- prepare
+  # mode=verify-trust: the registries' trusted publishers for this workflow
+  # and environment, checked by token exchanges that publish nothing
+  # (dev/release-publish/verify-trust.mjs). Every other job skips.
+  verify-trust:
+    name: Verify trusted publishers
+    if: inputs.mode == 'verify-trust'
+    # As the npm leg: npm's trusted publishing accepts GitHub-hosted runners.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/release-publish
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - run: node dev/release-publish/verify-trust.mjs
+
   resolve:
     name: Resolve the release and its artifacts
+    if: inputs.mode != 'verify-trust'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
