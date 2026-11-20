@@ -8,7 +8,7 @@ import {
   servePrivateStore,
   type PrivateStore,
 } from "../encryption/index.js";
-import { encryptionStoreScope } from "../encryption/browser-host.js";
+import { encryptionStoreScope } from "../encryption/store-scope.js";
 import { RecoveryPhrase } from "../local-first-auth/recovery-phrase.js";
 import { testApp } from "../testing/test-app.js";
 import { openConfig } from "./native-runtime/native-codec.js";

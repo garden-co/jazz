@@ -307,9 +307,9 @@ export async function openBrowserSessionCore(
     // next user, or any script on the origin, could otherwise still use them.
     // Only once the store is gone: a tab that still holds it keeps its keys.
     if (outcome === "deleted" && clientConfig.encryption) {
-      const { wipeBrowserEncryption } = await import("../encryption/browser-host.js");
-      await wipeBrowserEncryption({
-        config: clientConfig.encryption,
+      const { wipeEncryptionKeys } = await import("../encryption/wipe-keys.js");
+      await wipeEncryptionKeys({
+        store: clientConfig.encryption.store,
         appId: clientScope(clientConfig),
         environment: clientConfig.env ?? "dev",
         accountId: account,
