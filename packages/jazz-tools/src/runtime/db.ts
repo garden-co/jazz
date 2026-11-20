@@ -2564,6 +2564,14 @@ export class Db {
     return cancel;
   }
 
+  /** Whether this Db's app declares an end-to-end encrypted column. */
+  private declaresEncryption(): boolean {
+    const app = this.config?.encryption?.app;
+    if (!app) return false;
+    const declared = declaredEntries(resolveSchemaSource(app)) ?? {};
+    return Object.values(declared).some((entry) => Object.keys(entry.columns).length > 0);
+  }
+
   /**
    * A thin `Db` of an app that declares encryption has no handle of its own:
    * this one waits for the local-first client like any operation, then calls
@@ -3294,11 +3302,16 @@ export class Db {
       if (this.successor && closedBeforeSending(error)) return start(this.current());
       return undefined;
     };
-    // Decided before it is queued itself.
+    // Decided before it is queued itself. Only an app that declares
+    // encryption has writes that may yet wait: a plain app's transaction
+    // resolves as it always has.
     const client = this.getCurrentClient();
     const behindWait =
       this.writesWaiting > 0 ||
-      (isThinDb(this) && client !== null && getOwnerPreparation(client)?.pending !== undefined);
+      (isThinDb(this) &&
+        client !== null &&
+        getOwnerPreparation(client)?.pending !== undefined &&
+        this.declaresEncryption());
     const holdLaterWrites = () => {
       // Without a loader it fails at once: nothing to hold writes for.
       if (!release && localFirstLoaderOf(this)) release = this.holdWrites();
