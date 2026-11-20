@@ -1211,32 +1211,12 @@ impl Foreground {
                 && let Some(event) = subscription.stream.try_next_event()
             {
                 subscription.opened = true;
-                let event = match binding_host::event_chunk(event).map_err(|e| e.to_string())? {
-                    EventChunk::Delta {
-                        delta,
-                        reset,
-                        settled,
-                        tier,
-                        // Not in the foreground ABI yet: a coalesced backlog
-                        // reaches React Native as a plain reset.
-                        coalesced: _,
-                        // Nor are unreadable rows: React Native has no
-                        // encryption runtime yet.
-                        unreadable: _,
-                    } => ForegroundSubscriptionEvent::Delta {
-                        reset,
-                        settled,
-                        tier,
-                        delta,
-                    },
-                    EventChunk::Rejected { detail, .. } => {
-                        ForegroundSubscriptionEvent::Rejected { reason: detail }
-                    }
-                    EventChunk::Closed => {
-                        subscription.closed = true;
-                        ForegroundSubscriptionEvent::Closed
-                    }
-                };
+                let event = foreground_subscription_event(
+                    binding_host::event_chunk(event).map_err(|e| e.to_string())?,
+                );
+                if event == ForegroundSubscriptionEvent::Closed {
+                    subscription.closed = true;
+                }
                 subscription.buffer.push_back(event);
                 self.notify = true;
             }
@@ -3761,6 +3741,50 @@ pub enum RelayError {
     DeclarationsMismatch(String),
     #[error("native relay socket: {0}")]
     Socket(String),
+}
+
+/// One subscription event in the foreground ABI.
+pub(crate) fn foreground_subscription_event(chunk: EventChunk) -> ForegroundSubscriptionEvent {
+    match chunk {
+        EventChunk::Delta {
+            delta,
+            reset,
+            settled,
+            tier,
+            // Not in the foreground ABI yet: a coalesced backlog reaches
+            // React Native as a plain reset.
+            coalesced: _,
+            unreadable,
+        } => match unreadable {
+            // A reset with no rows left out is a plain reset: the reader
+            // takes a reset without a list as an empty one. So an app
+            // without encryption keeps event 0.
+            Some(json) if reset && json == "[]" => ForegroundSubscriptionEvent::Delta {
+                reset,
+                settled,
+                tier,
+                delta,
+            },
+            // The list changed, or a reset restates a non-empty one.
+            Some(unreadable_json) => ForegroundSubscriptionEvent::UnreadableDelta {
+                reset,
+                settled,
+                tier,
+                delta,
+                unreadable_json,
+            },
+            None => ForegroundSubscriptionEvent::Delta {
+                reset,
+                settled,
+                tier,
+                delta,
+            },
+        },
+        EventChunk::Rejected { detail, .. } => {
+            ForegroundSubscriptionEvent::Rejected { reason: detail }
+        }
+        EventChunk::Closed => ForegroundSubscriptionEvent::Closed,
+    }
 }
 
 #[cfg(test)]

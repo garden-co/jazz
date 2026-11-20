@@ -293,6 +293,14 @@ export type NativeForegroundSubscriptionEvent =
       tier: string;
       delta: Uint8Array;
       terminalOperations?: unknown[];
+      /**
+       * The rows the result leaves out because the encryption runtime could
+       * not open them, as a JSON array of `{ table, id, column, code }`. Set
+       * on a delta that changed the list, which it replaces, and on a reset
+       * that leaves rows out; absent when the list is unchanged (on a reset:
+       * none left out).
+       */
+      unreadable?: string;
     }
   | { type: "rejected"; reason: string }
   | { type: "closed" };
@@ -1080,7 +1088,7 @@ function decodeForegroundSubscriptionEvents(
   const events: NativeForegroundSubscriptionEvent[] = [];
   for (let index = 0; index < count; index += 1) {
     const tag = readVarint();
-    if (tag === 0 || tag === 3) {
+    if (tag === 0 || tag === 3 || tag === 4) {
       const reset = bytes[offset++];
       const settled = bytes[offset++];
       if ((reset !== 0 && reset !== 1) || (settled !== 0 && settled !== 1))
@@ -1103,6 +1111,21 @@ function decodeForegroundSubscriptionEvents(
           throw new Error("Jazz native foreground returned malformed terminal operations");
         terminalOperations = parsed;
       }
+      let unreadable: string | undefined;
+      if (tag === 4) {
+        const length = readVarint();
+        unreadable = decodeForegroundUtf8(bytes, offset, length, "unreadable rows");
+        offset += length;
+        // Fail closed here rather than when the runtime reads the list.
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(unreadable);
+        } catch {
+          parsed = undefined;
+        }
+        if (!Array.isArray(parsed))
+          throw new Error("Jazz native foreground returned malformed unreadable rows");
+      }
       events.push({
         type: "delta",
         reset: reset === 1,
@@ -1110,6 +1133,7 @@ function decodeForegroundSubscriptionEvents(
         tier,
         delta,
         ...(terminalOperations === undefined ? {} : { terminalOperations }),
+        ...(unreadable === undefined ? {} : { unreadable }),
       });
     } else if (tag === 1) {
       const length = readVarint();

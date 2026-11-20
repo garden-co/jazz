@@ -505,6 +505,12 @@ pending operations and uploads. Subscription event ordinal 3 is reserved for
 StructuredDelta: reset bool, settled bool, tier string, delta byte vector,
 terminal_operations_json string. Existing event ordinals 0–2 are unchanged;
 terminal operations use `binding_codec::terminal_operations_to_json`.
+Subscription event ordinal 4 is UnreadableDelta: reset bool, settled bool, tier
+string, delta byte vector, unreadable_json string (`binding_host::unreadable_json`,
+the rows the result leaves out undecrypted). The relay sends it instead of event 0
+when the core tells the list (an opening, a reset, a change), and event 0 when
+the list is unchanged or a reset leaves no row out. Its bytes are pinned by `unreadable_delta_event_has_pinned_bytes`
+and decoded by the same bytes in jazz-rn.
 
 The mutation enum has fixed ordinals Insert=0, Update=1, Upsert=2, Delete=3,
 Restore=4. Response 17 is NativeConnectionStatus with three ordered booleans:

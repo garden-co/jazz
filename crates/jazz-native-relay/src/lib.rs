@@ -817,6 +817,20 @@ pub enum ForegroundSubscriptionEvent {
         delta: Vec<u8>,
         terminal_operations_json: String,
     },
+    /// A [`Self::Delta`] that also names the rows its result leaves out
+    /// because the encryption runtime could not open them, as
+    /// `binding_host::unreadable_json` spells them (a JSON array of
+    /// `{ table, id, column, code }`); they replace the list told before.
+    /// Sent instead of `Delta` on an opening, a reset, and a delta that
+    /// changed the list. Appended last so the earlier variants keep their
+    /// postcard bytes.
+    UnreadableDelta {
+        reset: bool,
+        settled: bool,
+        tier: String,
+        delta: Vec<u8>,
+        unreadable_json: String,
+    },
 }
 
 /// ABI-owned response buffer. On successful execution, `data` is allocated by
