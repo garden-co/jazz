@@ -56,7 +56,7 @@ on:
           - publish
           - verify-trust
       maven-publishing-type:
-        description: "Central Portal publishingType: AUTOMATIC publishes once validated (waits for PUBLISHED); USER_MANAGED leaves it validated for Publish in the Portal."
+        description: "Central Portal publishingType: AUTOMATIC publishes once validated (the release waits only for PUBLISHING; a later job waits until repo1 serves it); USER_MANAGED leaves it validated for Publish in the Portal."
         required: true
         default: AUTOMATIC
         type: choice
@@ -742,6 +742,8 @@ jobs:
       contents: read
     env:
       PORTAL: ${{ inputs.mode == 'publish' || inputs.maven-portal-dry-run }}
+    outputs:
+      uploaded_at: ${{ steps.upload.outputs.uploaded_at }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -782,6 +784,7 @@ jobs:
           ls -l "${RUNNER_TEMP}/bundle.zip"
 
       - name: Upload to the Central Portal
+        id: upload
         if: env.PORTAL == 'true'
         env:
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
@@ -789,6 +792,48 @@ jobs:
           TYPE: ${{ inputs.mode == 'publish' && inputs.maven-publishing-type || 'USER_MANAGED' }}
           DROP: ${{ inputs.mode != 'publish' && '--drop' || '' }}
         run: node dev/release-publish/maven-central.mjs upload "${RUNNER_TEMP}/bundle.zip" "${VERSION}" "${TYPE}" ${DROP}
+
+  # With AUTOMATIC the Maven job returns at PUBLISHING (validated, no way
+  # back) and the GitHub release need not wait the ~11 min Central takes to
+  # publish. This job waits, without credentials (so without a second
+  # approval), until repo1.maven.org serves both artifacts, for at most 45
+  # min. If not, it fails and adds a note to the release.
+  maven-published:
+    name: Maven Central serves it
+    needs: [resolve, maven, finalize]
+    if: >-
+      ${{ !cancelled() && inputs.mode == 'publish' && inputs.maven-publishing-type == 'AUTOMATIC' &&
+          needs.maven.result == 'success' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 50
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/release-publish
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - name: Wait for repo1.maven.org
+        env:
+          UPLOADED_AT: ${{ needs.maven.outputs.uploaded_at }}
+        run: node dev/release-publish/maven-central.mjs await-served "${VERSION}" 45 "${UPLOADED_AT}"
+      - name: Note the failure on the release
+        if: failure()
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          gh release view "${TAG}" --json body --jq .body > "${RUNNER_TEMP}/notes.md" || exit 0
+          cat >> "${RUNNER_TEMP}/notes.md" <<EOF
+
+          > [!WARNING]
+          > The Kotlin packages (tools.jazz:jazz-kotlin and jazz-kotlin-android ${VERSION}) are not on Maven Central yet: they weren't served 45 minutes after upload. See ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}.
+          EOF
+          gh release edit "${TAG}" --notes-file "${RUNNER_TEMP}/notes.md"
+          echo "::error::Maven Central doesn't serve ${VERSION} 45 min after upload; noted on ${TAG}."
 
   go:
     name: Go module tag
@@ -1026,6 +1071,7 @@ jobs:
         inspector-stage,
         inspector-promote,
         finalize,
+        maven-published,
       ]
     if: always()
     runs-on: blacksmith-2vcpu-ubuntu-2404
