@@ -1009,7 +1009,7 @@ impl Db {
         column: &str,
         reader: R,
     ) -> Result<WriteHandle, Error> {
-        let row = self.inner().ids.next_row_id();
+        let row = self.inner.ids.borrow_mut().next_row_id();
         self.insert_streaming_value_with_id(table, row, cells, column, reader)
             .await
     }
@@ -1364,7 +1364,7 @@ impl Db {
 
     /// Replace the limits on local streaming uploads.
     pub fn set_large_value_staging_policy(&self, policy: LargeValueStagingPolicy) {
-        self.inner().staging = policy;
+        self.inner.staging_policy.set(policy);
     }
 
     /// End every streaming upload left untouched past the staging policy's
@@ -1373,7 +1373,7 @@ impl Db {
     pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
         let inner = self.inner();
         let now = streaming_now_ms();
-        let max_age = i64::try_from(inner.staging.max_age_ms).unwrap_or(i64::MAX);
+        let max_age = i64::try_from(inner.staging.get().max_age_ms).unwrap_or(i64::MAX);
         inner.release_dropped_uploads()?;
         crate::large::expire_receipts(&inner.conn, now)?;
         crate::large::expire_uploads(&inner.conn, now.saturating_sub(max_age))
@@ -1493,7 +1493,7 @@ fn admit_ingress(inner: &Inner, staged: &[lv::StagedChunk], now: i64) -> Result<
     if bytes == 0 {
         return Ok(());
     }
-    let policy = inner.staging;
+    let policy = inner.staging.get();
     let mut window = inner.ingress.borrow_mut();
     let now = now.max(0) as u64;
     if now.saturating_sub(window.0) >= policy.window_ms {

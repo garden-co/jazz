@@ -7490,7 +7490,7 @@ impl Inner {
     /// upstream. Every version it admits is confirmed; a replica's are
     /// confirmed by the `Catalogue` it mirrors.
     pub(super) fn publishes_catalogue(&self) -> bool {
-        self.authority && self.client.is_none()
+        self.authority.get() && self.client.is_none()
     }
 
     /// Whether `version`'s names are the authority's.
@@ -9227,7 +9227,8 @@ impl Db {
         if inner.client.is_some() {
             return;
         }
-        let stranded = !inner.authority && inner.holds_rows().expect("read the store's tables");
+        let stranded =
+            !inner.authority.get() && inner.holds_rows().expect("read the store's tables");
         inner.me = inner.own_code().expect("intern this replica's node");
         let node = *inner.identity.node.as_bytes();
         let mut client = Client::new(node);
@@ -10954,7 +10955,9 @@ impl Db {
                             // payload, for a host that reports refusals,
                             // until the host has (INV-TX-9). A relay keeps
                             // none of its sessions'.
-                            if inner.upstream_rejections.is_some() && !relayed && origins.is_empty()
+                            if inner.upstream_rejections.borrow().is_some()
+                                && !relayed
+                                && origins.is_empty()
                             {
                                 inner.retain_rejected(tx, error, serializable)?;
                             }
@@ -10968,7 +10971,7 @@ impl Db {
                             }
                             let me = *inner.identity.node.as_bytes();
                             if let (Some(rejections), false) =
-                                (inner.upstream_rejections.as_mut(), relayed)
+                                (inner.upstream_rejections.borrow_mut().as_mut(), relayed)
                             {
                                 let rejection = |writer, seq| crate::db::UpstreamRejection {
                                     writer,
@@ -11980,7 +11983,7 @@ impl Inner {
         if policy.is_none()
             && matches!(who, Who::Session(_))
             && self.sessions[index].bundle.is_none()
-            && (self.pins_required || crate::catalogue::serves_bundles(&self.conn)?)
+            && (self.pins_required.get() || crate::catalogue::serves_bundles(&self.conn)?)
         {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -12468,7 +12471,7 @@ impl Db {
     /// [`Reason::IdentityMismatch`]. A system store (a server) serves any
     /// identity.
     pub fn check_serves(&self, identity: AuthorSubject) -> Result<(), Error> {
-        let own = self.inner.borrow().identity.author;
+        let own = self.inner.identity.author;
         if matches!(own, AuthorSubject::Authenticated(_)) && identity != own {
             return Err(Error::with_reason(
                 ErrorCode::Protocol,
@@ -12516,7 +12519,7 @@ impl Db {
         // would never reach it.
         if bundle.is_none()
             && identity != AuthorSubject::SYSTEM
-            && (inner.pins_required || crate::catalogue::serves_bundles(&inner.conn)?)
+            && (inner.pins_required.get() || crate::catalogue::serves_bundles(&inner.conn)?)
         {
             return Err(Error::new(
                 ErrorCode::Protocol,
@@ -12744,8 +12747,8 @@ impl Db {
     /// ([`Db::track_closed_subscribers`]).
     pub fn take_closed_subscribers(&self) -> Vec<(SubscriberId, Error)> {
         self.inner
-            .borrow_mut()
             .closed
+            .borrow_mut()
             .as_mut()
             .map(std::mem::take)
             .unwrap_or_default()
@@ -12755,7 +12758,7 @@ impl Db {
     /// [`Db::take_closed_subscribers`]: for a host that takes them, as
     /// often as it ticks.
     pub fn track_closed_subscribers(&self) {
-        self.inner.borrow_mut().closed.get_or_insert_with(Vec::new);
+        self.inner.closed.borrow_mut().get_or_insert_with(Vec::new);
     }
 
     /// Serve one session's inbound messages for this tick.
@@ -12851,7 +12854,7 @@ impl Db {
             if let SyncMessage::PushChunks { nodes } = &message {
                 let bytes: usize = nodes.iter().map(|node| node.bytes.len()).sum();
                 let mut inner = self.inner.borrow_mut();
-                let policy = inner.staging;
+                let policy = inner.staging.get();
                 let session = &mut inner.sessions[index];
                 if session.ingress.0.elapsed() >= std::time::Duration::from_millis(policy.window_ms)
                 {
@@ -13101,7 +13104,7 @@ impl Db {
             if let Err(error) = self.serve_session(index) {
                 let subscriber = self.subscriber_at(index);
                 self.disconnect_subscriber(subscriber);
-                if let Some(closed) = self.inner.borrow_mut().closed.as_mut() {
+                if let Some(closed) = self.inner.closed.borrow_mut().as_mut() {
                     closed.push((subscriber, error));
                 }
             }
@@ -14330,7 +14333,7 @@ impl Db {
                         TransportError::Backpressure => ErrorCode::Backpressure,
                         TransportError::Failed(_) => ErrorCode::Protocol,
                     };
-                    if let Some(closed) = inner.closed.as_mut() {
+                    if let Some(closed) = inner.closed.borrow_mut().as_mut() {
                         closed.push((
                             subscriber,
                             Error::new(code, format!("could not send to this session: {error}")),
@@ -14392,7 +14395,7 @@ impl Db {
             };
             let db = self.session_db(index);
             let mut inner = db.inner();
-            let authority = inner.authority;
+            let authority = inner.authority.get();
             let (queue, group) = inner.subscribe_member(
                 &wait.prepared,
                 policy,
@@ -14577,7 +14580,7 @@ impl Db {
                 }
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
-                let authority = inner.authority;
+                let authority = inner.authority.get();
                 let dormant =
                     inner.sessions[index].restoring && upstream.is_none() && since.is_none();
                 let subscribed = inner.subscribe_member(
@@ -15443,7 +15446,7 @@ impl Db {
             }
             SyncMessage::PushChunks { nodes } => {
                 let inner = self.inner.borrow();
-                let max_age = i64::try_from(inner.staging.max_age_ms).unwrap_or(i64::MAX);
+                let max_age = i64::try_from(inner.staging.get().max_age_ms).unwrap_or(i64::MAX);
                 let expires = now_ms().saturating_add(max_age);
                 // A relay pushes what its sessions push on to its upstream,
                 // ahead of the commits that name it.

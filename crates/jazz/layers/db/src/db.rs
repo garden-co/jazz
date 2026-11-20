@@ -2,7 +2,7 @@
 
 use crate::storage::Storage;
 use crate::values::CachedRow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -728,7 +728,7 @@ struct Inner {
     pub(crate) possession: Option<crate::large::Possession>,
     /// Limits on local streaming uploads and on pushed nodes awaiting
     /// their commit.
-    staging: LargeValueStagingPolicy,
+    staging: Rc<Cell<LargeValueStagingPolicy>>,
     /// Dropped uploads queue cleanup without recursively borrowing the owner.
     upload_cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
     /// `conn.total_changes()` after the last large-value reclaim pass that
@@ -794,7 +794,7 @@ struct Inner {
     >,
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
-    identity: DbIdentity,
+    identity: Rc<DbIdentity>,
     /// The node SYSTEM provenance names ([`crate::options::DbConfig::system_node`]).
     system_node: crate::ids::NodeUuid,
     /// Provenance for the write being applied (set by `apply_as`).
@@ -834,7 +834,7 @@ struct Inner {
     /// While a replica stores a message's images: their rows' current
     /// images, read at once (see `Inner::begin_current_batch`).
     current_batch: RefCell<Option<HashMap<(String, RowUuid, Vec<u8>), Option<sync::Image>>>>,
-    ids: Box<dyn RowIdSource>,
+    ids: Rc<RefCell<Box<dyn RowIdSource>>>,
     /// The newest commit seq handed out: the authority's seq, or on a
     /// replica its own commit counter (its commits' tx).
     seq: u64,
@@ -882,13 +882,13 @@ struct Inner {
     /// `Db::echo_probes`).
     pub(crate) echo_probes: u64,
     /// The global authority: what it settles is durable at `Global`.
-    authority: bool,
+    authority: Rc<Cell<bool>>,
     /// Every session but SYSTEM's must be pinned to a published bundle
     /// (see [`Db::require_session_pins`]).
-    pub(crate) pins_required: bool,
+    pub(crate) pins_required: Rc<Cell<bool>>,
     /// Uploads the authority refused, by commit seq, kept for a host that
     /// reports them (see [`Db::track_upstream_rejections`]).
-    upstream_rejections: Option<Vec<UpstreamRejection>>,
+    upstream_rejections: Rc<RefCell<Option<Vec<UpstreamRejection>>>>,
     /// The upstream's refusals of this store's own commits, counted for
     /// [`Db::upload_status`].
     refusals: sync::Refusals,
@@ -910,13 +910,13 @@ struct Inner {
     /// ([`Db::take_closed_subscribers`]). Kept only for a host that does
     /// ([`Db::track_closed_subscribers`]), so that one which never takes
     /// them does not accumulate them.
-    closed: Option<Vec<(sync::SubscriberId, Error)>>,
+    closed: Rc<RefCell<Option<Vec<(sync::SubscriberId, Error)>>>>,
     /// Query statements that ran slow, until the host takes them
     /// ([`Db::take_slow_queries`]).
-    slow: RefCell<crate::slow::SlowLog>,
+    slow: Rc<RefCell<crate::slow::SlowLog>>,
     /// Text merges that ran past their work budget since the host last
     /// took them ([`Db::take_merge_fallbacks`]).
-    merge_fallbacks: RefCell<MergeFallbacks>,
+    merge_fallbacks: Rc<RefCell<MergeFallbacks>>,
     /// Subscribers accepted so far (each one's generation).
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
@@ -2294,7 +2294,7 @@ impl Db {
                 overlay: None,
                 derived: Vec::new(),
                 possession: None,
-                staging: LargeValueStagingPolicy::default(),
+                staging: Rc::default(),
                 upload_cleanup: Rc::default(),
                 reclaimed_at: None,
                 reclaim_passes: 0,
@@ -2320,7 +2320,7 @@ impl Db {
                 version_stored_views: RefCell::default(),
                 batches: HashMap::new(),
                 system_node: config.system_node.unwrap_or(config.identity.node),
-                identity: config.identity,
+                identity: Rc::new(config.identity),
                 writer: None,
                 last_stamp: (0, 0),
                 hlc_last: 0,
@@ -2333,9 +2333,11 @@ impl Db {
                 authors: RefCell::new(AuthorCodes::default()),
                 image_inserts: RefCell::default(),
                 current_batch: RefCell::default(),
-                ids: config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
+                ids: Rc::new(RefCell::new(
+                    config
+                        .id_source
+                        .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
+                )),
                 seq: 0,
                 me: 0,
                 shard: shard::ShardState::new(
@@ -2355,17 +2357,17 @@ impl Db {
                 reopenable: path.is_some(),
                 replayed_commits: 0,
                 echo_probes: 0,
-                authority: false,
-                pins_required: false,
-                upstream_rejections: None,
+                authority: Rc::default(),
+                pins_required: Rc::default(),
+                upstream_rejections: Rc::default(),
                 refusals: sync::Refusals::default(),
                 pending_revision_base: 0,
                 sessions: Vec::new(),
                 held_acks: None,
                 column_codes: RefCell::default(),
-                closed: None,
-                slow: RefCell::default(),
-                merge_fallbacks: RefCell::default(),
+                closed: Rc::default(),
+                slow: Rc::default(),
+                merge_fallbacks: Rc::default(),
                 accepted: 0,
                 since_tick: Vec::new(),
                 gone: RefCell::new(Vec::new()),
@@ -2441,8 +2443,10 @@ impl Db {
     /// until [`Db::discard_rejected_transaction`]; a reopened store that
     /// still holds some tracks again and reports them anew.
     pub fn track_upstream_rejections(&self) {
-        let mut inner = self.inner.borrow_mut();
-        inner.upstream_rejections.get_or_insert_with(Vec::new);
+        self.inner
+            .upstream_rejections
+            .borrow_mut()
+            .get_or_insert_with(Vec::new);
     }
 
     /// Report again, through [`Db::take_upstream_rejections`], each refused
@@ -2450,13 +2454,14 @@ impl Db {
     /// to be taken: for a host that could not deliver it before (no
     /// listener yet). Does nothing unless refusals are tracked.
     pub fn requeue_rejected_transactions(&self) -> Result<(), Error> {
-        let mut inner = self.inner.borrow_mut();
-        if inner.upstream_rejections.is_none() {
+        let inner = self.inner.borrow_mut();
+        if inner.upstream_rejections.borrow().is_none() {
             return Ok(());
         }
         let writer = *inner.identity.node.as_bytes();
         let retained = inner.rejected_transactions()?;
-        let queued = inner.upstream_rejections.as_mut().expect("tracked");
+        let mut rejections = inner.upstream_rejections.borrow_mut();
+        let queued = rejections.as_mut().expect("tracked");
         for rejected in retained {
             if !queued
                 .iter()
@@ -2513,8 +2518,8 @@ impl Db {
     /// wrote it) (empty unless [`Db::track_upstream_rejections`] was called).
     pub fn take_upstream_rejections(&self) -> Vec<UpstreamRejection> {
         self.inner
-            .borrow_mut()
             .upstream_rejections
+            .borrow_mut()
             .as_mut()
             .map(std::mem::take)
             .unwrap_or_default()
@@ -2530,8 +2535,8 @@ impl Db {
     /// still follow it once it is restored. A store that cannot write it
     /// now mints it when it first serves its catalogue, as before.
     pub fn set_authority(&self) {
-        let mut inner = self.inner.borrow_mut();
-        inner.authority = true;
+        let inner = self.inner.borrow_mut();
+        inner.authority.set(true);
         if inner.publishes_catalogue() {
             // A storage failure here surfaces again, with its error, from
             // the first catalogue it serves, which mints it then.
@@ -2544,7 +2549,7 @@ impl Db {
     /// each session it opens, so no session is governed by this store's
     /// own permissions.
     pub fn require_session_pins(&self) {
-        self.inner.borrow_mut().pins_required = true;
+        self.inner.pins_required.set(true);
     }
 
     /// Run `write`, one standalone write, under a thin client's own id for
@@ -2581,7 +2586,7 @@ impl Db {
 
     /// Whether this store is the global authority.
     pub fn is_authority(&self) -> bool {
-        self.inner.borrow().authority
+        self.inner.authority.get()
     }
 
     /// The identity of table `table` of this handle's schema: the same
@@ -3401,8 +3406,7 @@ impl Db {
     /// how many more there were than the list keeps. Hosts call it after
     /// ticking and report them.
     pub fn take_merge_fallbacks(&self) -> (Vec<MergeFallback>, u64) {
-        let inner = self.inner.borrow();
-        let mut fallbacks = inner.merge_fallbacks.borrow_mut();
+        let mut fallbacks = self.inner.merge_fallbacks.borrow_mut();
         (
             std::mem::take(&mut fallbacks.kept),
             std::mem::take(&mut fallbacks.dropped),
@@ -3413,7 +3417,7 @@ impl Db {
     /// the last call, slowest total first, and how many further shapes the
     /// window had no room for. See [`crate::slow`].
     pub fn take_slow_queries(&self) -> (Vec<crate::slow::SlowQuery>, u64) {
-        self.inner.borrow().slow.borrow_mut().take()
+        self.inner.slow.borrow_mut().take()
     }
 
     /// The slow-query report due now: one line per shape that ran slow
@@ -3431,17 +3435,13 @@ impl Db {
     /// [`Db::take_slow_query_report`] times it), for a host that reports
     /// the shapes itself; `None` in between.
     pub fn take_due_slow_queries(&self) -> Option<(Vec<crate::slow::SlowQuery>, u64)> {
-        self.inner.borrow().slow.borrow_mut().take_due()
+        self.inner.slow.borrow_mut().take_due()
     }
 
     /// Record query runs taking at least `threshold` (`None`: none).
     /// Defaults to [`crate::slow::DEFAULT_SLOW_QUERY_THRESHOLD`].
     pub fn set_slow_query_threshold(&self, threshold: Option<std::time::Duration>) {
-        self.inner
-            .borrow()
-            .slow
-            .borrow_mut()
-            .set_threshold(threshold);
+        self.inner.slow.borrow_mut().set_threshold(threshold);
     }
 
     /// How many changed rows a subscription's undelivered deltas may hold
@@ -3686,7 +3686,7 @@ impl Db {
         let settled = match (&remote, client) {
             (Some(signal), _) => sync::SettledBy::Remote(signal.clone()),
             (None, true) => sync::SettledBy::Never,
-            (None, false) => sync::SettledBy::Always(self.inner().authority),
+            (None, false) => sync::SettledBy::Always(self.inner.authority.get()),
         };
         let gate = match (&remote, self.link_hint()) {
             (Some(signal), Some(hint)) => {
@@ -3862,7 +3862,7 @@ impl Db {
         mut opts: InsertOptions,
     ) -> Result<WriteHandle, Error> {
         if opts.row_id.is_none() {
-            opts.row_id = Some(self.inner().ids.next_row_id());
+            opts.row_id = Some(self.inner.ids.borrow_mut().next_row_id());
         }
         let who = who(opts.identity);
         let op = StagedOp::Insert(table.to_owned(), cells, opts);
@@ -8555,7 +8555,7 @@ impl Inner {
             }
         }
         let key = table.row_branch_key(&cells);
-        let row = row_id.unwrap_or_else(|| self.ids.next_row_id());
+        let row = row_id.unwrap_or_else(|| self.ids.borrow_mut().next_row_id());
         let cells = self.merged_cells(table, row, None, None, cells)?;
         self.refuse_withheld(table, row, &key)?;
         match self.existing(&table.stored, row, &key)? {
@@ -9712,7 +9712,7 @@ impl Db {
     /// offloaded nodes ([`Self::deferring_chunk_fetches`]) is worth trying
     /// again only once this changed.
     pub fn chunk_fetches_answered(&self) -> u64 {
-        self.inner.staging().chunks.answered()
+        self.inner.chunks.answered()
     }
 
     /// This handle, but a read or write that waits on offloaded nodes of a
@@ -9882,15 +9882,40 @@ pub(crate) type GroundedRows = BTreeMap<String, BTreeSet<[u8; 16]>>;
 /// The store behind its one gate: every borrow first undoes a transaction
 /// handle's overlay, so nothing but that handle's next stage or read sees
 /// it.
-struct Store(RefCell<Inner>);
+struct Store {
+    // Each handle refers to one source of truth, also used by execution.
+    identity: Rc<DbIdentity>,
+    ids: Rc<RefCell<Box<dyn RowIdSource>>>,
+    authority: Rc<Cell<bool>>,
+    pins_required: Rc<Cell<bool>>,
+    slow: Rc<RefCell<crate::slow::SlowLog>>,
+    merge_fallbacks: Rc<RefCell<MergeFallbacks>>,
+    upstream_rejections: Rc<RefCell<Option<Vec<UpstreamRejection>>>>,
+    closed: Rc<RefCell<Option<Vec<(sync::SubscriberId, Error)>>>>,
+    staging_policy: Rc<Cell<LargeValueStagingPolicy>>,
+    chunks: Arc<crate::large::Chunks>,
+    inner: RefCell<Inner>,
+}
 
 impl Store {
     fn new(inner: Inner) -> Self {
-        Self(RefCell::new(inner))
+        Self {
+            identity: inner.identity.clone(),
+            ids: inner.ids.clone(),
+            authority: inner.authority.clone(),
+            pins_required: inner.pins_required.clone(),
+            slow: inner.slow.clone(),
+            merge_fallbacks: inner.merge_fallbacks.clone(),
+            upstream_rejections: inner.upstream_rejections.clone(),
+            closed: inner.closed.clone(),
+            staging_policy: inner.staging.clone(),
+            chunks: inner.chunks.clone(),
+            inner: RefCell::new(inner),
+        }
     }
 
     fn borrow_mut(&self) -> std::cell::RefMut<'_, Inner> {
-        let mut inner = self.0.borrow_mut();
+        let mut inner = self.inner.borrow_mut();
         inner.settle_overlay();
         inner
     }
@@ -9898,15 +9923,15 @@ impl Store {
     fn borrow(&self) -> std::cell::Ref<'_, Inner> {
         // A borrow already held means the overlay was undone when it was
         // taken.
-        if let Ok(mut inner) = self.0.try_borrow_mut() {
+        if let Ok(mut inner) = self.inner.try_borrow_mut() {
             inner.settle_overlay();
         }
-        self.0.borrow()
+        self.inner.borrow()
     }
 
     /// The store with a handle's overlay kept for its next stage.
     fn staging(&self) -> std::cell::RefMut<'_, Inner> {
-        self.0.borrow_mut()
+        self.inner.borrow_mut()
     }
 }
 
@@ -10558,7 +10583,7 @@ impl Db {
     /// insert, and undoing the overlay would make each stage replay the
     /// batch.
     pub fn next_row_id(&self) -> RowUuid {
-        self.inner.staging().ids.next_row_id()
+        self.inner.ids.borrow_mut().next_row_id()
     }
 
     /// How many staged writes have been replayed into transaction overlays:
@@ -11339,7 +11364,7 @@ impl TxRef<'_> {
         let row = match opts.row_id {
             Some(row) => row,
             // Drawing an id leaves the batch's overlay applied.
-            None => self.db.inner.staging().ids.next_row_id(),
+            None => self.db.inner.ids.borrow_mut().next_row_id(),
         };
         opts.row_id = Some(row);
         self.stage(StagedOp::Insert(table.to_owned(), cells, opts))
@@ -12409,5 +12434,67 @@ mod execute_script_tests {
                 .unwrap();
             assert_eq!(objects(&storage), 0, "{owner}");
         }
+    }
+}
+
+#[cfg(test)]
+mod independent_state_tests {
+    use super::*;
+    use jazz_model::model::public_schema::SchemaBuilder;
+
+    /// Alice can allocate IDs and access host settings and events while execution
+    /// owns the database state. This is a unit test because holding that private
+    /// borrow cannot be expressed through the synchronous storage API.
+    #[test]
+    fn host_state_does_not_borrow_execution_state() {
+        let identity = DbIdentity {
+            node: crate::ids::NodeUuid::from_bytes([1; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let schema = JazzSchema::new(&SchemaBuilder::new().build()).unwrap();
+        let db = block_on(Db::open(
+            DbConfig::new(schema, identity).with_id_source(SeededRowIdSource::new(42)),
+        ))
+        .unwrap();
+        let mut expected = SeededRowIdSource::new(42);
+        let execution = db.inner.borrow_mut();
+        db.check_serves(AuthorSubject::SYSTEM).unwrap();
+        assert_eq!(db.next_row_id(), expected.next_row_id());
+        assert_eq!(
+            execution.ids.borrow_mut().next_row_id(),
+            expected.next_row_id()
+        );
+        assert_eq!(db.next_row_id(), expected.next_row_id());
+        execution.authority.set(true);
+        assert!(db.is_authority());
+        db.require_session_pins();
+        assert!(execution.pins_required.get());
+        let policy = LargeValueStagingPolicy {
+            max_age_ms: 123,
+            ..Default::default()
+        };
+        db.set_large_value_staging_policy(policy);
+        assert_eq!(execution.staging.get().max_age_ms, 123);
+        db.set_slow_query_threshold(None);
+        assert!(db.take_slow_queries().0.is_empty());
+        assert!(db.take_merge_fallbacks().0.is_empty());
+        db.track_upstream_rejections();
+        execution
+            .upstream_rejections
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .push(UpstreamRejection {
+                writer: [1; 16],
+                seq: 1,
+                error: rejected("refused"),
+                serializable: false,
+            });
+        assert_eq!(db.take_upstream_rejections().len(), 1);
+        assert!(db.take_upstream_rejections().is_empty());
+        db.track_closed_subscribers();
+        assert!(execution.closed.borrow().is_some());
+        assert!(db.take_closed_subscribers().is_empty());
+        assert_eq!(db.chunk_fetches_answered(), execution.chunks.answered());
     }
 }
