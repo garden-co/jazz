@@ -272,33 +272,27 @@ impl E2eeClient {
                     };
                 }
                 // The newest valid challenge of the epoch: one that is not
-                // (junk the server shows, or one signed over other keys)
-                // never hides a valid one.
+                // (junk the server shows, one signed over other keys, or one
+                // whose answer fails, see `newest_answered`) never hides a
+                // valid one.
                 let mut candidates: Vec<_> = mine
                     .iter()
                     .filter(|challenge| challenge.row.epoch_id == state.epoch_id())
                     .collect();
                 candidates.sort_by_key(|challenge| std::cmp::Reverse(challenge.position));
                 let writer = self.writer()?;
-                let mut invalid = None;
-                for candidate in candidates {
+                let (proof, candidate) = newest_answered(candidates, |candidate| {
                     // Built, not revealed: the nonce is still unspent.
                     let mut scratch = device.clone();
-                    match respond(
+                    respond(
                         &writer,
                         &state,
                         &mut scratch,
                         &candidate.row,
                         &mut SharedRandom(&self.shared.random),
-                    ) {
-                        Ok(proof) => return Ok(Attempt::Ready((proof, candidate.row.clone()))),
-                        Err(error @ ProtocolError::Refused(RefusalCode::InvalidChallenge)) => {
-                            invalid = Some(error);
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                Err(invalid.map_or(ClientError::NoChallenge, ClientError::from))
+                    )
+                })?;
+                Ok(Attempt::Ready((proof, candidate.row.clone())))
             })
             .await?;
         let Attempt::Ready((proof, challenge)) = attempt else {
@@ -842,5 +836,102 @@ impl E2eeClient {
             Ok(())
         })
         .await
+    }
+}
+
+/// The first of `candidates` (challenges, newest first) that `answer`
+/// accepts, with its answer. One that is invalid, or whose answer fails for
+/// a reason of its own (a junk envelope a member signed, a mechanism this
+/// build does not route), is skipped: it never hides a valid one. A
+/// provider failure is not a property of the challenge and stops the
+/// search. With none accepted: the first failure that is not
+/// `invalid-challenge` (an unsupported challenge is not reported as
+/// invalid), else `invalid-challenge`, else [`ClientError::NoChallenge`].
+fn newest_answered<C, T>(
+    candidates: impl IntoIterator<Item = C>,
+    mut answer: impl FnMut(&C) -> Result<T, ProtocolError>,
+) -> Result<(T, C), ClientError> {
+    let mut invalid = None;
+    let mut failed = None;
+    for candidate in candidates {
+        match answer(&candidate) {
+            Ok(answered) => return Ok((answered, candidate)),
+            Err(ProtocolError::ProviderFailure) => {
+                return Err(ProtocolError::ProviderFailure.into());
+            }
+            Err(error @ ProtocolError::Refused(RefusalCode::InvalidChallenge)) => {
+                invalid.get_or_insert(error);
+            }
+            Err(error) => {
+                failed.get_or_insert(error);
+            }
+        }
+    }
+    Err(failed
+        .or(invalid)
+        .map_or(ClientError::NoChallenge, ClientError::from))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests of the challenge choice: a challenge whose answer fails
+    //! with an error (not a refusal) needs one an active member signed over
+    //! a junk envelope, or a mechanism the build does not route, which the
+    //! integration harness cannot produce (it holds no device's signing key
+    //! and routes every mechanism). The refusal case is covered end to end
+    //! by `an_invalid_newer_challenge_does_not_hide_a_valid_one`.
+    use super::*;
+    use jazz_e2ee::protocol::error::UnsupportedCapability;
+
+    fn unsupported() -> ProtocolError {
+        ProtocolError::Unsupported(UnsupportedCapability::AccountKeyEnvelope)
+    }
+
+    /// Contract: a newer challenge (mallory's junk, signed by a member)
+    /// whose answer fails with an error does not hide an older valid one.
+    ///
+    /// ```text
+    /// newest: junk ──answer──✗ error (skipped)
+    /// older:  valid ──answer──► answered
+    /// ```
+    #[test]
+    fn a_newer_challenge_that_errors_does_not_hide_a_valid_one() {
+        let answered = newest_answered(["junk", "valid"], |candidate| match *candidate {
+            "valid" => Ok(7),
+            _ => Err(unsupported()),
+        });
+        assert!(matches!(answered, Ok((7, "valid"))), "{answered:?}");
+    }
+
+    /// Contract: a provider failure stops the choice (it says nothing about
+    /// the challenge); with no challenge answered, an error other than
+    /// `invalid-challenge` is reported over it, so an unsupported challenge
+    /// is not reported as invalid.
+    #[test]
+    fn a_provider_failure_stops_and_unsupported_is_not_reported_as_invalid() {
+        let stopped = newest_answered(["first", "valid"], |candidate| match *candidate {
+            "valid" => Ok(7),
+            _ => Err(ProtocolError::ProviderFailure),
+        });
+        assert!(
+            matches!(
+                stopped,
+                Err(ClientError::Protocol(ProtocolError::ProviderFailure))
+            ),
+            "{stopped:?}"
+        );
+
+        let none: Result<(u8, _), _> = newest_answered(["invalid", "junk"], |candidate| {
+            Err(match *candidate {
+                "invalid" => ProtocolError::Refused(RefusalCode::InvalidChallenge),
+                _ => unsupported(),
+            })
+        });
+        assert!(
+            matches!(&none, Err(ClientError::Protocol(error)) if *error == unsupported()),
+            "{none:?}"
+        );
+        let none: Result<(u8, &str), _> = newest_answered([], |_: &&str| Ok(0));
+        assert!(matches!(none, Err(ClientError::NoChallenge)), "{none:?}");
     }
 }
