@@ -117,3 +117,16 @@ test("a real candidate wins over a newer dry run; otherwise the newest", () => {
     2,
   );
 });
+
+test("verify-trust checks every package npm-publish publishes, named as npm escapes them", async () => {
+  const { NPM_PACKAGES, escapedName } = await import("./verify-trust.mjs");
+  const { REQUIRED, NAPI_PLATFORMS } = await import("./npm-publish.mjs");
+  assert.equal(NPM_PACKAGES.length, 12);
+  for (const name of REQUIRED) assert.ok(NPM_PACKAGES.includes(name), name);
+  assert.equal(
+    NPM_PACKAGES.filter((n) => n.startsWith("@garden-co/jazz-napi-")).length,
+    NAPI_PLATFORMS,
+  );
+  assert.equal(escapedName("@garden-co/jazz-napi-darwin-x64"), "@garden-co%2fjazz-napi-darwin-x64");
+  assert.equal(escapedName("jazz-tools"), "jazz-tools");
+});
