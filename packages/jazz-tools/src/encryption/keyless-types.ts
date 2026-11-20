@@ -51,7 +51,9 @@ export type KeylessTypes<TTypes extends SchemaLike> = {
 /** `TApp` typed for a keyless backend; an app without encrypted columns is unchanged. */
 export type KeylessApp<TApp> = TApp extends { readonly "~types"?: infer TTypes }
   ? [Exclude<TTypes, undefined>] extends [infer T extends SchemaLike]
-    ? App<KeylessTypes<T>>
+    ? [{ [K in keyof T]: EncryptedColumnName<T[K]> }[keyof T]] extends [never]
+      ? TApp
+      : App<KeylessTypes<T>>
     : TApp
   : TApp;
 
