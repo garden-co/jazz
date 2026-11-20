@@ -25,7 +25,8 @@ name: Release publish
 # the draft left alone. A timing table for every job ends each run.
 #
 # The artifacts come from a release-artifacts.yml run of this repository on
-# `release` that built a commit with the published tree (the published
+# `release` or `changeset-release/*` that built a commit with the published
+# tree (the published
 # commit's own run first), whose release-manifest names
 # that commit, the tree and the version (dev/release-publish/producer-run.mjs). For dry runs only,
 # legacy-run-ids names runs of the old workflows holding the same files,
@@ -67,7 +68,7 @@ on:
         default: false
         type: boolean
       artifacts-run-id:
-        description: "A release-artifacts.yml run to take the artifacts from; it must have built <sha>'s tree on release. Empty: the newest that did, <sha>'s own first."
+        description: "A release-artifacts.yml run to take the artifacts from; it must have built <sha>'s tree on release or changeset-release/*. Empty: the newest that did, <sha>'s own first."
         required: false
         type: string
       legacy-run-ids:

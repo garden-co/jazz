@@ -6,7 +6,11 @@
 //      a real commit whose tree the git API reports;
 //   2. tree(head_sha) == tree(<sha>);
 //   3. it ran in this repository (no fork) on `push` or `workflow_dispatch`
-//      (never pull_request), on `release` (see isReleaseBranch);
+//      (never pull_request), on `release` or `changeset-release/*` (see
+//      isReleaseBranch); on changeset-release/* only when the published
+//      tree's release-artifacts.yml carries the trusted-cache guard
+//      (RELEASE_ARTIFACTS_WORKFLOW: that file at <sha>) and has its contract
+//      test (TRUSTED_CACHE_TEST_PRESENT=true: TRUSTED_CACHE_TEST exists at <sha>);
 //   4. its release-manifest names head_sha, the published tree and version;
 //   5. it succeeded.
 // resolve-artifacts.sh prefers a run of <sha> itself when there is one.
@@ -34,14 +38,15 @@ export function expectedProblems({ sha, tree, version, repo }) {
 }
 
 /**
- * Whether release-artifacts.yml runs on `branch` may be imported: `release`
- * only, which changes only through PRs under its ruleset. Not
- * `changeset-release/*` until a ruleset makes it writable by the
- * jazz-release-pr App and admins alone: until then any write collaborator can
- * push there and seed its actions/cache scope (#supply-chain, 2026-11-19).
+ * Whether release-artifacts.yml runs on `branch` may be imported: `release`,
+ * or `changeset-release/*` (the Version Packages head). A run there restores
+ * no cache: every restore in release-artifacts.yml's tree is gated on a
+ * trusted ref (main, release, merge-group/**), and
+ * dev/gates/test/release-artifacts-trusted-caches.test.mjs is the control
+ * that keeps it so (#supply-chain, 2026-11-19; jazz#6168).
  */
 export function isReleaseBranch(branch) {
-  return branch === "release";
+  return branch === "release" || /^changeset-release\/.+/.test(branch ?? "");
 }
 
 /**
@@ -49,14 +54,42 @@ export function isReleaseBranch(branch) {
  * commit with tree `tree`; empty when it may. `headTree` is tree(run.head_sha)
  * from the git API (null when the commit couldn't be read).
  */
-export function producerRunProblems(run, { tree, repo, headTree }) {
+/** The contract test that proves the tree honours the guard (jazz#6168): it must exist at the published commit too. */
+export const TRUSTED_CACHE_TEST = "dev/gates/test/release-artifacts-trusted-caches.test.mjs";
+
+/** The no-restore guard jazz#6168 put in release-artifacts.yml's top-level env. */
+export const TRUSTED_CACHE_GUARD =
+  "JAZZ_TRUSTED_CACHE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) && 'true' || 'false' }}";
+
+/**
+ * Whether release-artifacts.yml (its text at the published commit) carries
+ * the no-restore guard in its top-level env. Tree equality makes the
+ * producer's workflow the published commit's, so a changeset-release/* run
+ * restored no cache only if the published tree has the guard.
+ */
+export function hasTrustedCacheGuard(workflow) {
+  const lines = String(workflow ?? "").split("\n");
+  const env = lines.indexOf("env:");
+  if (env < 0) return false;
+  for (const line of lines.slice(env + 1)) {
+    if (!line.startsWith("  ") && line.trim() !== "" && !line.startsWith("#")) return false;
+    if (line === `  ${TRUSTED_CACHE_GUARD}`) return true;
+  }
+  return false;
+}
+
+export function producerRunProblems(run, { tree, repo, headTree, guarded = false }) {
   const problems = [];
   if (run?.path !== PRODUCER_PATH) problems.push(`run is ${run?.path}, not ${PRODUCER_PATH}`);
   if (run?.head_repository?.full_name !== repo || run?.repository?.full_name !== repo)
     problems.push(`run belongs to ${run?.head_repository?.full_name}, not ${repo}`);
   if (!EVENTS.has(run?.event)) problems.push(`run was triggered by ${run?.event}`);
   if (!isReleaseBranch(run?.head_branch))
-    problems.push(`run is on ${run?.head_branch}, not release`);
+    problems.push(`run is on ${run?.head_branch}, not release or changeset-release/*`);
+  else if (run.head_branch !== "release" && !guarded)
+    problems.push(
+      `run is on ${run.head_branch}, but the published tree lacks the trusted-cache guard or its contract test (jazz#6168)`,
+    );
   if (run?.status !== "completed" || run?.conclusion !== "success")
     problems.push(`run is ${run?.status}/${run?.conclusion}`);
   if (!/^[0-9a-f]{40}$/.test(run?.head_sha ?? "")) problems.push(`run head_sha ${run?.head_sha}?`);
@@ -86,6 +119,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     VERSION: version,
     GH_REPO: repo,
     HEAD_TREE: headTree,
+    RELEASE_ARTIFACTS_WORKFLOW: workflowFile,
+    TRUSTED_CACHE_TEST_PRESENT: testPresent,
   } = process.env;
   const inputProblems = expectedProblems({ sha, tree, version, repo });
   if (inputProblems.length > 0) {
@@ -95,7 +130,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const run = JSON.parse(readFileSync(runFile, "utf8"));
   const manifest = JSON.parse(readFileSync(manifestFile, "utf8"));
   const problems = [
-    ...producerRunProblems(run, { tree, repo, headTree: headTree || null }),
+    ...producerRunProblems(run, {
+      tree,
+      repo,
+      headTree: headTree || null,
+      guarded:
+        testPresent === "true" &&
+        Boolean(workflowFile) &&
+        hasTrustedCacheGuard(readFileSync(workflowFile, "utf8")),
+    }),
     ...manifestProblems(manifest, { headSha: run.head_sha, tree, version }),
   ];
   if (problems.length > 0) {
