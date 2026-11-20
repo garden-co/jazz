@@ -2386,6 +2386,7 @@ dependencies = [
  "getrandom 0.2.17",
  "jazz-core",
  "jazz-e2ee",
+ "jazz-e2ee-client",
  "rusqlite",
  "serde_json",
  "sha2 0.11.1",

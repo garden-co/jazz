@@ -500,6 +500,7 @@ impl E2eeClient {
     /// Holds the settle back-off's clock still, or moves it on by `by` when
     /// already held (tests: a wait is stepped, never slept).
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
     pub fn advance_settle_clock(&self, by: std::time::Duration) {
         let now = self.shared.now();
         self.shared.held_clock.set(Some(now + by));

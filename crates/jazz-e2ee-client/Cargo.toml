@@ -9,6 +9,10 @@ homepage.workspace = true
 rust-version.workspace = true
 include = ["src/**"]
 
+[features]
+# Test-only hooks (a stepped settle clock); the crate's own tests enable it.
+testing = []
+
 [dependencies]
 base64 = "0.22"
 futures = "0.3"
@@ -27,6 +31,7 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 uuid = { version = "1.18.1", features = ["v4", "js"] }
 
 [dev-dependencies]
+jazz-e2ee-client = { path = ".", features = ["testing"] }
 jazz = { workspace = true, features = ["e2ee-client", "testing"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 tempfile = "3.27.0"
