@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       artifact-run-id:
-        description: "Successful package-build workflow run containing inspector-prebuilt"
+        description: "Successful release-artifacts.yml or Publish jazz-tools alpha run on release containing inspector-prebuilt"
         required: true
         type: string
       source-sha:

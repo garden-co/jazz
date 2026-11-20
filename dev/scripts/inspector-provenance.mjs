@@ -4,7 +4,11 @@ import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const shaPattern = /^[a-f0-9]{40}$/;
-const previewPath = ".github/workflows/preview-build.yml";
+// Production staging takes only `release`-branch producers, built from
+// reviewed code. Not preview-build.yml's pull_request runs: they run from the
+// PR's merge ref and restore caches from the PR's own scope, which its author
+// controls (#supply-chain, 2026-11-19). A PR's Inspector goes to a preview
+// deployment; merge it to stage it for production.
 const publishPath = ".github/workflows/publish-jazz-tools-alpha.yml";
 // Not preview-jazz-tools-alpha-release.yml: its runs are on changeset-release/*,
 // with the cache-scope gap below, and it can still be dispatched there.
@@ -25,18 +29,13 @@ export function inspectorRunSource(run, repository) {
   }
   const releaseEvent = run.event === "push" || run.event === "workflow_dispatch";
   const approved =
-    (run.path === previewPath &&
-      run.event === "pull_request" &&
-      typeof run.head_branch === "string" &&
-      run.head_branch.length > 0) ||
     (run.path === publishPath && releaseEvent && run.head_branch === "release") ||
     (run.path === releaseArtifactsPath && releaseEvent && run.head_branch === "release");
   if (!approved)
     throw new Error(
       "Inspector artifact run has an unapproved producer workflow, event or source branch",
     );
-  // preview-build explicitly checks out the PR head; both release callers use
-  // their event ref. All three therefore build run.head_sha, not a PR merge SHA.
+  // Both release producers build their event ref, so run.head_sha.
   return run.head_sha;
 }
 
