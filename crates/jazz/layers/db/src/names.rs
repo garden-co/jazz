@@ -9,6 +9,7 @@
 //! same columns again.
 
 use crate::storage::Storage;
+use rusqlite::OptionalExtension;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::ids::SchemaVersionId;
@@ -561,6 +562,75 @@ impl Names {
         (copies, dropped)
     }
 
+    /// Physical tables owned by all admitted schemas, including branch tables.
+    pub(crate) fn stored_tables(&self) -> BTreeSet<String> {
+        self.versions
+            .values()
+            .flat_map(|(_, names)| names.tables.values().map(|(table, _)| table.clone()))
+            .chain(self.branches.keys().cloned())
+            .collect()
+    }
+
+    /// Refuse collisions before minting metadata or issuing application DDL.
+    fn check_schema_objects(
+        &self,
+        conn: &crate::storage::Storage,
+        schema: &Schema,
+    ) -> Result<(), Error> {
+        let owned = self.stored_tables();
+        for table in schema
+            .tables
+            .values()
+            .filter(|table| !owned.contains(&table.stored))
+        {
+            for name in [
+                &table.stored,
+                &format!("{}__h", table.stored),
+                &format!("{}__by_clock", table.stored),
+            ] {
+                let existing: Option<String> = conn
+                    .query_row(
+                        "SELECT name FROM sqlite_master WHERE name = ?1 COLLATE NOCASE",
+                        [name],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(storage)?;
+                if let Some(existing) = existing {
+                    return Err(schema_error(format!(
+                        "Cannot create Jazz table {}: SQLite object {existing} already exists outside Jazz's schema catalogue",
+                        table.stored
+                    )));
+                }
+            }
+        }
+        // Index DDL is idempotent on reopen, but an index on another table
+        // must never satisfy it, including indexes added by later schemas.
+        for table in schema.tables.values() {
+            for index in &table.indexes {
+                let name = table.index_name(index);
+                let existing: Option<(String, String, String)> = conn
+                    .query_row(
+                        "SELECT name, type, tbl_name FROM sqlite_master WHERE name = ?1 COLLATE NOCASE",
+                        [&name],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()
+                    .map_err(storage)?;
+                if let Some((existing, kind, owner)) = existing
+                    && !(owned.contains(&table.stored)
+                        && kind == "index"
+                        && owner.eq_ignore_ascii_case(&table.stored))
+                {
+                    return Err(schema_error(format!(
+                        "Cannot create Jazz index {name}: SQLite object {existing} already exists outside its catalogue-owned table",
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The most recently admitted version's names.
     pub(crate) fn latest(&self) -> Option<&StoredNames> {
         self.versions
@@ -722,6 +792,7 @@ impl Names {
         conn: &crate::storage::Storage,
         schema: &Schema,
     ) -> Result<(), Error> {
+        self.check_schema_objects(conn, schema)?;
         // One transaction for the whole schema: each column's `intern` is a
         // scope, and outside a transaction every one would commit (and sync
         // the file) alone. A schema with many enum columns then paid one

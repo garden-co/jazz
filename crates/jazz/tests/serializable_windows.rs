@@ -180,23 +180,32 @@ impl Net {
                 ("status".to_owned(), text("queued")),
                 ("created".to_owned(), Value::I32(created)),
             ]);
-            self.core
-                .seed_settled_mergeable_for_bootstrap("jobs", row, AuthorSubject::SYSTEM, cells)
-                .unwrap();
+            jazz::db::block_on(self.core.insert(
+                "jobs",
+                cells,
+                jazz::db::InsertOptions {
+                    row_id: Some(row),
+                    identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
         }
     }
 
     fn seed_queues(&self, names: &[(u8, &str)]) {
         for &(byte, name) in names {
             let cells = BTreeMap::from([("name".to_owned(), text(name))]);
-            self.core
-                .seed_settled_mergeable_for_bootstrap(
-                    "queues",
-                    RowUuid::from_bytes([byte; 16]),
-                    AuthorSubject::SYSTEM,
-                    cells,
-                )
-                .unwrap();
+            jazz::db::block_on(self.core.insert(
+                "queues",
+                cells,
+                jazz::db::InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([byte; 16])),
+                    identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
         }
     }
 

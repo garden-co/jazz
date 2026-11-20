@@ -1570,7 +1570,6 @@ fn refreshed(
     check(db, lives, what);
     let after = db.fanout_stats();
     let delta = jazz::db::FanoutStats {
-        groups: after.groups,
         shared_joins: after.shared_joins - before.shared_joins,
         woken: after.woken - before.woken,
         skipped: after.skipped - before.skipped,

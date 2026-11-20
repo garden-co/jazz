@@ -129,8 +129,16 @@ fn seed(db: &Db, table: &str, row: RowUuid, pairs: &[(&str, Value)]) {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone()))
         .collect::<BTreeMap<_, _>>();
-    db.seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, cells)
-        .unwrap();
+    jazz::db::block_on(db.insert(
+        table,
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
 }
 
 fn text(s: &str) -> Value {

@@ -313,6 +313,9 @@ pub(crate) fn kind(column: &Column) -> LargeValueKind {
 /// first (`set`), beside the table's earlier ones. An update retains every
 /// new epoch before it releases any old one, so an epoch that moves from
 /// one column to another is never freed in between.
+///
+/// Generated only for new tables or new column sets. A name already in use
+/// must fail: silently skipping a foreign trigger would lose refcount updates.
 pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) -> String {
     let mut sql = String::new();
     if columns.is_empty() {
@@ -351,9 +354,9 @@ pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) ->
                 .join(" ")
         };
         sql.push_str(&format!(
-            "CREATE TRIGGER IF NOT EXISTS {ins} AFTER INSERT ON {on} WHEN {} BEGIN {} END;\n\
-             CREATE TRIGGER IF NOT EXISTS {del} AFTER DELETE ON {on} WHEN {} BEGIN {} END;\n\
-             CREATE TRIGGER IF NOT EXISTS {upd} AFTER UPDATE OF {} ON {on} WHEN {} BEGIN {} {} END;\n",
+            "CREATE TRIGGER {ins} AFTER INSERT ON {on} WHEN {} BEGIN {} END;\n\
+             CREATE TRIGGER {del} AFTER DELETE ON {on} WHEN {} BEGIN {} END;\n\
+             CREATE TRIGGER {upd} AFTER UPDATE OF {} ON {on} WHEN {} BEGIN {} {} END;\n",
             any(&|name| chunked_sql(&format!("NEW.{name}"))),
             each(&|name| count(&format!("NEW.{name}"), "+", None)),
             any(&|name| chunked_sql(&format!("OLD.{name}"))),
@@ -364,16 +367,8 @@ pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) ->
                 epoch_sql(&format!("OLD.{name}")),
                 epoch_sql(&format!("NEW.{name}"))
             )),
-            each(&|name| count(
-                &format!("NEW.{name}"),
-                "+",
-                Some(&format!("OLD.{name}"))
-            )),
-            each(&|name| count(
-                &format!("OLD.{name}"),
-                "-",
-                Some(&format!("NEW.{name}"))
-            )),
+            each(&|name| count(&format!("NEW.{name}"), "+", Some(&format!("OLD.{name}")))),
+            each(&|name| count(&format!("OLD.{name}"), "-", Some(&format!("NEW.{name}")))),
             ins = trigger("ins"),
             del = trigger("del"),
             upd = trigger("upd"),

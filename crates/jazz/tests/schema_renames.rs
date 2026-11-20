@@ -627,17 +627,21 @@ fn server(first: JazzSchema, steps: Vec<(JazzSchema, MigrationLens)>) -> Db {
 }
 
 fn seed(server: &Db, table: &str, n: u8, cells: &[(&str, Value)]) {
-    server
-        .seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(
+        server.insert(
             table,
-            row(n),
-            AuthorSubject::SYSTEM,
             cells
                 .iter()
                 .map(|(column, value)| ((*column).to_owned(), value.clone()))
                 .collect(),
-        )
-        .unwrap();
+            jazz::db::InsertOptions {
+                row_id: Some(row(n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
 }
 
 #[test]
