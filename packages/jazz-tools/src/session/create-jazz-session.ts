@@ -23,6 +23,7 @@ import {
   handOffThinWrites,
 } from "../thin/index.js";
 import {
+  isThinDb,
   setLocalFirstUpgrader,
   type LocalFirstLoader,
   type LocalFirstModule,
@@ -433,6 +434,9 @@ export async function openBrowserSessionCore(
     setLocalFirstUpgrader(
       thin.db,
       (loader) => {
+        // Already handed over: a late call (a refusal's deferred start, or a
+        // wait that began before the hand-over) has nothing left to upgrade.
+        if (!isThinDb(thin.db)) return Promise.resolve();
         pending ??= upgrade(loader).finally(() => {
           pending = undefined;
         });
