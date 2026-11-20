@@ -45,7 +45,7 @@ teardown() {
     if [ -z "$row" ]; then echo "PASS teardown: no drive $core-data left"
     else t4_vercel sandbox drives rm --project "$VERCEL_PROJECT_ID" "$core-data" >> "$T4_WORK/teardown.log" 2>&1 && echo "PASS teardown: drive $core-data removed" || { echo "FAIL teardown: drive $core-data not removed (see teardown.log)"; FAIL=1; }; fi
   fi
-  step "end"; [ "$FAIL" = 0 ] || exit 1
+  step "teardown end"; [ "$FAIL" = 0 ] || exit 1
 }
 [ "$T4_MODE" = preview ] && [ "${T4_TEARDOWN:-}" = 1 ] && trap teardown EXIT
 step "deploy"; "$S/deploy.sh" "$APP" || exit 1
