@@ -781,6 +781,57 @@ fn a_server_substituting_the_requesters_keys_is_caught() {
     });
 }
 
+/// Contract: an invalid challenge the server shows as the newest of the
+/// epoch does not hide a valid one: the requester answers the newest valid
+/// challenge, and the approver that made it approves.
+#[test]
+fn an_invalid_newer_challenge_does_not_hide_a_valid_one() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("server.sqlite");
+        let alice = account(0xa1);
+        let first_store = Rc::new(MemoryStore::new());
+        let second_store = Rc::new(MemoryStore::new());
+        let pending = {
+            let server = secure_authority_with(&settings, Some(&live));
+            let first = device(&server, alice, first_store.clone(), 1, &settings);
+            first.status(&server, &[]);
+            let second = device(&server, alice, second_store.clone(), 2, &settings);
+            second.status(&server, &[&first]);
+            let both = [&first.db, &second.db];
+            let pending = drive(
+                &server,
+                &both,
+                first.client.challenge_device(&first.db, &second.id()),
+            )
+            .unwrap();
+            drive(
+                &server,
+                &both,
+                first.client.challenge_device(&first.db, &second.id()),
+            )
+            .unwrap();
+            pending
+        };
+        // The newer challenge's signed nonce no longer matches its signature.
+        tamper_newest(&live, "__e2ee_device_challenges", "nonce", &[0x5a; 32]);
+
+        let server = secure_authority_with(&settings, Some(&live));
+        let first = device(&server, alice, first_store, 3, &settings);
+        first.status(&server, &[]);
+        let second = device(&server, alice, second_store, 4, &settings);
+        let both = [&first.db, &second.db];
+        let shown = drive(&server, &both, second.client.answer_challenge(&second.db)).unwrap();
+        drive(
+            &server,
+            &both,
+            first.client.approve_device(&first.db, &pending, &shown),
+        )
+        .unwrap();
+    });
+}
+
 /// Contract: a challenge of an earlier account epoch is refused, as a
 /// replayed one would be: after the account rotates (a third device is
 /// removed) the second device's pending challenge names the old epoch, and

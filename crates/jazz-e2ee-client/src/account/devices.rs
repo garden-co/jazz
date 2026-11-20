@@ -271,23 +271,34 @@ impl E2eeClient {
                         Ok(Attempt::Stranded)
                     };
                 }
-                let challenge = mine
+                // The newest valid challenge of the epoch: one that is not
+                // (junk the server shows, or one signed over other keys)
+                // never hides a valid one.
+                let mut candidates: Vec<_> = mine
                     .iter()
                     .filter(|challenge| challenge.row.epoch_id == state.epoch_id())
-                    .max_by_key(|challenge| challenge.position)
-                    .ok_or(ClientError::NoChallenge)?
-                    .row
-                    .clone();
-                // Built, not revealed: the nonce is still unspent.
-                let mut scratch = device;
-                let proof = respond(
-                    &self.writer()?,
-                    &state,
-                    &mut scratch,
-                    &challenge,
-                    &mut SharedRandom(&self.shared.random),
-                )?;
-                Ok(Attempt::Ready((proof, challenge)))
+                    .collect();
+                candidates.sort_by_key(|challenge| std::cmp::Reverse(challenge.position));
+                let writer = self.writer()?;
+                let mut invalid = None;
+                for candidate in candidates {
+                    // Built, not revealed: the nonce is still unspent.
+                    let mut scratch = device.clone();
+                    match respond(
+                        &writer,
+                        &state,
+                        &mut scratch,
+                        &candidate.row,
+                        &mut SharedRandom(&self.shared.random),
+                    ) {
+                        Ok(proof) => return Ok(Attempt::Ready((proof, candidate.row.clone()))),
+                        Err(error @ ProtocolError::Refused(RefusalCode::InvalidChallenge)) => {
+                            invalid = Some(error);
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Err(invalid.map_or(ClientError::NoChallenge, ClientError::from))
             })
             .await?;
         let Attempt::Ready((proof, challenge)) = attempt else {
