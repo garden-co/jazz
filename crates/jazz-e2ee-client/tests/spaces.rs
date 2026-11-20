@@ -817,6 +817,79 @@ fn acquiring_from_a_rolled_back_server_is_stale_state() {
     });
 }
 
+/// Contract: a server restored from an older copy cannot show the author
+/// of a space's root at an earlier state than this device verified (§6.3a):
+/// once bob has read alice's account at a later cut, acquiring her space
+/// from the restored copy is `stale-state`, so a key is never taken from a
+/// view in which a device alice removed could still be active. Bob's own
+/// account passes its floor on the same copy: his own space is acquired.
+///
+/// ```text
+/// alice ──space A (root)──► server   bob ──space B (root)──► server (copy)
+/// bob ──later write; acquire A (floor of alice at c2)──► server
+/// bob ──acquire B──► restored copy: held
+/// bob ──acquire A──► restored copy (alice at c1) ──✗ stale-state
+/// ```
+#[test]
+fn acquiring_with_a_rolled_back_author_is_stale_state() {
+    within(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("server.sqlite");
+        let old = dir.path().join("old.sqlite");
+        let settings = EncryptionSettings::default();
+        let (alice_id, bob) = {
+            let server = secure_authority_with(&settings, Some(&live));
+            let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+            alice.activate(&server);
+            let bob = device(&server, account(0xb0), MemoryStore::new(), 2);
+            bob.activate(&server);
+            let theirs = new_project(&server, &alice, "plans");
+            add_member(&server, &alice, theirs, &bob.id());
+            write_note(&server, &alice, theirs, SECRET).unwrap();
+            pump(&server, &alice.db);
+            let own = new_project(&server, &bob, "mine");
+            write_note(&server, &bob, own, "bob's").unwrap();
+            pump(&server, &bob.db);
+            let theirs = space_address(&bob, theirs);
+            let own = space_address(&bob, own);
+            (alice.id(), (bob.who, bob.client, theirs, own))
+        };
+        let (who, client, theirs, own) = bob;
+        for suffix in ["", "-wal", "-shm"] {
+            let source = format!("{}{suffix}", live.display());
+            if std::path::Path::new(&source).exists() {
+                std::fs::copy(&source, format!("{}{suffix}", old.display())).unwrap();
+            }
+        }
+        {
+            let server = secure_authority_with(&settings, Some(&live));
+            let (db, _link) = session(&client, &server, who, &settings, 3, None);
+            project(&db, "a later write");
+            pump(&server, &db);
+            drive(&server, &[&db], client.acquire(&db, &theirs)).unwrap();
+        }
+        let floor = block_on(client.floor(&alice_id)).expect("alice's account is floored");
+
+        let restored = secure_authority_with(&settings, Some(&old));
+        let (db, _link) = session(&client, &restored, who, &settings, 4, None);
+        let held = drive(&restored, &[&db], client.acquire(&db, &own));
+        assert!(matches!(held, Ok(SpaceKeyState::Held)), "{held:?}");
+        let refused = drive(&restored, &[&db], client.acquire(&db, &theirs));
+        assert!(
+            matches!(
+                refused,
+                Err(ClientError::Protocol(ProtocolError::StaleState))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            block_on(client.floor(&alice_id)),
+            Some(floor),
+            "the floor stays"
+        );
+    });
+}
+
 /// Contract: a device acquires without waiting for a read when the rows
 /// it watches change, and the reports that waited for it are withdrawn:
 /// bob, a member of a space with no root, is told `space-pending` by a
