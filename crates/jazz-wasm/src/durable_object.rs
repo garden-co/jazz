@@ -2645,16 +2645,10 @@ mod core_host {
             Ok(CatalogueIndex::from_rows(&self.catalogue_rows()?, None))
         }
 
-        /// Publish the deploy request in `body` (valid JSON, checked by the
-        /// caller), as native's `POST admin/bundles`: validate it against
-        /// the core's catalogue and apply its rows and admissions in one
-        /// transaction, refused if the catalogue moved since it was staged
-        /// (`apply_catalogue`). Without a core yet, the deployment is
-        /// probed on a scratch store first, so one the catalogue refuses
-        /// never opens the app's store on its schema, and the core is
-        /// opened on its first schema; it is then staged again on that
-        /// core's catalogue (which admitted the schema it opened on). A
-        /// bundle new to the store ends the sessions pinned to others.
+        /// Publish rows and admissions atomically on the object's real store.
+        /// A first deployment includes initialization in that same transaction;
+        /// the core is installed only after commit. Later deployments end sessions
+        /// pinned to other bundles when publishing a new bundle.
         fn deploy(&mut self, body: &[u8]) -> Result<DeploymentResponse, DeployError> {
             let request =
                 || serde_json::from_slice::<DeployRequest>(body).map_err(DeployError::invalid);
@@ -2666,20 +2660,24 @@ mod core_host {
                     return Ok(deployment.staged.response);
                 }
                 let genesis = deployment.genesis()?;
-                let scratch = jazz::host::StoreFile::memory().map_err(DeployError::internal)?;
-                let mut probe = ServerCore::open(genesis.clone(), scratch, false, None)
-                    .map_err(DeployError::internal)?;
-                let probed = apply(&mut probe, request()?, now, false).map(drop);
-                probe.close();
-                probed?;
+                let rows = self.catalogue_rows().map_err(DeployError::internal)?;
+                let change = deployment.catalogue_change(&rows)?;
                 let file = jazz::host::StoreFile::from_storage(durable_object_storage(
                     self.storage.clone(),
                 ))
                 .map_err(DeployError::internal)?;
-                self.core = Some(
-                    self.open_server_core(genesis, file, false)
-                        .map_err(DeployError::internal)?,
-                );
+                let chunk_store = self.blobs.then(|| {
+                    std::sync::Arc::new(HostRunChunkStore)
+                        as std::sync::Arc<dyn jazz::chunk_store::ChunkStore>
+                });
+                self.core = Some(ServerCore::open_deployment(
+                    genesis,
+                    file,
+                    Some(self.app_id.clone()),
+                    chunk_store,
+                    change,
+                )?);
+                return Ok(deployment.staged.response);
             }
             let core = self.core.as_mut().expect("opened above");
             apply(core, request()?, now, true)
