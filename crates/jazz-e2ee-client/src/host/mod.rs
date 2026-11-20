@@ -16,3 +16,7 @@
 pub mod bridge;
 pub mod phrase;
 pub mod runtime;
+
+/// The device account's secret as native hosts pass it (see
+/// [`runtime::NativeOptions`]): its bytes are zeroized when it is dropped.
+pub use jazz_e2ee::protocol::derive::RecoverySecret;

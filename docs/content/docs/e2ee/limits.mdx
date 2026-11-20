@@ -57,10 +57,6 @@ languageTabs: backend
     app with a client instead.
   - React Native: the relay opens an encrypted app in Rust; the JavaScript calls and the store are not
     wired.
-- **Persistent browser storage on older Jazz versions.** On versions without the shared-worker read
-  fix from [Jazz #6152](https://github.com/garden-co/jazz/pull/6152), a transaction can stall between
-  reads and `db.encryption.ready()` can time out. Use in-page storage (`driver: { type: "memory" }`)
-  until you upgrade to a version that includes the fix.
 - **A script on your page can use the device's keys.** The browser keeps the device's keys protected by a
   key that scripts can use but never read out, and each tab holds the space keys it uses in memory. Any
   script that runs on your page's origin (an injected one, for example through a cross-site scripting
@@ -72,3 +68,7 @@ languageTabs: backend
   suspected injection, check the account's device list from a trusted device and remove the affected
   device and any device you do not recognise (each removal rotates the account);
   keep your page free of untrusted scripts as you would for anything else sensitive.
+- **A sign-out keeps the device's keys unless you pass `clearOnSignOut`.** Until they are wiped, a later
+  user of the same browser profile or a script on your origin can use them as above. With
+  `clearOnSignOut: true` (and the default persistent storage) a sign-out wipes them with the account's
+  local data; see [Signing out](/docs/e2ee/browser#signing-out).

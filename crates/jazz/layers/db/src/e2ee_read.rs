@@ -3,8 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use super::{Db, Inner, PreparedQuery, ReadSpec};
-use crate::e2ee::{E2eeRefusal, ReadSite};
+use super::{Db, Inner, PreparedQuery, ReadSpec, UnreadableRow};
+use crate::e2ee::{E2eeRefusal, OpenOutcome, ReadSite};
 use crate::options::{Error, ErrorCode};
 use crate::records::Value;
 use crate::values::CurrentRow;
@@ -43,16 +43,19 @@ impl Db {
 impl Inner {
     /// Open `rows`, which `prepared` read under `read`, before they leave
     /// toward a reader, then apply a rewritten query's residual. A strict
-    /// read fails rather than leave a row out (protocol §4.4).
+    /// read fails rather than leave a row out (protocol §4.4); any other
+    /// read answers the rows it left out, one entry per row, so its reader
+    /// can tell the result is incomplete (a window applied before opening
+    /// returns a short page, which these entries make up).
     pub(crate) fn open_read(
         &self,
         prepared: &PreparedQuery,
         read: &ReadSpec,
         strict: bool,
         rows: &mut Vec<CurrentRow>,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<UnreadableRow>, Error> {
         let Some(hooks) = self.e2ee.clone() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let table = prepared.query.table.as_str();
         let lens_defaults = if hooks.declarations().tables.contains_key(table) {
@@ -70,7 +73,7 @@ impl Inner {
         };
         // The outcome's reports (protocol §4.3) stay with the hooks that
         // built them: their runtime delivers them. Core reads the outcome
-        // only to fail a strict read.
+        // to fail a strict read and to tell a reader which rows it left out.
         let outcome = hooks.open_rows(&site, rows)?;
         if strict && outcome.leaves_rows_out() {
             if let Some((space, _)) = outcome.missing_epochs.first() {
@@ -87,7 +90,7 @@ impl Inner {
         if let Some(planned) = &prepared.planned {
             planned.residual.apply(rows)?;
         }
-        Ok(())
+        Ok(left_out(&outcome))
     }
 
     /// The columns of `table` that a migration added to rows already
@@ -123,4 +126,25 @@ impl Inner {
         }
         out
     }
+}
+
+/// The rows `outcome` left out, once each, in the order first reported: a
+/// row's reports that still return it (an empty cell with its default, a
+/// stale space) are notices, not omissions.
+fn left_out(outcome: &OpenOutcome) -> Vec<UnreadableRow> {
+    let mut seen = std::collections::BTreeSet::new();
+    outcome
+        .unreadable
+        .iter()
+        .filter(|report| !report.code.returns_row())
+        .filter_map(|report| {
+            let id = report.id?;
+            seen.insert(id).then(|| UnreadableRow {
+                table: report.table.clone(),
+                id,
+                column: report.column.clone(),
+                code: report.code.as_str(),
+            })
+        })
+        .collect()
 }

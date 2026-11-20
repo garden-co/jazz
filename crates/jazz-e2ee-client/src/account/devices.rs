@@ -22,8 +22,10 @@
 //! [removal request](E2eeClient::request_removal) another device
 //! [completes](E2eeClient::complete_removal_requests).
 //!
-//! **Recovery.** [`E2eeClient::register_recovery`] registers the root a
-//! recovery secret derives, and [`E2eeClient::recover_device`] approves
+//! **Recovery.** [`E2eeClient::start_device_account`] registers the root a
+//! device account's secret derives whenever the device starts active in
+//! it; [`E2eeClient::register_recovery`] registers the root of any
+//! recovery secret, and [`E2eeClient::recover_device`] approves
 //! this device with it. The secret and the keys derived from it live in
 //! memory for the call only and are never stored.
 
@@ -38,7 +40,9 @@ use jazz_e2ee::protocol::account::{
     AccountKey, AccountKeyEvidence, AccountReplay, AccountState, verify_private,
 };
 use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
+use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 use jazz_e2ee::protocol::error::{RecoveryFailure, RefusalCode};
+use jazz_e2ee::protocol::position::Position;
 use jazz_e2ee::protocol::records::account::{DeviceProof, DeviceRequest, approval_code};
 use jazz_e2ee::protocol::{Accepted, ProtocolError};
 
@@ -67,11 +71,38 @@ impl std::fmt::Debug for PendingApproval {
     }
 }
 
-/// A device of the account.
+/// A device of the account, with what its records say about it, so an
+/// application can show the user which device they are approving or
+/// removing. The records hold no name and no time: a device is told apart
+/// by when its request arrived, relative to the others, and by who approved
+/// it. More than one device waiting is worth showing as such: a code
+/// someone else asks the user to confirm may be theirs.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DeviceInfo {
     pub id: String,
     pub status: DeviceStatus,
+    /// Whether it is the device this runtime runs on.
+    pub this_device: bool,
+    /// The accepted position of its request: a later request has a greater
+    /// one. `None` if the read shows no request for it.
+    pub requested_at: Option<Position>,
+    /// How an active device entered the account; `None` for one waiting.
+    pub approved_by: Option<ApprovedBy>,
+    /// Whether it asked to be removed and waits for another device to
+    /// complete the removal (protocol §2.8).
+    pub removal_requested: bool,
+}
+
+/// How an active device entered the account, by its latest approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovedBy {
+    /// It created the account (or reset it) with its root.
+    AccountRoot,
+    /// The active device of this ID approved it by challenge (§2.5).
+    Device(String),
+    /// It restored itself with the recovery root of this ID (§2.9).
+    Recovery(String),
 }
 
 /// Whether a device is approved or waits for approval.
@@ -118,7 +149,7 @@ impl E2eeClient {
     /// the authenticated account key. A read that shows less than the
     /// device's floor is refused first (protocol §2.4).
     async fn view(&self, read: &AccountRead) -> Result<View, ClientError> {
-        let device = self.shared.device.borrow().clone();
+        let device = self.shared.device()?.clone();
         if self.check_floor_first(read, &device.id).await? == FloorCheck::NoLongerActive {
             return Err(ProtocolError::DeviceNoLongerActive.into());
         }
@@ -238,7 +269,7 @@ impl E2eeClient {
         let attempt = self
             .serializable(db, async |tx| {
                 let read = self.read_account(db, tx).await?;
-                let device = self.shared.device.borrow().clone();
+                let device = self.shared.device()?.clone();
                 if self.check_floor_first(&read, &device.id).await? == FloorCheck::NoLongerActive {
                     return Err(ProtocolError::DeviceNoLongerActive.into());
                 }
@@ -300,10 +331,12 @@ impl E2eeClient {
             return Err(ClientError::NoChallenge);
         };
         // Spent in the store, and confirmed, before the proof reveals it.
-        let keys = self.shared.device.borrow().keys();
+        let keys = self.shared.device()?.keys();
         let code = self.code(&challenge, &keys, &proof.nonce)?;
         self.mark_nonce_spent().await?;
-        self.shared.device.borrow_mut().approval_nonce.take();
+        if let Some(device) = self.shared.device.borrow_mut().as_mut() {
+            device.approval_nonce.take();
+        }
         self.publish_proof(db, &proof).await?;
         Ok(code)
     }
@@ -382,6 +415,32 @@ impl E2eeClient {
         self.serializable(db, async |tx| {
             let read = self.read_account(db, tx).await?;
             let view = self.view(&read).await?;
+            let this = &view.device.id;
+            let requested_at = |id: &str| {
+                read.private
+                    .requests
+                    .iter()
+                    .find(|request| request.row.id == id)
+                    .map(|request| request.position)
+            };
+            // The latest approval counts: a device carried into a later
+            // epoch keeps the one that admitted it.
+            let approved_by = |id: &str| {
+                let latest = view
+                    .state
+                    .approvals
+                    .iter()
+                    .rev()
+                    .find(|approval| approval.row.device_id == id);
+                match latest {
+                    Some(approval) => Some(match &approval.row.recovery_root_id {
+                        Some(root) => ApprovedBy::Recovery(root.clone()),
+                        None => ApprovedBy::Device(approval.row.signer_id.clone()),
+                    }),
+                    None if view.state.root.row.device_id == id => Some(ApprovedBy::AccountRoot),
+                    None => None,
+                }
+            };
             let mut listed: Vec<DeviceInfo> = view
                 .state
                 .active
@@ -389,6 +448,10 @@ impl E2eeClient {
                 .map(|id| DeviceInfo {
                     id: id.clone(),
                     status: DeviceStatus::Active,
+                    this_device: id == this,
+                    requested_at: requested_at(id),
+                    approved_by: approved_by(id),
+                    removal_requested: view.state.removal_requested.contains(id),
                 })
                 .collect();
             for request in &read.private.requests {
@@ -397,6 +460,10 @@ impl E2eeClient {
                     listed.push(DeviceInfo {
                         id: id.clone(),
                         status: DeviceStatus::Waiting,
+                        this_device: id == this,
+                        requested_at: Some(request.position),
+                        approved_by: None,
+                        removal_requested: false,
                     });
                 }
             }
@@ -411,7 +478,7 @@ impl E2eeClient {
     pub async fn challenged(&self, db: &Db) -> Result<bool, ClientError> {
         self.serializable(db, async |tx| {
             let read = self.read_account(db, tx).await?;
-            let device = self.shared.device.borrow().clone();
+            let device = self.shared.device()?.clone();
             let replay =
                 AccountReplay::new(&read.public, &self.shared.domain, &self.shared.registry)?;
             let state = replay
@@ -444,13 +511,16 @@ impl E2eeClient {
     /// §2.8): a fresh account epoch key delivered to the remaining devices
     /// and to the unretired recovery roots, and the recovery roots the
     /// device held retired in the same rotation. The device never removes
-    /// itself. The spaces the removed device could open are marked for
-    /// rotation (§3.5) by the delivery pass. Verifies the account again
-    /// afterwards. Needs the authority.
+    /// itself. Verifies the account again, then runs the delivery pass over
+    /// every space this device holds keys of, which marks those whose
+    /// current version the removed device could open (§3.5): this device's
+    /// next write to each rotates it first. A space whose pass fails is
+    /// marked anyway (fail closed). Needs the authority.
     pub async fn remove_device(&self, db: &Db, device_id: &str) -> Result<(), ClientError> {
         self.rotate_account(db, RotationTarget::RemoveDevice(device_id.to_owned()))
             .await?;
         self.ensure_account(db).await?;
+        self.mark_after_device_removal(db).await;
         Ok(())
     }
 
@@ -574,6 +644,7 @@ impl E2eeClient {
             outcomes.push((device, outcome));
             if done {
                 self.ensure_account(db).await?;
+                self.mark_after_device_removal(db).await;
             }
         }
     }
@@ -600,6 +671,47 @@ impl E2eeClient {
         secret: &RecoverySecret,
     ) -> Result<(), ClientError> {
         self.register(db, secret, false).await
+    }
+
+    /// Starts a device account on this device (protocol §2.9, "Register"):
+    /// verifies the account ([`Self::ensure_account`]) and, once this
+    /// device is active in it (right after bootstrap, or after approval),
+    /// registers the recovery root the account secret derives, so every
+    /// device account has recovery by its secret without the application
+    /// asking for it. A root of that secret that was retired stays retired:
+    /// nothing is written and the device still starts. A device awaiting
+    /// approval registers nothing; it registers at the first start that finds
+    /// it active. Verifies the account again after a registration, so
+    /// [`Self::with_account`] lists the root.
+    ///
+    /// `secret` is the device account's account secret, as the runtime was
+    /// opened with its identity (`ClientConfig::device_account`): a secret
+    /// of another identity is refused with `recovery-root-mismatch` and
+    /// nothing is written, and a runtime of an account of the application's
+    /// own sign-in is refused as unsupported (it registers its separate
+    /// secret with [`Self::register_recovery`]). The secret is in memory for
+    /// this call only. Needs the authority.
+    pub async fn start_device_account(
+        &self,
+        db: &Db,
+        secret: &RecoverySecret,
+    ) -> Result<AccountStatus, ClientError> {
+        let Some(identity) = &self.device_account else {
+            return Err(ClientError::Unsupported(
+                "start_device_account is for a device account: this runtime was opened \
+                 without its identity"
+                    .to_owned(),
+            ));
+        };
+        if DeviceAccountIdentity::from_secret(secret)?.public_key() != identity.public_key() {
+            return Err(ProtocolError::Recovery(RecoveryFailure::RootMismatch).into());
+        }
+        let status = self.ensure_account(db).await?;
+        if status != AccountStatus::Active {
+            return Ok(status);
+        }
+        self.register_recovery_at_start(db, secret).await?;
+        self.ensure_account(db).await
     }
 
     /// The registration a start-up runs with a device account's own secret:
@@ -720,7 +832,7 @@ impl E2eeClient {
         let attempt = self
             .serializable(db, async |tx| {
                 let read = self.read_account(db, tx).await?;
-                let mut device = self.shared.device.borrow().clone();
+                let mut device = self.shared.device()?.clone();
                 if self.check_floor_first(&read, &device.id).await? == FloorCheck::NoLongerActive {
                     return Err(ProtocolError::DeviceNoLongerActive.into());
                 }
@@ -813,7 +925,9 @@ impl E2eeClient {
             Some(Attempt::Ready(None)) => {}
             Some(Attempt::Ready(Some(records))) => {
                 self.mark_nonce_spent().await?;
-                self.shared.device.borrow_mut().approval_nonce.take();
+                if let Some(device) = self.shared.device.borrow_mut().as_mut() {
+                    device.approval_nonce.take();
+                }
                 self.publish_recovery(db, &records).await?;
             }
         }
