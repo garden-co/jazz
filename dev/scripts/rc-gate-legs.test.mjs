@@ -38,6 +38,13 @@ test("a dry run can never run t4 against the long-lived eval core", () => {
   );
 });
 
+test("the adopter gate starts beside rc-tarballs, not after it", () => {
+  const adopter = jobs["adopter-gate"];
+  assert.deepEqual(adopter.needs, ["resolve", "artifacts"]);
+  assert.equal(adopter.with.rc_npm_run_id, "${{ github.run_id }}");
+  assert.ok(jobs.verdict.needs.includes("rc-tarballs"), "the verdict still waits for rc-tarballs");
+});
+
 test("a NO-GO candidate is never published: publish waits for every pre-publish gate", () => {
   const publish = jobs.publish;
   for (const gate of ["examples-e2e", "preview", "rc-tarballs", "adopter-verdict", "attach-server"])
