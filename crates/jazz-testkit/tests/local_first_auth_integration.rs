@@ -660,6 +660,9 @@ async fn token_refreshed_right_after_connect_is_used_on_reconnect_impl() {
     let mut ctx = local_first_context(&server, test_schema(), &seed, ClientStorage::Memory);
     ctx.jwt_token = Some(mint(5));
     let client = jazz_testkit::connect(ctx).await.expect("connect");
+    // Opening does not wait for the server: the refresh comes right after
+    // the first link is admitted.
+    jazz::tools::test_support::wait_for_connected(&client).await;
     client
         .update_auth_token(mint(TOKEN_TTL_SECS))
         .expect("refresh token");
