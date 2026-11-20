@@ -503,7 +503,10 @@ impl Encryption {
     }
 
     /// One call from JS: the operation's name and its arguments, and its
-    /// result as JSON.
+    /// result as JSON. `recoveryCreate` answers with the recovery phrase,
+    /// the secret itself: the runtime zeroizes its own buffers, and the
+    /// caller owns the one copy in the answer (a host moves it into a
+    /// zeroizing buffer, or hands it on and drops it at once).
     pub fn call(
         self: &Rc<Self>,
         op: String,
@@ -605,11 +608,14 @@ impl Encryption {
             }
             // A new recovery secret as its 24-word phrase, to keep; nothing is
             // registered.
+            // The bytes and the phrase are zeroized here; the answer's one
+            // copy belongs to the caller (see `Encryption::call`).
             "recoveryCreate" => {
-                let mut bytes = [0u8; 32];
-                jazz_e2ee::RandomSource::fill(&mut OsRandom, &mut bytes)
+                let mut bytes = jazz_e2ee::Zeroizing::new([0u8; 32]);
+                jazz_e2ee::RandomSource::fill(&mut OsRandom, &mut *bytes)
                     .map_err(|error| error.to_string())?;
-                json!({ "phrase": super::phrase::from_secret(&bytes) })
+                let phrase = super::phrase::from_secret(&bytes);
+                json!({ "phrase": phrase.as_str() })
             }
             // `automatic`: the start-up registration of a device account's
             // own secret, for which a retired root is not an error. Otherwise
@@ -1023,7 +1029,7 @@ fn describe(error: ClientError) -> String {
 fn recovery_secret(args: &Value) -> Result<RecoverySecret, String> {
     if let Some(phrase) = args.get("phrase").and_then(Value::as_str) {
         return super::phrase::to_secret(phrase)
-            .map(RecoverySecret::from_bytes)
+            .map(|bytes| RecoverySecret::from_bytes(*bytes))
             .map_err(|error| format!("{}: the recovery phrase is not valid", error.code()));
     }
     let hex = args

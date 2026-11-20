@@ -3,7 +3,13 @@
 //! same words the TypeScript client's `RecoveryPhrase` makes, so a phrase
 //! moves between platforms. The runtime's recovery secret is exactly these
 //! 32 bytes (`E2EE_PROTOCOL.md` §2.9).
+//!
+//! Both a phrase and its bytes are the secret, so every buffer that holds
+//! either (the bits, a lowercased copy, the words, the bytes) is zeroized
+//! when dropped, and the phrase is written into one buffer reserved up front,
+//! so it never grows and leaves a copy behind.
 
+use jazz_e2ee::Zeroizing;
 use sha2::{Digest, Sha256};
 
 /// The 2048 words, in order.
@@ -36,37 +42,43 @@ fn words() -> Vec<&'static str> {
     LIST.lines().collect()
 }
 
+/// The longest phrase: 24 words of at most 8 letters, and the spaces between.
+const MAX_PHRASE: usize = 24 * 8 + 23;
+
 /// The 24-word phrase of `secret`.
-pub fn from_secret(secret: &[u8; 32]) -> String {
+pub fn from_secret(secret: &[u8; 32]) -> Zeroizing<String> {
     let words = words();
-    let mut bits = secret.to_vec();
-    bits.push(Sha256::digest(secret)[0]);
-    let mut phrase = Vec::with_capacity(24);
+    let mut bits = Zeroizing::new([0u8; 33]);
+    bits[..32].copy_from_slice(secret);
+    bits[32] = Sha256::digest(secret)[0];
+    let mut phrase = Zeroizing::new(String::with_capacity(MAX_PHRASE));
     for word in 0..24 {
         let mut index = 0usize;
         for bit in 0..11 {
             let at = word * 11 + bit;
             index = (index << 1) | usize::from((bits[at / 8] >> (7 - at % 8)) & 1);
         }
-        phrase.push(words[index]);
+        if word > 0 {
+            phrase.push(' ');
+        }
+        phrase.push_str(words[index]);
     }
-    phrase.join(" ")
+    phrase
 }
 
 /// The 32 secret bytes of `phrase`: words separated by any white space, in
 /// any letter case.
-pub fn to_secret(phrase: &str) -> Result<[u8; 32], PhraseError> {
-    let phrase = phrase.to_lowercase();
-    let given: Vec<&str> = phrase.split_whitespace().collect();
-    if given.len() != 24 {
+pub fn to_secret(phrase: &str) -> Result<Zeroizing<[u8; 32]>, PhraseError> {
+    let phrase = Zeroizing::new(phrase.to_lowercase());
+    if phrase.split_whitespace().count() != 24 {
         return Err(PhraseError::InvalidLength);
     }
     let words = words();
-    let mut bits = [0u8; 33];
-    for (word, text) in given.iter().enumerate() {
+    let mut bits = Zeroizing::new([0u8; 33]);
+    for (word, text) in phrase.split_whitespace().enumerate() {
         let index = words
             .iter()
-            .position(|known| known == text)
+            .position(|known| *known == text)
             .ok_or(PhraseError::InvalidWord)?;
         for bit in 0..11 {
             if (index >> (10 - bit)) & 1 == 1 {
@@ -75,9 +87,9 @@ pub fn to_secret(phrase: &str) -> Result<[u8; 32], PhraseError> {
             }
         }
     }
-    let mut secret = [0u8; 32];
+    let mut secret = Zeroizing::new([0u8; 32]);
     secret.copy_from_slice(&bits[..32]);
-    if Sha256::digest(secret)[0] != bits[32] {
+    if Sha256::digest(*secret)[0] != bits[32] {
         return Err(PhraseError::InvalidChecksum);
     }
     Ok(secret)
@@ -92,11 +104,14 @@ mod tests {
     #[test]
     fn a_phrase_is_the_standard_one() {
         let zero = format!("{}art", "abandon ".repeat(23));
-        assert_eq!(from_secret(&[0; 32]), zero);
-        assert_eq!(to_secret(&zero), Ok([0; 32]));
+        assert_eq!(*from_secret(&[0; 32]), zero);
+        assert_eq!(to_secret(&zero).map(|secret| *secret), Ok([0; 32]));
         let ones = format!("{}vote", "zoo ".repeat(23));
-        assert_eq!(from_secret(&[0xff; 32]), ones);
-        assert_eq!(to_secret(&ones.to_uppercase()), Ok([0xff; 32]));
+        assert_eq!(*from_secret(&[0xff; 32]), ones);
+        assert_eq!(
+            to_secret(&ones.to_uppercase()).map(|secret| *secret),
+            Ok([0xff; 32])
+        );
     }
 
     /// Contract: the embedded list is BIP-39's English list, byte for byte
@@ -120,7 +135,7 @@ mod tests {
     #[test]
     fn a_wrong_phrase_is_refused_by_name() {
         let right = from_secret(&[7; 32]);
-        assert_eq!(to_secret(&right), Ok([7; 32]));
+        assert_eq!(to_secret(&right).map(|secret| *secret), Ok([7; 32]));
         let short: Vec<&str> = right.split(' ').take(23).collect();
         assert_eq!(to_secret(&short.join(" ")), Err(PhraseError::InvalidLength));
         assert_eq!(

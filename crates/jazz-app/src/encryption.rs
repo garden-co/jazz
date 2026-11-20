@@ -522,6 +522,10 @@ impl Encryption {
     /// Its failure is [`Error::Encryption`] with the runtime's code
     /// (`approval-answered`, `no-challenge`, `approval-code-mismatch`,
     /// `device-no-longer-active`, `unsupported`, `store`, `closed`, ...).
+    ///
+    /// `recoveryCreate` answers `{ "phrase": ... }`, the recovery secret
+    /// itself: take the string out of the answer (`Value::take`) into a
+    /// zeroizing buffer, and keep no other copy.
     pub async fn call(&self, op: &str, args: Value) -> Result<Value> {
         if let Some(refusal) = self.refusal() {
             return Err(refusal);
