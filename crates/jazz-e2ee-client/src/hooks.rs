@@ -238,6 +238,20 @@ impl E2eeHooks for Hooks {
                 web_time::Instant::now(),
             ));
         }
+        // A member row this client deletes, a removal: the space is served
+        // before the next encrypted write, so the pass sets the
+        // needs-rotation mark and that write rotates first (protocol §3.4,
+        // §3.5). A delete names no cells: the runtime finds the space from
+        // the deleted row.
+        if write.table == crate::account::rows::SPACE_MEMBERS
+            && matches!(write.kind, WriteKind::Delete)
+        {
+            let mut removals = self.shared.member_removals.borrow_mut();
+            if removals.len() == crate::state::MAX_REPORTS {
+                removals.pop_front();
+            }
+            removals.push_back((write.row, web_time::Instant::now()));
+        }
         let Some(plan) = self.plan(write.table) else {
             return Ok(());
         };
@@ -321,23 +335,25 @@ impl E2eeHooks for Hooks {
         };
         let address = Self::address(&keys, plan, &identifier).map_err(SealError::Refused)?;
         let refused_here = keys.creation_refused.contains(&address);
-        let tried = keys.rotation_tried.contains(&address);
+        // The marks of the `write` call this write runs in, or of the
+        // writes no call wraps.
+        let mark = (self.shared.current_write.get(), address.clone());
+        let tried = keys.rotation_tried.contains(&mark);
         // A write no `write` call wraps is the retry the mark was made for:
         // it takes the mark, and the next write gets its own chance.
-        let keys = if tried && self.shared.wrapped_writes.get() == 0 {
+        let keys = if tried && mark.0.is_none() {
             drop(keys);
-            self.shared
-                .keys
-                .borrow_mut()
-                .rotation_tried
-                .remove(&address);
+            self.shared.keys.borrow_mut().rotation_tried.remove(&mark);
             self.shared.keys.borrow()
         } else {
             keys
         };
-        // The space needs rotation: the runtime rotates it, and the write
-        // is tried again (protocol §3.5).
-        if keys.rotation_pending.contains(&address) && !tried && keys.online {
+        // The space needs rotation, or a removal this client wrote has not
+        // been served yet and may mark it: the runtime serves the removal,
+        // rotates the space if it needs it, and the write is tried again
+        // (protocol §3.5).
+        let removal = !self.shared.member_removals.borrow().is_empty();
+        if (keys.rotation_pending.contains(&address) || removal) && !tried && keys.online {
             return Err(SealError::NeedsKey {
                 space: db_address(&address),
             });

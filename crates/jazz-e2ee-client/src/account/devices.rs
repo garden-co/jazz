@@ -149,7 +149,7 @@ impl E2eeClient {
     /// the authenticated account key. A read that shows less than the
     /// device's floor is refused first (protocol §2.4).
     async fn view(&self, read: &AccountRead) -> Result<View, ClientError> {
-        let device = self.shared.device.borrow().clone();
+        let device = self.shared.device()?.clone();
         if self.check_floor_first(read, &device.id).await? == FloorCheck::NoLongerActive {
             return Err(ProtocolError::DeviceNoLongerActive.into());
         }
@@ -269,7 +269,7 @@ impl E2eeClient {
         let attempt = self
             .serializable(db, async |tx| {
                 let read = self.read_account(db, tx).await?;
-                let device = self.shared.device.borrow().clone();
+                let device = self.shared.device()?.clone();
                 if self.check_floor_first(&read, &device.id).await? == FloorCheck::NoLongerActive {
                     return Err(ProtocolError::DeviceNoLongerActive.into());
                 }
@@ -331,10 +331,12 @@ impl E2eeClient {
             return Err(ClientError::NoChallenge);
         };
         // Spent in the store, and confirmed, before the proof reveals it.
-        let keys = self.shared.device.borrow().keys();
+        let keys = self.shared.device()?.keys();
         let code = self.code(&challenge, &keys, &proof.nonce)?;
         self.mark_nonce_spent().await?;
-        self.shared.device.borrow_mut().approval_nonce.take();
+        if let Some(device) = self.shared.device.borrow_mut().as_mut() {
+            device.approval_nonce.take();
+        }
         self.publish_proof(db, &proof).await?;
         Ok(code)
     }
@@ -476,7 +478,7 @@ impl E2eeClient {
     pub async fn challenged(&self, db: &Db) -> Result<bool, ClientError> {
         self.serializable(db, async |tx| {
             let read = self.read_account(db, tx).await?;
-            let device = self.shared.device.borrow().clone();
+            let device = self.shared.device()?.clone();
             let replay =
                 AccountReplay::new(&read.public, &self.shared.domain, &self.shared.registry)?;
             let state = replay
@@ -806,7 +808,7 @@ impl E2eeClient {
         let attempt = self
             .serializable(db, async |tx| {
                 let read = self.read_account(db, tx).await?;
-                let mut device = self.shared.device.borrow().clone();
+                let mut device = self.shared.device()?.clone();
                 if self.check_floor_first(&read, &device.id).await? == FloorCheck::NoLongerActive {
                     return Err(ProtocolError::DeviceNoLongerActive.into());
                 }
@@ -861,7 +863,9 @@ impl E2eeClient {
             Attempt::Ready(Some(records)) => records,
         };
         self.mark_nonce_spent().await?;
-        self.shared.device.borrow_mut().approval_nonce.take();
+        if let Some(device) = self.shared.device.borrow_mut().as_mut() {
+            device.approval_nonce.take();
+        }
         self.publish_recovery(db, &records).await?;
         self.ensure_account(db).await
     }

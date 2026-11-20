@@ -324,13 +324,16 @@ impl E2eeClient {
             }
             Err(error) => return Err(self.forget_account_on(error)),
         };
+        // Learn and keep the new version, then deliver it to the rest. The
+        // mark is cleared once the new version is held: until then a write
+        // to the space waits for it instead of sealing under the version the
+        // removed member holds.
+        self.acquire_full(db, space).await?;
         self.shared
             .keys
             .borrow_mut()
             .rotation_pending
             .remove(&address);
-        // Learn and keep the new version, then deliver it to the rest.
-        self.acquire_full(db, space).await?;
         let mut written = first;
         for batch in rest.chunks(DELIVERY_BATCH) {
             written += self.deliver_batch(db, &address, batch).await?;
@@ -384,7 +387,7 @@ impl E2eeClient {
         let records = {
             let account = self.account.borrow();
             let account = account.as_ref().ok_or(ClientError::NoAccount)?;
-            let device = self.shared.device.borrow().clone();
+            let device = self.shared.device()?.clone();
             let author = Author::new(&directory, &self.shared.account_id, &account.key, &device)?;
             let make = match kind {
                 Rotation::Ordinary => rotate,

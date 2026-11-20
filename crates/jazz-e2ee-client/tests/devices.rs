@@ -61,7 +61,7 @@ fn memory() -> Rc<dyn jazz_e2ee_client::PrivateStore> {
 
 impl Device {
     fn id(&self) -> String {
-        self.client.device().id.clone()
+        self.client.device().unwrap().id.clone()
     }
 
     fn status(&self, server: &Db, others: &[&Device]) -> AccountStatus {
@@ -953,7 +953,7 @@ fn a_server_substituting_the_requesters_keys_is_caught() {
             first.status(&server, &[]);
             let second = device(&server, alice, second_store.clone(), 2, &settings);
             second.status(&server, &[&first]);
-            first.client.device().sealing.public.bytes.clone()
+            first.client.device().unwrap().sealing.public.bytes.clone()
         };
         for table in ["__e2ee_device_requests", "__e2ee_device_keys"] {
             tamper_newest(&live, table, "publicKey", &attacker_key);

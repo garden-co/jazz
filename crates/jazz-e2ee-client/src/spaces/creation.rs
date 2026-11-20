@@ -76,7 +76,7 @@ impl E2eeClient {
                 &self.shared.registry,
                 account.public.through,
             )?;
-            let device = self.shared.device.borrow().clone();
+            let device = self.shared.device()?.clone();
             let author = Author::new(&directory, &self.shared.account_id, &account.key, &device)?;
             let writer = SpaceWriter {
                 suite: self.shared.registry.select(&self.shared.selected)?,
@@ -208,7 +208,7 @@ impl E2eeClient {
                 read.ledger.through,
             )
             .map_err(ClientError::from)?;
-            let device = self.shared.device.borrow().clone();
+            let device = self.shared.device()?.clone();
             let author = Author::new(&directory, &self.shared.account_id, &account.key, &device)
                 .map_err(ClientError::from)?;
             let writer = SpaceWriter {

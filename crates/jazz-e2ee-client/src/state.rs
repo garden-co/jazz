@@ -2,7 +2,7 @@
 //! device, the held keys, the catalogue identities the cell contexts name,
 //! and the reports reads leave for the runtime.
 
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
@@ -226,6 +226,39 @@ impl Published {
         self.listeners.clone()
     }
 
+    /// Forgets which missing versions of `space` were told, so a version
+    /// still missing after the space's keys changed is told again.
+    fn forget_missing_keys(&mut self, space: &SpaceAddress) {
+        let of_space = format!(":{}:{}:", space.scope_id, space.identifier);
+        self.events
+            .retain(|key| !(key.starts_with("missing-key:") && key.contains(&of_space)));
+    }
+
+    /// Forgets every report and event, keeping the listeners, and returns
+    /// the withdrawals of the held reports of a space.
+    fn reset(&mut self) -> Vec<Report> {
+        let listeners = std::mem::take(&mut self.listeners);
+        let old = std::mem::replace(
+            self,
+            Self {
+                listeners,
+                ..Default::default()
+            },
+        );
+        old.order
+            .into_values()
+            .filter_map(|key| {
+                Some(Report::Withdrawn {
+                    space: key.space?,
+                    table: key.table,
+                    id: key.id,
+                    column: key.column,
+                    code: key.code,
+                })
+            })
+            .collect()
+    }
+
     /// Forgets the reports of `space`, per space and per row, with one of
     /// `codes`, returning their withdrawals.
     fn withdraw(&mut self, space: &SpaceAddress, codes: &[UnreadableCode]) -> Vec<Report> {
@@ -381,13 +414,19 @@ pub(crate) struct KeyState {
     /// the rows it wrote): the natural moments stop repairing them while the
     /// client runs; an explicit call always attempts (protocol §3.2).
     pub(crate) repair_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
-    /// Spaces whose rotation the current write already tried: it seals under
-    /// the current version whatever came of it, and the mark stays unless
-    /// the rotation succeeded or was refused (protocol §3.5). A write the
-    /// runtime does not wrap (a host's, retried after
+    /// Spaces whose rotation a write already tried, by the write: it seals
+    /// under the current version whatever came of it, and the mark stays
+    /// unless the rotation succeeded or was refused (protocol §3.5). Each
+    /// [`crate::E2eeClient::write`] call has its own marks (`Some` of its
+    /// number), removed when it returns, so a concurrent call to the same
+    /// space still gets its own rotation chance. Writes the runtime does not
+    /// wrap share `None`: such a write (a host's, retried after
     /// [`crate::E2eeClient::prepare_space`]) takes its space's mark when it
-    /// seals, so the next write gets its own rotation chance.
-    pub(crate) rotation_tried: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    /// seals, so the next write gets its own chance.
+    pub(crate) rotation_tried: BTreeSet<(
+        Option<u64>,
+        jazz_e2ee::protocol::records::space::SpaceAddress,
+    )>,
     /// Spaces whose rotation by this device was refused while the client
     /// runs: no automatic rotation, and no evaluation of the mark.
     pub(crate) rotation_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
@@ -421,13 +460,15 @@ pub(crate) struct Shared {
     pub(crate) content: SharedDomain,
     pub(crate) account_id: String,
     pub(crate) plans: BTreeMap<String, TablePlan>,
-    pub(crate) device: RefCell<LocalDevice>,
+    /// This device; `None` once the store is wiped, its secrets and
+    /// approval nonce dropped (and zeroed) with it (§6.4).
+    pub(crate) device: RefCell<Option<LocalDevice>>,
     pub(crate) keys: RefCell<KeyState>,
     pub(crate) random: RefCell<Box<dyn RandomSource>>,
     pub(crate) reports: RefCell<VecDeque<Report>>,
     /// Reports waiting for the runtime to deliver them to listeners: a
     /// hook never calls out while the database is busy.
-    pub(crate) outbox: RefCell<Vec<Report>>,
+    pub(crate) outbox: RefCell<VecDeque<Report>>,
     pub(crate) published: RefCell<Published>,
     pub(crate) creations: RefCell<Creations>,
     /// Versions reads needed and did not hold, since the runtime last
@@ -441,6 +482,13 @@ pub(crate) struct Shared {
     /// §3.4), or until [`MEMBER_CHANGE_WAIT`] passes without the row: a write
     /// that was rejected or abandoned leaves no row to wait for.
     pub(crate) member_changes: RefCell<VecDeque<(RowUuid, SpaceAddress, web_time::Instant)>>,
+    /// Member rows this client's writes deleted, with when, until their
+    /// space's pass has run (protocol §3.4, §3.5): a removal's pass sets the
+    /// needs-rotation mark, so the next write rotates first. While one is
+    /// queued and the client is online, an encrypted write is held back
+    /// (`NeedsKey`) until the queue is served. A deleted row the local store
+    /// does not show after [`MEMBER_CHANGE_WAIT`] is dropped.
+    pub(crate) member_removals: RefCell<VecDeque<(RowUuid, web_time::Instant)>>,
     /// The settle back-off's clock when a test holds it still (`None`: the
     /// real one), so a wait is stepped, not slept.
     pub(crate) held_clock: std::cell::Cell<Option<web_time::Instant>>,
@@ -449,9 +497,12 @@ pub(crate) struct Shared {
     /// The collectors of the repair reads in flight, each registered for the
     /// duration of its read (protocol §3.2).
     pub(crate) collectors: RefCell<BTreeMap<uuid::Uuid, Collector>>,
-    /// How many [`crate::E2eeClient::write`] calls are running: their
-    /// rounds keep the marks of `rotation_tried` until the call returns.
-    pub(crate) wrapped_writes: std::cell::Cell<usize>,
+    /// The [`crate::E2eeClient::write`] call whose operation is being polled,
+    /// if any: what the hooks seal belongs to that call's `rotation_tried`
+    /// marks.
+    pub(crate) current_write: std::cell::Cell<Option<u64>>,
+    /// The number the next [`crate::E2eeClient::write`] call takes.
+    pub(crate) next_write: std::cell::Cell<u64>,
 }
 
 /// Queues `missing`, at most `cap` entries. A full queue drops its oldest
@@ -492,13 +543,27 @@ fn enqueue_missing(
 }
 
 impl Shared {
+    /// This device, or [`ClientError::Closed`] once the store was wiped.
+    pub(crate) fn device(&self) -> Result<Ref<'_, LocalDevice>, ClientError> {
+        Ref::filter_map(self.device.borrow(), Option::as_ref).map_err(|_| ClientError::Closed)
+    }
+
+    /// Drops the device's secrets and approval nonce (each zeroed on drop)
+    /// and every held key: the store was wiped (§6.4).
+    pub(crate) fn forget_secrets(&self) {
+        let mut keys = self.keys.borrow_mut();
+        keys.closed = true;
+        keys.held = Default::default();
+        self.device.borrow_mut().take();
+    }
+
     pub(crate) fn report(&self, report: Report) {
         {
             let mut outbox = self.outbox.borrow_mut();
             if outbox.len() == MAX_REPORTS {
-                outbox.remove(0);
+                outbox.pop_front();
             }
-            outbox.push(report.clone());
+            outbox.push_back(report.clone());
         }
         let mut reports = self.reports.borrow_mut();
         if reports.len() == MAX_REPORTS {
@@ -595,6 +660,23 @@ impl Shared {
                 listener(report);
             }
         }
+    }
+
+    /// Forgets which missing versions of `space` the listeners were told:
+    /// its keys changed, so one still missing is told again.
+    pub(crate) fn forget_missing_keys(&self, space: &SpaceAddress) {
+        self.published.borrow_mut().forget_missing_keys(space);
+    }
+
+    /// Forgets what was reported for a device and account that are gone
+    /// (re-enrolment): reports not yet delivered or polled, the reports and
+    /// events already delivered, and with them the spaces watched for
+    /// them. The listeners stay; the withdrawals of the reports they hold
+    /// reach them with the next delivery.
+    pub(crate) fn reset_reports(&self) {
+        self.reports.borrow_mut().clear();
+        let withdrawn = self.published.borrow_mut().reset();
+        *self.outbox.borrow_mut() = withdrawn.into();
     }
 
     /// Withdraws the reports of `space` with one of `codes`.
