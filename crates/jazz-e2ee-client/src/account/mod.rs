@@ -34,7 +34,7 @@ use jazz_e2ee::protocol::records::account::{
 };
 use jazz_e2ee::protocol::{Accepted, Position, ProtocolError};
 
-pub use devices::{DeviceInfo, DeviceStatus, PendingApproval};
+pub use devices::{ApprovedBy, DeviceInfo, DeviceStatus, PendingApproval};
 
 use crate::client::E2eeClient;
 use crate::error::ClientError;

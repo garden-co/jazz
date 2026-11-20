@@ -625,11 +625,199 @@ fn a_recovery_restores_access_and_its_root_is_retired_with_the_device() {
     });
 }
 
+/// lena's device of her device-account account, opened with her identity.
+fn lena_device(server: &Db, seed: u8, node: u8) -> (Device, AuthorSubject) {
+    let (lena, identity) = device_account(seed);
+    let client = open_account(
+        memory(),
+        lena,
+        EncryptionSettings::default(),
+        Some(identity),
+    );
+    (attach(server, client, lena, node), lena)
+}
+
+/// Contract: a device account registers the recovery root its account
+/// secret derives when it starts (§2.9, "Register"), without the
+/// application asking: lena's first device starts, and a new device of hers
+/// restores itself with nothing but that secret. Starting again writes
+/// nothing; a secret of another identity is refused and writes nothing.
+///
+/// ```text
+/// lena's first device ──start (secret)──► root + delivery
+/// lena's first device ──start again──► nothing written
+/// lena's new device ──recover (secret)──► active, reads her note
+/// lena's first device ──start (mallory's secret)──✗ recovery-root-mismatch
+/// ```
+#[test]
+fn a_device_account_registers_its_recovery_root_at_start() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([0x4f; 32]);
+        let (first, lena) = lena_device(&server, 0x4f, 1);
+        let status = drive(
+            &server,
+            &[&first.db],
+            first.client.start_device_account(&first.db, &secret),
+        )
+        .unwrap();
+        assert_eq!(status, AccountStatus::Active);
+        assert_eq!(
+            first
+                .client
+                .with_account(|account| account.state.recovery_roots.len()),
+            Some(1),
+            "the verified account lists the root"
+        );
+        let space = space_with_a_note(&server, &first, &account_id(lena));
+        pump(&server, &first.db);
+        let rows = || {
+            (
+                count(&server, "__e2ee_recovery_roots"),
+                count(&server, "__e2ee_recovery_deliveries"),
+            )
+        };
+        let before = rows();
+        assert_eq!(before, (1, 1));
+        drive(
+            &server,
+            &[&first.db],
+            first.client.start_device_account(&first.db, &secret),
+        )
+        .unwrap();
+        pump(&server, &first.db);
+        assert_eq!(rows(), before, "a second start writes nothing");
+
+        let mallory = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([0x5f; 32]);
+        let refused = drive(
+            &server,
+            &[&first.db],
+            first.client.start_device_account(&first.db, &mallory),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(ClientError::Protocol(ProtocolError::Recovery(
+                    jazz_e2ee::protocol::error::RecoveryFailure::RootMismatch
+                )))
+            ),
+            "another identity's secret is refused: {refused:?}"
+        );
+        pump(&server, &first.db);
+        assert_eq!(rows(), before, "nothing written for it");
+
+        let (second, _) = lena_device(&server, 0x4f, 2);
+        assert_eq!(
+            drive(
+                &server,
+                &[&second.db, &first.db],
+                second.client.start_device_account(&second.db, &secret),
+            )
+            .unwrap(),
+            AccountStatus::AwaitingApproval,
+            "a device awaiting approval registers nothing"
+        );
+        let status = drive(
+            &server,
+            &[&second.db, &first.db],
+            second.client.recover_device(&second.db, &secret),
+        )
+        .unwrap();
+        assert_eq!(status, AccountStatus::Active);
+        second.follow_notes(&server);
+        let notes = notes_of(&server, &second, space);
+        assert_eq!(notes[0].cell("body"), Some(text(SECRET)));
+    });
+}
+
+/// Contract: a device account whose secret's root was retired still
+/// starts: the start-up registration writes nothing and is not an error
+/// (§2.9, "Retiring a derived root"), unlike an explicit registration.
+///
+/// ```text
+/// lena's device ──start (secret)──► root; ──retire it──► server
+/// lena's device ──start (secret)──► active, nothing written
+/// ```
+#[test]
+fn a_device_account_starts_after_its_secrets_root_is_retired() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([0x6f; 32]);
+        let (first, _) = lena_device(&server, 0x6f, 1);
+        drive(
+            &server,
+            &[&first.db],
+            first.client.start_device_account(&first.db, &secret),
+        )
+        .unwrap();
+        let root = first
+            .client
+            .with_account(|account| account.state.recovery_roots[0].row.id.clone())
+            .unwrap();
+        drive(
+            &server,
+            &[&first.db],
+            first.client.retire_recovery_root(&first.db, &root),
+        )
+        .unwrap();
+        pump(&server, &first.db);
+        let rows = || {
+            (
+                count(&server, "__e2ee_recovery_roots"),
+                count(&server, "__e2ee_recovery_deliveries"),
+            )
+        };
+        let before = rows();
+        let status = drive(
+            &server,
+            &[&first.db],
+            first.client.start_device_account(&first.db, &secret),
+        )
+        .unwrap();
+        assert_eq!(status, AccountStatus::Active);
+        pump(&server, &first.db);
+        assert_eq!(rows(), before, "nothing written");
+        assert_eq!(
+            first
+                .client
+                .with_account(|account| account.state.recovery_roots.len()),
+            Some(0),
+            "the root stays retired"
+        );
+    });
+}
+
+/// Contract: a runtime of an account of the application's own sign-in has
+/// no device-account identity to check a secret against: starting it as a
+/// device account is refused as unsupported and writes nothing.
+#[test]
+fn an_app_account_is_not_started_as_a_device_account() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let first = device(&server, alice, memory(), 1, &settings);
+        first.status(&server, &[]);
+        let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([7; 32]);
+        let refused = drive(
+            &server,
+            &[&first.db],
+            first.client.start_device_account(&first.db, &secret),
+        );
+        assert!(
+            matches!(refused, Err(ClientError::Unsupported(_))),
+            "{refused:?}"
+        );
+        pump(&server, &first.db);
+        assert_eq!(count(&server, "__e2ee_recovery_roots"), 0);
+    });
+}
+
 /// Contract: a retired recovery root stays retired. Registering its secret
 /// again writes nothing and is refused with `recovery-root-mismatch`, as
 /// explicit recovery with it is: a user re-registering an old phrase must
 /// not believe they have recovery. (The start-up registration of a device
-/// account's own secret writes nothing and goes on: `jazz-ffi`'s
+/// account's own secret writes nothing and goes on:
 /// `a_device_account_starts_after_its_secrets_root_is_retired`.)
 ///
 /// ```text
@@ -1544,7 +1732,9 @@ fn a_recovery_delivery_that_does_not_open_does_not_skip_the_registration() {
     });
 }
 
-/// Contract: the device list shows active devices and the ones waiting, and a
+/// Contract: the device list shows active devices and the ones waiting, with
+/// which is this device, the order their requests arrived in and who approved
+/// each, so a user can tell the device they approve from others; and a
 /// device awaiting approval learns it was challenged without guessing: before
 /// the challenge it is not, after it is, and after it answered it is not
 /// again; a removed device is no longer listed.
@@ -1574,6 +1764,24 @@ fn devices_are_listed_and_a_challenge_is_noticed() {
             status(&second.id()),
             Some(jazz_e2ee_client::DeviceStatus::Waiting)
         );
+        let info = |listed: &[jazz_e2ee_client::DeviceInfo], id: &str| {
+            listed
+                .iter()
+                .find(|device| device.id == id)
+                .cloned()
+                .unwrap()
+        };
+        let (mine, waiting) = (info(&listed, &first.id()), info(&listed, &second.id()));
+        assert!(mine.this_device && !waiting.this_device);
+        assert_eq!(
+            mine.approved_by,
+            Some(jazz_e2ee_client::ApprovedBy::AccountRoot)
+        );
+        assert_eq!(waiting.approved_by, None);
+        assert!(
+            waiting.requested_at > mine.requested_at,
+            "the later request is told apart by its position"
+        );
         assert!(!drive(&server, &both, second.client.challenged(&second.db)).unwrap());
         let pending = drive(
             &server,
@@ -1596,6 +1804,10 @@ fn devices_are_listed_and_a_challenge_is_noticed() {
             listed
                 .iter()
                 .all(|device| device.status == jazz_e2ee_client::DeviceStatus::Active)
+        );
+        assert_eq!(
+            info(&listed, &second.id()).approved_by,
+            Some(jazz_e2ee_client::ApprovedBy::Device(first.id()))
         );
         drive(
             &server,

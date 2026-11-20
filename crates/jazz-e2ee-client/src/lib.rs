@@ -58,7 +58,7 @@ pub mod store;
 mod values;
 
 pub use account::{
-    AccountStatus, AccountWatch, DeviceInfo, DeviceStatus, OwnAccount, PendingApproval,
+    AccountStatus, AccountWatch, ApprovedBy, DeviceInfo, DeviceStatus, OwnAccount, PendingApproval,
 };
 pub use client::{ClientConfig, E2eeClient};
 pub use error::ClientError;
