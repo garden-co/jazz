@@ -147,3 +147,15 @@ const status = await session.db.encryption.ready();
 The account store remembers the signed-in account. The private store holds the device's
 encryption keys. In Expo, import `createJazzClient` from `jazz-tools/expo`, keep the
 same `encryption` option, and let Expo supply the account store.
+
+`memoryPrivateStore()`, which these entry points also export, is for tests only: it protects nothing.
+
+### Keys on the JavaScript bridge
+
+Because the private store is JavaScript, the device's keys cross the bridge between JavaScript and the
+native runtime (JSI). The secrets `protect` takes and `unprotect` returns, and the documents `save` and
+`load` carry, cross it as base64 strings. A device account's secret crosses it once, as hexadecimal
+text, when the session starts. JavaScript strings can't be wiped: they stay in the JavaScript heap until
+the garbage collector reuses it. Native code wipes its own copies, and the native runtime drops the
+account secret once recovery at start finishes or fails. In debug builds, keep tools that log bridge
+traffic or inspect the JavaScript heap away from real accounts.

@@ -69,8 +69,11 @@ export interface PrivateStore {
 }
 
 /**
- * A store in memory, for tests and sessions that keep nothing. It protects
- * nothing: its secrets are as they are.
+ * A store in memory, **for tests only** (and sessions that keep nothing). It
+ * protects nothing: `protect` returns the secret as it is, and the device's
+ * keys are lost when the app restarts. Never ship it in an app: on React
+ * Native and Expo, supply a store whose protecting key lives in the Keychain or
+ * the Android Keystore (see the docs' Private store page).
  */
 export function memoryPrivateStore(): PrivateStore {
   const scopes = new Map<string, { incarnation: bigint; docs: Map<string, StoredDocument> }>();

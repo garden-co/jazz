@@ -1659,14 +1659,25 @@ impl NativeRelayHost {
         #[cfg(feature = "e2ee-client")]
         let attachment =
             if let Some(encryption) = self.admitted_scopes[&admitted_scope].encryption.clone() {
-                let owner = &self.account_session_owners[&admitted_scope];
-                relay.attach_foreground_encrypted(
+                // The first encrypted foreground takes the account secret
+                // for its runtime's recovery at start; the owner keeps no
+                // copy once it attached (a failed attach gives it back).
+                let owner = self
+                    .account_session_owners
+                    .get_mut(&admitted_scope)
+                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+                let secret = owner.device_account_secret.take();
+                let attached = relay.attach_foreground_encrypted(
                     identity,
                     claims,
                     lease,
                     encryption,
-                    owner.device_account_secret.clone(),
-                )
+                    secret.clone(),
+                );
+                if attached.is_err() {
+                    owner.device_account_secret = secret;
+                }
+                attached
             } else {
                 relay.attach_foreground_client(identity, claims, lease)
             };

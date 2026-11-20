@@ -153,16 +153,12 @@ type Command = futures::channel::oneshot::Sender<Result<Value, String>>;
 /// over the private store the app supplied (a JavaScript store, see
 /// `js_store`), for the account of its session.
 pub async fn build(
-    options: Options,
+    mut options: Options,
     account_id: String,
     store: Rc<JsStore>,
 ) -> Result<Built, String> {
     let declarations = declarations(&options)?;
-    let recovery = options
-        .device_account_secret
-        .as_deref()
-        .map(secret)
-        .transpose()?;
+    let recovery = take_account_secret(&mut options)?;
     build_client(declarations, account_id, store, recovery.as_ref()).await
 }
 
@@ -170,7 +166,7 @@ pub async fn build(
 /// startup. When a keyless relay supplies its declarations, the device must
 /// use those same declarations, including the app and environment.
 pub async fn build_native(
-    options: Options,
+    mut options: Options,
     account_id: String,
     store: Rc<JsStore>,
     relay_declarations: Option<&E2eeDeclarations>,
@@ -179,11 +175,7 @@ pub async fn build_native(
     if relay_declarations.is_some_and(|expected| *expected != declarations) {
         return Err("the device's encryption declarations do not match the relay".to_owned());
     }
-    let recovery = options
-        .device_account_secret
-        .as_deref()
-        .map(secret)
-        .transpose()?;
+    let recovery = take_account_secret(&mut options)?;
     let built = build_client(declarations, account_id, store, recovery.as_ref()).await?;
     Ok(NativeBuilt { built, recovery })
 }
@@ -1075,16 +1067,23 @@ fn recovery_secret(args: &Value) -> Result<RecoverySecret, String> {
 }
 
 /// A recovery secret from its hexadecimal text.
+/// The account secret `options` carries, taken out of them: its text is
+/// wiped once read, and only the parsed secret (cleared on drop) is kept.
+fn take_account_secret(options: &mut Options) -> Result<Option<RecoverySecret>, String> {
+    let hex = jazz_e2ee::Zeroizing::new(options.device_account_secret.take());
+    hex.as_deref().map(secret).transpose()
+}
+
 fn secret(hex: &str) -> Result<RecoverySecret, String> {
     if hex.len() != 64 || !hex.is_ascii() {
         return Err("a recovery secret is 64 hexadecimal characters".to_owned());
     }
-    let mut bytes = [0u8; 32];
+    let mut bytes = jazz_e2ee::Zeroizing::new([0u8; 32]);
     for (index, byte) in bytes.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&hex[2 * index..2 * index + 2], 16)
             .map_err(|_| "a recovery secret is hexadecimal".to_owned())?;
     }
-    Ok(RecoverySecret::from_bytes(bytes))
+    Ok(RecoverySecret::from_bytes(*bytes))
 }
 
 /// A report as the JS events carry it.

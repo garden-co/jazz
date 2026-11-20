@@ -534,7 +534,7 @@ impl NativeRelay {
         claims: BTreeMap<String, Value>,
         lease: ForegroundNodeLease,
         encryption: ForegroundEncryption,
-        device_account_secret: Option<String>,
+        device_account_secret: Option<zeroize::Zeroizing<String>>,
     ) -> Result<NativeRelayClient, RelayError> {
         if identity.author != self.inner.identity.author
             || self.inner.declarations.as_ref() != Some(&encryption.declarations)

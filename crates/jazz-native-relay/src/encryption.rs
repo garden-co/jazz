@@ -72,14 +72,16 @@ impl ForegroundEncryption {
     pub async fn build(
         self,
         account: String,
-        device_account_secret: Option<String>,
+        device_account_secret: Option<zeroize::Zeroizing<String>>,
         store: Rc<JsStore>,
     ) -> Result<Built, String> {
         let built = host::build_native(
             host::Options {
                 app_file: self.bindings.to_vec(),
                 from_bindings: true,
-                device_account_secret,
+                // Moved, not copied: the runtime wipes it once it has read it.
+                device_account_secret: device_account_secret
+                    .map(|mut secret| std::mem::take(&mut *secret)),
                 app_id: self.declarations.app_id.uuid().to_string(),
                 environment: self.declarations.environment.clone(),
             },
