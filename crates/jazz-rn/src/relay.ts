@@ -224,7 +224,16 @@ export type NativeForegroundResponse =
     }
   | { type: "probe"; abiVersion: number }
   | { type: "ticked" }
-  | { type: "rows"; rows: Uint8Array }
+  | {
+      type: "rows";
+      rows: Uint8Array;
+      /**
+       * A one-shot read's rows left out because the encryption runtime could
+       * not open them, as a JSON array of `{ table, id, column, code }`;
+       * absent when it left none out.
+       */
+      unreadable?: string;
+    }
   | { type: "subscribed"; subscription: number }
   | { type: "subscriptionEvents"; events: NativeForegroundSubscriptionEvent[] }
   | { type: "unsubscribed"; closed: boolean }
@@ -903,6 +912,20 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
       reports: decodeForegroundStrings(bytes, "encryption reports"),
     };
   }
+  if (tag === 37) {
+    // ReportedRows: the rows, then the rows left out as JSON.
+    let lengthEnd = 1;
+    while (lengthEnd < bytes.length && (bytes[lengthEnd]! & 0x80) !== 0) lengthEnd++;
+    if (lengthEnd >= bytes.length)
+      throw new Error("Jazz native foreground returned malformed reported rows");
+    const length = decodeForegroundU64(bytes.subarray(1, lengthEnd + 1), "reported rows length");
+    const rowsEnd = lengthEnd + 1 + length;
+    if (rowsEnd > bytes.length)
+      throw new Error("Jazz native foreground returned malformed reported rows");
+    const unreadable = decodeForegroundString(bytes.subarray(rowsEnd), "unreadable rows");
+    assertUnreadableJson(unreadable);
+    return { type: "rows", rows: bytes.slice(lengthEnd + 1, rowsEnd), unreadable };
+  }
   if (
     tag === 16 &&
     bytes.length >= 5 &&
@@ -1116,15 +1139,7 @@ function decodeForegroundSubscriptionEvents(
         const length = readVarint();
         unreadable = decodeForegroundUtf8(bytes, offset, length, "unreadable rows");
         offset += length;
-        // Fail closed here rather than when the runtime reads the list.
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(unreadable);
-        } catch {
-          parsed = undefined;
-        }
-        if (!Array.isArray(parsed))
-          throw new Error("Jazz native foreground returned malformed unreadable rows");
+        assertUnreadableJson(unreadable);
       }
       events.push({
         type: "delta",
@@ -1146,6 +1161,18 @@ function decodeForegroundSubscriptionEvents(
   if (offset !== bytes.length)
     throw new Error("Jazz native foreground returned trailing subscription bytes");
   return events;
+}
+
+/** Fail closed on a list of unreadable rows that is not a JSON array. */
+function assertUnreadableJson(json: string): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    parsed = undefined;
+  }
+  if (!Array.isArray(parsed))
+    throw new Error("Jazz native foreground returned malformed unreadable rows");
 }
 
 // Bounded so `fromCharCode.apply` stays well under engine argument limits.

@@ -135,7 +135,7 @@ export class NativeForegroundDb {
     query: Uint8Array,
     opts: unknown,
     openTransactionId?: string,
-  ): Uint8Array | { poll(): Uint8Array | null; cancel(): void } {
+  ): Uint8Array | PendingForegroundRows {
     const transaction =
       openTransactionId === undefined
         ? undefined
@@ -149,7 +149,13 @@ export class NativeForegroundDb {
       optionsJson: JSON.stringify(opts ?? {}),
       transaction,
     });
-    if (response.type === "rows") return response.rows;
+    if (response.type === "rows") {
+      if (response.unreadable === undefined) return response.rows;
+      // Answered as a done read, so the rows it left out reach the runtime
+      // (as a pending napi read carries them).
+      const { rows, unreadable } = response;
+      return { poll: () => rows, cancel: () => {}, unreadable: () => unreadable };
+    }
     if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type === "pending") return this.pendingRows(response.operation);
     return unexpected("all", response.type);
@@ -630,11 +636,13 @@ export class NativeForegroundDb {
     return this.executeAllowClosed(command);
   }
 
-  private pendingRows(operation: number): { poll(): Uint8Array | null; cancel(): void } {
+  private pendingRows(operation: number): PendingForegroundRows {
     // Admitted just now, by the caller's `execute`.
     const since = this.tickFailures;
     let completed = false;
+    let unreadable: string | null = null;
     return {
+      unreadable: () => unreadable,
       poll: () => {
         if (completed) throw new Error("Native foreground read is already complete");
         this.tickSince(since);
@@ -648,6 +656,7 @@ export class NativeForegroundDb {
           });
         }
         if (response.type !== "rows") return unexpected("poll", response.type);
+        unreadable = response.unreadable ?? null;
         return response.rows;
       },
       cancel: () => {
@@ -1230,3 +1239,14 @@ function rejectsCommand(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("runtime failed during execute");
 }
+
+/**
+ * A foreground read still to finish (or finished with rows left out). Once it
+ * is done, `unreadable` names the rows it left out because they could not be
+ * decrypted, as JSON; `null` when none.
+ */
+type PendingForegroundRows = {
+  poll(): Uint8Array | null;
+  cancel(): void;
+  unreadable(): string | null;
+};

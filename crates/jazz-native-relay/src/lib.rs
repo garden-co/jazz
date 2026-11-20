@@ -792,6 +792,15 @@ pub enum ForegroundDbCommandResponse {
     EncryptionReports {
         reports: Vec<String>,
     },
+    /// [`Self::Rows`] for a one-shot read that left rows out because the
+    /// encryption runtime could not open them, named as
+    /// `binding_host::unreadable_json` spells them (a JSON array of
+    /// `{ table, id, column, code }`). A read that left none out answers
+    /// `Rows`. Appended last so the earlier responses keep their bytes.
+    ReportedRows {
+        rows: Vec<u8>,
+        unreadable_json: String,
+    },
 }
 
 /// One already-materialized subscription event.  The byte payload deliberately
