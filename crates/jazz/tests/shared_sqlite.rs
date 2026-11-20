@@ -313,3 +313,229 @@ fn legacy_groove_markers_are_refused_without_modification() {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }
+
+/// Alice's first schema must not reuse Bob's refcount-trigger names. Direct
+/// SQL creates Bob's objects; a rejected open leaves his trigger and rows intact.
+#[test]
+fn foreign_refcount_trigger_names_refuse_initialization() {
+    for target in ["notes", "notes__h"] {
+        for operation in ["ins", "del", "upd"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("trigger.sqlite");
+            let other = rusqlite::Connection::open(&path).unwrap();
+            let trigger = format!("{target}__lv_{operation}").to_uppercase();
+            other.execute_batch(&format!("CREATE TABLE other (value TEXT); INSERT INTO other VALUES ('bob'); CREATE TRIGGER \"{trigger}\" AFTER INSERT ON other BEGIN SELECT 1; END;")).unwrap();
+            let error = block_on(Db::open_at(
+                config(schema(&["notes"])),
+                &path,
+                FileOptions::default(),
+            ))
+            .err()
+            .expect("must refuse a foreign trigger");
+            assert!(
+                error
+                    .message
+                    .to_lowercase()
+                    .contains(&trigger.to_lowercase()),
+                "{error}"
+            );
+            assert_eq!(
+                other
+                    .query_row(
+                        "SELECT tbl_name FROM sqlite_master WHERE name = ?1",
+                        [&trigger],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "other"
+            );
+            assert_eq!(
+                other
+                    .query_row("SELECT value FROM other", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "bob"
+            );
+            assert_eq!(
+                other
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE name = 'notes'",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+    }
+}
+
+/// Alice adds a large-capable column to an existing schema; Bob already owns
+/// its derived trigger name. The failed admission must leave Alice's rows and
+/// old schema usable, with neither current nor history columns partly added.
+#[test]
+fn foreign_refcount_trigger_names_refuse_later_column_sets() {
+    let later = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .column_with_default(
+                        "extra",
+                        ColumnType::Text,
+                        jazz::tools::Value::Text(String::new()),
+                    )
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    // Obtain the derived suffix from a successful admission: new column
+    // lineages include a schema-derived suffix, not just their logical name.
+    let reference = tempfile::tempdir().unwrap();
+    let reference_path = reference.path().join("reference.sqlite");
+    let reference_db = open(&reference_path, schema(&["notes"]));
+    block_on(
+        reference_db.apply_catalogue(jazz::catalogue::CatalogueChange {
+            admit: vec![(later.clone(), vec![])],
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let reference_sql = rusqlite::Connection::open(reference_path).unwrap();
+    let trigger: String = reference_sql
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name GLOB 'notes__lv_ins_*'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let suffix = trigger.strip_prefix("notes__lv_ins_").unwrap();
+    for target in ["notes", "notes__h"] {
+        for operation in ["ins", "del", "upd"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("later-trigger.sqlite");
+            let db = open(&path, schema(&["notes"]));
+            insert(&db, "notes", "alice");
+            let other = rusqlite::Connection::open(&path).unwrap();
+            let trigger = format!("{target}__lv_{operation}_{suffix}");
+            other.execute_batch(&format!("CREATE TABLE other (value TEXT); INSERT INTO other VALUES ('bob'); CREATE TRIGGER \"{trigger}\" AFTER INSERT ON other BEGIN SELECT 1; END;")).unwrap();
+            let error = block_on(db.apply_catalogue(jazz::catalogue::CatalogueChange {
+                admit: vec![(later.clone(), vec![])],
+                ..Default::default()
+            }))
+            .expect_err("must refuse a foreign per-set trigger");
+            assert!(error.message.contains(&trigger), "{error}");
+            assert_eq!(bodies(&db, "notes"), ["alice"]);
+            assert_eq!(
+                other
+                    .query_row(
+                        "SELECT tbl_name FROM sqlite_master WHERE name = ?1",
+                        [&trigger],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "other"
+            );
+            for table in ["notes", "notes__h"] {
+                assert_eq!(
+                    other
+                        .query_row(
+                            "SELECT count(*) FROM pragma_table_info(?1) WHERE name GLOB 'extra~*'",
+                            [table],
+                            |row| row.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    0
+                );
+            }
+            drop(db);
+            assert_eq!(bodies(&open(&path, schema(&["notes"])), "notes"), ["alice"]);
+        }
+    }
+}
+
+/// Bob's index cannot satisfy Alice's index DDL, either at first open or when
+/// she adds an index later. Once Bob removes the collision, Alice's own index
+/// is created and reopening remains idempotent.
+#[test]
+fn foreign_index_names_refuse_initial_and_later_schemas() {
+    let notes = || {
+        TableSchemaBuilder::new("notes")
+            .column("body", ColumnType::Text)
+            .policies(allow_all_policies())
+    };
+    let indexed = compile_schema(
+        &SchemaBuilder::new()
+            .table(notes().index_only(["body"]))
+            .build(),
+    );
+    let unindexed = compile_schema(
+        &SchemaBuilder::new()
+            .table(notes().index_only([] as [&str; 0]))
+            .build(),
+    );
+    let reference = tempfile::tempdir().unwrap();
+    let reference_path = reference.path().join("reference.sqlite");
+    drop(open(&reference_path, indexed.clone()));
+    let reference_sql = rusqlite::Connection::open(reference_path).unwrap();
+    let index: String = reference_sql
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name GLOB 'notes__ix(*)'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let foreign = index.to_uppercase();
+    for existing in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.sqlite");
+        if existing {
+            let db = open(&path, unindexed.clone());
+            insert(&db, "notes", "alice");
+        }
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other.execute_batch(&format!("CREATE TABLE other (value TEXT); INSERT INTO other VALUES ('bob'); CREATE INDEX \"{foreign}\" ON other(value);")).unwrap();
+        let error = block_on(Db::open_at(
+            config(indexed.clone()),
+            &path,
+            FileOptions::default(),
+        ))
+        .err()
+        .expect("must refuse a foreign index");
+        assert_eq!(error.code, ErrorCode::Schema);
+        assert!(error.message.contains(&foreign));
+        assert_eq!(
+            other
+                .query_row(
+                    "SELECT tbl_name FROM sqlite_master WHERE name = ?1",
+                    [&foreign],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "other"
+        );
+        assert_eq!(
+            other
+                .query_row("SELECT value FROM other", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "bob"
+        );
+        other
+            .execute_batch(&format!("DROP INDEX \"{foreign}\""))
+            .unwrap();
+        drop(open(&path, indexed.clone()));
+        let db = open(&path, indexed.clone());
+        assert_eq!(
+            other
+                .query_row(
+                    "SELECT tbl_name FROM sqlite_master WHERE name = ?1",
+                    [&index],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "notes"
+        );
+        if existing {
+            assert_eq!(bodies(&db, "notes"), ["alice"]);
+        }
+    }
+}
