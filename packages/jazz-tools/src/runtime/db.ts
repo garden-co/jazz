@@ -55,6 +55,7 @@ import {
   type StreamingMutationKind,
   type StreamingValueSource,
   validateWriteWaitTimeout,
+  waitAsWritten,
   WriteWaitTimeoutError,
 } from "./client.js";
 import { assertBacklogRows } from "./backlog-rows.js";
@@ -69,7 +70,12 @@ import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { resolveQueryOutputTable } from "./query-output-table.js";
 import { applyColumnTransforms, createRowTransformer, transformRow } from "./row-transformer.js";
-import { getOwnerPreparation, runAfterPreparation, WritePreparation } from "./write-preparation.js";
+import {
+  getOwnerPreparation,
+  ownerPreparation,
+  runAfterPreparation,
+  WritePreparation,
+} from "./write-preparation.js";
 import { nativeCoreErrorCode, unreadableTargetError } from "./native-runtime/native-error-code.js";
 import { writeRow } from "./write-row.js";
 import {
@@ -133,7 +139,13 @@ import {
   type DbForConnection,
 } from "./connection-manager/index.js";
 import { toError } from "./util.js";
-import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
+import {
+  isThinDb,
+  localFirstLoaderOf,
+  upgradeDbToLocalFirst,
+  type LocalFirstLoader,
+} from "./local-first-upgrade.js";
+import { EncryptionNeedsLocalFirstError } from "./encryption-needs-local-first.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
 import { notDeclaredEncryption, type Encryption } from "../encryption/index.js";
@@ -142,6 +154,11 @@ import type { BrowserEncryptionConfig } from "../encryption/browser-host.js";
 
 /** `getDeviceAccountProof` hands out a session's sync proof only with this long left. */
 const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
+/**
+ * How long an operation on an encrypted column waits for the local-first
+ * client before it fails; a live query warns then and keeps waiting.
+ */
+const LOCAL_FIRST_WAIT_MS = 30_000;
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -2434,6 +2451,20 @@ export class Db {
   private successor: Db | null = null;
   /** Queries and listeners that move to the successor with the upgrade. */
   private readonly movable = new Set<{ move(next: Db): void }>();
+  /** The schema this Db's client was opened with. */
+  private clientSchema: WasmSchema | null = null;
+  /** How many writes this Db took, numbering each (see {@link failedWait}). */
+  private writesMade = 0;
+  /** Writes waiting for the local-first client now. */
+  private writesWaiting = 0;
+  /**
+   * The last wait for the local-first client that failed, and how many
+   * writes had been made by then: an encrypted write queued behind that one
+   * fails with the same error rather than waiting again.
+   */
+  private failedWait: { error: unknown; writesMade: number } | null = null;
+  /** End waits for the local-first client: a sign-out or an account switch. */
+  private readonly localFirstWaitEnders = new Set<(error: Error) => void>();
   private readonly shutdownAbort = new AbortController();
   private syncStatusSnapshot: SyncStatus | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
@@ -2792,7 +2823,9 @@ export class Db {
    */
   protected getClient(schema: WasmSchema): JazzClient {
     this.assertOpen();
-    return this.connection.getClient(schema);
+    const client = this.connection.getClient(schema);
+    this.clientSchema ??= schema;
+    return client;
   }
 
   protected getCurrentClient(): JazzClient | null {
@@ -2824,12 +2857,241 @@ export class Db {
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
     notifyLocalWrite(this);
-    return setWriteWaitReadiness(handle, async (tier) => {
+    return this.readied(handle);
+  }
+
+  /** `result`, a write's handle, waits for this Db to be ready (see `setWriteWaitReadiness`). */
+  private readied<T>(result: T): T {
+    if (!(result instanceof WriteHandle)) return result;
+    return setWriteWaitReadiness(result, async (tier) => {
       // A write made before this Db handed over to a successor waits on its
       // own runtime's last uploads, which the drain keeps going.
       if (this.drain) return;
       await this.ensureReady(tier === "global" ? "upload" : "runtime");
     });
+  }
+
+  /**
+   * `handle` is for a write held back behind earlier ones: it waits as the
+   * handle the write returns once it ran, on whichever client ran it. A
+   * failure before it ran that no wait takes is reported as a mutation
+   * error, as an unsent thin write's is.
+   */
+  private heldBack<THandle extends WriteHandle<unknown, unknown>>(
+    handle: THandle,
+    written: Promise<WriteHandle<unknown, unknown>>,
+  ): THandle {
+    return waitAsWritten(handle, written, (error) =>
+      this.handleMutationError(unmadeWriteEvent(error, ++this.writesMade)),
+    );
+  }
+
+  /**
+   * Run `write` after the writes this Db took before it
+   * (`runAfterPreparation`), on the client that does this Db's work by the
+   * time it runs: one held back across the local-first upgrade runs on the
+   * successor, ahead of the writes made there since. One the thin client
+   * refuses because it touches an end-to-end encrypted column waits for the
+   * local-first client (starting it) and runs there; without a loader, the
+   * refusal is thrown.
+   */
+  private runWrite<T>(
+    schema: WasmSchema,
+    write: (client: JazzClient, db: Db) => T | Promise<T>,
+  ): T | Promise<T> {
+    const client = this.getClient(schema);
+    const made = ++this.writesMade;
+    return runAfterPreparation(client, () => {
+      if (this.successor) return this.runOnCurrent(schema, write);
+      const retry = (error: unknown) => this.retryOnLocalFirst(error, made, schema, write);
+      let result: T | Promise<T>;
+      try {
+        result = write(client, this);
+      } catch (error) {
+        return retry(error);
+      }
+      return result instanceof Promise ? result.catch(retry) : result;
+    });
+  }
+
+  /** Run `write` on the Db that does this one's work now, not behind its queue. */
+  private runOnCurrent<T>(
+    schema: WasmSchema,
+    write: (client: JazzClient, db: Db) => T | Promise<T>,
+  ): T | Promise<T> {
+    const db = this.current();
+    const client = db.getClient(schema);
+    return client.retryAfterKey(() => write(client, db)) as T | Promise<T>;
+  }
+
+  private retryOnLocalFirst<T>(
+    error: unknown,
+    made: number,
+    schema: WasmSchema,
+    write: (client: JazzClient, db: Db) => T | Promise<T>,
+  ): Promise<T> {
+    if (!(error instanceof EncryptionNeedsLocalFirstError)) throw error;
+    const failed = this.failedWait;
+    // Queued behind a write whose wait failed: it fails alike.
+    if (failed && made <= failed.writesMade) throw failed.error;
+    const waited = this.awaitLocalFirst(error);
+    this.writesWaiting++;
+    return waited
+      .then(
+        () => this.runOnCurrent(schema, write),
+        (failure: unknown) => {
+          this.failedWait = { error: failure, writesMade: this.writesMade };
+          throw failure;
+        },
+      )
+      .finally(() => {
+        this.writesWaiting--;
+      });
+  }
+
+  /**
+   * Wait for the local-first client after the thin one refused `refused`,
+   * which touches an end-to-end encrypted column, and start loading it if
+   * it isn't: resolves with the Db that does this one's work then, once it
+   * has verified the account. Throws `refused` at once when no loader is
+   * known. A failed load, the deadline, a sign-out, an account switch or a
+   * close ends the wait. A live query passes `deadline: false`: it waits
+   * for the hand-over only, with no deadline.
+   */
+  private awaitLocalFirst(refused: EncryptionNeedsLocalFirstError, deadline = true): Promise<Db> {
+    const loader = localFirstLoaderOf(this);
+    if (!loader) throw refused;
+    return this.untilLocalFirst(refused, loader, deadline);
+  }
+
+  private untilLocalFirst(
+    refused: EncryptionNeedsLocalFirstError,
+    loader: LocalFirstLoader,
+    deadline: boolean,
+  ): Promise<Db> {
+    const { operation, table, column } = refused;
+    const failed = (reason: "load-failed" | "timeout", cause?: unknown) =>
+      new EncryptionNeedsLocalFirstError(
+        { reason, operation, table, ...(column === undefined ? {} : { column }) },
+        cause === undefined ? undefined : { cause },
+      );
+    let end!: (error: Error) => void;
+    const ended = new Promise<never>((_, reject) => {
+      // Handed over: this Db closes, and the wait ends with the upgrade.
+      end = (error) => {
+        if (!this.successor) reject(error);
+      };
+    });
+    this.localFirstWaitEnders.add(end);
+    const stopOnShutdown = this.onShutdown(() =>
+      end(this.replaced ?? new DbClosedError("closing")),
+    );
+    const started = Date.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      if (deadline) timer = setTimeout(() => reject(failed("timeout")), LOCAL_FIRST_WAIT_MS);
+    });
+    const upgraded = upgradeDbToLocalFirst(this, loader).catch((cause: unknown) => {
+      throw this.replaced ?? failed("load-failed", cause);
+    });
+    for (const outcome of [ended, timedOut, upgraded]) outcome.catch(() => undefined);
+    return Promise.race([upgraded, ended, timedOut])
+      .then(() => {
+        const next = this.current();
+        if (next === this) {
+          // The session moved on without upgrading this Db.
+          this.assertOpen();
+          throw failed("load-failed", new Error("the session did not upgrade this Db"));
+        }
+        if (!deadline) return next;
+        // A local-first client that has just opened reads and writes
+        // encrypted columns once it has verified the account, which syncs
+        // what names them: that is part of the wait. If it fails, the
+        // operation gets the local-first client's own answer.
+        const left = Math.max(1, LOCAL_FIRST_WAIT_MS - (Date.now() - started));
+        const verified = next.encryption.ready({ timeoutMs: left }).catch(() => undefined);
+        return Promise.race([verified, timedOut]).then(() => next);
+      })
+      .finally(() => {
+        clearTimeout(timer);
+        this.localFirstWaitEnders.delete(end);
+        stopOnShutdown();
+      });
+  }
+
+  /**
+   * Hold a live query the thin client refused (it reads an encrypted
+   * column) until the local-first client takes over this Db's live queries,
+   * which opens it there, and start loading that client. It emits nothing
+   * meanwhile. At the deadline it warns once and keeps waiting: only a
+   * failed load, a sign-out, an account switch or a close end it, through
+   * `fail`. Returns how to stop holding it, or nothing without a loader.
+   */
+  private parkUntilLocalFirst(
+    refused: EncryptionNeedsLocalFirstError,
+    fail: (error: unknown) => void,
+  ): (() => void) | undefined {
+    if (!localFirstLoaderOf(this)) return undefined;
+    let stopped = false;
+    const warning = setTimeout(
+      () =>
+        console.warn(
+          `A live query on \`${refused.table}\` reads end-to-end encrypted columns and is waiting for the local-first client, which has not loaded within ${LOCAL_FIRST_WAIT_MS / 1000} seconds. It stays loading until that client loads.`,
+        ),
+      LOCAL_FIRST_WAIT_MS,
+    );
+    void this.awaitLocalFirst(refused, false)
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          if (!stopped) fail(error);
+        },
+      )
+      .finally(() => clearTimeout(warning));
+    return () => {
+      stopped = true;
+      clearTimeout(warning);
+    };
+  }
+
+  /**
+   * A callback transaction runs once more, on the local-first client, when
+   * the thin client refused it (an operation in it touched an encrypted
+   * column), once that client has loaded; or when this Db handed over to
+   * that client while the transaction waited, so the closed thin runtime
+   * ended it before anything of it was sent. At most once: `rerun` itself
+   * never runs it again.
+   *
+   * One admitted behind a write waiting for the local-first client begins
+   * only after that write, so what ends it shows in its commit: it resolves
+   * once that commit is made, or with its rerun.
+   */
+  private rerunOnLocalFirst<R extends WriteHandle<unknown, unknown>>(
+    attempt: Promise<R>,
+    rerun: (db: Db) => Promise<R>,
+  ): Promise<R> {
+    const again = (error: unknown): Promise<R> | undefined => {
+      if (error instanceof EncryptionNeedsLocalFirstError)
+        return this.awaitLocalFirst(error).then(rerun);
+      if (this.successor && closedBeforeSending(error)) return rerun(this.current());
+      return undefined;
+    };
+    const behindWait = this.writesWaiting > 0;
+    return attempt.then(
+      (result) =>
+        behindWait
+          ? result.txId.then(
+              () => result,
+              // Otherwise its wait reports the failure, as for any commit.
+              (error: unknown) => again(error) ?? result,
+            )
+          : result,
+      (error: unknown) => {
+        const rerun = again(error);
+        if (!rerun) throw error;
+        return rerun;
+      },
+    );
   }
 
   protected getAccessContext(): DbAccessContext | null {
@@ -3247,21 +3509,31 @@ export class Db {
     const value = deferred ? immediateWriteRow(table, id!, values) : undefined;
     const output = (row: WasmRow) =>
       transformOutputRow<T>(table, transformRow(row, table._schema, table._table));
-    const inserted = runAfterPreparation(client, () =>
-      client.insert(
-        table._table,
-        values,
-        normalizeSelectorOptions(table._schema, table._table, id ? { ...options, id } : options),
-        context?.writeSession,
-        context?.attribution,
+    const inserted = this.runWrite(table._schema, (client, db) =>
+      db.readied(
+        client.insert(
+          table._table,
+          values,
+          normalizeSelectorOptions(table._schema, table._table, id ? { ...options, id } : options),
+          context?.writeSession,
+          context?.attribution,
+        ),
       ),
     );
     return this.wrapWriteWait(
       inserted instanceof Promise
-        ? new WriteResult(
-            value ?? output(client.previewInsertInternal(table._table, values, id)),
-            inserted.then((result) => result.txId),
-            client,
+        ? this.heldBack(
+            new WriteResult(
+              // Waiting for the local-first client: a thin one can't
+              // preview, and the row's id was reserved.
+              value ??
+                (isThinDb(this)
+                  ? immediateWriteRow(table, id!, values)
+                  : output(client.previewInsertInternal(table._table, values, id))),
+              inserted.then((result) => result.txId),
+              client,
+            ),
+            inserted,
           )
         : inserted.mapValue(output),
     );
@@ -3281,12 +3553,12 @@ export class Db {
     options?: StreamingInsertOptions,
   ): Promise<WriteHandle<{ id: string }>> {
     assertWritableTable(table);
-    const client = this.getClient(table._schema);
+    this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
     rejectComputedWrites(table, ordinaryData);
     notifyLocalWrite(this);
     const id = options?.id;
-    return runAfterPreparation(client, async () => {
+    return this.runWrite(table._schema, async (client) => {
       const transformedData = transformInputColumns(table, ordinaryData);
       const values = toWriteRecordForOperation(
         "Insert",
@@ -3323,12 +3595,12 @@ export class Db {
     options?: UpdateOptions,
   ): Promise<WriteHandle<{ id: string }>> {
     assertWritableTable(table);
-    const client = this.getClient(table._schema);
+    this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
     rejectComputedWrites(table, ordinaryData);
     notifyLocalWrite(this);
     const context = this.getAccessContext();
-    return runAfterPreparation(client, async () => {
+    return this.runWrite(table._schema, async (client) => {
       const transformedData = transformInputColumns(table, ordinaryData);
       const values = toWriteRecordForOperation(
         "Update",
@@ -3356,12 +3628,12 @@ export class Db {
     options?: UpdateOptions,
   ): Promise<WriteHandle<{ id: string }>> {
     assertWritableTable(table);
-    const client = this.getClient(table._schema);
+    this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
     rejectComputedWrites(table, ordinaryData);
     notifyLocalWrite(this);
     const context = this.getAccessContext();
-    return runAfterPreparation(client, async () => {
+    return this.runWrite(table._schema, async (client) => {
       const transformedData = transformInputColumns(table, ordinaryData);
       const values = toWriteRecordForOperation(
         "Upsert",
@@ -3409,22 +3681,30 @@ export class Db {
     const value = deferred ? immediateWriteRow(table, id, values) : undefined;
     const output = (row: WasmRow) =>
       transformOutputRow<T>(table, transformRow(row, table._schema, table._table));
-    const restored = runAfterPreparation(client, () =>
-      client.restore(
-        table._table,
-        id,
-        values,
-        normalizeSelectorOptions(table._schema, table._table, options),
-        context?.writeSession,
-        context?.attribution,
+    const restored = this.runWrite(table._schema, (client, db) =>
+      db.readied(
+        client.restore(
+          table._table,
+          id,
+          values,
+          normalizeSelectorOptions(table._schema, table._table, options),
+          context?.writeSession,
+          context?.attribution,
+        ),
       ),
     );
     return this.wrapWriteWait(
       restored instanceof Promise
-        ? new WriteResult(
-            value ?? output(client.previewInsertInternal(table._table, values, id)),
-            restored.then((result) => result.txId),
-            client,
+        ? this.heldBack(
+            new WriteResult(
+              value ??
+                (isThinDb(this)
+                  ? immediateWriteRow(table, id, values)
+                  : output(client.previewInsertInternal(table._table, values, id))),
+              restored.then((result) => result.txId),
+              client,
+            ),
+            restored,
           )
         : restored.mapValue(output),
     );
@@ -3451,17 +3731,18 @@ export class Db {
     data: Record<string, unknown>,
     operation: "Update" | "Upsert",
     options?: UpdateOptions,
-    stage?: (values: ReturnType<typeof toWriteRecord>) => WriteHandle,
+    stage?: (values: ReturnType<typeof toWriteRecord>, client: JazzClient) => WriteHandle,
   ): WriteHandle {
     const client = this.getClient(table._schema);
     rejectComputedWrites(table, data);
     if (getOwnerPreparation(client)?.pending) data = { ...data };
     const context = this.getAccessContext();
     const normalized = normalizeViewOptions(table._schema, table._table, options);
-    const result = runAfterPreparation(client, () => {
+    const result = this.runWrite(table._schema, (client, db) => db.readied(mutate(client)));
+    function mutate(client: JazzClient): WriteHandle | Promise<WriteHandle> {
       const submit = (record: Record<string, unknown>) => {
         const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
-        if (stage) return stage(values);
+        if (stage) return stage(values, client);
         return operation === "Upsert"
           ? client.upsert(
               table._table,
@@ -3506,12 +3787,15 @@ export class Db {
           }
         });
       }
-    });
+    }
     return this.wrapWriteWait(
       result instanceof Promise
-        ? new WriteHandle(
-            result.then((handle) => handle.txId),
-            client,
+        ? this.heldBack(
+            new WriteHandle(
+              result.then((handle) => handle.txId),
+              client,
+            ),
+            result,
           )
         : result,
     );
@@ -3550,12 +3834,12 @@ export class Db {
     options?: LoweredUpdateOptions,
   ): WriteHandle {
     assertWritableTable(table);
-    const client = this.getClient(table._schema);
+    this.getClient(table._schema);
     const { replacements, descriptors } = lowerUpdate(table, data, options);
     options = withoutEditedFrom(options);
     const context = this.getAccessContext();
     if (descriptors.length > 0) {
-      return this.prepareMutation(table, id, replacements, "Update", options, (updates) =>
+      return this.prepareMutation(table, id, replacements, "Update", options, (updates, client) =>
         client.updateLargeValues(
           table._table,
           id,
@@ -3579,20 +3863,25 @@ export class Db {
     assertWritableTable(table);
     const client = this.getClient(table._schema);
     const context = this.getAccessContext();
-    const result = runAfterPreparation(client, () =>
-      client.delete(
-        table._table,
-        id,
-        normalizeViewOptions(table._schema, table._table, options),
-        context?.writeSession,
-        context?.attribution,
+    const result = this.runWrite(table._schema, (client, db) =>
+      db.readied(
+        client.delete(
+          table._table,
+          id,
+          normalizeViewOptions(table._schema, table._table, options),
+          context?.writeSession,
+          context?.attribution,
+        ),
       ),
     );
     return this.wrapWriteWait(
       result instanceof Promise
-        ? new WriteHandle(
-            result.then((handle) => handle.txId),
-            client,
+        ? this.heldBack(
+            new WriteHandle(
+              result.then((handle) => handle.txId),
+              client,
+            ),
+            result,
           )
         : result,
     );
@@ -3719,6 +4008,15 @@ export class Db {
   transaction<TResult>(
     callback: (tx: TransactionScope<"mergeable">) => TResult | Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>> {
+    return this.rerunOnLocalFirst(this.transactionOnce(callback), (db) =>
+      db.transactionOnce(callback),
+    );
+  }
+
+  /** {@link transaction}, run once: never again on the local-first client. */
+  private transactionOnce<TResult>(
+    callback: (tx: TransactionScope<"mergeable">) => TResult | Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
     return runInTransaction(
       transaction,
@@ -3733,6 +4031,15 @@ export class Db {
    * @returns a write result containing the result of the callback
    */
   serializableTransaction<TResult>(
+    callback: (tx: TransactionScope<"serializable">) => TResult | Promise<TResult>,
+  ): Promise<SerializableWriteResult<Awaited<TResult>>> {
+    return this.rerunOnLocalFirst(this.serializableTransactionOnce(callback), (db) =>
+      db.serializableTransactionOnce(callback),
+    );
+  }
+
+  /** {@link serializableTransaction}, run once: never again on the local-first client. */
+  private serializableTransactionOnce<TResult>(
     callback: (tx: TransactionScope<"serializable">) => TResult | Promise<TResult>,
   ): Promise<SerializableWriteResult<Awaited<TResult>>> {
     const transaction = this.beginSerializableTransaction();
@@ -3821,6 +4128,10 @@ export class Db {
       // (its own runtime closing): the successor answers it. Any other
       // error is the read's own answer.
       if (this.successor && isRuntimeClosed(error)) return this.current().all(query, options);
+      // The thin client refused it, as it reads an encrypted column: the
+      // local-first client answers it once loaded.
+      if (error instanceof EncryptionNeedsLocalFirstError)
+        return (await this.awaitLocalFirst(error)).all(query, options);
       throw error;
     }
   }
@@ -3831,7 +4142,9 @@ export class Db {
   ): Promise<T[]> {
     const client = this.getClient(query._schema);
     const preparation = getOwnerPreparation(client);
-    if (preparation?.pending) await preparation.drain();
+    // A write waiting for the local-first client isn't made yet, so this
+    // read couldn't see it anyway: it doesn't wait behind it.
+    if (preparation?.pending && this.writesWaiting === 0) await preparation.drain();
     // A newly attached browser-worker follower learns the namespace-wide
     // connection state during its init handshake. The core read gate needs
     // that state before it decides whether the first load may wait.
@@ -3960,33 +4273,79 @@ export class Db {
       typeof callbacks === "function" ? { onDelta: callbacks, onError: undefined } : callbacks;
     let ready: Promise<void> | undefined;
     let first = true;
+    const fail = (error: Error) => {
+      if (onError) onError(error);
+      else console.error("Unhandled Jazz subscription error", error);
+    };
+    // Refused by the thin client and held until the local-first one took over.
+    let wasParked = false;
     const stop = this.registerMovable((db) => {
       // On the successor the query starts over: its opening result replaces
       // what the subscriber has, rows the upgrade already read in included.
       let opening = !first;
       first = false;
-      const handle = db.subscribeDeltaHere(
-        query,
-        {
-          onDelta: (delta) => {
-            if (opening) {
-              opening = false;
-              onDelta({
-                delta: delta.delta,
-                all: delta.all ?? [],
-                reset: true,
-              });
-              return;
-            }
-            onDelta(delta);
+      let parked: (() => void) | undefined;
+      const open = () => {
+        const handle = db.subscribeDeltaHere(
+          query,
+          {
+            onDelta: (delta) => {
+              if (opening) {
+                opening = false;
+                onDelta({
+                  delta: delta.delta,
+                  all: delta.all ?? [],
+                  reset: true,
+                });
+                return;
+              }
+              onDelta(delta);
+            },
+            onError: (error) => {
+              // The thin client refused it, as it reads an encrypted column:
+              // it waits, with nothing emitted, for the local-first client,
+              // which opens it when it takes over this Db's live queries.
+              if (error instanceof EncryptionNeedsLocalFirstError) {
+                parked = db.parkUntilLocalFirst(error, (failure) => {
+                  stop();
+                  fail(toError(failure));
+                });
+                if (parked) {
+                  wasParked = true;
+                  return;
+                }
+              }
+              fail(error);
+            },
           },
-          ...(onError === undefined ? {} : { onError }),
-        },
-        options,
-        session,
-      );
-      ready ??= handle.ready;
-      return handle;
+          options,
+          session,
+        );
+        ready ??= handle.ready;
+        return handle;
+      };
+      if (!wasParked) {
+        const handle = open();
+        return () => {
+          handle();
+          parked?.();
+        };
+      }
+      // A local-first client that has just opened reads encrypted columns
+      // once it has verified the account, which syncs what names them:
+      // opened sooner, the query would answer without them and stay so.
+      let dropped = false;
+      let handle: SubscriptionHandle | undefined;
+      void Promise.resolve()
+        .then(() => db.encryption.ready({ timeoutMs: LOCAL_FIRST_WAIT_MS }))
+        .catch(() => undefined)
+        .then(() => {
+          if (!dropped) handle = open();
+        });
+      return () => {
+        dropped = true;
+        handle?.();
+      };
     });
     const handle = (() => stop()) as SubscriptionHandle;
     if (ready) Object.defineProperty(handle, "ready", { value: ready });
@@ -4314,6 +4673,7 @@ export class Db {
     this.replaced = error;
     for (const end of Array.from(this.liveSubscriptionEnders)) end(error);
     this.liveSubscriptionEnders.clear();
+    for (const end of Array.from(this.localFirstWaitEnders)) end(error);
   }
 
   /**
@@ -4327,6 +4687,13 @@ export class Db {
   adoptSuccessor(next: Db): void {
     if (this.successor) throw new Error("This Db already has a successor");
     const own = this.currentRuntime();
+    // Writes this Db still holds back (waiting for the local-first client,
+    // or queued behind one that is) run on `next` first, then those made on
+    // `next` from now on.
+    const ownClient = this.getCurrentClient();
+    const heldBack = ownClient ? getOwnerPreparation(ownClient)?.pending : undefined;
+    if (heldBack && this.clientSchema)
+      void ownerPreparation(next.getClient(this.clientSchema)).run(() => heldBack);
     this.successor = next;
     // A read still waiting for this runtime's server (the server is down)
     // asks `next` instead: only the drain below waits for that server.
@@ -5003,6 +5370,36 @@ export function holdCredentialRenewal(db: object): () => void {
 }
 
 /** `error` says the runtime closed, also when a connection wrapped it as its cause. */
+/** A write held back that failed before it was made: it was never sent. */
+function unmadeWriteEvent(error: unknown, number: number): MutationErrorEvent {
+  const transactionId = `unmade:${number}` as TxId;
+  const reason = error instanceof Error ? error.message : String(error);
+  return {
+    code: "not_sent",
+    reason,
+    transaction: {
+      transactionId,
+      kind: "mergeable",
+      sealed: true,
+      latestSettlement: { kind: "missing", transactionId },
+    },
+  };
+}
+
+/**
+ * Whether `error` says the runtime had closed before the request was sent.
+ * A request in flight when it closed (`ThinConnectionLostError`) may have
+ * reached the server: that is not this.
+ */
+function closedBeforeSending(error: unknown): boolean {
+  let closed = false;
+  for (let current = error; current instanceof Error; current = current.cause) {
+    if (current.name === "ThinConnectionLostError") return false;
+    if (current instanceof RuntimeClosedError) closed = true;
+  }
+  return closed;
+}
+
 function isRuntimeClosed(error: unknown): boolean {
   for (let current = error; current instanceof Error; current = current.cause)
     if (current instanceof RuntimeClosedError) return true;

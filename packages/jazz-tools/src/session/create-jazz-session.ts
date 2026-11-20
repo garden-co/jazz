@@ -421,12 +421,18 @@ export async function openBrowserSessionCore(
       createThinDb,
     );
     let pending: Promise<void> | undefined;
-    setLocalFirstUpgrader(thin.db, (loader) => {
-      pending ??= upgrade(loader).finally(() => {
-        pending = undefined;
-      });
-      return pending;
-    });
+    // With the app's loader, an operation on an encrypted column waits for
+    // the upgrade, and starts it if it hasn't started.
+    setLocalFirstUpgrader(
+      thin.db,
+      (loader) => {
+        pending ??= upgrade(loader).finally(() => {
+          pending = undefined;
+        });
+        return pending;
+      },
+      loadLocalFirst,
+    );
     return upgradableClient(thin);
   };
 

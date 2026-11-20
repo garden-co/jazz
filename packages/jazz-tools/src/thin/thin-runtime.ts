@@ -103,6 +103,12 @@ import {
 } from "./encrypted-guard.js";
 import { EncryptionNeedsLocalFirstError } from "../runtime/encryption-needs-local-first.js";
 
+/** @internal What a refusal of an operation on an encrypted column becomes. */
+export type ThinRefusalReview = (
+  refusal: EncryptionNeedsLocalFirstError,
+  inTransaction: boolean,
+) => EncryptionNeedsLocalFirstError;
+
 export interface ThinRuntimeOptions {
   /** WebSocket implementation; the global one by default. */
   WebSocket?: WebSocketConstructor;
@@ -352,6 +358,7 @@ export class ThinRuntime implements Runtime {
   /** Every request passes it before it is encoded (see `admit`). */
   private readonly guard: EncryptedGuard;
   private refusalReason: () => ThinRefusalReason = () => "no-loader";
+  private refusalReview?: ThinRefusalReview;
 
   constructor(schema: WasmSchema, options: ThinRuntimeOptions = {}) {
     this.schema = schema;
@@ -365,10 +372,12 @@ export class ThinRuntime implements Runtime {
 
   /**
    * @internal How a refusal of an operation on an encrypted column advises
-   * the app: by who opened this runtime's `Db`.
+   * the app: by who opened this runtime's `Db`, and what `review` makes of
+   * it, given whether the operation was in a transaction.
    */
-  adviseRefusals(reason: () => ThinRefusalReason): void {
+  adviseRefusals(reason: () => ThinRefusalReason, review?: ThinRefusalReview): void {
     this.refusalReason = reason;
+    this.refusalReview = review;
   }
 
   // ---- connection -------------------------------------------------------
@@ -775,7 +784,9 @@ export class ThinRuntime implements Runtime {
         const id = (request as { transaction?: unknown }).transaction;
         const transaction =
           typeof id === "string" ? this.transactions.get(id as OpenTransactionId) : undefined;
-        if (transaction) transaction.refused ??= error;
+        const refusal = this.refusalReview?.(error, typeof id === "string") ?? error;
+        if (transaction) transaction.refused ??= refusal;
+        throw refusal;
       }
       throw error;
     }
@@ -1349,7 +1360,16 @@ export class ThinRuntime implements Runtime {
     sessionJson?: string | null,
   ): OpenTransactionId {
     this.refuseOtherSession(sessionJson, "Begin transaction");
-    if (this.closed) throw new Error("Begin transaction failed: the thin runtime is closed");
+    if (this.closed)
+      throw new Error("Begin transaction failed: the thin runtime is closed", {
+        cause: new RuntimeClosedError("the thin runtime is closed"),
+      });
+    // Its Db handed over: a transaction admitted behind writes made before
+    // that begins on the successor instead, after them.
+    if (this.handedOver)
+      throw new Error("Begin transaction failed: the Db handed over to its local-first successor", {
+        cause: new RuntimeClosedError("the thin runtime handed over"),
+      });
     if (this.transactions.has(id)) {
       throw new Error(`Begin transaction failed: transaction ${id} has already been opened`);
     }
