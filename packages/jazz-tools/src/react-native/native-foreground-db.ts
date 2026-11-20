@@ -75,6 +75,11 @@ export class NativeForegroundDb {
   private slowQueryLogUnsupported = false;
   private pendingUploadCountUnsupported = false;
   private uploadStatusUnsupported = false;
+  /**
+   * A tick failure met while an encryption call waited. The call is not its
+   * owner, so the next `tick()` (the core's own driver) throws it.
+   */
+  private heldTickFailure: { error: unknown } | undefined;
 
   constructor(
     private readonly runtime: NativeForegroundRuntime,
@@ -183,6 +188,15 @@ export class NativeForegroundDb {
 
   tick(): void {
     this.assertOpen();
+    const held = this.heldTickFailure;
+    if (held) {
+      this.heldTickFailure = undefined;
+      throw held.error;
+    }
+    this.driveTick();
+  }
+
+  private driveTick(): void {
     this.runtime.tick();
     if (!this.mutationErrorCallback && !this.authRejectedCallback && !this.upstreamFailureCallback)
       return;
@@ -378,7 +392,10 @@ export class NativeForegroundDb {
   async encryptionCall(op: string, args?: Record<string, unknown> | null): Promise<string> {
     // The relay drives readiness even while its owner is busy. Polling that
     // operation must leave JS free to answer private store requests.
-    const response = await this.completeOperation(this.encryptionCommand(op, args), op !== "ready");
+    const response = await this.completeOperation(
+      this.encryptionCommand(op, args),
+      op === "ready" ? "pollOnly" : "sharedTick",
+    );
     return this.encryptionResult(op, response);
   }
 
@@ -924,22 +941,45 @@ export class NativeForegroundDb {
     };
   }
 
+  /**
+   * Polls an admitted operation to its result. `drive` says how the wait
+   * treats the core tick:
+   * - `ownTick`: ticks, and a tick failure is the operation's (streaming
+   *   mutations run through the core), so it cancels the operation;
+   * - `sharedTick`: ticks, but the relay runs the operation (encryption
+   *   calls), so a tick failure is not its own. Cancelling would drop work
+   *   that may not be repeatable (a spent approval). The operation keeps
+   *   polling to its own result and the first failure is held for the next
+   *   `tick()`, whose caller owns core failures;
+   * - `pollOnly`: never ticks (readiness, which must not wait for the owner).
+   * Only the operation's own poll failure, or closing, cancels it otherwise.
+   */
   private async completeOperation(
     response: ForegroundResponse,
-    driveCore = true,
+    drive: "ownTick" | "sharedTick" | "pollOnly" = "ownTick",
   ): Promise<ForegroundResponse> {
     while (response.type === "pending") {
       const operation = response.operation;
       try {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        if (driveCore) this.tick();
+        if (drive === "ownTick") this.tick();
+        if (drive === "sharedTick") this.tickAlongside();
         response = this.execute({ type: "poll", operation });
       } catch (error) {
-        this.cancelInterruptedOperation(operation, driveCore);
+        this.cancelInterruptedOperation(operation, drive !== "pollOnly");
         throw error;
       }
     }
     return response;
+  }
+
+  private tickAlongside(): void {
+    this.assertOpen();
+    try {
+      this.driveTick();
+    } catch (error) {
+      this.heldTickFailure ??= { error };
+    }
   }
 
   private cancelInterruptedOperation(operation: number, probe: boolean): void {
