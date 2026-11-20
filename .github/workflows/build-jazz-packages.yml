@@ -46,6 +46,9 @@ on:
         value: ${{ jobs.assemble-jazz-rn.outputs.artifact }}
 
 env:
+  # Fail closed: only main, release and merge-group/** restore caches an
+  # untrusted ref could have written (#supply-chain, 2026-11-19).
+  JAZZ_TRUSTED_CACHE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) && 'true' || 'false' }}
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
   JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
 
@@ -77,16 +80,19 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
           setup-node: "false"
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
+          use-cache: ${{ env.JAZZ_TRUSTED_CACHE == 'true' }}
           version: 0.14.0
           cache-key: ${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ matrix.target }}
 
       - uses: ./.github/actions/install-rust-tool
         with:
+          restore-cache: ${{ env.JAZZ_TRUSTED_CACHE }}
           tool: cargo-zigbuild@0.20.1
 
       - name: Build server binary
@@ -179,6 +185,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
           # Only main pushes write the cache: they are what warms it, and a
@@ -189,11 +196,13 @@ jobs:
 
       - uses: ./.github/actions/install-rust-tool
         with:
+          restore-cache: ${{ env.JAZZ_TRUSTED_CACHE }}
           tool: wasm-pack@0.13.1
 
       # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
       # time, with no retry: keep them, so a flaky CDN can't fail a release.
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - if: env.JAZZ_TRUSTED_CACHE == 'true'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/.wasm-pack
           key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -235,6 +244,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
           # Only main pushes write the cache: they are what warms it, and a
@@ -245,11 +255,13 @@ jobs:
 
       - uses: ./.github/actions/install-rust-tool
         with:
+          restore-cache: ${{ env.JAZZ_TRUSTED_CACHE }}
           tool: wasm-pack@0.13.1
 
       # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
       # time, with no retry: keep them, so a flaky CDN can't fail a release.
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - if: env.JAZZ_TRUSTED_CACHE == 'true'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/.wasm-pack
           key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -293,6 +305,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
           # Only main pushes write the cache: they are what warms it, and a
@@ -303,6 +316,7 @@ jobs:
 
       - uses: ./.github/actions/install-rust-tool
         with:
+          restore-cache: ${{ env.JAZZ_TRUSTED_CACHE }}
           tool: wasm-pack@0.13.1
 
       # The whole script, not bare wasm-pack: it also runs the size-tuned
@@ -346,6 +360,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
           # Only main pushes write the cache: they are what warms it, and a
@@ -356,11 +371,13 @@ jobs:
 
       - uses: ./.github/actions/install-rust-tool
         with:
+          restore-cache: ${{ env.JAZZ_TRUSTED_CACHE }}
           tool: wasm-pack@0.13.1
 
       # wasm-pack downloads wasm-bindgen and binaryen (wasm-opt) at build
       # time, with no retry: keep them, so a flaky CDN can't fail a release.
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - if: env.JAZZ_TRUSTED_CACHE == 'true'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/.wasm-pack
           key: wasm-pack-0.13.1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -401,6 +418,7 @@ jobs:
       - uses: ./.github/actions/setup-build
         if: ${{ !startsWith(matrix.platform, 'linux-') }}
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-targets: ${{ matrix.target }}
           sccache: ${{ matrix.use_sccache && 'true' || 'false' }}
           # Off for every platform today; if a matrix entry turns it on, only
@@ -412,7 +430,7 @@ jobs:
       # Cargo.lock (the workspace version), so start from this platform's last
       # build anyway, and only the workspace crates recompile.
       - name: Cache baseline-specific Linux Cargo products
-        if: startsWith(matrix.platform, 'linux-')
+        if: "env.JAZZ_TRUSTED_CACHE == 'true' && (startsWith(matrix.platform, 'linux-'))"
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: target/linux-napi-*
@@ -473,6 +491,7 @@ jobs:
       # LTO link, so it never hit, and installing it cost ~2 minutes.
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-targets: ${{ matrix.target }}
           rust-cache-key: jazz-rn-android-${{ matrix.abi }}
           setup-node: "false"
@@ -570,6 +589,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           setup-node: "false"
           rust-cache: "false"
           rust-targets: ${{ matrix.target }}
@@ -588,6 +608,7 @@ jobs:
         id: sccache
         uses: ./.github/actions/apple-sccache
         with:
+          restore-cache: ${{ env.JAZZ_TRUSTED_CACHE }}
           key: jazz-rn-${{ matrix.target }}
           min-os: ios${{ steps.ios.outputs.min }}
           writer-role: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
@@ -680,6 +701,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           setup-node: "false"
           rust-cache: "false"
           rust-targets: ${{ matrix.target }}
@@ -739,6 +761,8 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc
+          # setup-node v5+ caches the packageManager's store without `cache:`.
+          package-manager-cache: ${{ env.JAZZ_TRUSTED_CACHE == 'true' }}
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -780,6 +804,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-toolchain: ""
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
@@ -945,6 +970,7 @@ jobs:
           ref: ${{ inputs.ref }}
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-toolchain: ""
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
@@ -987,6 +1013,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-toolchain: ""
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
@@ -1052,6 +1079,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-toolchain: ""
 
       # Gradle's distribution, dependencies and build cache on a sticky disk
@@ -1131,13 +1159,15 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-toolchain: ""
 
       # pod install's downloads: React Native's prebuilt tarballs (which
       # pod-install-retrying.sh copies in and out) and CocoaPods' own caches.
       # Its version is pinned by the lockfile; an older entry is harmless,
       # since the tarballs are named by version.
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      - if: env.JAZZ_TRUSTED_CACHE == 'true'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/Library/Caches/CocoaPods
@@ -1237,6 +1267,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           rust-toolchain: ""
 
       - name: The version and source revision

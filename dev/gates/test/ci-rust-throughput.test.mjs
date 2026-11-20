@@ -764,7 +764,7 @@ test("trusted runners consume the validated immutable tool bundle", () => {
   assert.match(setupBuildAction, /Jobs are clients only/);
   assert.match(
     setupBuildAction,
-    /name: Cache Rust build artifacts[\s\S]*if: inputs\.rust-toolchain != '' && inputs\.rust-cache == 'true' && steps\.provisioned-tools\.outputs\.active != 'true'[\s\S]*uses: Swatinem\/rust-cache@/,
+    /name: Cache Rust build artifacts[\s\S]*if: inputs\.rust-toolchain != '' && inputs\.rust-cache == 'true' && inputs\.restore-caches == 'true' && steps\.provisioned-tools\.outputs\.active != 'true'[\s\S]*uses: Swatinem\/rust-cache@/,
     "rust-cache cleanup must never mutate a provisioned runner's shared Rust homes",
   );
   assert.doesNotMatch(
@@ -781,7 +781,7 @@ test("trusted runners consume the validated immutable tool bundle", () => {
           " && steps.provisioned-tools.outputs.active != 'true'\n      uses: Swatinem/rust-cache@",
           "\n      uses: Swatinem/rust-cache@",
         ),
-        /name: Cache Rust build artifacts[\s\S]*if: inputs\.rust-toolchain != '' && inputs\.rust-cache == 'true' && steps\.provisioned-tools\.outputs\.active != 'true'[\s\S]*uses: Swatinem\/rust-cache@/,
+        /name: Cache Rust build artifacts[\s\S]*if: inputs\.rust-toolchain != '' && inputs\.rust-cache == 'true' && inputs\.restore-caches == 'true' && steps\.provisioned-tools\.outputs\.active != 'true'[\s\S]*uses: Swatinem\/rust-cache@/,
       ),
     /rust-cache/,
   );

@@ -59,6 +59,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
 env:
+  # Fail closed: only main, release and merge-group/** restore caches an
+  # untrusted ref could have written (#supply-chain, 2026-11-19).
+  JAZZ_TRUSTED_CACHE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) && 'true' || 'false' }}
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
   JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
 

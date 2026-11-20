@@ -52,6 +52,10 @@ inputs:
     description: "Commit the sccache sticky disk after the job ('true', 'false', 'on-change', 'if-missing'). 'false' keeps the job a read-only consumer, and its post step off the critical path."
     required: false
     default: "true"
+  restore-caches:
+    description: "'false' restores nothing from a cache an untrusted ref could have written: no setup-node pnpm cache, no rust-cache, no cached Rust tools (commit-gated sticky disks stay). release-artifacts.yml and everything it calls pass 'true' only on main, release and merge-group/** (dev/gates/test/release-artifacts-trusted-caches.test.mjs)."
+    required: false
+    default: "true"
   sccache-s3:
     description: "Chain the job-local sccache to the shared S3 tier (disk,s3). Only for callers that already authenticated and exported the trusted S3 configuration, as ci-suite.yml's trusted jobs do."
     required: false
@@ -95,7 +99,9 @@ runs:
       uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
       with:
         node-version-file: .nvmrc
-        cache: pnpm
+        cache: ${{ inputs.restore-caches == 'true' && 'pnpm' || '' }}
+        # setup-node v5+ caches the packageManager's store without `cache:`.
+        package-manager-cache: ${{ inputs.restore-caches == 'true' }}
         cache-dependency-path: |
           pnpm-lock.yaml
           .github-cache-scope
@@ -130,7 +136,7 @@ runs:
       # host-owned shared Cargo state on those runners, so one job can remove
       # registry sources while another job is compiling.  Keep rust-cache
       # confined to hosted jobs, whose mutable Rust homes are job-local.
-      if: inputs.rust-toolchain != '' && inputs.rust-cache == 'true' && steps.provisioned-tools.outputs.active != 'true'
+      if: inputs.rust-toolchain != '' && inputs.rust-cache == 'true' && inputs.restore-caches == 'true' && steps.provisioned-tools.outputs.active != 'true'
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
         cache-on-failure: true
@@ -148,6 +154,7 @@ runs:
       uses: ./.github/actions/install-rust-tool
       with:
         tool: sccache@0.15.0
+        restore-cache: ${{ inputs.restore-caches }}
 
     - name: Mount sccache sticky disk
       if: inputs.sccache == 'true' && inputs.sccache-sticky-disk == 'true' && runner.os == 'Linux' && steps.provisioned-tools.outputs.active != 'true'
