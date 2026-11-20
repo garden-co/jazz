@@ -43,6 +43,7 @@ export const ciPartitionJobs = Object.freeze({
   "rust-differential": "test-storage-compat",
   "storage-compat": "test-storage-compat",
   "durable-object-limits": "test-durable-object-limits",
+  "wasm-durable-object": "test-wasm-durable-object",
   // One test-ts matrix job per TypeScript shard (see typescriptPartitions).
   "typescript-tools-node-1": "test-ts",
   "typescript-tools-node-2": "test-ts",
@@ -469,6 +470,18 @@ export const ciPartitions = Object.freeze({
       "--workspace",
       "--features",
       "jazz-core/durable-object-limits",
+    ]),
+  ]),
+  // jazz-wasm's own Durable Object suite in workerd, through Miniflare (the
+  // host, its smoke test and R2 large values; crates/jazz-wasm/tests/
+  // durable-objects). It needs dev builds with the test-only
+  // `durable-object-tests` feature (a panic route, held limits), so it can't
+  // reuse the -O1 host tools-other builds; its two builds share one compile.
+  "wasm-durable-object": Object.freeze([
+    command("jazz-wasm Durable Object suite", "pnpm", [
+      "--filter",
+      "jazz-wasm",
+      "test:durable-objects",
     ]),
   ]),
   // jazz-ffi's generated Kotlin and Swift, compiled with smoke programs and
