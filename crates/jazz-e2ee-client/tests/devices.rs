@@ -1597,3 +1597,156 @@ fn devices_are_listed_and_a_challenge_is_noticed() {
         assert!(listed.iter().all(|device| device.id != second.id()));
     });
 }
+
+/// Every file of the SQLite database at `from`, copied to `to`.
+fn copy_database(from: &std::path::Path, to: &std::path::Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let source = std::path::PathBuf::from(format!("{}{suffix}", from.display()));
+        if source.exists() {
+            std::fs::copy(&source, format!("{}{suffix}", to.display())).unwrap();
+        }
+    }
+}
+
+/// `client` on a new session of `server`.
+fn attach(server: &Db, client: E2eeClient, who: AuthorSubject, node: u8) -> Device {
+    let (db, link) = session(
+        &client,
+        server,
+        who,
+        &EncryptionSettings::default(),
+        node,
+        None,
+    );
+    Device {
+        client,
+        db,
+        _link: link,
+    }
+}
+
+/// Contract: once alice has seen bob remove a device, a server restored
+/// from a copy taken before the removal cannot make her deliver a space key
+/// to the account epoch the removed device holds: her device kept a floor
+/// for bob's account, which survives a restart, so the pass over the space
+/// is `stale-state` and writes nothing. The floor is wiped with her held
+/// keys.
+///
+/// ```text
+/// alice: space, bob a member without the key; bob: two devices (copy taken)
+/// bob ──remove second device (bob's epoch e1 → e2)──► server
+/// alice ──pass: delivery to bob at e2──► server        (floor for bob: e2)
+/// alice (restarted) ──pass──► restored copy (bob at e1) ──✗ stale-state
+/// ```
+#[test]
+fn a_member_shown_from_before_a_device_removal_gets_no_delivery() {
+    within(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("server.sqlite");
+        let old = dir.path().join("old.sqlite");
+        let settings = EncryptionSettings::default();
+        let alice = account(0xa1);
+        let bob = account(0xb0);
+        let alice_store = memory();
+        let deliveries = "__e2ee_space_deliveries";
+
+        let (alice_client, bob_first, removed, space) = {
+            let server = secure_authority_with(&settings, Some(&live));
+            let alice_device = device(&server, alice, alice_store.clone(), 1, &settings);
+            assert_eq!(alice_device.status(&server, &[]), AccountStatus::Active);
+            let space = space_with_a_note(&server, &alice_device, &account_id(alice));
+            let first = device(&server, bob, memory(), 2, &settings);
+            assert_eq!(first.status(&server, &[]), AccountStatus::Active);
+            let second = device(&server, bob, memory(), 3, &settings);
+            second.status(&server, &[&first]);
+            approve(&server, &first, &second);
+            assert_eq!(second.status(&server, &[&first]), AccountStatus::Active);
+            let scope = alice_device
+                .db
+                .table_identity("projects")
+                .unwrap()
+                .unwrap()
+                .0;
+            let member = std::collections::BTreeMap::from([
+                ("scopeId".to_owned(), Value::Uuid(scope)),
+                ("identifier".to_owned(), Value::Uuid(space)),
+                (
+                    "accountId".to_owned(),
+                    Value::Uuid(uuid::Uuid::parse_str(&account_id(bob)).unwrap()),
+                ),
+            ]);
+            block_on(
+                alice_device
+                    .db
+                    .insert("__e2ee_members", member, Default::default()),
+            )
+            .unwrap();
+            pump(&server, &alice_device.db);
+            assert_eq!(count(&server, deliveries), 0, "bob lacks the key");
+            (alice_device.client, first.client, second.id(), space)
+        };
+        copy_database(&live, &old);
+
+        let alice_client = {
+            let server = secure_authority_with(&settings, Some(&live));
+            let first = attach(&server, bob_first, bob, 4);
+            drive(
+                &server,
+                &[&first.db],
+                first.client.remove_device(&first.db, &removed),
+            )
+            .unwrap();
+            // Alice's own account is not verified again: her own floor stays
+            // at a cut the restored copy reaches, so only bob's floor can
+            // refuse what it shows.
+            let alice_device = attach(&server, alice_client, alice, 5);
+            let address = space_address(&alice_device, space);
+            let delivered = drive(
+                &server,
+                &[&alice_device.db],
+                alice_device
+                    .client
+                    .deliver_space(&alice_device.db, &address),
+            )
+            .unwrap();
+            assert_eq!(delivered, 1, "bob is served at his new epoch");
+            assert_eq!(count(&server, deliveries), 1);
+            alice_device.client
+        };
+        let floor = block_on(alice_client.floor(&account_id(bob)));
+        assert!(floor.is_some(), "alice keeps a floor for bob's account");
+        drop(alice_client);
+
+        let restarted = open_account(alice_store.clone(), alice, settings.clone(), None);
+        assert_eq!(block_on(restarted.floor(&account_id(bob))), floor);
+        let restored = secure_authority_with(&settings, Some(&old));
+        let alice_device = attach(&restored, restarted, alice, 6);
+        assert_eq!(alice_device.status(&restored, &[]), AccountStatus::Active);
+        let address = space_address(&alice_device, space);
+        let refused = drive(
+            &restored,
+            &[&alice_device.db],
+            alice_device
+                .client
+                .deliver_space(&alice_device.db, &address),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(ClientError::Protocol(ProtocolError::StaleState))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            count(&restored, deliveries),
+            0,
+            "nothing is delivered to the removed device's epoch"
+        );
+        assert_eq!(block_on(alice_device.client.floor(&account_id(bob))), floor);
+
+        block_on(alice_device.client.wipe()).unwrap();
+        let fresh = open_account(alice_store, alice, settings, None);
+        assert_eq!(block_on(fresh.floor(&account_id(bob))), None);
+        assert_eq!(fresh.with_held(|held| held.spaces().len()), 0);
+    });
+}

@@ -18,7 +18,7 @@ use jazz::db::{Db, Error, ErrorCode};
 use jazz::e2ee::{E2eeRefusal, SpaceAddress, Unreadable, UnreadableCode};
 use jazz::query::{Query, col, eq, lit};
 use jazz::tools::OpenTransactionId;
-use jazz_e2ee::protocol::account::PublicAccountLedger;
+use jazz_e2ee::protocol::account::{AccountFloor, PublicAccountLedger};
 use jazz_e2ee::protocol::content::{HeldSpace, KeyMark, MissingKey};
 use jazz_e2ee::protocol::error::UnsupportedCapability;
 use jazz_e2ee::protocol::records::space::SpaceAddress as ProtocolAddress;
@@ -203,15 +203,24 @@ impl E2eeClient {
     }
 
     /// The chain of `read`, with the keys this account obtains from it, and
-    /// whether it is a member. This account's own history in the read is
-    /// checked against the floor first: a server that rolled it back (to
-    /// show a removed device as active) is `stale-state`, and nothing of
-    /// the read is used.
+    /// whether it is a member. Every account history in the read is checked
+    /// against this device's floor for that account first (§6.3a): a server
+    /// that rolled one back (to show a removed device as active, or a
+    /// member's epoch from before a device removal) is `stale-state`, and
+    /// nothing of the read is used, so nothing is decrypted, written or
+    /// delivered with it.
+    ///
+    /// Once the read has passed and its chain replayed, the floor of every
+    /// other account whose current state the read verified is stored, or
+    /// advanced if that state changed: the cut, generation, root and
+    /// current epoch of the account's whole public history at this read's
+    /// cut. A state equal to the stored floor writes nothing, so a device
+    /// writes a floor once per account and then only when that account
+    /// changes. The own account's floor is kept by account verification
+    /// alone ([`E2eeClient::ensure_account`]).
     pub(crate) async fn replay_space(&self, read: &SpaceRead) -> Result<Replayed, ClientError> {
         let own = &self.shared.account_id;
         let floor = self.floor(own).await;
-        let account = self.account.borrow();
-        let account = account.as_ref().ok_or(ClientError::NoAccount)?;
         let directory = AccountDirectory::new(
             &read.accounts,
             &self.shared.domain,
@@ -225,23 +234,84 @@ impl E2eeClient {
                 .ok_or(ProtocolError::StaleState)?;
             state.check_floor(read.ledger.through, floor)?;
         }
+        let floors = self.check_others(read, &directory).await?;
         let member = read.ledger.is_member(own);
-        let Some(chain) = SpaceChain::replay(&read.ledger, &directory)? else {
-            return Ok(Replayed {
-                chain: None,
-                held: None,
-                member,
-                acquisition: None,
-            });
+        let replayed = {
+            let account = self.account.borrow();
+            let account = account.as_ref().ok_or(ClientError::NoAccount)?;
+            match SpaceChain::replay(&read.ledger, &directory)? {
+                None => Replayed {
+                    chain: None,
+                    held: None,
+                    member,
+                    acquisition: None,
+                },
+                Some(chain) => {
+                    let acquisition =
+                        acquire(&chain, &read.ledger, &directory, &account.epoch_keys)?;
+                    let held = HeldSpace::from_acquisition(&chain, &acquisition.keys)?;
+                    Replayed {
+                        chain: Some(chain),
+                        held,
+                        member,
+                        acquisition: Some(acquisition),
+                    }
+                }
+            }
         };
-        let acquisition = acquire(&chain, &read.ledger, &directory, &account.epoch_keys)?;
-        let held = HeldSpace::from_acquisition(&chain, &acquisition.keys)?;
-        Ok(Replayed {
-            chain: Some(chain),
-            held,
-            member,
-            acquisition: Some(acquisition),
-        })
+        for (account_id, floor) in &floors {
+            self.advance_floor(account_id, floor).await?;
+        }
+        Ok(replayed)
+    }
+
+    /// Checks the current state of every account in `read` but this
+    /// device's own against its floor, if this device has one (§2.4,
+    /// "Floors"): an account with a floor whose read shows no counting
+    /// root, an earlier cut or generation, or a chain without the floor's
+    /// epoch is `stale-state`; a replaced root is `root-not-mine`. Returns
+    /// the floors to store once the read is used: those of the accounts
+    /// with a current state that differs from their stored floor, or that
+    /// have none yet. An account whose current state cannot be evaluated
+    /// is neither checked nor floored: every use of that state (its
+    /// sealing keys, its current epoch) fails the same way.
+    async fn check_others(
+        &self,
+        read: &SpaceRead,
+        directory: &AccountDirectory<'_>,
+    ) -> Result<Vec<(String, AccountFloor)>, ClientError> {
+        let through = read.ledger.through;
+        let mut advance = Vec::new();
+        for ledger in &read.accounts {
+            let account_id = &ledger.account_id;
+            if *account_id == self.shared.account_id {
+                continue;
+            }
+            let Ok(state) = directory.current(account_id) else {
+                continue;
+            };
+            let stored = self.floor(account_id).await;
+            let Some(state) = state else {
+                if stored.is_some() {
+                    return Err(ProtocolError::StaleState.into());
+                }
+                continue;
+            };
+            if let Some(stored) = &stored {
+                state.check_floor(through, stored)?;
+            }
+            let floor = state.floor(through, None);
+            let unchanged = stored.is_some_and(|stored| {
+                AccountFloor {
+                    through: stored.through,
+                    ..floor.clone()
+                } == stored
+            });
+            if !unchanged {
+                advance.push((account_id.clone(), floor));
+            }
+        }
+        Ok(advance)
     }
 
     /// Acquires the keys of `space` (protocol §3.3): reads its rows and
