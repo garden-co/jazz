@@ -22,7 +22,7 @@ let rollbacks = 0;
 function parameterize(text) {
   const blobs = [];
   let out = "";
-  for (let i = 0; i < text.length; ) {
+  for (let i = 0; i < text.length;) {
     const c = text[i];
     if ((c === "x" || c === "X") && text[i + 1] === "'" && !/[\w]/.test(text[i - 1] ?? "")) {
       const end = text.indexOf("'", i + 2);

@@ -3066,7 +3066,7 @@ describe("createJazz", () => {
     });
     // ...and let a send already under way finish.
     const sendsSoFar = () => requestPaths.filter((path) => path === sessionPath).length;
-    for (let seen = -1; seen !== sendsSoFar(); ) {
+    for (let seen = -1; seen !== sendsSoFar();) {
       seen = sendsSoFar();
       await new Promise((resolve) => setTimeout(resolve, 300));
     }

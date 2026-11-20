@@ -8,7 +8,7 @@
     "build": "env NEXT_PUBLIC_APP_ORIGIN=http://127.0.0.1:3000 JAZZ_APP_ID=00000000-0000-0000-0000-000000000301 BETTER_AUTH_SECRET=2ff8ef66a6ee1a1e551a8f0c7dfa9c8d6fd4cc683a963f04989fdd84cc9cdb53 sh -c 'jazz-tools generate && next build'",
     "start": "next start",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "test:e2e": "playwright test"
   },
   "dependencies": {

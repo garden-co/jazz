@@ -645,33 +645,34 @@ function pauseAfterFirstChunkFrame(coreUrl: string, tag: number) {
   const held: Uint8Array[] = [];
   let socket: WebSocket | undefined;
   let receivedChunks = false;
-  const gate = vi
-    .spyOn(WebSocket.prototype, "send")
-    .mockImplementation(function (this: WebSocket, data) {
-      if (
-        new URL(this.url).host !== host ||
-        !(data instanceof Uint8Array) ||
-        (socket && this !== socket)
-      ) {
-        return send.call(this, data);
-      }
-      const frames = decodeWebSocketFrameBatch(data);
-      if (!socket) {
-        const first = frames.findIndex((frame) => frame[0] === tag);
-        if (first < 0) return send.call(this, data);
-        socket = this;
-        socket.addEventListener("message", (event) => {
-          if (
-            event.data instanceof ArrayBuffer &&
-            decodeWebSocketFrameBatch(new Uint8Array(event.data)).some((frame) => frame[0] === 7)
-          ) {
-            receivedChunks = true;
-          }
-        });
-        send.call(this, encodeWebSocketFrameBatch(frames.splice(0, first + 1)));
-      }
-      held.push(...frames);
-    });
+  const gate = vi.spyOn(WebSocket.prototype, "send").mockImplementation(function (
+    this: WebSocket,
+    data,
+  ) {
+    if (
+      new URL(this.url).host !== host ||
+      !(data instanceof Uint8Array) ||
+      (socket && this !== socket)
+    ) {
+      return send.call(this, data);
+    }
+    const frames = decodeWebSocketFrameBatch(data);
+    if (!socket) {
+      const first = frames.findIndex((frame) => frame[0] === tag);
+      if (first < 0) return send.call(this, data);
+      socket = this;
+      socket.addEventListener("message", (event) => {
+        if (
+          event.data instanceof ArrayBuffer &&
+          decodeWebSocketFrameBatch(new Uint8Array(event.data)).some((frame) => frame[0] === 7)
+        ) {
+          receivedChunks = true;
+        }
+      });
+      send.call(this, encodeWebSocketFrameBatch(frames.splice(0, first + 1)));
+    }
+    held.push(...frames);
+  });
   return {
     held,
     get receivedChunks() {

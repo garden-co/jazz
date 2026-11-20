@@ -63,11 +63,11 @@ it("refuses to send a serializable branch read over a link without the feature",
   const masked = (features: number) => features & ~FEATURE_SERIALIZABLE_BRANCH_READS;
   const spies = [WasmDb.prototype, NapiDb.prototype].map((prototype) => {
     const original = prototype.wireFeatures;
-    return vi
-      .spyOn(prototype, "wireFeatures")
-      .mockImplementation(function (this: typeof prototype) {
-        return masked(original.call(this));
-      });
+    return vi.spyOn(prototype, "wireFeatures").mockImplementation(function (
+      this: typeof prototype,
+    ) {
+      return masked(original.call(this));
+    });
   });
   const server = await startTestJazz({ app, permissions, coreOptions: { inMemory: true } });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;

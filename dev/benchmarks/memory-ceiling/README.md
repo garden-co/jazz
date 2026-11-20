@@ -51,7 +51,7 @@ true peak of a fresh process).
 For each scenario the adapter declares:
 
 1. Starts the server binary as tenant pods do (`jazz-tools server <app>
---data-dir …`, `NODE_ENV=production`, `MIMALLOC_ARENA_RESERVE=0`, heap
+   --data-dir …`, `NODE_ENV=production`, `MIMALLOC_ARENA_RESERVE=0`, heap
    sampling at the shipped default) and deploys the app's schema and
    permissions.
 2. **Grows** the data in steps (×1.5 by default) through the app's schema:

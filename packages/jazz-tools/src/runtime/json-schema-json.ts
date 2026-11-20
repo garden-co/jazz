@@ -274,7 +274,7 @@ function toFraction(value: number): [bigint, bigint] {
 function powi(base: number, exponent: number): number {
   let result = 1;
   let factor = base;
-  for (let remaining = exponent; ; ) {
+  for (let remaining = exponent; ;) {
     if (remaining & 1) result *= factor;
     remaining = Math.trunc(remaining / 2);
     if (remaining === 0) break;
