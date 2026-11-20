@@ -15,8 +15,12 @@
 //   maven-central.mjs upload <out.zip> <version> <USER_MANAGED|AUTOMATIC> [--drop]
 //       Skips when Central already has <version>. Otherwise uploads the
 //       bundle and polls the deployment: USER_MANAGED until VALIDATED (and
-//       then drops it with --drop: a dry run), AUTOMATIC until PUBLISHED.
-//       Reports how long each state took.
+//       then drops it with --drop: a dry run), AUTOMATIC until PUBLISHING.
+//       Reports how long each state took; writes deployment_id and
+//       uploaded_at (ms) to GITHUB_OUTPUT.
+//   maven-central.mjs await-served <version> <minutes> [uploaded_at]
+//       Waits (no credentials) until repo1.maven.org serves both POMs;
+//       exit 1 after <minutes>.
 //
 // Auth: MAVEN_CENTRAL_USERNAME and MAVEN_CENTRAL_PASSWORD (a Portal user token).
 import { execFileSync } from "node:child_process";
@@ -170,7 +174,12 @@ async function upload(zip, version, type, drop) {
   const id = (await portal("POST", `/upload?${query}`, form)).trim();
   const seen = [[`uploaded (${id})`, Date.now()]];
   console.log(`deployment ${id} (${type})`);
-  const target = type === "AUTOMATIC" ? "PUBLISHED" : "VALIDATED";
+  // AUTOMATIC returns once Central is PUBLISHING: it can't fail validation
+  // any more, and the rest (~11 min for alpha.68) is Central's own work,
+  // which the maven-published job watches off the critical path.
+  const target = type === "AUTOMATIC" ? "PUBLISHING" : "VALIDATED";
+  if (process.env.GITHUB_OUTPUT)
+    appendFileSync(process.env.GITHUB_OUTPUT, `deployment_id=${id}\nuploaded_at=${started}\n`);
   let state = "";
   // Up to 60 minutes: Central's publishing can take that long on a bad day.
   for (let i = 0; i < 360; i++) {
@@ -185,10 +194,10 @@ async function upload(zip, version, type, drop) {
       if (await isPublished(version)) break;
       throw new Error(`deployment ${id} failed: ${JSON.stringify(status.errors ?? status)}`);
     }
-    if (state === target) break;
+    if (state === target || (target === "PUBLISHING" && state === "PUBLISHED")) break;
     await new Promise((r) => setTimeout(r, 10_000));
   }
-  if (state !== target && state !== "FAILED")
+  if (state !== target && state !== "FAILED" && !(target === "PUBLISHING" && state === "PUBLISHED"))
     throw new Error(`deployment ${id} is ${state} after 60 minutes`);
   if (drop) {
     await portal("DELETE", `/deployment/${encodeURIComponent(id)}`);
@@ -205,11 +214,49 @@ async function upload(zip, version, type, drop) {
   summary(lines.join("\n"));
 }
 
+/** The POM URLs Maven Central serves for `version`: what consumers resolve. */
+export function servedUrls(version) {
+  return Object.keys(ARTIFACTS).map(
+    (artifact) =>
+      `https://repo1.maven.org/maven2/${GROUP}/${artifact}/${version}/${artifact}-${version}.pom`,
+  );
+}
+
+/**
+ * Waits until Maven Central serves both artifacts at `version` (no
+ * credentials: repo1.maven.org is public), for at most `minutes`. A deployment
+ * that FAILED never appears there, so it ends as a timeout.
+ */
+async function awaitServed(version, minutes, uploadedAt) {
+  const started = Number(uploadedAt) || Date.now();
+  const deadline = Date.now() + Number(minutes) * 60_000;
+  const urls = servedUrls(version);
+  let missing = urls;
+  while (missing.length > 0 && Date.now() < deadline) {
+    const still = [];
+    for (const url of missing) {
+      const response = await fetch(url, { method: "HEAD" }).catch(() => null);
+      if (!response?.ok) still.push(url);
+    }
+    missing = still;
+    if (missing.length > 0) await new Promise((r) => setTimeout(r, 20_000));
+  }
+  const after = Math.round((Date.now() - started) / 1000);
+  if (missing.length > 0) {
+    summary(
+      `### Maven Central: NOT served ${after}s after upload (${minutes} min ceiling)\n\n${missing.map((u) => `- ${u}`).join("\n")}\n`,
+    );
+    process.exit(1);
+  }
+  summary(`### Maven Central: served on repo1.maven.org ${after}s after upload\n`);
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (command === "bundle") return bundle(args[0], args[1], args[2]);
   if (command === "published") process.exit((await isPublished(args[0])) ? 0 : 1);
   if (command === "upload") return upload(args[0], args[1], args[2], args.includes("--drop"));
+  if (command === "await-served") return awaitServed(args[0], args[1], args[2]);
   throw new Error(
     "usage: maven-central.mjs bundle <tree> <version> <out.zip> | published <version> | upload <zip> <version> <type> [--drop]",
   );
