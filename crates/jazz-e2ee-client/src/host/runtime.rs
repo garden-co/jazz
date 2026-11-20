@@ -16,6 +16,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use crate::state::{RETRY_FIRST, RETRY_LAST};
 use crate::{
     AccountStatus, ClientConfig, ClientError, DeviceStatus, E2eeClient, PendingApproval,
     PrivateStore, Report,
@@ -992,10 +993,6 @@ async fn within<F: Future + Unpin>(mut future: F, limit: std::time::Duration) ->
     })
     .await
 }
-
-/// The first wait before verification is tried again, doubling up to the last.
-const RETRY_FIRST: std::time::Duration = std::time::Duration::from_millis(250);
-const RETRY_LAST: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Whether a failed verification may pass when tried again: a failure of the
 /// database or the store (the server out of reach, a disk), not a refusal by

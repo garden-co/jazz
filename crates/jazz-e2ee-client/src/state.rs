@@ -29,6 +29,39 @@ pub const MAX_REPORTS: usize = 10_000;
 /// the next natural moment anyway.
 pub(crate) const MEMBER_CHANGE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The first wait before a failed operation is tried again, doubling up to
+/// the last: the runtime's verification, and the settle of a space whose
+/// acquisition failed.
+pub(crate) const RETRY_FIRST: std::time::Duration = std::time::Duration::from_millis(250);
+pub(crate) const RETRY_LAST: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A space whose settle failed: how many times in a row, and when it may be
+/// tried again. The first failure is retried at the next settle; each later
+/// one waits [`RETRY_FIRST`], doubling up to [`RETRY_LAST`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SettleBackoff {
+    pub(crate) failures: u32,
+    pub(crate) retry_at: web_time::Instant,
+}
+
+impl SettleBackoff {
+    /// After one more failure of a space that had failed `previous` times
+    /// in a row (none: it had not).
+    pub(crate) fn after_failure(previous: Option<Self>) -> Self {
+        let failures = previous.map_or(0, |backoff| backoff.failures) + 1;
+        let wait = match failures {
+            1 => std::time::Duration::ZERO,
+            n => RETRY_FIRST
+                .saturating_mul(1 << (n - 2).min(16))
+                .min(RETRY_LAST),
+        };
+        Self {
+            failures,
+            retry_at: web_time::Instant::now() + wait,
+        }
+    }
+}
+
 /// Something a read or a load left for the runtime to act on or pass on.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -399,6 +432,9 @@ pub(crate) struct Shared {
     /// Versions reads needed and did not hold, since the runtime last
     /// looked.
     pub(crate) missing: RefCell<VecDeque<Missing>>,
+    /// Spaces whose settle failed, until one succeeds: a space that keeps
+    /// failing is not read again at every settle.
+    pub(crate) settle_backoff: RefCell<BTreeMap<SpaceAddress, SettleBackoff>>,
     /// Member rows this client's writes staged, with their spaces and when,
     /// until the next pass after they commit serves the space (protocol
     /// §3.4), or until [`MEMBER_CHANGE_WAIT`] passes without the row: a write

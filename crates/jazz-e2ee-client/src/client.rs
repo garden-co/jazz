@@ -230,6 +230,7 @@ impl E2eeClient {
             published: Default::default(),
             creations: Default::default(),
             missing: Default::default(),
+            settle_backoff: Default::default(),
             member_changes: Default::default(),
             member_change_wait: std::cell::Cell::new(crate::state::MEMBER_CHANGE_WAIT),
             collectors: Default::default(),

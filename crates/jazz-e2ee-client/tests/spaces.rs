@@ -452,6 +452,70 @@ fn one_failed_space_does_not_drop_the_others_reports() {
     });
 }
 
+/// Contract: a space whose acquisition keeps failing is not read at every
+/// settle (the host loop settles at every turn): after its first failure it
+/// is retried at once, after the next it waits, longer each time, keeping
+/// its entries. A success ends the wait.
+///
+/// ```text
+/// bob reads notes of `first` (member, delivered); the key save keeps failing
+/// settle ×10 at once ──► first read twice (fail, retry, fail), then waits
+/// store healthy, wait over ──► settled, key held
+/// ```
+#[test]
+fn a_failing_space_is_not_read_at_every_settle() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let first = new_project(&server, &alice, "one");
+        write_note(&server, &alice, first, SECRET).unwrap();
+        pump(&server, &alice.db);
+        drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
+
+        let settings = EncryptionSettings::default();
+        let store = FaultyStore::default();
+        let client = open_account(
+            Rc::new(store.clone()),
+            account(0xb0),
+            settings.clone(),
+            None,
+        );
+        let (db, link) = session(&client, &server, account(0xb0), &settings, 2, None);
+        let bob = Device {
+            who: account(0xb0),
+            client,
+            db,
+            _link: Some(link),
+            live: Default::default(),
+        };
+        bob.activate(&server);
+        add_member(&server, &alice, first, &bob.id());
+        assert_eq!(deliver(&server, &alice, &[&bob], first), 1);
+
+        bob.follow_notes(&server);
+        let prepared = bob.db.prepare_query(&Query::from("notes")).unwrap();
+        assert!(block_on(bob.db.all(&prepared, local())).unwrap().is_empty());
+
+        store.failing.set(true);
+        let before = store.saves.get();
+        let settle = || drive(&server, &[&bob.db], bob.client.settle_reads(&bob.db));
+        for _ in 0..10 {
+            let _ = settle();
+        }
+        assert_eq!(
+            store.saves.get() - before,
+            2,
+            "read once, retried once, then left to wait"
+        );
+
+        store.failing.set(false);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(settle().unwrap(), "settled once the wait is over");
+        assert_eq!(read_notes(&server, &bob, first).unwrap().len(), 1);
+    });
+}
+
 /// Alice's database at `path`, not linked to any server.
 fn offline_db(client: &E2eeClient, who: AuthorSubject, node: u8, path: &std::path::Path) -> Db {
     let config = jazz::db::DbConfig::new(

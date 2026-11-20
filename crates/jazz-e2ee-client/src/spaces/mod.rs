@@ -29,7 +29,7 @@ use crate::account::rows::{self, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
 use crate::hooks::code;
-use crate::state::{Missing, Report, Shared};
+use crate::state::{Missing, Report, SettleBackoff, Shared};
 
 pub use creation::SpaceCreation;
 pub use delivery::MEMBER_LIMIT;
@@ -513,22 +513,43 @@ impl E2eeClient {
     /// Every space is settled. One whose acquisition fails reports nothing
     /// (a failure is not a key's absence) and keeps its entries for the
     /// next settle; the first such error is returned once the others are
-    /// reported.
+    /// reported. A space that failed is retried at the next settle, then
+    /// after a wait that doubles with each failure in a row (see
+    /// [`SettleBackoff`]): until then its entries are kept and it is not
+    /// read. A success ends the wait.
     async fn settle_missing(&self, db: &Db, missing: Vec<Missing>) -> Result<bool, ClientError> {
         let mut by_space: BTreeMap<SpaceAddress, Vec<Missing>> = BTreeMap::new();
         for entry in missing {
             by_space.entry(entry.space.clone()).or_default().push(entry);
         }
+        // A space no read waits on any more has nothing to back off from.
+        self.shared
+            .settle_backoff
+            .borrow_mut()
+            .retain(|space, _| by_space.contains_key(space));
+        let now = web_time::Instant::now();
         let mut reports = Vec::new();
         let mut held = false;
         let mut failure = None;
         for (space, entries) in by_space {
+            let backoff = self.shared.settle_backoff.borrow().get(&space).copied();
+            if backoff.is_some_and(|backoff| now < backoff.retry_at) {
+                for entry in entries {
+                    self.shared.missing(entry);
+                }
+                continue;
+            }
             match self.settle_space(db, &space, &entries).await {
                 Ok((settled, any_held)) => {
+                    self.shared.settle_backoff.borrow_mut().remove(&space);
                     reports.extend(settled);
                     held |= any_held;
                 }
                 Err(error) => {
+                    self.shared
+                        .settle_backoff
+                        .borrow_mut()
+                        .insert(space, SettleBackoff::after_failure(backoff));
                     for entry in entries {
                         self.shared.missing(entry);
                     }
