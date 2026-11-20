@@ -4,7 +4,8 @@
 //!
 //! Encrypted cells are ciphertext to such a database, so it never answers
 //! with them: a read returns each row of an encrypted table without its
-//! encrypted columns (and their equality tokens), a write that names an
+//! encrypted columns (and their equality tokens, and any other column with
+//! the reserved `__e2ee_eq_` prefix), a write that names an
 //! encrypted column is refused, and a query that filters, orders or selects
 //! one is refused naming the pattern. Plain tables and plain columns of an
 //! encrypted table work as usual. It has no account, no store and nothing
@@ -19,7 +20,7 @@ use jazz::e2ee::{
     StreamTarget, WriteCells, WriteKind,
 };
 use jazz::query::Query;
-use jazz::tools::deployment::artifact::encryption::equality_column;
+use jazz::tools::deployment::artifact::encryption::{EQUALITY_PREFIX, equality_column};
 
 use crate::hooks::unsupported_query;
 
@@ -90,6 +91,17 @@ impl E2eeHooks for KeylessHooks {
         let sealed = self.sealed(site.table);
         for row in rows.iter_mut() {
             for name in &sealed {
+                row.remove_cell(name);
+            }
+            // A column with the equality-token prefix is reserved: a query
+            // that selects one by name is refused, so a full-row read does
+            // not answer it either, declared as a token or not.
+            let reserved: Vec<String> = row
+                .cells()
+                .filter(|(name, _)| name.starts_with(EQUALITY_PREFIX))
+                .map(|(name, _)| name.to_owned())
+                .collect();
+            for name in &reserved {
                 row.remove_cell(name);
             }
         }

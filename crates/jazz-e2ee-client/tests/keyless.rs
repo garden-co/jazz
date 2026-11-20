@@ -32,7 +32,9 @@ const SECRET: &str = "PLAINTEXT-ONLY-ALICE-KNOWS";
 /// an encrypted column, and a filter, ordering or selection of one, are
 /// refused. Alice's secret never reaches the backend's store as plaintext.
 /// Alice sees what the backend writes to plain columns, including one whose
-/// name resembles an equality token for an unindexed field.
+/// name resembles an equality token for an unindexed field; the backend
+/// writes that one but does not read it back (the prefix is reserved: a
+/// full-row read leaves it out, and selecting it is refused).
 ///
 /// ```text
 /// alice ──sealed row──► server ──► backend (keyless hooks)
@@ -80,7 +82,9 @@ fn a_keyless_backend_relays_ciphertext_and_works_on_plain_columns() {
         rows[0].cell("plainNote"),
         Some(Value::Nullable(Some(Box::new(text("hello")))))
     );
-    assert_eq!(rows[0].cell(PLAIN_COLUMN), Some(plain_bytes(b"hello")));
+    // A column with the reserved prefix is not answered either, as a
+    // query selecting it by name is refused (below).
+    assert_eq!(rows[0].cell(PLAIN_COLUMN), None);
     for sealed in ["body", "note", "attachment", "rank", "__e2ee_eq_body"] {
         assert_eq!(rows[0].cell(sealed), None, "{sealed} is not answered");
     }
