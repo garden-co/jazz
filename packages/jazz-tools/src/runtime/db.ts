@@ -3144,12 +3144,13 @@ export class Db {
    * ended it before anything of it was sent. At most once: `rerun` itself
    * never runs it again.
    *
-   * One admitted behind a write waiting for the local-first client begins
-   * only after that write, so what ends it shows in its commit: it resolves
-   * once that commit is made, or with its rerun.
+   * One made behind earlier writes on a thin client (one waiting for the
+   * local-first client, or one still in the queue that may yet wait) begins
+   * only after them, so what ends it shows in its commit: it resolves once
+   * that commit is made, or with its rerun.
    */
   private rerunOnLocalFirst<R extends WriteHandle<unknown, unknown>>(
-    attempt: Promise<R>,
+    attempt: () => Promise<R>,
     rerun: (db: Db) => Promise<R>,
   ): Promise<R> {
     const again = (error: unknown): Promise<R> | undefined => {
@@ -3158,8 +3159,12 @@ export class Db {
       if (this.successor && closedBeforeSending(error)) return rerun(this.current());
       return undefined;
     };
-    const behindWait = this.writesWaiting > 0;
-    return attempt.then(
+    // Decided before it is queued itself.
+    const client = this.getCurrentClient();
+    const behindWait =
+      this.writesWaiting > 0 ||
+      (isThinDb(this) && client !== null && getOwnerPreparation(client)?.pending !== undefined);
+    return attempt().then(
       (result) =>
         behindWait
           ? result.txId.then(
@@ -4090,8 +4095,9 @@ export class Db {
   transaction<TResult>(
     callback: (tx: TransactionScope<"mergeable">) => TResult | Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>> {
-    return this.rerunOnLocalFirst(this.transactionOnce(callback), (db) =>
-      db.transactionOnce(callback),
+    return this.rerunOnLocalFirst(
+      () => this.transactionOnce(callback),
+      (db) => db.transactionOnce(callback),
     );
   }
 
@@ -4115,8 +4121,9 @@ export class Db {
   serializableTransaction<TResult>(
     callback: (tx: TransactionScope<"serializable">) => TResult | Promise<TResult>,
   ): Promise<SerializableWriteResult<Awaited<TResult>>> {
-    return this.rerunOnLocalFirst(this.serializableTransactionOnce(callback), (db) =>
-      db.serializableTransactionOnce(callback),
+    return this.rerunOnLocalFirst(
+      () => this.serializableTransactionOnce(callback),
+      (db) => db.serializableTransactionOnce(callback),
     );
   }
 

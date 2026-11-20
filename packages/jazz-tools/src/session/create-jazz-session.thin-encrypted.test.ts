@@ -844,6 +844,48 @@ describe("a thin session of an app with encrypted columns", () => {
     expect(texts(await kept.all(app.comments, { tier: "remote" }))).toEqual(["in a transaction"]);
   }, 90_000);
 
+  it("reruns a callback transaction queued behind a write that waits only once it runs", async () => {
+    const host = await serve();
+    const { kept, gate, project } = await thinMember(host);
+    // A plain streaming insert holds the queue; the encrypted insert behind
+    // it is refused, and waits, only once the stream ends. The transaction
+    // is queued behind both, though nothing waited when it was made.
+    let endStream!: () => void;
+    const streamEnds = new Promise<void>((resolve) => (endStream = resolve));
+    async function* chunks(): AsyncGenerator<string> {
+      yield "streamed ";
+      await streamEnds;
+      yield "note";
+    }
+    const streaming = kept.insertStreaming(app.notes, { text: chunks() });
+    const task = kept.insert(app.tasks, {
+      projectId: project,
+      title: "behind the stream",
+    } as never);
+    let runs = 0;
+    const result = settled(
+      kept.transaction((tx) => {
+        runs++;
+        tx.insert(app.notes, { text: "in a transaction" } as never);
+        return runs;
+      }),
+    );
+    endStream();
+    gate.release();
+
+    await (await streaming).wait({ tier: "global" });
+    await task.wait({ tier: "global" });
+    const { value: written, error } = await result;
+    expect(error).toBeUndefined();
+    await written!.wait({ tier: "global" });
+    expect(written!.value).toBe(2);
+    expect(runs).toBe(2);
+    expect(texts(await kept.all(app.notes, { tier: "remote" })).sort()).toEqual([
+      "in a transaction",
+      "streamed note",
+    ]);
+  }, 90_000);
+
   it("reruns a callback transaction at most once, whichever ends each run", async () => {
     const host = await serve();
     const gate = gatedLoader();
