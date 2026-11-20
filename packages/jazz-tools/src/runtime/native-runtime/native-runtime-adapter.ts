@@ -1191,7 +1191,10 @@ export class NativeRuntimeAdapter implements Runtime {
   ) {
     // The app's code sees encrypted columns as their plaintext types; what
     // goes to the database (`schemaBytes`, the hash) stays as stored.
-    (this as unknown as { schema: WasmSchema }).schema = plainSchema(schema, opts?.plainEntries);
+    // A keyless backend's reads carry no encrypted column: optional there.
+    (this as unknown as { schema: WasmSchema }).schema = plainSchema(schema, opts?.plainEntries, {
+      keyless: opts?.keyless !== undefined,
+    });
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
     this.readAuthorizationHost =
       opts?.owner?.readAuthorizationHost ?? opts?.readAuthorizationHost ?? "client-local";
