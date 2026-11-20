@@ -454,6 +454,34 @@ pub(crate) struct Shared {
     pub(crate) wrapped_writes: std::cell::Cell<usize>,
 }
 
+/// Queues `missing`, at most `cap` entries. A full queue drops its oldest
+/// entry of a space that is not backed off: a backed-off space's entries
+/// are the rows its reads are unresolved for (re-queued ahead of newer
+/// ones), so they go last. When every entry is backed off, `missing` itself
+/// is dropped; a later read reports it again.
+fn enqueue_missing(
+    queue: &mut VecDeque<Missing>,
+    backoff: &BTreeMap<SpaceAddress, SettleBackoff>,
+    missing: Missing,
+    cap: usize,
+) {
+    if queue.contains(&missing) {
+        return;
+    }
+    if queue.len() >= cap {
+        match queue
+            .iter()
+            .position(|entry| !backoff.contains_key(&entry.space))
+        {
+            Some(oldest) => {
+                queue.remove(oldest);
+            }
+            None => return,
+        }
+    }
+    queue.push_back(missing);
+}
+
 impl Shared {
     pub(crate) fn report(&self, report: Report) {
         {
@@ -496,13 +524,12 @@ impl Shared {
 
     pub(crate) fn missing(&self, missing: Missing) {
         let mut queue = self.missing.borrow_mut();
-        if queue.contains(&missing) {
-            return;
-        }
-        if queue.len() == MAX_REPORTS {
-            queue.pop_front();
-        }
-        queue.push_back(missing);
+        enqueue_missing(
+            &mut queue,
+            &self.settle_backoff.borrow(),
+            missing,
+            MAX_REPORTS,
+        );
     }
 
     /// Delivers what the hooks reported since the last call to the
@@ -594,5 +621,57 @@ pub(crate) fn db_address(
     SpaceAddress {
         scope_id: address.scope_id.clone(),
         identifier: address.identifier.clone(),
+    }
+}
+
+#[cfg(test)]
+mod missing_queue_tests {
+    use super::*;
+
+    fn entry(space: &str, n: u8) -> Missing {
+        Missing {
+            table: "notes".to_owned(),
+            id: RowUuid::from_bytes([n; 16]),
+            column: "body".to_owned(),
+            space: SpaceAddress {
+                scope_id: "scope".to_owned(),
+                identifier: space.to_owned(),
+            },
+            epoch_id: "e".to_owned(),
+        }
+    }
+
+    fn backed_off(space: &str) -> (SpaceAddress, SettleBackoff) {
+        (
+            entry(space, 0).space,
+            SettleBackoff::after_failure(None, ClientError::Unsupported("x".to_owned())),
+        )
+    }
+
+    /// A full queue evicts the oldest entry of a space that is not backed
+    /// off, never a backed-off space's re-queued rows.
+    #[test]
+    fn a_full_queue_keeps_a_backed_off_spaces_rows() {
+        let backoff = BTreeMap::from([backed_off("held")]);
+        let mut queue = VecDeque::new();
+        enqueue_missing(&mut queue, &backoff, entry("held", 1), 3);
+        enqueue_missing(&mut queue, &backoff, entry("other", 2), 3);
+        enqueue_missing(&mut queue, &backoff, entry("other", 3), 3);
+        enqueue_missing(&mut queue, &backoff, entry("other", 4), 3);
+        let ids: Vec<u8> = queue.iter().map(|e| e.id.as_bytes()[0]).collect();
+        assert_eq!(ids, [1, 3, 4]);
+    }
+
+    /// When every queued entry is backed off, the newcomer is dropped.
+    #[test]
+    fn a_queue_of_only_backed_off_rows_drops_the_newcomer() {
+        let backoff = BTreeMap::from([backed_off("held")]);
+        let mut queue = VecDeque::new();
+        for n in 1..=3 {
+            enqueue_missing(&mut queue, &backoff, entry("held", n), 3);
+        }
+        enqueue_missing(&mut queue, &backoff, entry("other", 4), 3);
+        let ids: Vec<u8> = queue.iter().map(|e| e.id.as_bytes()[0]).collect();
+        assert_eq!(ids, [1, 2, 3]);
     }
 }
