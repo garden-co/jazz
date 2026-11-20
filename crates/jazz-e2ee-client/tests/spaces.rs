@@ -2878,6 +2878,58 @@ fn a_lazy_rotation_that_could_not_be_made_is_retried_on_the_next_write() {
     });
 }
 
+/// Contract: the rotation a write tried is that write's own: while a
+/// `write` call runs, host writes it does not wrap still each get their own
+/// rotation chance after each removal, instead of sealing under the version
+/// a removed member holds because an earlier write's mark was still there.
+///
+/// ```text
+/// write call A runs:
+///   alice removes bob ──host write──► NeedsKey ─ prepare_space: rotate ─► note
+///   alice removes carol ──host write──► NeedsKey ─ prepare_space: rotate ─► note
+/// carol reads neither note
+/// ```
+#[test]
+fn host_writes_inside_a_write_call_each_get_their_own_rotation() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        let carol = device(&server, account(0xc0), MemoryStore::new(), 7);
+        carol.activate(&server);
+        add_member(&server, &alice, space, &carol.id());
+        carol.follow_notes(&server);
+        assert_eq!(deliver(&server, &alice, &[&bob, &carol], space), 2);
+        pump(&server, &carol.db);
+        assert_eq!(read_notes(&server, &carol, space).unwrap().len(), 1);
+
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.write(&alice.db, async || {
+                for (removed, body) in [(&bob, "after bob"), (&carol, "after carol")] {
+                    let member = member_row(&server, &removed.id());
+                    block_on(alice.db.delete(MEMBERS, member, Default::default())).unwrap();
+                    host_write_note(&server, &alice, space, body);
+                }
+                Ok(())
+            }),
+        )
+        .unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(
+            count(&server, "__e2ee_space_successors"),
+            2,
+            "each removal's host write rotated first"
+        );
+        pump(&server, &carol.db);
+        assert_eq!(
+            read_notes(&server, &carol, space).unwrap().len(),
+            1,
+            "carol reads only the note from before"
+        );
+    });
+}
+
 /// Contract: a device whose account is no longer a member never delivers,
 /// though it still holds the key: its pass writes nothing and fails nothing.
 #[test]

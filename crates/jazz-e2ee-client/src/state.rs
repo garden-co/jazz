@@ -381,13 +381,19 @@ pub(crate) struct KeyState {
     /// the rows it wrote): the natural moments stop repairing them while the
     /// client runs; an explicit call always attempts (protocol §3.2).
     pub(crate) repair_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
-    /// Spaces whose rotation the current write already tried: it seals under
-    /// the current version whatever came of it, and the mark stays unless
-    /// the rotation succeeded or was refused (protocol §3.5). A write the
-    /// runtime does not wrap (a host's, retried after
+    /// Spaces whose rotation a write already tried, by the write: it seals
+    /// under the current version whatever came of it, and the mark stays
+    /// unless the rotation succeeded or was refused (protocol §3.5). Each
+    /// [`crate::E2eeClient::write`] call has its own marks (`Some` of its
+    /// number), removed when it returns, so a concurrent call to the same
+    /// space still gets its own rotation chance. Writes the runtime does not
+    /// wrap share `None`: such a write (a host's, retried after
     /// [`crate::E2eeClient::prepare_space`]) takes its space's mark when it
-    /// seals, so the next write gets its own rotation chance.
-    pub(crate) rotation_tried: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    /// seals, so the next write gets its own chance.
+    pub(crate) rotation_tried: BTreeSet<(
+        Option<u64>,
+        jazz_e2ee::protocol::records::space::SpaceAddress,
+    )>,
     /// Spaces whose rotation by this device was refused while the client
     /// runs: no automatic rotation, and no evaluation of the mark.
     pub(crate) rotation_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
@@ -456,9 +462,12 @@ pub(crate) struct Shared {
     /// The collectors of the repair reads in flight, each registered for the
     /// duration of its read (protocol §3.2).
     pub(crate) collectors: RefCell<BTreeMap<uuid::Uuid, Collector>>,
-    /// How many [`crate::E2eeClient::write`] calls are running: their
-    /// rounds keep the marks of `rotation_tried` until the call returns.
-    pub(crate) wrapped_writes: std::cell::Cell<usize>,
+    /// The [`crate::E2eeClient::write`] call whose operation is being polled,
+    /// if any: what the hooks seal belongs to that call's `rotation_tried`
+    /// marks.
+    pub(crate) current_write: std::cell::Cell<Option<u64>>,
+    /// The number the next [`crate::E2eeClient::write`] call takes.
+    pub(crate) next_write: std::cell::Cell<u64>,
 }
 
 /// Queues `missing`, at most `cap` entries. A full queue drops its oldest

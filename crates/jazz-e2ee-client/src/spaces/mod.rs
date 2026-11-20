@@ -748,13 +748,10 @@ impl E2eeClient {
     ) -> Result<T, ClientError> {
         self.ensure_open()?;
         self.reconcile_once(db).await?;
-        let _wrapped = WrappedWrite::enter(&self.shared);
+        let call = WrappedWrite::enter(&self.shared);
         for round in 0..ATTEMPTS {
             self.begin_attempt(db).await?;
-            if round == 0 {
-                self.shared.keys.borrow_mut().rotation_tried.clear();
-            }
-            let outcome = op().await;
+            let outcome = call.run(op()).await;
             let staged = std::mem::take(&mut self.shared.creations.borrow_mut().attempt);
             let error = match outcome {
                 Ok(value) => return Ok(value),
@@ -766,7 +763,7 @@ impl E2eeClient {
             let Some(E2eeRefusal::NeedsKey { space }) = E2eeRefusal::of(&error) else {
                 return Err(error.into());
             };
-            if round + 1 == ATTEMPTS || !self.make_ready(db, &space).await? {
+            if round + 1 == ATTEMPTS || !self.make_ready(db, &space, Some(call.id)).await? {
                 return Err(error.into());
             }
         }
@@ -786,7 +783,7 @@ impl E2eeClient {
         self.ensure_open()?;
         self.reconcile_once(db).await?;
         self.begin_attempt(db).await?;
-        self.make_ready(db, space).await
+        self.make_ready(db, space, None).await
     }
 
     /// What each attempt of a write starts with, wrapped or not: the
@@ -816,8 +813,15 @@ impl E2eeClient {
     }
 
     /// Gets a key ready for a write to `space`: whether the write can be
-    /// tried again.
-    async fn make_ready(&self, db: &Db, space: &SpaceAddress) -> Result<bool, ClientError> {
+    /// tried again. `call` is the [`E2eeClient::write`] call the write runs
+    /// in (`None` for a write no call wraps), whose mark a rotation tried
+    /// here sets.
+    async fn make_ready(
+        &self,
+        db: &Db,
+        space: &SpaceAddress,
+        call: Option<u64>,
+    ) -> Result<bool, ClientError> {
         let address = protocol_address(space)?;
         let online = self.shared.keys.borrow().online;
         // A space that needs rotation is rotated before the write; refused,
@@ -832,7 +836,7 @@ impl E2eeClient {
             let mut keys = self.shared.keys.borrow_mut();
             let pending = keys.rotation_pending.contains(&address);
             if pending || removal {
-                keys.rotation_tried.insert(address.clone());
+                keys.rotation_tried.insert((call, address.clone()));
             }
             pending
         };
@@ -902,24 +906,62 @@ pub(crate) fn has_unpublished(space: &HeldSpace) -> bool {
         .any(|(_, mark)| matches!(mark, KeyMark::Unpublished { .. }))
 }
 
-/// A running [`E2eeClient::write`] call: while any runs, the marks of
-/// `rotation_tried` last for the call's rounds; when the last returns they
-/// are cleared, so a write no call wraps gets its own rotation chance.
-struct WrappedWrite<'a>(&'a Shared);
+/// A running [`E2eeClient::write`] call, with its own number: the marks of
+/// `rotation_tried` it sets last for its rounds and are removed when it
+/// returns. Another call to the same space, running at the same time, has
+/// its own marks, so it gets its own rotation chance.
+struct WrappedWrite<'a> {
+    shared: &'a Shared,
+    id: u64,
+}
 
 impl<'a> WrappedWrite<'a> {
     fn enter(shared: &'a Shared) -> Self {
-        shared.wrapped_writes.set(shared.wrapped_writes.get() + 1);
-        Self(shared)
+        let id = shared.next_write.get();
+        shared.next_write.set(id.wrapping_add(1));
+        Self { shared, id }
+    }
+
+    /// `op` run as this call's: while it is polled, what the hooks seal
+    /// belongs to this call.
+    fn run<F: Future>(&self, op: F) -> InCall<'a, F> {
+        InCall {
+            shared: self.shared,
+            id: self.id,
+            op: Box::pin(op),
+        }
     }
 }
 
 impl Drop for WrappedWrite<'_> {
     fn drop(&mut self) {
-        let left = self.0.wrapped_writes.get().saturating_sub(1);
-        self.0.wrapped_writes.set(left);
-        if left == 0 {
-            self.0.keys.borrow_mut().rotation_tried.clear();
-        }
+        let id = self.id;
+        self.shared
+            .keys
+            .borrow_mut()
+            .rotation_tried
+            .retain(|(call, _)| *call != Some(id));
+    }
+}
+
+/// An operation of a [`WrappedWrite`] call, which names the call as the
+/// current one while it is polled, and restores the one before after.
+struct InCall<'a, F> {
+    shared: &'a Shared,
+    id: u64,
+    op: std::pin::Pin<Box<F>>,
+}
+
+impl<F: Future> Future for InCall<'_, F> {
+    type Output = F::Output;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let before = self.shared.current_write.replace(Some(self.id));
+        let polled = self.op.as_mut().poll(cx);
+        self.shared.current_write.set(before);
+        polled
     }
 }

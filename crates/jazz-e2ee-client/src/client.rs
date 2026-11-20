@@ -236,7 +236,8 @@ impl E2eeClient {
             held_clock: Default::default(),
             member_change_wait: std::cell::Cell::new(crate::state::MEMBER_CHANGE_WAIT),
             collectors: Default::default(),
-            wrapped_writes: Default::default(),
+            current_write: Default::default(),
+            next_write: Default::default(),
         });
         let client = Self {
             hooks: Rc::new(Hooks {

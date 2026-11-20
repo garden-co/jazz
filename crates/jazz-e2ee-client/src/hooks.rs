@@ -335,16 +335,15 @@ impl E2eeHooks for Hooks {
         };
         let address = Self::address(&keys, plan, &identifier).map_err(SealError::Refused)?;
         let refused_here = keys.creation_refused.contains(&address);
-        let tried = keys.rotation_tried.contains(&address);
+        // The marks of the `write` call this write runs in, or of the
+        // writes no call wraps.
+        let mark = (self.shared.current_write.get(), address.clone());
+        let tried = keys.rotation_tried.contains(&mark);
         // A write no `write` call wraps is the retry the mark was made for:
         // it takes the mark, and the next write gets its own chance.
-        let keys = if tried && self.shared.wrapped_writes.get() == 0 {
+        let keys = if tried && mark.0.is_none() {
             drop(keys);
-            self.shared
-                .keys
-                .borrow_mut()
-                .rotation_tried
-                .remove(&address);
+            self.shared.keys.borrow_mut().rotation_tried.remove(&mark);
             self.shared.keys.borrow()
         } else {
             keys
