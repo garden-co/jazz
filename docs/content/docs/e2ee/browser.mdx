@@ -55,6 +55,10 @@ column. Until the upgrade has finished:
   page closes before the upgrade: a write that has not been sent is not saved. If the wait fails, the
   writes queued behind it fail with the same error, and a write nobody awaited is reported to
   `db.onMutationError`. A write that waits is not run after the account changes.
+- **Writes wait for a refused callback transaction.** While a callback transaction that the thin
+  client refused waits for the local-first client, writes you make run after the load, in the order
+  you made them, and after the transaction's rerun starts. During the rerun, other writes behave as
+  they do beside any pending transaction.
 - **A transaction callback may run twice.** `db.transaction(...)` and `db.serializableTransaction(...)`
   start on the thin client. If an operation inside one touches an encrypted column, Jazz rolls the
   transaction back (even if your callback catches the error), waits for the local-first client and runs
@@ -80,8 +84,8 @@ which only the local-first client has:
 - **Async calls wait like any other operation**: `ready()`, `deviceId()`, `devices.*`, `recovery.*`,
   `keys.*` and `members.*` wait up to 30 seconds for the local-first client, start loading it if it
   has not started, then run on the real handle. The 30 seconds cover the load and the new client
-  verifying the account. While the `Db` is thin that is also the longest `ready({ timeoutMs })`
-  waits, whatever `timeoutMs` you pass: past it the call rejects with reason `"timeout"`. They reject with the same `EncryptionNeedsLocalFirstError` as
+  verifying the account. While the `Db` is thin, `ready({ timeoutMs })` waits for the shorter of
+  your `timeoutMs` and those 30 seconds, then rejects with reason `"timeout"`. They reject with the same `EncryptionNeedsLocalFirstError` as
   above (reason `"no-loader"` without a loader). `await db.encryption.ready()` is the way to wait for
   the keys: on a thin `Db` it waits for the upgrade first, then for the device's keys to be ready.
 - **A handle you took while thin keeps working** after the upgrade; you do not need to read

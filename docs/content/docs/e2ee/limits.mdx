@@ -37,7 +37,8 @@ languageTabs: backend
   after it, so one delayed write delays the rest, and a plain read made behind a streaming write that
   waits can wait up to 30 seconds too. A transaction callback may run twice before the
   client has loaded; a transaction you open with `beginTransaction()` is not held behind a waiting
-  callback transaction, so begin it again after the load. A live query on a client that never loads stays loading after its warning, until a failed load, a sign-out or a close ends it. On a thin `Db`, `db.encryption` waits the same way (`keys.*` included, and `ready({ timeoutMs })` waits at most 30 seconds), and `recovery.create()` cannot wait and throws. A sign-out ends waiting calls with `DbClosedError`; a call made afterwards gets `DbReplacedError`. See
+  callback transaction, so begin it again after the load. A callback transaction refused only at
+  commit also holds later writes until its rerun starts. A live query on a client that never loads stays loading after its warning, until a failed load, a sign-out or a close ends it. On a thin `Db`, `db.encryption` waits the same way (`keys.*` included, and `ready({ timeoutMs })` waits at most 30 seconds), and `recovery.create()` cannot wait and throws. A sign-out ends waiting calls with `DbClosedError`; a call made afterwards gets `DbReplacedError`. See
   [Encryption in the browser](/docs/e2ee/browser#before-the-local-first-client-has-loaded).
 - **No default store.** The app supplies the private store and its protection.
 - **Node, the browser and the native clients.** Node (`createJazzClient` from `jazz-tools/backend`), the
