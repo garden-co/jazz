@@ -68,17 +68,19 @@ fn row(generation: u8, index: usize) -> RowUuid {
 
 fn seed_rows(server: &Db, generation: u8, range: std::ops::Range<usize>) {
     for index in range {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "items",
-                row(generation, index),
-                AuthorSubject::SYSTEM,
-                BTreeMap::from([(
-                    "label".to_owned(),
-                    Value::String(format!("g{generation}-{index}")),
-                )]),
-            )
-            .expect("seed");
+        jazz::db::block_on(server.insert(
+            "items",
+            BTreeMap::from([(
+                "label".to_owned(),
+                Value::String(format!("g{generation}-{index}")),
+            )]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(generation, index)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .expect("seed");
     }
 }
 
