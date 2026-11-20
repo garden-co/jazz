@@ -32,13 +32,13 @@ pre-commit:
         # This package owns its Prettier policy (single quotes); root oxfmt
         # otherwise rewrites it to its incompatible default.
         - "crates/jazz-rn/react-native.config.js"
-      run: pnpm exec oxfmt --ignore-path .oxfmtignore {staged_files}
+      run: pnpm exec vp fmt --no-error-on-unmatched-pattern {staged_files}
       stage_fixed: true
     oxlint:
       glob: "*.{ts,tsx,js,jsx}"
-      # CI's ignore file, so the hook never lints or autofixes a file that
+      # CI's root lint config, so the hook never lints or autofixes a file that
       # `pnpm lint` skips (oxlint drops explicitly passed ignored paths).
-      run: pnpm oxlint --fix --ignore-path .oxlintignore {staged_files}
+      run: pnpm exec vp lint --fix --no-error-on-unmatched-pattern {staged_files}
       stage_fixed: true
     # Type-check the docs snippet packages. `--only` skips the topological
     # `^build` chain, which otherwise drags in jazz-rn's native (NDK) build —

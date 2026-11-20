@@ -47,6 +47,8 @@ allowBuilds:
   workerd: true
 
 overrides:
+  # Our Vitest 4 suites use Playwright. Avoid picking up Vite+'s Vitest 5 preview provider.
+  "vitest@4.1.0>@vitest/browser-preview": "-"
   "libsodium-wrappers@0.8.3>libsodium": 0.8.3
   react: 19.2.4
   react-dom: 19.2.4
