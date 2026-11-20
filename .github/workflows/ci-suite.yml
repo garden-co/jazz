@@ -493,6 +493,11 @@ jobs:
   # same way; together they run every TypeScript suite.
   test-ts:
     if: inputs.scope == 'full'
+    # The Turbo signing key lives in this environment, whose deployment
+    # branches are main and merge-group/* only. Other runs (pull requests,
+    # dispatches) get no environment, so they can neither read the key nor
+    # use the remote cache, whatever this file says.
+    environment: ${{ inputs.trusted-cache && inputs.sccache-write && 'turbo-remote-cache' || '' }}
     name: test-ts (${{ matrix.partition }})
     strategy:
       fail-fast: false
@@ -713,18 +718,6 @@ jobs:
           echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
           echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
           echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
-      - name: Export trusted Turbo cache signing key
-        if: inputs.trusted-cache && inputs.sccache-write
-        env:
-          CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-        run: echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"
-      - name: Set up signed Turbo Remote Cache
-        if: steps.decide.outputs.run == 'true' && inputs.trusted-cache && inputs.sccache-write
-        uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0
-        with:
-          team: garden-co
-          policy: pol_0b019736-e95d-4f60-a5dd-e9415148834c
-          audience: https://github.com/garden-co
       - uses: ./.github/actions/setup-blacksmith
         if: steps.decide.outputs.run == 'true'
         with:
@@ -743,6 +736,11 @@ jobs:
   # for native bridge coverage.
   test-react-native:
     if: inputs.scope == 'full'
+    # The Turbo signing key lives in this environment, whose deployment
+    # branches are main and merge-group/* only. Other runs (pull requests,
+    # dispatches) get no environment, so they can neither read the key nor
+    # use the remote cache, whatever this file says.
+    environment: ${{ inputs.trusted-cache && inputs.sccache-write && 'turbo-remote-cache' || '' }}
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 20
     container:
