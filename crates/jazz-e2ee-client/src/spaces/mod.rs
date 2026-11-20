@@ -404,6 +404,7 @@ impl E2eeClient {
         };
         self.withdraw_stale(space, state, member);
         if known(self) != before {
+            self.shared.forget_missing_keys(space);
             let tables = self.tables_of(space);
             let tables: Vec<&str> = tables.iter().map(String::as_str).collect();
             db.refresh_reads_of(&tables)?;

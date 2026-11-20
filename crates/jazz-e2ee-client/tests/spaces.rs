@@ -364,6 +364,104 @@ fn a_member_without_a_delivery_sees_key_pending_once() {
     });
 }
 
+/// Contract: a device that enrols again after its account was reset
+/// forgets what was reported to the device it was: the listener is told
+/// the withdrawal of its `key-pending`, a listener registered later is
+/// told nothing, and the space it waited on is no longer watched.
+///
+/// ```text
+/// carol ──space, alice a member (no delivery)──► alice's device 1: key-pending
+/// alice's device 2 ──request, reset──► server
+/// device 1 ──verify──► re-enrolled: withdrawn; nothing held; nothing watched
+/// ```
+#[test]
+fn reenrolment_forgets_the_old_devices_reports() {
+    within(|| {
+        let settings = EncryptionSettings {
+            allow_account_reset: true,
+            ..Default::default()
+        };
+        let server = secure_authority_with(&settings, None);
+        // A device under the reset settings.
+        let reset_device = |who, node| {
+            let client = open_account(Rc::new(MemoryStore::new()), who, settings.clone(), None);
+            let (db, link) = session(&client, &server, who, &settings, node, None);
+            Device {
+                who,
+                client,
+                db,
+                _link: Some(link),
+                live: Default::default(),
+            }
+        };
+        let first = reset_device(account(0xa1), 1);
+        first.activate(&server);
+        let carol = reset_device(account(0xc0), 2);
+        carol.activate(&server);
+        let space = new_project(&server, &carol, "plans");
+        add_member(&server, &carol, space, &first.id());
+        write_note(&server, &carol, space, SECRET).unwrap();
+        pump(&server, &carol.db);
+
+        let seen = reports_of(&first);
+        let mut watch = drive(&server, &[&first.db], first.client.watch_spaces(&first.db)).unwrap();
+        first.follow_notes(&server);
+        assert!(read_notes(&server, &first, space).unwrap().is_empty());
+        assert_eq!(codes(&seen), [(UnreadableCode::KeyPending, false)]);
+
+        let second = reset_device(first.who, 3);
+        assert_eq!(
+            drive(
+                &server,
+                &[&second.db],
+                second.client.ensure_account(&second.db)
+            )
+            .unwrap(),
+            AccountStatus::AwaitingApproval
+        );
+        assert_eq!(
+            drive(
+                &server,
+                &[&second.db],
+                second.client.reset_account(&second.db)
+            )
+            .unwrap(),
+            AccountStatus::Active
+        );
+        pump(&server, &first.db);
+        assert_eq!(
+            drive(
+                &server,
+                &[&first.db],
+                first.client.ensure_account(&first.db)
+            )
+            .unwrap(),
+            AccountStatus::Reenrolled
+        );
+        first.client.flush_reports();
+        assert!(
+            seen.borrow().iter().any(|report| matches!(
+                report,
+                Report::Withdrawn {
+                    code: UnreadableCode::KeyPending,
+                    ..
+                }
+            )),
+            "{:?}",
+            seen.borrow()
+        );
+        assert!(reports_of(&first).borrow().is_empty());
+        assert!(first.client.take_reports().is_empty());
+        let synced = drive(
+            &server,
+            &[&first.db],
+            first.client.sync_spaces(&first.db, &mut watch),
+        )
+        .unwrap();
+        assert!(synced.is_empty(), "{synced:?}");
+    });
+}
+
 /// Alice's database at `path`, not linked to any server.
 fn offline_db(client: &E2eeClient, who: AuthorSubject, node: u8, path: &std::path::Path) -> Db {
     let config = jazz::db::DbConfig::new(

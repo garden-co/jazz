@@ -714,6 +714,8 @@ impl E2eeClient {
         // What belongs to the device and account that are gone: versions its
         // reads found missing.
         self.shared.missing.borrow_mut().clear();
+        // Its reports, and the spaces watched for them.
+        self.shared.reset_reports();
         self.reconciled.set(false);
         *self.account.borrow_mut() = None;
         *documents = Documents::default();
