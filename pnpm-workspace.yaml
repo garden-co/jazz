@@ -21,21 +21,21 @@ packages:
 
 catalogs:
   default:
-    "@sveltejs/vite-plugin-svelte": 7.0.0
+    "@sveltejs/vite-plugin-svelte": 7.3.1
     "@types/node": "^22.0.0"
-    "@vitest/browser": 4.1.0
-    "@vitest/browser-playwright": 4.1.0
-    "@vitejs/plugin-react": 6.0.1
-    "@vitejs/plugin-vue": 6.0.4
+    "@vitest/browser": 5.1.0
+    "@vitest/browser-playwright": 5.1.0
+    "@vitejs/plugin-react": 6.3.0
+    "@vitejs/plugin-vue": 6.0.11
     next: 16.2.11
     svelte-check: "^4.0.0"
     typescript: 6.0.2
-    vite: 8.0.1
-    vite-plugin-solid: 2.11.12
+    vite: 8.3.8
+    vite-plugin-solid: 2.11.17
     "vite-plugin-top-level-await": 1.6.0
     "vite-plugin-wasm": 3.6.0
     jsdom: 26.1.0
-    vitest: 4.1.0
+    vitest: 5.1.0
     vue-tsc: "^2.1.10"
 
 allowBuilds:
@@ -47,8 +47,6 @@ allowBuilds:
   workerd: true
 
 overrides:
-  # Our Vitest 4 suites use Playwright. Avoid picking up Vite+'s Vitest 5 preview provider.
-  "vitest@4.1.0>@vitest/browser-preview": "-"
   "libsodium-wrappers@0.8.3>libsodium": 0.8.3
   react: 19.2.4
   react-dom: 19.2.4
