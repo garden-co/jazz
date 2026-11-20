@@ -28,6 +28,34 @@ export interface PendingEncryptionHost {
 }
 
 const LISTENERS = new Set(["onReport", "onUnreadable", "onChallenge"]);
+/**
+ * The real handle's members, by path: a name not here is not a member, so the
+ * stand-in answers `undefined` for it (`toJSON`, `then`, `inspect` and the
+ * like) instead of inventing a call that would start the load.
+ */
+const MEMBERS: { [name: string]: readonly string[] | true } = {
+  deviceId: true,
+  ready: true,
+  start: true,
+  stop: true,
+  onReport: true,
+  onUnreadable: true,
+  onChallenge: true,
+  devices: ["list", "challenge", "answer", "remove", "requestRemoval", "completeRemovals"],
+  recovery: ["create", "enable", "restoreFromPasskey", "register", "restore", "list", "retire"],
+  keys: ["deliver", "rotate"],
+  members: ["row"],
+};
+/** For the test that keeps the table in step with the real class. */
+export const PENDING_HANDLE_MEMBERS: Readonly<Record<string, readonly string[] | true>> = MEMBERS;
+
+const isMember = (path: readonly string[]): boolean => {
+  const top = Object.hasOwn(MEMBERS, path[0]!) ? MEMBERS[path[0]!]! : undefined;
+  if (top === undefined) return false;
+  if (path.length === 1) return true;
+  return path.length === 2 && top !== true && top.includes(path[1]!);
+};
+
 /** Calls that return a value at once, not a promise. */
 const SYNCHRONOUS = new Set(["recovery.create"]);
 /** The runtime's own lifecycle: nothing to wait for on a thin client. */
@@ -37,8 +65,9 @@ export function pendingEncryption(host: PendingEncryptionHost): Encryption {
   const at = (path: readonly string[]): unknown =>
     new Proxy(function () {} as unknown as object, {
       get(_target, key) {
-        if (typeof key !== "string" || key === "then") return undefined;
-        return at([...path, key]);
+        if (typeof key !== "string") return undefined;
+        const next = [...path, key];
+        return isMember(next) ? at(next) : undefined;
       },
       apply(_target, _this, args: unknown[]) {
         const name = path.join(".");

@@ -59,3 +59,57 @@ describe("a handle taken while thin", () => {
     expect(real.stop).not.toHaveBeenCalled();
   });
 });
+
+describe("the stand-in's members", () => {
+  it("exposes only what the real handle has", () => {
+    const { handle } = setup();
+    const any = handle as unknown as Record<string, unknown>;
+    for (const name of ["toJSON", "then", "inspect", "nope", "constructor"]) {
+      expect(any[name]).toBeUndefined();
+    }
+    expect(any[Symbol.toPrimitive]).toBeUndefined();
+    expect((handle.recovery as unknown as Record<string, unknown>).nope).toBeUndefined();
+    expect(typeof handle.recovery.create).toBe("function");
+  });
+
+  it("does not start a load or leave a rejection when serialised", () => {
+    const resolve = vi.fn(() => Promise.reject(new Error("load failed")));
+    const handle = pendingEncryption({
+      live: () => undefined,
+      resolve,
+      refuseSync: (op) => new Error(op),
+      whenLocalFirst: () => () => {},
+    });
+    expect(JSON.stringify(handle)).toBeUndefined();
+    expect(JSON.stringify({ handle })).toBe("{}");
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("lists exactly the members of the real class", async () => {
+    const { Encryption } = await import("./index.js");
+    const { PENDING_HANDLE_MEMBERS } = await import("./pending-handle.js");
+    const real = new Encryption({} as never);
+    const own = (o: object) =>
+      Object.getOwnPropertyNames(o)
+        .filter((n) => !n.startsWith("#") && n !== "constructor")
+        .sort();
+    const publicTop = [
+      ...own(Object.getPrototypeOf(real)).filter((n) => typeof (real as never)[n] === "function"),
+      "devices",
+      "recovery",
+      "keys",
+      "members",
+    ].sort();
+    expect(Object.keys(PENDING_HANDLE_MEMBERS).sort()).toEqual(
+      publicTop.filter(
+        (n) => !["call", "verified", "verify", "verifyOnce", "deliver", "emit"].includes(n),
+      ),
+    );
+    for (const group of ["devices", "recovery", "keys", "members"]) {
+      const methods = own(Object.getPrototypeOf((real as never)[group])).filter(
+        (n) => !["phraseSecret", "refuseForDeviceAccount"].includes(n),
+      );
+      expect([...(PENDING_HANDLE_MEMBERS[group] as string[])].sort()).toEqual(methods);
+    }
+  });
+});
