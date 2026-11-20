@@ -203,12 +203,14 @@ export class Encryption {
       if (status === "active") await this.call("recoveryRegister", { secret: hex });
       else if (status === "awaiting-approval") {
         // A device with no other to approve it recovers with the account
-        // secret; without a registered root there is nothing to recover from.
-        try {
-          status = await this.call<AccountStatus>("recoveryRestore", { secret: hex });
-        } catch {
-          // Stays awaiting approval.
-        }
+        // secret. `null`: nothing to recover from yet (no registered root
+        // or delivery for it), so it stays awaiting approval. Any other
+        // failure (store, database, a refused recovery) is the caller's.
+        const restored = await this.call<AccountStatus | null>("recoveryRestore", {
+          secret: hex,
+          automatic: true,
+        });
+        if (restored !== null) status = restored;
       }
     }
     return status;

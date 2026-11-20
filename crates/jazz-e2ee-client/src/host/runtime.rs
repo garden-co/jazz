@@ -643,13 +643,28 @@ impl Encryption {
                     .map_err(describe)?;
                 Value::Null
             }
+            // `automatic`: the device's own recovery with its account secret,
+            // as native readiness runs it. `null`: nothing to recover from
+            // (yet), so the device stays awaiting approval.
             "recoveryRestore" => {
-                let status = client
-                    .recover_device(db, &recovery_secret(args)?)
-                    .await
-                    .map_err(describe)?;
-                self.status.set(Some(status));
-                json!(status_name(status))
+                let secret = recovery_secret(args)?;
+                let restored = if args.get("automatic").and_then(Value::as_bool) == Some(true) {
+                    match client.recover_device_when_available(db, &secret).await {
+                        Err(ClientError::ApprovalAnswered) => {
+                            client.ensure_account(db).await.map(Some)
+                        }
+                        outcome => outcome,
+                    }
+                } else {
+                    client.recover_device(db, &secret).await.map(Some)
+                };
+                match restored.map_err(describe)? {
+                    Some(status) => {
+                        self.status.set(Some(status));
+                        json!(status_name(status))
+                    }
+                    None => Value::Null,
+                }
             }
             "recoveryRetire" => {
                 client
