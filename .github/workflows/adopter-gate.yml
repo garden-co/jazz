@@ -153,17 +153,6 @@ jobs:
       - if: startsWith(matrix.job, 't9-')
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { ref: "${{ needs.inputs.outputs.rc_ref }}", path: rc-src }
-      - name: Fetch the RC files this job needs
-        env:
-          {
-            GH_TOKEN: "${{ github.token }}",
-            AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}",
-            AG_NEED: "${{ matrix.job == 't10' && 'npm,server' || ((matrix.job == 't9-go' || matrix.job == 't9-kotlin') && 'npm,languages' || 'npm') }}",
-          }
-        run: |
-          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
-            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
-          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with: { node-version-file: .nvmrc }
       # The gate's apps are their own pnpm projects (pnpm 11), not the repo workspace (packageManager pnpm@10).
@@ -198,6 +187,18 @@ jobs:
           cp gradle.zip /tmp/gradle.zip
           echo "bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531  /tmp/gradle.zip" | sha256sum -c
           unzip -q /tmp/gradle.zip -d /opt && echo /opt/gradle-8.14.3/bin >> "$GITHUB_PATH" && echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+      # Fetched last, so the setup above overlaps a still-running RC's rc-tarballs (fetch-rc.sh waits for rc-npm).
+      - name: Fetch the RC files this job needs
+        env:
+          {
+            GH_TOKEN: "${{ github.token }}",
+            AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}",
+            AG_NEED: "${{ matrix.job == 't10' && 'npm,server' || ((matrix.job == 't9-go' || matrix.job == 't9-kotlin') && 'npm,languages' || 'npm') }}",
+          }
+        run: |
+          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
+            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
+          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
       - name: Run ${{ matrix.job }}
         env: { MATRIX_JOB: "${{ matrix.job }}" }
         run: |
@@ -338,6 +339,17 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with: { node-version-file: .nvmrc }
+      - name: pnpm (retried)
+        run: for i in 1 2 3; do npm install --global "pnpm@$PNPM_VERSION" > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
+      - if: env.VERCEL_TOKEN != ''
+        # Pinned, so t4 is reproducible (the version its green runs used); retried.
+        run: for i in 1 2 3; do npm install --global vercel@66.2.0 > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
+      - name: Playwright browsers cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with: { path: ~/.cache/ms-playwright, key: playwright-chromium-v1 }
+      # Fetched last, so the setup above overlaps a still-running RC's rc-tarballs (fetch-rc.sh waits for rc-npm).
       - name: Fetch the RC files this job needs
         env:
           {
@@ -349,16 +361,6 @@ jobs:
           if [ -n "${{ inputs.artifacts_run_id }}" ]; then
             $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
           else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with: { node-version-file: .nvmrc }
-      - name: pnpm (retried)
-        run: for i in 1 2 3; do npm install --global "pnpm@$PNPM_VERSION" > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
-      - if: env.VERCEL_TOKEN != ''
-        # Pinned, so t4 is reproducible (the version its green runs used); retried.
-        run: for i in 1 2 3; do npm install --global vercel@66.2.0 > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
-      - name: Playwright browsers cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with: { path: ~/.cache/ms-playwright, key: playwright-chromium-v1 }
       - run: $AG/t4.sh
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

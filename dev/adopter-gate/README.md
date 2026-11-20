@@ -29,7 +29,7 @@ Post-publish: `registry-smoke.sh <version> npm|create-jazz|crates|go|swift|kotli
 
 ```sh
 dev/adopter-gate/fetch-rc.sh v2.0.0-alpha.68-rc.1 [attach-language-artifacts run id]
-# or: AG_EXPECT_SHA=<full commit sha> dev/adopter-gate/fetch-rc.sh --run <release-artifacts run> --npm-run <RC run>
+# or: AG_EXPECT_SHA=<full commit sha> dev/adopter-gate/fetch-rc.sh --run <release-artifacts run> --npm-run <RC run>   # waits up to AG_NPM_WAIT_S (300 s) for rc-npm while the RC run is still going
 dev/adopter-gate/bed.sh t1 && dev/adopter-gate/fixtures.sh && dev/adopter-gate/t9.sh go   # etc.
 node dev/adopter-gate/verdict.mjs dev/adopter-gate/.results
 ```
