@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use common::*;
 use jazz::db::{Db, DbConfig, FileOptions, ReadOpts, ReadTier, block_on};
-use jazz::query::{Query, col, eq, lit};
+use jazz::query::{OrderDirection, Query, col, eq, gt, lit};
 use jazz::records::Value;
 use jazz_e2ee_client::{KeylessHooks, MemoryStore};
 
@@ -139,6 +139,33 @@ fn a_keyless_backend_relays_ciphertext_and_works_on_plain_columns() {
     ] {
         let error = fetch(&server, &backend, query.clone());
         assert!(error.is_err(), "refused: {query:?}");
+    }
+    // Filtering and ordering by an encrypted column are refused when the
+    // query is prepared, naming the pattern; nothing is answered.
+    for (query, pattern) in [
+        (
+            Query::from("notes").filter(eq(col("body"), lit(text("anything")))),
+            "filtered on a backend",
+        ),
+        (
+            Query::from("notes").filter(eq(col("note"), lit(text("anything")))),
+            "in a filter",
+        ),
+        (
+            Query::from("notes").filter(gt(col("rank"), lit(Value::I32(1)))),
+            "in a filter",
+        ),
+        (
+            Query::from("notes").order_by("body", OrderDirection::Asc),
+            "in ORDER BY",
+        ),
+        (
+            Query::from("notes").order_by("rank", OrderDirection::Desc),
+            "in ORDER BY",
+        ),
+    ] {
+        let error = backend.prepare_query(&query).unwrap_err();
+        assert!(error.to_string().contains(pattern), "{query:?}: {error}");
     }
     pump(&server, &backend);
     let stored = stored_bytes(&path);

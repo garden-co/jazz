@@ -50,7 +50,53 @@ pub struct Built {
     /// column } }`, as JSON, for the host to watch the spaces in use.
     pub spaces: Value,
     pub client: Rc<E2eeClient>,
-    pub reports: Rc<RefCell<VecDeque<String>>>,
+    pub reports: Rc<RefCell<ReportQueue>>,
+}
+
+/// The most reports kept for JS between two takes.
+pub const MAX_REPORTS: usize = 1024;
+
+/// The reports waiting for JS, as JSON texts: at most [`MAX_REPORTS`]. An
+/// app that reads none (no listener) holds no more than that; past it the
+/// oldest report goes (never a challenge, which the device must answer)
+/// and the next take starts with one `reports-dropped` report counting
+/// those that went.
+#[derive(Debug, Default)]
+pub struct ReportQueue {
+    /// Each report, and whether it is a challenge.
+    waiting: VecDeque<(bool, String)>,
+    dropped: u64,
+}
+
+impl ReportQueue {
+    pub fn push(&mut self, report: Value) {
+        let challenge = report["type"] == "challenged";
+        if self.waiting.len() >= MAX_REPORTS {
+            let oldest = self
+                .waiting
+                .iter()
+                .position(|(challenge, _)| !challenge)
+                .unwrap_or(0);
+            self.waiting.remove(oldest);
+            self.dropped += 1;
+        }
+        self.waiting.push_back((challenge, report.to_string()));
+    }
+
+    /// The reports waiting, oldest first, and the count of those dropped.
+    pub fn take(&mut self) -> Vec<String> {
+        let dropped = std::mem::take(&mut self.dropped);
+        let dropped = (dropped > 0)
+            .then(|| json!({ "type": "reports-dropped", "count": dropped }).to_string());
+        dropped
+            .into_iter()
+            .chain(self.waiting.drain(..).map(|(_, report)| report))
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.waiting.is_empty() && self.dropped == 0
+    }
 }
 
 /// The runtime and what the host keeps beside it.
@@ -59,7 +105,7 @@ pub struct Encryption {
     pub store: Rc<JsStore>,
     db: Rc<Db>,
     /// The reports of the runtime, as JSON, waiting for JS.
-    reports: Rc<RefCell<VecDeque<String>>>,
+    reports: Rc<RefCell<ReportQueue>>,
     /// Approvals this device started, by the device they are for.
     approvals: RefCell<BTreeMap<String, PendingApproval>>,
     /// Space watches the app asked to open or close, applied by the loop:
@@ -169,9 +215,9 @@ pub async fn build(
     .await
     .map_err(|error| error.to_string())?;
     let client = Rc::new(client);
-    let reports = Rc::new(RefCell::new(VecDeque::new()));
+    let reports = Rc::new(RefCell::new(ReportQueue::default()));
     let sink = Rc::clone(&reports);
-    client.on_report(move |report| sink.borrow_mut().push_back(report_json(report).to_string()));
+    client.on_report(move |report| sink.borrow_mut().push(report_json(report)));
     Ok(Built {
         spaces,
         client,
@@ -221,7 +267,7 @@ impl Encryption {
     /// The reports waiting, as JSON texts.
     pub fn take_reports(&self) -> Vec<String> {
         self.client.flush_reports();
-        self.reports.borrow_mut().drain(..).collect()
+        self.reports.borrow_mut().take()
     }
 
     /// An app subscription on an encrypted table opened (`true`) or closed
@@ -286,7 +332,7 @@ impl Encryption {
                 .ok_or_else(|| format!("`{name}` is missing"))
         };
         Ok(match op {
-            "deviceId" => json!(client.device().id.clone()),
+            "deviceId" => json!(client.device().map_err(describe)?.id.clone()),
             "ready" => {
                 let status = client.ensure_account(db).await.map_err(describe)?;
                 self.status.set(Some(status));
@@ -362,11 +408,17 @@ impl Encryption {
                         .collect::<Vec<_>>()
                 )
             }
+            // `atStart`: the registration a device account runs at each
+            // start with its own secret. It writes nothing when the root is
+            // registered already, and a retired root is not an error there
+            // (the device still starts), where an explicit call refuses it.
             "recoveryRegister" => {
-                client
-                    .register_recovery(db, &secret(&text("secret")?)?)
-                    .await
-                    .map_err(describe)?;
+                let secret = secret(&text("secret")?)?;
+                let registered = match args.get("atStart").and_then(Value::as_bool) {
+                    Some(true) => client.register_recovery_at_start(db, &secret).await,
+                    _ => client.register_recovery(db, &secret).await,
+                };
+                registered.map_err(describe)?;
                 Value::Null
             }
             "recoveryRestore" => {
@@ -510,7 +562,7 @@ async fn main_loop(this: Rc<Encryption>) {
                     noticed = true;
                     this.reports
                         .borrow_mut()
-                        .push_back(json!({ "type": "challenged" }).to_string());
+                        .push(json!({ "type": "challenged" }));
                 }
                 Ok(false) => noticed = false,
                 _ => {}
@@ -657,7 +709,9 @@ fn describe(error: ClientError) -> String {
         ClientError::NoAccount => "no-account",
         ClientError::Unsupported(_) => "unsupported",
         ClientError::Database(_) => "database",
-        ClientError::Protocol(_) => "protocol",
+        // The protocol's own code when it has one (`recovery-root-mismatch`,
+        // `stale-state`, ...): what a caller tells expected refusals by.
+        ClientError::Protocol(error) => error.code().unwrap_or("protocol"),
         _ => "error",
     };
     format!("{code}: {error}")
@@ -868,6 +922,46 @@ mod tests {
             Err(crate::StoreError::Wiped) => (false, "wiped".to_owned()),
             Err(error) => (false, error.to_string()),
         }
+    }
+
+    /// Contract: the reports waiting for JS stay bounded when nothing takes
+    /// them: past [`MAX_REPORTS`] the oldest go, a challenge is kept, and
+    /// the next take says how many went before the rest, oldest first.
+    #[test]
+    fn the_report_queue_is_bounded_and_counts_what_it_dropped() {
+        let mut queue = ReportQueue::default();
+        queue.push(json!({ "type": "challenged" }));
+        for index in 0..MAX_REPORTS + 10 {
+            queue.push(json!({ "type": "unreadable", "index": index }));
+        }
+        let taken = queue.take();
+        assert_eq!(taken.len(), MAX_REPORTS + 1);
+        let first: Value = serde_json::from_str(&taken[0]).unwrap();
+        assert_eq!(first, json!({ "type": "reports-dropped", "count": 11 }));
+        assert_eq!(taken[1], json!({ "type": "challenged" }).to_string());
+        let oldest_kept: Value = serde_json::from_str(&taken[2]).unwrap();
+        assert_eq!(oldest_kept["index"], 11);
+        let newest: Value = serde_json::from_str(taken.last().unwrap()).unwrap();
+        assert_eq!(newest["index"], MAX_REPORTS + 9);
+        assert!(queue.is_empty());
+        assert!(queue.take().is_empty(), "the count is reported once");
+    }
+
+    /// Contract: a protocol failure that has a code of its own reaches JS
+    /// with that code, so a caller can tell an expected refusal (nothing to
+    /// recover from) from a failure; one without keeps `protocol`.
+    #[test]
+    fn protocol_failures_carry_their_own_code() {
+        use jazz_e2ee::protocol::error::{ProtocolError, RecoveryFailure};
+        let described = describe(ClientError::Protocol(ProtocolError::Recovery(
+            RecoveryFailure::RootMismatch,
+        )));
+        assert!(
+            described.starts_with("recovery-root-mismatch: "),
+            "{described}"
+        );
+        let described = describe(ClientError::Protocol(ProtocolError::ProviderFailure));
+        assert!(described.starts_with("protocol: "), "{described}");
     }
 
     /// Contract: reports reach JS as JSON with a stable `type`, and the
