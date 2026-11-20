@@ -234,8 +234,8 @@ fn floor(through: u64, generation: u64, keys: KeyColumns) -> AccountFloor {
 }
 
 /// Contract: a floor survives a restart and only moves forward: a floor of
-/// an earlier cut or a lower generation is `stale-state` and changes
-/// nothing; a floor record that fails its signature check is skipped and
+/// an earlier cut, a lower generation or an earlier epoch position is
+/// `stale-state` and changes nothing; a floor record that fails its signature check is skipped and
 /// reported, never used.
 #[test]
 fn floors_only_move_forward_and_survive_a_restart() {
@@ -256,6 +256,15 @@ fn floors_only_move_forward_and_survive_a_restart() {
     let lower = block_on(client.advance_floor(BOB, &floor(10, 0, keys.clone())));
     assert!(matches!(
         lower,
+        Err(ClientError::Protocol(ProtocolError::StaleState))
+    ));
+    let earlier_epoch = AccountFloor {
+        epoch_position: Position(1),
+        ..floor(10, 1, keys.clone())
+    };
+    let earlier_epoch = block_on(client.advance_floor(BOB, &earlier_epoch));
+    assert!(matches!(
+        earlier_epoch,
         Err(ClientError::Protocol(ProtocolError::StaleState))
     ));
     drop(client);

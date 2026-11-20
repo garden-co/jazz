@@ -399,6 +399,15 @@ impl E2eeClient {
             // A record of this format that does not decode is damaged and
             // may be replaced; anything else is of a format this runtime
             // does not read, refused and never overwritten (§6.1).
+            //
+            // Replacing it does not fail open. A floor guards against an
+            // older account state, not against whoever can write this
+            // store: that writer could as well delete the record, and a
+            // damaged one carries no state this device signed, so it is
+            // treated as absent (§6.3a: skipped and reported, protection
+            // restarting at the next verified state, §8). Refusing to
+            // advance instead would block the account's floor for good,
+            // until a wipe.
             Err(_) if floor_format(&stored.bytes).as_deref() == Some(FLOOR_FORMAT) => {
                 self.skipped(name, "a floor record that does not decode");
                 None
@@ -576,10 +585,10 @@ impl E2eeClient {
     }
 
     /// Stores `floor` as `account_id`'s floor, signed by the device. A floor
-    /// only moves forward: one of an earlier cut or a lower generation than
-    /// the stored floor is `stale-state`, and nothing is written. The
-    /// caller has checked the newer state against the stored floor first
-    /// (`AccountState::check_floor`).
+    /// only moves forward: one of an earlier cut, a lower generation or an
+    /// earlier epoch position than the stored floor is `stale-state`, and
+    /// nothing is written. The caller has checked the newer state against
+    /// the stored floor first (`AccountState::check_floor`).
     pub async fn advance_floor(
         &self,
         account_id: &str,
@@ -596,8 +605,13 @@ impl E2eeClient {
                 Some((current, revision)) => (current.as_ref(), Some(*revision)),
                 None => (None, None),
             };
+            // Every field that orders states moves forward: the cut, the
+            // generation and the current epoch's position (§6.3a). A later
+            // generation's epochs follow the earlier one's on the ledger.
             if current.is_some_and(|current| {
-                floor.through < current.through || floor.generation < current.generation
+                floor.through < current.through
+                    || floor.generation < current.generation
+                    || floor.epoch_position < current.epoch_position
             }) {
                 return Err(ProtocolError::StaleState.into());
             }
