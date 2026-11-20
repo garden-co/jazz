@@ -669,7 +669,9 @@ impl E2eeClient {
     /// Wipes this account's private state (held keys, floors, the device)
     /// and enrolls a new local device in a new incarnation of the scope,
     /// keeping the runtime open (§2.4, "Floors"): what a device the account
-    /// no longer has does before it requests approval again.
+    /// no longer has does before it requests approval again. If the old
+    /// incarnation cannot be deleted or the new device cannot be stored, the
+    /// runtime is closed and the error returned.
     pub(crate) async fn reenrol(&self) -> Result<(), ClientError> {
         let mut documents = self.documents.lock().await;
         self.ensure_open()?;
@@ -679,19 +681,32 @@ impl E2eeClient {
         }
         *self.account.borrow_mut() = None;
         *documents = Documents::default();
-        self.store.delete(&self.scope).await?;
-        let incarnation = self.store.open_scope(&self.scope).await?;
-        let device = Self::load_device(
-            &*self.store,
-            incarnation,
-            &self.shared.registry,
-            &self.shared.selected,
-            &self.shared.domain,
-            &self.shared.account_id,
-            &self.scope,
-            &mut SharedRandom(&self.shared.random),
-        )
-        .await?;
+        // Once the old incarnation is deleted, the runtime has no device
+        // until the new one is stored: any failure from here closes it, so
+        // nothing runs on as a device the store no longer has.
+        let renewed = async {
+            self.store.delete(&self.scope).await?;
+            let incarnation = self.store.open_scope(&self.scope).await?;
+            let device = Self::load_device(
+                &*self.store,
+                incarnation,
+                &self.shared.registry,
+                &self.shared.selected,
+                &self.shared.domain,
+                &self.shared.account_id,
+                &self.scope,
+                &mut SharedRandom(&self.shared.random),
+            )
+            .await?;
+            Ok::<_, ClientError>((incarnation, device))
+        };
+        let (incarnation, device) = match renewed.await {
+            Ok(renewed) => renewed,
+            Err(error) => {
+                self.close();
+                return Err(error);
+            }
+        };
         self.incarnation.set(incarnation);
         *self.shared.device.borrow_mut() = device;
         Ok(())
