@@ -332,10 +332,10 @@ an encoded message, so a change to how commits travel never strands a
 write a user made offline:
 
 - `_jazz_pending (tx, node, seq, clock, snapshot, own, acting, author,
-claims)`: the commit's writer and HLC, a serializable commit's snapshot
+  claims)`: the commit's writer and HLC, a serializable commit's snapshot
   and own commits (NULL when mergeable), and who it acts as.
 - `_jazz_pending_ops (tx, n, op, tbl, id, target, move_from, move_to, at,
-has_cells, bases, proof_key, proof_seq)`: each op, by position `n`.
+  has_cells, bases, proof_key, proof_seq)`: each op, by position `n`.
 - `_jazz_pending_cells (tx, n, list, col, ty, nulls, value)`: each cell an op
   writes (`list` 0) or an upsert creates its row with (`list` 1): the kind
   of value (`ty`), how many present-nullable wrappers hold it (`nulls`), and
@@ -504,7 +504,7 @@ for one query's result:
   in the view its effective row is the head's version, which the reader's
   policy denies, so the view leaves the row out, as the authority's own
   evaluation of the view does. The server sends `AccessLost { hidden: true
-}` for it (§8.6) once: a later write to either version sends nothing
+  }` for it (§8.6) once: a later write to either version sends nothing
   while the reader still may not read the head's, so the reader learns that
   the row is hidden, not when it is edited. The replica keeps a marker of it in
   `_jazz_withheld` that masks the base's row of the id in every branch view

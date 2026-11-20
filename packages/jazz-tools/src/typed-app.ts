@@ -220,20 +220,18 @@ export type TableWhereInput<
     >;
   } & {
     [TColumn in ProvenanceMagicColumn]?: ProvenanceMagicColumns[TColumn] extends Date
-      ?
-          | Date
-          | number
-          | {
-              eq?: Date | number;
-              ne?: Date | number;
-              gt?: Date | number;
-              gte?: Date | number;
-              lt?: Date | number;
-              lte?: Date | number;
-            }
-      :
-          | ProvenanceMagicColumns[TColumn]
-          | { eq?: ProvenanceMagicColumns[TColumn]; ne?: ProvenanceMagicColumns[TColumn] };
+      ? | Date
+        | number
+        | {
+            eq?: Date | number;
+            ne?: Date | number;
+            gt?: Date | number;
+            gte?: Date | number;
+            lt?: Date | number;
+            lte?: Date | number;
+          }
+      : | ProvenanceMagicColumns[TColumn]
+        | { eq?: ProvenanceMagicColumns[TColumn]; ne?: ProvenanceMagicColumns[TColumn] };
   }
 >;
 

@@ -1136,9 +1136,9 @@ Meaning:
   `exists`. `session.__jazz_outer_row…` is not a session value: the reader
   refuses it.
 - **Session values.** `session.user` (the account: `$createdBy =
-session.user` matches rows written through any identity linked to it),
+  session.user` matches rows written through any identity linked to it),
   `session.identity` (the exact login: `$createdBy.identity =
-session.identity` matches only rows it wrote), `session.claims.<path>`,
+  session.identity` matches only rows it wrote), `session.claims.<path>`,
   `session.identity.subject`, `session.identity.issuer` and
   `session.authMode`; any other path is refused as a typo.
 - **Comparisons.** A comparison compares a column with a value, a column
@@ -1174,7 +1174,7 @@ session.identity` matches only rows it wrote), `session.claims.<path>`,
   `Project`, `distinct on` is `Distinct`, `order by` is `OrderBy` (`asc` is
   the default), `limit`/`offset` are `Limit`/`Offset`, `union(label: q, …)` is
   `Union` and `recursive(seed: …, step: …, frontier: …, dedupe: (…), maxDepth:
-n | fixpoint)` is `Gather`. In a predicate, a column is `scope.col` or
+  n | fixpoint)` is `Gather`. In a predicate, a column is `scope.col` or
   `col`; `outer.col` and `frontier.col` are the outer and frontier rows'
   columns, `id(row)`, `id(outer)` and `id(frontier)` their row ids,
   `param.name` a query parameter, `session.…` a session value, and
