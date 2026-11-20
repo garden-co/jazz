@@ -109,36 +109,42 @@ fn pump(server: &Db, client: &Db) {
 fn setup() -> (Db, Db) {
     let server = open(0);
     for (n, name) in [(1, "ada"), (2, "bob"), (3, "cy")] {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "users",
-                id(1, n),
-                AuthorSubject::SYSTEM,
-                cells(&[("name", text(name))]),
-            )
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            "users",
+            cells(&[("name", text(name))]),
+            jazz::db::InsertOptions {
+                row_id: Some(id(1, n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     }
     for (n, sender) in [(1, 1), (2, 2)] {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "messages",
-                id(2, n),
-                AuthorSubject::SYSTEM,
-                cells(&[
-                    ("senderId", Value::Uuid(id(1, sender).0)),
-                    ("body", text(&format!("m{n}"))),
-                ]),
-            )
-            .unwrap();
-    }
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "comments",
-            id(3, 1),
-            AuthorSubject::SYSTEM,
-            cells(&[("messageId", Value::Uuid(id(2, 1).0)), ("text", text("c1"))]),
-        )
+        jazz::db::block_on(server.insert(
+            "messages",
+            cells(&[
+                ("senderId", Value::Uuid(id(1, sender).0)),
+                ("body", text(&format!("m{n}"))),
+            ]),
+            jazz::db::InsertOptions {
+                row_id: Some(id(2, n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
         .unwrap();
+    }
+    jazz::db::block_on(server.insert(
+        "comments",
+        cells(&[("messageId", Value::Uuid(id(2, 1).0)), ("text", text("c1"))]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(3, 1)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     let client = open(1);
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
@@ -207,14 +213,16 @@ fn array_children_ship_and_new_children_follow() {
     );
 
     // A child inserted later matches the correlation watch.
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "comments",
-            id(3, 2),
-            AuthorSubject::SYSTEM,
-            cells(&[("messageId", Value::Uuid(id(2, 2).0)), ("text", text("c2"))]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "comments",
+        cells(&[("messageId", Value::Uuid(id(2, 2).0)), ("text", text("c2"))]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(3, 2)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     pump(&server, &client);
     assert_eq!(local(&client, "comments").len(), 2);
     // And the client's own tree read sees it under its parent.
@@ -315,36 +323,42 @@ fn nested_array_children_ship_at_every_level() {
     assert_eq!(local(&client, "comments").len(), 1);
 
     // A grandchild under a shipped child.
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "comments",
-            id(3, 2),
-            AuthorSubject::SYSTEM,
-            cells(&[("messageId", Value::Uuid(id(2, 2).0)), ("text", text("c2"))]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "comments",
+        cells(&[("messageId", Value::Uuid(id(2, 2).0)), ("text", text("c2"))]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(3, 2)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     pump(&server, &client);
     nested_seen(&mut stream, &mut seen);
     assert_eq!(seen[&id(1, 2)], ["bob", "m2", "c2"]);
 
     // A child that joins later, then a grandchild under it.
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "messages",
-            id(2, 3),
-            AuthorSubject::SYSTEM,
-            cells(&[("senderId", Value::Uuid(id(1, 3).0)), ("body", text("m3"))]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "messages",
+        cells(&[("senderId", Value::Uuid(id(1, 3).0)), ("body", text("m3"))]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(2, 3)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     pump(&server, &client);
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "comments",
-            id(3, 3),
-            AuthorSubject::SYSTEM,
-            cells(&[("messageId", Value::Uuid(id(2, 3).0)), ("text", text("c3"))]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "comments",
+        cells(&[("messageId", Value::Uuid(id(2, 3).0)), ("text", text("c3"))]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(3, 3)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     pump(&server, &client);
     nested_seen(&mut stream, &mut seen);
     assert_eq!(seen[&id(1, 3)], ["cy", "m3", "c3"]);

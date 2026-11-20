@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ErrorCode, FileOptions, InsertOptions, ReadOpts, ReadTier, block_on,
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, ReadTier, block_on,
 };
 use jazz::host::{HostTable, HostTables, StoreFile};
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -107,18 +107,27 @@ fn host_tables_share_the_store_file_and_survive_reopening() {
     assert_eq!(rows.len(), 1);
 }
 
+/// Alice's host tables share a file with Bob's unrelated application table.
+/// Direct SQL represents Bob's application and verifies Jazz leaves it intact.
 #[test]
-fn a_file_jazz_did_not_write_is_refused_before_any_host_table_is_touched() {
+fn unrelated_tables_survive_host_table_writes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("jazz.sqlite");
-    rusqlite::Connection::open(&path)
-        .unwrap()
-        .execute_batch("CREATE TABLE theirs (x INTEGER)")
+    let other = rusqlite::Connection::open(&path).unwrap();
+    other
+        .execute_batch("CREATE TABLE theirs (x INTEGER); INSERT INTO theirs VALUES (7)")
         .unwrap();
-    let before = std::fs::read(&path).unwrap();
-    let Err(error) = StoreFile::open(&path, options()) else {
-        panic!("a foreign file must be refused");
-    };
-    assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs);
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let file = StoreFile::open(&path, options()).unwrap();
+    file.host_put_many(JOURNAL, &[pair(b"key", b"value")])
+        .unwrap();
+    assert_eq!(
+        file.host_get(JOURNAL, b"key").unwrap(),
+        Some(b"value".to_vec())
+    );
+    assert_eq!(
+        other
+            .query_row("SELECT x FROM theirs", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
 }

@@ -643,7 +643,6 @@ impl Group {
 /// Counters for the fan-out bench and tests.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FanoutStats {
-    pub groups: usize,
     pub shared_joins: u64,
     /// Groups a commit refreshed, by any path: a re-run, a re-check, or a
     /// re-nest alone (a group woken only through correlated relations).
@@ -876,7 +875,6 @@ impl Fanout {
                 (plans + group.plans.hits, roots + group.root_plans.hits)
             });
         FanoutStats {
-            groups: self.groups.len(),
             coalesced: self.coalesced.get(),
             kept_plans,
             kept_root_plans,
