@@ -872,6 +872,64 @@ mod smoke {
         )
     }
 
+    /// A thin request inserting row `row` (16 bytes) of `table` with
+    /// `cells`, a JSON object by column: a string is text, an integer an
+    /// `i64`, an array of numbers bytes and `{ "uuid": "…" }` a uuid. For
+    /// the encrypted app's system tables, which a session writes over its
+    /// socket.
+    #[wasm_bindgen(js_name = testThinInsertRow)]
+    pub fn test_thin_insert_row(
+        id: u64,
+        table: &str,
+        row: &[u8],
+        cells: &str,
+    ) -> Result<Vec<u8>, JsValue> {
+        use jazz::records::ValueType;
+        let cells: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(cells).map_err(js)?;
+        let mut fields = Vec::new();
+        let mut values = Vec::new();
+        for (column, value) in cells {
+            let (value_type, value) = match value {
+                serde_json::Value::String(text) => (ValueType::String, Value::String(text)),
+                serde_json::Value::Number(number) => (
+                    ValueType::I64,
+                    Value::I64(number.as_i64().ok_or_else(|| js("an integer"))?),
+                ),
+                serde_json::Value::Array(_) => (
+                    ValueType::Bytes,
+                    Value::Bytes(serde_json::from_value(value).map_err(js)?),
+                ),
+                serde_json::Value::Object(object) => {
+                    let uuid = object
+                        .get("uuid")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| js("an object names a uuid"))?;
+                    (
+                        ValueType::Uuid,
+                        Value::Uuid(uuid::Uuid::parse_str(uuid).map_err(js)?),
+                    )
+                }
+                other => return Err(js(format!("{column}: unsupported value {other}"))),
+            };
+            fields.push((column, value_type));
+            values.push(value);
+        }
+        let descriptor = jazz::records::RecordDescriptor::new(fields);
+        let record =
+            jazz::records::OwnedRecord::new(descriptor.create(&values).map_err(js)?, descriptor);
+        let row: Vec<u8> = row.to_vec();
+        Ok(thin(
+            id,
+            jazz::thin::ThinOp::Insert {
+                table: table.to_owned(),
+                cells: jazz::binding_codec::encode_named_cells(&record).map_err(js)?,
+                options: serde_json::to_vec(&serde_json::json!({ "rowId": row })).map_err(js)?,
+                transaction: None,
+            },
+        ))
+    }
+
     /// A thin request reading every note.
     #[wasm_bindgen(js_name = testThinQueryNotes)]
     pub fn test_thin_query_notes(id: u64) -> Vec<u8> {
