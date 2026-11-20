@@ -19,6 +19,7 @@ import { EncryptionNeedsLocalFirstError } from "../runtime/encryption-needs-loca
 import {
   isThinDb,
   setLocalFirstUpgrader,
+  upgradeDbToLocalFirst,
   type LocalFirstLoader,
 } from "../runtime/local-first-upgrade.js";
 import type { MutationErrorEvent, WriteResult } from "../runtime/client.js";
@@ -1129,6 +1130,23 @@ describe("a thin session of an app with encrypted columns", () => {
       "streamed note",
     ]);
   }, 90_000);
+
+  // A wait that began before the hand-over (a refusal's deferred start, a
+  // rerun's wait) can ask for the upgrade after it: nothing is left to do.
+  it("a call to upgrade made after the hand-over resolves at once", async () => {
+    const host = await serve();
+    const gate = gatedLoader();
+    const session = await open(host, undefined, gate.loader);
+    const kept = db(session);
+    gate.release();
+    await expect.poll(() => isThinDb(kept), { timeout: 20_000 }).toBe(false);
+    const calls = gate.calls;
+
+    await upgradeDbToLocalFirst(kept, gate.loader);
+    expect(gate.calls).toBe(calls);
+    expect(isThinDb(kept)).toBe(false);
+    await kept.insert(app.notes, { text: "after" } as never).wait({ tier: "global" });
+  }, 60_000);
 
   it("reruns a callback transaction at most once, whichever ends each run", async () => {
     const host = await serve();
