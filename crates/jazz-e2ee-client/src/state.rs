@@ -349,7 +349,10 @@ pub(crate) struct KeyState {
     pub(crate) repair_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
     /// Spaces whose rotation the current write already tried: it seals under
     /// the current version whatever came of it, and the mark stays unless
-    /// the rotation succeeded or was refused (protocol §3.5).
+    /// the rotation succeeded or was refused (protocol §3.5). A write the
+    /// runtime does not wrap (a host's, retried after
+    /// [`crate::E2eeClient::prepare_space`]) takes its space's mark when it
+    /// seals, so the next write gets its own rotation chance.
     pub(crate) rotation_tried: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
     /// Spaces whose rotation by this device was refused while the client
     /// runs: no automatic rotation, and no evaluation of the mark.
@@ -370,6 +373,10 @@ pub(crate) struct Creations {
     /// Roots staged in this run whose transaction may not have committed
     /// yet: a root absent from the store is not yet known to be lost.
     pub(crate) staged: BTreeSet<String>,
+    /// Staged roots the database dropped (their write or transaction
+    /// failed): the next write abandons them before anything seals under
+    /// their keys.
+    pub(crate) dropped: BTreeSet<String>,
 }
 
 /// Everything the runtime and its hooks share.
@@ -402,6 +409,9 @@ pub(crate) struct Shared {
     /// The collectors of the repair reads in flight, each registered for the
     /// duration of its read (protocol §3.2).
     pub(crate) collectors: RefCell<BTreeMap<uuid::Uuid, Collector>>,
+    /// How many [`crate::E2eeClient::write`] calls are running: their
+    /// rounds keep the marks of `rotation_tried` until the call returns.
+    pub(crate) wrapped_writes: std::cell::Cell<usize>,
 }
 
 impl Shared {

@@ -29,7 +29,7 @@ use crate::account::rows::{self, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
 use crate::hooks::code;
-use crate::state::{Missing, Report};
+use crate::state::{Missing, Report, Shared};
 
 pub use creation::SpaceCreation;
 pub use delivery::MEMBER_LIMIT;
@@ -642,14 +642,12 @@ impl E2eeClient {
     ) -> Result<T, ClientError> {
         self.ensure_open()?;
         self.reconcile_once(db).await?;
+        let _wrapped = WrappedWrite::enter(&self.shared);
         for round in 0..ATTEMPTS {
-            // A creation the authority refused since the last write stops
-            // the automatic paths before this one stages anything.
-            self.settle_pending(db).await?;
+            self.begin_attempt(db).await?;
             if round == 0 {
                 self.shared.keys.borrow_mut().rotation_tried.clear();
             }
-            self.shared.creations.borrow_mut().attempt.clear();
             let outcome = op().await;
             let staged = std::mem::take(&mut self.shared.creations.borrow_mut().attempt);
             let error = match outcome {
@@ -675,13 +673,36 @@ impl E2eeClient {
     /// steps `write` takes between its rounds. `true` when the write can be
     /// tried again; `false` when it cannot yet (a member waits for a
     /// delivery, or the creation was refused), so the caller waits and
-    /// calls again, or gives up.
+    /// calls again, or gives up. The write tried again after a rotation
+    /// this prepared seals under whatever version that left; the write after
+    /// it gets its own rotation, as each call of `write` does.
     pub async fn prepare_space(&self, db: &Db, space: &SpaceAddress) -> Result<bool, ClientError> {
         self.ensure_open()?;
         self.reconcile_once(db).await?;
+        self.begin_attempt(db).await?;
+        self.make_ready(db, space).await
+    }
+
+    /// What each attempt of a write starts with, wrapped or not: the
+    /// creations whose staged root the database dropped since are
+    /// abandoned, as `write` abandons what a failed call staged.
+    async fn begin_attempt(&self, db: &Db) -> Result<(), ClientError> {
+        let dropped: Vec<String> = self
+            .shared
+            .creations
+            .borrow()
+            .dropped
+            .iter()
+            .cloned()
+            .collect();
+        for root_id in &dropped {
+            self.abandon_creation(root_id).await?;
+        }
+        // A creation the authority refused since the last write stops
+        // the automatic paths before this one stages anything.
         self.settle_pending(db).await?;
         self.shared.creations.borrow_mut().attempt.clear();
-        self.make_ready(db, space).await
+        Ok(())
     }
 
     /// Gets a key ready for a write to `space`: whether the write can be
@@ -748,6 +769,8 @@ impl E2eeClient {
             );
             self.keep(space).await?;
         }
+        // Refused and kept: the hooks need not hold the key back any more.
+        self.shared.creations.borrow_mut().dropped.remove(root_id);
         Ok(())
     }
 }
@@ -762,4 +785,26 @@ pub(crate) fn has_unpublished(space: &HeldSpace) -> bool {
     space
         .held()
         .any(|(_, mark)| matches!(mark, KeyMark::Unpublished { .. }))
+}
+
+/// A running [`E2eeClient::write`] call: while any runs, the marks of
+/// `rotation_tried` last for the call's rounds; when the last returns they
+/// are cleared, so a write no call wraps gets its own rotation chance.
+struct WrappedWrite<'a>(&'a Shared);
+
+impl<'a> WrappedWrite<'a> {
+    fn enter(shared: &'a Shared) -> Self {
+        shared.wrapped_writes.set(shared.wrapped_writes.get() + 1);
+        Self(shared)
+    }
+}
+
+impl Drop for WrappedWrite<'_> {
+    fn drop(&mut self) {
+        let left = self.0.wrapped_writes.get().saturating_sub(1);
+        self.0.wrapped_writes.set(left);
+        if left == 0 {
+            self.0.keys.borrow_mut().rotation_tried.clear();
+        }
+    }
 }

@@ -1314,6 +1314,63 @@ fn a_write_that_fails_after_staging_its_root_abandons_the_creation() {
     });
 }
 
+/// Contract: through the host path too (the database call alone, then
+/// `prepare_space` after a key failure), a write the database fails after
+/// it staged the space's root leaves no creation: the next write does not
+/// seal under that root's key, but stages a fresh root with itself.
+///
+/// ```text
+/// host insert ──NeedsKey──► prepare_space: root R prepared
+/// host insert (bad cell) ──stages R, core fails──► R dropped
+/// host insert ──NeedsKey (R's key held back)──► prepare_space: R refused, root R' ──► note + R'
+/// ```
+#[test]
+fn a_host_write_that_fails_after_staging_its_root_gets_a_fresh_root() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let space = new_project(&server, &alice, "plans");
+        let mut bad = note(space, SECRET);
+        bad.insert("title".to_owned(), Value::I32(1));
+        let first = block_on(alice.db.insert("notes", bad.clone(), Default::default()))
+            .map(|_| ())
+            .unwrap_err();
+        let Some(jazz::e2ee::E2eeRefusal::NeedsKey { space: at }) =
+            jazz::e2ee::E2eeRefusal::of(&first)
+        else {
+            panic!("the first write needs the space's key: {first:?}");
+        };
+        assert!(
+            drive(
+                &server,
+                &[&alice.db],
+                alice.client.prepare_space(&alice.db, &at)
+            )
+            .unwrap()
+        );
+        let failed = block_on(alice.db.insert("notes", bad, Default::default()))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            jazz::e2ee::E2eeRefusal::of(&failed).is_none(),
+            "the database refused the write itself: {failed:?}"
+        );
+
+        host_write_note(&server, &alice, space, SECRET);
+        pump(&server, &alice.db);
+        assert_eq!(
+            (count(&server, SPACES), count(&server, "notes")),
+            (1, 1),
+            "the note came with a root"
+        );
+        drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
+        assert_eq!(marks(&alice, space), [KeyMark::Refused, KeyMark::Published]);
+        let rows = read_notes(&server, &alice, space).unwrap();
+        assert_eq!(rows.len(), 1);
+    });
+}
+
 /// Contract: rows of an account's history that this client cannot decode
 /// make that account's history odd, not the space incomplete: bob, a
 /// member awaiting a delivery, still sees the space `key-pending`, not
@@ -1505,6 +1562,87 @@ fn removing_a_member_rotates_the_space_before_the_next_write() {
         assert_eq!(read_notes(&server, &carol, space).unwrap().len(), 2);
         pump(&server, &bob.db);
         assert_eq!(read_notes(&server, &bob, space).unwrap().len(), 1);
+    });
+}
+
+/// A note written the way a host binding writes: the database call alone,
+/// and after a failure for want of a key, `prepare_space` and the call
+/// again.
+fn host_write_note(server: &Db, device: &Device, space: uuid::Uuid, body: &str) {
+    for _ in 0..3 {
+        let error = match block_on(
+            device
+                .db
+                .insert("notes", note(space, body), Default::default()),
+        ) {
+            Ok(_) => return,
+            Err(error) => error,
+        };
+        let Some(jazz::e2ee::E2eeRefusal::NeedsKey { space: at }) =
+            jazz::e2ee::E2eeRefusal::of(&error)
+        else {
+            panic!("the host write failed: {error:?}");
+        };
+        let ready = drive(
+            server,
+            &[&device.db],
+            device.client.prepare_space(&device.db, &at),
+        )
+        .unwrap();
+        assert!(ready, "the space is ready for the write");
+    }
+    panic!("the host write never went through");
+}
+
+/// The member row of `account` in the server's members table.
+fn member_row(server: &Db, account: &str) -> jazz::ids::RowUuid {
+    all(server, Query::from(MEMBERS))
+        .unwrap()
+        .into_iter()
+        .find(|row| {
+            row.cell("accountId") == Some(Value::Uuid(uuid::Uuid::parse_str(account).unwrap()))
+        })
+        .unwrap()
+        .row_uuid()
+}
+
+/// Contract: a host binding's writes, which `write` does not wrap, rotate
+/// the space after every removal of the run, as wrapped writes do: the
+/// first removal's rotation does not keep the second one's from happening.
+///
+/// ```text
+/// alice removes bob ──host write──► NeedsKey ─ prepare_space: rotate ─► note
+/// alice removes carol ──host write──► NeedsKey ─ prepare_space: rotate ─► note
+/// ```
+#[test]
+fn a_host_write_rotates_after_each_removal_of_the_run() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        let carol = device(&server, account(0xc0), MemoryStore::new(), 7);
+        carol.activate(&server);
+        add_member(&server, &alice, space, &carol.id());
+        carol.follow_notes(&server);
+        assert_eq!(deliver(&server, &alice, &[&bob, &carol], space), 2);
+        let at = space_address(&alice, space);
+
+        for (removed, successors) in [(&bob, 1), (&carol, 2)] {
+            let member = member_row(&server, &removed.id());
+            block_on(alice.db.delete(MEMBERS, member, Default::default())).unwrap();
+            pump(&server, &alice.db);
+            deliver(&server, &alice, &[], space);
+            assert!(alice.client.needs_rotation(&at).unwrap());
+
+            host_write_note(&server, &alice, space, "after");
+            pump(&server, &alice.db);
+            assert_eq!(
+                count(&server, "__e2ee_space_successors"),
+                successors,
+                "the write after removing {} rotated first",
+                removed.id()
+            );
+            assert!(!alice.client.needs_rotation(&at).unwrap());
+        }
     });
 }
 
