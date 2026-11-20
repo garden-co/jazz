@@ -63,8 +63,16 @@ s = s.replace('implementation("tools.jazz:jazz-kotlin")', f'''implementation(fil
 s = re.sub(r'tasks\.named<JavaExec>\("run"\).*\n', '', s); open(p, 'w').write(s)
 PY
         else echo "note: no release jar; building jazz-kotlin from source"; fi
-        ( cd "$K" && gradle installDist --no-daemon -q ) > kt-build.log 2>&1 \
-          || { echo "FAIL t9 kotlin build"; sed -n '/What went wrong/,/^\* Try/p' kt-build.log | head -25; tail -4 kt-build.log; return; }
+        # Fetch, then build. Only the fetch retries, and only on network errors (Maven Central answers 429 when busy),
+        # with 30 s then 60 s backoff. The build runs --offline, once: a build failure fails (no pass-on-retry).
+        local i; for i in 1 2 3; do
+          ( cd "$K" && gradle --no-daemon -q -I "$AG/t9/gradle-fetch.init.gradle" agFetchDeps ) > kt-fetch.log 2>&1 && break
+          grep -qE "status code (429|5[0-9][0-9])|Could not (GET|HEAD)|timed out|Connection reset|UnknownHost|No route to host" kt-fetch.log \
+            || break   # not a network error: the build below reports it
+          [ $i -lt 3 ] && { echo "note: t9 kotlin dependency fetch hit a network error (attempt $i), retrying in $((i * 30)) s"; sleep $((i * 30)); }
+        done
+        ( cd "$K" && gradle installDist --no-daemon -q --offline ) > kt-build.log 2>&1 \
+          || { echo "FAIL t9 kotlin build"; sed -n '/What went wrong/,/^\* Try/p' kt-build.log kt-fetch.log | head -25; tail -4 kt-build.log; return; }
         KT_CLI=$K/build/install/stage-plan-kotlin-cli/bin/stage-plan-kotlin-cli APP_ID=$APP_ID ./run-lang-clients.sh 2>&1 | grep -E "^(PASS|FAIL)" ;;
     swift) [ -f "$AG_TGZ/libjazz_ffi-linux-x86_64.tar.gz" ] || { echo "FAIL t9 swift: no libjazz_ffi-linux-x86_64.tar.gz in the RC inputs"; return; }
         local L=$W/ffi; mkdir -p "$L" && tar xzf "$AG_TGZ/libjazz_ffi-linux-x86_64.tar.gz" -C "$L"
