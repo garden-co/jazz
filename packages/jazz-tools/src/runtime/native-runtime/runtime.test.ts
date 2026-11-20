@@ -1221,6 +1221,96 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
+  // #6049: a native host reports a refused credential (`onAuthRejected`) but
+  // not the admission after it. Once its link is connected again with no
+  // refusal, the runtime calls `onAuthRestored`, as the link machine does on
+  // `live`, so the Db's auth error clears.
+  it("calls onAuthRestored once a native host's link is admitted again after a refusal", async () => {
+    let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let reportAuthRejected: ((reason: string) => void) | undefined;
+    let reportUpstreamFailure:
+      | ((failure: { reason: string; retrying: boolean } | null) => void)
+      | undefined;
+    let connected = false;
+    let authRejected: string | null = null;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+              schedule = callback;
+            },
+            tick: () => undefined,
+            onAuthRejected: (callback: (reason: string) => void) => {
+              reportAuthRejected = callback;
+            },
+            onUpstreamFailure: (
+              callback: (failure: { reason: string; retrying: boolean } | null) => void,
+            ) => {
+              reportUpstreamFailure = callback;
+            },
+            nativeConnectionStatus: () => ({
+              configured: true,
+              explicitlyOffline: false,
+              connected,
+              authRejected,
+            }),
+            isNativeForegroundClosed: () => false,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    let restored = 0;
+    runtime.onAuthFailure(() => undefined);
+    runtime.onAuthRestored(() => {
+      restored += 1;
+    });
+    const settle = async () => {
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    };
+
+    // Connected before any refusal: nothing to restore.
+    connected = true;
+    schedule!("immediate");
+    await settle();
+    expect(restored).toBe(0);
+
+    const reason = "authentication expired";
+    connected = false;
+    authRejected = reason;
+    reportAuthRejected!(reason);
+    reportUpstreamFailure!({ reason, retrying: false });
+    schedule!("immediate");
+    await settle();
+    expect(restored).toBe(0);
+
+    // Reconnecting, not yet admitted.
+    authRejected = null;
+    reportUpstreamFailure!(null);
+    schedule!("immediate");
+    await settle();
+    expect(restored).toBe(0);
+
+    // Admitted: the host's link is connected with no refusal.
+    connected = true;
+    schedule!("immediate");
+    await settle();
+    expect(restored).toBe(1);
+
+    // Only once per refusal.
+    schedule!("immediate");
+    await settle();
+    expect(restored).toBe(1);
+    await runtime.close();
+  });
+
   it("reports pre-hello auth failures and reconnects with refreshed auth", async () => {
     const sockets: FakeWebSocket[] = [];
     let allowServerHello = false;
