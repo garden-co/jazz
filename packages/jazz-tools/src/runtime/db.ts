@@ -3045,7 +3045,9 @@ export class Db {
     if (this.heldWrites)
       // By the time it runs, this Db may have handed over to its successor.
       return this.afterHeldWrites(() =>
-        this.successor ? this.runOnSuccessor(schema, write) : this.runWriteNow(schema, write),
+        this.successor
+          ? this.runOnSuccessor(() => this.runOnCurrent(schema, write))
+          : this.runWriteNow(schema, write),
       );
     return this.runWriteNow(schema, write);
   }
@@ -3061,7 +3063,9 @@ export class Db {
     const madeBefore = this.successor === null;
     return runAfterPreparation(client, () => {
       if (this.successor)
-        return madeBefore ? this.runOnSuccessor(schema, write) : this.runOnCurrent(schema, write);
+        return madeBefore
+          ? this.runOnSuccessor(() => this.runOnCurrent(schema, write))
+          : this.runOnCurrent(schema, write);
       const retry = (error: unknown) => this.retryOnLocalFirst(error, made, schema, write);
       let result: T | Promise<T>;
       try {
@@ -3089,27 +3093,27 @@ export class Db {
   }
 
   /**
-   * Run `write`, made while this Db was thin, on the local-first client it
-   * handed over to. That client refuses encrypted tables (`not_observed`)
-   * until it has synced their catalogue identities once, which can land
-   * after the hand-over, and after the account's verification that a wait
-   * for it includes. So it is tried again until `deadline`: the 30 seconds
-   * the wait for the local-first client promises.
+   * Run `run`, work made while this Db was thin (a write, or a callback
+   * transaction's rerun), on the local-first client it handed over to. That
+   * client refuses encrypted tables (`not_observed`) until it has synced
+   * their catalogue identities once, which can land after the hand-over,
+   * and after the account's verification that a wait for it includes. A
+   * refused run committed nothing, so it is tried again until `deadline`:
+   * the 30 seconds the wait for the local-first client promises.
    */
   private runOnSuccessor<T>(
-    schema: WasmSchema,
-    write: (client: JazzClient, db: Db) => T | Promise<T>,
+    run: () => T | Promise<T>,
     deadline = Date.now() + LOCAL_FIRST_WAIT_MS,
   ): T | Promise<T> {
     const retry = (error: unknown): Promise<T> => {
       if (nativeCoreErrorCode(error) !== "not_observed" || Date.now() >= deadline) throw error;
       return new Promise<void>((resolve) => setTimeout(resolve, NOT_OBSERVED_RETRY_MS)).then(() =>
-        this.runOnSuccessor(schema, write, deadline),
+        this.runOnSuccessor(run, deadline),
       );
     };
     let result: T | Promise<T>;
     try {
-      result = this.runOnCurrent(schema, write);
+      result = run();
     } catch (error) {
       return retry(error);
     }
@@ -3131,7 +3135,7 @@ export class Db {
     this.writesWaiting++;
     return waited
       .then(
-        () => this.runOnSuccessor(schema, write, deadline),
+        () => this.runOnSuccessor(() => this.runOnCurrent(schema, write), deadline),
         (failure: unknown) => {
           this.failedWait = { error: failure, writesMade: this.writesMade };
           throw failure;
@@ -3253,7 +3257,8 @@ export class Db {
    * column), once that client has loaded; or when this Db handed over to
    * that client while the transaction waited, so the closed thin runtime
    * ended it before anything of it was sent. At most once: `rerun` itself
-   * never runs it again.
+   * never runs it again, except while the local-first client refuses it as
+   * not yet synced (`runOnSuccessor`), which commits nothing of it.
    *
    * One made behind earlier writes on a thin client (one waiting for the
    * local-first client, or one still in the queue that may yet wait) begins
@@ -3280,7 +3285,9 @@ export class Db {
     if (this.heldWrites)
       // Handed over meanwhile: its one run is on the successor.
       return this.afterHeldWrites(() =>
-        this.successor ? rerun(this.current()) : this.rerunOnLocalFirstNow(attempt, rerun),
+        this.successor
+          ? this.runOnSuccessor(() => rerun(this.current()))
+          : this.rerunOnLocalFirstNow(attempt, rerun),
       );
     return this.rerunOnLocalFirstNow(attempt, rerun);
   }
@@ -3292,14 +3299,17 @@ export class Db {
     let release: (() => void) | undefined;
     // The wait is over: writes held behind it run, beside the rerun.
     const end = () => release?.();
-    const start = (db: Db) => {
+    // On the successor, which may not have synced yet.
+    const start = (deadline?: number) => {
       end();
-      return rerun(db);
+      return Promise.resolve(this.runOnSuccessor(() => rerun(this.current()), deadline));
     };
     const again = (error: unknown): Promise<R> | undefined => {
-      if (error instanceof EncryptionNeedsLocalFirstError)
-        return this.awaitLocalFirst(error).then(start);
-      if (this.successor && closedBeforeSending(error)) return start(this.current());
+      if (error instanceof EncryptionNeedsLocalFirstError) {
+        const deadline = Date.now() + LOCAL_FIRST_WAIT_MS;
+        return this.awaitLocalFirst(error).then(() => start(deadline));
+      }
+      if (this.successor && closedBeforeSending(error)) return start();
       return undefined;
     };
     // Decided before it is queued itself. Only an app that declares
