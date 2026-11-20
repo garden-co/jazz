@@ -344,76 +344,12 @@ jobs:
               }
 
               if (treeReuseSafe) {
-                // Built once per commit by release-artifacts.yml, dispatched
-                // on the Version Packages head; the standalone preview run is
-                // the fallback for heads from before it.
-                const requiredArtifacts = [
-                  "pkg-jazz-tools",
-                  "pkg-jazz-wasm",
-                  "pkg-jazz-napi",
-                  "pkg-jazz-rn",
-                  "pkg-create-jazz",
-                  "inspector-prebuilt",
-                  "jazz-tools-linux-x64",
-                  "jazz-tools-linux-arm64",
-                ];
-                const misses = [];
-                for (const workflowId of [
-                  "release-artifacts.yml",
-                  "preview-jazz-tools-alpha-release.yml",
-                ]) {
-                  let runs = [];
-                  try {
-                    const runsResponse = await github.rest.actions.listWorkflowRuns({
-                      owner,
-                      repo,
-                      workflow_id: workflowId,
-                      branch: releasePrHeadRef,
-                      head_sha: releasePrHeadSha,
-                      per_page: 100,
-                    });
-                    runs = (runsResponse.data.workflow_runs || []).filter(Boolean);
-                  } catch (error) {
-                    if (error.status !== 404) throw error;
-                  }
-                  const sourceRun = runs
-                    .filter(
-                      (run) =>
-                        run.head_sha === releasePrHeadSha &&
-                        run.event === "workflow_dispatch" &&
-                        run.status === "completed" &&
-                        run.conclusion === "success",
-                    )
-                    .sort(
-                      (a, b) =>
-                        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-                    )[0];
-                  if (!sourceRun) {
-                    misses.push(`no successful ${workflowId} run for ${releasePrHeadRef}@${releasePrHeadSha}`);
-                    continue;
-                  }
-                  const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
-                    owner,
-                    repo,
-                    run_id: sourceRun.id,
-                    per_page: 100,
-                  });
-                  const availableArtifacts = new Set(
-                    artifacts.filter((artifact) => !artifact.expired).map((artifact) => artifact.name),
-                  );
-                  const missingArtifacts = requiredArtifacts.filter(
-                    (artifactName) => !availableArtifacts.has(artifactName),
-                  );
-                  if (missingArtifacts.length > 0) {
-                    misses.push(`${workflowId} run ${sourceRun.id} is missing artifacts: ${missingArtifacts.join(", ")}`);
-                    continue;
-                  }
-                  usePreviewArtifacts = "true";
-                  previewRunId = String(sourceRun.id);
-                  reason = `reusing ${workflowId} artifacts from run ${sourceRun.id} for PR #${releasePrNumber}`;
-                  break;
-                }
-                if (usePreviewArtifacts !== "true") reason = misses.join("; ");
+                // No reuse: the Version Packages head's runs (release-artifacts.yml
+                // or the preview) are on changeset-release/*, which restores an
+                // actions/cache scope any write collaborator can seed
+                // (#supply-chain, 2026-11-19). This run builds until
+                // release-artifacts.yml restores no cache on untrusted refs.
+                reason = "reuse of changeset-release/* runs is disabled (cache scope); building";
               }
             }
 
