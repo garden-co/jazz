@@ -767,6 +767,101 @@ fn pending_upload_count_has_pinned_bytes_and_answers() {
 }
 
 #[test]
+fn unreadable_delta_event_has_pinned_bytes() {
+    // Appended event: ordinals 0-3 keep their bytes. The same bytes are
+    // decoded in crates/jazz-rn/src/__tests__/index.test.tsx.
+    let json = r#"[{"table":"t","id":"i","column":null,"code":"key-pending"}]"#;
+    let mut expected = vec![
+        4, // SubscriptionEvents
+        1, // one event
+        4, // UnreadableDelta
+        1, // reset
+        0, // settled
+        5,
+        b'L',
+        b'o',
+        b'c',
+        b'a',
+        b'l', // tier
+        2,
+        9,
+        8, // delta
+        json.len() as u8,
+    ];
+    expected.extend_from_slice(json.as_bytes());
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::SubscriptionEvents {
+            events: vec![ForegroundSubscriptionEvent::UnreadableDelta {
+                reset: true,
+                settled: false,
+                tier: "Local".to_owned(),
+                delta: vec![9, 8],
+                unreadable_json: json.to_owned(),
+            }],
+        })
+        .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn a_delta_names_its_unreadable_rows_only_when_the_list_is_told() {
+    use crate::relay::foreground_subscription_event;
+    use jazz::binding_host::EventChunk;
+    let chunk_with = |reset: bool, unreadable: Option<&str>| EventChunk::Delta {
+        delta: vec![9, 8],
+        reset,
+        coalesced: false,
+        settled: true,
+        tier: "Local".to_owned(),
+        unreadable: unreadable.map(str::to_owned),
+    };
+    let chunk = |unreadable: Option<&str>| chunk_with(false, unreadable);
+    let json = r#"[{"table":"todos","id":"x","column":"title","code":"key-pending"}]"#;
+    assert_eq!(
+        foreground_subscription_event(chunk(Some(json))),
+        ForegroundSubscriptionEvent::UnreadableDelta {
+            reset: false,
+            settled: true,
+            tier: "Local".to_owned(),
+            delta: vec![9, 8],
+            unreadable_json: json.to_owned(),
+        }
+    );
+    // An emptied list is still told, so the reader drops the old one.
+    assert!(matches!(
+        foreground_subscription_event(chunk(Some("[]"))),
+        ForegroundSubscriptionEvent::UnreadableDelta { unreadable_json, .. } if unreadable_json == "[]"
+    ));
+    // A reset restates a non-empty list; with none left out it is a plain
+    // reset, which the reader takes as an empty list (an app without
+    // encryption keeps event 0).
+    assert!(matches!(
+        foreground_subscription_event(chunk_with(true, Some(json))),
+        ForegroundSubscriptionEvent::UnreadableDelta { reset: true, .. }
+    ));
+    assert_eq!(
+        foreground_subscription_event(chunk_with(true, Some("[]"))),
+        ForegroundSubscriptionEvent::Delta {
+            reset: true,
+            settled: true,
+            tier: "Local".to_owned(),
+            delta: vec![9, 8],
+        }
+    );
+    // Unchanged: the plain delta, with its bytes as before.
+    assert_eq!(
+        foreground_subscription_event(chunk(None)),
+        ForegroundSubscriptionEvent::Delta {
+            reset: false,
+            settled: true,
+            tier: "Local".to_owned(),
+            delta: vec![9, 8],
+        }
+    );
+}
+
+#[test]
 fn upload_status_has_pinned_bytes_and_answers() {
     // Appended command and answer: existing ordinals stay fixed.
     assert_eq!(

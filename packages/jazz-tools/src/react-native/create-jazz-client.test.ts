@@ -39,6 +39,7 @@ import {
   REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
+  unreadableRows,
   type JazzClient,
 } from "./index.js";
 import { createDb } from "./create-db.js";
@@ -270,6 +271,69 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     );
   });
 
+  it("names the rows a native subscription leaves out undecrypted, with each delivery", async () => {
+    installJsiForegroundFactory();
+    const rowId = new Uint8Array(16).fill(7);
+    const pending = { table: "notes", id: "x", column: "title", code: "key-pending" };
+    const added = encodeSubscriptionDelta({
+      added: [{ table: "notes", rowId, title: "Native note" }],
+    });
+    const empty = encodeSubscriptionDelta({ added: [] });
+    // The opening names one row; a plain delta leaves the list as it is;
+    // a delta that moves no row and tells an empty list empties it.
+    const drains = [
+      encodeSubscriptionEvents(added, JSON.stringify([pending])),
+      encodeSubscriptionEvents(empty, undefined, false),
+      encodeSubscriptionEvents(empty, "[]", false),
+    ];
+    nativeForegroundTest.execute = (command) => {
+      switch (command[0]) {
+        case 3:
+          return Uint8Array.of(3, 12);
+        case 4:
+          return drains.shift() ?? Uint8Array.of(4, 0);
+        case 5:
+          return Uint8Array.of(5, 1);
+        case 6:
+          return Uint8Array.of(6, 1);
+        case 7:
+          return Uint8Array.of(7, 1);
+        case 21:
+          return Uint8Array.of(16, 1, 0, 1, 0);
+        case 22:
+          return encodeNativeSession("reader");
+        case 35:
+          return Uint8Array.of(26, 2, 91, 93, 0, 0); // tickEvents: "[]", no failures
+        case 17:
+          return Uint8Array.from([15, ...command.subarray(1, 17)]);
+        default:
+          throw new Error(`unexpected foreground command ${command[0]}`);
+      }
+    };
+
+    client = await openJazzClient({
+      ...(await accountConfig("react-native-native-foreground-unreadable")),
+      nativeRelay: nativeRelayReceipt().config,
+    });
+
+    const seen: { titles: string[]; unreadable: readonly unknown[] }[] = [];
+    let unsubscribe: () => void = () => {};
+    const settled = new Promise<void>((resolve) => {
+      unsubscribe = client!.db.subscribe(app.notes, (notes) => {
+        seen.push({ titles: notes.map((note) => note.title), unreadable: unreadableRows(notes) });
+        if (seen.length === 3) resolve();
+      });
+    });
+    await settled;
+    unsubscribe();
+
+    expect(seen).toEqual([
+      { titles: ["Native note"], unreadable: [pending] },
+      { titles: ["Native note"], unreadable: [pending] },
+      { titles: ["Native note"], unreadable: [] },
+    ]);
+  });
+
   it("fails closed on an in-place auth refresh instead of reading through the prior native capability", async () => {
     nativeForegroundTest.close.mockClear();
     installJsiForegroundFactory();
@@ -399,9 +463,17 @@ function encodeBytesResponse(tag: number, bytes: Uint8Array): Uint8Array {
   return Uint8Array.from([tag, ...varint(bytes.length), ...bytes]);
 }
 
-function encodeSubscriptionEvents(delta: Uint8Array): Uint8Array {
+function encodeSubscriptionEvents(
+  delta: Uint8Array,
+  unreadable?: string,
+  reset = true,
+): Uint8Array {
   const tier = new TextEncoder().encode("local");
-  return Uint8Array.from([4, 1, 0, 1, 1, tier.length, ...tier, ...varint(delta.length), ...delta]);
+  const event = [reset ? 1 : 0, 1, tier.length, ...tier, ...varint(delta.length), ...delta];
+  if (unreadable === undefined) return Uint8Array.from([4, 1, 0, ...event]);
+  // Event 4: a delta that names the rows its result leaves out.
+  const json = new TextEncoder().encode(unreadable);
+  return Uint8Array.from([4, 1, 4, ...event, ...varint(json.length), ...json]);
 }
 
 function encodeNativeSession(userId: string): Uint8Array {

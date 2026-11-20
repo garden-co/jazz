@@ -15,6 +15,7 @@ export {
   type JazzClientProviderProps,
 } from "./provider.js";
 export { useAll } from "./use-all.js";
+export { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
 export { useOne, useOneSuspense, type UseOneResult, type UseOneSuspenseResult } from "./use-one.js";
 export type { DurabilityTier, QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 
