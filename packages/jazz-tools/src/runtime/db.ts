@@ -2580,12 +2580,35 @@ export class Db {
       new EncryptionNeedsLocalFirstError({ reason, operation, table });
     const upgradable = () => hasLocalFirstUpgrader(this);
     return (this.pendingEncryption = pendingEncryption({
-      resolve: async () => {
+      resolve: async (timeoutMs) => {
         const live = this.current();
         if (live !== this) return live.encryption;
         const refused = refusal("encryption", upgradable() ? "no-loader" : "direct-thin");
         // Without a loader this throws the refusal; without an upgrader it is the direct-thin advice.
-        return (await this.awaitLocalFirst(refused)).encryption;
+        const waiting = this.awaitLocalFirst(refused);
+        if (timeoutMs === undefined || timeoutMs >= LOCAL_FIRST_WAIT_MS)
+          return (await waiting).encryption;
+        // The caller's shorter timeout: the wait itself still ends at its own cap.
+        waiting.catch(() => undefined);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const early = new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new EncryptionNeedsLocalFirstError({
+                  reason: "timeout",
+                  operation: "encryption",
+                  table,
+                }),
+              ),
+            Math.max(0, timeoutMs),
+          );
+        });
+        try {
+          return (await Promise.race([waiting, early])).encryption;
+        } finally {
+          clearTimeout(timer);
+        }
       },
       live: () => {
         const live = this.current();

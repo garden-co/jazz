@@ -11,7 +11,7 @@ import type { Encryption } from "./index.js";
 
 export interface PendingEncryptionHost {
   /** The real handle, once the local-first client holds it; rejects when that can't happen. */
-  resolve(): Promise<Encryption>;
+  resolve(timeoutMs?: number): Promise<Encryption>;
   /**
    * The real handle once this Db handed over to the local-first client;
    * undefined while it is still thin. Throws the Db's own closed or replaced
@@ -86,7 +86,12 @@ export function pendingEncryption(host: PendingEncryptionHost): Encryption {
         if (lifecycle) return undefined;
         if (synchronous) throw host.refuseSync(name);
         if (path.length === 1 && LISTENERS.has(path[0]!)) return listen(path[0]!, args[0]);
-        return host.resolve().then((next) => call(next, path, args));
+        // A caller's own `ready({ timeoutMs })` shortens the wait; the host keeps its cap.
+        const own =
+          name === "ready" ? (args[0] as { timeoutMs?: number } | undefined)?.timeoutMs : undefined;
+        return host
+          .resolve(typeof own === "number" ? own : undefined)
+          .then((next) => call(next, path, args));
       },
     });
 

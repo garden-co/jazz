@@ -236,6 +236,22 @@ describe("calls on a db.encryption handle taken while thin", () => {
     expect(isThinDb(kept)).toBe(true);
   }, 60_000);
 
+  it("applies the caller's shorter ready({ timeoutMs }) while thin", async () => {
+    const host = await serve();
+    pageStillLoading();
+    const gate = gatedLoader();
+    const kept = db(await thinSession(host, gate.loader));
+    const started = Date.now();
+    const error = await kept.encryption.ready({ timeoutMs: 300 }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+    expect((error as EncryptionNeedsLocalFirstError).reason).toBe("timeout");
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(isThinDb(kept)).toBe(true);
+  }, 30_000);
+
   it("ends a call at a stalled load at the deadline, and at sign-out", async () => {
     const host = await serve();
     pageStillLoading();

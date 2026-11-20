@@ -67,7 +67,7 @@ describe("the stand-in's members", () => {
     for (const name of ["toJSON", "then", "inspect", "nope", "constructor"]) {
       expect(any[name]).toBeUndefined();
     }
-    expect(any[Symbol.toPrimitive]).toBeUndefined();
+    expect((handle as unknown as Record<symbol, unknown>)[Symbol.toPrimitive]).toBeUndefined();
     expect((handle.recovery as unknown as Record<string, unknown>).nope).toBeUndefined();
     expect(typeof handle.recovery.create).toBe("function");
   });
