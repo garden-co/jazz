@@ -314,8 +314,12 @@ jobs:
     needs: inputs
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 15
+    # Serialized only where runs share a core: production (the long-lived core) and previews on the shared
+    # cli-previews core (T4_TEARDOWN unset). A per-run preview core (ci-<run id>) or a skip shares nothing, so those
+    # runs go side by side: a test dispatch never queues a real RC's t4.
     concurrency:
-      { group: "adopter-gate-t4-${{ inputs.t4_mode || 'production' }}", cancel-in-progress: false }
+      group: "adopter-gate-t4-${{ ((inputs.t4_mode || 'production') == 'production' || (inputs.t4_mode == 'preview' && vars.T4_TEARDOWN != '1')) && (inputs.t4_mode || 'production') || github.run_id }}"
+      cancel-in-progress: false
     # Its secrets and vars live only in this environment (no reviewers: the gate must not wait on a person).
     environment: adopter-gate-t4
     env:
