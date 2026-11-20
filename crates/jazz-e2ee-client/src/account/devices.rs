@@ -577,8 +577,9 @@ impl E2eeClient {
 
     /// Registers the recovery root `secret` derives for the account's
     /// current generation, unless a valid root with that ID exists (protocol
-    /// §2.9, "Register"): the root, signed by this active device, and a
-    /// delivery of the account key sealed to it. When the root and its
+    /// §2.9, "Register") or was retired, which writes nothing: the root,
+    /// signed by this active device, and a delivery of the account key
+    /// sealed to it. When the root and its
     /// delivery for the current epoch are there and the delivery opens with the
     /// secret's key, nothing is written. What was written is not read back:
     /// a server that altered the rows can leave recovery broken whatever
@@ -598,6 +599,15 @@ impl E2eeClient {
                 &self.shared.domain.account(&self.shared.account_id)?,
                 view.state.generation,
             )?;
+            // Retired: it stays retired (§2.9, "Retiring a derived root"), so
+            // there is nothing to register and a start with this secret goes on.
+            if view
+                .state
+                .retired_recovery_roots
+                .contains_key(&keys.root_id)
+            {
+                return Ok(());
+            }
             // Registered already, with its delivery for the current epoch:
             // nothing to write, so a binding may call this at every start.
             // The delivery must open with the recovery key: a row that is
@@ -643,7 +653,8 @@ impl E2eeClient {
     /// approval with itself as both approver and requester, the root
     /// authorising it. Like any answer to a challenge it reveals the
     /// approval nonce, so it is marked spent first. Verifies the account
-    /// afterwards. The secret is in memory for this call only.
+    /// afterwards. A root that was retired is refused
+    /// (`recovery-root-mismatch`). The secret is in memory for this call only.
     pub async fn recover_device(
         &self,
         db: &Db,
@@ -656,8 +667,9 @@ impl E2eeClient {
 
     /// Automatic account-secret recovery can wait while the authority does
     /// not yet show a root or delivery, or while a newly enrolled device
-    /// still needs to recover. Evidence that is present but refused still
-    /// fails the operation.
+    /// still needs to recover. A retired root ends the wait: the device
+    /// stays awaiting approval (`Some`). Evidence that is present but
+    /// refused still fails the operation.
     pub(crate) async fn recover_device_when_available(
         &self,
         db: &Db,
@@ -720,6 +732,15 @@ impl E2eeClient {
                                 .any(|root| root.row.id == keys.root_id) =>
                     {
                         return Ok(None);
+                    }
+                    // A retired root never comes back: automatic recovery
+                    // stops waiting and the device stays awaiting approval.
+                    // Explicit recovery is refused.
+                    Err(ProtocolError::Recovery(RecoveryFailure::RootMismatch))
+                        if automatic
+                            && state.retired_recovery_roots.contains_key(&keys.root_id) =>
+                    {
+                        return Ok(Some(Attempt::Ready(None)));
                     }
                     Err(ProtocolError::Recovery(RecoveryFailure::DeliveryMissing))
                         if automatic

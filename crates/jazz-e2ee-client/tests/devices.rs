@@ -625,6 +625,88 @@ fn a_recovery_restores_access_and_its_root_is_retired_with_the_device() {
     });
 }
 
+/// Contract: a retired recovery root stays retired. Registering its secret
+/// again (as an app does at every start of an active device) writes
+/// nothing and is not an error; explicit recovery with it is refused with
+/// `recovery-root-mismatch`.
+///
+/// ```text
+/// first ──register root──► server; first ──retire it──► server
+/// first ──register the same secret──► Ok, nothing written
+/// new device ──recover (secret)──► refused: recovery-root-mismatch
+/// ```
+#[test]
+fn a_retired_recovery_root_stays_retired() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let first = device(&server, alice, memory(), 1, &settings);
+        first.status(&server, &[]);
+        let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([5; 32]);
+        drive(
+            &server,
+            &[&first.db],
+            first.client.register_recovery(&first.db, &secret),
+        )
+        .unwrap();
+        first.status(&server, &[]);
+        let root = first
+            .client
+            .with_account(|account| account.state.recovery_roots[0].row.id.clone())
+            .unwrap();
+        drive(
+            &server,
+            &[&first.db],
+            first.client.retire_recovery_root(&first.db, &root),
+        )
+        .unwrap();
+        pump(&server, &first.db);
+        let rows = || {
+            (
+                count(&server, "__e2ee_recovery_roots"),
+                count(&server, "__e2ee_recovery_deliveries"),
+            )
+        };
+        let before = rows();
+
+        drive(
+            &server,
+            &[&first.db],
+            first.client.register_recovery(&first.db, &secret),
+        )
+        .expect("a retired root is not registered again, and that is not an error");
+        pump(&server, &first.db);
+        assert_eq!(rows(), before, "nothing written");
+        assert_eq!(
+            first
+                .client
+                .with_account(|account| account.state.recovery_roots.len()),
+            Some(0)
+        );
+
+        let second = device(&server, alice, memory(), 2, &settings);
+        assert_eq!(
+            second.status(&server, &[&first]),
+            AccountStatus::AwaitingApproval
+        );
+        let refused = drive(
+            &server,
+            &[&second.db, &first.db],
+            second.client.recover_device(&second.db, &secret),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(ClientError::Protocol(ProtocolError::Recovery(
+                    jazz_e2ee::protocol::error::RecoveryFailure::RootMismatch
+                )))
+            ),
+            "{refused:?}"
+        );
+    });
+}
+
 /// Overwrites `column` of the newest row of `table` in the SQLite database
 /// at `path` with `value`: a server altering the last device's rows.
 fn tamper_newest(path: &std::path::Path, table: &str, column: &str, value: &[u8]) {
