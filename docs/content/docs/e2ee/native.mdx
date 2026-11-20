@@ -28,6 +28,29 @@ device-approval challenge as your device would.
 | Go             | the OS key store (Keychain, Credential Manager, libsecret) | the user's config or data directory |
 | Rust           | the OS key store, through a crate such as `keyring`        | the app's data directory            |
 
+### Keep the store out of backups
+
+Keep the key on this device only, and keep the store's files out of backups and sync. A restored backup
+or a VM snapshot is a copied device: if the key travels with the files, the copy can answer a
+device-approval challenge as the original would. Where the key is bound to the device, a copy opens
+nothing.
+
+- **Apple:** store the key in the Keychain with a `...ThisDeviceOnly` accessibility class, such as
+  `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, and set `isExcludedFromBackup` on the store's
+  directory.
+- **Android:** use an Android Keystore key, and exclude the store's files from Auto Backup and device
+  transfer (`dataExtractionRules`, or `fullBackupContent` before Android 12).
+- **Desktop (Go, Rust):** use the OS key store's local, non-syncing entry where it has one, and keep the
+  files out of folders that sync to the cloud.
+
+### Key bytes in memory
+
+The store's requests and answers carry key bytes as base64 text. Jazz wipes the copies Rust holds and
+the C string your store callback returns. The Swift, Kotlin and Go wrappers zero the byte buffers they
+own: the secret they pass to `protect`, and the secret `unprotect` returns, once they have read it. In
+Kotlin and Go, `unprotect` should therefore return a fresh array or slice. Strings can't be wiped in
+Swift, Kotlin or Go, so the request and answer texts stay in memory until it is reused.
+
 ## Opening an encrypted app
 
 An app that declares encrypted columns opens only with a store. Without one the open fails and names
@@ -147,3 +170,15 @@ const status = await session.db.encryption.ready();
 The account store remembers the signed-in account. The private store holds the device's
 encryption keys. In Expo, import `createJazzClient` from `jazz-tools/expo`, keep the
 same `encryption` option, and let Expo supply the account store.
+
+`memoryPrivateStore()`, which these entry points also export, is for tests only: it protects nothing.
+
+### Keys on the JavaScript bridge
+
+Because the private store is JavaScript, the device's keys cross the bridge between JavaScript and the
+native runtime (JSI). The secrets `protect` takes and `unprotect` returns, and the documents `save` and
+`load` carry, cross it as base64 strings. A device account's secret crosses it once, as hexadecimal
+text, when the session starts. JavaScript strings can't be wiped: they stay in the JavaScript heap until
+the garbage collector reuses it. Native code wipes its own copies, and the native runtime drops the
+account secret once recovery at start finishes or fails. In debug builds, keep tools that log bridge
+traffic or inspect the JavaScript heap away from real accounts.

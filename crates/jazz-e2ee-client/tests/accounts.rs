@@ -366,7 +366,7 @@ fn a_device_left_out_of_a_reset_enrols_again() {
     pump(&server, &first_db);
     assert!(watch.changed(), "the rows already there");
     assert!(!watch.changed());
-    let old_device = first.device().id.clone();
+    let old_device = first.device().unwrap().id.clone();
 
     let second = open_account(Rc::new(MemoryStore::new()), alice, settings.clone(), None);
     let (second_db, _second_link) = session(&second, &server, alice, &settings, 2, None);
@@ -389,13 +389,71 @@ fn a_device_left_out_of_a_reset_enrols_again() {
         drive(&server, &[&first_db], first.ensure_account(&first_db)).unwrap(),
         AccountStatus::Reenrolled
     );
-    assert_ne!(first.device().id, old_device);
+    assert_ne!(first.device().unwrap().id, old_device);
     assert!(first.with_held(|held| held.space(&root_id).is_none()));
     assert!(first.with_account(|_| ()).is_none());
     assert_eq!(
         drive(&server, &[&first_db], first.ensure_account(&first_db)).unwrap(),
         AccountStatus::AwaitingApproval
     );
+}
+
+/// Contract: a device left out of a reset whose new device cannot be
+/// stored (the store fails after the old state is wiped) closes its
+/// runtime: it does not run on as the device the store no longer has.
+///
+/// ```text
+/// device 2 ──request, reset──► server
+/// device 1 ──verify──► device-no-longer-active ──wipe──► new device: save ✗
+///          ──► the store's error; every later call: closed
+/// ```
+#[test]
+fn a_failed_reenrolment_closes_the_runtime() {
+    let settings = EncryptionSettings {
+        allow_account_reset: true,
+        ..Default::default()
+    };
+    let alice = account(0xa5);
+    let server = secure_authority_with(&settings, None);
+    let first_store = FaultyStore::default();
+    let first = open_account(Rc::new(first_store.clone()), alice, settings.clone(), None);
+    let (first_db, _first_link) = session(&first, &server, alice, &settings, 1, None);
+    assert_eq!(
+        drive(&server, &[&first_db], first.ensure_account(&first_db)).unwrap(),
+        AccountStatus::Active
+    );
+    let second = open_account(Rc::new(MemoryStore::new()), alice, settings.clone(), None);
+    let (second_db, _second_link) = session(&second, &server, alice, &settings, 2, None);
+    assert_eq!(
+        drive(&server, &[&second_db], second.ensure_account(&second_db)).unwrap(),
+        AccountStatus::AwaitingApproval
+    );
+    assert_eq!(
+        drive(&server, &[&second_db], second.reset_account(&second_db)).unwrap(),
+        AccountStatus::Active
+    );
+    pump(&server, &first_db);
+
+    first_store.failing.set(true);
+    let failed = drive(&server, &[&first_db], first.ensure_account(&first_db));
+    assert!(
+        matches!(
+            failed,
+            Err(ClientError::Store(jazz_e2ee_client::StoreError::Failed(_)))
+        ),
+        "{failed:?}"
+    );
+    first_store.failing.set(false);
+    let closed = drive(&server, &[&first_db], first.ensure_account(&first_db));
+    assert!(matches!(closed, Err(ClientError::Closed)), "{closed:?}");
+    // Its device's secrets are dropped with the store (§6.4).
+    assert!(matches!(first.device(), Err(ClientError::Closed)));
+    let space = project(&first_db, "plans");
+    let held = new_space_key(&second.device().unwrap(), &address(&first_db, space));
+    assert!(matches!(
+        block_on(first.keep(held)),
+        Err(ClientError::Closed)
+    ));
 }
 
 /// Contract: two first devices of one account that bootstrap at once do

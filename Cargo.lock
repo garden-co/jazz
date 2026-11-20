@@ -2388,6 +2388,7 @@ dependencies = [
  "jazz-core",
  "jazz-e2ee",
  "jazz-e2ee-client",
+ "postcard",
  "rusqlite",
  "serde_json",
  "sha2 0.11.1",
@@ -2395,6 +2396,7 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "web-time",
+ "zeroize",
 ]
 
 [[package]]
@@ -2553,6 +2555,7 @@ dependencies = [
  "tokio-tungstenite",
  "uniffi",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2625,6 +2628,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "zeroize",
 ]
 
 [[package]]

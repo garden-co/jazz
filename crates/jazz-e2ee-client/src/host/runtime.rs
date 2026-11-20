@@ -53,7 +53,53 @@ pub struct Built {
     /// column } }`, as JSON, for the host to watch the spaces in use.
     pub spaces: Value,
     pub client: Rc<E2eeClient>,
-    pub reports: Rc<RefCell<VecDeque<String>>>,
+    pub reports: Rc<RefCell<ReportQueue>>,
+}
+
+/// The most reports kept for JS between two takes.
+pub const MAX_REPORTS: usize = 1024;
+
+/// The reports waiting for JS, as JSON texts: at most [`MAX_REPORTS`]. An
+/// app that reads none (no listener) holds no more than that; past it the
+/// oldest report goes (never a challenge, which the device must answer)
+/// and the next take starts with one `reports-dropped` report counting
+/// those that went.
+#[derive(Debug, Default)]
+pub struct ReportQueue {
+    /// Each report, and whether it is a challenge.
+    waiting: VecDeque<(bool, String)>,
+    dropped: u64,
+}
+
+impl ReportQueue {
+    pub fn push(&mut self, report: Value) {
+        let challenge = report["type"] == "challenged";
+        if self.waiting.len() >= MAX_REPORTS {
+            let oldest = self
+                .waiting
+                .iter()
+                .position(|(challenge, _)| !challenge)
+                .unwrap_or(0);
+            self.waiting.remove(oldest);
+            self.dropped += 1;
+        }
+        self.waiting.push_back((challenge, report.to_string()));
+    }
+
+    /// The reports waiting, oldest first, and the count of those dropped.
+    pub fn take(&mut self) -> Vec<String> {
+        let dropped = std::mem::take(&mut self.dropped);
+        let dropped = (dropped > 0)
+            .then(|| json!({ "type": "reports-dropped", "count": dropped }).to_string());
+        dropped
+            .into_iter()
+            .chain(self.waiting.drain(..).map(|(_, report)| report))
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.waiting.is_empty() && self.dropped == 0
+    }
 }
 
 /// A native device runtime and its account-secret recovery configuration.
@@ -91,7 +137,7 @@ pub struct Encryption {
     pub store: Rc<JsStore>,
     db: Rc<Db>,
     /// The reports of the runtime, as JSON, waiting for JS.
-    reports: Rc<RefCell<VecDeque<String>>>,
+    reports: Rc<RefCell<ReportQueue>>,
     /// Approvals this device started, by the device they are for.
     approvals: RefCell<BTreeMap<String, PendingApproval>>,
     /// Space watches the app asked to open or close, applied by the loop:
@@ -153,37 +199,57 @@ type Command = futures::channel::oneshot::Sender<Result<Value, String>>;
 /// over the private store the app supplied (a JavaScript store, see
 /// `js_store`), for the account of its session.
 pub async fn build(
-    options: Options,
+    mut options: Options,
     account_id: String,
     store: Rc<JsStore>,
 ) -> Result<Built, String> {
     let declarations = declarations(&options)?;
-    let recovery = options
-        .device_account_secret
-        .as_deref()
-        .map(secret)
-        .transpose()?;
+    let recovery = take_account_secret(&mut options)?;
     build_client(declarations, account_id, store, recovery.as_ref()).await
+}
+
+/// What a native host passes to open an encrypted app's database: as
+/// [`Options`] for the app's `jazz.app.json`, with the device account's
+/// secret as a [`RecoverySecret`], which zeroizes its bytes when dropped,
+/// rather than as hexadecimal text.
+pub struct NativeOptions {
+    /// The app's `jazz.app.json`, or its generated bindings' compiled app
+    /// (`from_bindings`), from which the declarations are read.
+    pub app_file: Vec<u8>,
+    pub from_bindings: bool,
+    /// The device account's secret; `None` for an account the app signs in
+    /// itself.
+    pub device_account_secret: Option<RecoverySecret>,
+    pub app_id: String,
+    pub environment: String,
 }
 
 /// Build a native device runtime that handles account-secret recovery at
 /// startup. When a keyless relay supplies its declarations, the device must
 /// use those same declarations, including the app and environment.
 pub async fn build_native(
-    options: Options,
+    options: NativeOptions,
     account_id: String,
     store: Rc<JsStore>,
     relay_declarations: Option<&E2eeDeclarations>,
 ) -> Result<NativeBuilt, String> {
-    let declarations = declarations(&options)?;
+    let NativeOptions {
+        app_file,
+        from_bindings,
+        device_account_secret: recovery,
+        app_id,
+        environment,
+    } = options;
+    let declarations = declarations(&Options {
+        app_file,
+        from_bindings,
+        device_account_secret: None,
+        app_id,
+        environment,
+    })?;
     if relay_declarations.is_some_and(|expected| *expected != declarations) {
         return Err("the device's encryption declarations do not match the relay".to_owned());
     }
-    let recovery = options
-        .device_account_secret
-        .as_deref()
-        .map(secret)
-        .transpose()?;
     let built = build_client(declarations, account_id, store, recovery.as_ref()).await?;
     Ok(NativeBuilt { built, recovery })
 }
@@ -244,9 +310,9 @@ async fn build_client(
     .await
     .map_err(|error| error.to_string())?;
     let client = Rc::new(client);
-    let reports = Rc::new(RefCell::new(VecDeque::new()));
+    let reports = Rc::new(RefCell::new(ReportQueue::default()));
     let sink = Rc::clone(&reports);
-    client.on_report(move |report| sink.borrow_mut().push_back(report_json(report).to_string()));
+    client.on_report(move |report| sink.borrow_mut().push(report_json(report)));
     Ok(Built {
         spaces,
         client,
@@ -347,7 +413,7 @@ impl Encryption {
     /// The reports waiting, as JSON texts.
     pub fn take_reports(&self) -> Vec<String> {
         self.client.flush_reports();
-        self.reports.borrow_mut().drain(..).collect()
+        self.reports.borrow_mut().take()
     }
 
     /// An app subscription on an encrypted table opened (`true`) or closed
@@ -497,12 +563,16 @@ impl Encryption {
             return Ok(Some(status));
         };
         match status {
-            AccountStatus::Active => {
-                self.client
-                    .register_recovery_at_start(&self.db, &secret)
-                    .await?;
-                Ok(Some(status))
-            }
+            // The start-up registration of the device account's own secret
+            // (the runtime was opened with the identity that secret derives).
+            AccountStatus::Active => self
+                .client
+                .start_device_account(&self.db, &secret)
+                .await
+                .map(Some),
+            // Not what `start_device_account` does: a device awaiting
+            // approval recovers with the secret when the root and its
+            // delivery are there, and waits (`None`) while they are not.
             AccountStatus::AwaitingApproval => {
                 match self
                     .client
@@ -522,15 +592,18 @@ impl Encryption {
     fn record_native_failure(&self, native: &NativeReadiness, error: ClientError) {
         let text = describe_native(&error);
         let (code, message) = text.split_once(": ").expect("a host error has a code");
-        self.reports.borrow_mut().push_back(
-            json!({ "type": "ready-failed", "code": code, "message": message }).to_string(),
-        );
+        self.reports
+            .borrow_mut()
+            .push(json!({ "type": "ready-failed", "code": code, "message": message }));
         native.recovery.borrow_mut().take();
         *native.result.borrow_mut() = Verification::Failed(error);
     }
 
     /// One call from JS: the operation's name and its arguments, and its
-    /// result as JSON.
+    /// result as JSON. `recoveryCreate` answers with the recovery phrase,
+    /// the secret itself: the runtime zeroizes its own buffers, and the
+    /// caller owns the one copy in the answer (a host moves it into a
+    /// zeroizing buffer, or hands it on and drops it at once).
     pub fn call(
         self: &Rc<Self>,
         op: String,
@@ -555,7 +628,7 @@ impl Encryption {
                 .ok_or_else(|| format!("`{name}` is missing"))
         };
         Ok(match op {
-            "deviceId" => json!(client.device().id.clone()),
+            "deviceId" => json!(client.device().map_err(describe)?.id.clone()),
             "ready" => {
                 let status = client.ensure_account(db).await.map_err(describe)?;
                 self.status.set(Some(status));
@@ -633,11 +706,14 @@ impl Encryption {
             }
             // A new recovery secret as its 24-word phrase, to keep; nothing is
             // registered.
+            // The bytes and the phrase are zeroized here; the answer's one
+            // copy belongs to the caller (see `Encryption::call`).
             "recoveryCreate" => {
-                let mut bytes = [0u8; 32];
-                jazz_e2ee::RandomSource::fill(&mut OsRandom, &mut bytes)
+                let mut bytes = jazz_e2ee::Zeroizing::new([0u8; 32]);
+                jazz_e2ee::RandomSource::fill(&mut OsRandom, &mut *bytes)
                     .map_err(|error| error.to_string())?;
-                json!({ "phrase": super::phrase::from_secret(&bytes) })
+                let phrase = super::phrase::from_secret(&bytes);
+                json!({ "phrase": phrase.as_str() })
             }
             // `automatic`: the start-up registration of a device account's
             // own secret, for which a retired root is not an error. Otherwise
@@ -887,7 +963,7 @@ async fn main_loop(this: Rc<Encryption>) {
                     noticed = true;
                     this.reports
                         .borrow_mut()
-                        .push_back(json!({ "type": "challenged" }).to_string());
+                        .push(json!({ "type": "challenged" }));
                 }
                 Ok(false) => noticed = false,
                 _ => {}
@@ -1053,7 +1129,9 @@ fn describe(error: ClientError) -> String {
         ClientError::NoAccount => "no-account",
         ClientError::Unsupported(_) => "unsupported",
         ClientError::Database(_) => "database",
-        ClientError::Protocol(_) => "protocol",
+        // The protocol's own code when it has one (`recovery-root-mismatch`,
+        // `stale-state`, ...): what a caller tells expected refusals by.
+        ClientError::Protocol(error) => error.code().unwrap_or("protocol"),
         _ => "error",
     };
     format!("{code}: {error}")
@@ -1064,7 +1142,7 @@ fn describe(error: ClientError) -> String {
 fn recovery_secret(args: &Value) -> Result<RecoverySecret, String> {
     if let Some(phrase) = args.get("phrase").and_then(Value::as_str) {
         return super::phrase::to_secret(phrase)
-            .map(RecoverySecret::from_bytes)
+            .map(|bytes| RecoverySecret::from_bytes(*bytes))
             .map_err(|error| format!("{}: the recovery phrase is not valid", error.code()));
     }
     let hex = args
@@ -1075,16 +1153,23 @@ fn recovery_secret(args: &Value) -> Result<RecoverySecret, String> {
 }
 
 /// A recovery secret from its hexadecimal text.
+/// The account secret `options` carries, taken out of them: its text is
+/// wiped once read, and only the parsed secret (cleared on drop) is kept.
+fn take_account_secret(options: &mut Options) -> Result<Option<RecoverySecret>, String> {
+    let hex = jazz_e2ee::Zeroizing::new(options.device_account_secret.take());
+    hex.as_deref().map(secret).transpose()
+}
+
 fn secret(hex: &str) -> Result<RecoverySecret, String> {
     if hex.len() != 64 || !hex.is_ascii() {
         return Err("a recovery secret is 64 hexadecimal characters".to_owned());
     }
-    let mut bytes = [0u8; 32];
+    let mut bytes = jazz_e2ee::Zeroizing::new([0u8; 32]);
     for (index, byte) in bytes.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&hex[2 * index..2 * index + 2], 16)
             .map_err(|_| "a recovery secret is hexadecimal".to_owned())?;
     }
-    Ok(RecoverySecret::from_bytes(bytes))
+    Ok(RecoverySecret::from_bytes(*bytes))
 }
 
 /// A report as the JS events carry it.
@@ -1235,7 +1320,7 @@ mod tests {
         use jazz::schema::JazzSchema;
         use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
-        let options = Options {
+        let options = NativeOptions {
             app_file: br#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
                 "tables": {
                     "projects": { "columns": { "name": "string" } },
@@ -1394,6 +1479,46 @@ mod tests {
             Err(crate::StoreError::Wiped) => (false, "wiped".to_owned()),
             Err(error) => (false, error.to_string()),
         }
+    }
+
+    /// Contract: the reports waiting for JS stay bounded when nothing takes
+    /// them: past [`MAX_REPORTS`] the oldest go, a challenge is kept, and
+    /// the next take says how many went before the rest, oldest first.
+    #[test]
+    fn the_report_queue_is_bounded_and_counts_what_it_dropped() {
+        let mut queue = ReportQueue::default();
+        queue.push(json!({ "type": "challenged" }));
+        for index in 0..MAX_REPORTS + 10 {
+            queue.push(json!({ "type": "unreadable", "index": index }));
+        }
+        let taken = queue.take();
+        assert_eq!(taken.len(), MAX_REPORTS + 1);
+        let first: Value = serde_json::from_str(&taken[0]).unwrap();
+        assert_eq!(first, json!({ "type": "reports-dropped", "count": 11 }));
+        assert_eq!(taken[1], json!({ "type": "challenged" }).to_string());
+        let oldest_kept: Value = serde_json::from_str(&taken[2]).unwrap();
+        assert_eq!(oldest_kept["index"], 11);
+        let newest: Value = serde_json::from_str(taken.last().unwrap()).unwrap();
+        assert_eq!(newest["index"], MAX_REPORTS + 9);
+        assert!(queue.is_empty());
+        assert!(queue.take().is_empty(), "the count is reported once");
+    }
+
+    /// Contract: a protocol failure that has a code of its own reaches JS
+    /// with that code, so a caller can tell an expected refusal (nothing to
+    /// recover from) from a failure; one without keeps `protocol`.
+    #[test]
+    fn protocol_failures_carry_their_own_code() {
+        use jazz_e2ee::protocol::error::{ProtocolError, RecoveryFailure};
+        let described = describe(ClientError::Protocol(ProtocolError::Recovery(
+            RecoveryFailure::RootMismatch,
+        )));
+        assert!(
+            described.starts_with("recovery-root-mismatch: "),
+            "{described}"
+        );
+        let described = describe(ClientError::Protocol(ProtocolError::ProviderFailure));
+        assert!(described.starts_with("protocol: "), "{described}");
     }
 
     /// Contract: reports reach JS as JSON with a stable `type`, and the

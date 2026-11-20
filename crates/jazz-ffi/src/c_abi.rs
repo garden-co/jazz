@@ -13,6 +13,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 
 use serde_json::{Value as Json, json};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::JazzError;
 use crate::core::{Core, Event, Opts, SubscriptionCore, parse_tx, write_tier};
@@ -736,7 +737,7 @@ pub type JazzTokenCallback = Option<
 /// A private store's callback (see the header): `request` is JSON text;
 /// returns 0 with `*payload` the result as JSON text, or non-zero with
 /// `*payload` the error (`conflict`, `wiped` or a message); `*payload` is a
-/// `malloc`ed string jazz frees.
+/// `malloc`ed string jazz zeroes and frees.
 pub type JazzStoreCallback = Option<
     unsafe extern "C" fn(
         ctx: *mut c_void,
@@ -856,26 +857,42 @@ fn host_store(
     let gate: std::sync::Arc<StoreGate> =
         std::sync::Arc::new(crate::gate::Gate::new((cb, StoreRef(ctx))));
     let calling = gate.clone();
+    // Requests and answers carry key bytes as base64: the request, its C
+    // copy and the callback's answer are wiped before they are freed (the
+    // answer read back is the runtime's to wipe).
     let calls: crate::core::StoreCalls = std::sync::Arc::new(move |request: String| {
+        let request = Zeroizing::new(request);
         calling
             .call(|&(cb, ctx)| {
-                let request = CString::new(request.clone()).unwrap_or_default();
+                // A request never holds a NUL (it is JSON text); one that did
+                // would be sent empty, as `CString::new` refuses it.
+                let mut text = Zeroizing::new(Vec::with_capacity(request.len() + 1));
+                if !request.as_bytes().contains(&0) {
+                    text.extend_from_slice(request.as_bytes());
+                }
+                text.push(0);
                 let mut payload: *mut c_char = ptr::null_mut();
                 // SAFETY: per `jazz_open_encrypted`'s contract, while the
-                // handle (this gate) is open.
-                let failed = unsafe { cb(ctx.0, request.as_ptr(), &mut payload) };
-                let text = if payload.is_null() {
+                // handle (this gate) is open; `text` is NUL-terminated.
+                let failed = unsafe { cb(ctx.0, text.as_ptr().cast(), &mut payload) };
+                let answer = if payload.is_null() {
                     String::new()
                 } else {
                     // SAFETY: the callback sets a NUL-terminated `malloc`ed
-                    // string.
-                    let text = unsafe { CStr::from_ptr(payload) }
-                        .to_string_lossy()
-                        .into_owned();
-                    unsafe { free(payload.cast()) };
-                    text
+                    // string, which is wiped (to its NUL) and freed here.
+                    unsafe {
+                        let answer = CStr::from_ptr(payload);
+                        let read = answer.to_string_lossy().into_owned();
+                        std::slice::from_raw_parts_mut(
+                            payload.cast::<u8>(),
+                            answer.to_bytes().len(),
+                        )
+                        .zeroize();
+                        free(payload.cast());
+                        read
+                    }
                 };
-                (failed == 0, text)
+                (failed == 0, answer)
             })
             .unwrap_or_else(|| (false, "the app is closed".to_owned()))
     });

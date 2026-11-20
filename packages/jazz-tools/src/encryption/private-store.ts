@@ -15,21 +15,11 @@ export interface StoredDocument {
   revision: bigint;
 }
 
-/** The save found another revision than `expected`: read again and merge. */
-export class PrivateStoreConflictError extends Error {
-  constructor(message = "the private store changed since it was read") {
-    super(message);
-    this.name = "PrivateStoreConflictError";
-  }
-}
+// The errors live on their own so a store (the browser's) can throw them
+// without bringing this module's code into the thin client's first load.
+import { PrivateStoreConflictError, PrivateStoreWipedError } from "./private-store-errors.js";
 
-/** The scope was deleted (and perhaps made again) since it was opened: nothing is written. */
-export class PrivateStoreWipedError extends Error {
-  constructor(message = "the private store was wiped since it was opened") {
-    super(message);
-    this.name = "PrivateStoreWipedError";
-  }
-}
+export { PrivateStoreConflictError, PrivateStoreWipedError };
 
 export interface PrivateStore {
   /** The document `doc` of `scope`, or `null`. */
@@ -69,8 +59,11 @@ export interface PrivateStore {
 }
 
 /**
- * A store in memory, for tests and sessions that keep nothing. It protects
- * nothing: its secrets are as they are.
+ * A store in memory, **for tests only** (and sessions that keep nothing). It
+ * protects nothing: `protect` returns the secret as it is, and the device's
+ * keys are lost when the app restarts. Never ship it in an app: on React
+ * Native and Expo, supply a store whose protecting key lives in the Keychain or
+ * the Android Keystore (see the docs' Private store page).
  */
 export function memoryPrivateStore(): PrivateStore {
   const scopes = new Map<string, { incarnation: bigint; docs: Map<string, StoredDocument> }>();

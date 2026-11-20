@@ -147,7 +147,7 @@ mod plan {
         pub(crate) async fn device(
             &self,
             _account: crate::AccountId,
-            _secret: Option<[u8; 32]>,
+            _secret: Option<&crate::DeviceKey>,
         ) -> Result<Option<jazz::tools::ClientEncryption>> {
             Ok(None)
         }
@@ -178,6 +178,9 @@ mod plan {
     thread_local! {
         /// The runtime of the client on this thread.
         static DEVICE: RefCell<Option<Rc<host::Encryption>>> = const { RefCell::new(None) };
+        /// Told after each tick of the client on this thread: what calls
+        /// waiting on the runtime wait for (see `polled`).
+        static TICKED: Rc<tokio::sync::Notify> = Rc::new(tokio::sync::Notify::new());
     }
 
     /// What the client needs to open an app that declares encryption.
@@ -223,7 +226,7 @@ mod plan {
         pub(crate) async fn device(
             &self,
             account: crate::AccountId,
-            secret: Option<[u8; 32]>,
+            secret: Option<&crate::DeviceKey>,
         ) -> Result<Option<ClientEncryption>> {
             if self.declarations.is_none() {
                 return Ok(None);
@@ -241,17 +244,15 @@ mod plan {
                     }))
                 }
             });
-            let secret_hex = secret.map(|bytes| {
-                bytes
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
-            });
+            // The secret goes straight into a `RecoverySecret`, which
+            // zeroizes it when dropped: no hexadecimal or other copy.
+            let device_account_secret = secret
+                .map(|key| jazz_e2ee_client::host::RecoverySecret::from_bytes(key.to_bytes()));
             let built = host::build_native(
-                host::Options {
+                host::NativeOptions {
                     app_file: self.app_file.clone(),
                     from_bindings: false,
-                    device_account_secret: secret_hex,
+                    device_account_secret,
                     app_id: self.app_id.to_string(),
                     environment: config.environment.clone(),
                 },
@@ -294,6 +295,7 @@ mod plan {
     impl EncryptionRuntime for Driver {
         fn after_tick(&self) {
             self.0.drive();
+            TICKED.with(|ticked| ticked.notify_waiters());
         }
 
         fn stop(&self) {
@@ -335,22 +337,40 @@ mod plan {
             })
     }
 
+    /// The longest a waiting call goes without polling its future again
+    /// when nothing on the client ticks: the runtime's own deadlines and
+    /// retry timers are read when it is polled, so a wait with the server out
+    /// of reach is a slow timer, not a busy loop.
+    const IDLE_POLL_MAX: Duration = Duration::from_millis(100);
+    const IDLE_POLL_FIRST: Duration = Duration::from_millis(2);
+
     /// Polls `future` until it is done, driving the runtime's loop between
-    /// polls: the runtime's futures register no waker (the host polls
-    /// them), so the wait is a short timer.
+    /// polls. The runtime's futures register no waker (the host polls them),
+    /// so the wait is for the client's next tick, which is when they can make
+    /// progress (a store answer and a sync message each tick the client),
+    /// or, while nothing ticks, a timer that backs off to [`IDLE_POLL_MAX`].
     async fn polled<T>(
         runtime: &host::Encryption,
         future: impl std::future::Future<Output = T>,
     ) -> T {
         let mut future = std::pin::pin!(future);
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut idle = IDLE_POLL_FIRST;
         loop {
+            // Made before the poll, so a tick between the poll and the wait
+            // still wakes it (`notify_waiters` counts a `Notified` from when
+            // it is made).
+            let ticks = TICKED.with(Rc::clone);
+            let ticked = ticks.notified();
             if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
                 runtime.wake_if_owed();
                 return value;
             }
             runtime.drive();
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::select! {
+                () = ticked => idle = IDLE_POLL_FIRST,
+                () = tokio::time::sleep(idle) => idle = (idle * 2).min(IDLE_POLL_MAX),
+            }
         }
     }
 
@@ -525,6 +545,10 @@ impl Encryption {
     /// Its failure is [`Error::Encryption`] with the runtime's code
     /// (`approval-answered`, `no-challenge`, `approval-code-mismatch`,
     /// `device-no-longer-active`, `unsupported`, `store`, `closed`, ...).
+    ///
+    /// `recoveryCreate` answers `{ "phrase": ... }`, the recovery secret
+    /// itself: take the string out of the answer (`Value::take`) into a
+    /// zeroizing buffer, and keep no other copy.
     pub async fn call(&self, op: &str, args: Value) -> Result<Value> {
         if let Some(refusal) = self.refusal() {
             return Err(refusal);

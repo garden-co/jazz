@@ -13,8 +13,11 @@ pub(super) struct AccountSessionOwner {
     pub app_id: String,
     #[cfg(feature = "e2ee-client")]
     pub environment: String,
+    /// The device account's secret until the scope's first encrypted
+    /// foreground takes it for its runtime's recovery at start (wiped when
+    /// dropped). Nothing here keeps a copy after that.
     #[cfg(feature = "e2ee-client")]
-    pub device_account_secret: Option<String>,
+    pub device_account_secret: Option<zeroize::Zeroizing<String>>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -234,7 +237,12 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_begin_account_session_json
         };
         let mut request = serde_json::from_slice::<AccountSessionRequest>(request)
             .map_err(|_| JazzNativeRelayStatus::InvalidCommand)?;
-        let device_account_secret = request.device_account_secret.take();
+        // Wiped when dropped: once checked, or once the scope's first
+        // encrypted foreground has handed it to its runtime.
+        let device_account_secret = request
+            .device_account_secret
+            .take()
+            .map(zeroize::Zeroizing::new);
         // A recovery secret is accepted only if it is the account's own
         // signing root. The normal admission below still verifies its JWT.
         if let Some(secret) = &device_account_secret {

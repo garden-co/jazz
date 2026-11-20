@@ -128,8 +128,8 @@ fn a_leased_foreground_opens_with_the_apps_async_private_store() {
         );
         let expired =
             readiness_while_sibling_holds_the_host(&*lease, foreground, &*sibling_lease, sibling);
-        ready_expires_while_owner_is_busy(&relay, &execute);
-        readiness_reads_the_authority_again(&relay, &execute, &app, &store);
+        ready_expires_while_owner_is_busy(&relay, execute);
+        readiness_reads_the_authority_again(&relay, execute, &app, &store);
         let Response::Pending { operation: retired } =
             leased_execute(&*sibling_lease, sibling, start_ready(2000)).unwrap()
         else {
@@ -167,12 +167,100 @@ fn a_leased_foreground_opens_with_the_apps_async_private_store() {
     }
 }
 
+/// Alice's device account opens its first encrypted foreground: the native
+/// host hands her account secret to that foreground's runtime, which wipes
+/// it once its recovery at start is done, and keeps no copy of its own for
+/// the rest of the session (as `devices-and-recovery.mdx` says).
+///
+/// Alice ──admit (secret)──► host ──first foreground──► runtime
+///                            │
+///                            └── holds no secret afterwards
+///
+/// White-box: what the host holds is not observable through its C ABI, so
+/// the test reads the session's owner, and puts the secret there itself
+/// rather than minting a device account whose proof the admission checks.
+#[test]
+fn the_host_keeps_no_account_secret_once_a_foreground_attached() {
+    let root = tempfile::tempdir().unwrap();
+    let root_bytes = root.path().to_str().unwrap().as_bytes();
+    let app = jazz::tools::deployment::artifact::load_app(include_bytes!(
+        "../../../jazz-codegen/tests/apps/encrypted/jazz.app.json"
+    ))
+    .unwrap();
+    let mut schema = serde_json::to_value(app.current_schema()).unwrap();
+    let bindings = json!({
+        "schema": {
+            "current": app.current_hash(),
+            "schemas": [{ "hash": app.current_hash(), "schema": schema }],
+            "migrations": [],
+            "encryption": app.encryption(),
+        },
+        "relations": {},
+    });
+    schema["encryptionBindings"] = json!(bindings.to_string());
+    let schema = serde_json::to_vec(&schema).unwrap();
+    let app_id = "07070707-0707-4707-8707-070707070707";
+    let request = serde_json::to_vec(&json!({
+        "registry": format!("https://edge.example/apps/{app_id}/accounts"),
+        "app_id": app_id,
+        "env": "test",
+        "account_id": ALICE_ACCOUNT_ID,
+        "issuer": "https://issuer.example",
+        "subject": "alice",
+        "bearer": "alice-session",
+        "server_url": null,
+    }))
+    .unwrap();
+
+    unsafe {
+        let host = jazz_native_relay_host_new();
+        let lease = jazz_native_relay_host_retain(host, 1);
+        let admitted = admit_account(&*lease, root_bytes, &request, &schema);
+        let capability = AdmissionCapability(admitted.as_slice().try_into().unwrap());
+        let secret = || {
+            (*host).lock().unwrap().account_session_owners[&capability]
+                .device_account_secret
+                .is_some()
+        };
+        (*host)
+            .lock()
+            .unwrap()
+            .account_session_owners
+            .get_mut(&capability)
+            .unwrap()
+            .device_account_secret = Some(zeroize::Zeroizing::new("42".repeat(32)));
+        assert!(secret());
+
+        let foreground = open_admitted_foreground(&*lease, &admitted);
+        assert!(!secret(), "the host must not keep the account secret");
+
+        assert_eq!(
+            leased_execute(&*lease, foreground, Request::Close).unwrap(),
+            Response::Closed { closed: true }
+        );
+        jazz_native_relay_host_lease_free(lease);
+        jazz_native_relay_host_free(host);
+    }
+}
+
 fn open_account_foreground(
     lease: &JazzNativeRelayHostLease,
     root: &[u8],
     request: &[u8],
     schema: &[u8],
 ) -> u64 {
+    let admitted = admit_account(lease, root, request, schema);
+    open_admitted_foreground(lease, &admitted)
+}
+
+/// Begins the account session and attaches its schema: the admitted
+/// scope's capability.
+fn admit_account(
+    lease: &JazzNativeRelayHostLease,
+    root: &[u8],
+    request: &[u8],
+    schema: &[u8],
+) -> Vec<u8> {
     let lease = std::ptr::from_ref(lease).cast_mut();
     let mut out = JazzNativeRelayBytes::EMPTY;
     unsafe {
@@ -202,6 +290,13 @@ fn open_account_foreground(
         );
         let admitted = std::slice::from_raw_parts(out.data, out.len).to_vec();
         jazz_native_relay_bytes_free(&mut out);
+        admitted
+    }
+}
+
+fn open_admitted_foreground(lease: &JazzNativeRelayHostLease, admitted: &[u8]) -> u64 {
+    let lease = std::ptr::from_ref(lease).cast_mut();
+    unsafe {
         let mut foreground = 0;
         assert_eq!(
             jazz_native_relay_host_lease_open_attached_foreground(

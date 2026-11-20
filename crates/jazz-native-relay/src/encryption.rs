@@ -72,11 +72,17 @@ impl ForegroundEncryption {
     pub async fn build(
         self,
         account: String,
-        device_account_secret: Option<String>,
+        device_account_secret: Option<zeroize::Zeroizing<String>>,
         store: Rc<JsStore>,
     ) -> Result<Built, String> {
+        // Read straight into a zeroizing `RecoverySecret`; the hexadecimal
+        // text is wiped when it drops here.
+        let device_account_secret = device_account_secret
+            .as_ref()
+            .map(|secret| account_secret(secret.as_str()))
+            .transpose()?;
         let built = host::build_native(
-            host::Options {
+            host::NativeOptions {
                 app_file: self.bindings.to_vec(),
                 from_bindings: true,
                 device_account_secret,
@@ -119,18 +125,40 @@ pub(crate) fn keyless(declarations: Declarations) -> Rc<dyn jazz::e2ee::E2eeHook
     jazz_e2ee_client::KeylessHooks::hooks(declarations)
 }
 
+/// The device account's secret from its 64 hexadecimal characters, as the
+/// [`RecoverySecret`](jazz_e2ee_client::host::RecoverySecret) the runtime
+/// takes (which zeroizes its bytes when dropped).
+fn account_secret(hex: &str) -> Result<jazz_e2ee_client::host::RecoverySecret, String> {
+    if hex.len() != 64 || !hex.is_ascii() {
+        return Err("a recovery secret is 64 hexadecimal characters".to_owned());
+    }
+    let mut bytes = [0u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * index..2 * index + 2], 16)
+            .map_err(|_| "a recovery secret is hexadecimal".to_owned())?;
+    }
+    let secret = jazz_e2ee_client::host::RecoverySecret::from_bytes(bytes);
+    bytes.fill(0);
+    Ok(secret)
+}
+
 /// The runtime for `account`, built over the device's store.
 pub(crate) fn build(
     device: EncryptedDevice,
     account: String,
     declarations: &Declarations,
 ) -> Result<Built, String> {
+    let device_account_secret = device
+        .device_account_secret
+        .as_deref()
+        .map(account_secret)
+        .transpose()?;
     let store = (device.store)();
     let built = jazz::db::block_on(host::build_native(
-        host::Options {
+        host::NativeOptions {
             app_file: device.app_file,
             from_bindings: false,
-            device_account_secret: device.device_account_secret,
+            device_account_secret,
             app_id: device.app_id,
             environment: device.environment,
         },

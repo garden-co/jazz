@@ -1244,6 +1244,14 @@ async function initialize(context: RuntimeContext): Promise<void> {
         "WASM runtime does not support encrypted apps; rebuild the matching Jazz WASM artifact",
       );
     }
+    // The keyless open takes one app id for both its encryption domain and the
+    // proof's check: a proof minted for another app must not be checked
+    // against this one (nor this app's rows sealed under the proof's).
+    if (keyless && proof && proof.appId !== options.appId) {
+      throw new Error(
+        `The encrypted app's id (${options.appId}) is not the one its client proof names (${proof.appId})`,
+      );
+    }
     unownedDb = keyless
       ? await wasmModule.WasmDb.openBrowserKeyless(
           context.pageStore,
