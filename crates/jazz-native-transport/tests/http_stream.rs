@@ -342,7 +342,7 @@ async fn a_backend_that_cannot_upgrade_sockets_syncs_over_the_stream() {
             )
             .await
             .expect("connects over the stream");
-            assert!(client.is_connected());
+            jazz::tools::test_support::wait_for_connected(&client).await;
             assert_eq!(
                 connector.last_transport(),
                 Some(HttpStreamTransportKind::HttpStream)
