@@ -23,7 +23,7 @@ enum Value {
 }
 
 /// Appends `value` as a JSON string, escaped as `JSON.stringify` does.
-pub(crate) fn push_string(out: &mut String, value: &str) {
+pub fn push_string(out: &mut String, value: &str) {
     out.push('"');
     for ch in value.chars() {
         match ch {
