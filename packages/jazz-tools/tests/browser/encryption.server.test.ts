@@ -1,5 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 import { createJazzClient, openBrowserSessionCore } from "../../src/session/create-jazz-session.js";
+import { unreadableRows } from "../../src/encryption/unreadable.js";
 import { browserPrivateStore } from "../../src/encryption/browser-store.js";
 import { encryptionStoreScope } from "../../src/encryption/store-scope.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
@@ -34,13 +35,17 @@ afterEach(async () => {
   localStorage.clear();
 });
 
-async function serverAt(name: string, options?: { onDisk?: boolean }) {
+async function serverAt(
+  name: string,
+  options?: { onDisk?: boolean; permissions?: typeof permissions },
+) {
   const core = await getJazzServerInfo(uniqueDbName(name), options);
   const { appId, serverUrl: coreUrl, adminSecret } = core;
-  await deploy({ appId, serverUrl: coreUrl, adminSecret, app, permissions });
+  const served = options?.permissions ?? permissions;
+  await deploy({ appId, serverUrl: coreUrl, adminSecret, app, permissions: served });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
-    { schema: app, permissions },
+    { schema: app, permissions: served },
   );
   const url = await jazzAppVisitor(backend);
   const pageFetch = globalThis.fetch;
@@ -213,6 +218,63 @@ it("encrypts in a real browser: a device's keys in the browser's own store, a ta
     "The reloaded device should read its encrypted row",
   );
 }, 240_000);
+
+it("a one-shot read in the browser names the rows it leaves out undecrypted", async () => {
+  // Tasks are readable to everyone here, so a device of another account is
+  // handed the ciphertext of alice's task: it holds no key for her space.
+  const open = structuredClone(permissions) as { tables: Record<string, unknown> };
+  open.tables.tasks = { read: "true", insert: "allowedTo.read(project)" };
+  const server = await serverAt("encryption-unreadable", {
+    permissions: open as typeof permissions,
+  });
+
+  const alice = await step("alice load", load(server, uniqueDbName("encryption-alice")), 40_000);
+  const aliceDb = alice.getSnapshot().client!.db;
+  expect(await step("alice ready", aliceDb.encryption.ready({ timeoutMs: 40_000 }), 45_000)).toBe(
+    "active",
+  );
+  const account = alice.getSnapshot().user!.accountId;
+  const project = crypto.randomUUID();
+  const self = await step(
+    "member row",
+    aliceDb.encryption.members.row({ table: "projects", id: project }, account),
+  );
+  const written = await aliceDb.transaction((tx) => {
+    tx.insert(app.projects, { name: "plans", ownerId: account }, { id: project });
+    tx.insert(membersTable, self as never);
+  });
+  await step("project global", written.wait({ tier: "global" }));
+  const task = await aliceDb.insert(app.tasks, { projectId: project, title: "alice's secret" });
+  await step("task global", task.wait({ tier: "global" }));
+  const tasks = app.tasks.where({ projectId: project });
+  // Alice holds the key: her result is complete.
+  const hers = await aliceDb.all(tasks, { tier: "remote" });
+  expect(hers.map((row) => row.title)).toEqual(["alice's secret"]);
+  expect(unreadableRows(hers)).toEqual([]);
+  await alice.close();
+
+  // Another account's device in this browser (its account is localStorage's).
+  localStorage.clear();
+  const bob = await step("bob load", load(server, uniqueDbName("encryption-bob")), 40_000);
+  const bobDb = bob.getSnapshot().client!.db;
+  expect(await step("bob ready", bobDb.encryption.ready({ timeoutMs: 40_000 }), 45_000)).toBe(
+    "active",
+  );
+  expect(bob.getSnapshot().user!.accountId).not.toBe(account);
+  let bobSees: readonly unknown[] = [];
+  await waitForCondition(
+    async () => {
+      bobSees = await bobDb.all(tasks, { tier: "remote" });
+      return unreadableRows(bobSees).length > 0;
+    },
+    30_000,
+    "Bob's one-shot read should name alice's task as unreadable",
+  );
+  expect(bobSees).toEqual([]);
+  expect(unreadableRows(bobSees)).toEqual([
+    { table: "tasks", id: hers[0]!.id, column: "title", code: expect.any(String) },
+  ]);
+}, 180_000);
 
 /** A thin page load: no wait for the upgrade; `client` loads the local-first client, if given. */
 async function loadThin(
