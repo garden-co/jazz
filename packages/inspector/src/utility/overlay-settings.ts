@@ -41,9 +41,9 @@ export function isDetachedInspector(): boolean {
 
 export function requestDetachOverlay(route: string): void {
   try {
-    const control = (window.parent as unknown as Record<string, unknown>)[OVERLAY_CONTROL_GLOBAL] as
-      | InspectorOverlayControl
-      | undefined;
+    const control = (window.parent as unknown as Record<string, unknown>)[
+      OVERLAY_CONTROL_GLOBAL
+    ] as InspectorOverlayControl | undefined;
     if (control?.detach(route) && document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
@@ -55,9 +55,9 @@ export function requestDetachOverlay(route: string): void {
 export function setOverlayActiveRoute(route: string): void {
   try {
     const overlayWindow = isDetachedInspector() ? window.opener : window.parent;
-    const control = (overlayWindow as unknown as Record<string, unknown>)[OVERLAY_CONTROL_GLOBAL] as
-      | InspectorOverlayControl
-      | undefined;
+    const control = (overlayWindow as unknown as Record<string, unknown>)[
+      OVERLAY_CONTROL_GLOBAL
+    ] as InspectorOverlayControl | undefined;
     control?.setActiveRoute(route);
   } catch {
     // No parent / cross-origin (e.g. standalone app) — nothing to synchronize.

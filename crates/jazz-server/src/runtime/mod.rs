@@ -307,6 +307,22 @@ pub enum CatalogueApplyError {
     Failed(String),
 }
 
+impl From<String> for CatalogueApplyError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<jazz::db::Error> for CatalogueApplyError {
+    fn from(error: jazz::db::Error) -> Self {
+        if error.code == jazz::db::ErrorCode::Storage {
+            Self::Failed(error.to_string())
+        } else {
+            Self::Rejected(error.to_string())
+        }
+    }
+}
+
 impl std::fmt::Display for CatalogueApplyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1040,7 +1056,8 @@ impl Owner {
         wake: std_mpsc::Sender<Work>,
         any_stored_catalogue: bool,
         app: Option<String>,
-    ) -> Result<Self, String> {
+        initial: Option<CatalogueChange>,
+    ) -> Result<Self, CatalogueApplyError> {
         let chunk_io = match &chunk_store {
             Some(choice) if choice.network => {
                 Some(ChunkIoRunner::start(Arc::clone(&choice.store), wake)?)
@@ -1048,19 +1065,15 @@ impl Owner {
             _ => None,
         };
         let mut owner =
-            Self::open_on(
-                schema,
-                file,
-                any_stored_catalogue,
-                app,
-                |config| match &chunk_store {
+            Self::open_on(schema, file, any_stored_catalogue, app, initial, |config| {
+                match &chunk_store {
                     Some(choice) if choice.network => config
                         .with_chunk_store(Arc::clone(&choice.store))
                         .with_host_chunk_io(),
                     Some(choice) => config.with_chunk_store(Arc::clone(&choice.store)),
                     None => config,
-                },
-            )?;
+                }
+            })?;
         owner.chunk_io = chunk_io;
         Ok(owner)
     }
@@ -1077,8 +1090,9 @@ impl Owner {
         file: StoreFile,
         any_stored_catalogue: bool,
         app: Option<String>,
+        initial: Option<CatalogueChange>,
         configure: impl FnOnce(jazz::db::DbConfig) -> jazz::db::DbConfig,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CatalogueApplyError> {
         let rows = file
             .catalogue()
             .map_err(|error| format!("read catalogue: {error}"))?;
@@ -1106,8 +1120,11 @@ impl Owner {
             (None, None) => schema,
         };
         let config = configure(config(current));
-        let db = block_on(Db::open_file(config, file))
-            .map_err(|error| format!("open server store: {error}"))?;
+        let db = match initial {
+            Some(change) => Db::open_file_with_catalogue(config, file, change),
+            None => block_on(Db::open_file(config, file)),
+        }
+        .map_err(CatalogueApplyError::from)?;
         db.set_authority();
         db.require_session_pins();
         db.track_closed_subscribers();

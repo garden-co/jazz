@@ -94,8 +94,32 @@ impl ServerCore {
         app: Option<String>,
         chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
     ) -> Result<Self, String> {
+        Self::open_on(schema, file, any_stored_catalogue, app, chunk_store, None)
+            .map_err(String::from)
+    }
+
+    /// Initialize and publish a first deployment in the real store's scope.
+    /// No core is returned until initialization and catalogue admission commit.
+    pub fn open_deployment(
+        schema: JazzSchema,
+        file: StoreFile,
+        app: Option<String>,
+        chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
+        change: CatalogueChange,
+    ) -> Result<Self, CatalogueApplyError> {
+        Self::open_on(schema, file, true, app, chunk_store, Some(change))
+    }
+
+    fn open_on(
+        schema: JazzSchema,
+        file: StoreFile,
+        any_stored_catalogue: bool,
+        app: Option<String>,
+        chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
+        initial: Option<CatalogueChange>,
+    ) -> Result<Self, CatalogueApplyError> {
         Ok(Self {
-            owner: Owner::open_on(schema, file, any_stored_catalogue, app, |config| {
+            owner: Owner::open_on(schema, file, any_stored_catalogue, app, initial, |config| {
                 match chunk_store {
                     Some(store) => config.with_chunk_store(store).with_host_chunk_io(),
                     None => config,
@@ -464,6 +488,89 @@ mod tests {
     fn core() -> ServerCore {
         let schema = JazzSchema::new(&source()).unwrap();
         ServerCore::open(schema, StoreFile::memory().unwrap(), false, None).unwrap()
+    }
+
+    /// Alice initializes a managed store, then Bob's table blocks a later
+    /// admission. Initialization and catalogue rows roll back together; Alice
+    /// can retry with another genesis and keep Bob's data.
+    /// alice -> initialize notes -> admit tasks -> collision -> rollback
+    #[test]
+    fn first_deployment_on_managed_storage_rolls_back_and_retries() {
+        use jazz::storage::{Storage, managed_emulation::EmulatedObjectSql};
+        let backend = EmulatedObjectSql::open_in_memory().unwrap();
+        let observer = Storage::from_backend(backend.clone());
+        observer
+            .execute_batch("CREATE TABLE tasks (v TEXT); INSERT INTO tasks VALUES ('bob')")
+            .unwrap();
+        let file = || StoreFile::from_storage(Storage::from_backend(backend.clone())).unwrap();
+        let initial_file = file();
+        let before: i64 = observer
+            .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+            .unwrap();
+        let source = source();
+        let later = SchemaBuilder::new()
+            .table(TableSchema::builder("tasks").column("body", ColumnType::Text))
+            .build();
+        let change = CatalogueChange {
+            put: jazz::catalogue::CataloguePut {
+                schemas: vec![(source.clone(), 1)],
+                ..Default::default()
+            },
+            admit: vec![(JazzSchema::new(&later).unwrap(), vec![])],
+        };
+        let result = ServerCore::open_deployment(
+            JazzSchema::new(&source).unwrap(),
+            initial_file,
+            None,
+            None,
+            change,
+        );
+        assert!(matches!(result, Err(CatalogueApplyError::Rejected(_))));
+        assert_eq!(
+            observer
+                .query_row("SELECT count(*) FROM sqlite_master", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            observer
+                .query_row("SELECT v FROM tasks", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "bob"
+        );
+        let retry = SchemaBuilder::new()
+            .table(TableSchema::builder("messages").column("body", ColumnType::Text))
+            .build();
+        let schema = JazzSchema::new(&retry).unwrap();
+        let change = CatalogueChange {
+            put: jazz::catalogue::CataloguePut {
+                schemas: vec![(retry.clone(), 2)],
+                ..Default::default()
+            },
+            admit: vec![(schema.clone(), vec![])],
+        };
+        let core = ServerCore::open_deployment(schema.clone(), file(), None, None, change).unwrap();
+        assert!(
+            core.db()
+                .catalogue()
+                .unwrap()
+                .schemas
+                .iter()
+                .any(|row| row.schema == retry)
+        );
+        core.close();
+        let reopened = ServerCore::open(schema, file(), true, None).unwrap();
+        assert!(
+            reopened
+                .db()
+                .catalogue()
+                .unwrap()
+                .schemas
+                .iter()
+                .any(|row| row.schema == retry)
+        );
+        reopened.close();
     }
 
     fn body(bytes: Vec<u8>) -> BTreeMap<String, Value> {

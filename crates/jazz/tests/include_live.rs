@@ -51,12 +51,15 @@ fn setup(messages: u32) -> Db {
     );
     let db = block_on(Db::open(config)).unwrap();
     for u in 0..50 {
-        db.seed_settled_mergeable_for_bootstrap(
+        jazz::db::block_on(db.insert(
             "users",
-            id(1, u),
-            AuthorSubject::SYSTEM,
             [("name".to_owned(), Value::String(format!("u{u}")))].into(),
-        )
+            jazz::db::InsertOptions {
+                row_id: Some(id(1, u)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
         .unwrap();
     }
     for n in 0..messages {
@@ -65,8 +68,16 @@ fn setup(messages: u32) -> Db {
             ("body".to_owned(), Value::String(format!("m{n}"))),
         ]
         .into();
-        db.seed_settled_mergeable_for_bootstrap("messages", id(2, n), AuthorSubject::SYSTEM, cells)
-            .unwrap();
+        jazz::db::block_on(db.insert(
+            "messages",
+            cells,
+            jazz::db::InsertOptions {
+                row_id: Some(id(2, n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     }
     db
 }
@@ -166,12 +177,15 @@ fn renaming_a_sender_updates_messages_through_a_nullable_reference() {
     )))
     .unwrap();
     for u in 0..2 {
-        db.seed_settled_mergeable_for_bootstrap(
+        jazz::db::block_on(db.insert(
             "users",
-            id(1, u),
-            AuthorSubject::SYSTEM,
             [("name".to_owned(), Value::String(format!("u{u}")))].into(),
-        )
+            jazz::db::InsertOptions {
+                row_id: Some(id(1, u)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
         .unwrap();
     }
     for (n, sender) in [Some(0), Some(1), Some(0), None].into_iter().enumerate() {
@@ -184,12 +198,15 @@ fn renaming_a_sender_updates_messages_through_a_nullable_reference() {
             ("body".to_owned(), Value::String(format!("m{n}"))),
         ]
         .into();
-        db.seed_settled_mergeable_for_bootstrap(
+        jazz::db::block_on(db.insert(
             "messages",
-            id(2, n as u32),
-            AuthorSubject::SYSTEM,
             cells,
-        )
+            jazz::db::InsertOptions {
+                row_id: Some(id(2, n as u32)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
         .unwrap();
     }
     let prepared = db
@@ -262,28 +279,38 @@ fn a_policy_hidden_include_target_stays_hidden_after_it_changes() {
     .unwrap();
     // User 0 is the reader's own; user 1 is hidden from them.
     for (u, owner) in [(0, reader), (1, other)] {
-        db.seed_settled_mergeable_for_bootstrap(
-            "users",
-            id(1, u),
-            AuthorSubject::SYSTEM,
-            [
-                ("name".to_owned(), Value::String(format!("u{u}"))),
-                ("owner".to_owned(), Value::String(owner.principal_parts().1)),
-            ]
-            .into(),
+        jazz::db::block_on(
+            db.insert(
+                "users",
+                [
+                    ("name".to_owned(), Value::String(format!("u{u}"))),
+                    ("owner".to_owned(), Value::String(owner.principal_parts().1)),
+                ]
+                .into(),
+                jazz::db::InsertOptions {
+                    row_id: Some(id(1, u)),
+                    identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                    ..Default::default()
+                },
+            ),
         )
         .unwrap();
     }
     for n in 0..2 {
-        db.seed_settled_mergeable_for_bootstrap(
-            "messages",
-            id(2, n),
-            AuthorSubject::SYSTEM,
-            [
-                ("senderId".to_owned(), Value::Uuid(id(1, n).0)),
-                ("body".to_owned(), Value::String(format!("m{n}"))),
-            ]
-            .into(),
+        jazz::db::block_on(
+            db.insert(
+                "messages",
+                [
+                    ("senderId".to_owned(), Value::Uuid(id(1, n).0)),
+                    ("body".to_owned(), Value::String(format!("m{n}"))),
+                ]
+                .into(),
+                jazz::db::InsertOptions {
+                    row_id: Some(id(2, n)),
+                    identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                    ..Default::default()
+                },
+            ),
         )
         .unwrap();
     }

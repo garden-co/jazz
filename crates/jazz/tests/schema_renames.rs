@@ -360,6 +360,27 @@ fn a_renamed_table_keeps_its_stored_table() {
     assert!(db.prepare_query(&Query::from("todos")).is_err());
 }
 
+/// Pending uploads are kept under stored names; a host asks under the
+/// table's current name. A rename keeps the stored table, so `tasks`' rows
+/// are stored in `todos`, and asking for `tasks` must find them.
+#[test]
+fn pending_upload_rows_answers_under_a_renamed_tables_current_name() {
+    let path = scratch("pending-rows");
+    let db = open_at(v1(), &path);
+    let db = reopen(db, &path, system(v2()));
+    let db = reopen(db, &path, system(v3()));
+    // An upstream that never answers: the commit stays pending.
+    let (client_side, _never_answered) = pipe();
+    let _link = block_on(db.connect_upstream(client_side));
+    insert(&db, "tasks", 2, "name", "b");
+
+    assert_eq!(db.pending_upload_rows("tasks").unwrap(), [row(2)]);
+    assert!(
+        db.pending_upload_rows("todos").is_err(),
+        "the stored name is not a table of the current schema"
+    );
+}
+
 #[test]
 fn reopening_finds_the_renamed_columns_again() {
     let path = scratch("reopen");
@@ -627,17 +648,21 @@ fn server(first: JazzSchema, steps: Vec<(JazzSchema, MigrationLens)>) -> Db {
 }
 
 fn seed(server: &Db, table: &str, n: u8, cells: &[(&str, Value)]) {
-    server
-        .seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(
+        server.insert(
             table,
-            row(n),
-            AuthorSubject::SYSTEM,
             cells
                 .iter()
                 .map(|(column, value)| ((*column).to_owned(), value.clone()))
                 .collect(),
-        )
-        .unwrap();
+            jazz::db::InsertOptions {
+                row_id: Some(row(n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
 }
 
 #[test]

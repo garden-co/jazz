@@ -416,7 +416,7 @@ accepted/reopen/rebuild receipts for the same coordinate.
   `(branch_key, row_uuid, seq, tx_time, tx_node_id)` (`seq = 0` while pending), plus a per-lineage combined derived current
   row per exact branch key. The database has exactly one
   `jazz_deletion_history`, keyed by `(physical_table_id, branch_key,
-row_uuid, tx_time, tx_node_id)` and with a seek/index prefix
+  row_uuid, tx_time, tx_node_id)` and with a seek/index prefix
   `(physical_table_id, branch_key, row_uuid)`. The
   deletion record's `schema_version` is retained provenance, not a storage
   partition. Content rows use `schema_version` as a Groove descriptor
@@ -474,7 +474,7 @@ rejection: Nullable<jazz_rejection_reason>, permission_subject: Nullable<AuthorS
   `message: String` (an empty message is allowed). Any other spelling is
   refused. The retry store `jazz_rejected_transactions` uses the same enum,
   required, with fields `(time, node_id, kind, made_by, rejection_reason,
-user_metadata)`.
+  user_metadata)`.
 
 This layout is covered by the `jazz.node-storage.v2` root profile (with
 `groove.dictionary.v1` for the interned authors). Roots written with an
@@ -596,7 +596,7 @@ slots do not make their semantics interchangeable:
 - An `Serializable` transaction carries its table-bound compare-and-swap evidence:
   `base_snapshot`, point reads `(table, row_uuid, observed TxId)`, absent reads
   `(table, row_uuid)`, and predicate reads `(table, shape_id, canonical query,
-binding_id, binding values)`. The authority compares those dependencies and
+  binding_id, binding values)`. The authority compares those dependencies and
   every written row's single parent against global current state. The table is
   part of each dependency identity; the same `RowUuid` in another table is not
   the same read or CAS target. These fields MUST NOT be discarded or inferred

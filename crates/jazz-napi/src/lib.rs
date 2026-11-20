@@ -2611,6 +2611,19 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()).into())
     }
 
+    /// Ids of `table`'s rows with a write the server has neither accepted
+    /// nor refused yet (recovered ones included), sorted.
+    #[napi(js_name = "pendingUploadRows")]
+    pub fn pending_upload_rows(&self, table: String) -> js::Result<Vec<String>> {
+        Ok(self
+            .binding()?
+            .pending_upload_rows(&table)
+            .map_err(host_error)?
+            .into_iter()
+            .map(|row| row.0.to_string())
+            .collect())
+    }
+
     /// The optimistic in-memory side of a client/worker pair: its
     /// subscriptions open with the worker's answer.
     #[napi(js_name = "setNonDurableClient")]

@@ -2,9 +2,9 @@
   "license": "MIT",
   "scripts": {
     "changeset": "changeset",
-    "format": "oxfmt --ignore-path .oxfmtignore .",
-    "format:check": "oxfmt --check --ignore-path .oxfmtignore . && cargo fmt --check",
-    "lint": "oxlint . --ignore-path .oxlintignore && pnpm lint:rust",
+    "format": "vp fmt .",
+    "format:check": "vp fmt --check . && cargo fmt --check",
+    "lint": "vp lint . && pnpm lint:rust",
     "lint:rust": "cargo clippy --workspace -- -D warnings",
     "test:tooling": "node --test dev/gates/test/lint-hook-parity.test.mjs && node --test dev/scripts/check-lockstep-versions.test.mjs && node --test dev/release-publish/release-publish.test.mjs dev/release-publish/producer-run.test.mjs",
     "test:focused-rust": "bash dev/gates/test/dev-t.test.sh",
@@ -29,23 +29,21 @@
     "release:publish:alpha": "changeset publish --tag alpha",
     "test": "turbo run test --only",
     "bench:realistic:profile-browser": "node dev/benchmarks/realistic/profile_browser.mjs",
-    "postinstall": "lefthook install"
+    "postinstall": "vp config --hooks --no-agent"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.8",
-    "lefthook": "^2.0.15",
     "next": "catalog:default",
-    "oxfmt": "^0.27.0",
-    "oxlint": "^1.42.0",
     "pkg-pr-new": "^0.0.75",
     "playwright": "^1.58.2",
     "tsx": "^4.21.0",
     "turbo": "^2.0.0",
     "typescript": "catalog:default",
+    "vite-plus": "catalog:default",
     "yaml": "2.8.2"
   },
   "engines": {
-    "node": ">=22.12"
+    "node": "^22.22.1 || ^24.11.0 || >=26.0.0"
   },
   "packageManager": "pnpm@10.14.0"
 }

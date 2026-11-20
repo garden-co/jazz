@@ -131,12 +131,30 @@ case "$platform" in
       stage_header
       rm -rf "$stage"
     fi
+    # The staticlib carries DWARF for the relay and the Rust std it links:
+    # strip it with the NDK's own llvm-strip (found the way cargo-ndk finds
+    # the NDK) so the npm package stays smaller (#6181). Symbols stay, so
+    # consumer apps link as before and backtraces keep function names.
+    ndk=${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}
+    sdk=${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}
+    if [[ -z "$ndk" && -n "$sdk" && -d "$sdk/ndk" ]]; then
+      ndk=$(find "$sdk/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+    fi
+    llvm_strip=
+    if [[ -n "$ndk" && -d "$ndk/toolchains/llvm/prebuilt" ]]; then
+      llvm_strip=$(find "$ndk/toolchains/llvm/prebuilt" -mindepth 3 -maxdepth 3 -path '*/bin/llvm-strip' | head -1)
+    fi
+    [[ -n "$llvm_strip" && -x "$llvm_strip" ]] || {
+      echo "could not find the Android NDK's llvm-strip; set ANDROID_NDK_HOME" >&2
+      exit 1
+    }
     mkdir -p "$stage"
     for android_abi in "${android_abis[@]}"; do
       rust_target=${rust_targets[$android_abi]}
       cargo ndk -t "$android_abi" rustc --manifest-path "$relay_manifest" --crate-type staticlib --profile release-mobile
       mkdir -p "$stage/$android_abi"
       cp "$root/target/$rust_target/release-mobile/libjazz_native_relay.a" "$stage/$android_abi/"
+      "$llvm_strip" --strip-debug "$stage/$android_abi/libjazz_native_relay.a"
     done
     if [[ "$platform" == android ]]; then
       write_manifest "$package/android/jazz-native-relay.manifest.json" "$stage"

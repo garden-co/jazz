@@ -63,9 +63,8 @@ so a commit they accept does not fail CI's lint:
   features over the selected packages, so `--package <crate>` compiles a crate
   differently from `--workspace` and can pass what CI rejects. Incremental
   compilation keeps a re-run down to the changed crates and their dependents.
-  Lefthook invokes Cargo directly, without a Node child process.
-- `oxlint` runs `oxlint --fix` on the staged files with CI's
-  `.oxlintignore`, so it never lints or rewrites a file that CI skips.
+- `oxlint` runs `vp lint --fix` on the staged files with CI's
+  lint settings in `vite.config.ts`, so it never lints or rewrites a file that CI skips.
 
 Run `pnpm test:tooling` to check that the hooks still match CI.
 

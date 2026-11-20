@@ -876,10 +876,6 @@ struct Inner {
     /// clock too, so a reopened file never hands out a transaction id it
     /// may already have uploaded (see [`Inner::next_seq`]).
     pub(crate) reopenable: bool,
-    /// Rows the authority named as written for this replica's own commits
-    /// whose version was not this replica's image of them (see
-    /// `Inner::as_written_images`), asked for whole instead.
-    pub(crate) as_written_mismatches: u64,
     /// Pending commits a rebase replayed (see `Db::rebase`).
     pub(crate) replayed_commits: u64,
     /// Echoes a serving pass examined to match its images (see
@@ -896,6 +892,11 @@ struct Inner {
     /// The upstream's refusals of this store's own commits, counted for
     /// [`Db::upload_status`].
     refusals: sync::Refusals,
+    /// What [`Db::upload_status`] adds to the client queue's own revision,
+    /// so the pending revision keeps growing when the queue is replaced (a
+    /// reopen along another version) or the store is a rebuilt one
+    /// ([`Db::seed_pending_revision`]).
+    pub(crate) pending_revision_base: u64,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
     /// Durability acks to sessions held until the host has persisted the
@@ -1456,32 +1457,27 @@ pub fn take_vm_steps_for_test() -> u64 {
 }
 
 /// The application tables a store holds, by their stored columns.
-fn stored_schema(conn: &Storage, jazz: &JazzSchema) -> Result<Schema, Error> {
-    let names: Vec<String> = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-        .and_then(|mut statement| {
-            statement
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<_, _>>()
-        })
-        .map_err(storage)?;
+fn stored_schema(
+    conn: &Storage,
+    jazz: &JazzSchema,
+    names: &BTreeSet<String>,
+) -> Result<Schema, Error> {
     let mut tables = BTreeMap::new();
     for name in names {
-        if name.starts_with("_jazz")
-            || name.starts_with("_cf_")
-            || name.starts_with("sqlite_")
-            || name.ends_with("__h")
-        {
-            continue;
-        }
         let columns: Vec<String> = conn
-            .prepare(&format!("PRAGMA table_info({})", quote(&name)))
+            .prepare(&format!("PRAGMA table_info({})", quote(name)))
             .and_then(|mut statement| {
                 statement
                     .query_map([], |row| row.get(1))?
                     .collect::<Result<_, _>>()
             })
             .map_err(storage)?;
+        if columns.is_empty() {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                format!("Jazz catalogue references missing table {name}"),
+            ));
+        }
         let columns = columns
             .into_iter()
             .filter(|column| {
@@ -1493,13 +1489,13 @@ fn stored_schema(conn: &Storage, jazz: &JazzSchema) -> Result<Schema, Error> {
         // A large-capable column is one the large-value refcount triggers
         // watch (`large::triggers`): its kind comes from the schemas unioned
         // in.
-        let large = crate::large::stored_large_columns(conn, &name)?;
+        let large = crate::large::stored_large_columns(conn, name)?;
         for column in &mut table.columns {
             if large.contains(&column.stored) {
                 column.ty = ValueType::Nullable(Box::new(ValueType::String));
             }
         }
-        tables.insert(name, table);
+        tables.insert(name.clone(), table);
     }
     Ok(Schema {
         tables,
@@ -1957,7 +1953,6 @@ impl Db {
     /// Open on `storage` (a host's SQL: [`Storage::from_backend`]), with
     /// no file: chunks live in the store itself.
     pub async fn open_storage(config: DbConfig, storage: Storage) -> Result<Self, Error> {
-        crate::format::admit(&storage)?;
         Self::open_on(config, storage, None)
     }
 
@@ -1984,6 +1979,28 @@ impl Db {
         )
     }
 
+    /// Initialize the real store and publish its first catalogue atomically.
+    /// Failure leaves existing host and application tables unchanged; the
+    /// returned database is usable only after the outer scope commits.
+    pub fn open_file_with_catalogue(
+        config: DbConfig,
+        file: crate::host::StoreFile,
+        change: crate::catalogue::CatalogueChange,
+    ) -> Result<Self, Error> {
+        let crate::host::StoreFile { conn, path } = file;
+        let conn = Rc::new(conn);
+        conn.scope("jazz_initialize", |_| {
+            crate::format::admit(&conn)?;
+            let db = Self::open_initialized(
+                config,
+                conn.clone(),
+                path.as_ref().map(|(path, vfs)| (path.as_path(), *vfs)),
+            )?;
+            db.apply_catalogue_now(change)?;
+            Ok(db)
+        })
+    }
+
     /// Run `f` on the store's connection, outside any transaction handle's
     /// overlay (see [`crate::host`]).
     pub(crate) fn with_host_connection<T>(
@@ -1995,8 +2012,20 @@ impl Db {
     }
 
     fn open_on(
-        mut config: DbConfig,
+        config: DbConfig,
         conn: crate::storage::Storage,
+        path: Option<(&std::path::Path, Option<&'static str>)>,
+    ) -> Result<Self, Error> {
+        let conn = Rc::new(conn);
+        conn.scope("jazz_initialize", |_| {
+            crate::format::admit(&conn)?;
+            Self::open_initialized(config, conn.clone(), path)
+        })
+    }
+
+    fn open_initialized(
+        mut config: DbConfig,
+        conn: Rc<crate::storage::Storage>,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement is prepared: the flag is read at
@@ -2048,6 +2077,11 @@ impl Db {
             inner.reset_everything();
             // Pending writes upload under the version they were written
             // in, and replay by the names of the one now current.
+            let retired = inner
+                .client
+                .as_ref()
+                .map_or(0, |client| client.pending_revision());
+            inner.pending_revision_base += retired + 1;
             inner.client = None;
             inner.load_client()?;
         }
@@ -2083,7 +2117,7 @@ impl Db {
 
     fn open_named(
         config: DbConfig,
-        conn: crate::storage::Storage,
+        conn: Rc<crate::storage::Storage>,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement, so both see all of them.
@@ -2155,13 +2189,11 @@ impl Db {
             crate::values::note_rollback(rollback_key);
         }))
         .map_err(storage)?;
-        let fresh: i64 = conn
-            // Durable Object SQLite keeps its own `_cf_*` tables in the file.
-            .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'", [], |r| r.get(0))
-            .map_err(storage)?;
+        let owned_tables = names.stored_tables();
+        let fresh = owned_tables.is_empty();
         // A reopened store keeps every column earlier schemas added; bring
         // it up to this schema without touching what is already there.
-        let physical = if fresh == 0 {
+        let physical = if fresh {
             execute_script(&conn, &schema.ddl())?;
             let mut physical = Schema {
                 tables: BTreeMap::new(),
@@ -2180,7 +2212,7 @@ impl Db {
             // store's union grew: the opening schema is not always the
             // newest (a server core reopens under its genesis while later
             // versions' tables and columns take writes, #4769).
-            let mut physical = stored_schema(&conn, &config.schema)?;
+            let mut physical = stored_schema(&conn, &config.schema, &owned_tables)?;
             let mut ddl = String::new();
             for (version, earlier) in &admitted {
                 if *version == config.schema.version_id() {
@@ -2242,7 +2274,7 @@ impl Db {
             view: None,
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
-                conn: Rc::new(conn),
+                conn,
                 validated_shapes: HashSet::new(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
@@ -2321,13 +2353,13 @@ impl Db {
                 client: None,
                 non_durable: false,
                 reopenable: path.is_some(),
-                as_written_mismatches: 0,
                 replayed_commits: 0,
                 echo_probes: 0,
                 authority: false,
                 pins_required: false,
                 upstream_rejections: None,
                 refusals: sync::Refusals::default(),
+                pending_revision_base: 0,
                 sessions: Vec::new(),
                 held_acks: None,
                 column_codes: RefCell::default(),
@@ -2378,6 +2410,21 @@ impl Db {
     pub fn seed_seq_floor(&self, floor: u64) {
         let mut inner = self.inner.borrow_mut();
         inner.seq = inner.seq.max(floor);
+    }
+
+    /// Report pending revisions above `floor` from now on: a host that
+    /// replaces a store with a fresh one continues the old one's revision,
+    /// so a status read across the swap never looks unchanged.
+    pub fn seed_pending_revision(&self, floor: u64) {
+        let mut inner = self.inner.borrow_mut();
+        let current = inner.pending_revision_base
+            + inner
+                .client
+                .as_ref()
+                .map_or(0, |client| client.pending_revision());
+        if current <= floor {
+            inner.pending_revision_base += floor + 1 - current;
+        }
     }
 
     /// Every SQLite store holds complete history; this one is also the
@@ -4021,6 +4068,10 @@ impl Db {
         &self,
         change: crate::catalogue::CatalogueChange,
     ) -> Result<(), Error> {
+        self.apply_catalogue_now(change)
+    }
+
+    fn apply_catalogue_now(&self, change: crate::catalogue::CatalogueChange) -> Result<(), Error> {
         let saved = {
             let inner = self.inner();
             (
@@ -9083,6 +9134,7 @@ enum WriteCheck {
     Restore,
 }
 
+#[derive(Clone)]
 struct DeferredCheck {
     /// The schema the write was made through, which names its table.
     schema: Rc<Schema>,
@@ -9847,6 +9899,11 @@ struct Batch {
     /// rather than copied, so a stage costs the same however many writes
     /// came before it.
     rows: Arc<GroundedRows>,
+    /// The check of each row's first write in `ops`, by stored table and
+    /// row: the policy a later staged write to that row continues, so
+    /// staging decides the row by its first write as the commit and the
+    /// authority do (SPEC 7).
+    first_checks: HashMap<(String, [u8; 16]), Vec<DeferredCheck>>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
@@ -10458,6 +10515,7 @@ impl Db {
                 reads_state: Rc::default(),
                 ops: Vec::new(),
                 rows: Arc::default(),
+                first_checks: HashMap::new(),
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
                 claims: None,
@@ -10800,6 +10858,20 @@ impl Db {
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         let staged = batch.ops.len();
+        // The extra write's row, and the checks its first staged write
+        // left, which decide it instead of the extra write's own.
+        let extra_row = match extra.as_deref().and_then(|op| Some((op, op.row()?))) {
+            Some((op, row)) => Some((
+                inner.schema.table(op.table())?.stored.clone(),
+                *row.0.as_bytes(),
+            )),
+            None => None,
+        };
+        let first_checks = extra_row
+            .as_ref()
+            .and_then(|key| batch.first_checks.get(key))
+            .cloned()
+            .unwrap_or_default();
         // A row is never evidence for its own check.
         let staged_rows = match extra.as_deref() {
             Some(op) => {
@@ -10866,6 +10938,8 @@ impl Db {
         // A step that is undone leaves no head rows behind.
         let heads = inner.inherited_heads.borrow().clone();
         let joins = extra.is_some();
+        let mut first = Vec::new();
+        let mut first_key = None;
         let applied = match extra {
             Some(op) => inner.counter_deltas(op).and_then(|()| {
                 let schema = inner.schema.clone();
@@ -10874,9 +10948,24 @@ impl Db {
                 // evidence for this one's (SPEC 7), as at the authority
                 // that receives the unit. The commit checks the whole unit.
                 inner.defer_checks();
+                // A row the batch already wrote is decided by its first
+                // write's check on its end state, as on commit, where the
+                // whole unit applies under one `defer_checks`: the extra
+                // write's own check is dropped as a later write's.
+                if let Some(pending) = inner.deferred.borrow_mut().as_mut() {
+                    pending.extend(first_checks);
+                }
                 let applied = inner
                     .apply_all_checking(&[(schema, op.clone())], 0, own)
-                    .and_then(|()| inner.finish_checks_after(own, staged_rows));
+                    .and_then(|()| {
+                        if let Some(key) = &extra_row
+                            && let Some(pending) = inner.deferred.borrow().as_ref()
+                        {
+                            first.extend(pending.iter().cloned());
+                            first_key = Some(key.clone());
+                        }
+                        inner.finish_checks_after(own, staged_rows)
+                    });
                 if applied.is_err() {
                     inner.abandon_checks();
                 }
@@ -10900,6 +10989,13 @@ impl Db {
         }
         if keep && let Some(overlay) = inner.overlay.as_mut() {
             overlay.applied += 1;
+        }
+        if keep
+            && let Some(key) = first_key
+            && !first.is_empty()
+            && let Some(batch) = inner.batches.get_mut(&id)
+        {
+            batch.first_checks.entry(key).or_insert(first);
         }
         result
     }

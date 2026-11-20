@@ -98,6 +98,10 @@ pub struct UploadStatus {
     pub rejected: u64,
     /// The latest of those refusals.
     pub last_rejection: Option<UploadRefusal>,
+    /// Changes whenever a commit joins or leaves the pending set, so a host
+    /// comparing statuses sees every change of [`Db::pending_upload_rows`],
+    /// also one that leaves the count and the oldest time as they were.
+    pub pending_revision: u64,
 }
 
 /// One refused upload, as [`UploadStatus`] names it.
@@ -2138,6 +2142,8 @@ struct PendingQueue {
     /// branch view copies the row from its base branch, so a commit
     /// depends on every branch of the rows it writes.
     by_id: HashMap<(String, RowUuid), BTreeSet<u64>>,
+    /// Bumped whenever a commit joins or leaves the queue.
+    revision: u64,
 }
 
 impl PendingQueue {
@@ -2174,6 +2180,7 @@ impl PendingQueue {
                 .insert(pending.tx);
         }
         self.commits.insert(pending.tx, pending);
+        self.revision += 1;
     }
 
     /// Take back commit `tx`, just pushed.
@@ -2189,6 +2196,7 @@ impl PendingQueue {
     fn remove(&mut self, tx: u64) {
         if let Some(pending) = self.commits.remove(&tx) {
             self.unindex(&pending);
+            self.revision += 1;
         }
     }
 
@@ -2208,6 +2216,19 @@ impl PendingQueue {
                 }
             }
         }
+    }
+
+    /// The ids of `stored` table's rows a pending commit writes, through
+    /// any branch, sorted.
+    fn row_ids(&self, stored: &str) -> Vec<RowUuid> {
+        let mut ids = self
+            .by_id
+            .keys()
+            .filter(|(table, _)| table == stored)
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
     }
 
     /// The pending txs writing any branch of `row`'s row.
@@ -6555,13 +6576,12 @@ impl Inner {
         seq: u64,
         accepted_at: Option<u64>,
         as_written: &[AsWritten],
-    ) -> Result<(Vec<Image>, Vec<WholeRow>, u64), Error> {
+    ) -> Result<(Vec<Image>, Vec<WholeRow>), Error> {
         let client = self.client.as_ref().expect("client");
         let mut images = Vec::new();
         let mut whole = Vec::new();
-        let mut mismatched = 0;
         let Some(pending) = client.pending.get(tx) else {
-            return Ok((images, whole, mismatched));
+            return Ok((images, whole));
         };
         for written in as_written {
             let row = pending
@@ -6592,7 +6612,6 @@ impl Inner {
                         )));
                     };
                     let same = echo_digest(&entry.image) == written.digest;
-                    mismatched += u64::from(!same);
                     same.then_some(entry)
                 }
                 None => None,
@@ -6612,7 +6631,7 @@ impl Inner {
                 None => whole.push((table.clone(), *row.0.as_bytes(), key.clone())),
             }
         }
-        Ok((images, whole, mismatched))
+        Ok((images, whole))
     }
 
     /// The `$createdAt` of a row's settled version beneath pending writes:
@@ -8810,6 +8829,11 @@ impl Client {
 }
 
 impl Client {
+    /// The pending queue's revision (see [`UploadStatus::pending_revision`]).
+    pub(crate) fn pending_revision(&self) -> u64 {
+        self.pending.revision
+    }
+
     /// Why this store refused its current link (see
     /// [`Inner::refuse_upstream`]), if it did: nothing answers a remote
     /// read until a new link does.
@@ -10155,6 +10179,21 @@ impl Db {
             .map_or(0, |client| client.pending.len())
     }
 
+    /// The rows of `table` written by a local commit that awaits the
+    /// upstream's verdict, through any branch: committed here (recovered
+    /// ones included) and not yet accepted or refused. In row order. Empty
+    /// on a database that has never had an upstream; an error for a table
+    /// the schema does not have.
+    pub fn pending_upload_rows(&self, table: &str) -> Result<Vec<RowUuid>, Error> {
+        // Resolved under this handle's own schema, not whichever view ran last.
+        let inner = self.inner();
+        let stored = inner.schema.stored_table(table)?;
+        Ok(inner
+            .client
+            .as_ref()
+            .map_or_else(Vec::new, |client| client.pending.row_ids(stored)))
+    }
+
     /// The ids the pending commits upload under, sorted: a relayed commit
     /// uploads under its session's id, so a host holding both a session and
     /// the store that relays it counts each write once by this id.
@@ -10189,6 +10228,11 @@ impl Db {
             oldest_pending_at,
             rejected: inner.refusals.count,
             last_rejection: inner.refusals.last.clone(),
+            pending_revision: inner.pending_revision_base
+                + inner
+                    .client
+                    .as_ref()
+                    .map_or(0, |client| client.pending.revision),
         }
     }
 
@@ -10807,7 +10851,7 @@ impl Db {
                                 as_written,
                                 ..
                             } => {
-                                let (images, whole, mismatched) = inner.as_written_images(
+                                let (images, whole) = inner.as_written_images(
                                     tx,
                                     through,
                                     *accepted_at,
@@ -10818,7 +10862,6 @@ impl Db {
                                 // and the commit stays pending until they
                                 // arrive: its writes never drop out here.
                                 if !whole.is_empty() && !arrived {
-                                    inner.as_written_mismatches += mismatched;
                                     for row in &whole {
                                         inner.ask_whole(row.clone(), through)?;
                                     }
@@ -12620,15 +12663,6 @@ impl Db {
         }
     }
 
-    /// Rows the authority named as written for this replica's own commits
-    /// that were not this replica's image of them, and were asked for
-    /// whole instead (for tests and metrics): each is a case the
-    /// authority's inference that its writer holds the row missed, at the
-    /// cost of one round trip (SPEC 8 §8.3).
-    pub fn as_written_mismatches(&self) -> u64 {
-        self.inner.borrow().as_written_mismatches
-    }
-
     /// Pending commits replayed over restored baselines since this store
     /// opened (for tests and metrics): settling a commit replays the
     /// pending commits sharing its rows, not every one still pending.
@@ -12685,26 +12719,6 @@ impl Db {
             .iter()
             .filter(|session| session.open)
             .count()
-    }
-
-    /// Seed a row as settled server state, written by `made_by`.
-    pub fn seed_settled_mergeable_for_bootstrap(
-        &self,
-        table: &str,
-        row: RowUuid,
-        made_by: AuthorSubject,
-        cells: BTreeMap<String, Value>,
-    ) -> Result<u64, Error> {
-        let handle = block_on(self.insert(
-            table,
-            cells,
-            InsertOptions {
-                row_id: Some(row),
-                identity: WriteIdentity::Attribution(made_by),
-                ..Default::default()
-            },
-        ))?;
-        Ok(handle.tx)
     }
 
     /// Sessions the server ended since the last call, with why: for what

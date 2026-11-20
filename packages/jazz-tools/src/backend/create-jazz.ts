@@ -4053,14 +4053,12 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     db: () => backend.db,
     dbAs: async (user) => backendDbForSession(backend, await sessionFor(user, "inspect `as`")),
     sessions: () =>
-      [...liveSessions].map(
-        ({ session: live, transport, openedAt }): InspectSessionInfo => ({
-          userId: live.userId ?? null,
-          kind: live.trusted ? "backend-client" : live.userId === undefined ? "guest" : "user",
-          transport,
-          openedAt,
-        }),
-      ),
+      [...liveSessions].map(({ session: live, transport, openedAt }): InspectSessionInfo => ({
+        userId: live.userId ?? null,
+        kind: live.trusted ? "backend-client" : live.userId === undefined ? "guest" : "user",
+        transport,
+        openedAt,
+      })),
     get hook() {
       return options.inspect;
     },

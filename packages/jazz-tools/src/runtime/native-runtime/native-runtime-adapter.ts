@@ -290,6 +290,8 @@ type NativeDb = {
   /** How many local commits still wait for the server's verdict. */
   /** This store's uploads; see {@link UploadStatus}. */
   uploadStatus?(): UploadStatus;
+  /** Ids of `table`'s rows with an undecided write; `null` when the host cannot tell. */
+  pendingUploadRows?(table: string): string[] | null;
   /**
    * A React Native foreground's scope store, deleted by its native relay
    * (see `NativeForegroundDb.deleteNativeStore`), with the writes it dropped.
@@ -1035,6 +1037,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverTransportErrorRetrying = false;
   private serverTransportErrorAwaitsAuth = false;
   private nativeAuthRefusalRenewable = false;
+  /** A native host reported a refusal whose admission it has not shown since. */
+  private nativeAuthRefused = false;
   private nativeLinkEverConnected = false;
   private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
   private firstLoadWaitSeen = false;
@@ -1249,6 +1253,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // unavailable and remote subscriptions fail once it stops retrying,
     // while local work keeps running (#4337).
     this.db.onUpstreamFailure?.((failure) => {
+      this.noteNativeAuthRestored();
       if (!failure) {
         this.nativeAuthRefusalRenewable = false;
         return this.clearRemoteServerTransportError();
@@ -1620,7 +1625,10 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private linkChanged(): void {
-    if (this === this.ownerRuntime) this.noteLinkFailure();
+    if (this === this.ownerRuntime) {
+      this.noteNativeAuthRestored();
+      this.noteLinkFailure();
+    }
     this.remoteLink.changed();
     this.linkStatusPublisher.changed();
     this.syncStatusPublisher.changed();
@@ -1682,6 +1690,13 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) return this.ownerRuntime.uploadStatus();
     if (this.closed) return NO_UPLOADS;
     return this.db?.uploadStatus?.() ?? NO_UPLOADS;
+  }
+
+  /** Ids of `table`'s rows with a write the server has not decided yet; see {@link Runtime}. */
+  pendingUploadRows(table: string): readonly string[] | null {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.pendingUploadRows(table);
+    if (this.closed) return null;
+    return this.db?.pendingUploadRows?.(table) ?? null;
   }
 
   /** The latest time the link failed, and how; it stays after the link recovers. */
@@ -3353,8 +3368,28 @@ export class NativeRuntimeAdapter implements Runtime {
       // that as a terminal upstream failure. A credential the app renews
       // restarts it, so treat it as the web socket path does (#3923).
       this.nativeAuthRefusalRenewable = isRenewableAuthFailure(mapAuthReason(reason));
+      this.nativeAuthRefused = true;
       this.authFailureCallback?.(reason);
     });
+  }
+
+  /**
+   * A native host reports a refused credential but not the admission after
+   * it: once its link is connected again with no refusal, whatever refused
+   * the credential holds no more, as the link machine's `live` says (#6049).
+   */
+  private noteNativeAuthRestored(): void {
+    if (!this.nativeAuthRefused || this.closed) return;
+    let admitted = false;
+    try {
+      const status = this.db?.nativeConnectionStatus?.();
+      admitted = Boolean(status?.connected && !status.authRejected);
+    } catch {
+      return;
+    }
+    if (!admitted) return;
+    this.nativeAuthRefused = false;
+    this.authRestoredCallback?.();
   }
 
   onAuthRestored(callback: () => void): void {
@@ -4356,6 +4391,7 @@ export class NativeRuntimeAdapter implements Runtime {
           // terminal.
           throw new CoreTickFailedError(error);
         }
+        this.ownerRuntime.noteNativeAuthRestored();
         // Commits and the server's verdicts change the pending count.
         this.syncStatusPublisher.changed();
         this.reportSlowQueries();

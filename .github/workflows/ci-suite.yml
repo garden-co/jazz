@@ -599,7 +599,8 @@ jobs:
           name: band-chat-browser-failure-screenshots-${{ matrix.partition }}
           # This fixture renders synthetic users and rooms; do not broaden to
           # browser traces, storage profiles, or arbitrary application captures.
-          path: examples/band-chat/apps/nextjs-betterauth/tests/browser/__screenshots__/band-chat.test.tsx/*.png
+          path: examples/band-chat/apps/nextjs-betterauth/.vitest/attachments/failure-screenshots/band-chat.test.tsx/*.png
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
       - name: Report sccache statistics

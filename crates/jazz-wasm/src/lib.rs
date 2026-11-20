@@ -1824,6 +1824,19 @@ impl WasmDb {
             .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
+    /// Ids of `table`'s rows with a write the server has neither accepted
+    /// nor refused yet, sorted.
+    #[wasm_bindgen(js_name = pendingUploadRows)]
+    pub fn pending_upload_rows(&self, table: String) -> Result<Vec<String>, JsValue> {
+        Ok(self
+            .binding()?
+            .pending_upload_rows(&table)
+            .map_err(host_error)?
+            .into_iter()
+            .map(|row| row.0.to_string())
+            .collect())
+    }
+
     /// The optimistic in-memory side of a browser client/worker pair: its
     /// subscriptions open with the worker's answer.
     #[wasm_bindgen(js_name = setNonDurableClient)]

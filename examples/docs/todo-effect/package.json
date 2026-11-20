@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "tsc --noEmit",
+    "check": "tsrs --noEmit",
     "build": "pnpm run check",
     "start": "tsx src/server.ts",
     "test": "vitest run",

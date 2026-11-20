@@ -1,6 +1,6 @@
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { JazzClient } from "../web/create-jazz-client.js";
+import type { SolidJazzClient } from "./create-solid-jazz-client.js";
 import { JazzClientProvider, useSession } from "./provider.js";
 import { useJazzSession, type UseJazzSession } from "./session.js";
 import { SessionContext } from "./session-context.js";
@@ -9,7 +9,7 @@ vi.mock("../runtime/db.js", () => ({}));
 vi.mock("../session/create-jazz-session.js", () => ({ openBrowserSessionCore: vi.fn() }));
 vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
 
-function makeClient(): JazzClient {
+function makeClient(): SolidJazzClient {
   return {
     db: {} as never,
     session: {
@@ -18,8 +18,12 @@ function makeClient(): JazzClient {
       claims: {},
       authMode: "device-account",
     },
+    loading: false,
+    error: undefined,
+    state: "ready",
+    authState: null,
     shutdown: vi.fn(async () => undefined),
-  } as unknown as JazzClient;
+  };
 }
 
 describe("solid/useJazzSession under <JazzClientProvider client>", () => {

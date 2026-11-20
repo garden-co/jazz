@@ -35,6 +35,7 @@ async function setup(events: string[]) {
   const clients: JazzClient[] = [];
   const core = await createJazzSessionOwner({
     accounts,
+    decorate: () => ({ reauthenticate: vi.fn(async () => {}) }),
     openClient: async (account) => {
       const client = attachSubscriptionStore(
         {

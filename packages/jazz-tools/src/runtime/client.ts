@@ -212,6 +212,11 @@ export interface Runtime {
   upstreamLinkStatus?(): LinkStatus;
   /** @internal This client's uploads: pending, since when, and refusals. */
   uploadStatus?(): UploadStatus;
+  /**
+   * @internal Ids of `table`'s rows with a write the server has not decided
+   * yet, sorted; `null` when this runtime cannot tell.
+   */
+  pendingUploadRows?(table: string): readonly string[] | null;
   /** @internal The latest link failure this client saw, if any. */
   lastLinkFailure?(): LinkFailure | null;
   /** @internal Observe changes of the link status or the upload status. */

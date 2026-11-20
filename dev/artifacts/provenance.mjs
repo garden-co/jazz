@@ -252,7 +252,7 @@ function trackedInputContents(root, paths) {
   );
   const contents = new Map();
   const batchLimit = 256 * 1024;
-  for (let start = 0; start < cleanPaths.length; ) {
+  for (let start = 0; start < cleanPaths.length;) {
     let bytes = 0;
     let end = start;
     while (end < cleanPaths.length) {

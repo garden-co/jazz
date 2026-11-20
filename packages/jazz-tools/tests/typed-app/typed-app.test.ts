@@ -607,17 +607,15 @@ describe("typed app prototype", () => {
       );
       // @ts-expect-error Db no longer exposes a separate applyDiffs method
       db.applyDiffs(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {});
-      // @ts-expect-error a column cannot be both replaced and diffed
-      db.update(
-        largeValueUpdateApp.documents,
-        "00000000-0000-0000-0000-000000000001",
-        { title: "replacement" },
-        {
-          applyDiffs: {
-            title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
-          },
+      const documents = largeValueUpdateApp.documents;
+      const id = "00000000-0000-0000-0000-000000000001";
+      const titleDiff = {
+        applyDiffs: {
+          title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
         },
-      );
+      };
+      // @ts-expect-error a column cannot be both replaced and diffed
+      db.update(documents, id, { title: "replacement" }, titleDiff);
       // Transactions take the same applyDiffs option (#2087).
       void db.transaction((tx) => {
         tx.update(
@@ -631,16 +629,7 @@ describe("typed app prototype", () => {
           },
         );
         // @ts-expect-error a column cannot be both replaced and diffed in a transaction either
-        tx.update(
-          largeValueUpdateApp.documents,
-          "00000000-0000-0000-0000-000000000001",
-          { title: "replacement" },
-          {
-            applyDiffs: {
-              title: { within: { from: 0, to: 1 }, splices: [{ at: 0, delete: 0, insert: "x" }] },
-            },
-          },
-        );
+        tx.update(documents, id, { title: "replacement" }, titleDiff);
       });
       db.upsert(largeValueUpdateApp.documents, "00000000-0000-0000-0000-000000000001", {
         // @ts-expect-error partial descriptors belong exclusively to update's applyDiffs option
