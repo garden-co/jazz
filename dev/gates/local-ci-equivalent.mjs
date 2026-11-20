@@ -259,6 +259,21 @@ export const ciPartitions = Object.freeze({
       "--features",
       "jazz-core/testing,jazz-core/e2ee-client",
     ]),
+    // The native relay's encryption tests exist only with its `e2ee-client`
+    // feature, which no other run enables.
+    command("jazz-native-relay tests with e2ee-client", "node", [
+      "dev/gates/run-rust-tests.mjs",
+      "--require-nextest",
+      "--timeout-seconds",
+      "600",
+      "--nextest-profile",
+      "jazz-ci",
+      "--",
+      "-p",
+      "jazz-native-relay",
+      "--features",
+      "e2ee-client",
+    ]),
     // jazz-ffi's C ABI from a C program linking its staticlib, and the Swift
     // and Kotlin sources uniffi-bindgen generates (target/jazz-ffi-bindings).
     command("jazz-ffi C ABI and UniFFI bindings", "bash", ["dev/gates/jazz-ffi.sh"]),
