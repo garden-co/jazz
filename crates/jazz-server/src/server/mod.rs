@@ -101,6 +101,11 @@ pub struct ServerState {
     /// trusted workload's token, or the admin secret.
     pub(crate) backend_credential: Option<Arc<crate::middleware::workload::BackendCredential>>,
     pub(crate) workload_secrets: Option<crate::middleware::workload::InternalSecrets>,
+    /// The configured admin secret the app's backend signing key derives
+    /// from (`crate::portable::backend_signing_key`); `None` on a core that
+    /// trusts a workload or has no admin secret, which keeps a generated key
+    /// in its store instead.
+    pub(crate) backend_signing_secret: Option<String>,
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<ServerRuntimeHandle>>,
     /// Per-state admission owner for policy-scoped WebSocket connections.

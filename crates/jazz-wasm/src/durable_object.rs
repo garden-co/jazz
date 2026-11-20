@@ -986,6 +986,7 @@ mod core_host {
         admit_by_core_secret, same_secret, SessionRevocation, UpgradeCredential,
         WebSocketCredential, WebSocketPrelude,
     };
+    use jazz_server::portable::backend_signing_key;
     use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
     use jazz_server::portable::deployment::{self, DeployError, DeployRequest};
     use jazz_server::portable::handshake::{link, negotiate_hello};
@@ -2131,6 +2132,7 @@ mod core_host {
                 ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
                     credentials.admin(&self.secret)?
                 }
+                ("GET", backend_signing_key::ROUTE) => credentials.admin(&self.secret)?,
                 #[cfg(feature = "durable-object-tests")]
                 ("POST", "test/panic" | "test/panic-rows" | "test/limits") => {
                     credentials.admin(&self.secret)?
@@ -2172,6 +2174,16 @@ mod core_host {
                 ("GET", "admin/bundles") => match self.catalogue_index() {
                     Ok(index) => answer(200, published_bundles(&index)),
                     Err(error) => refusal(500, ErrorResponse::internal(error)),
+                },
+                // The core secret is configured and outlives every
+                // deployment, so the key derives from it (jazz#5553).
+                ("GET", backend_signing_key::ROUTE) => HttpAnswer {
+                    status: 200,
+                    body: backend_signing_key::body(&backend_signing_key::derived(
+                        &self.secret,
+                        &self.app_id,
+                    )),
+                    content_type: "application/json",
                 },
                 _ => {
                     if let Err(error) = serde_json::from_slice::<DeployRequest>(body) {

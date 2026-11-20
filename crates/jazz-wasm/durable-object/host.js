@@ -215,7 +215,9 @@ export function jazzCoreClass(wasm) {
           ? new Response(null, { status: answer.status })
           : new Response(answer.body, {
               status: answer.status,
-              headers: { "content-type": answer.contentType },
+              // Answers to the app's backend (accounts, its signing key,
+              // deployments): never kept by a cache on the way.
+              headers: { "content-type": answer.contentType, "cache-control": "no-store" },
             });
       }
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
