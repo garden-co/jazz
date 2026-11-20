@@ -59,8 +59,9 @@ A wrong code approves nothing. The code is how a server that substituted keys is
 
 `devices.remove(id)` removes a device and rotates the account; `devices.requestRemoval()` asks another
 device to remove this one. On a device account, removal does not revoke access from anyone who holds the
-account secret (see above). On an account your own sign-in manages, removal ends that device's access,
-and the account keeps a 24-word recovery phrase, shown once:
+account secret (see above). On an account your own sign-in manages, removal ends that device's access unless it also holds the
+recovery secret: a removed device that knows it can still restore. To close that, retire the recovery
+credential and register a new secret. The account keeps a 24-word recovery phrase, shown once:
 
 ```ts
 const phrase = db.encryption.recovery.create(); // keep it; registers nothing
