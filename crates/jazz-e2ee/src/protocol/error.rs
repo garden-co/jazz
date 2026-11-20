@@ -16,6 +16,8 @@ pub enum UnsupportedCapability {
     SigningMechanism,
     /// A registered signing mechanism at an unregistered version.
     SigningVersion,
+    /// An account key envelope names an unregistered mechanism or version.
+    AccountKeyEnvelope,
 }
 
 impl UnsupportedCapability {
@@ -24,6 +26,7 @@ impl UnsupportedCapability {
             Self::LedgerVersion => "ledger-version",
             Self::SigningMechanism => "signing-mechanism",
             Self::SigningVersion => "signing-version",
+            Self::AccountKeyEnvelope => "account-key-envelope",
         }
     }
 }

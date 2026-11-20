@@ -5,6 +5,7 @@
 mod common;
 
 use common::TestRandom;
+use common::mechanisms::{OTHER_SEAL, UNROUTED_SEAL, custom_registry, relabelled};
 use common::protocol::{ALICE, Env, Ledger};
 use jazz_e2ee::agility::MechanismId;
 use jazz_e2ee::mechanisms::key_seal;
@@ -18,7 +19,7 @@ use jazz_e2ee::protocol::error::{
 use jazz_e2ee::protocol::ids::IdForm;
 use jazz_e2ee::protocol::records::account::{
     AccountKind, AccountRoot, approval_code, challenge_signed_bytes, nonce_commitment,
-    proof_signed_bytes,
+    proof_signed_bytes, recovery_delivery_context,
 };
 use jazz_e2ee::protocol::{Accepted, Position, ids, signing};
 
@@ -130,6 +131,53 @@ fn approval_activates_a_device_that_then_obtains_the_key() {
         replay
             .author_active_at(Position(at.0 + 1), &phone.id, state.epoch_id())
             .unwrap()
+    );
+}
+
+fn two_approval_deliveries(env: &Env) -> (Ledger, LocalDevice, [u8; 32]) {
+    let mut rng = TestRandom(3);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    let (_, key) = ledger.root(env, &laptop, 0, &mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(env, &laptop, &phone, &mut rng);
+    ledger.approve(env, &laptop, &phone, &mut rng);
+    (ledger, phone, key)
+}
+
+/// Alice's phone skips an approval delivery with an unknown sealing
+/// mechanism and acquires the account key from the next delivery.
+///
+/// ```text
+/// Alice's phone ── first approval delivery ──✗ unsupported
+///               ── second approval delivery ──► account key
+/// ```
+#[test]
+fn account_acquisition_skips_an_unsupported_delivery() {
+    let env = Env::new(ALICE);
+    let (mut ledger, phone, key) = two_approval_deliveries(&env);
+    let first = &mut ledger.private.deliveries[0].row.envelope;
+    *first = relabelled(key_seal::MECHANISM, UNROUTED_SEAL, first);
+    assert_eq!(ledger.evidence(&env).1.approvals().len(), 2);
+    assert_eq!(*ledger.acquire(&env, &phone).unwrap().key(), key);
+}
+
+/// Alice's phone reports unsupported after exhausting its approval
+/// deliveries when both use an unknown sealing mechanism.
+#[test]
+fn account_acquisition_reports_only_unsupported_deliveries() {
+    let env = Env::new(ALICE);
+    let (mut ledger, phone, _) = two_approval_deliveries(&env);
+    for delivery in &mut ledger.private.deliveries {
+        let envelope = &mut delivery.row.envelope;
+        *envelope = relabelled(key_seal::MECHANISM, UNROUTED_SEAL, envelope);
+    }
+    assert_eq!(ledger.evidence(&env).1.approvals().len(), 2);
+    assert_eq!(
+        ledger.acquire(&env, &phone).unwrap_err(),
+        ProtocolError::Unsupported(UnsupportedCapability::AccountKeyEnvelope)
     );
 }
 
@@ -444,6 +492,66 @@ fn recovery_restores_a_new_device() {
         .unwrap()
         .unwrap();
     assert!(!state.is_removed(&replacement.id));
+}
+
+/// Alice's recovery skips a delivery sealed to a registered mechanism for
+/// which she has no key. A later delivery sealed to her recovery key opens.
+/// Without a matching key for any candidate, the delivery is unusable in
+/// recovery and the account key is unavailable in device acquisition.
+///
+/// ```text
+/// Alice ── first recovery delivery ──✗ no matching key
+///       ── second recovery delivery ──► account key
+/// ```
+#[test]
+fn recovery_acquisition_skips_a_delivery_without_a_matching_key() {
+    let (registry, _) = custom_registry(OTHER_SEAL);
+    let env = Env::with(registry, Default::default(), ALICE);
+    let mut rng = TestRandom(10);
+    let laptop = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    let (_, key) = ledger.root(&env, &laptop, 0, &mut rng);
+    let recovery =
+        RecoveryKeys::derive(&RecoverySecret::from_bytes([7; 32]), &env.application(), 0).unwrap();
+    ledger.register_recovery(&env, &laptop, &recovery, &mut rng);
+    let valid = &ledger.private.recovery_deliveries[0];
+    let mut other = valid.row.clone();
+    other.id = ids::random_v4(&mut rng).unwrap();
+    let context = recovery_delivery_context(&env.application(), ALICE, &other).unwrap();
+    let sealer = env.registry.key_sealer(OTHER_SEAL).unwrap();
+    let recipient = sealer.generate_key_pair(&mut rng).unwrap();
+    other.envelope = sealer
+        .seal(&recipient.public, &context, &key, &mut rng)
+        .unwrap();
+    assert_eq!(
+        env.registry.open_sealed(
+            std::slice::from_ref(&recovery.sealing),
+            &context,
+            &other.envelope,
+        ),
+        Err(jazz_e2ee::Error::NoKeyForMechanism)
+    );
+    let (state, evidence) = ledger.evidence(&env);
+    let replay = ledger.replay(&env);
+    let keys = AccountKeyEvidence::new(&replay, &state, &evidence).unwrap();
+    let deliveries = [Accepted::new(valid.position, other), valid.clone()];
+    assert_eq!(
+        *keys
+            .acquire_with_recovery(&recovery, &deliveries)
+            .unwrap()
+            .key(),
+        key
+    );
+    assert_eq!(
+        keys.acquire_with_recovery(&recovery, &deliveries[..1])
+            .unwrap_err(),
+        ProtocolError::Recovery(RecoveryFailure::DeliveryUnusable)
+    );
+    assert_eq!(
+        keys.acquire(&laptop.id, &[]).unwrap_err(),
+        ProtocolError::AccountKeyUnavailable
+    );
 }
 
 /// Recovery fails with its own codes: keys of another secret do not match

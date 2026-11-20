@@ -23,6 +23,7 @@
 //! `encryption.mechanisms` settings (see [`ClientConfig`]): readers route
 //! only allowed mechanisms, and writers select only allowed ones.
 
+mod account;
 mod client;
 mod error;
 mod hooks;
@@ -31,6 +32,7 @@ mod state;
 pub mod store;
 mod values;
 
+pub use account::{AccountStatus, AccountWatch, OwnAccount};
 pub use client::{ClientConfig, E2eeClient};
 pub use error::ClientError;
 pub use state::{MAX_REPORTS, Report};

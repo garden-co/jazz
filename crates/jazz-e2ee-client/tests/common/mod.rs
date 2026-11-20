@@ -62,35 +62,37 @@ pub fn allow_all() -> TablePolicies {
 /// and `rank` (optional integer) are encrypted, each stored as required
 /// bytes, as the protocol prescribes.
 pub fn schema() -> JazzSchema {
-    JazzSchema::new(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("projects")
-                    .column("name", ColumnType::Text)
-                    .policies(allow_all()),
-            )
-            .table(
-                TableSchemaBuilder::new("notes")
-                    .fk_column("projectId", "projects")
-                    .column("title", ColumnType::Text)
-                    .column("body", ColumnType::Bytea)
-                    .nullable_column("__e2ee_eq_body", ColumnType::Bytea)
-                    .nullable_column("__e2ee_eq_note", ColumnType::Bytea)
-                    .column("note", ColumnType::Bytea)
-                    .column("attachment", ColumnType::Bytea)
-                    .column("rank", ColumnType::Bytea)
-                    .nullable_column("plainNote", ColumnType::Text)
-                    .policies(allow_all()),
-            )
-            .table(
-                TableSchemaBuilder::new("vaults")
-                    .column("label", ColumnType::Text)
-                    .column("secret", ColumnType::Bytea)
-                    .policies(allow_all()),
-            )
-            .build(),
-    )
-    .unwrap()
+    JazzSchema::new(&app_schema()).unwrap()
+}
+
+/// The app's tables, before compiling.
+pub fn app_schema() -> jazz::tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("projects")
+                .column("name", ColumnType::Text)
+                .policies(allow_all()),
+        )
+        .table(
+            TableSchemaBuilder::new("notes")
+                .fk_column("projectId", "projects")
+                .column("title", ColumnType::Text)
+                .column("body", ColumnType::Bytea)
+                .nullable_column("__e2ee_eq_body", ColumnType::Bytea)
+                .nullable_column("__e2ee_eq_note", ColumnType::Bytea)
+                .column("note", ColumnType::Bytea)
+                .column("attachment", ColumnType::Bytea)
+                .column("rank", ColumnType::Bytea)
+                .nullable_column("plainNote", ColumnType::Text)
+                .policies(allow_all()),
+        )
+        .table(
+            TableSchemaBuilder::new("vaults")
+                .column("label", ColumnType::Text)
+                .column("secret", ColumnType::Bytea)
+                .policies(allow_all()),
+        )
+        .build()
 }
 
 /// The schema before a migration added `notes`' encrypted columns.
@@ -227,6 +229,7 @@ pub fn open_client_with(store: Rc<dyn PrivateStore>, declarations: E2eeDeclarati
         account_id: ALICE.to_owned(),
         registry: Registry::builtin(),
         random: Box::new(OsRandom),
+        device_account: None,
     }))
     .unwrap()
 }
@@ -276,6 +279,11 @@ impl Transport for Recorded {
 
 /// `client` connected to `server`; every frame either sends is recorded.
 pub fn link(client: &Db, server: &Db) -> (Upstream, Rc<RefCell<Vec<u8>>>) {
+    link_as(client, server, AuthorSubject::SYSTEM)
+}
+
+/// `client` connected to `server`, which serves it as `who`.
+pub fn link_as(client: &Db, server: &Db, who: AuthorSubject) -> (Upstream, Rc<RefCell<Vec<u8>>>) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let wire = Rc::new(RefCell::new(Vec::new()));
@@ -291,7 +299,7 @@ pub fn link(client: &Db, server: &Db) -> (Upstream, Rc<RefCell<Vec<u8>>>) {
                 inbound: up,
                 wire: wire.clone(),
             }),
-            AuthorSubject::SYSTEM,
+            who,
         )
         .unwrap();
     (link, wire)
@@ -306,23 +314,6 @@ pub fn pump(server: &Db, client: &Db) {
 }
 
 /// A client database linked to `server` and synced once, so the runtime
-/// Runs `future` while the clients and `server` exchange what it waits
-/// for.
-pub fn drive<T>(server: &Db, clients: &[&Db], future: impl std::future::Future<Output = T>) -> T {
-    let mut future = std::pin::pin!(future);
-    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-    for _ in 0..2_000 {
-        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut cx) {
-            return value;
-        }
-        for client in clients {
-            block_on(client.tick()).unwrap();
-        }
-        block_on(server.tick()).unwrap();
-    }
-    panic!("the operation did not finish within 2,000 turns");
-}
-
 /// knows the catalogue identities.
 pub fn online(
     client: &E2eeClient,
@@ -627,6 +618,178 @@ impl PrivateStore for FaultyStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Accounts: the app with Jazz's system tables, their derived policies, and
+// a session per account.
+// ---------------------------------------------------------------------------
+
+/// The app's schema with the system tables and the policies Jazz derives
+/// for them from the declarations, under the app-wide `settings`.
+pub fn secure_schema_with(settings: &EncryptionSettings) -> JazzSchema {
+    use jazz::tools::deployment::artifact::system_tables::{
+        derive_e2ee_policies, with_e2ee_fragment,
+    };
+    let mut schema = with_e2ee_fragment(&app_schema());
+    for (table, policies) in
+        derive_e2ee_policies(&schema, &declarations().tables, settings).unwrap()
+    {
+        schema.get_mut(&table).unwrap().policies = policies;
+    }
+    JazzSchema::new(&schema).unwrap()
+}
+
+/// An account of the application's own sign-in.
+pub fn account(byte: u8) -> AuthorSubject {
+    AuthorSubject::for_test_bytes([byte; 16])
+}
+
+pub fn account_id(who: AuthorSubject) -> String {
+    who.account_id().unwrap().0.to_string()
+}
+
+/// A device-account account and its identity, which the secret `seed`
+/// derives: its account ID is the one the identity founds for this app.
+pub fn device_account(
+    seed: u8,
+) -> (
+    AuthorSubject,
+    jazz_e2ee::protocol::device_account::DeviceAccountIdentity,
+) {
+    use jazz_e2ee::protocol::derive::RecoverySecret;
+    use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
+    let identity =
+        DeviceAccountIdentity::from_secret(&RecoverySecret::from_bytes([seed; 32])).unwrap();
+    let subject = identity.subject();
+    let app = *app_id().as_object_id().uuid();
+    let who = AuthorSubject::reserved(jazz::identity::DEVICE_ACCOUNT_ISSUER, &subject)
+        .unwrap()
+        .with_account(jazz::account_registry::device_account_id(app, &subject));
+    (who, identity)
+}
+
+/// The authority of the secure schema, in memory or at `path`.
+pub fn secure_authority_with(settings: &EncryptionSettings, path: Option<&Path>) -> Db {
+    let config = DbConfig::new(secure_schema_with(settings), identity(0));
+    let server = match path {
+        Some(path) => block_on(Db::open_at(config, path, FileOptions::default())).unwrap(),
+        None => block_on(Db::open(config)).unwrap(),
+    };
+    server.set_authority().unwrap();
+    server
+}
+
+/// `who`'s runtime on `store`.
+pub fn open_account(
+    store: Rc<dyn PrivateStore>,
+    who: AuthorSubject,
+    settings: EncryptionSettings,
+    device_account: Option<jazz_e2ee::protocol::device_account::DeviceAccountIdentity>,
+) -> E2eeClient {
+    block_on(E2eeClient::open(ClientConfig {
+        store,
+        declarations: declarations_with(settings),
+        account_id: account_id(who),
+        registry: Registry::builtin(),
+        random: Box::new(OsRandom),
+        device_account,
+    }))
+    .unwrap()
+}
+
+/// `who`'s database with the runtime's hooks, linked to `server` as
+/// `who`'s session and synced once.
+pub fn session(
+    client: &E2eeClient,
+    server: &Db,
+    who: AuthorSubject,
+    settings: &EncryptionSettings,
+    node: u8,
+    path: Option<&Path>,
+) -> (Db, Upstream) {
+    let config = DbConfig::new(
+        secure_schema_with(settings),
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author: who,
+        },
+    )
+    .with_e2ee(client.hooks());
+    let db = match path {
+        Some(path) => block_on(Db::open_at(config, path, FileOptions::default())).unwrap(),
+        None => block_on(Db::open(config)).unwrap(),
+    };
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let wire = Rc::new(RefCell::new(Vec::new()));
+    let link = block_on(db.connect_upstream(Box::new(Recorded {
+        out: up.clone(),
+        inbound: down.clone(),
+        wire: wire.clone(),
+    })));
+    server
+        .accept_subscriber(
+            Box::new(Recorded {
+                out: down,
+                inbound: up,
+                wire,
+            }),
+            who,
+        )
+        .unwrap();
+    pump(server, &db);
+    assert!(client.prepare(&db).unwrap(), "identities after one sync");
+    (db, link)
+}
+
+/// Runs `future` while the clients and `server` exchange what it waits
+/// for.
+pub fn drive<T>(server: &Db, clients: &[&Db], future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..2_000 {
+        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+            return value;
+        }
+        for client in clients {
+            block_on(client.tick()).unwrap();
+        }
+        block_on(server.tick()).unwrap();
+    }
+    panic!("the operation did not finish within 2,000 turns");
+}
+
+/// A new space root of project `space` made by the device's verified
+/// account, from the account rows the runtime read: the key a device holds
+/// once it created the space (the root row itself stays in this fixture).
+pub fn space_key_of_account(client: &E2eeClient, db: &Db, space: uuid::Uuid) -> HeldSpace {
+    let registry = Registry::builtin();
+    let domain = AppDomain::new(
+        &app_id().as_object_id().uuid().to_string(),
+        Some(ENVIRONMENT),
+    )
+    .unwrap();
+    let address = address(db, space);
+    let records = client
+        .with_account(|account| {
+            let ledgers = vec![account.public.clone()];
+            let directory =
+                AccountDirectory::new(&ledgers, &domain, &registry, account.public.through)
+                    .unwrap();
+            let device = client.device().unwrap().clone();
+            let author =
+                Author::new(&directory, client.account_id(), &account.key, &device).unwrap();
+            let writer = SpaceWriter {
+                suite: registry.select(&MechanismConfig::default()).unwrap(),
+                registry: &registry,
+                domain: &domain,
+                account_id: client.account_id(),
+            };
+            space_root(&writer, &address, &author, &mut OsRandom).unwrap()
+        })
+        .expect("an active account");
+    held(&records)
+}
+
 /// Every cell of every table of the SQLite file at `path`, as bytes.
 pub fn stored_bytes(path: &std::path::Path) -> Vec<u8> {
     let conn = rusqlite::Connection::open(path).unwrap();
@@ -653,4 +816,31 @@ pub fn stored_bytes(path: &std::path::Path) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Overwrites every stored cell of `column` in `table` of the SQLite
+/// database at `path` with `value`: a server altering its own rows.
+pub fn tamper(path: &std::path::Path, table: &str, column: &str, value: &[u8]) {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let stored: String = conn
+        .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .into_iter()
+        .find(|name| name == column || name.starts_with(&format!("{column}~")))
+        .unwrap();
+    let changed = conn
+        .execute(
+            &format!("UPDATE \"{table}\" SET \"{stored}\" = ?1"),
+            [value],
+        )
+        .unwrap();
+    assert!(changed > 0, "nothing to alter in {table}");
+}
+
+pub fn count(server: &Db, table: &str) -> usize {
+    all(server, Query::from(table)).unwrap().len()
 }
