@@ -31,6 +31,7 @@ catalogs:
     svelte-check: "^4.0.0"
     typescript: 6.0.2
     vite: 8.3.8
+    vite-plus: 1.7.0
     vite-plugin-solid: 2.11.17
     "vite-plugin-top-level-await": 1.6.0
     "vite-plugin-wasm": 3.6.0
