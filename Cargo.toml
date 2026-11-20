@@ -65,25 +65,25 @@ sqlite-wasm-rs = { path = "vendor/sqlite-wasm-rs" }
 # dev/scripts/sync-crate-versions.mjs, and CI checks it
 # (dev/scripts/check-lockstep-versions.mjs).
 [workspace.package]
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 license = "MIT"
 repository = "https://github.com/garden-co/jazz"
 homepage = "https://jazz.tools"
 rust-version = "1.93"
 
 [workspace.dependencies]
-jazz = { package = "jazz-core", version = "=2.0.0-alpha.51", path = "crates/jazz", default-features = false }
-jazz-db = { version = "=2.0.0-alpha.51", path = "crates/jazz/layers/db", default-features = false }
-jazz-model = { version = "=2.0.0-alpha.51", path = "crates/jazz/layers/model", default-features = false }
-jazz-protocol = { version = "=2.0.0-alpha.51", path = "crates/jazz/layers/protocol", default-features = false }
-jazz-types = { version = "=2.0.0-alpha.51", path = "crates/jazz/layers/types", default-features = false }
-jazz-compression = { version = "=2.0.0-alpha.51", path = "crates/jazz-compression", default-features = false }
-jazz-text = { version = "=2.0.0-alpha.51", path = "crates/jazz-text" }
-jazz-codegen = { version = "=2.0.0-alpha.51", path = "crates/jazz-codegen" }
-jazz-otel = { version = "=2.0.0-alpha.51", path = "crates/jazz-otel" }
-jazz-native-transport = { version = "=2.0.0-alpha.51", path = "crates/jazz-native-transport" }
-jazz-server = { version = "=2.0.0-alpha.51", path = "crates/jazz-server" }
-jazz-app-support = { version = "=2.0.0-alpha.51", path = "crates/jazz-app" }
+jazz = { package = "jazz-core", version = "=2.0.0-alpha.52", path = "crates/jazz", default-features = false }
+jazz-db = { version = "=2.0.0-alpha.52", path = "crates/jazz/layers/db", default-features = false }
+jazz-model = { version = "=2.0.0-alpha.52", path = "crates/jazz/layers/model", default-features = false }
+jazz-protocol = { version = "=2.0.0-alpha.52", path = "crates/jazz/layers/protocol", default-features = false }
+jazz-types = { version = "=2.0.0-alpha.52", path = "crates/jazz/layers/types", default-features = false }
+jazz-compression = { version = "=2.0.0-alpha.52", path = "crates/jazz-compression", default-features = false }
+jazz-text = { version = "=2.0.0-alpha.52", path = "crates/jazz-text" }
+jazz-codegen = { version = "=2.0.0-alpha.52", path = "crates/jazz-codegen" }
+jazz-otel = { version = "=2.0.0-alpha.52", path = "crates/jazz-otel" }
+jazz-native-transport = { version = "=2.0.0-alpha.52", path = "crates/jazz-native-transport" }
+jazz-server = { version = "=2.0.0-alpha.52", path = "crates/jazz-server" }
+jazz-app-support = { version = "=2.0.0-alpha.52", path = "crates/jazz-app" }
 rustc-hash = "2.1.1"
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
 
