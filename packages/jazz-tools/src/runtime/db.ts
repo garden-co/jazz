@@ -7,6 +7,7 @@ import { Utf8Decoder } from "./utf8.js";
 import { parseSnapshotRef, type SnapshotRef } from "./snapshot-ref.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { AccountHandle } from "../accounts/state.js";
+import { plainSchema } from "../encryption/plain-schema.js";
 import { DbClosedError, GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
 import { assertAccountConfig, copyAccountConfigAdmission } from "../accounts/config-capability.js";
@@ -137,7 +138,7 @@ import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
 import { notDeclaredEncryption, type Encryption } from "../encryption/index.js";
-import { plainSchema } from "../encryption/plain-schema.js";
+import { unreadableRows, withUnreadable } from "../encryption/unreadable.js";
 
 /** `getDeviceAccountProof` hands out a session's sync proof only with this long left. */
 const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
@@ -3840,13 +3841,18 @@ export class Db {
       context || usesRelationTraversal
         ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
         : await client.queryInternal(wasmQuery, queryOptions);
-    if (!prepared.computedState) return rows.map(prepared.transform);
-    return finishComputedRead(query, builtQuery, outputTable, prepared, rows, (physical) =>
-      client.queryInternal(
-        translateQuery(builderJson, planningSchema, physical),
-        queryOptions,
-        context?.readSession,
+    // Rows left out as undecryptable stay with the typed result.
+    const unreadable = unreadableRows(rows);
+    if (!prepared.computedState) return withUnreadable(rows.map(prepared.transform), unreadable);
+    return withUnreadable(
+      await finishComputedRead(query, builtQuery, outputTable, prepared, rows, (physical) =>
+        client.queryInternal(
+          translateQuery(builderJson, planningSchema, physical),
+          queryOptions,
+          context?.readSession,
+        ),
       ),
+      unreadable,
     );
   }
 

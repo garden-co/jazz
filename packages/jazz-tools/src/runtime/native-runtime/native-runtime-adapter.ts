@@ -4,6 +4,7 @@ import { servePrivateStore, type PrivateStore } from "../../encryption/private-s
 import { retryAfterKey } from "../../encryption/key-retry.js";
 import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
 import { SpaceUse, type SubscriptionSpaceUse } from "../../encryption/space-use.js";
+import { withUnreadable, type UnreadableRow } from "../../encryption/unreadable.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
@@ -271,7 +272,12 @@ type NativeWriteOptions = {
   updatedAtMs?: number;
 };
 
-type PendingNativeRead = { poll(): Uint8Array | null; cancel(): void };
+type PendingNativeRead = {
+  poll(): Uint8Array | null;
+  cancel(): void;
+  /** A one-shot read's rows left out as undecryptable, as JSON (see {@link UnreadableRow}). */
+  unreadable?(): string | null;
+};
 type NativeReadResult = Uint8Array | PendingNativeRead;
 type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
 type PendingNativePermissionAdvice = {
@@ -2963,6 +2969,12 @@ export class NativeRuntimeAdapter implements Runtime {
       this.attachLocalReadCoverageInBackground(tier, query, session);
     }
     this.emitQueryCoverageTrace("attach");
+    // Rows the read left out because they could not be decrypted: kept
+    // with the result it returns (see `unreadableRows`).
+    let unreadable: UnreadableRow[] | undefined;
+    const leftOut = (rows: UnreadableRow[]) => {
+      unreadable = rows;
+    };
     if (queryHasArraySubqueries(coreQueryJson)) {
       if (pendingTx) {
         const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
@@ -2973,18 +2985,30 @@ export class NativeRuntimeAdapter implements Runtime {
           subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
         );
       }
-      const payload = await this.readRowsForContextAsync(query, opts, readContext);
+      const payload = await this.readRowsForContextAsync(
+        query,
+        opts,
+        readContext,
+        undefined,
+        leftOut,
+      );
       this.emitQueryCoverageTrace("covered");
-      return rowsFromRelationSnapshot(
-        readRelationSnapshot(payload),
-        this.schema,
-        subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+      return withUnreadable(
+        rowsFromRelationSnapshot(
+          readRelationSnapshot(payload),
+          this.schema,
+          subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+        ),
+        unreadable,
       );
     }
     const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
-    const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
+    const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx, leftOut);
     this.emitQueryCoverageTrace("covered");
-    return rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
+    return withUnreadable(
+      rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns),
+      unreadable,
+    );
   }
 
   createSubscription(
@@ -3868,9 +3892,10 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     session: RuntimeSession | undefined,
     pendingTx: PendingTx | undefined,
+    leftOut?: (rows: UnreadableRow[]) => void,
   ): Promise<Uint8Array> {
     const context = this.nativeReadContext(session, pendingTx);
-    return this.readRowsForContextAsync(query, opts, context, pendingTx?.id);
+    return this.readRowsForContextAsync(query, opts, context, pendingTx?.id, leftOut);
   }
 
   /**
@@ -3899,16 +3924,20 @@ export class NativeRuntimeAdapter implements Runtime {
     return result as Uint8Array;
   }
 
+  /** `leftOut` is told the rows the read left out as undecryptable, if any. */
   private async readRowsForContextAsync(
     query: NativeQueryInput,
     opts: unknown,
     context: NativeReadContext,
     openTransactionId?: OpenTransactionId,
+    leftOut?: (rows: UnreadableRow[]) => void,
   ): Promise<Uint8Array> {
-    return this.awaitNativeRead(
-      this.startRowsForContext(query, opts, context, openTransactionId),
-      (opts as { tier?: string }).tier,
-    );
+    const started = this.startRowsForContext(query, opts, context, openTransactionId);
+    const bytes = await this.awaitNativeRead(started, (opts as { tier?: string }).tier);
+    const read = await started;
+    const unreadable = isPendingNativeRead(read) ? read.unreadable?.() : null;
+    if (leftOut && unreadable) leftOut(JSON.parse(unreadable) as UnreadableRow[]);
+    return bytes;
   }
 
   private startRowsForContext(

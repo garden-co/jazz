@@ -16420,6 +16420,20 @@ fn hold_shipped(shipped: &mut HashMap<(String, [u8; 16], Vec<u8>), Pos>, image: 
 
 // ---- reads through the binding entry point -------------------------------
 
+/// A row a read left out because the client's encryption hooks could not
+/// open it (protocol §4.3): the read is incomplete by this row. A rewritten
+/// query's filters and window apply after rows are opened, so such a row
+/// may also be one the query would not have matched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnreadableRow {
+    pub table: String,
+    pub id: RowUuid,
+    /// The first column that could not be opened, when one was.
+    pub column: Option<String>,
+    /// The protocol's code (`key-unavailable`, `key-pending`, ...).
+    pub code: &'static str,
+}
+
 /// What a serialized one-shot read returns.
 #[derive(Debug)]
 pub enum SerializedReadResult {
@@ -16451,6 +16465,24 @@ impl Db {
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         coverage: Option<&dyn Fn() -> bool>,
     ) -> Result<SerializedReadResult, Error> {
+        Ok(self
+            .all_serialized_query_reporting(query, opts, open_tx, request_scope, coverage)
+            .await?
+            .0)
+    }
+
+    /// [`Db::all_serialized_query`], with the rows the read left out because
+    /// the client's encryption hooks could not open them: the result is
+    /// incomplete by those rows (protocol §4.3). Empty without hooks, and
+    /// for a read in an open transaction, which is strict (protocol §4.4).
+    pub async fn all_serialized_query_reporting(
+        &self,
+        query: &[u8],
+        opts: ReadOpts,
+        open_tx: Option<OpenTransactionId>,
+        request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        coverage: Option<&dyn Fn() -> bool>,
+    ) -> Result<(SerializedReadResult, Vec<UnreadableRow>), Error> {
         let query: Query = jazz_model::query::decode_client_query_postcard(query)
             .map_err(|e| Error::new(ErrorCode::Query, format!("undecodable query: {e}")))?;
         let mut prepared = self.prepare_query(&query)?;
@@ -16472,12 +16504,16 @@ impl Db {
                 SerializedReadResult::Rows(rows)
             }
         };
+        // What the last local run left out; a run that failed and is tried
+        // again replaces it.
+        let unreadable = std::cell::RefCell::new(Vec::new());
+        let reported = |rows: Vec<CurrentRow>| (result(rows), unreadable.take());
         if let Some(tx) = open_tx {
             let rows = self
                 .tx_ref(tx)
                 .all_prepared_with_options(&prepared, identity, &opts, coverage)
                 .await?;
-            return Ok(result(rows));
+            return Ok((result(rows), Vec::new()));
         }
         // A branch view's head is current over a frozen base too: only a
         // snapshot read is wholly this store's.
@@ -16523,7 +16559,9 @@ impl Db {
                 {
                     spec.position = Position::At(at);
                 }
-                let roots = inner.run_for_reader(&prepared, identity, &spec, false)?;
+                let (roots, left_out) =
+                    inner.run_for_reader_reporting(&prepared, identity, &spec, false)?;
+                *unreadable.borrow_mut() = left_out;
                 inner.nest_relations(&prepared, identity, &spec, roots)
             })
         };
@@ -16537,14 +16575,14 @@ impl Db {
         };
         match self.fetching(read).await {
             Err(error) if wait(&error) => {}
-            read => return read.map(result),
+            read => return read.map(reported),
         }
         // A row whose large values are still being fetched answers once
         // their chunks arrive, while the upstream that will send them is
         // connected (a reloaded tab's rows come from its relay first).
         poll_fn(|_| match read() {
             Err(error) if wait(&error) => Poll::Pending,
-            read => Poll::Ready(read.map(result)),
+            read => Poll::Ready(read.map(reported)),
         })
         .await
     }

@@ -17,6 +17,8 @@ export {
   PrivateStoreWipedError,
 } from "./private-store.js";
 export type { PrivateStore, StoredDocument, StoreTarget } from "./private-store.js";
+export { unreadableRows } from "./unreadable.js";
+export type { UnreadableRow } from "./unreadable.js";
 
 /** The account's state as this device sees it. */
 export type AccountStatus = "active" | "awaiting-approval" | "reenrolled";
@@ -72,6 +74,11 @@ export type EncryptionReport =
       space: { table: string; id: string } | null;
     }
   | { type: "challenged" }
+  /**
+   * Reports Jazz kept for the app while nothing took them, past its limit:
+   * `count` older ones were dropped (a challenge never is).
+   */
+  | { type: "reports-dropped"; count: number }
   | { type: string; [key: string]: unknown };
 
 /** The native calls the handle is built on. */
@@ -255,7 +262,11 @@ export class Encryption {
     };
   }
 
-  /** The reports of rows left out because they could not be read. */
+  /**
+   * The reports of rows left out because they could not be read, as they
+   * happen. The read that left a row out also says so itself: see
+   * {@link unreadableRows}.
+   */
   onUnreadable(listener: (report: EncryptionReport) => void): () => void {
     return this.onReport((report) => {
       if (report.type === "unreadable") listener(report);
