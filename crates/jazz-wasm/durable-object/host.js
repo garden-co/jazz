@@ -440,15 +440,7 @@ export function jazzCoreClass(wasm) {
       if (failure !== undefined) this.logBucketFailure(lane, failure);
       else lane.logged = false;
       this.flush();
-      // Wake for what waits out a backoff.
-      const wait = Math.max(this.chunkIo.retryAt, this.chunkFetches.retryAt) - Date.now();
-      if (wait > 0) {
-        clearTimeout(this.bucketTimer);
-        this.bucketTimer = setTimeout(() => {
-          const current = this.current();
-          if (current !== null) this.pumpBucket(current);
-        }, wait);
-      }
+      this.rearmBucket();
     }
 
     backOff(lane, failed) {
@@ -472,11 +464,28 @@ export function jazzCoreClass(wasm) {
       lane.out = false;
       this.backOff(lane, true);
       this.logBucketFailure(lane, reason(error));
+      this.rearmBucket();
+    }
+
+    /**
+     * Wake for whatever waits out a backoff: at the earliest lane's retry,
+     * then again for the other's, so re-arming for one lane never drops the
+     * other's wake.
+     */
+    rearmBucket() {
+      const now = Date.now();
+      const due = [this.chunkIo.retryAt, this.chunkFetches.retryAt].filter((at) => at > now);
       clearTimeout(this.bucketTimer);
-      this.bucketTimer = setTimeout(() => {
-        const current = this.current();
-        if (current !== null) this.pumpBucket(current);
-      }, lane.retryAt - Date.now());
+      if (due.length === 0) return;
+      this.bucketTimer = setTimeout(
+        () => {
+          const current = this.current();
+          if (current === null) return;
+          this.pumpBucket(current);
+          this.rearmBucket();
+        },
+        Math.min(...due) - now,
+      );
     }
 
     /** A lane's first failure of a run, then every tenth while it lasts. */
