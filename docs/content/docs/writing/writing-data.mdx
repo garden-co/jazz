@@ -587,6 +587,22 @@ write recovered after a reload or made in another tab may still be waiting when 
 await db.waitForSync({ timeoutMs: 10_000 });
 ```
 
+### Which rows are still waiting
+
+To mark individual rows as not yet saved, such as a message that has not reached the server, ask
+for the rows a table's pending transactions wrote:
+
+```ts
+const pending = db.getPendingUploadRows(app.messages); // ["0193…", …] or null
+const unsubscribe = db.onPendingUploadRowsChange(app.messages, (ids) => renderMarks(ids));
+```
+
+A row is listed from the moment a transaction that wrote it is committed until the server accepts
+or rejects that transaction, including transactions recovered from local storage after a restart
+(with the same browser caveat as `pendingUploads`). The IDs are sorted, and the listener fires only
+when the set changes. The result is `null` while the Db cannot name rows yet, for example while it
+still runs on a thin startup runtime; treat `null` as "unknown", not as "nothing pending".
+
 ## Handling mutation errors
 
 A mutation can fail when you call it or while you wait:

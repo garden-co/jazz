@@ -892,6 +892,11 @@ struct Inner {
     /// The upstream's refusals of this store's own commits, counted for
     /// [`Db::upload_status`].
     refusals: sync::Refusals,
+    /// What [`Db::upload_status`] adds to the client queue's own revision,
+    /// so the pending revision keeps growing when the queue is replaced (a
+    /// reopen along another version) or the store is a rebuilt one
+    /// ([`Db::seed_pending_revision`]).
+    pub(crate) pending_revision_base: u64,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
     /// Durability acks to sessions held until the host has persisted the
@@ -2072,6 +2077,11 @@ impl Db {
             inner.reset_everything();
             // Pending writes upload under the version they were written
             // in, and replay by the names of the one now current.
+            let retired = inner
+                .client
+                .as_ref()
+                .map_or(0, |client| client.pending_revision());
+            inner.pending_revision_base += retired + 1;
             inner.client = None;
             inner.load_client()?;
         }
@@ -2349,6 +2359,7 @@ impl Db {
                 pins_required: false,
                 upstream_rejections: None,
                 refusals: sync::Refusals::default(),
+                pending_revision_base: 0,
                 sessions: Vec::new(),
                 held_acks: None,
                 column_codes: RefCell::default(),
@@ -2399,6 +2410,21 @@ impl Db {
     pub fn seed_seq_floor(&self, floor: u64) {
         let mut inner = self.inner.borrow_mut();
         inner.seq = inner.seq.max(floor);
+    }
+
+    /// Report pending revisions above `floor` from now on: a host that
+    /// replaces a store with a fresh one continues the old one's revision,
+    /// so a status read across the swap never looks unchanged.
+    pub fn seed_pending_revision(&self, floor: u64) {
+        let mut inner = self.inner.borrow_mut();
+        let current = inner.pending_revision_base
+            + inner
+                .client
+                .as_ref()
+                .map_or(0, |client| client.pending_revision());
+        if current <= floor {
+            inner.pending_revision_base += floor + 1 - current;
+        }
     }
 
     /// Every SQLite store holds complete history; this one is also the

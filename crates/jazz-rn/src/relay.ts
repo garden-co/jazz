@@ -178,6 +178,8 @@ export type NativeForegroundCommand =
   | { type: "uploadStatus" }
   /** Delete the scope's local store (ABI 6). */
   | { type: "deleteStore" }
+  /** Ids of `table`'s rows with a write the server has not decided yet (append-only command). */
+  | { type: "pendingUploadRows"; table: string }
   | {
       type: "beginStreamingMutation";
       mutation: "insert" | "update" | "upsert";
@@ -273,7 +275,9 @@ export type NativeForegroundResponse =
   | { type: "slowQueryThresholdSet" }
   | { type: "pendingUploadCount"; count: number }
   | { type: "uploadStatus"; statusJson: string }
-  | { type: "storeDeleted"; pendingUploads: number };
+  | { type: "storeDeleted"; pendingUploads: number }
+  /** Row ids, 16 bytes each, sorted. */
+  | { type: "pendingUploadRows"; rows: Uint8Array[] };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -427,6 +431,9 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "pendingUploadCount") return Uint8Array.of(38);
   if (command.type === "uploadStatus") return Uint8Array.of(39);
   if (command.type === "deleteStore") return Uint8Array.of(40);
+  if (command.type === "pendingUploadRows") {
+    return concatForegroundBytes(Uint8Array.of(41), encodeForegroundString(command.table));
+  }
   if (command.type === "takeSlowQueryReport") {
     return concatForegroundBytes(
       Uint8Array.of(36),
@@ -846,6 +853,12 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
       pendingUploads: decodeForegroundU64(bytes.subarray(1), "deleted store's pending uploads"),
     };
   }
+  if (tag === 32) {
+    return {
+      type: "pendingUploadRows",
+      rows: decodeForegroundIds(bytes.subarray(1), "pending upload rows"),
+    };
+  }
   if (
     tag === 16 &&
     bytes.length >= 5 &&
@@ -964,6 +977,23 @@ function decodeForegroundBytes(bytes: Uint8Array, label: string): Uint8Array {
       const body = bytes.subarray(index + 1);
       if (body.byteLength === length) return body;
       break;
+    }
+    multiplier *= 128;
+  }
+  throw new Error(`Jazz native foreground returned malformed ${label}`);
+}
+
+/** A postcard `Vec<[u8; 16]>`: a count, then 16 bytes per id. */
+function decodeForegroundIds(bytes: Uint8Array, label: string): Uint8Array[] {
+  let count = 0;
+  let multiplier = 1;
+  for (let index = 0; index < bytes.length && index < 10; index += 1) {
+    const byte = bytes[index]!;
+    count += (byte & 0x7f) * multiplier;
+    if ((byte & 0x80) === 0) {
+      const body = bytes.subarray(index + 1);
+      if (!Number.isSafeInteger(count) || body.byteLength !== count * 16) break;
+      return Array.from({ length: count }, (_, n) => body.subarray(n * 16, n * 16 + 16));
     }
     multiplier *= 128;
   }
