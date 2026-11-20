@@ -360,6 +360,9 @@ async fn a_guest_is_kept_while_no_one_is_signed_in_and_linked_on_sign_up() {
         .insert(NewTodo::new("As a guest", false))
         .await
         .unwrap();
+    // The guest's store is in memory: its write reaches the server before
+    // the session reopens on the linked user.
+    jazz.wait_for_sync().await.unwrap();
 
     // The backend names no one: the guest stays, with its client.
     session.refresh().await.unwrap();
