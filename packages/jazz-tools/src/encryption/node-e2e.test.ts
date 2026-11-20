@@ -316,6 +316,62 @@ describe("encryption on Node, end to end", () => {
     expect(unreadableRows(limited).map((row) => row.id)).toEqual([after]);
     // Alice holds every key: her results are complete.
     expect(unreadableRows(later)).toEqual([]);
+
+    // His subscriptions say the same, and keep saying it as the result
+    // changes: each delivered result names the rows it leaves out, a page
+    // counts them, and the list follows the rows the result would hold.
+    let whole: (typeof later)[number][] | undefined;
+    let windowed: (typeof later)[number][] | undefined;
+    const stopWhole = bob.db.subscribe(tasks, (rows) => (whole = rows), { tier: "remote" });
+    const stopWindowed = bob.db.subscribe(
+      tasks.orderBy("label", "desc").limit(1),
+      (rows) => (windowed = rows),
+      { tier: "remote" },
+    );
+    try {
+      const named = await until(
+        async () => (whole && unreadableRows(whole).length > 0 ? whole : undefined),
+        "bob's subscription to name the rotated row",
+      );
+      expect(named.map((row) => row.title)).toEqual(["before"]);
+      expect(unreadableRows(named)).toEqual([
+        { table: "tasks", id: after, column: "title", code: expect.stringMatching(/^key-/) },
+      ]);
+      const page = await until(
+        async () => (windowed && unreadableRows(windowed).length > 0 ? windowed : undefined),
+        "bob's windowed subscription to name the rotated row",
+      );
+      expect(page).toEqual([]);
+      expect(unreadableRows(page).map((row) => row.id)).toEqual([after]);
+
+      // Another row he cannot open: his visible rows stay as they were, but
+      // the next result names both, and the page moves on to the new row.
+      await alice.db
+        .insert(app.tasks, { projectId: project, title: "later", label: "3" })
+        .wait({ tier: "global" });
+      const all = await alice.db.all(tasks, { tier: "remote" });
+      const laterId = all.find((row) => row.title === "later")!.id;
+      const grown = await until(
+        async () => (whole && unreadableRows(whole).length === 2 ? whole : undefined),
+        "bob's subscription to name the second rotated row",
+      );
+      expect(grown.map((row) => row.title)).toEqual(["before"]);
+      expect(
+        unreadableRows(grown)
+          .map((row) => row.id)
+          .sort(),
+      ).toEqual([after, laterId].sort());
+      const moved = await until(
+        async () =>
+          windowed && unreadableRows(windowed)[0]?.id === laterId ? windowed : undefined,
+        "bob's page to name the newest row instead",
+      );
+      expect(moved).toEqual([]);
+      expect(unreadableRows(moved)).toHaveLength(1);
+    } finally {
+      stopWhole();
+      stopWindowed();
+    }
   }, 90_000);
 
   it("a device account restored from its key on a new device reads again, with no other device", async () => {
