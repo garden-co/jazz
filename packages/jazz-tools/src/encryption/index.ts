@@ -18,6 +18,8 @@ export {
   PrivateStoreWipedError,
 } from "./private-store.js";
 export type { PrivateStore, StoredDocument, StoreTarget } from "./private-store.js";
+export { unreadableRows } from "./unreadable.js";
+export type { UnreadableRow } from "./unreadable.js";
 
 /** The account's state as this device sees it. */
 export type AccountStatus = "active" | "awaiting-approval" | "reenrolled";
@@ -40,7 +42,12 @@ export class EncryptionStoreRequiredError extends Error {
   }
 }
 
-/** A failure of an encryption call; `code` is stable (`approval-answered`, `approval-code-mismatch`, `no-challenge`, `store`, `closed`, `protocol`, ...). */
+/**
+ * A failure of an encryption call; `code` is stable (`approval-answered`,
+ * `approval-code-mismatch`, `no-challenge`, `store`, `closed`, a protocol
+ * refusal's own code such as `recovery-root-mismatch` or `stale-state`, and
+ * `protocol` for a protocol failure without one, ...).
+ */
 export class EncryptionError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
@@ -73,6 +80,11 @@ export type EncryptionReport =
       space: { table: string; id: string } | null;
     }
   | { type: "challenged" }
+  /**
+   * Reports Jazz kept for the app while nothing took them, past its limit:
+   * `count` older ones were dropped (a challenge never is).
+   */
+  | { type: "reports-dropped"; count: number }
   | { type: string; [key: string]: unknown };
 
 /** The native calls the handle is built on. */
@@ -94,6 +106,9 @@ export interface EncryptionOptions {
   /** How often to look for reports to deliver, in milliseconds. */
   reportIntervalMs?: number;
 }
+
+/** A restore's refusals that mean there is nothing to recover from. */
+const NOTHING_TO_RECOVER = new Set(["recovery-root-mismatch", "recovery-delivery-missing"]);
 
 const toHex = (bytes: Uint8Array) =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -193,14 +208,21 @@ export class Encryption {
     const secret = await this.options.accountSecret?.();
     if (secret !== undefined) {
       const hex = toHex(parseSecret(secret));
-      if (status === "active") await this.call("recoveryRegister", { secret: hex });
-      else if (status === "awaiting-approval") {
+      // Runs at every start: the runtime writes nothing when the root is
+      // registered already, and a retired root does not stop the device.
+      if (status === "active") {
+        await this.call("recoveryRegister", { secret: hex, atStart: true });
+      } else if (status === "awaiting-approval") {
         // A device with no other to approve it recovers with the account
-        // secret; without a registered root there is nothing to recover from.
+        // secret. Without a root registered for it (or with no delivery for
+        // the current key) there is nothing to recover from, and the device
+        // stays awaiting approval; any other failure is the caller's.
         try {
           status = await this.call<AccountStatus>("recoveryRestore", { secret: hex });
-        } catch {
-          // Stays awaiting approval.
+        } catch (error) {
+          if (!(error instanceof EncryptionError) || !NOTHING_TO_RECOVER.has(error.code)) {
+            throw error;
+          }
         }
       }
     }
@@ -262,7 +284,11 @@ export class Encryption {
     };
   }
 
-  /** The reports of rows left out because they could not be read. */
+  /**
+   * The reports of rows left out because they could not be read, as they
+   * happen. The read that left a row out also says so itself: see
+   * {@link unreadableRows}.
+   */
   onUnreadable(listener: (report: EncryptionReport) => void): () => void {
     return this.onReport((report) => {
       if (report.type === "unreadable") listener(report);
@@ -447,10 +473,19 @@ export class Recovery {
   }
 }
 
-/** The handle of an app that declares no encryption: every use throws. */
+/**
+ * The handle of an app that declares no encryption: every use throws. What
+ * looks at a value without using it is answered instead: `await` and
+ * promise checks (`then`), `JSON.stringify` (`toJSON`), `console.log` and
+ * the inspector (`util.inspect`, other symbols), so logging or awaiting
+ * `db.encryption` is not an error.
+ */
 export function notDeclaredEncryption(): Encryption {
   return new Proxy({} as Encryption, {
-    get() {
+    get(_target, property) {
+      if (property === "then" || property === "toJSON" || typeof property === "symbol") {
+        return undefined;
+      }
       throw new EncryptionNotDeclaredError();
     },
   });

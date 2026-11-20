@@ -195,16 +195,70 @@ describe("createJazz validates and opens encrypted apps with keyless hooks", () 
     expect(await readdir(process.cwd())).toEqual([]);
   });
 
+  const remoteStore = () =>
+    remote({
+      url: "http://127.0.0.1:1",
+      appId: "00000000-0000-4000-8000-000000000001",
+      secret: "test-secret",
+    });
+
+  it("refuses an invalid encrypted app before sending a deployment request to a remote store", async () => {
+    // Current bindings, so the app itself is what is refused: its
+    // permissions are not a jazz.permissions.json. (A remote store checks a
+    // decrypt's confirmation itself, when it receives the deployment.)
+    await inProject();
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected request"));
+    try {
+      await expect(startEncrypted(remoteStore(), ["tasks.notes"], { tables: {} })).rejects.toThrow(
+        /permissions.*must be the app's jazz\.permissions\.json/,
+      );
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
+  it("publishes a valid encrypted app to a remote store with its declarations", async () => {
+    await inProject();
+    const published: Record<string, unknown>[] = [];
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/admin/migrations/graph")) {
+        return Response.json({ latestBundleSchemaHash: null, schemas: [], migrations: [] });
+      }
+      if (url.endsWith("/admin/bundles")) {
+        const body = init?.body;
+        const text = typeof body === "string" ? body : new TextDecoder().decode(body as Uint8Array);
+        published.push(JSON.parse(text) as Record<string, unknown>);
+        // The test ends here: the publish was what it checks.
+        return Response.json({ error: "stopped by the test" }, { status: 500 });
+      }
+      throw new Error(`unexpected request to ${url}`);
+    });
+    try {
+      await expect(startEncrypted(remoteStore(), ["tasks.notes"])).rejects.toThrow(
+        /stopped by the test/,
+      );
+      expect(published).toHaveLength(1);
+      const [deployment] = published as [
+        { encryption?: unknown; confirmDecrypt?: string[]; schemas: { schema: unknown }[] },
+      ];
+      expect(deployment.confirmDecrypt).toEqual(["tasks.notes"]);
+      expect(JSON.stringify(deployment.encryption)).toContain('"tasks"');
+      // The stored schema keeps the sealed columns as bytes and Jazz's system tables.
+      expect(JSON.stringify(deployment.schemas)).toContain("__e2ee_members");
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+
   it("rejects stale bindings before sending a deployment request to a remote store", async () => {
     await inProject(notes);
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected request"));
     try {
-      const store = remote({
-        url: "http://127.0.0.1:1",
-        appId: "00000000-0000-4000-8000-000000000001",
-        secret: "test-secret",
-      });
-      await expect(startEncrypted(store, ["tasks.notes"])).rejects.toThrow(/bindings out of date/);
+      await expect(startEncrypted(remoteStore(), ["tasks.notes"])).rejects.toThrow(
+        /bindings out of date/,
+      );
       expect(fetch).not.toHaveBeenCalled();
     } finally {
       fetch.mockRestore();

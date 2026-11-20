@@ -231,6 +231,34 @@ impl E2eeClient {
         Ok(results)
     }
 
+    /// After a device removal this device made: the pass over every space
+    /// it holds keys of, which marks each one whose current version the
+    /// removed device could open (protocol §2.8, §3.5), so that this device's
+    /// next write to it rotates first. A space whose pass fails (offline, a
+    /// refused or failed read) is marked anyway, unless its rotation was
+    /// refused: a needless rotation costs one rotation, but a write sealed
+    /// under a version the removed device holds cannot be undone. A later
+    /// pass that succeeds clears a mark the space does not need.
+    pub(crate) async fn mark_after_device_removal(&self, db: &Db) {
+        let held: Vec<_> = self
+            .shared
+            .keys
+            .borrow()
+            .held
+            .spaces()
+            .iter()
+            .map(|space| space.address().clone())
+            .collect();
+        for address in held {
+            if self.deliver_pass(db, &db_address(&address)).await.is_err() {
+                let mut keys = self.shared.keys.borrow_mut();
+                if !keys.rotation_refused.contains(&address) {
+                    keys.rotation_pending.insert(address);
+                }
+            }
+        }
+    }
+
     /// Whether `space` needs rotation (protocol §3.5): its current version
     /// is held by an account that is no longer a member, or was sealed to an
     /// account epoch a removal superseded. A write to it is then preceded by
@@ -296,13 +324,16 @@ impl E2eeClient {
             }
             Err(error) => return Err(self.forget_account_on(error)),
         };
+        // Learn and keep the new version, then deliver it to the rest. The
+        // mark is cleared once the new version is held: until then a write
+        // to the space waits for it instead of sealing under the version the
+        // removed member holds.
+        self.acquire_full(db, space).await?;
         self.shared
             .keys
             .borrow_mut()
             .rotation_pending
             .remove(&address);
-        // Learn and keep the new version, then deliver it to the rest.
-        self.acquire_full(db, space).await?;
         let mut written = first;
         for batch in rest.chunks(DELIVERY_BATCH) {
             written += self.deliver_batch(db, &address, batch).await?;
@@ -356,7 +387,7 @@ impl E2eeClient {
         let records = {
             let account = self.account.borrow();
             let account = account.as_ref().ok_or(ClientError::NoAccount)?;
-            let device = self.shared.device.borrow().clone();
+            let device = self.shared.device()?.clone();
             let author = Author::new(&directory, &self.shared.account_id, &account.key, &device)?;
             let make = match kind {
                 Rotation::Ordinary => rotate,

@@ -6,7 +6,9 @@
 //! with them: a read returns each row of an encrypted table without its
 //! encrypted columns (and their equality tokens), a write that names an
 //! encrypted column is refused, and a query that filters, orders or selects
-//! one is refused naming the pattern. Plain tables and plain columns of an
+//! one is refused naming the pattern: core refuses every condition and
+//! ordering on an encrypted column but a top-level equality before the hook
+//! plans, and this hook refuses that equality and a selection. Plain tables and plain columns of an
 //! encrypted table work as usual. It has no account, no store and nothing
 //! to configure.
 
@@ -18,7 +20,7 @@ use jazz::e2ee::{
     E2eeDeclarations, E2eeHooks, OpenOutcome, QueryPlan, ReadSite, SealError, StreamSealer,
     StreamTarget, WriteCells, WriteKind,
 };
-use jazz::query::Query;
+use jazz::query::{Operand, Query};
 
 use crate::hooks::unsupported_query;
 
@@ -100,6 +102,22 @@ impl E2eeHooks for KeylessHooks {
             return Ok(QueryPlan::Plain);
         }
         let table = query.table.as_str();
+        // What core leaves to the hook: a top-level equality of an
+        // equality column, which a client turns into tokens. Without keys
+        // there are no tokens to compare.
+        let mut filtered = false;
+        for filter in &query.filters {
+            filter.any_operand(&mut |operand| {
+                filtered |= matches!(operand, Operand::Column(name) if sealed.contains(name));
+                filtered
+            });
+        }
+        if filtered {
+            return Err(unsupported_query(
+                "an encrypted column filtered on a backend (it holds no keys)",
+                table,
+            ));
+        }
         if query
             .select
             .as_ref()
