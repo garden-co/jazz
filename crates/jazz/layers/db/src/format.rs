@@ -68,9 +68,12 @@ pub(crate) fn check(conn: &Storage) -> Result<bool, Error> {
         .optional()
         .map_err(storage)?;
     if stamp.is_none() {
+        // Durable Object hosts can create their own tables before the core opens.
+        // Their indexes also belong to the host, not to the core storage format.
         let unstamped: bool = conn
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE lower(name) GLOB '_jazz_*')",
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE lower(name) GLOB '_jazz_*'
+                 AND NOT (lower(name) GLOB '_jazz_host_*' AND lower(tbl_name) GLOB '_jazz_host_*'))",
                 [],
                 |row| row.get(0),
             )
