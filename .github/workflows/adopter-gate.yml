@@ -172,14 +172,16 @@ jobs:
       - if: matrix.job == 't9-rust'
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with: { workspaces: rc-src }
-      # jazz#6158: a fresh runner's Gradle dependency fetch failed once. No retry (a failure fails); the cache makes
-      # most runs fetch nothing.
-      - name: Gradle dependency cache
+      # jazz#6158 and RC 44647657966 (Maven Central 429s): t9.sh fetches dependencies in a retried step of its own, then
+      # builds --offline. The cache makes most runs fetch nothing. It is restored here and saved after the run even
+      # when the job fails (actions/cache's own save skips failed jobs, so a cold key stayed cold).
+      - name: Gradle dependency cache (restore)
+        id: gradle-cache
         if: matrix.job == 't9-kotlin'
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          path: ~/.gradle/caches
-          key: gradle-deps-${{ hashFiles('rc-src/examples/stage-plan/apps/kotlin-cli/build.gradle.kts', 'dev/adopter-gate/t9.sh') }}
+          path: ~/.gradle/caches/modules-2
+          key: gradle-deps-${{ hashFiles('rc-src/examples/stage-plan/apps/kotlin-cli/build.gradle.kts', 'dev/adopter-gate/t9.sh', 'dev/adopter-gate/t9/gradle-fetch.init.gradle') }}
       - name: Gradle 8.14.3 zip cache (keyed by its sha256)
         if: matrix.job == 't9-kotlin'
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -206,6 +208,12 @@ jobs:
             sizes) $AG/sizes.sh "${{ needs.inputs.outputs.previous }}" ;;
             *) $AG/$MATRIX_JOB.sh ;;
           esac
+      - name: Gradle dependency cache (save, also after a failure)
+        if: always() && matrix.job == 't9-kotlin' && steps.gradle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.gradle/caches/modules-2
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

@@ -33,7 +33,8 @@ teardown() {
     t4_vercel rm --yes "$url" >> "$T4_WORK/teardown.log" 2>&1 && echo "PASS teardown: deployment $url removed" || { echo "FAIL teardown: deployment $url not removed (see teardown.log)"; FAIL=1; }
   fi
   if [ -n "$core" ]; then
-    if t4_vercel sandbox ls --project "$VERCEL_PROJECT_ID" 2>/dev/null | grep -q "^$core "; then
+    # --all: plain `sandbox ls` hides stopped sandboxes, which still have to go.
+    if t4_vercel sandbox ls --all --project "$VERCEL_PROJECT_ID" 2>/dev/null | grep -q "^$core "; then
       t4_vercel sandbox rm --project "$VERCEL_PROJECT_ID" "$core" >> "$T4_WORK/teardown.log" 2>&1 && echo "PASS teardown: sandbox $core removed" || { echo "FAIL teardown: sandbox $core not removed (see teardown.log)"; FAIL=1; }
     fi
     # A Drive can't be deleted while a Sandbox holds it: wait (up to 3 min) until it shows no attached sandbox.

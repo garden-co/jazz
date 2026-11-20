@@ -48,7 +48,9 @@ body() {
       || echo "REVIEW t4 no core existed before the deploy: vercel() created a new, empty one, so old data couldn't be checked against it"
   fi
   local ran; ran=$(sed -n '/^=== core and inventory after/,/^=== wrong-region/p' "$L" | grep -oE 'core running=[^ ]+' | cut -d= -f2)
-  [ "$ran" = "$(ag_version)" ] && echo "PASS t4 production core runs $ran" || echo "REVIEW t4 couldn't confirm the core's version (read: '${ran:-nothing}')"
+  # The core this run used: the per-run ci-<run id> core in preview mode, the long-lived production core otherwise.
+  local core; core=$(source "$AG/t4/scripts/env.sh" && t4_core_name)
+  [ "$ran" = "$(ag_version)" ] && echo "PASS t4 core $core runs $ran" || echo "REVIEW t4 couldn't confirm the core's version (read: '${ran:-nothing}')"
   # run-t4.sh stops at a failed required step (build, deploy, playwright) without always printing a FAIL line.
   if [ $rc -ne 0 ]; then echo "FAIL t4 stopped at step: $(grep '^=== ' "$AG_RESULTS/t4-full.log" | grep -vE '^=== (teardown|end)' | tail -1 | sed 's/^=== //') (exit $rc)"; grep -E '^(deploy|next build|jazz-tools generate --check) exit code: [1-9]' "$AG_RESULTS/t4-full.log" | sed 's/^/FAIL t4 /'; fi
 }
