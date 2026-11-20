@@ -1486,18 +1486,7 @@ fn reporting_read_or_pending(
     let future: ReadFuture = Box::pin(async move {
         let (bytes, rows) = future.await?;
         if !rows.is_empty() {
-            let rows: Vec<serde_json::Value> = rows
-                .iter()
-                .map(|row| {
-                    serde_json::json!({
-                        "table": row.table,
-                        "id": row.id.0.to_string(),
-                        "column": row.column,
-                        "code": row.code,
-                    })
-                })
-                .collect();
-            *slot.borrow_mut() = Some(serde_json::Value::Array(rows).to_string());
+            *slot.borrow_mut() = Some(binding_host::unreadable_json(&rows));
         }
         Ok(bytes)
     });
@@ -1673,6 +1662,11 @@ pub struct SubscriptionDeltaEvent {
     pub settled: bool,
     #[napi(ts_type = "'None' | 'Local' | 'Global'")]
     pub tier: String,
+    /// The rows the result leaves out because the encryption runtime could
+    /// not open them, as a JSON array of `{ table, id, column, code }`.
+    /// Set on an opening, a reset, and a delta that changed the list, which
+    /// it replaces; absent when the list is unchanged.
+    pub unreadable: Option<String>,
 }
 
 #[napi(object)]
@@ -1729,6 +1723,7 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
                 coalesced,
                 settled,
                 tier,
+                unreadable,
             } => Either3::A(SubscriptionDeltaEvent {
                 event_type: "delta".to_owned(),
                 reset,
@@ -1737,6 +1732,7 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
                 terminal_operations: Vec::new(),
                 settled,
                 tier,
+                unreadable,
             }),
             EventChunk::Rejected { detail, code } => Either3::B(SubscriptionRejectedEvent {
                 event_type: "rejected".to_owned(),

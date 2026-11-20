@@ -2250,8 +2250,12 @@ fn event_chunk_to_js(chunk: EventChunk) -> Result<JsValue, JsValue> {
             coalesced,
             settled,
             tier,
+            unreadable,
         } => {
             set_prop(&object, "type", JsValue::from_str("delta"))?;
+            if let Some(unreadable) = unreadable {
+                set_prop(&object, "unreadable", JsValue::from_str(&unreadable))?;
+            }
             set_prop(
                 &object,
                 "delta",

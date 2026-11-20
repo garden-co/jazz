@@ -7,6 +7,8 @@
  * translate them at transport boundaries without forcing client-side copies.
  */
 
+import type { UnreadableRow } from "../encryption/unreadable.js";
+
 export type Value =
   | { type: "Integer"; value: number }
   | { type: "BigInt"; value: bigint | number }
@@ -109,6 +111,12 @@ export interface RuntimeSubscriptionDelta {
   removed: RuntimeSubscriptionRemovedRow[];
   updated: RuntimeSubscriptionUpdatedRow[];
   terminalOperations?: RuntimeTerminalOperation[];
+  /**
+   * The rows the result leaves out because this device could not decrypt
+   * them, replacing the list a delta last gave: set on a reset, and on a
+   * delta when the list changed. Absent: unchanged (on a reset: none).
+   */
+  unreadable?: readonly UnreadableRow[];
 }
 
 export type ColumnType =
