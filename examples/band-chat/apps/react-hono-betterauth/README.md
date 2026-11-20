@@ -48,5 +48,5 @@ pnpm cf:deploy                              # set APP_ORIGIN in wrangler.jsonc t
 ```
 
 For `pnpm cf:dev`, put both secrets in `.dev.vars` (`BETTER_AUTH_SECRET=…`,
-`JAZZ_CORE_SECRET=…`). The Worker needs the Workers Paid plan: the two wasm
-modules (core and backend) are over the Free plan's 3 MB.
+`JAZZ_CORE_SECRET=…`). The Worker, with its two wasm modules (core and
+backend), is about 20 MB, under Workers' 64 MiB limit on every plan.
