@@ -3093,13 +3093,13 @@ export class Db {
   }
 
   /**
-   * Run `run`, work made while this Db was thin (a write, or a callback
-   * transaction's rerun), on the local-first client it handed over to. That
-   * client refuses encrypted tables (`not_observed`) until it has synced
-   * their catalogue identities once, which can land after the hand-over,
-   * and after the account's verification that a wait for it includes. A
-   * refused run committed nothing, so it is tried again until `deadline`:
-   * the 30 seconds the wait for the local-first client promises.
+   * Run `run`, work made while this Db was thin (a write, a callback
+   * transaction's rerun, or a read), on the local-first client it handed
+   * over to. That client refuses encrypted tables (`not_observed`) until it
+   * has synced their catalogue identities once, which can land after the
+   * hand-over, and after the account's verification that a wait for it
+   * includes. A refused run committed nothing, so it is tried again until
+   * `deadline`: the 30 seconds the wait for the local-first client promises.
    */
   private runOnSuccessor<T>(
     run: () => T | Promise<T>,
@@ -4415,14 +4415,22 @@ export class Db {
     try {
       return await this.allInternal(query, lowerPublicDbQueryOptions(options));
     } catch (error) {
+      // On the successor, which may not have synced yet.
+      const answer = (deadline?: number) =>
+        this.runOnSuccessor(() => this.current().all(query, options), deadline);
       // Begun before this Db handed over to a successor, and ended by that
-      // (its own runtime closing): the successor answers it. Any other
-      // error is the read's own answer.
-      if (this.successor && isRuntimeClosed(error)) return this.current().all(query, options);
+      // (its own runtime closing, or this Db draining before the read
+      // reached it): the successor answers it. Any other error is the
+      // read's own answer.
+      if (this.successor && (isRuntimeClosed(error) || error instanceof DbClosedError))
+        return answer();
       // The thin client refused it, as it reads an encrypted column: the
       // local-first client answers it once loaded.
-      if (error instanceof EncryptionNeedsLocalFirstError)
-        return (await this.awaitLocalFirst(error)).all(query, options);
+      if (error instanceof EncryptionNeedsLocalFirstError) {
+        const deadline = Date.now() + LOCAL_FIRST_WAIT_MS;
+        await this.awaitLocalFirst(error);
+        return answer(deadline);
+      }
       throw error;
     }
   }

@@ -1120,6 +1120,33 @@ describe("a thin session of an app with encrypted columns", () => {
     expect(titles(rows).sort()).toEqual(["kept", "queued"]);
   }, 90_000);
 
+  // And for a read queued behind the stream: the hand-over ends it, and the
+  // local-first client answers it.
+  it("a read ended by the hand-over waits for the local-first client's first sync", async () => {
+    const host = await serve();
+    const { kept, gate, project } = await thinMember(host);
+    let endStream!: () => void;
+    const streamEnds = new Promise<void>((resolve) => (endStream = resolve));
+    async function* chunks(): AsyncGenerator<string> {
+      yield "streamed ";
+      await streamEnds;
+      yield "note";
+    }
+    const streaming = kept.insertStreaming(app.notes, { text: chunks() });
+    const read = kept.all(tasks.where({ projectId: project }));
+    const connections = holdNewConnections(host);
+    gate.release();
+    await expect.poll(() => isThinDb(kept), { timeout: 20_000 }).toBe(false);
+
+    // Runs on the local-first client, which has not synced yet.
+    endStream();
+    await (await streaming).wait({ tier: "global" });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    connections.release();
+
+    expect(titles(await read)).toEqual(["kept"]);
+  }, 90_000);
+
   it("reruns a callback transaction queued behind a write that waits only once it runs", async () => {
     const host = await serve();
     const { kept, gate, project } = await thinMember(host);
