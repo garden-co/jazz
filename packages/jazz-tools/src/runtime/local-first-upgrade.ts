@@ -49,6 +49,11 @@ export function setLocalFirstUpgrader(db: Db, upgrade: Upgrader): void {
   upgraders.set(db, upgrade);
 }
 
+/** @internal Whether a session upgrades `db` (`setLocalFirstUpgrader`). */
+export function hasLocalFirstUpgrader(db: Db): boolean {
+  return upgraders.has(db);
+}
+
 /** @internal Implementation of `Db.upgradeToLocalFirst`. */
 export async function upgradeDbToLocalFirst(db: Db, loader: LocalFirstLoader): Promise<void> {
   // `const { upgradeToLocalFirst } = db` loses its Db: say so, instead of
