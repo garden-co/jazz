@@ -273,8 +273,8 @@ impl E2eeClient {
                 }
                 // The newest valid challenge of the epoch: one that is not
                 // (junk the server shows, one signed over other keys, or one
-                // whose answer fails, see `newest_answered`) never hides a
-                // valid one.
+                // whose answer proves it invalid, see `newest_answered`)
+                // never hides a valid one.
                 let mut candidates: Vec<_> = mine
                     .iter()
                     .filter(|challenge| challenge.row.epoch_id == state.epoch_id())
@@ -840,13 +840,15 @@ impl E2eeClient {
 }
 
 /// The first of `candidates` (challenges, newest first) that `answer`
-/// accepts, with its answer. One that is invalid, or whose answer fails for
-/// a reason of its own (a junk envelope a member signed, a mechanism this
-/// build does not route), is skipped: it never hides a valid one. A
-/// provider failure is not a property of the challenge and stops the
-/// search. With none accepted: the first failure that is not
-/// `invalid-challenge` (an unsupported challenge is not reported as
-/// invalid), else `invalid-challenge`, else [`ClientError::NoChallenge`].
+/// accepts, with its answer. One whose answer fails in a way that proves
+/// the challenge itself invalid (see [`proves_challenge_invalid`]) is
+/// skipped: it never hides a valid one. Any other failure (a mechanism this
+/// build does not support, a provider or random-source failure) says
+/// nothing against the challenge, which may be the one the approver waits
+/// on, and stops the search with that error, before any nonce is spent.
+/// With none accepted: the first skipped failure that is not
+/// `invalid-challenge`, else `invalid-challenge`, else
+/// [`ClientError::NoChallenge`].
 fn newest_answered<C, T>(
     candidates: impl IntoIterator<Item = C>,
     mut answer: impl FnMut(&C) -> Result<T, ProtocolError>,
@@ -856,9 +858,7 @@ fn newest_answered<C, T>(
     for candidate in candidates {
         match answer(&candidate) {
             Ok(answered) => return Ok((answered, candidate)),
-            Err(ProtocolError::ProviderFailure) => {
-                return Err(ProtocolError::ProviderFailure.into());
-            }
+            Err(error) if !proves_challenge_invalid(&error) => return Err(error.into()),
             Err(error @ ProtocolError::Refused(RefusalCode::InvalidChallenge)) => {
                 invalid.get_or_insert(error);
             }
@@ -872,6 +872,26 @@ fn newest_answered<C, T>(
         .map_or(ClientError::NoChallenge, ClientError::from))
 }
 
+/// Whether answering a challenge failed because of the challenge itself:
+/// it is not for this device's keys or epoch (`invalid-challenge`,
+/// `stale-challenge`), its record is malformed, or its signature or sealed
+/// envelope is junk (malformed, unauthentic, or sealed to a key of a
+/// mechanism this device does not hold). Unsupported mechanisms or formats,
+/// provider and random-source failures, and contradictions of the account
+/// state are not.
+fn proves_challenge_invalid(error: &ProtocolError) -> bool {
+    matches!(
+        error,
+        ProtocolError::Refused(RefusalCode::InvalidChallenge | RefusalCode::StaleChallenge)
+            | ProtocolError::InvalidRecord(_)
+            | ProtocolError::Crypto(
+                jazz_e2ee::Error::InvalidCiphertext
+                    | jazz_e2ee::Error::InvalidInput
+                    | jazz_e2ee::Error::NoKeyForMechanism
+            )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     //! Unit tests of the challenge choice: a challenge whose answer fails
@@ -879,7 +899,9 @@ mod tests {
     //! a junk envelope, or a mechanism the build does not route, which the
     //! integration harness cannot produce (it holds no device's signing key
     //! and routes every mechanism). The refusal case is covered end to end
-    //! by `an_invalid_newer_challenge_does_not_hide_a_valid_one`.
+    //! by `an_invalid_newer_challenge_does_not_hide_a_valid_one`. A failure
+    //! that stops the choice returns before `answer_challenge` spends the
+    //! nonce.
     use super::*;
     use jazz_e2ee::protocol::error::UnsupportedCapability;
 
@@ -887,48 +909,67 @@ mod tests {
         ProtocolError::Unsupported(UnsupportedCapability::AccountKeyEnvelope)
     }
 
+    fn junk() -> ProtocolError {
+        ProtocolError::Crypto(jazz_e2ee::Error::InvalidCiphertext)
+    }
+
     /// Contract: a newer challenge (mallory's junk, signed by a member)
-    /// whose answer fails with an error does not hide an older valid one.
+    /// whose answer fails with an error proving it invalid does not hide
+    /// an older valid one.
     ///
     /// ```text
-    /// newest: junk ──answer──✗ error (skipped)
+    /// newest: junk ──answer──✗ invalid ciphertext (skipped)
     /// older:  valid ──answer──► answered
     /// ```
     #[test]
     fn a_newer_challenge_that_errors_does_not_hide_a_valid_one() {
         let answered = newest_answered(["junk", "valid"], |candidate| match *candidate {
             "valid" => Ok(7),
-            _ => Err(unsupported()),
+            _ => Err(junk()),
         });
         assert!(matches!(answered, Ok((7, "valid"))), "{answered:?}");
     }
 
-    /// Contract: a provider failure stops the choice (it says nothing about
-    /// the challenge); with no challenge answered, an error other than
-    /// `invalid-challenge` is reported over it, so an unsupported challenge
-    /// is not reported as invalid.
+    /// Contract: only a failure that proves the challenge invalid is
+    /// skipped. A newer challenge this device cannot judge (an unsupported
+    /// mechanism), a provider failure and a random-source failure say
+    /// nothing against it: the choice stops with that error, no older
+    /// challenge is answered, and the nonce stays unspent.
+    ///
+    /// ```text
+    /// newest: genuine ──answer──✗ unsupported / provider / random ──► stop
+    /// older:  valid   (not answered)
+    /// ```
     #[test]
-    fn a_provider_failure_stops_and_unsupported_is_not_reported_as_invalid() {
-        let stopped = newest_answered(["first", "valid"], |candidate| match *candidate {
-            "valid" => Ok(7),
-            _ => Err(ProtocolError::ProviderFailure),
-        });
-        assert!(
-            matches!(
-                stopped,
-                Err(ClientError::Protocol(ProtocolError::ProviderFailure))
-            ),
-            "{stopped:?}"
-        );
+    fn a_failure_that_does_not_prove_the_challenge_invalid_stops_the_choice() {
+        for stop in [
+            unsupported(),
+            ProtocolError::ProviderFailure,
+            ProtocolError::from(jazz_e2ee::Error::RandomUnavailable),
+        ] {
+            let stopped = newest_answered(["newer", "valid"], |candidate| match *candidate {
+                "valid" => Ok(7),
+                _ => Err(stop.clone()),
+            });
+            assert!(
+                matches!(&stopped, Err(ClientError::Protocol(error)) if *error == stop),
+                "{stop:?}: {stopped:?}"
+            );
+        }
+    }
 
+    /// Contract: with no challenge answered, a skipped failure other than
+    /// `invalid-challenge` is reported over it; with none, no challenge.
+    #[test]
+    fn with_none_answered_the_most_specific_failure_is_reported() {
         let none: Result<(u8, _), _> = newest_answered(["invalid", "junk"], |candidate| {
             Err(match *candidate {
                 "invalid" => ProtocolError::Refused(RefusalCode::InvalidChallenge),
-                _ => unsupported(),
+                _ => junk(),
             })
         });
         assert!(
-            matches!(&none, Err(ClientError::Protocol(error)) if *error == unsupported()),
+            matches!(&none, Err(ClientError::Protocol(error)) if *error == junk()),
             "{none:?}"
         );
         let none: Result<(u8, &str), _> = newest_answered([], |_: &&str| Ok(0));
