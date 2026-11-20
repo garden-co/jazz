@@ -222,7 +222,7 @@ fn a_row_whose_key_arrives_leaves_the_list_as_it_joins_the_result() {
     let writer = open_client(Rc::new(MemoryStore::new()));
     let (writer_db, _w, _) = online(&writer, &server, None);
     let space = project(&writer_db, "plans");
-    let key = new_space_key(&writer.device(), &address(&writer_db, space));
+    let key = new_space_key(&writer.device().unwrap(), &address(&writer_db, space));
     block_on(writer.keep(key.clone())).unwrap();
     let row = block_on(writer_db.insert("notes", note(space, SECRET), Default::default()))
         .unwrap()
