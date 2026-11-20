@@ -82,7 +82,11 @@ describe("encryption on the Node binding", () => {
     const first = await openEncrypted(store, "device-a");
     const id = await first.encryption.deviceId();
     expect(typeof id).toBe("string");
-    expect(JSON.parse(first.db.encryptionState())).toMatchObject({ status: null, error: null });
+    expect(JSON.parse(first.db.encryptionState())).toEqual({
+      status: null,
+      error: null,
+      stage: expect.any(String),
+    });
     expect(first.db.takeEncryptionReports()).toEqual([]);
     await first.close();
     // The device's keys went through the store's protection and its documents.
