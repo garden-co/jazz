@@ -6375,7 +6375,12 @@ impl Inner {
         self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
         if history {
-            self.prune_history(&image.table, RowUuid::from_bytes(image.id), &image.key)?;
+            self.prune_history(
+                self.retention_of(self.owner_version).contains(&image.table),
+                &image.table,
+                RowUuid::from_bytes(image.id),
+                &image.key,
+            )?;
         }
         Ok(())
     }
@@ -7831,6 +7836,7 @@ impl Inner {
         &self,
         (node, tx): ([u8; 16], u64),
         ops: &[StagedOp],
+        retention: &BTreeSet<String>,
     ) -> Result<(), Error> {
         if self.retention().is_empty() {
             return Ok(());
@@ -7843,7 +7849,7 @@ impl Inner {
             && ops.iter().all(|op| {
                 self.schema
                     .stored_table(op.table())
-                    .is_ok_and(|stored| self.prunes(stored))
+                    .is_ok_and(|stored| retention.contains(stored))
             });
         // A thin client's commits reach the authority through any of its
         // servers, so out of order (`INV-HIST-23` holds per server): each
@@ -9285,7 +9291,7 @@ impl Db {
                 .map(|op| inner.stored_op(op, &schema))
                 .collect::<Result<Vec<_>, _>>()?
         };
-        self.record_stored_upload(ops, seq, kind, relayed, None)
+        self.record_stored_upload(ops, seq, kind, relayed, None, None)
     }
 
     /// [`Db::record_upload`] of ops already named by stored names.
@@ -9299,6 +9305,7 @@ impl Db {
         kind: Kind,
         relayed: Option<Relayed>,
         claims: Option<BTreeMap<String, Value>>,
+        retention: Option<&BTreeSet<String>>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
@@ -9308,7 +9315,8 @@ impl Db {
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
         drop(inner);
-        let recorded = self.record_upload_under_stored_view(ops, seq, kind, relayed, claims);
+        let recorded =
+            self.record_upload_under_stored_view(ops, seq, kind, relayed, claims, retention);
         self.inner.borrow_mut().schema = active;
         recorded
     }
@@ -9320,6 +9328,7 @@ impl Db {
         kind: Kind,
         relayed: Option<Relayed>,
         claims: Option<BTreeMap<String, Value>>,
+        retention: Option<&BTreeSet<String>>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         // A read-only serializable commit still goes up: the authority
@@ -9503,7 +9512,7 @@ impl Db {
                 let reorder = client.pending.later_on(&rows, seq, order);
                 drop(inner);
                 if reorder {
-                    self.rebase(Some(rows.into_iter().collect()))?;
+                    self.rebase(Some(rows.into_iter().collect()), retention)?;
                 }
             }
             Err(error) => {
@@ -9521,14 +9530,14 @@ impl Db {
                     expected: None,
                 });
                 drop(inner);
-                let _ = self.settle_locally(seq);
+                let _ = self.settle_locally(seq, retention);
             }
         }
         Ok(())
     }
 
     /// A transaction that cannot upload is rejected at once.
-    fn settle_locally(&self, tx: u64) -> Result<(), Error> {
+    fn settle_locally(&self, tx: u64, retention: Option<&BTreeSet<String>>) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         let mut rows = HashSet::new();
         if let Some(client) = inner.client.as_mut() {
@@ -9542,7 +9551,7 @@ impl Db {
             client.pending.remove(tx);
         }
         drop(inner);
-        self.rebase(Some(rows))
+        self.rebase(Some(rows), retention)
     }
 
     /// Remote reads ship the query's rows plus its supporting rows (single
@@ -10430,7 +10439,7 @@ impl Db {
             // Dry-run under the session's policies: a pinned session's bundle.
             let governed = inner.governed_view(&inner.schema.clone(), index);
             let active = std::mem::replace(&mut inner.schema, governed);
-            let applied = inner.apply_as(&op, who, seq).map(drop);
+            let applied = inner.apply_as(&op, who, seq, None, None).map(drop);
             inner.schema = active;
             inner.changed.borrow_mut().truncate(mark);
             Scoped::Undo(applied)
@@ -11129,7 +11138,7 @@ impl Db {
             }
         }
         if rebase {
-            self.rebase(changed)?;
+            self.rebase(changed, None)?;
             self.inner.borrow_mut().reconcile_unsettled()?;
         }
         // Results whose position moved read as of the new one.
@@ -11456,7 +11465,11 @@ impl Db {
     /// it went in (but for its local `$updatedAt` stamp): leaving it keeps
     /// settling a write proportional to the rows it touches, not to every
     /// write still pending.
-    fn rebase(&self, changed: Option<HashSet<RowKey>>) -> Result<(), Error> {
+    fn rebase(
+        &self,
+        changed: Option<HashSet<RowKey>>,
+        retention: Option<&BTreeSet<String>>,
+    ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         let Some(client) = inner.client.as_mut() else {
             return Ok(());
@@ -11537,7 +11550,7 @@ impl Db {
                 let replayed = ops
                     .iter()
                     .filter(|op| shown(op))
-                    .try_for_each(|op| match inner.apply(op, tx) {
+                    .try_for_each(|op| match inner.apply(op, tx, retention) {
                         // A part of a cross-shard commit that landed before its fate
                         // (another shard answered first) already holds its row. The
                         // writer's version overlays that baseline as it overlays any
@@ -11560,7 +11573,7 @@ impl Db {
                             };
                             let at = image.at;
                             inner.drop_row(table, *row, key, at)?;
-                            inner.apply(op, tx).map(drop)
+                            inner.apply(op, tx, retention).map(drop)
                         }
                         other => other.map(drop),
                     })
@@ -15204,8 +15217,10 @@ impl Db {
                 // sessions prune nothing. A relay's link carries its
                 // sessions' commits, which prune by the link's version (a
                 // known limit: a relay serves one deployment's schema).
-                let written = self.inner.borrow().written_version(index);
-                let prior = self.inner.borrow().set_writing(written);
+                let retention = {
+                    let inner = self.inner.borrow();
+                    inner.retention_of(inner.written_version(index).unwrap_or(inner.owner_version))
+                };
                 let decided = (|| -> Result<_, Error> {
                     Ok(match known {
                         // A resend's writer may not hold what the commit made of
@@ -15263,6 +15278,7 @@ impl Db {
                                         (node, tx),
                                         clock,
                                         possession,
+                                        &retention,
                                         false,
                                     )
                                 })
@@ -15299,7 +15315,6 @@ impl Db {
                         },
                     })
                 })();
-                self.inner.borrow().restore_writing(prior);
                 let (result, rows, echoable) = decided?;
                 let mut inner = self.inner.borrow_mut();
                 // An accepted commit's fate carries the seq it landed at (a
@@ -15833,6 +15848,10 @@ impl Db {
         // A shard is no relay, so the writer's clock orders nothing here:
         // the part lands at the position its gateway fixes.
         let clock = 0;
+        let retention = {
+            let inner = self.inner.borrow();
+            inner.retention_of(inner.owner_version)
+        };
         self.with_claims(claims.map(|claims| (identity, claims)), || {
             db.authorize_commit(
                 who,
@@ -15842,6 +15861,7 @@ impl Db {
                 (node, tx),
                 clock,
                 possession,
+                &retention,
                 true,
             )
         })
@@ -15861,6 +15881,7 @@ impl Db {
         id: ([u8; 16], u64),
         clock: u64,
         possession: crate::large::Possession,
+        retention: &BTreeSet<String>,
         trial: bool,
     ) -> Result<(Vec<RowKey>, Vec<Echoable>), (Error, Vec<RowKey>)> {
         // A clock past what this store counts (its own plus the offset
@@ -16155,7 +16176,11 @@ impl Db {
             inner.as_sent.borrow_mut().clear();
             let applied = ops
                 .iter()
-                .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
+                .try_for_each(|op| {
+                    inner
+                        .apply_as(op, who, seq, None, Some(retention))
+                        .map(drop)
+                })
                 .and_then(|()| inner.finish_checks(seq))
                 .and_then(|()| inner.settle_possession());
             inner.possession = None;
@@ -16189,7 +16214,7 @@ impl Db {
                 .and_then(|()| inner.record_settled(id.0, id.1, Some(inner.own_pos(seq))))
                 .and_then(|()| match relay {
                     true => Ok(()),
-                    false => inner.prune_transactions(id, &ops),
+                    false => inner.prune_transactions(id, &ops, retention),
                 })
                 // Its hold goes with it: the record of both commits together.
                 .and_then(|()| inner.forget_hold(part));
@@ -16215,6 +16240,7 @@ impl Db {
                         bases,
                     }),
                     None,
+                    Some(retention),
                 )
             } else {
                 Ok(())

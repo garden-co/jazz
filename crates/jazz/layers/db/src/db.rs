@@ -767,9 +767,6 @@ struct Inner {
     >,
     /// [`Inner::retention_of`], by version.
     retention_by_version: RefCell<HashMap<crate::ids::SchemaVersionId, Rc<BTreeSet<String>>>>,
-    /// What the write being applied prunes ([`Inner::writing_under`]):
-    /// `None` goes by the owner's schema.
-    writing: RefCell<Option<Rc<BTreeSet<String>>>>,
     /// Where each admitted version stores its tables and columns.
     names: crate::names::Names,
     views: BTreeMap<SchemaViewId, JazzSchema>,
@@ -797,8 +794,6 @@ struct Inner {
     identity: Rc<DbIdentity>,
     /// The node SYSTEM provenance names ([`crate::options::DbConfig::system_node`]).
     system_node: crate::ids::NodeUuid,
-    /// Provenance for the write being applied (set by `apply_as`).
-    writer: Option<Stamp>,
     /// The commit seq and time of the last local stamp: writes of one commit
     /// share a time, and later commits get strictly later ones, so
     /// `$createdAt` orders this node's writes even within one millisecond.
@@ -815,8 +810,6 @@ struct Inner {
     /// The writer id the next standalone write commits under instead of
     /// this store's own: a thin client's write (see [`Db::write_as_origin`]).
     pub(crate) next_origin: Option<([u8; 16], u64)>,
-    /// That id while its write runs (see `Db::write_unnotified`).
-    commit_origin: Option<([u8; 16], u64)>,
     /// A wall clock tests set (see `Db::set_clock_for_test`).
     clock_for_test: Option<i64>,
     /// When pulls the chunk store failed to answer at once are asked of it
@@ -2312,7 +2305,6 @@ impl Db {
                 },
                 retention: RefCell::default(),
                 retention_by_version: RefCell::default(),
-                writing: RefCell::default(),
                 names,
                 views: BTreeMap::new(),
                 bundles: HashMap::new(),
@@ -2321,12 +2313,10 @@ impl Db {
                 batches: HashMap::new(),
                 system_node: config.system_node.unwrap_or(config.identity.node),
                 identity: Rc::new(config.identity),
-                writer: None,
                 last_stamp: (0, 0),
                 hlc_last: 0,
                 own_order: HashMap::new(),
                 next_origin: None,
-                commit_origin: None,
                 clock_for_test: None,
                 store_retry: sync::StoreRetry::default(),
                 merge_budget: jazz_text::MERGE_WORK_BUDGET,
@@ -3934,12 +3924,12 @@ impl Db {
                 let mark = inner.changed.borrow().len();
                 (inner.seq, mark)
             };
-            let (notify, handle) = self.write_unnotified(|inner, seq| {
+            let (notify, handle) = self.write_unnotified(|inner, seq, origin| {
                 let edits = inner.chunk_large_cells(&mut op)?;
                 inner.counter_deltas(&mut op)?;
                 inner.derived.extend(edits.derived);
                 inner.pending_nodes.extend(edits.pending_nodes);
-                let applied = inner.apply_as(&op, who, seq);
+                let applied = inner.apply_as(&op, who, seq, origin, None);
                 inner.clear_derived();
                 applied
             })?;
@@ -3983,7 +3973,7 @@ impl Db {
     /// the caller notifies subscribers once its upload record is in.
     fn write_unnotified(
         &self,
-        apply: impl FnOnce(&mut Inner, u64) -> Result<WriteHandle, Error>,
+        apply: impl FnOnce(&mut Inner, u64, Option<([u8; 16], u64)>) -> Result<WriteHandle, Error>,
     ) -> Result<(bool, WriteHandle), Error> {
         let standalone = {
             let mut inner = self.inner();
@@ -4008,9 +3998,7 @@ impl Db {
                 }
             };
             let applied = conn.scope("w", |_| {
-                inner.commit_origin = origin;
-                let applied = apply(&mut inner, seq);
-                inner.commit_origin = None;
+                let applied = apply(&mut inner, seq, origin);
                 // The authority records the fate of a commit made under a
                 // client's id in the commit itself.
                 applied.and_then(|handle| {
@@ -4025,9 +4013,9 @@ impl Db {
                         let prunable = {
                             let changed = inner.changed.borrow();
                             changed.len() > mark
-                                && changed[mark..]
-                                    .iter()
-                                    .all(|(stored, ..)| inner.prunes(stored))
+                                && changed[mark..].iter().all(|(stored, ..)| {
+                                    inner.retention_of(inner.owner_version).contains(stored)
+                                })
                         };
                         inner.note_origin_entry(node, tx, prunable)?;
                     }
@@ -7296,16 +7284,6 @@ impl Inner {
         })
     }
 
-    fn stamp(&self) -> Result<Stamp, Error> {
-        match &self.writer {
-            Some(stamp) => Ok(stamp.clone()),
-            None => Ok(Stamp {
-                at: 0,
-                author: self.author_code(&author_key(&self.stamp_author()))?,
-            }),
-        }
-    }
-
     /// Who this database's own writes are attributed to: its author, or for
     /// the internal authority, the system at this node (as Jazz attributes
     /// system writes to the node that made them).
@@ -8202,7 +8180,14 @@ impl Inner {
 
     /// Copy the row's current image into its history before it is
     /// superseded (history holds superseded images only).
-    fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
+    fn snapshot(
+        &self,
+        prune: bool,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+    ) -> Result<(), Error> {
         let id = row.0.as_bytes().to_vec();
         let current: Option<(i64, Vec<u8>)> = self
             .conn
@@ -8234,7 +8219,7 @@ impl Inner {
         );
         self.exec(&sql, rusqlite::params![id, key])
             .map_err(storage)?;
-        self.prune_history(&table.stored, row, key)
+        self.prune_history(prune, &table.stored, row, key)
     }
 
     /// Whether stored table `stored` may have dropped history: some
@@ -8312,33 +8297,6 @@ impl Inner {
         declared
     }
 
-    /// Whether the write being applied prunes stored table `stored`'s
-    /// history: the schema it was written under declares the table
-    /// latest-only. A session's commit is written under its declared
-    /// version, else its bundle's ([`Inner::writing`]); any other write
-    /// under the owner's schema.
-    pub(crate) fn prunes(&self, stored: &str) -> bool {
-        match &*self.writing.borrow() {
-            Some(set) => set.contains(stored),
-            None => self.retention_of(self.owner_version).contains(stored),
-        }
-    }
-
-    /// Apply what follows as writes made under schema `version` (`None`:
-    /// the owner's), which decides what they prune ([`Inner::prunes`]),
-    /// until [`Inner::restore_writing`] gets back what this returns.
-    pub(crate) fn set_writing(
-        &self,
-        version: Option<crate::ids::SchemaVersionId>,
-    ) -> Option<Rc<BTreeSet<String>>> {
-        let set = version.map(|version| self.retention_of(version));
-        self.writing.replace(set)
-    }
-
-    pub(crate) fn restore_writing(&self, prior: Option<Rc<BTreeSet<String>>>) {
-        *self.writing.borrow_mut() = prior;
-    }
-
     /// For a latest-only table, drop the row's accepted versions in history
     /// older than its newest one there (`INV-HIST-26`). That one stays: it
     /// is the image just superseded, which keyed fanout and a commit's
@@ -8348,11 +8306,12 @@ impl Inner {
     /// this row.
     pub(crate) fn prune_history(
         &self,
+        prune: bool,
         stored: &str,
         row: RowUuid,
         key: &[u8],
     ) -> Result<(), Error> {
-        if !self.prunes(stored) {
+        if !prune {
             return Ok(());
         }
         let history = quote(&format!("{stored}__h"));
@@ -8373,6 +8332,7 @@ impl Inner {
     #[allow(clippy::too_many_arguments)]
     fn copy_on_write(
         &self,
+        stamp: &Stamp,
         table: &Table,
         row: RowUuid,
         from: &[u8],
@@ -8428,7 +8388,17 @@ impl Inner {
             rusqlite::params![to, self.own_pos(seq).t(), id, from, w],
         )
         .map_err(storage)?;
-        self.set_cells(table, row, to, head_cells, Cells::Carried, seq, None, false)
+        self.set_cells(
+            stamp,
+            table,
+            row,
+            to,
+            head_cells,
+            Cells::Carried,
+            seq,
+            None,
+            false,
+        )
     }
 
     /// Write cells (and the deletion flag) into a row's current version
@@ -8437,6 +8407,7 @@ impl Inner {
     #[allow(clippy::too_many_arguments)]
     fn set_cells(
         &self,
+        stamp: &Stamp,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -8483,7 +8454,7 @@ impl Inner {
                 values.len()
             ));
         }
-        for (name, value) in self.stamp()?.updated() {
+        for (name, value) in stamp.updated() {
             values.push(value);
             sets.push(format!("{} = ?{}", quote(name), values.len()));
         }
@@ -8516,6 +8487,7 @@ impl Inner {
     #[allow(clippy::too_many_arguments)]
     fn insert(
         &mut self,
+        stamp: &Stamp,
         table_name: &str,
         mut cells: BTreeMap<String, Value>,
         source: Cells,
@@ -8646,7 +8618,6 @@ impl Inner {
             names.push(quote(&stored));
             values.push(default);
         }
-        let stamp = self.stamp()?;
         // The update stamp stays NULL until the row is updated.
         for (name, value) in stamp.created() {
             names.push(quote(name));
@@ -8776,6 +8747,8 @@ impl Inner {
     #[allow(clippy::too_many_arguments)]
     fn patch(
         &mut self,
+        prune: bool,
+        stamp: &Stamp,
         table_name: &str,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
@@ -8813,6 +8786,7 @@ impl Inner {
                     cells.entry(column).or_insert(value);
                 }
                 return self.insert(
+                    stamp,
                     table_name,
                     cells,
                     Cells::Authored,
@@ -8891,9 +8865,10 @@ impl Inner {
                 }
                 let held = (!staged_tombstone).then_some(&key[..]);
                 let cells = self.merged_cells(table, row, held, Some((&key, seq)), cells)?;
-                self.snapshot(table, row, &key, seq)?;
+                self.snapshot(prune, table, row, &key, seq)?;
                 // An upsert over a tombstone replaces it.
                 self.set_cells(
+                    stamp,
                     table,
                     row,
                     &key,
@@ -8913,8 +8888,18 @@ impl Inner {
             } => {
                 self.authorize_patch(table, row, &from, &who, verb, seq)?;
                 let cells = self.merged_cells(table, row, Some(&from), Some((&to, seq)), cells)?;
-                self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
-                self.set_cells(table, row, &to, &cells, Cells::Authored, seq, None, true)?;
+                self.copy_on_write(stamp, table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
+                self.set_cells(
+                    stamp,
+                    table,
+                    row,
+                    &to,
+                    &cells,
+                    Cells::Authored,
+                    seq,
+                    None,
+                    true,
+                )?;
                 to
             }
             Located::Absent { .. } => unreachable!("absent upserts insert"),
@@ -8945,8 +8930,11 @@ impl Inner {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update(
         &mut self,
+        prune: bool,
+        stamp: &Stamp,
         table: &str,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
@@ -8954,7 +8942,7 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, None, target, who, seq)
+        self.patch(prune, stamp, table, row, cells, None, target, who, seq)
     }
 
     /// Upsert `cells` into `row`; if it creates the row, `created` fills
@@ -8963,6 +8951,8 @@ impl Inner {
     #[allow(clippy::too_many_arguments)]
     fn upsert(
         &mut self,
+        prune: bool,
+        stamp: &Stamp,
         table: &str,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
@@ -8971,11 +8961,24 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, Some(created), target, who, seq)
+        self.patch(
+            prune,
+            stamp,
+            table,
+            row,
+            cells,
+            Some(created),
+            target,
+            who,
+            seq,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn delete(
         &mut self,
+        prune: bool,
+        stamp: &Stamp,
         table_name: &str,
         row: RowUuid,
         target: &Target,
@@ -9007,8 +9010,9 @@ impl Inner {
                 ..
             } => {
                 check(self, &key)?;
-                self.snapshot(table, row, &key, seq)?;
+                self.snapshot(prune, table, row, &key, seq)?;
                 self.set_cells(
+                    stamp,
                     table,
                     row,
                     &key,
@@ -9028,8 +9032,9 @@ impl Inner {
                 at,
             } => {
                 check(self, &from)?;
-                self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
+                self.copy_on_write(stamp, table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(
+                    stamp,
                     table,
                     row,
                     &to,
@@ -9068,6 +9073,8 @@ impl Inner {
     #[allow(clippy::too_many_arguments)]
     fn restore(
         &mut self,
+        prune: bool,
+        stamp: &Stamp,
         table_name: &str,
         row: RowUuid,
         content: Option<BTreeMap<String, Value>>,
@@ -9095,7 +9102,7 @@ impl Inner {
             }
             Located::Row { .. } | Located::Inherited { .. } => return Err(row_not_deleted(row)),
         };
-        self.snapshot(table, row, &key, seq)?;
+        self.snapshot(prune, table, row, &key, seq)?;
         let mut cells = BTreeMap::new();
         if let Some(content) = &content {
             self.validate_cells(table, content)?;
@@ -9117,6 +9124,7 @@ impl Inner {
             }
         }
         self.set_cells(
+            stamp,
             table,
             row,
             &key,
@@ -9430,8 +9438,11 @@ impl Db {
 impl Inner {
     /// A branch move: a source tombstone plus a destination insert (or a
     /// restore of an earlier destination tombstone), in one commit.
+    #[allow(clippy::too_many_arguments)]
     fn move_row(
         &mut self,
+        prune: bool,
+        stamp: &Stamp,
         table: &str,
         from: BranchSelector,
         to: BranchSelector,
@@ -9464,11 +9475,21 @@ impl Inner {
                 cells.insert(column.name.clone(), value);
             }
         }
-        self.delete(table, row, &Target::Exact(from), Who::Local, seq)?;
+        self.delete(
+            prune,
+            stamp,
+            table,
+            row,
+            &Target::Exact(from),
+            Who::Local,
+            seq,
+        )?;
         // The moved row carries its stored cells: they are not re-checked.
         let to = Target::Exact(to);
         match self.locate(t, row, &to)? {
             Located::Row { deleted: true, .. } => self.restore(
+                prune,
+                stamp,
                 table,
                 row,
                 Some(cells),
@@ -9478,6 +9499,7 @@ impl Inner {
                 seq,
             ),
             _ => self.insert(
+                stamp,
                 table,
                 cells,
                 Cells::Carried,
@@ -10229,9 +10251,14 @@ impl StagedOp {
 
 impl Inner {
     /// Re-apply a staged write unchecked, keeping its provenance.
-    fn apply(&mut self, op: &StagedOp, seq: u64) -> Result<WriteHandle, Error> {
+    fn apply(
+        &mut self,
+        op: &StagedOp,
+        seq: u64,
+        retention: Option<&BTreeSet<String>>,
+    ) -> Result<WriteHandle, Error> {
         let who = op.author().map_or(Who::Local, Who::Attributed);
-        self.apply_as(op, who, seq)
+        self.apply_as(op, who, seq, None, retention)
     }
 
     /// Wall-clock Unix ms (or the one a test set).
@@ -10300,14 +10327,13 @@ impl Inner {
 
     /// Give commit `seq` its HLC if it has none yet: its writes are at it,
     /// written by this store's node as tx `seq`.
-    fn stamp_commit(&mut self, seq: u64) {
+    fn stamp_commit(&mut self, seq: u64, origin: Option<([u8; 16], u64)>) {
         if self.me == sync::ACCEPTED {
             return;
         }
         // A commit made under a thin client's id is kept under it: a relay
         // uploads it so, so a resend of it anywhere gets its fate (SPEC 8
         // §8.14).
-        let origin = self.commit_origin;
         if origin.is_some() || !self.own_order.contains_key(&seq) {
             let hlc = self.next_hlc();
             let (node, tx) = origin.unwrap_or((*self.identity.node.as_bytes(), seq));
@@ -10349,7 +10375,14 @@ impl Inner {
     }
 
     /// Apply one write as `who`: policies apply for a session identity.
-    fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
+    fn apply_as(
+        &mut self,
+        op: &StagedOp,
+        who: Who,
+        seq: u64,
+        origin: Option<([u8; 16], u64)>,
+        retention: Option<&BTreeSet<String>>,
+    ) -> Result<WriteHandle, Error> {
         let author = match who {
             Who::Session(author) | Who::Attributed(author) => author,
             Who::Local => self.stamp_author(),
@@ -10368,14 +10401,17 @@ impl Inner {
         // An explicit timestamp (a backfill) stamps this write alone; the
         // clock's monotonic stamps go on.
         let at = op.updated_at_ms().map_or(at, |ms| ms as i64);
-        self.stamp_commit(seq);
-        self.writer = Some(Stamp {
+        self.stamp_commit(seq, origin);
+        let stamp = Stamp {
             at,
             author: self.author_code(&author_key(&author))?,
-        });
-        let result = self.apply_op(op, who, seq);
-        self.writer = None;
-        result
+        };
+        let stored = self.schema.stored_table(op.table())?;
+        let prune = retention.map_or_else(
+            || self.retention_of(self.owner_version).contains(stored),
+            |tables| tables.contains(stored),
+        );
+        self.apply_op(prune, &stamp, op, who, seq)
     }
 
     /// What the authority refuses of a session's write before any policy
@@ -10401,29 +10437,36 @@ impl Inner {
         Ok(())
     }
 
-    fn apply_op(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
+    fn apply_op(
+        &mut self,
+        prune: bool,
+        stamp: &Stamp,
+        op: &StagedOp,
+        who: Who,
+        seq: u64,
+    ) -> Result<WriteHandle, Error> {
         match op.clone() {
             StagedOp::Insert(t, c, o) => {
                 let target = Target::exact(&o.target);
-                self.insert(&t, c, Cells::Authored, o.row_id, &target, who, seq)
+                self.insert(stamp, &t, c, Cells::Authored, o.row_id, &target, who, seq)
             }
             StagedOp::Update(t, r, c, o) => {
                 let target = Target::of(&o.target, self)?;
-                self.update(&t, r, c, &target, who, seq)
+                self.update(prune, stamp, &t, r, c, &target, who, seq)
             }
             StagedOp::Upsert(t, r, c, created, o) => {
                 let target = Target::of(&o.target, self)?;
-                self.upsert(&t, r, c, created, &target, who, seq)
+                self.upsert(prune, stamp, &t, r, c, created, &target, who, seq)
             }
             StagedOp::Delete(t, r, o) => {
                 let target = Target::of(&o.target, self)?;
-                self.delete(&t, r, &target, who, seq)
+                self.delete(prune, stamp, &t, r, &target, who, seq)
             }
             StagedOp::Restore(t, r, c, o) => {
                 let target = Target::exact(&o.target);
-                self.restore(&t, r, c, Cells::Authored, &target, who, seq)
+                self.restore(prune, stamp, &t, r, c, Cells::Authored, &target, who, seq)
             }
-            StagedOp::Move(t, from, to, r) => self.move_row(&t, from, to, r, seq),
+            StagedOp::Move(t, from, to, r) => self.move_row(prune, stamp, &t, from, to, r, seq),
         }
     }
 
@@ -10441,10 +10484,10 @@ impl Inner {
         let result = ops.iter().enumerate().try_for_each(|(i, (schema, op))| {
             self.schema = schema.clone();
             if i < checked {
-                self.apply(op, seq).map(drop)
+                self.apply(op, seq, None).map(drop)
             } else {
                 let identity = op.identity().map_or(Who::Local, who);
-                self.apply_as(op, identity, seq).map(drop)
+                self.apply_as(op, identity, seq, None, None).map(drop)
             }
         });
         self.schema = active;
@@ -10882,7 +10925,9 @@ impl Db {
             .iter()
             .map(|(schema, op)| self.inner().stored_op(op.clone(), schema))
             .collect::<Result<Vec<_>, _>>()
-            .and_then(|ops| self.record_stored_upload(ops, seq, kind, None, batch.claims.clone()));
+            .and_then(|ops| {
+                self.record_stored_upload(ops, seq, kind, None, batch.claims.clone(), None)
+            });
         if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
