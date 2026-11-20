@@ -25,7 +25,8 @@ name: Release publish
 # the draft left alone. A timing table for every job ends each run.
 #
 # The artifacts come from a release-artifacts.yml run of this repository on
-# `release` that built a commit with the published tree (the published
+# `release` or `changeset-release/*` that built a commit with the published
+# tree (the published
 # commit's own run first), whose release-manifest names
 # that commit, the tree and the version (dev/release-publish/producer-run.mjs). For dry runs only,
 # legacy-run-ids names runs of the old workflows holding the same files,
@@ -46,15 +47,16 @@ on:
         required: true
         type: string
       mode:
-        description: "dry-run publishes nothing; publish waits for the publish environment's approval."
+        description: "dry-run publishes nothing; publish waits for the publish environment's approval; verify-trust only checks the npm and crates.io trusted publishers (in the publish environment), publishing nothing (version and sha are ignored)."
         required: true
         default: dry-run
         type: choice
         options:
           - dry-run
           - publish
+          - verify-trust
       maven-publishing-type:
-        description: "Central Portal publishingType: AUTOMATIC publishes once validated (waits for PUBLISHED); USER_MANAGED leaves it validated for Publish in the Portal."
+        description: "Central Portal publishingType: AUTOMATIC publishes once validated (the release waits only for PUBLISHING; a later job waits until repo1 serves it); USER_MANAGED leaves it validated for Publish in the Portal."
         required: true
         default: AUTOMATIC
         type: choice
@@ -67,7 +69,7 @@ on:
         default: false
         type: boolean
       artifacts-run-id:
-        description: "A release-artifacts.yml run to take the artifacts from; it must have built <sha>'s tree on release. Empty: the newest that did, <sha>'s own first."
+        description: "A release-artifacts.yml run to take the artifacts from; it must have built <sha>'s tree on release or changeset-release/*. Empty: the newest that did, <sha>'s own first."
         required: false
         type: string
       legacy-run-ids:
@@ -95,8 +97,31 @@ env:
 
 jobs:
   # ---------------------------------------------------------------- prepare
+  # mode=verify-trust: the registries' trusted publishers for this workflow
+  # and environment, checked by token exchanges that publish nothing
+  # (dev/release-publish/verify-trust.mjs). Every other job skips.
+  verify-trust:
+    name: Verify trusted publishers
+    if: inputs.mode == 'verify-trust'
+    # As the npm leg: npm's trusted publishing accepts GitHub-hosted runners.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/release-publish
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - run: node dev/release-publish/verify-trust.mjs
+
   resolve:
     name: Resolve the release and its artifacts
+    if: inputs.mode != 'verify-trust'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
@@ -717,6 +742,8 @@ jobs:
       contents: read
     env:
       PORTAL: ${{ inputs.mode == 'publish' || inputs.maven-portal-dry-run }}
+    outputs:
+      uploaded_at: ${{ steps.upload.outputs.uploaded_at }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -757,6 +784,7 @@ jobs:
           ls -l "${RUNNER_TEMP}/bundle.zip"
 
       - name: Upload to the Central Portal
+        id: upload
         if: env.PORTAL == 'true'
         env:
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
@@ -764,6 +792,48 @@ jobs:
           TYPE: ${{ inputs.mode == 'publish' && inputs.maven-publishing-type || 'USER_MANAGED' }}
           DROP: ${{ inputs.mode != 'publish' && '--drop' || '' }}
         run: node dev/release-publish/maven-central.mjs upload "${RUNNER_TEMP}/bundle.zip" "${VERSION}" "${TYPE}" ${DROP}
+
+  # With AUTOMATIC the Maven job returns at PUBLISHING (validated, no way
+  # back) and the GitHub release need not wait the ~11 min Central takes to
+  # publish. This job waits, without credentials (so without a second
+  # approval), until repo1.maven.org serves both artifacts, for at most 45
+  # min. If not, it fails and adds a note to the release.
+  maven-published:
+    name: Maven Central serves it
+    needs: [resolve, maven, finalize]
+    if: >-
+      ${{ !cancelled() && inputs.mode == 'publish' && inputs.maven-publishing-type == 'AUTOMATIC' &&
+          needs.maven.result == 'success' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 50
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/release-publish
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - name: Wait for repo1.maven.org
+        env:
+          UPLOADED_AT: ${{ needs.maven.outputs.uploaded_at }}
+        run: node dev/release-publish/maven-central.mjs await-served "${VERSION}" 45 "${UPLOADED_AT}"
+      - name: Note the failure on the release
+        if: failure()
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          gh release view "${TAG}" --json body --jq .body > "${RUNNER_TEMP}/notes.md" || exit 0
+          cat >> "${RUNNER_TEMP}/notes.md" <<EOF
+
+          > [!WARNING]
+          > The Kotlin packages (tools.jazz:jazz-kotlin and jazz-kotlin-android ${VERSION}) are not on Maven Central yet: they weren't served 45 minutes after upload. See ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}.
+          EOF
+          gh release edit "${TAG}" --notes-file "${RUNNER_TEMP}/notes.md"
+          echo "::error::Maven Central doesn't serve ${VERSION} 45 min after upload; noted on ${TAG}."
 
   go:
     name: Go module tag
@@ -1001,6 +1071,7 @@ jobs:
         inspector-stage,
         inspector-promote,
         finalize,
+        maven-published,
       ]
     if: always()
     runs-on: blacksmith-2vcpu-ubuntu-2404

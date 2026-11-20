@@ -2,16 +2,21 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { TRUSTED_CACHE_TEST, hasTrustedCacheGuard } from "../release-publish/producer-run.mjs";
 
 const shaPattern = /^[a-f0-9]{40}$/;
-const previewPath = ".github/workflows/preview-build.yml";
+// Production staging takes only `release`-branch producers, built from
+// reviewed code. Not preview-build.yml's pull_request runs: they run from the
+// PR's merge ref and restore caches from the PR's own scope, which its author
+// controls (#supply-chain, 2026-11-19). A PR's Inspector goes to a preview
+// deployment; merge it to stage it for production.
 const publishPath = ".github/workflows/publish-jazz-tools-alpha.yml";
-// Not preview-jazz-tools-alpha-release.yml: its runs are on changeset-release/*,
-// with the cache-scope gap below, and it can still be dispatched there.
-// release-artifacts.yml builds its run's head_sha. Only its `release` runs:
-// a run on changeset-release/* restores an actions/cache scope that any
-// write collaborator can seed today (#supply-chain, 2026-11-19), until
-// release-artifacts.yml restores no cache on untrusted refs.
+// Not preview-jazz-tools-alpha-release.yml: its runs on changeset-release/*
+// restore caches from that branch's scope, and it can still be dispatched there.
+// release-artifacts.yml builds its run's head_sha, on `release` or
+// `changeset-release/*`: there it restores no cache (every restore is gated
+// on a trusted ref; dev/gates/test/release-artifacts-trusted-caches.test.mjs
+// is the control; #supply-chain, 2026-11-19, jazz#6168).
 const releaseArtifactsPath = ".github/workflows/release-artifacts.yml";
 
 export function inspectorRunSource(run, repository) {
@@ -25,18 +30,15 @@ export function inspectorRunSource(run, repository) {
   }
   const releaseEvent = run.event === "push" || run.event === "workflow_dispatch";
   const approved =
-    (run.path === previewPath &&
-      run.event === "pull_request" &&
-      typeof run.head_branch === "string" &&
-      run.head_branch.length > 0) ||
     (run.path === publishPath && releaseEvent && run.head_branch === "release") ||
-    (run.path === releaseArtifactsPath && releaseEvent && run.head_branch === "release");
+    (run.path === releaseArtifactsPath &&
+      releaseEvent &&
+      (run.head_branch === "release" || /^changeset-release\/.+/.test(run.head_branch ?? "")));
   if (!approved)
     throw new Error(
       "Inspector artifact run has an unapproved producer workflow, event or source branch",
     );
-  // preview-build explicitly checks out the PR head; both release callers use
-  // their event ref. All three therefore build run.head_sha, not a PR merge SHA.
+  // Both release producers build their event ref, so run.head_sha.
   return run.head_sha;
 }
 
@@ -61,8 +63,21 @@ export function verifyInspectorHandoff({
   artifactCommit,
   deploymentCommit,
   branchRef,
+  deploymentReleaseArtifactsWorkflow = "",
+  deploymentHasTrustedCacheTest = false,
 }) {
   const artifactSha = inspectorRunSource(run, repository);
+  // A changeset-release/* release-artifacts run restored no cache only if the
+  // (tree-equal) deployed commit's release-artifacts.yml has the guard.
+  if (
+    run.path === releaseArtifactsPath &&
+    run.head_branch !== "release" &&
+    !(deploymentHasTrustedCacheTest && hasTrustedCacheGuard(deploymentReleaseArtifactsWorkflow))
+  ) {
+    throw new Error(
+      "Inspector artifact run is on changeset-release/*, but the deployed tree lacks the trusted-cache guard or its contract test (jazz#6168)",
+    );
+  }
   inspectorBranchRefPath(repository, branch);
   if (
     !shaPattern.test(sourceSha ?? "") ||
@@ -107,7 +122,29 @@ export function verifyInspectorRunFromGitHub(
     artifactCommit: api(`repos/${repository}/git/commits/${artifactSha}`),
     deploymentCommit: api(`repos/${repository}/git/commits/${env.SOURCE_SHA}`),
     branchRef: api(branchPath),
+    ...(run.path === releaseArtifactsPath && run.head_branch !== "release"
+      ? {
+          deploymentReleaseArtifactsWorkflow: fileAt(
+            api,
+            repository,
+            ".github/workflows/release-artifacts.yml",
+            env.SOURCE_SHA,
+          ),
+          deploymentHasTrustedCacheTest:
+            fileAt(api, repository, TRUSTED_CACHE_TEST, env.SOURCE_SHA) !== null,
+        }
+      : {}),
   });
+}
+
+/** A file's text at `sha`, or null when it doesn't exist there. */
+function fileAt(api, repository, path, sha) {
+  try {
+    const file = api(`repos/${repository}/contents/${path}?ref=${sha}`);
+    return Buffer.from(file.content ?? "", file.encoding ?? "base64").toString("utf8");
+  } catch {
+    return null;
+  }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {

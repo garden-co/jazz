@@ -373,111 +373,33 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
-      # Retried once: the artifact service sometimes answers "Server Error".
-      - id: dl2
-        continue-on-error: true
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          {
-            name: pkg-jazz-tools,
-            path: packages/jazz-tools,
-            run-id: "${{ env.RUN_ID }}",
-            github-token: "${{ github.token }}",
+      # In parallel, each retried: the artifact service sometimes answers "Server Error".
+      - name: Download the built packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fetch() {
+            local name=$1 dest=$2 tmp
+            for attempt in 1 2 3 4 5; do
+              tmp=$(mktemp -d)
+              if gh run download "${RUN_ID}" -R "${GITHUB_REPOSITORY}" -n "${name}" -D "${tmp}"; then
+                mkdir -p "${dest}"
+                cp -a "${tmp}/." "${dest}/"
+                return 0
+              fi
+              echo "::warning::download of ${name} failed (attempt ${attempt}); retrying"
+              sleep $((attempt * 5))
+            done
+            echo "::error::could not download ${name} from run ${RUN_ID}"
+            return 1
           }
-
-      - if: steps.dl2.outcome == 'failure'
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          {
-            name: pkg-jazz-tools,
-            path: packages/jazz-tools,
-            run-id: "${{ env.RUN_ID }}",
-            github-token: "${{ github.token }}",
-          }
-      # Retried once: the artifact service sometimes answers "Server Error".
-      - id: dl3
-        continue-on-error: true
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          {
-            name: pkg-jazz-wasm,
-            path: crates/jazz-wasm,
-            run-id: "${{ env.RUN_ID }}",
-            github-token: "${{ github.token }}",
-          }
-
-      - if: steps.dl3.outcome == 'failure'
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          {
-            name: pkg-jazz-wasm,
-            path: crates/jazz-wasm,
-            run-id: "${{ env.RUN_ID }}",
-            github-token: "${{ github.token }}",
-          }
-      # Retried once: the artifact service sometimes answers "Server Error".
-      - id: dl4
-        continue-on-error: true
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          {
-            name: pkg-jazz-napi,
-            path: crates/jazz-napi,
-            run-id: "${{ env.RUN_ID }}",
-            github-token: "${{ github.token }}",
-          }
-
-      - if: steps.dl4.outcome == 'failure'
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          {
-            name: pkg-jazz-napi,
-            path: crates/jazz-napi,
-            run-id: "${{ env.RUN_ID }}",
-            github-token: "${{ github.token }}",
-          }
-      # Retried once: the artifact service sometimes answers "Server Error".
-      - id: dl5
-        continue-on-error: true
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          {
-            name: pkg-jazz-rn,
-            path: crates/jazz-rn,
-            run-id: "${{ env.RUN_ID }}",
-            github-token: "${{ github.token }}",
-          }
-
-      - if: steps.dl5.outcome == 'failure'
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          {
-            name: pkg-jazz-rn,
-            path: crates/jazz-rn,
-            run-id: "${{ env.RUN_ID }}",
-            github-token: "${{ github.token }}",
-          }
-      # Retried once: the artifact service sometimes answers "Server Error".
-      - id: dl6
-        continue-on-error: true
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          {
-            name: pkg-create-jazz,
-            path: packages/create-jazz,
-            run-id: "${{ env.RUN_ID }}",
-            github-token: "${{ github.token }}",
-          }
-
-      - if: steps.dl6.outcome == 'failure'
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          {
-            name: pkg-create-jazz,
-            path: packages/create-jazz,
-            run-id: "${{ env.RUN_ID }}",
-            github-token: "${{ github.token }}",
-          }
+          fetch pkg-jazz-tools packages/jazz-tools &
+          fetch pkg-jazz-wasm crates/jazz-wasm &
+          fetch pkg-jazz-napi crates/jazz-napi &
+          fetch pkg-jazz-rn crates/jazz-rn &
+          fetch pkg-create-jazz packages/create-jazz &
+          for job in $(jobs -p); do wait "${job}"; done
 
       - name: Verify the built payloads
         run: |
@@ -505,14 +427,16 @@ jobs:
           set -euo pipefail
           out="${RUNNER_TEMP}/npm"
           mkdir -p "${out}"
+          # In parallel: each pack is one gzip stream, and they write distinct files.
           for pkg in jazz-wasm jazz-napi jazz-tools create-jazz; do
-            pnpm --filter "${pkg}" pack --pack-destination "${out}"
+            pnpm --filter "${pkg}" pack --pack-destination "${out}" &
           done
           for dir in crates/jazz-napi/npm/*/; do
-            npm pack "${dir}" --pack-destination "${out}"
+            npm pack "${dir}" --pack-destination "${out}" &
           done
           JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="${JAZZ_RN_CARGO_NDK_VERSION}" \
-            node dev/artifacts/rn-packages.mjs pack "${out}"
+            node dev/artifacts/rn-packages.mjs pack "${out}" &
+          for job in $(jobs -p); do wait "${job}"; done
           rm -f "${out}/rn-packages.json"
           node dev/artifacts/verify-packed-napi.mjs "${out}/jazz-napi-${VERSION}.tgz"
           # Not `grep -q`: under pipefail its early exit makes tar fail with a write error.
@@ -832,8 +756,10 @@ jobs:
   # status maps PASS -> green, NEEDS_REVIEW -> HOLD, FAIL -> NO-GO.
   adopter-gate:
     name: Adopter gate
-    needs: [resolve, artifacts, rc-tarballs]
-    if: "!cancelled() && needs.rc-tarballs.result == 'success'"
+    # Not after rc-tarballs: its jobs set up while rc-tarballs packs, and
+    # fetch-rc.sh waits for this run's rc-npm (AG_NPM_WAIT_S).
+    needs: [resolve, artifacts]
+    if: "!cancelled() && needs.artifacts.result == 'success'"
     uses: ./.github/workflows/adopter-gate.yml
     permissions:
       contents: read

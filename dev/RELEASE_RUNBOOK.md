@@ -107,9 +107,11 @@ this document or public receipts.
   packaging, then retry through the publisher's existing-version handling. Never
   republish different bytes under an existing version.
 - Verify every expected npm package/version, native payload, dependency and dist-tag
-  using registry reads and installation. Since alpha.60 the publisher moves both
-  `alpha` and `latest` to the new version for every v2 package, so a plain
-  `npm install jazz-tools` gets v2 and Classic is `jazz-tools@0`. To roll `latest`
+  using registry reads and installation. Since alpha.61 the publishers (trusted
+  publishing) publish every v2 package straight to `latest`, so a plain
+  `npm install jazz-tools` gets v2 and Classic is `jazz-tools@0`. They can't
+  move any other dist-tag: `alpha` has stayed at 2.0.0-alpha.60 and only a
+  maintainer's `npm dist-tag add <pkg>@<version> alpha` (or `rm`) changes it. To roll `latest`
   back, run `npm dist-tag add <pkg>@<previous> latest` for each package. Confirm the source tag matches the exact
   released source. Build artifacts alone are not proof of npm publication.
 - Promote the verified docs deployment. The publisher stages and promotes the
@@ -157,11 +159,10 @@ gh workflow run release-publish.yml --ref main \
 ```
 
 - Before the approval it takes the prebuilt artifacts of a
-  `release-artifacts.yml` run on `release` that built the published tree,
-  the release commit's own run first: wait for the `release` push's run to
-  succeed (a dry run may name old workflows' runs with `legacy-run-ids`
-  instead). The Version Packages head's run is reused once
-  `changeset-release/**` is protected by its ruleset. It checks them, runs `cargo package` on every crate, embeds and
+  `release-artifacts.yml` run on `release` or `changeset-release/*` that
+  built the published tree: the release commit's own run first, else the
+  Version Packages head's (a dry run may name old workflows' runs with
+  `legacy-run-ids` instead). It checks them, runs `cargo package` on every crate, embeds and
   tests the Go module, and attaches every asset to the draft release (create
   the draft with its notes first, with `github-release.yml`).
 - Every publish leg (npm, crates.io, Maven Central, Go tag, Swift mirror)
@@ -169,9 +170,12 @@ gh workflow run release-publish.yml --ref main \
   stages and promotes after npm; the draft is published as Latest last.
 - Each leg skips what is already published: after a partial failure, use
   "Re-run failed jobs" (the re-run waits for approval again).
-- `maven-publishing-type` is `AUTOMATIC` (the Maven leg waits until Central
-  reports PUBLISHED); `USER_MANAGED` leaves it validated for Publish in the
-  Portal, as before. `maven-portal-dry-run` (dry run
+- `maven-publishing-type` is `AUTOMATIC`: the Maven leg returns once Central
+  is PUBLISHING, so the GitHub release goes public without waiting for
+  Central's ~11 min of publishing; the "Maven Central serves it" job then
+  waits (up to 45 min) for repo1.maven.org to serve both artifacts, and if
+  not, fails and adds a warning to the release notes. `USER_MANAGED` leaves it
+  validated for Publish in the Portal, as before. `maven-portal-dry-run` (dry run
   only) uploads `USER_MANAGED`, waits for VALIDATED and drops it.
 - The run summary opens with the RC gate's verdict (`rc-verdict` of the
   newest release-candidate.yml run on the Version Packages head): every HOLD

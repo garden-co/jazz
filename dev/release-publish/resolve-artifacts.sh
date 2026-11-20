@@ -4,8 +4,8 @@
 #   SHA=<commit> VERSION=<version> MODE=<publish|dry-run> [ARTIFACTS_RUN_ID=<id>] [LEGACY_RUN_IDS="<id> <id> …"] \
 #     dev/release-publish/resolve-artifacts.sh
 #
-# Takes a successful release-artifacts.yml run on `release` that built
-# <sha>'s tree (a run of <sha> itself first),
+# Takes a successful release-artifacts.yml run on `release` or
+# `changeset-release/*` that built <sha>'s tree (a run of <sha> itself first),
 # whose release-manifest names the commit it built, the tree and the version
 # (dev/release-publish/producer-run.mjs). ARTIFACTS_RUN_ID names one run
 # instead of searching; it is held to the same rule.
@@ -28,10 +28,21 @@ echo "tree=${tree}" >> "${out}"
 echo "release ${VERSION} at ${SHA}, tree ${tree}"
 
 # Supply-chain rule (dev/release-publish/producer-run.mjs): a successful
-# release-artifacts.yml run of this repository on `release` (push or
-# dispatch) that built a commit with this tree, and whose release-manifest
+# release-artifacts.yml run of this repository on `release` or
+# `changeset-release/*` (push or dispatch) that built a commit with this tree, and whose release-manifest
 # names that commit, tree and version. A run of ${SHA} itself comes first.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# release-artifacts.yml as the published commit has it: a changeset-release/*
+# producer counts only if it carries the trusted-cache guard (jazz#6168).
+workflow_at_sha="$(mktemp)"
+gh api "repos/${GH_REPO}/contents/.github/workflows/release-artifacts.yml?ref=${SHA}" --jq .content 2>/dev/null |
+  base64 -d > "${workflow_at_sha}" 2>/dev/null || : > "${workflow_at_sha}"
+# ...and only if the published tree has the contract test that proves the rest
+# of the tree honours the guard.
+trusted_cache_test=false
+if gh api "repos/${GH_REPO}/contents/dev/gates/test/release-artifacts-trusted-caches.test.mjs?ref=${SHA}" --silent 2>/dev/null; then
+  trusted_cache_test=true
+fi
 producer_ok() { # <run id> -> prints the run's head_sha when it may be imported
   local dir head head_tree
   dir="$(mktemp -d)"
@@ -41,6 +52,7 @@ producer_ok() { # <run id> -> prints the run's head_sha when it may be imported
   gh run download "$1" -R "${GH_REPO}" -n release-manifest -D "${dir}" >/dev/null 2>&1 ||
     { echo "run $1: no release-manifest" >&2; return 1; }
   SHA="${SHA}" TREE="${tree}" VERSION="${VERSION}" GH_REPO="${GH_REPO}" HEAD_TREE="${head_tree}" \
+    RELEASE_ARTIFACTS_WORKFLOW="${workflow_at_sha}" TRUSTED_CACHE_TEST_PRESENT="${trusted_cache_test}" \
     node "${here}/producer-run.mjs" "${dir}/run.json" "${dir}/manifest.json" >&2 || return 1
   echo "${head}"
 }
@@ -50,7 +62,7 @@ if [ -n "${ARTIFACTS_RUN_ID:-}" ]; then
   candidates=("${ARTIFACTS_RUN_ID}")
 else
   # Runs of ${SHA} itself, newest first; then the release branches' runs.
-  for query in "head_sha=${SHA}&" "branch=release&"; do
+  for query in "head_sha=${SHA}&" "branch=release&" "branch=changeset-release%2Frelease&"; do
     runs="$(gh api "repos/${GH_REPO}/actions/workflows/release-artifacts.yml/runs?${query}status=success&per_page=50" 2>/dev/null)" || continue
     mapfile -t -O "${#candidates[@]}" candidates < <(jq -r '.workflow_runs | sort_by(.created_at) | reverse | .[] | .id' <<<"${runs}")
   done

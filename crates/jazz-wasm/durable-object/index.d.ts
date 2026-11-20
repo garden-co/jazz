@@ -8,6 +8,14 @@ export interface JazzCoreEnv {
   JAZZ_CORE_SECRET: string;
   /** A public schema's JSON, served until one is published (optional). */
   JAZZ_SCHEMA?: string;
+  /**
+   * An R2 bucket for large values' bytes (recommended): without it they stay
+   * in the object's SQLite. Objects go under `JAZZ_BLOBS_PREFIX`, claimed for
+   * this app by a `.jazz-owner` object.
+   */
+  JAZZ_BLOBS?: R2Bucket;
+  /** Where in `JAZZ_BLOBS` this app's objects go; defaults to `jazz/<app id>/`. */
+  JAZZ_BLOBS_PREFIX?: string;
 }
 
 /** The Durable Object class holding an app's Jazz core. */

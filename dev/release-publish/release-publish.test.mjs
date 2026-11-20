@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkManifest, publishLevels } from "./npm-publish.mjs";
-import { isPayload, requiredFiles } from "./maven-central.mjs";
+import { checkManifest, npmAnswer, publishLevels } from "./npm-publish.mjs";
+import { isPayload, requiredFiles, servedUrls } from "./maven-central.mjs";
 import { pickGateRun, summarize } from "./rc-verdict.mjs";
 
 const pkg = (name, deps = []) => ({ name, deps });
@@ -116,4 +116,39 @@ test("a real candidate wins over a newer dry run; otherwise the newest", () => {
     ]).id,
     2,
   );
+});
+
+test("verify-trust checks every package npm-publish publishes, named as npm escapes them", async () => {
+  const { NPM_PACKAGES, escapedName } = await import("./verify-trust.mjs");
+  const { REQUIRED, NAPI_PLATFORMS } = await import("./npm-publish.mjs");
+  assert.equal(NPM_PACKAGES.length, 12);
+  for (const name of REQUIRED) assert.ok(NPM_PACKAGES.includes(name), name);
+  assert.equal(
+    NPM_PACKAGES.filter((n) => n.startsWith("@garden-co/jazz-napi-")).length,
+    NAPI_PLATFORMS,
+  );
+  assert.equal(escapedName("@garden-co/jazz-napi-darwin-x64"), "@garden-co%2fjazz-napi-darwin-x64");
+  assert.equal(escapedName("jazz-tools"), "jazz-tools");
+});
+
+test("npm's answer is kept, without the tarball listing", () => {
+  const out = [
+    "npm notice 📦  jazz-rn-android@2.0.0-alpha.68",
+    "npm notice Tarball Contents",
+    "npm notice 101.2MB android/libjazz.so",
+    "npm notice Publishing to https://registry.npmjs.org/ with tag latest and public access",
+    "npm notice publish Signed provenance statement",
+    "+ jazz-rn-android@2.0.0-alpha.68",
+  ].join("\n");
+  const answer = npmAnswer(out);
+  assert.match(answer, /\+ jazz-rn-android@2\.0\.0-alpha\.68/);
+  assert.match(answer, /Publishing to/);
+  assert.doesNotMatch(answer, /Tarball|101\.2MB/);
+});
+
+test("Maven Central counts as served when repo1 has both POMs", () => {
+  assert.deepEqual(servedUrls("2.0.0-alpha.69"), [
+    "https://repo1.maven.org/maven2/tools/jazz/jazz-kotlin/2.0.0-alpha.69/jazz-kotlin-2.0.0-alpha.69.pom",
+    "https://repo1.maven.org/maven2/tools/jazz/jazz-kotlin-android/2.0.0-alpha.69/jazz-kotlin-android-2.0.0-alpha.69.pom",
+  ]);
 });
