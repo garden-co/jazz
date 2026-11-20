@@ -84,6 +84,44 @@ function run(cmd, args) {
   });
 }
 
+/** npm's result lines (its `+ name@version` and notices), without the tarball listing. */
+export function npmAnswer(out) {
+  return out
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        /^\+ |stag|publish/i.test(line) &&
+        !/^npm notice (📦|Tarball|=== |[0-9.]+[kMG]?B )/.test(line),
+    )
+    .slice(0, 6)
+    .join(" | ");
+}
+
+/**
+ * After publishing: whether npm serves each version. Polls for up to
+ * `minutes`; a version npm accepted but doesn't serve is most likely staged,
+ * waiting for a maintainer's approval on npmjs.com.
+ */
+async function servedOrWarn(specs, minutes) {
+  const deadline = Date.now() + minutes * 60_000;
+  let missing = [...specs];
+  while (missing.length > 0 && Date.now() < deadline) {
+    const still = [];
+    for (const spec of missing) {
+      const view = await run("npm", ["view", spec, "version", "--prefer-online"]);
+      if (view.status !== 0) still.push(spec);
+    }
+    missing = still;
+    if (missing.length > 0) await new Promise((r) => setTimeout(r, 20_000));
+  }
+  for (const spec of missing)
+    console.log(
+      `::warning::npm accepted ${spec} but doesn't serve it after ${minutes} min: most likely staged, waiting for approval on npmjs.com (its trusted publisher may lack direct publishing).`,
+    );
+  return missing;
+}
+
 async function publishOne(pkg, dryRun) {
   const started = Date.now();
   const spec = `${pkg.name}@${pkg.version}`;
@@ -94,7 +132,20 @@ async function publishOne(pkg, dryRun) {
   if (dryRun) args.push("--dry-run");
   const result = await run("npm", args);
   const seconds = Math.round((Date.now() - started) / 1000);
-  if (result.status === 0) return { spec, result: dryRun ? "dry-run ok" : "published", seconds };
+  // npm's own answer, always: it says whether the version was published or
+  // only staged (a trusted publisher without direct publishing stages).
+  const answer = npmAnswer(result.out);
+  if (answer) console.log(`    ${spec}: npm says: ${answer}`);
+  if (result.status === 0) {
+    if (dryRun) return { spec, result: "dry-run ok", seconds };
+    return {
+      spec,
+      result: /\bstag(e|ed|ing)\b/i.test(result.out)
+        ? "staged (needs approval on npmjs.com)"
+        : "published",
+      seconds,
+    };
+  }
   // npm accepts a large upload before it serves it: publishing again answers
   // E409 "Cannot publish over previously staged version". It is ours already.
   if (/E409/.test(result.out) && /previously staged version/.test(result.out))
@@ -166,6 +217,11 @@ async function main() {
   }
   const total = Math.round((Date.now() - started) / 1000);
   console.log(`npm: ${rows.length} packages in ${total}s${dryRun ? " (dry run)" : ""}`);
+  if (!dryRun) {
+    const published = rows.filter((r) => r.result !== "already on npm").map((r) => r.spec);
+    const unserved = new Set(await servedOrWarn(published, 5));
+    for (const r of rows) if (unserved.has(r.spec)) r.result += "; NOT SERVED after 5 min";
+  }
   if (process.env.GITHUB_STEP_SUMMARY) {
     const lines = [
       `### npm${dryRun ? " (dry run)" : ""}: ${total}s`,
