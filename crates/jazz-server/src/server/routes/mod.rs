@@ -107,6 +107,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             "/accounts/revoke-sessions",
             post(accounts::revoke_sessions_for_admin),
         )
+        .route(
+            "/backend-signing-key",
+            get(accounts::backend_signing_key_for_admin),
+        )
         .route("/migrations/graph", get(migration_graph_handler))
         .route(
             "/introspection/subscriptions",

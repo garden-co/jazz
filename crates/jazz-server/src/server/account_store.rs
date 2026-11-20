@@ -86,6 +86,22 @@ impl StoredAccountRegistry {
             .map_err(unavailable)
     }
 
+    /// The app's backend signing key kept in the store, generated and kept
+    /// on first use (see [`crate::portable::backend_signing_key::stored`]).
+    pub(crate) fn backend_signing_key(
+        &mut self,
+    ) -> Result<crate::portable::backend_signing_key::Key, RegistryError> {
+        use crate::portable::backend_signing_key as signing;
+        self.storage
+            .write(
+                |conn| match signing::stored(conn, || signing::generate(Uuid::new_v4)) {
+                    Err(RegistryError::Unavailable(error)) => Err(registry::storage_error(error)),
+                    decided => Ok(decided),
+                },
+            )
+            .map_err(unavailable)?
+    }
+
     /// The latest session revocation mark recorded for `principal`.
     pub(crate) fn sessions_revoked_before(
         &mut self,

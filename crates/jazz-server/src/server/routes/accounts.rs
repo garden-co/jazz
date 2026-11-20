@@ -205,6 +205,36 @@ pub(super) async fn revoke_sessions_for_admin(
     }))
 }
 
+/// The app's backend signing key (see
+/// [`crate::portable::backend_signing_key`]), for the app's trusted backend
+/// only: the admin secret, or a backend credential stating admin access.
+/// Derived from a configured admin secret; otherwise the key kept in the
+/// store, so it outlives this process either way.
+pub(super) async fn backend_signing_key_for_admin(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl axum::response::IntoResponse, Failure> {
+    use crate::portable::backend_signing_key as signing;
+    crate::middleware::auth::validate_admin_secret(
+        super::http::admin_secret_header(&headers),
+        &state.auth_config,
+    )?;
+    let key = match &state.backend_signing_secret {
+        Some(secret) => signing::derived(secret, &state.app_id.to_string()),
+        None => owner(&state)?
+            .backend_signing_key()
+            .await
+            .map_err(failure)?,
+    };
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        signing::body(&key),
+    ))
+}
+
 /// Authentication denial and temporary registry availability are different wire outcomes.
 #[derive(Debug)]
 pub(super) enum AdmissionError {
