@@ -2491,7 +2491,7 @@ export class Db {
   private writesWaiting = 0;
   /**
    * Writes made after a refused callback transaction settled wait on this
-   * until its rerun's commit is made (see {@link rerunOnLocalFirst}).
+   * until its rerun starts (see {@link rerunOnLocalFirst}).
    */
   private heldWrites: Promise<void> | null = null;
   /**
@@ -3217,13 +3217,18 @@ export class Db {
    * only after them, so what ends it shows in its commit: it resolves once
    * that commit is made, or with its rerun.
    *
-   * A refused one takes its place among this Db's writes when its callback
-   * settles: writes and callback transactions made after that wait for it
-   * (in their own order) until its rerun's commit is made, or the rerun or
-   * the wait for the local-first client fails. Writes made while the
-   * callback still runs are concurrent with it and aren't held; nor are
-   * reads. They are held here, not in the client's write queue: the
-   * hand-over moves that queue ahead of the rerun, which waits on them.
+   * A refused one holds this Db's writes while it waits for the
+   * local-first client: writes and callback transactions made after its
+   * callback settles run after the load, in their own order. The hold opens
+   * when its rerun starts, or when the wait ends any other way (the load
+   * failed, the deadline, sign-out, close), so nothing waits on the rerun:
+   * during it, writes behave as beside any pending transaction on the
+   * local-first client, where a callback transaction holds nothing. Writes
+   * made while the refused callback still runs are concurrent with it and
+   * aren't held; nor are reads. One refused only at its deferred commit
+   * holds from when its commit fails: writes made before that, already in
+   * the client's write queue, aren't held. They are held here, not in that
+   * queue: the hand-over moves it ahead of the rerun.
    */
   private rerunOnLocalFirst<R extends WriteHandle<unknown, unknown>>(
     attempt: (settledRefused: () => void) => Promise<R>,
@@ -3241,10 +3246,17 @@ export class Db {
     attempt: (settledRefused: () => void) => Promise<R>,
     rerun: (db: Db) => Promise<R>,
   ): Promise<R> {
+    let release: (() => void) | undefined;
+    // The wait is over: writes held behind it run, beside the rerun.
+    const end = () => release?.();
+    const start = (db: Db) => {
+      end();
+      return rerun(db);
+    };
     const again = (error: unknown): Promise<R> | undefined => {
       if (error instanceof EncryptionNeedsLocalFirstError)
-        return this.awaitLocalFirst(error).then(rerun);
-      if (this.successor && closedBeforeSending(error)) return rerun(this.current());
+        return this.awaitLocalFirst(error).then(start);
+      if (this.successor && closedBeforeSending(error)) return start(this.current());
       return undefined;
     };
     // Decided before it is queued itself.
@@ -3252,7 +3264,6 @@ export class Db {
     const behindWait =
       this.writesWaiting > 0 ||
       (isThinDb(this) && client !== null && getOwnerPreparation(client)?.pending !== undefined);
-    let release: (() => void) | undefined;
     const holdLaterWrites = () => {
       // Without a loader it fails at once: nothing to hold writes for.
       if (!release && localFirstLoaderOf(this)) release = this.holdWrites();
@@ -3262,8 +3273,13 @@ export class Db {
         behindWait
           ? result.txId.then(
               () => result,
-              // Otherwise its wait reports the failure, as for any commit.
-              (error: unknown) => again(error) ?? result,
+              (error: unknown) => {
+                // Refused only at its deferred commit: it holds the writes
+                // made from now on while it waits, as one refused earlier.
+                if (error instanceof EncryptionNeedsLocalFirstError) holdLaterWrites();
+                // Otherwise its wait reports the failure, as for any commit.
+                return again(error) ?? result;
+              },
             )
           : result,
       (error: unknown) => {
@@ -3272,12 +3288,8 @@ export class Db {
         return rerun;
       },
     );
-    // Open once its rerun's commit is made (or it failed), so a held write
-    // can't stage on the local-first client before that commit.
-    const end = () => release?.();
-    settled.then((result) => {
-      if (release) Promise.resolve(result.txId).then(end, end);
-    }, end);
+    // Not rerun, or the wait failed: open all the same.
+    settled.then(end, end);
     return settled;
   }
 
@@ -4917,7 +4929,7 @@ export class Db {
       void ownerPreparation(next.getClient(this.clientSchema)).run(() => heldBack);
     // Writes held behind a refused callback transaction: those made on
     // `next` from now on wait for them too. Not in `next`'s write queue,
-    // where the transaction's rerun, which they wait for, will queue.
+    // where the transaction's rerun, whose start opens them, will queue.
     const held = this.heldWrites;
     if (held) next.chainHeldWrites((next.heldWrites ?? Promise.resolve()).then(() => held));
     this.successor = next;

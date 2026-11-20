@@ -21,7 +21,7 @@ import {
   setLocalFirstUpgrader,
   type LocalFirstLoader,
 } from "../runtime/local-first-upgrade.js";
-import type { MutationErrorEvent } from "../runtime/client.js";
+import type { MutationErrorEvent, WriteResult } from "../runtime/client.js";
 import { testApp } from "../testing/index.js";
 import { openBrowserSessionCore, type BrowserJazzSession } from "./create-jazz-session.js";
 
@@ -716,7 +716,9 @@ describe("a thin session of an app with encrypted columns", () => {
       const { value: written, error } = await result;
       expect(error).toBeUndefined();
       expect(written!.value).toBe(2);
-      await written!.wait({ tier: "global" });
+      // A serializable transaction's wait is for the authority's answer.
+      if (form === "transaction") await (written as WriteResult<number>).wait({ tier: "global" });
+      else await written!.wait();
       expect(runs).toBe(2);
       // Only the rerun's note: the thin attempt committed nothing.
       expect(texts(await kept.all(app.notes, { tier: "remote" }))).toEqual([
@@ -844,64 +846,99 @@ describe("a thin session of an app with encrypted columns", () => {
     expect(texts(await kept.all(app.comments, { tier: "remote" }))).toEqual(["in a transaction"]);
   }, 90_000);
 
-  // A refused callback transaction takes its place among the writes when its
-  // callback settles: a plain write made after that waits for its rerun.
+  // A refused callback transaction holds the writes made after its callback
+  // settles while it waits for the local-first client: they run after the
+  // load, in their own order. The hold opens when its rerun starts.
   //
-  //   transaction(insert task T) ──refused──► wait ──► rerun on local-first ──► server
-  //   insert(comment on T) ─────── held ──────────────────────────────────────► server
-  it("a plain write made after a refused transaction settles lands after its rerun", async () => {
+  //   transaction(insert task) ──refused──► wait ──► rerun on local-first ──► server
+  //   insert(note), insert(reply to it) ── held ──┴──► local-first, in order ──► server
+  it("writes made while a refused transaction waits land after the load, in order", async () => {
     const host = await serve();
     const { kept, gate, project } = await thinMember(host);
-    const taskId = crypto.randomUUID();
     let runs = 0;
     const result = kept.transaction((tx) => {
       runs++;
-      tx.insert(app.tasks, { projectId: project, title: "in a transaction" } as never, {
-        id: taskId,
-      });
+      tx.insert(app.tasks, { projectId: project, title: "in a transaction" } as never);
     });
-    // Allowed only once the task is on the server.
-    const comment = kept.insert(app.comments, { taskId, text: "after the transaction" } as never);
+    const note = kept.insert(app.notes, { text: "held" } as never);
+    // Allowed only once its note is on the server.
+    const reply = kept.insert(app.replies, {
+      noteId: idOf(note.value),
+      text: "after its note",
+    } as never);
+    const landedThin = note.wait({ tier: "global" }).then(() => isThinDb(kept));
+    // Unheld, the note would reach the server through the thin client now.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await kept.all(app.notes, { tier: "remote" })).toEqual([]);
     gate.release();
 
     await (await result).wait({ tier: "global" });
-    await comment.wait({ tier: "global" });
+    expect(await landedThin).toBe(false);
+    await reply.wait({ tier: "global" });
     expect(runs).toBe(2);
-    expect(texts(await kept.all(app.comments, { tier: "remote" }))).toEqual([
-      "after the transaction",
-    ]);
+    expect(texts(await kept.all(app.notes, { tier: "remote" }))).toEqual(["held"]);
+    expect(texts(await kept.all(app.replies, { tier: "remote" }))).toEqual(["after its note"]);
+    const rows = await kept.all(tasks.where({ projectId: project }));
+    expect(titles(rows).sort()).toEqual(["in a transaction", "kept"]);
   }, 90_000);
 
-  it("a write a refused callback awaits inside itself is not held behind it", async () => {
-    const host = await serve();
-    const { kept, gate, project } = await thinMember(host);
-    let runs = 0;
-    const result = settled(
-      kept.transaction(async (tx) => {
-        runs++;
-        try {
-          tx.insert(app.tasks, { projectId: project, title: "caught" } as never);
-        } catch {
-          // Carries on, and waits for a write of its own outside the transaction.
-        }
-        if (runs === 1)
-          await kept
-            .insert(app.notes, { text: "awaited inside" } as never)
-            .wait({ tier: "global" });
-      }),
-    );
-    // Released only once the awaited write landed: had it been held behind
-    // the transaction, it would never land.
-    await expect
-      .poll(async () => texts(await kept.all(app.notes, { tier: "remote" })), { timeout: 20_000 })
-      .toEqual(["awaited inside"]);
-    gate.release();
+  // A write the callback awaits, made through the Db rather than the
+  // transaction, settles in both runs: in the first it is concurrent with
+  // the callback, and in the rerun the hold is already open.
+  const awaitedWrites = {
+    insert: (kept: Db, text: string) =>
+      kept.insert(app.notes, { text } as never).wait({ tier: "global" }),
+    insertStreaming: async (kept: Db, text: string) => {
+      async function* chunks(): AsyncGenerator<string> {
+        yield text;
+      }
+      await (await kept.insertStreaming(app.notes, { text: chunks() })).wait({ tier: "global" });
+    },
+    "nested transaction": async (kept: Db, text: string) => {
+      await (
+        await kept.transaction((inner) => {
+          inner.insert(app.notes, { text } as never);
+        })
+      ).wait({ tier: "global" });
+    },
+  };
+  for (const [kind, write] of Object.entries(awaitedWrites)) {
+    it(`a refused callback that awaits a ${kind} of its own settles in both runs`, async () => {
+      const host = await serve();
+      const { kept, gate, project } = await thinMember(host);
+      let runs = 0;
+      const result = settled(
+        kept.transaction(async (tx) => {
+          const run = ++runs;
+          try {
+            tx.insert(app.tasks, { projectId: project, title: "caught" } as never);
+          } catch {
+            // Carries on, and waits for a write of its own outside the transaction.
+          }
+          await write(kept, `awaited in run ${run}`);
+        }),
+      );
+      // Released only once the first run's write landed: had it been held
+      // behind the transaction, it would never land.
+      await expect
+        .poll(async () => texts(await kept.all(app.notes, { tier: "remote" })), {
+          timeout: 20_000,
+        })
+        .toEqual(["awaited in run 1"]);
+      gate.release();
 
-    const { value: written, error } = await result;
-    expect(error).toBeUndefined();
-    await written!.wait({ tier: "global" });
-    expect(runs).toBe(2);
-  }, 90_000);
+      const { value: written, error } = await result;
+      expect(error).toBeUndefined();
+      await written!.wait({ tier: "global" });
+      expect(runs).toBe(2);
+      expect(texts(await kept.all(app.notes, { tier: "remote" })).sort()).toEqual([
+        "awaited in run 1",
+        "awaited in run 2",
+      ]);
+      // And the Db takes writes after it.
+      await kept.insert(app.notes, { text: "after" } as never).wait({ tier: "global" });
+    }, 90_000);
+  }
 
   it("a plain write held behind a refused transaction runs when the load fails", async () => {
     const host = await serve();
@@ -927,6 +964,80 @@ describe("a thin session of an app with encrypted columns", () => {
     expect(refused.reason).toBe("load-failed");
     await note.wait({ tier: "global" });
     expect(texts(await kept.all(app.notes, { tier: "remote" }))).toEqual(["held, then written"]);
+  }, 90_000);
+
+  it("a plain write held behind a refused transaction runs when the wait ends at the deadline", async () => {
+    const host = await serve();
+    const { device } = await member(host);
+    const session = await open(host, device, () => new Promise(() => {}));
+    const kept = db(session);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const result = settled(
+      kept.transaction((tx) => {
+        tx.insert(app.tasks, { projectId: crypto.randomUUID(), title: "refused" } as never);
+      }),
+    );
+    const note = kept.insert(app.notes, { text: "held, then written" } as never);
+    // The wait's deadline starts once the thin attempt has rolled back.
+    let ended = false;
+    void result.then(() => (ended = true));
+    while (!ended) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    vi.useRealTimers();
+
+    const refused = (await result).error as EncryptionNeedsLocalFirstError;
+    expect(refused).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+    expect(refused.reason).toBe("timeout");
+    await note.wait({ tier: "global" });
+    expect(texts(await kept.all(app.notes, { tier: "remote" }))).toEqual(["held, then written"]);
+  }, 90_000);
+
+  // Begun behind a plain stream, its begin and insert are deferred: the
+  // callback settles unrefused, and the refusal shows only in its commit.
+  it("a callback transaction refused only at its deferred commit holds the writes made while it waits", async () => {
+    const host = await serve();
+    const { device, project } = await member(host);
+    // Only the refusal starts the load: its first call says the wait began.
+    pageStillLoading();
+    const gate = gatedLoader();
+    const kept = db(await open(host, device, gate.loader));
+    let endStream!: () => void;
+    const streamEnds = new Promise<void>((resolve) => (endStream = resolve));
+    async function* chunks(): AsyncGenerator<string> {
+      yield "streamed ";
+      await streamEnds;
+      yield "note";
+    }
+    const streaming = kept.insertStreaming(app.notes, { text: chunks() });
+    let runs = 0;
+    const result = settled(
+      kept.transaction((tx) => {
+        runs++;
+        tx.insert(app.tasks, { projectId: project, title: "deferred" } as never);
+      }),
+    );
+    endStream();
+    await (await streaming).wait({ tier: "global" });
+    await expect.poll(() => gate.calls, { timeout: 20_000 }).toBe(1);
+    expect(runs).toBe(1);
+
+    const note = kept.insert(app.notes, { text: "made while it waits" } as never);
+    const landedThin = note.wait({ tier: "global" }).then(() => isThinDb(kept));
+    // Unheld, the note would reach the server through the thin client now.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(texts(await kept.all(app.notes, { tier: "remote" }))).toEqual(["streamed note"]);
+    gate.release();
+
+    const { value: written, error } = await result;
+    expect(error).toBeUndefined();
+    await written!.wait({ tier: "global" });
+    expect(runs).toBe(2);
+    expect(await landedThin).toBe(false);
+    const rows = await kept.all(tasks.where({ projectId: project }));
+    expect(titles(rows).sort()).toEqual(["deferred", "kept"]);
   }, 90_000);
 
   it("reruns a callback transaction queued behind a write that waits only once it runs", async () => {

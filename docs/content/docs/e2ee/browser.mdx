@@ -63,7 +63,11 @@ column. Until the upgrade has finished:
   start on the thin client. If an operation inside one touches an encrypted column, Jazz rolls the
   transaction back (even if your callback catches the error), waits for the local-first client and runs
   the callback once more on it. Before the full client has loaded, therefore, a callback may run twice,
-  so keep side effects (network calls, analytics, counters outside the database) outside it. A
+  so keep side effects (network calls, analytics, counters outside the database) outside it. While
+  such a transaction waits, the writes you make after its callback has finished wait with it, and run
+  in the order you made them when the wait ends (on the local-first client, once it has loaded).
+  Nothing is held while the callback runs again: writes then behave as beside any pending transaction
+  on the local-first client. A
   transaction that begins with `beginTransaction()` is not rerun: it fails with reason
   `"transaction"` and starts the load, and you begin it again once `db.upgradeToLocalFirst(loader)` has
   resolved. Such a transaction is also not held behind a callback transaction that is waiting for the
