@@ -67,7 +67,7 @@ it("runs a signed-in user's transaction as them, and their policies refuse what 
   const committed = await db.transaction((tx) => {
     tx.insert(app.notes, { title: "alice's" });
   });
-  await committed.wait();
+  await committed.wait({ tier: "global" });
   // Readable only by its author: written as alice.
   expect((await db.all(app.notes)).map((note) => note.title)).toEqual(["alice's"]);
 
@@ -90,7 +90,7 @@ it("runs the transaction of a guest whose token is for the endpoint", async () =
   const committed = await db.transaction((tx) => {
     tx.insert(app.notes, { title: "the guest's" });
   });
-  await committed.wait();
+  await committed.wait({ tier: "global" });
   expect((await db.all(app.notes)).map((note) => note.title)).toEqual(["the guest's"]);
 }, 60_000);
 
@@ -124,7 +124,7 @@ it("runs the transaction of a client built against the app's previous schema", a
   const committed = await db.transaction((tx) => {
     tx.insert(oldApp.notes, { title: "after the redeploy" });
   });
-  await committed.wait();
+  await committed.wait({ tier: "global" });
   expect((await db.all(oldApp.notes)).map((note) => note.title).sort()).toEqual([
     "after the redeploy",
     "before",
@@ -164,7 +164,7 @@ it("runs the transaction of a client built against an app that ships migrations"
   const committed = await db.transaction((tx) => {
     tx.insert(migratedApp.notes, { body: "in a transaction" });
   });
-  await committed.wait();
+  await committed.wait({ tier: "global" });
   const serializable = await db.serializableTransaction(async (tx) => {
     const existing = await tx.all(migratedApp.notes);
     tx.insert(migratedApp.notes, { body: `after ${existing.length}` });
