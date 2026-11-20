@@ -243,8 +243,10 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
             .columns
             .iter()
             .map(|c| {
+                // `encrypted: true` lets a keyless backend's types drop the
+                // column: its reads never carry one.
                 format!(
-                    "{}: {{ kind: \"{}\"; nullable: {}; value: {} }};",
+                    "{}: {{ kind: \"{}\"; nullable: {}; value: {}{} }};",
                     prop(&c.name),
                     kind(&c.ty.ty),
                     c.ty.nullable,
@@ -254,7 +256,8 @@ pub fn generate(app: &App) -> Result<String, CodegenError> {
                             .fields
                             .get(&c.name)
                             .map_or_else(|| ts_type(&c.ty.ty), |row| row.clone()),
-                    }
+                    },
+                    if c.encrypted { "; encrypted: true" } else { "" }
                 )
             })
             .collect();

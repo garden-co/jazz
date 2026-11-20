@@ -180,19 +180,23 @@ impl EventQueue {
         self.stale.is_some_and(|stale| stale.ahead == 0)
     }
 
-    /// The next event. A due coalesced reset reads as a reset of `rows`:
-    /// `None` when the group cannot be read now, and the reset then waits
-    /// for the next read instead of being lost.
-    pub(super) fn pop_front(&mut self, rows: Option<&[CurrentRow]>) -> Option<SubscriptionEvent> {
+    /// The next event. A due coalesced reset reads as a reset of `rows`,
+    /// which leave out `unreadable`: `None` when the group cannot be read
+    /// now, and the reset then waits for the next read instead of being
+    /// lost.
+    pub(super) fn pop_front(
+        &mut self,
+        result: Option<(&[CurrentRow], &Arc<[UnreadableRow]>)>,
+    ) -> Option<SubscriptionEvent> {
         if let Some(stale) = &mut self.stale {
             if stale.ahead > 0 {
                 stale.ahead -= 1;
                 return self.events.pop_front();
             }
-            let rows = rows?;
+            let (rows, unreadable) = result?;
             let Stale { settled, tier, .. } = *stale;
             self.stale = None;
-            let mut event = opening(rows);
+            let mut event = opening(rows, unreadable);
             if let SubscriptionEvent::Delta {
                 settled: s,
                 tier: t,
@@ -500,6 +504,12 @@ pub(super) struct Group {
     identity: Option<AuthorSubject>,
     read: ReadSpec,
     pub(super) rows: Vec<CurrentRow>,
+    /// The rows the result leaves out because the client's encryption
+    /// hooks could not open them, as of `rows` (protocol §4.3). Replaced
+    /// only when it changes, so a pointer comparison tells a change.
+    pub(super) unreadable: Arc<[UnreadableRow]>,
+    /// The list the members were last told ([`Group::push`]).
+    told_unreadable: Arc<[UnreadableRow]>,
     members: Vec<Member>,
     watches: Vec<Watch>,
     /// Per table watched as [`Watch::Evidence`], how its read policies
@@ -985,8 +995,8 @@ impl Inner {
             }),
         };
         let tier = settled.tier();
-        let open = |rows: &[CurrentRow]| {
-            let mut event = opening(rows);
+        let open = |rows: &[CurrentRow], unreadable: &Arc<[UnreadableRow]>| {
+            let mut event = opening(rows, unreadable);
             if let SubscriptionEvent::Delta {
                 settled, tier: t, ..
             } = &mut event
@@ -1007,7 +1017,7 @@ impl Inner {
             // While the group awaits chunks its rows may be stale: the
             // joiner opens with the group's next successful run instead.
             let opened = group.opened && !group.awaiting;
-            let queue = new_queue(opened.then(|| open(&group.rows)));
+            let queue = new_queue(opened.then(|| open(&group.rows, &group.unreadable)));
             group.members.push(member(&queue, opened));
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
@@ -1023,12 +1033,16 @@ impl Inner {
                 .compile(prepared, identity, visible)
                 .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
         };
-        // The opening leaves toward the subscription's members.
+        // The opening leaves toward the subscription's members, naming the
+        // rows it left out.
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
+        let mut unreadable = Vec::new();
         #[cfg(feature = "e2ee-client")]
         let run = run.and_then(|mut rows| {
-            self.open_read(prepared, &visible, false, &mut rows)?;
+            unreadable = self.open_read(prepared, &visible, false, &mut rows)?;
             Ok(rows)
         });
+        let unreadable: Arc<[UnreadableRow]> = unreadable.into();
         let (rows, awaiting) =
             match run.and_then(|rows| self.nest_relations(prepared, identity, &visible, rows)) {
                 Ok(rows) => (rows, false),
@@ -1061,7 +1075,7 @@ impl Inner {
         );
         let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
-        let queue = new_queue((!awaiting).then(|| open(&rows)));
+        let queue = new_queue((!awaiting).then(|| open(&rows, &unreadable)));
         let gid = self.fan.next;
         self.fan.next += 1;
         self.fan.index(gid, &watches);
@@ -1074,6 +1088,8 @@ impl Inner {
             read,
             rows,
             members: vec![member(&queue, !awaiting)],
+            told_unreadable: Arc::clone(&unreadable),
+            unreadable,
             watches,
             evidence,
             recheck,
@@ -2326,8 +2342,29 @@ impl Inner {
         // The changed rows leave toward the subscription's members: opened
         // as a full run's are.
         #[cfg(feature = "e2ee-client")]
-        if let Err(error) = self.open_read(&group.prepared, &read, false, &mut fresh) {
-            return Some(Err(error));
+        {
+            let left_out = match self.open_read(&group.prepared, &read, false, &mut fresh) {
+                Ok(left_out) => left_out,
+                Err(error) => return Some(Err(error)),
+            };
+            // A page's window counted the rows it left out, which the
+            // result does not hold: only a full run places them.
+            if group.prepared.query.limit.is_some()
+                && (!left_out.is_empty() || !group.unreadable.is_empty())
+            {
+                return None;
+            }
+            // The changed rows' entries are replaced by what they read as now.
+            if !left_out.is_empty() || group.unreadable.iter().any(|row| ids.contains(&row.id)) {
+                let mut unreadable: Vec<UnreadableRow> = group
+                    .unreadable
+                    .iter()
+                    .filter(|row| !ids.contains(&row.id))
+                    .cloned()
+                    .collect();
+                unreadable.extend(left_out);
+                replace_unreadable(&mut group.unreadable, unreadable);
+            }
         }
         // Relations of the changed roots only; the others' are unchanged.
         let fresh = match self.nest_relations_kept(
@@ -2625,18 +2662,24 @@ impl Inner {
         }
     }
 
-    /// A group's rows, with array relations nested in their cells.
-    fn group_rows(&self, group: &mut Group) -> Result<Vec<CurrentRow>, Error> {
+    /// A group's rows, with array relations nested in their cells, and
+    /// the rows the run left out because they could not be opened.
+    fn group_rows(
+        &self,
+        group: &mut Group,
+    ) -> Result<(Vec<CurrentRow>, Vec<UnreadableRow>), Error> {
         let read = self.visible_read(&group.read, &group.tables);
         group.applied = cut_of(&read);
-        let rows = self.run_for_reader(&group.prepared, group.identity, &read, false)?;
-        self.nest_relations_kept(
+        let (rows, unreadable) =
+            self.run_for_reader_reporting(&group.prepared, group.identity, &read, false)?;
+        let rows = self.nest_relations_kept(
             &group.prepared,
             group.identity,
             &read,
             rows,
             &mut group.plans,
-        )
+        )?;
+        Ok((rows, unreadable))
     }
 
     /// Re-run the live results whose cut moved: their read's settle rose,
@@ -2659,8 +2702,9 @@ impl Inner {
     fn reset_group(&self, group: &mut Group) {
         match self.group_rows(group) {
             Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
-            Ok(rows) => {
+            Ok((rows, unreadable)) => {
                 group.awaiting = false;
+                group.set_unreadable(unreadable);
                 // Rows that left the result go out as removals before the
                 // re-opening: a reset tells local readers to replace their
                 // result, but a replica only drops rows it is told to (a
@@ -2686,7 +2730,8 @@ impl Inner {
                     }
                 }
                 group.opened = true;
-                group.push(opening(&rows));
+                let event = opening(&rows, &group.unreadable);
+                group.push(event);
                 group.rows = rows;
                 Self::hold(group, false);
                 group.keys.clear();
@@ -2827,6 +2872,7 @@ impl Inner {
                     return Refresh::Rechecked;
                 }
                 Some(Ok(None)) => {
+                    group.flush_unreadable();
                     #[cfg(any(test, feature = "testing"))]
                     if relations {
                         oracle::compare(self, group, "recheck");
@@ -2846,8 +2892,8 @@ impl Inner {
                 None => {}
             }
         }
-        let rows = match self.group_rows(group) {
-            Ok(rows) => rows,
+        let (rows, unreadable) = match self.group_rows(group) {
+            Ok(result) => result,
             Err(error) if crate::large::is_missing(&error) => {
                 group.awaiting = true;
                 return Refresh::Reran;
@@ -2863,12 +2909,16 @@ impl Inner {
             }
         };
         let was_awaiting = std::mem::take(&mut group.awaiting);
+        group.set_unreadable(unreadable);
         if let Some(mut event) = diff(&group.rows, &rows) {
             self.add_splices(group, &prior, &mut event);
             group.push(event);
         } else if was_awaiting {
             // Settlement withheld while waiting is published now.
             group.push(delta(false, Vec::new(), Vec::new(), Vec::new()));
+        } else {
+            // The rows stayed, but which ones are left out may not have.
+            group.flush_unreadable();
         }
         // Members that joined while the group waited saw no rows: they
         // open on the current ones (the deltas above went to the others).
@@ -3196,6 +3246,8 @@ fn compose(
         tier,
         // Composed from plain deltas only: never a coalesced reset.
         coalesced: false,
+        // Stamped when the composed delta is pushed.
+        unreadable: None,
     }]
 }
 
@@ -3230,6 +3282,19 @@ fn refresh_includes(group: &mut Group, changed: &BTreeSet<(String, RowUuid)>) {
 }
 
 impl Group {
+    /// The result now leaves out `unreadable` (see [`replace_unreadable`]).
+    fn set_unreadable(&mut self, unreadable: Vec<UnreadableRow>) {
+        replace_unreadable(&mut self.unreadable, unreadable);
+    }
+
+    /// Tell the members a changed unreadable list that no event since
+    /// carried (the rows themselves did not change), as an empty delta.
+    fn flush_unreadable(&mut self) {
+        if self.opened && !self.awaiting && !Arc::ptr_eq(&self.unreadable, &self.told_unreadable) {
+            self.push(delta(false, Vec::new(), Vec::new(), Vec::new()));
+        }
+    }
+
     /// Whether a root-only wake may be applied by re-checking its ids.
     /// With relations, a root row's write
     /// may change another root row's relation cells (a relation over the
@@ -3246,11 +3311,21 @@ impl Group {
     }
 
     /// Publish `event` to every member. A delta reaches only opened
-    /// members; an opening opens the others too.
-    fn push(&mut self, event: SubscriptionEvent) {
+    /// members; an opening opens the others too. A delta carries the
+    /// result's unreadable rows when they changed since the members were
+    /// last told them.
+    fn push(&mut self, mut event: SubscriptionEvent) {
         if let Some(deferred) = &mut self.deferred {
             deferred.push(event);
             return;
+        }
+        if let SubscriptionEvent::Delta { unreadable, .. } = &mut event {
+            if unreadable.is_none() && !Arc::ptr_eq(&self.unreadable, &self.told_unreadable) {
+                *unreadable = Some(Arc::clone(&self.unreadable));
+            }
+            if let Some(told) = unreadable {
+                self.told_unreadable = Arc::clone(told);
+            }
         }
         #[cfg(any(test, feature = "testing"))]
         if oracle::on() && self.oracle_before.is_some() {
@@ -3271,7 +3346,7 @@ impl Group {
         {
             return;
         }
-        let event = opening(rows);
+        let event = opening(rows, &self.unreadable);
         for member in &self.members {
             if member.joined.get() == Joined::AwaitingOpening {
                 Self::deliver(self.query(), member, event.clone());
@@ -3928,7 +4003,17 @@ fn sql_order(a: &[(Sql, bool)], b: &[(Sql, bool)]) -> std::cmp::Ordering {
     Ordering::Equal
 }
 
-pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
+/// Replace a group's unreadable list with `unreadable` when it differs, so
+/// a pointer comparison tells a change (see [`Group::unreadable`]).
+fn replace_unreadable(slot: &mut Arc<[UnreadableRow]>, unreadable: Vec<UnreadableRow>) {
+    if **slot != *unreadable {
+        *slot = unreadable.into();
+    }
+}
+
+/// The opening (a reset) of a result of `rows`, which leaves out
+/// `unreadable`.
+pub(super) fn opening(rows: &[CurrentRow], unreadable: &Arc<[UnreadableRow]>) -> SubscriptionEvent {
     let added = rows
         .iter()
         .enumerate()
@@ -3939,7 +4024,11 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
             splices: Vec::new(),
         })
         .collect();
-    delta(true, added, Vec::new(), Vec::new())
+    let mut event = delta(true, added, Vec::new(), Vec::new());
+    if let SubscriptionEvent::Delta { unreadable: u, .. } = &mut event {
+        *u = Some(Arc::clone(unreadable));
+    }
+    event
 }
 
 /// What identifies a result row across runs: its id, plus its seq for a
@@ -5163,20 +5252,20 @@ mod event_queue_tests {
             before.push_back(one_row_delta(), "notes");
         }
         assert!(matches!(
-            before.pop_front(Some(&[])),
+            before.pop_front(Some((&[], &Arc::from([])))),
             Some(SubscriptionEvent::Rejected { .. })
         ));
-        assert!(is_reset(&before.pop_front(Some(&[]))));
-        assert!(before.pop_front(Some(&[])).is_none());
+        assert!(is_reset(&before.pop_front(Some((&[], &Arc::from([]))))));
+        assert!(before.pop_front(Some((&[], &Arc::from([])))).is_none());
 
         let mut after = queue(2);
         for _ in 0..3 {
             after.push_back(one_row_delta(), "notes");
         }
         after.push_back(rejected(), "notes");
-        assert!(is_reset(&after.pop_front(Some(&[]))));
+        assert!(is_reset(&after.pop_front(Some((&[], &Arc::from([]))))));
         assert!(matches!(
-            after.pop_front(Some(&[])),
+            after.pop_front(Some((&[], &Arc::from([])))),
             Some(SubscriptionEvent::Rejected { .. })
         ));
     }
@@ -5190,7 +5279,7 @@ mod event_queue_tests {
         assert!(queue.reset_due());
         assert!(queue.pop_front(None).is_none());
         assert!(queue.reset_due());
-        assert!(is_reset(&queue.pop_front(Some(&[]))));
+        assert!(is_reset(&queue.pop_front(Some((&[], &Arc::from([]))))));
         assert!(queue.is_empty());
     }
 }

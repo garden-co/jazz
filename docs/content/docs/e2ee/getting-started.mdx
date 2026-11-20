@@ -115,6 +115,22 @@ can come back shorter than its limit, or empty, and still not be the last one: t
 filters on an encrypted column, they may include rows that would not have matched.) A `key-pending` row
 comes back once its key arrives; read again, or use a subscription, which updates by itself.
 
+A subscription's results say the same. Each result it delivers carries the rows it leaves out, and
+`unreadableRows` works on it as on a read's:
+
+```ts
+const stop = session.db.subscribe(app.tasks.where({ projectId }), (tasks) => {
+  render(tasks);
+  showIncomplete(unreadableRows(tasks));
+});
+```
+
+The list stays current: a new row this device cannot open is named in the next result (even when the
+visible rows did not change), a row whose key arrives joins the result and leaves the list in the same
+update, and a row that leaves the query (deleted, or moved out of a page) is no longer named. A
+subscription with `limit` counts these rows toward its page, as a read does. Framework hooks (`useAll`
+and its counterparts) build their own arrays, so they do not carry the list yet.
+
 The runtime also reports each row it could not read, as it happens:
 
 ```ts
@@ -133,8 +149,20 @@ encryption participant: it has no account, no identity and no keys. Its own data
 and the plain columns of an encrypted table as normal, never sees an encrypted column (the rows come
 back without it), refuses a write that names one ("the backend holds no encryption keys; encrypted
 columns are written by clients") and refuses a filter, ordering or selection of one. A server
-that needs to compute on encrypted content cannot; do that on a client. The generated types are the
-clients' and give an encrypted column its plaintext type; on the backend, that property is `undefined`.
+that needs to compute on encrypted content cannot; do that on a client.
+
+The generated types are the clients': they give an encrypted column its plaintext type. On the backend,
+query through `keyless(app)` from `jazz-tools/backend`, the same app typed as the backend reads it: an
+encrypted column is absent from its rows (`title?: undefined`), its inserts and its filters.
+
+```ts
+import { keyless } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+
+const backendApp = keyless(app);
+// jazz = await createJazz({ app, ... }).ready()
+const tasks = await jazz.db.all(backendApp.tasks); // each task.title is undefined
+```
 
 `db.encryption` exists on every `Db`; for an app that declares no encryption, using it throws
 `EncryptionNotDeclaredError`.

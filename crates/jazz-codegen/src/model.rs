@@ -68,6 +68,9 @@ pub struct Column {
     pub references: Option<String>,
     /// The transform (in [`App::transforms`]) the stored value goes through.
     pub transform: Option<String>,
+    /// Whether the column is encrypted: [`Column::ty`] is then its
+    /// plaintext type, which only a client holding the keys reads.
+    pub encrypted: bool,
 }
 
 impl Column {
@@ -274,6 +277,7 @@ fn table(
             merge: c.merge_strategy,
             references: c.references.map(|t| t.as_str().to_string()),
             transform: info.and_then(|i| i.transforms.get(c.name_str()).cloned()),
+            encrypted: encryption.is_some_and(|e| e.columns.contains_key(c.name_str())),
         })
         .collect();
     let relations = info

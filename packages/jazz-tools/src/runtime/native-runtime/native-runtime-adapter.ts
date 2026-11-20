@@ -4804,6 +4804,9 @@ export class NativeRuntimeAdapter implements Runtime {
       chunk.terminalOperations,
       subscription.outputColumns?.rootColumns,
     );
+    if (chunk.unreadable !== undefined) {
+      delta.unreadable = JSON.parse(chunk.unreadable) as UnreadableRow[];
+    }
     subscription.callback?.(delta);
   }
 
@@ -7773,6 +7776,8 @@ function normalizeSubscriptionChunk(chunk: unknown):
       coalesced?: boolean;
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
+      /** The rows left out as undecryptable, as JSON, when they changed. */
+      unreadable?: string;
     }
   | {
       type: "rejected";
@@ -7791,6 +7796,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     reset?: unknown;
     coalesced?: unknown;
     terminalOperations?: unknown;
+    unreadable?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -7806,6 +7812,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalOperations: Array.isArray(record.terminalOperations)
         ? (record.terminalOperations as NativeTerminalOperation[])
         : undefined,
+      ...(typeof record.unreadable === "string" ? { unreadable: record.unreadable } : {}),
     };
   }
   if (record.type === "rejected" || record.type === "Rejected") {

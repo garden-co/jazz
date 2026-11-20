@@ -850,6 +850,13 @@ export interface SubscriptionDeltaEvent {
   terminalOperations: Array<never>
   settled: boolean
   tier: 'None' | 'Local' | 'Global'
+  /**
+   * The rows the result leaves out because the encryption runtime could
+   * not open them, as a JSON array of `{ table, id, column, code }`.
+   * Set on an opening, a reset, and a delta that changed the list, which
+   * it replaces; absent when the list is unchanged.
+   */
+  unreadable?: string
 }
 
 export type SubscriptionEvent =

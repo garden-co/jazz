@@ -15,6 +15,7 @@ import type {
 } from "../drivers/types.js";
 import { isValidUtf8 } from "./util.js";
 import { cloneRowData } from "./structural-values.js";
+import { withUnreadable, type UnreadableRow } from "../encryption/unreadable.js";
 
 export const RowChangeKind = {
   Added: 0 as const,
@@ -136,6 +137,7 @@ type SubscriptionManagerTransaction<T> = {
   orderedIds: string[];
   orderedIdIndex: JournaledMap<string, number>;
   deferredTerminalOperations: RuntimeTerminalOperation[];
+  unreadable: readonly UnreadableRow[];
 };
 
 /**
@@ -372,6 +374,12 @@ export class SubscriptionManager<T extends { id: string }> {
   private deferredTerminalOperations: RuntimeTerminalOperation[] = [];
   /** Rollback state while `handleDelta` is applying a delta. */
   private transaction: SubscriptionManagerTransaction<T> | null = null;
+  /**
+   * The rows the result leaves out because this device could not decrypt
+   * them, as the runtime last said: every result `all()` returns carries
+   * them (see `unreadableRows`).
+   */
+  private unreadable: readonly UnreadableRow[] = [];
 
   /** `orderedIds`, copied first if a rollback may still need the original. */
   private writableOrderedIds(): string[] {
@@ -503,6 +511,10 @@ export class SubscriptionManager<T extends { id: string }> {
         this.clearRows();
         this.deferredTerminalOperations = [];
       }
+      // A delta names the unreadable rows when they changed; a reset
+      // restates them (none from a runtime without encryption).
+      if (delta.unreadable !== undefined) this.unreadable = delta.unreadable;
+      else if (reset) this.unreadable = [];
       // Validate and register each occurrence once, keeping its public result
       // key and exact ordered-root address for the rest of this frame.
       const registerOccurrence = (sidecar: Uint8Array) => {
@@ -618,6 +630,7 @@ export class SubscriptionManager<T extends { id: string }> {
       orderedIdIndex: this.orderedIdIndex,
       // Never mutated in place: readyTerminalOperations replaces the array.
       deferredTerminalOperations: this.deferredTerminalOperations,
+      unreadable: this.unreadable,
     };
     this.currentResults.beginJournal();
     this.terminalRows.beginJournal();
@@ -651,6 +664,7 @@ export class SubscriptionManager<T extends { id: string }> {
     this.orderedIds = transaction.orderedIds;
     this.orderedIdIndex = transaction.orderedIdIndex;
     this.deferredTerminalOperations = transaction.deferredTerminalOperations;
+    this.unreadable = transaction.unreadable;
   }
 
   /** Preserve a child splice that raced ahead of its root hydration. */
@@ -904,10 +918,7 @@ export class SubscriptionManager<T extends { id: string }> {
     );
     this.orderedIdIndex = new JournaledMap();
     this.reindexOrderedIds();
-    const all = this.orderedIds
-      .map((id) => this.currentResults.get(id))
-      .filter((item): item is T => item !== undefined);
-    return { delta, reset: true as const, all };
+    return { delta, reset: true as const, all: this.all() };
   }
 
   private applyBulkTypedDelta(delta: RowDelta<T>[]): void {
@@ -950,6 +961,7 @@ export class SubscriptionManager<T extends { id: string }> {
    */
   clear(): void {
     this.clearRows();
+    this.unreadable = [];
   }
 
   private clearRows(): void {
@@ -961,10 +973,14 @@ export class SubscriptionManager<T extends { id: string }> {
     this.orderedIdIndex = new JournaledMap();
   }
 
+  /** The current result; `unreadableRows` on it gives the rows it leaves out. */
   all(): T[] {
-    return this.orderedIds
-      .map((id) => this.currentResults.get(id))
-      .filter((item): item is T => item !== undefined);
+    return withUnreadable(
+      this.orderedIds
+        .map((id) => this.currentResults.get(id))
+        .filter((item): item is T => item !== undefined),
+      this.unreadable,
+    );
   }
 
   /**
