@@ -12,6 +12,7 @@ import {
 } from "../encryption/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { Db } from "../runtime/db.js";
+import { DbReplacedError } from "../runtime/db-replaced-error.js";
 import { DbClosedError } from "../runtime/graceful-shutdown-error.js";
 import { RuntimeClosedError } from "../runtime/runtime-closed-error.js";
 import { EncryptionNeedsLocalFirstError } from "../runtime/encryption-needs-local-first.js";
@@ -468,6 +469,24 @@ describe("a thin session of an app with encrypted columns", () => {
     }
     expect(errors).toHaveLength(1);
     expect(errors[0]).toBeInstanceOf(DbClosedError);
+  }, 60_000);
+
+  it("ends a waiting write the moment the session replaces the Db, before it shuts down", async () => {
+    const host = await serve();
+    const gate = gatedLoader();
+    const session = await open(host, undefined, gate.loader);
+    const kept = db(session);
+    const write = kept.insert(app.tasks, { projectId: crypto.randomUUID(), title: "x" } as never);
+    const written = settled(write.wait({ tier: "global" }));
+    await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
+
+    // The session marks the old Db replaced while its client still drains;
+    // the Db is not shut down yet, so only this ends the wait.
+    kept.markReplaced("signed-out");
+
+    const { error } = await written;
+    expect(error).toBeInstanceOf(DbReplacedError);
+    gate.release();
   }, 60_000);
 
   it("does not run a waiting write after an account switch", async () => {
