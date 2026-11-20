@@ -1712,12 +1712,22 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   transaction: Transaction<TKind>,
   callback: (target: Scoped<Transaction<TKind>>) => TResult,
   client: JazzClient | (() => JazzClient),
+  settledRefused?: () => void,
 ): RunInTransactionResult<TResult, TKind> {
+  // The callback settled (returned, threw, or its promise settled): its
+  // commit point, where a refused transaction tells `settledRefused`.
+  let settled = false;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    if (settledRefused && transaction.refusal()) settledRefused();
+  };
   let value: TResult;
   try {
     const scope = createTransactionScope(transaction);
     value = callback(scope);
   } catch (error) {
+    settle();
     try {
       await transaction.rollback();
     } catch {
@@ -1726,14 +1736,17 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
     throw error;
   }
   const resultClient = typeof client === "function" ? client : () => client;
+  if (typeof (value as { then?: unknown } | null)?.then !== "function") settle();
   let resolvedValue: Awaited<TResult>;
   try {
     resolvedValue = await value;
+    settle();
     // An operation in it was refused and the callback caught that: it can
     // never commit, and fails as if the callback had not caught it.
     const refusal = transaction.refusal();
     if (refusal) throw refusal;
   } catch (error) {
+    settle();
     try {
       await transaction.rollback();
     } catch {
@@ -2477,6 +2490,11 @@ export class Db {
   /** Writes waiting for the local-first client now. */
   private writesWaiting = 0;
   /**
+   * Writes made after a refused callback transaction settled wait on this
+   * until its rerun's commit is made (see {@link rerunOnLocalFirst}).
+   */
+  private heldWrites: Promise<void> | null = null;
+  /**
    * The last wait for the local-first client that failed, and how many
    * writes had been made by then: an encrypted write queued behind that one
    * fails with the same error rather than waiting again.
@@ -2981,6 +2999,18 @@ export class Db {
     schema: WasmSchema,
     write: (client: JazzClient, db: Db) => T | Promise<T>,
   ): T | Promise<T> {
+    if (this.heldWrites)
+      // By the time it runs, this Db may have handed over to its successor.
+      return this.afterHeldWrites(() =>
+        this.successor ? this.runOnCurrent(schema, write) : this.runWriteNow(schema, write),
+      );
+    return this.runWriteNow(schema, write);
+  }
+
+  private runWriteNow<T>(
+    schema: WasmSchema,
+    write: (client: JazzClient, db: Db) => T | Promise<T>,
+  ): T | Promise<T> {
     const client = this.getClient(schema);
     const made = ++this.writesMade;
     return runAfterPreparation(client, () => {
@@ -2994,6 +3024,11 @@ export class Db {
       }
       return result instanceof Promise ? result.catch(retry) : result;
     });
+  }
+
+  /** Whether a write made now runs later: behind the client's queue, or held. */
+  private writeDeferred(client: JazzClient): boolean {
+    return this.heldWrites !== null || getOwnerPreparation(client)?.pending !== undefined;
   }
 
   /** Run `write` on the Db that does this one's work now, not behind its queue. */
@@ -3148,9 +3183,29 @@ export class Db {
    * local-first client, or one still in the queue that may yet wait) begins
    * only after them, so what ends it shows in its commit: it resolves once
    * that commit is made, or with its rerun.
+   *
+   * A refused one takes its place among this Db's writes when its callback
+   * settles: writes and callback transactions made after that wait for it
+   * (in their own order) until its rerun's commit is made, or the rerun or
+   * the wait for the local-first client fails. Writes made while the
+   * callback still runs are concurrent with it and aren't held; nor are
+   * reads. They are held here, not in the client's write queue: the
+   * hand-over moves that queue ahead of the rerun, which waits on them.
    */
   private rerunOnLocalFirst<R extends WriteHandle<unknown, unknown>>(
-    attempt: () => Promise<R>,
+    attempt: (settledRefused: () => void) => Promise<R>,
+    rerun: (db: Db) => Promise<R>,
+  ): Promise<R> {
+    if (this.heldWrites)
+      // Handed over meanwhile: its one run is on the successor.
+      return this.afterHeldWrites(() =>
+        this.successor ? rerun(this.current()) : this.rerunOnLocalFirstNow(attempt, rerun),
+      );
+    return this.rerunOnLocalFirstNow(attempt, rerun);
+  }
+
+  private rerunOnLocalFirstNow<R extends WriteHandle<unknown, unknown>>(
+    attempt: (settledRefused: () => void) => Promise<R>,
     rerun: (db: Db) => Promise<R>,
   ): Promise<R> {
     const again = (error: unknown): Promise<R> | undefined => {
@@ -3164,7 +3219,12 @@ export class Db {
     const behindWait =
       this.writesWaiting > 0 ||
       (isThinDb(this) && client !== null && getOwnerPreparation(client)?.pending !== undefined);
-    return attempt().then(
+    let release: (() => void) | undefined;
+    const holdLaterWrites = () => {
+      // Without a loader it fails at once: nothing to hold writes for.
+      if (!release && localFirstLoaderOf(this)) release = this.holdWrites();
+    };
+    const settled = attempt(holdLaterWrites).then(
       (result) =>
         behindWait
           ? result.txId.then(
@@ -3179,6 +3239,41 @@ export class Db {
         return rerun;
       },
     );
+    // Open once its rerun's commit is made (or it failed), so a held write
+    // can't stage on the local-first client before that commit.
+    const end = () => release?.();
+    settled.then((result) => {
+      if (release) Promise.resolve(result.txId).then(end, end);
+    }, end);
+    return settled;
+  }
+
+  /** Hold the writes made from now on until the returned function is called. */
+  private holdWrites(): () => void {
+    // Handed over: the writes made from now on are the successor's.
+    if (this.successor) return this.current().holdWrites();
+    let open!: () => void;
+    const opened = new Promise<void>((resolve) => (open = resolve));
+    this.chainHeldWrites((this.heldWrites ?? Promise.resolve()).then(() => opened));
+    return open;
+  }
+
+  /** Run `operation` after the writes held so far, and hold later ones behind it. */
+  private afterHeldWrites<T>(operation: () => T | Promise<T>): Promise<T> {
+    const ran = this.heldWrites!.then(operation);
+    this.chainHeldWrites(ran);
+    return ran;
+  }
+
+  private chainHeldWrites(next: Promise<unknown>): void {
+    const tail = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.heldWrites = tail;
+    void tail.then(() => {
+      if (this.heldWrites === tail) this.heldWrites = null;
+    });
   }
 
   protected getAccessContext(): DbAccessContext | null {
@@ -3586,7 +3681,7 @@ export class Db {
       table._table,
     );
     const context = this.getAccessContext();
-    const deferred = !!getOwnerPreparation(client)?.pending;
+    const deferred = this.writeDeferred(client);
     const encrypted = declaredEntries(table._schema);
     // The row ID can also name its encryption space. Keep it across the first
     // attempt and any retries, including one that starts key preparation.
@@ -3764,7 +3859,7 @@ export class Db {
       table._table,
     );
     const context = this.getAccessContext();
-    const deferred = !!getOwnerPreparation(client)?.pending;
+    const deferred = this.writeDeferred(client);
     const value = deferred ? immediateWriteRow(table, id, values) : undefined;
     const output = (row: WasmRow) =>
       transformOutputRow<T>(table, transformRow(row, table._schema, table._table));
@@ -3822,7 +3917,7 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema);
     rejectComputedWrites(table, data);
-    if (getOwnerPreparation(client)?.pending) data = { ...data };
+    if (this.writeDeferred(client)) data = { ...data };
     const context = this.getAccessContext();
     const normalized = normalizeViewOptions(table._schema, table._table, options);
     const result = this.runWrite(table._schema, (client, db) => db.readied(mutate(client)));
@@ -4096,7 +4191,7 @@ export class Db {
     callback: (tx: TransactionScope<"mergeable">) => TResult | Promise<TResult>,
   ): Promise<WriteResult<Awaited<TResult>>> {
     return this.rerunOnLocalFirst(
-      () => this.transactionOnce(callback),
+      (settledRefused) => this.transactionOnce(callback, settledRefused),
       (db) => db.transactionOnce(callback),
     );
   }
@@ -4104,12 +4199,14 @@ export class Db {
   /** {@link transaction}, run once: never again on the local-first client. */
   private transactionOnce<TResult>(
     callback: (tx: TransactionScope<"mergeable">) => TResult | Promise<TResult>,
+    settledRefused?: () => void,
   ): Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
     return runInTransaction(
       transaction,
       callback,
       () => getDbTxHandleBinding(transaction, "result").ownerClient,
+      settledRefused,
     );
   }
 
@@ -4122,7 +4219,7 @@ export class Db {
     callback: (tx: TransactionScope<"serializable">) => TResult | Promise<TResult>,
   ): Promise<SerializableWriteResult<Awaited<TResult>>> {
     return this.rerunOnLocalFirst(
-      () => this.serializableTransactionOnce(callback),
+      (settledRefused) => this.serializableTransactionOnce(callback, settledRefused),
       (db) => db.serializableTransactionOnce(callback),
     );
   }
@@ -4130,12 +4227,14 @@ export class Db {
   /** {@link serializableTransaction}, run once: never again on the local-first client. */
   private serializableTransactionOnce<TResult>(
     callback: (tx: TransactionScope<"serializable">) => TResult | Promise<TResult>,
+    settledRefused?: () => void,
   ): Promise<SerializableWriteResult<Awaited<TResult>>> {
     const transaction = this.beginSerializableTransaction();
     return runInTransaction(
       transaction,
       callback,
       () => getDbTxHandleBinding(transaction, "result").ownerClient,
+      settledRefused,
     );
   }
 
@@ -4783,6 +4882,11 @@ export class Db {
     const heldBack = ownClient ? getOwnerPreparation(ownClient)?.pending : undefined;
     if (heldBack && this.clientSchema)
       void ownerPreparation(next.getClient(this.clientSchema)).run(() => heldBack);
+    // Writes held behind a refused callback transaction: those made on
+    // `next` from now on wait for them too. Not in `next`'s write queue,
+    // where the transaction's rerun, which they wait for, will queue.
+    const held = this.heldWrites;
+    if (held) next.chainHeldWrites((next.heldWrites ?? Promise.resolve()).then(() => held));
     this.successor = next;
     for (const waiter of Array.from(this.successorWaiters)) waiter(next.current());
     this.successorWaiters.clear();
