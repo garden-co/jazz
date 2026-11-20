@@ -259,6 +259,7 @@
     "docs-quick-wins",
     "drain-core-ticks-during-quiesce",
     "drop-alpha59-alpha60-exporter",
+    "durable-object-r2-blobs",
     "durable-object-websocket-hibernation",
     "durable-object-worker",
     "durable-objects-store",
