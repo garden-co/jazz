@@ -359,7 +359,7 @@ impl E2eeClient {
         let records = {
             let account = self.account.borrow();
             let account = account.as_ref().ok_or(ClientError::NoAccount)?;
-            let device = self.shared.device.borrow().clone();
+            let device = self.shared.device()?.clone();
             let author = Author::new(&directory, &self.shared.account_id, &account.key, &device)?;
             let make = match kind {
                 Rotation::Ordinary => rotate,

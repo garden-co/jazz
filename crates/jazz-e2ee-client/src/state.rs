@@ -2,7 +2,7 @@
 //! device, the held keys, the catalogue identities the cell contexts name,
 //! and the reports reads leave for the runtime.
 
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
@@ -226,6 +226,39 @@ impl Published {
         self.listeners.clone()
     }
 
+    /// Forgets which missing versions of `space` were told, so a version
+    /// still missing after the space's keys changed is told again.
+    fn forget_missing_keys(&mut self, space: &SpaceAddress) {
+        let of_space = format!(":{}:{}:", space.scope_id, space.identifier);
+        self.events
+            .retain(|key| !(key.starts_with("missing-key:") && key.contains(&of_space)));
+    }
+
+    /// Forgets every report and event, keeping the listeners, and returns
+    /// the withdrawals of the held reports of a space.
+    fn reset(&mut self) -> Vec<Report> {
+        let listeners = std::mem::take(&mut self.listeners);
+        let old = std::mem::replace(
+            self,
+            Self {
+                listeners,
+                ..Default::default()
+            },
+        );
+        old.order
+            .into_values()
+            .filter_map(|key| {
+                Some(Report::Withdrawn {
+                    space: key.space?,
+                    table: key.table,
+                    id: key.id,
+                    column: key.column,
+                    code: key.code,
+                })
+            })
+            .collect()
+    }
+
     /// Forgets the reports of `space`, per space and per row, with one of
     /// `codes`, returning their withdrawals.
     fn withdraw(&mut self, space: &SpaceAddress, codes: &[UnreadableCode]) -> Vec<Report> {
@@ -427,13 +460,15 @@ pub(crate) struct Shared {
     pub(crate) content: SharedDomain,
     pub(crate) account_id: String,
     pub(crate) plans: BTreeMap<String, TablePlan>,
-    pub(crate) device: RefCell<LocalDevice>,
+    /// This device; `None` once the store is wiped, its secrets and
+    /// approval nonce dropped (and zeroed) with it (§6.4).
+    pub(crate) device: RefCell<Option<LocalDevice>>,
     pub(crate) keys: RefCell<KeyState>,
     pub(crate) random: RefCell<Box<dyn RandomSource>>,
     pub(crate) reports: RefCell<VecDeque<Report>>,
     /// Reports waiting for the runtime to deliver them to listeners: a
     /// hook never calls out while the database is busy.
-    pub(crate) outbox: RefCell<Vec<Report>>,
+    pub(crate) outbox: RefCell<VecDeque<Report>>,
     pub(crate) published: RefCell<Published>,
     pub(crate) creations: RefCell<Creations>,
     /// Versions reads needed and did not hold, since the runtime last
@@ -508,13 +543,27 @@ fn enqueue_missing(
 }
 
 impl Shared {
+    /// This device, or [`ClientError::Closed`] once the store was wiped.
+    pub(crate) fn device(&self) -> Result<Ref<'_, LocalDevice>, ClientError> {
+        Ref::filter_map(self.device.borrow(), Option::as_ref).map_err(|_| ClientError::Closed)
+    }
+
+    /// Drops the device's secrets and approval nonce (each zeroed on drop)
+    /// and every held key: the store was wiped (§6.4).
+    pub(crate) fn forget_secrets(&self) {
+        let mut keys = self.keys.borrow_mut();
+        keys.closed = true;
+        keys.held = Default::default();
+        self.device.borrow_mut().take();
+    }
+
     pub(crate) fn report(&self, report: Report) {
         {
             let mut outbox = self.outbox.borrow_mut();
             if outbox.len() == MAX_REPORTS {
-                outbox.remove(0);
+                outbox.pop_front();
             }
-            outbox.push(report.clone());
+            outbox.push_back(report.clone());
         }
         let mut reports = self.reports.borrow_mut();
         if reports.len() == MAX_REPORTS {
@@ -611,6 +660,23 @@ impl Shared {
                 listener(report);
             }
         }
+    }
+
+    /// Forgets which missing versions of `space` the listeners were told:
+    /// its keys changed, so one still missing is told again.
+    pub(crate) fn forget_missing_keys(&self, space: &SpaceAddress) {
+        self.published.borrow_mut().forget_missing_keys(space);
+    }
+
+    /// Forgets what was reported for a device and account that are gone
+    /// (re-enrolment): reports not yet delivered or polled, the reports and
+    /// events already delivered, and with them the spaces watched for
+    /// them. The listeners stay; the withdrawals of the reports they hold
+    /// reach them with the next delivery.
+    pub(crate) fn reset_reports(&self) {
+        self.reports.borrow_mut().clear();
+        let withdrawn = self.published.borrow_mut().reset();
+        *self.outbox.borrow_mut() = withdrawn.into();
     }
 
     /// Withdraws the reports of `space` with one of `codes`.

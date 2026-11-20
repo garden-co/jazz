@@ -29,6 +29,7 @@
 //! binding is this device's, it names the expected account and its
 //! signature verifies.
 
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::agility::{KeyPair, MechanismId, PublicKey, SecretKey};
@@ -227,7 +228,9 @@ impl StoredDevice {
                     .try_into()
                     .map_err(|_| ProtocolError::InvalidRecord("approval nonce length"))?;
                 let nonce = Zeroizing::new(nonce);
-                if nonce_commitment(&self.id, &nonce[..])? != self.approval_commitment {
+                // Constant time: the nonce is secret until it is revealed.
+                let commitment = nonce_commitment(&self.id, &nonce[..])?;
+                if !bool::from(commitment.ct_eq(&self.approval_commitment)) {
                     return invalid("the approval nonce does not open its commitment");
                 }
                 Some(ApprovalNonce(nonce))

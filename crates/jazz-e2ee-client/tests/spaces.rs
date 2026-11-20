@@ -705,6 +705,104 @@ fn a_backed_off_space_does_not_fail_a_read_of_the_others() {
     });
 }
 
+/// Contract: a device that enrols again after its account was reset
+/// forgets what was reported to the device it was: the listener is told
+/// the withdrawal of its `key-pending`, a listener registered later is
+/// told nothing, and the space it waited on is no longer watched.
+///
+/// ```text
+/// carol ──space, alice a member (no delivery)──► alice's device 1: key-pending
+/// alice's device 2 ──request, reset──► server
+/// device 1 ──verify──► re-enrolled: withdrawn; nothing held; nothing watched
+/// ```
+#[test]
+fn reenrolment_forgets_the_old_devices_reports() {
+    within(|| {
+        let settings = EncryptionSettings {
+            allow_account_reset: true,
+            ..Default::default()
+        };
+        let server = secure_authority_with(&settings, None);
+        // A device under the reset settings.
+        let reset_device = |who, node| {
+            let client = open_account(Rc::new(MemoryStore::new()), who, settings.clone(), None);
+            let (db, link) = session(&client, &server, who, &settings, node, None);
+            Device {
+                who,
+                client,
+                db,
+                _link: Some(link),
+                live: Default::default(),
+            }
+        };
+        let first = reset_device(account(0xa1), 1);
+        first.activate(&server);
+        let carol = reset_device(account(0xc0), 2);
+        carol.activate(&server);
+        let space = new_project(&server, &carol, "plans");
+        add_member(&server, &carol, space, &first.id());
+        write_note(&server, &carol, space, SECRET).unwrap();
+        pump(&server, &carol.db);
+
+        let seen = reports_of(&first);
+        let mut watch = drive(&server, &[&first.db], first.client.watch_spaces(&first.db)).unwrap();
+        first.follow_notes(&server);
+        assert!(read_notes(&server, &first, space).unwrap().is_empty());
+        assert_eq!(codes(&seen), [(UnreadableCode::KeyPending, false)]);
+
+        let second = reset_device(first.who, 3);
+        assert_eq!(
+            drive(
+                &server,
+                &[&second.db],
+                second.client.ensure_account(&second.db)
+            )
+            .unwrap(),
+            AccountStatus::AwaitingApproval
+        );
+        assert_eq!(
+            drive(
+                &server,
+                &[&second.db],
+                second.client.reset_account(&second.db)
+            )
+            .unwrap(),
+            AccountStatus::Active
+        );
+        pump(&server, &first.db);
+        assert_eq!(
+            drive(
+                &server,
+                &[&first.db],
+                first.client.ensure_account(&first.db)
+            )
+            .unwrap(),
+            AccountStatus::Reenrolled
+        );
+        first.client.flush_reports();
+        assert!(
+            seen.borrow().iter().any(|report| matches!(
+                report,
+                Report::Withdrawn {
+                    code: UnreadableCode::KeyPending,
+                    ..
+                }
+            )),
+            "{:?}",
+            seen.borrow()
+        );
+        assert!(reports_of(&first).borrow().is_empty());
+        assert!(first.client.take_reports().is_empty());
+        let synced = drive(
+            &server,
+            &[&first.db],
+            first.client.sync_spaces(&first.db, &mut watch),
+        )
+        .unwrap();
+        assert!(synced.is_empty(), "{synced:?}");
+    });
+}
+
 /// Alice's database at `path`, not linked to any server.
 fn offline_db(client: &E2eeClient, who: AuthorSubject, node: u8, path: &std::path::Path) -> Db {
     let config = jazz::db::DbConfig::new(
@@ -1154,6 +1252,79 @@ fn acquiring_from_a_rolled_back_server_is_stale_state() {
                 ))
             ),
             "{refused:?}"
+        );
+    });
+}
+
+/// Contract: a server restored from an older copy cannot show the author
+/// of a space's root at an earlier state than this device verified (§6.3a):
+/// once bob has read alice's account at a later cut, acquiring her space
+/// from the restored copy is `stale-state`, so a key is never taken from a
+/// view in which a device alice removed could still be active. Bob's own
+/// account passes its floor on the same copy: his own space is acquired.
+///
+/// ```text
+/// alice ──space A (root)──► server   bob ──space B (root)──► server (copy)
+/// bob ──later write; acquire A (floor of alice at c2)──► server
+/// bob ──acquire B──► restored copy: held
+/// bob ──acquire A──► restored copy (alice at c1) ──✗ stale-state
+/// ```
+#[test]
+fn acquiring_with_a_rolled_back_author_is_stale_state() {
+    within(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("server.sqlite");
+        let old = dir.path().join("old.sqlite");
+        let settings = EncryptionSettings::default();
+        let (alice_id, bob) = {
+            let server = secure_authority_with(&settings, Some(&live));
+            let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+            alice.activate(&server);
+            let bob = device(&server, account(0xb0), MemoryStore::new(), 2);
+            bob.activate(&server);
+            let theirs = new_project(&server, &alice, "plans");
+            add_member(&server, &alice, theirs, &bob.id());
+            write_note(&server, &alice, theirs, SECRET).unwrap();
+            pump(&server, &alice.db);
+            let own = new_project(&server, &bob, "mine");
+            write_note(&server, &bob, own, "bob's").unwrap();
+            pump(&server, &bob.db);
+            let theirs = space_address(&bob, theirs);
+            let own = space_address(&bob, own);
+            (alice.id(), (bob.who, bob.client, theirs, own))
+        };
+        let (who, client, theirs, own) = bob;
+        for suffix in ["", "-wal", "-shm"] {
+            let source = format!("{}{suffix}", live.display());
+            if std::path::Path::new(&source).exists() {
+                std::fs::copy(&source, format!("{}{suffix}", old.display())).unwrap();
+            }
+        }
+        {
+            let server = secure_authority_with(&settings, Some(&live));
+            let (db, _link) = session(&client, &server, who, &settings, 3, None);
+            project(&db, "a later write");
+            pump(&server, &db);
+            drive(&server, &[&db], client.acquire(&db, &theirs)).unwrap();
+        }
+        let floor = block_on(client.floor(&alice_id)).expect("alice's account is floored");
+
+        let restored = secure_authority_with(&settings, Some(&old));
+        let (db, _link) = session(&client, &restored, who, &settings, 4, None);
+        let held = drive(&restored, &[&db], client.acquire(&db, &own));
+        assert!(matches!(held, Ok(SpaceKeyState::Held)), "{held:?}");
+        let refused = drive(&restored, &[&db], client.acquire(&db, &theirs));
+        assert!(
+            matches!(
+                refused,
+                Err(ClientError::Protocol(ProtocolError::StaleState))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            block_on(client.floor(&alice_id)),
+            Some(floor),
+            "the floor stays"
         );
     });
 }
