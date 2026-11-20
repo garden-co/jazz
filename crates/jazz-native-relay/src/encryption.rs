@@ -132,14 +132,15 @@ fn account_secret(hex: &str) -> Result<jazz_e2ee_client::host::RecoverySecret, S
     if hex.len() != 64 || !hex.is_ascii() {
         return Err("a recovery secret is 64 hexadecimal characters".to_owned());
     }
-    let mut bytes = [0u8; 32];
+    // Zeroized when dropped, on every return: a `fill(0)` of a local that is
+    // never read again may be optimised away, and would miss the bytes
+    // parsed before a refusal.
+    let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
     for (index, byte) in bytes.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&hex[2 * index..2 * index + 2], 16)
             .map_err(|_| "a recovery secret is hexadecimal".to_owned())?;
     }
-    let secret = jazz_e2ee_client::host::RecoverySecret::from_bytes(bytes);
-    bytes.fill(0);
-    Ok(secret)
+    Ok(jazz_e2ee_client::host::RecoverySecret::from_bytes(*bytes))
 }
 
 /// The runtime for `account`, built over the device's store.
