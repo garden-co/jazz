@@ -65,11 +65,11 @@ function makeStateA(): AuthState {
 
 function makeStateB(): AuthState {
   return {
-    authMode: "local-first",
+    authMode: "device-account",
     session: {
       user: author("urn:jazz:local-first", "u-b"),
       claims: { role: "writer" },
-      authMode: "local-first",
+      authMode: "device-account",
     },
   };
 }
@@ -191,11 +191,11 @@ describe("solid/createJazzClientStateStore", () => {
       expect(store.session?.claims.sub).toBeUndefined();
 
       b.emit({
-        authMode: "local-first",
+        authMode: "device-account",
         session: {
           user: author("urn:jazz:local-first", "u-b2"),
           claims: {},
-          authMode: "local-first",
+          authMode: "device-account",
         },
       });
       await flushMicrotasks();

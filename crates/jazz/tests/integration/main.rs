@@ -25,8 +25,6 @@ mod branch_view_sync;
 mod branch_views;
 #[path = "../bundle_permissions.rs"]
 mod bundle_permissions;
-#[path = "../callback_transaction_cancellation.rs"]
-mod callback_transaction_cancellation;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
 #[path = "../catalogue_unsupported_versions.rs"]
@@ -107,6 +105,8 @@ mod link_identities;
 mod local_first_first_load_gate;
 #[path = "../local_first_server_wait.rs"]
 mod local_first_server_wait;
+#[path = "../managed_storage.rs"]
+mod managed_storage;
 #[path = "../maybe_conflicting.rs"]
 mod maybe_conflicting;
 #[path = "../mirrored_lens_defaults.rs"]
@@ -205,6 +205,8 @@ mod shard_role;
 mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
+#[path = "../staged_transaction_cancellation.rs"]
+mod staged_transaction_cancellation;
 #[path = "../storage_corpus.rs"]
 mod storage_corpus;
 #[path = "../storage_errors.rs"]
@@ -219,6 +221,8 @@ mod streaming_upload_ownership;
 mod structured_result_tree;
 #[path = "../subscription_backlog.rs"]
 mod subscription_backlog;
+#[path = "../subscription_scope_sharing.rs"]
+mod subscription_scope_sharing;
 #[path = "../sync_access_loss.rs"]
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]

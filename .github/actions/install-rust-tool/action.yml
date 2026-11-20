@@ -5,6 +5,10 @@ inputs:
   tool:
     description: Pinned tool name accepted by dev/ci/install-rust-tool.sh.
     required: true
+  restore-cache:
+    description: "'false' never restores the tool from the Actions cache (an untrusted ref could have written it): it is installed afresh, pinned and verified."
+    required: false
+    default: "true"
   installer-revision:
     description: Bump to invalidate a broken immutable hosted-tool cache.
     required: false
@@ -37,7 +41,7 @@ runs:
     # because an older tool is not an acceptable fallback.
     - name: Restore pinned Cargo tool
       id: tool-cache
-      if: steps.provisioned-tool.outputs.active != 'true'
+      if: steps.provisioned-tool.outputs.active != 'true' && inputs.restore-cache == 'true'
       uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
       with:
         path: ${{ runner.temp }}/jazz-rust-tool

@@ -143,6 +143,42 @@ this document or public receipts.
   or unrecoverable tenants. A brief, intentional alpha wire mismatch in which old
   clients fail loudly is not by itself a reason for creation maintenance.
 
+## One-approval publish (release-publish.yml, being proven)
+
+`.github/workflows/release-publish.yml` replaces steps 2–5 of today's publish
+(npm, crates, language artifacts, Go, Swift, Kotlin, GitHub release) with one
+run and one approval of the `publish` environment. It runs beside the existing
+workflows until it has published a release; until then it is dispatched by
+hand:
+
+```sh
+gh workflow run release-publish.yml --ref main \
+  -f version=2.0.0-alpha.N -f sha=<release merge commit> -f mode=dry-run
+```
+
+- Before the approval it takes the prebuilt artifacts of a
+  `release-artifacts.yml` run on `release` that built the published tree,
+  the release commit's own run first: wait for the `release` push's run to
+  succeed (a dry run may name old workflows' runs with `legacy-run-ids`
+  instead). The Version Packages head's run is reused once
+  `changeset-release/**` is protected by its ruleset. It checks them, runs `cargo package` on every crate, embeds and
+  tests the Go module, and attaches every asset to the draft release (create
+  the draft with its notes first, with `github-release.yml`).
+- Every publish leg (npm, crates.io, Maven Central, Go tag, Swift mirror)
+  waits on `publish` at the same moment: approve them together. Inspector
+  stages and promotes after npm; the draft is published as Latest last.
+- Each leg skips what is already published: after a partial failure, use
+  "Re-run failed jobs" (the re-run waits for approval again).
+- `maven-publishing-type` is `AUTOMATIC` (the Maven leg waits until Central
+  reports PUBLISHED); `USER_MANAGED` leaves it validated for Publish in the
+  Portal, as before. `maven-portal-dry-run` (dry run
+  only) uploads `USER_MANAGED`, waits for VALIDATED and drops it.
+- The run summary opens with the RC gate's verdict (`rc-verdict` of the
+  newest release-candidate.yml run on the Version Packages head): every HOLD
+  with its owner, to decide before approving. A NO-GO refuses the publish; a
+  gate run from before `rc-verdict` is reported as having no verdict.
+- The run summary has a timing table for every job.
+
 ## 5. Publish the GitHub Release and announcement
 
 - Verify package publication and post-release acceptance are complete, with no

@@ -76,7 +76,7 @@ export function trustAttachedBrowserWorkerSession(config: DbConfig): void {
   const payload = parseJwtPayload(config.jwtToken ?? "");
   const authMode =
     payload?.iss === LOCAL_FIRST_JWT_ISSUER
-      ? "local-first"
+      ? "device-account"
       : payload?.iss === ANONYMOUS_JWT_ISSUER
         ? "anonymous"
         : null;
@@ -300,6 +300,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     onFailure,
     onStorageReset,
     onStorageInvalidated,
+    onNewerBuild,
   }: BrowserWorkerConnectionContext<DbConfig>): BrowserWorkerConnection {
     const runtime = client.getRuntime();
     if (!(runtime instanceof NativeRuntimeAdapter)) {
@@ -367,6 +368,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         onFailure,
         onStorageReset,
         onStorageInvalidated,
+        onNewerBuild,
       },
     );
   }

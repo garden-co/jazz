@@ -1,0 +1,296 @@
+name: Release artifacts
+
+# Builds every release artifact once per commit, so the release candidate gate
+# and the publish workflows verify and ship these files instead of rebuilding:
+#   release-server     jazz-tools-linux-{x64,arm64}, SHA256SUMS
+#                      (+ debug-symbols-jazz-tools-linux-* from the build)
+#   release-npm        every npm tarball, packed exactly as publish packs them,
+#                      NPM-SHA256SUMS, rn-packages.json
+#   release-languages  libjazz_ffi-<platform>.tar.gz, jazz-ffi-bindings.tar.gz,
+#                      jazz-kotlin-<v>.jar, jazz-kotlin-android-<v>.aar,
+#                      libjazz_ffi-source.txt, SHA256SUMS-languages
+#   release-maven      the tools/jazz tree of a local Maven repository, signed
+#                      with a throwaway key (publish re-signs it)
+#   release-swift      JazzFFI.xcframework.zip, JazzFFI.xcframework.zip.checksum
+#   release-swift-mirror  the assembled garden-co/jazz-swift tree, verified
+#   release-manifest   manifest.json: sha, tree, version, run, publish order,
+#                      every file's artifact and sha256
+# plus the intermediate artifacts publish-jazz-tools-alpha.yml downloads
+# today (pkg-jazz-tools, pkg-jazz-wasm, pkg-jazz-napi, pkg-jazz-rn,
+# pkg-create-jazz, inspector-prebuilt), under the same names.
+#
+# Versions are baked in: the Cargo workspace version reaches the server and
+# jazz-napi binaries (jazz-otel's service.version), and the package.json
+# versions reach the tarballs and the Kotlin jar. So only a run on the Version
+# Packages head (changeset-release/release, dispatched by
+# changesets-release-pr.yml, since GITHUB_TOKEN pushes trigger nothing), or
+# on a commit with the same tree, carries what a release ships. Runs on main
+# and release keep the build caches warm and catch packaging breakage after
+# merge. Consumers find a run by commit (head_sha) or by tree
+# (manifest.json `tree`, the way publish matches the release merge commit to
+# the Version Packages head).
+on:
+  push:
+    branches: [main, release]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to build."
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit to build."
+        required: true
+        type: string
+    outputs:
+      run_id:
+        description: The run holding the artifacts.
+        value: ${{ jobs.manifest.outputs.run_id }}
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer main commit supersedes an older one's build; release builds and
+  # dispatched builds always finish.
+  group: release-artifacts-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || format('{0}-{1}', inputs.ref || github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+env:
+  # Fail closed: only main, release and merge-group/** restore caches an
+  # untrusted ref could have written (#supply-chain, 2026-11-19).
+  JAZZ_TRUSTED_CACHE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) && 'true' || 'false' }}
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+  JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
+
+jobs:
+  resolve:
+    name: Resolve the commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tree: ${{ steps.resolve.outputs.tree }}
+      version: ${{ steps.resolve.outputs.version }}
+      release: ${{ steps.resolve.outputs.release }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - id: resolve
+        env:
+          # The branch the run belongs to (a dispatch's or caller's ref; inputs.ref
+          # is usually a SHA).
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          # The run is found (and attested) by its head_sha: it must build
+          # exactly that commit. Dispatch on the branch whose head to build.
+          if [ "${sha}" != "${GITHUB_SHA}" ]; then
+            echo "::error::ref ${INPUT_REF} is ${sha}, not this run's commit ${GITHUB_SHA}; dispatch with --ref on the branch to build."
+            exit 1
+          fi
+          version=$(node -p 'require("./packages/jazz-tools/package.json").version')
+          # Attest only what a release can ship: the release branch and the
+          # Version Packages head (by name or by a dispatch of either).
+          release=false
+          case "${REF_NAME}" in
+            release|refs/heads/release|changeset-release/*|refs/heads/changeset-release/*) release=true ;;
+          esac
+          {
+            echo "sha=${sha}"
+            echo "tree=$(git rev-parse 'HEAD^{tree}')"
+            echo "version=${version}"
+            echo "release=${release}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building ${version} at ${sha} (tree $(git rev-parse 'HEAD^{tree}'), release=${release})"
+
+  packages:
+    name: Packages
+    needs: resolve
+    # id-token: the macOS jobs' S3 sccache tier (.github/actions/apple-sccache).
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/build-jazz-packages.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+      include_rn: true
+      # release-server and release-npm, packed beside the package checks.
+      release_bundles: true
+      # Release builds also rebuild the iOS relay without cache and require
+      # it byte-identical to the cached build.
+      reproduce_ios_relay: ${{ needs.resolve.outputs.release == 'true' }}
+
+  # The called workflows' publish jobs never run here (dry-run, publish:
+  # false), but GitHub checks every called job's permissions against the
+  # caller's before it evaluates their conditions.
+  languages:
+    name: Languages
+    needs: resolve
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    uses: ./.github/workflows/attach-language-artifacts.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      ref: ${{ needs.resolve.outputs.sha }}
+      dry-run: true
+      maven: true
+
+  swift:
+    name: Swift
+    needs: resolve
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/swift-mirror.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+      version: ${{ needs.resolve.outputs.version }}
+      publish: false
+      # What a release can ship is also rebuilt without any cache, and must
+      # give the same checksum.
+      reproduce: ${{ needs.resolve.outputs.release == 'true' }}
+
+  # Collects the release-* artifacts, writes manifest.json and, for release
+  # runs, attests every file's build provenance.
+  manifest:
+    name: Manifest
+    needs: [resolve, packages, languages, swift]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    outputs:
+      run_id: ${{ github.run_id }}
+    env:
+      SHA: ${{ needs.resolve.outputs.sha }}
+      TREE: ${{ needs.resolve.outputs.tree }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: language-artifacts
+          path: out/release-languages
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: JazzFFI.xcframework
+          path: out/release-swift
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-swift-mirror
+          path: out/release-swift-mirror
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-server
+          path: out/release-server
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: release-npm
+          path: out/release-npm
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-kotlin-maven
+          path: out/release-maven
+
+      - name: Check and write manifest.json
+        run: |
+          set -euo pipefail
+          cd out
+          (cd release-languages && sha256sum -c SHA256SUMS-languages)
+          (cd release-server && sha256sum -c SHA256SUMS)
+          (cd release-npm && sha256sum -c NPM-SHA256SUMS)
+          test -s release-languages/libjazz_ffi-source.txt
+          test "$(cat release-languages/libjazz_ffi-source.txt)" = "${SHA}"
+          test -s "release-languages/jazz-kotlin-${VERSION}.jar"
+          test -s "release-languages/jazz-kotlin-android-${VERSION}.aar"
+          (cd release-swift && echo "$(cat JazzFFI.xcframework.zip.checksum)  JazzFFI.xcframework.zip" | sha256sum -c -)
+          grep -q "releases/download/v${VERSION}/JazzFFI.xcframework.zip" release-swift-mirror/Package.swift
+          find . -type f | sort | sed 's|^\./||' | xargs sha256sum > "${RUNNER_TEMP}/all.txt"
+          node -e '
+            const fs = require("fs");
+            const files = fs.readFileSync(process.argv[1], "utf8").trim().split("\n").map((line) => {
+              const [sha256, path] = line.split(/\s+/, 2);
+              const [artifact, ...rest] = path.split("/");
+              return { artifact, path: rest.join("/"), sha256 };
+            });
+            const v = process.env.VERSION;
+            const npm = new Set(files.filter((f) => f.artifact === "release-npm").map((f) => f.path));
+            const napiPlatforms = [...npm].filter((f) => f.startsWith("garden-co-jazz-napi-")).sort();
+            const order = [`jazz-wasm-${v}.tgz`, ...napiPlatforms, `jazz-napi-${v}.tgz`,
+              `jazz-rn-android-${v}.tgz`, `jazz-rn-ios-${v}.tgz`, `jazz-rn-${v}.tgz`,
+              `jazz-tools-${v}.tgz`, `create-jazz-${v}.tgz`];
+            const missing = order.filter((f) => !npm.has(f));
+            if (missing.length) throw new Error(`release-npm lacks ${missing.join(", ")}`);
+            const manifest = {
+              schema: 1,
+              sha: process.env.SHA,
+              tree: process.env.TREE,
+              version: v,
+              repository: process.env.GITHUB_REPOSITORY,
+              workflow: "release-artifacts.yml",
+              run_id: Number(process.env.GITHUB_RUN_ID),
+              run_attempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+              publish_order: order,
+              files,
+            };
+            fs.writeFileSync("manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+          ' "${RUNNER_TEMP}/all.txt"
+          echo "$(jq '.files | length' manifest.json) files"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-manifest
+          path: out/manifest.json
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-languages
+          path: out/release-languages/*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-maven
+          path: out/release-maven
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-swift
+          path: out/release-swift/*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-swift-mirror
+          path: out/release-swift-mirror
+          include-hidden-files: true
+          if-no-files-found: error
+
+      # This run is the release's provenance: verify an asset with
+      # `gh attestation verify <file> --repo garden-co/jazz
+      #  --signer-workflow garden-co/jazz/.github/workflows/release-artifacts.yml`.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: needs.resolve.outputs.release == 'true'
+        with:
+          # Every file of the shipped artifacts, as release-publish.yml verifies
+          # them (release-maven is re-signed at publish, the mirror is pushed).
+          subject-path: |
+            out/release-server/*
+            out/release-npm/*
+            out/release-languages/*
+            out/release-swift/*
+            out/manifest.json

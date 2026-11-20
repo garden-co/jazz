@@ -23,6 +23,8 @@ import {
   type BrowserDeleteStoreRequest,
   type BrowserDeleteStoreResponse,
   BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
+  BROWSER_STORE_HELD_BY_ANOTHER_BUILD,
+  BROWSER_STORE_OPEN_WITH_NEWER_BUILD,
 } from "./browser-worker-protocol.js";
 import type {
   BrowserForegroundNodeLease,
@@ -617,7 +619,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private worker: SharedWorker | null = null;
   private readonly readyPromise: Promise<void>;
   private initialConfigurationAdmissionRejected = false;
-  private heldByAnotherSignIn = false;
+  /** Why the worker refused this tab for now: another tab holds the store. */
+  private heldByAnotherTab: "sign-in" | "build" | false = false;
+  /** The worker refused this tab because a newer build of the app has the store open. */
+  private olderThanStore = false;
   private readyError: Error | null = null;
   private connection: MessagePortBrowserFollowerConnection | null = null;
   private closed = false;
@@ -643,6 +648,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       | "onFailure"
       | "onStorageReset"
       | "onStorageInvalidated"
+      | "onNewerBuild"
     >,
   ) {
     // A physical database namespace has exactly one broker realm for a given
@@ -873,10 +879,16 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           port.close();
           if (this.worker === worker) this.worker = null;
           const error = deserializeBrowserRelayError(event.data.error);
-          this.heldByAnotherSignIn = error.message === BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN;
+          this.olderThanStore = error.message === BROWSER_STORE_OPEN_WITH_NEWER_BUILD;
+          this.heldByAnotherTab =
+            error.message === BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
+              ? "sign-in"
+              : error.message === BROWSER_STORE_HELD_BY_ANOTHER_BUILD || this.olderThanStore
+                ? "build"
+                : false;
           this.initialConfigurationAdmissionRejected =
             error.message === "incompatible persistent browser configuration" ||
-            this.heldByAnotherSignIn;
+            this.heldByAnotherTab !== false;
           settle({ connected: false, error });
           return;
         }
@@ -912,6 +924,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
               renewBrowserStoreGeneration(this.dbName);
               this.callbacks.onStorageInvalidated?.();
             },
+            onNewerBuild: this.callbacks.onNewerBuild,
           },
           options.logLevel === "trace",
         );
@@ -1014,8 +1027,12 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     return this.initialConfigurationAdmissionRejected;
   }
 
-  waitsForAnotherSignIn(): boolean {
-    return this.heldByAnotherSignIn;
+  waitsForAnotherTab(): "sign-in" | "build" | false {
+    return this.heldByAnotherTab;
+  }
+
+  isOlderThanStore(): boolean {
+    return this.olderThanStore;
   }
 
   /**

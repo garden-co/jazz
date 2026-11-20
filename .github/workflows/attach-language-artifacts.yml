@@ -34,6 +34,25 @@ on:
   pull_request:
     paths:
       - .github/workflows/attach-language-artifacts.yml
+  # release-artifacts.yml builds these once per commit (always a dry run).
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      ref:
+        required: false
+        type: string
+        default: ""
+      dry-run:
+        required: false
+        type: boolean
+        default: true
+      maven:
+        description: "Also build the Maven Central bundle (jazz-kotlin-maven), signed with a throwaway key."
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       version:
@@ -55,10 +74,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: attach-language-artifacts-${{ inputs.version || github.ref }}
+  # Called from release-artifacts.yml (github.workflow is then the caller's),
+  # one group per calling run: its dry runs never queue behind, or block, a
+  # real attach of the same version.
+  group: attach-language-artifacts-${{ inputs.version || github.ref }}${{ github.workflow != 'Attach language artifacts' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 env:
+  # Fail closed: only main, release and merge-group/** restore caches an
+  # untrusted ref could have written (#supply-chain, 2026-11-19).
+  JAZZ_TRUSTED_CACHE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) && 'true' || 'false' }}
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
   # A pull_request run has no inputs: a dry run under a placeholder version.
   VERSION: ${{ inputs.version || '2.0.0-alpha.0' }}
@@ -75,17 +100,20 @@ jobs:
         include:
           # Ubuntu 22.04 for its older glibc (2.35), so the library links on
           # more systems.
+          # 16 vCPUs: a release's fresh version compiles jazz-ffi from scratch
+          # (no cache here), 8.5 min on 4 vCPUs (run 44548302340), followed by
+          # the bindings, Kotlin and the manifest.
           # jna: the directory JNA loads the library from inside the Kotlin
           # jar (dev/scripts/build-kotlin-dist.sh).
           # static/shared: the libraries shipped (on Windows also
           # jazz_ffi.dll.lib, the DLL's import library).
-          - os: blacksmith-4vcpu-ubuntu-2204
+          - os: blacksmith-16vcpu-ubuntu-2204
             platform: linux-x86_64
             target: x86_64-unknown-linux-gnu
             static: libjazz_ffi.a
             shared: libjazz_ffi.so
             jna: linux-x86-64
-          - os: blacksmith-4vcpu-ubuntu-2204-arm
+          - os: blacksmith-16vcpu-ubuntu-2204-arm
             platform: linux-aarch64
             target: aarch64-unknown-linux-gnu
             static: libjazz_ffi.a
@@ -104,7 +132,8 @@ jobs:
             static: libjazz_ffi.a
             shared: libjazz_ffi.dylib
             jna: darwin-x86-64
-          - os: blacksmith-2vcpu-windows-2025
+          # 8 vCPUs: 8 min on 2 vCPUs, about 1.5 min warm here.
+          - os: blacksmith-8vcpu-windows-2025
             platform: windows-x86_64
             target: x86_64-pc-windows-msvc
             static: jazz_ffi.lib
@@ -148,6 +177,7 @@ jobs:
 
       - uses: ./.github/actions/setup-build
         with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
           setup-node: "false"
           rust-cache: "false"
           rust-targets: ${{ matrix.target }}
@@ -250,28 +280,141 @@ jobs:
           path: natives
           if-no-files-found: error
 
+  # jazz-ffi for the Android aar, one ABI per job (each is a fat-LTO build of
+  # about 2 min; cargo-ndk builds the ABIs one after another), by the aar's
+  # own Gradle task (cargoNdkFfi: same cargo-ndk, NDK and release-mobile
+  # profile), and from arm64-v8a's library the Kotlin bindings, as the aar's
+  # generateUniffi makes them. The kotlin and maven jobs package these.
+  android-jni:
+    name: Build jazz-ffi for Android (${{ matrix.abi }})
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { abi: arm64-v8a, target: aarch64-linux-android }
+          - { abi: armeabi-v7a, target: armv7-linux-androideabi }
+          - { abi: x86_64, target: x86_64-linux-android }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || inputs.ref || format('v{0}', inputs.version) }}
+          persist-credentials: false
+
+      # No build cache: release builds must not read one pull_request runs
+      # could write (and sccache never hits a fat-LTO build anyway).
+      - uses: ./.github/actions/setup-build
+        with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
+          setup-node: "false"
+          rust-cache: "false"
+          rust-targets: ${{ matrix.target }}
+
+      # The pinned JDK and Gradle (dev/scripts/kotlin-toolchain.sh; the
+      # directories are named by version), not refetched every run. Only
+      # those: the SDK and NDK stay out of the cache. A pull_request run's
+      # cache is scoped to its PR, never read by a release run.
+      - if: env.JAZZ_TRUSTED_CACHE == 'true'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cache/jazz-kotlin/jdk-*
+            ~/.cache/jazz-kotlin/gradle-*
+          key: kotlin-toolchain-${{ runner.os }}-${{ hashFiles('dev/scripts/kotlin-toolchain.sh') }}
+
+      - name: Build
+        env:
+          ABI: ${{ matrix.abi }}
+        run: |
+          # A release without the per-ABI build leaves the aar to the kotlin job.
+          if ! grep -q KOTLIN_ANDROID_JNI_OUT dev/scripts/test-kotlin-android.sh; then
+            echo "::warning::No split Android build at this ref."
+            mkdir -p "${RUNNER_TEMP}/android"
+            echo "none" > "${RUNNER_TEMP}/android/NONE-${ABI}"
+            exit 0
+          fi
+          KOTLIN_TOOLCHAIN=pinned CARGO_PROFILE=release-mobile KOTLIN_ANDROID_ABIS="${ABI}" \
+            KOTLIN_ANDROID_JNI_OUT="${RUNNER_TEMP}/android" bash dev/scripts/test-kotlin-android.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: kotlin-android-jni-${{ matrix.abi }}
+          path: ${{ runner.temp }}/android
+          if-no-files-found: error
+
   # The Kotlin/JVM jar (every platform's library inside, for JNA) and the
-  # Android aar, by the Kotlin package's own script.
+  # Android aar, by the Kotlin package's own script, from the libraries and
+  # bindings built above: no Rust here.
   kotlin:
     name: Build the Kotlin jar and aar
-    needs: build
+    needs: [build, android-jni]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: ${{ github.event_name == 'pull_request' && github.sha || inputs.ref || format('v{0}', inputs.version) }}
+          persist-credentials: false
 
-      - uses: ./.github/actions/setup-build
+      # The pinned JDK and Gradle (dev/scripts/kotlin-toolchain.sh; the
+      # directories are named by version), not refetched every run. Only
+      # those: the SDK and NDK stay out of the cache. A pull_request run's
+      # cache is scoped to its PR, never read by a release run.
+      - if: env.JAZZ_TRUSTED_CACHE == 'true'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          setup-node: "false"
-          rust-cache: "false"
+          path: |
+            ~/.cache/jazz-kotlin/jdk-*
+            ~/.cache/jazz-kotlin/gradle-*
+          key: kotlin-toolchain-${{ runner.os }}-${{ hashFiles('dev/scripts/kotlin-toolchain.sh') }}
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: natives-*
           merge-multiple: true
           path: natives
+
+      # The jar's bindings: generated from the linux-x86_64 release library,
+      # as the jar's generateUniffi does.
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-ffi-linux-x86_64
+          path: ${{ runner.temp }}/jazz-ffi-linux-x86_64
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: kotlin-android-jni-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/android
+
+      # Set only when every piece is there: otherwise (an older ref) the
+      # scripts build them with cargo.
+      - name: Use the prebuilt jazz-ffi
+        run: |
+          bindings="${RUNNER_TEMP}/jazz-ffi-linux-x86_64/jazz-ffi-bindings/kotlin"
+          android="${RUNNER_TEMP}/android"
+          ls -R "${android}"
+          if [ -d "${bindings}" ] && [ -d "${android}/uniffi" ] &&
+            [ -f "${android}/jniLibs/arm64-v8a/libjazz_ffi.so" ] &&
+            [ -f "${android}/jniLibs/armeabi-v7a/libjazz_ffi.so" ] &&
+            [ -f "${android}/jniLibs/x86_64/libjazz_ffi.so" ]; then
+            {
+              echo "KOTLIN_JVM_BINDINGS=${bindings}"
+              echo "KOTLIN_ANDROID_JNI_LIBS=${android}/jniLibs"
+              echo "KOTLIN_ANDROID_BINDINGS=${android}/uniffi"
+            } >> "${GITHUB_ENV}"
+          else
+            echo "::warning::No prebuilt Android jazz-ffi: building it with cargo."
+          fi
+
+      # Only for an older ref: the scripts then build jazz-ffi themselves.
+      - uses: ./.github/actions/setup-build
+        if: env.KOTLIN_ANDROID_JNI_LIBS == ''
+        with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
+          setup-node: "false"
+          rust-cache: "false"
 
       - name: Assemble
         run: |
@@ -294,6 +437,103 @@ jobs:
           # `error` once dev/scripts/build-kotlin-dist.sh is on main.
           if-no-files-found: warn
 
+  # The Maven Central bundle: the tools/jazz tree of a local Maven repository,
+  # from the same natives and prebuilt jazz-ffi as the jar above, signed with
+  # a throwaway key (publish re-signs it). Beside the kotlin job, not after it.
+  maven:
+    name: Build the Maven repository
+    needs: [build, android-jni]
+    if: inputs.maven
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.sha || inputs.ref || format('v{0}', inputs.version) }}
+          persist-credentials: false
+
+      # The pinned JDK and Gradle (dev/scripts/kotlin-toolchain.sh; the
+      # directories are named by version), not refetched every run. Only
+      # those: the SDK and NDK stay out of the cache. A pull_request run's
+      # cache is scoped to its PR, never read by a release run.
+      - if: env.JAZZ_TRUSTED_CACHE == 'true'
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cache/jazz-kotlin/jdk-*
+            ~/.cache/jazz-kotlin/gradle-*
+          key: kotlin-toolchain-${{ runner.os }}-${{ hashFiles('dev/scripts/kotlin-toolchain.sh') }}
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: natives-*
+          merge-multiple: true
+          path: natives
+
+      # The jar's bindings: generated from the linux-x86_64 release library,
+      # as the jar's generateUniffi does.
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-ffi-linux-x86_64
+          path: ${{ runner.temp }}/jazz-ffi-linux-x86_64
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: kotlin-android-jni-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/android
+
+      # Set only when every piece is there: otherwise (an older ref) the
+      # scripts build them with cargo.
+      - name: Use the prebuilt jazz-ffi
+        run: |
+          bindings="${RUNNER_TEMP}/jazz-ffi-linux-x86_64/jazz-ffi-bindings/kotlin"
+          android="${RUNNER_TEMP}/android"
+          ls -R "${android}"
+          if [ -d "${bindings}" ] && [ -d "${android}/uniffi" ] &&
+            [ -f "${android}/jniLibs/arm64-v8a/libjazz_ffi.so" ] &&
+            [ -f "${android}/jniLibs/armeabi-v7a/libjazz_ffi.so" ] &&
+            [ -f "${android}/jniLibs/x86_64/libjazz_ffi.so" ]; then
+            {
+              echo "KOTLIN_JVM_BINDINGS=${bindings}"
+              echo "KOTLIN_ANDROID_JNI_LIBS=${android}/jniLibs"
+              echo "KOTLIN_ANDROID_BINDINGS=${android}/uniffi"
+            } >> "${GITHUB_ENV}"
+          else
+            echo "::warning::No prebuilt Android jazz-ffi: building it with cargo."
+          fi
+
+      # Only for an older ref: the scripts then build jazz-ffi themselves.
+      - uses: ./.github/actions/setup-build
+        if: env.KOTLIN_ANDROID_JNI_LIBS == ''
+        with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
+          setup-node: "false"
+          rust-cache: "false"
+
+      - name: Throwaway signing key
+        run: |
+          set -euo pipefail
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          gpg --batch --pinentry-mode loopback --passphrase dry-run \
+            --quick-gen-key "Jazz dry run <dry-run@example.invalid>" rsa4096 sign 1d
+          {
+            echo "ORG_GRADLE_PROJECT_signingInMemoryKey<<EOF_KEY"
+            gpg --batch --pinentry-mode loopback --passphrase dry-run --armor --export-secret-keys
+            echo "EOF_KEY"
+            echo "ORG_GRADLE_PROJECT_signingInMemoryKeyPassword=dry-run"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build, sign, check
+        run: bash dev/scripts/publish-kotlin.sh natives local
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-kotlin-maven
+          path: ~/.m2/repository/tools/jazz
+          if-no-files-found: error
+
   # Read-only: packs the assets reproducibly and checksums them, for the
   # attach job (a real run) or as the dry run's result.
   pack:
@@ -302,9 +542,17 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
+      # Not jazz-*: called from release-artifacts.yml, the run also holds
+      # jazz-napi-*, jazz-wasm-*, jazz-rn-* and jazz-tools-linux-*.
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          pattern: jazz-*
+          pattern: jazz-ffi-*
+          merge-multiple: true
+          path: built
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-kotlin-dist
           merge-multiple: true
           path: built
 

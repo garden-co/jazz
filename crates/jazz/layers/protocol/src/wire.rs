@@ -66,6 +66,17 @@ pub const FEATURE_SERIALIZABLE_BRANCH_READS: WireFeatures = 1 << 12;
 /// sends a read or commit using them only over a link that negotiated this,
 /// and refuses it locally otherwise.
 pub const FEATURE_TEXT_AFFIX_PREDICATES: WireFeatures = 1 << 13;
+/// The peer reads an error frame that names its reason
+/// ([`WireReasonedError`]): a client advertises this in its `Hello`, and a
+/// server then says why it refused the client's credential
+/// ([`WireErrorReason`]) instead of leaving the client to read it out of the
+/// message. Decided by what the client offered, not by
+/// negotiation, so a server can use it for errors before its own hello; a
+/// server never advertises it (SPEC 8, "Typed error reasons").
+pub const FEATURE_TYPED_ERROR_REASON: WireFeatures = 1 << 14;
+
+/// The replica accepts the ReplaceHolds sync message (v1, tag 21) on an existing link.
+pub const FEATURE_REPLACE_HOLDS: WireFeatures = 1 << 15;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -95,6 +106,61 @@ pub enum WireFrame {
     /// nothing and needs no answer. Postcard-v1 enum tag 7 within wire v6;
     /// only after both peers negotiated [`FEATURE_HEARTBEAT`].
     Heartbeat,
+}
+
+/// Why a server refused a client's credential, or asked it to authenticate
+/// again. Encoding `wire-error-reason-v1`: postcard-v1 enum tags, pinned by
+/// `crates/jazz/layers/protocol/fixtures/wire_reasoned_error_v1.json`. Append-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireErrorReason {
+    /// The credential expired (tag 0).
+    Expired,
+    /// No credential was presented (tag 1).
+    Missing,
+    /// The credential is not valid for this app (tag 2).
+    Invalid,
+    /// The app turned this auth mode off (tag 3).
+    Disabled,
+    /// The identity was revoked or reassigned (tag 4).
+    Revoked,
+    /// A planned re-authentication: the session reached the expiry the
+    /// app's auth gave it; connect again (tag 5).
+    Reauthenticate,
+}
+
+impl WireErrorReason {
+    /// The reason with this postcard-v1 tag, if this build knows it.
+    pub fn from_tag(tag: u32) -> Option<Self> {
+        Some(match tag {
+            0 => Self::Expired,
+            1 => Self::Missing,
+            2 => Self::Invalid,
+            3 => Self::Disabled,
+            4 => Self::Revoked,
+            5 => Self::Reauthenticate,
+            _ => return None,
+        })
+    }
+}
+
+/// The body of a [`WireFrame::Error`] that names its reason (encoding
+/// `wire-error-reason-v1`): the `Error` body (code, retry, message) followed
+/// by the [`WireErrorReason`] tag, under the same frame tag (1). The message
+/// is length-prefixed, so the reason is unambiguous. Sent only to a client
+/// whose `Hello` offered [`FEATURE_TYPED_ERROR_REASON`]: no new frame tag,
+/// since a server's frames after its hello are told apart from sync messages
+/// by their first byte, and every other tag is a sync message's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireReasonedError {
+    /// As [`WireError::code`].
+    pub code: WireErrorCode,
+    /// As [`WireError::retry`].
+    pub retry: WireRetry,
+    /// As [`WireError::message`].
+    pub message: String,
+    /// Why.
+    pub reason: WireErrorReason,
 }
 
 /// Which independently bounded transport resource this grant releases.
@@ -479,6 +545,12 @@ pub struct WireError {
     pub retry: WireRetry,
     /// Human-readable diagnostic. Not part of semantic compatibility.
     pub message: String,
+    /// Why, when the server said so ([`WireReasonedError`]). Not part of the
+    /// plain `Error` body: [`encode_frame`] leaves it out, as every peer
+    /// decodes it; [`encode_error_frame_for_client`] adds it for a client
+    /// that reads it.
+    #[serde(skip)]
+    pub reason: Option<WireErrorReason>,
 }
 
 impl WireError {
@@ -488,7 +560,14 @@ impl WireError {
             code,
             retry,
             message: message.into(),
+            reason: None,
         }
+    }
+
+    /// This error, naming why.
+    pub fn with_reason(mut self, reason: WireErrorReason) -> Self {
+        self.reason = Some(reason);
+        self
     }
 
     /// Whether this error ends a link without ending the client: the peer is
@@ -539,6 +618,52 @@ pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
     decode_postcard_exact(bytes)
+}
+
+/// Decode a frame as a client that offered [`FEATURE_TYPED_ERROR_REASON`]
+/// does: an `Error` frame may end with its reason (`wire-error-reason-v1`).
+/// Every other receiver uses [`decode_frame`], which refuses those bytes.
+pub fn decode_frame_with_error_reason(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+    decode_frame(bytes).or_else(|error| {
+        // The reason as a raw tag: one this build does not know (a newer
+        // server) leaves the error unnamed, and the message decides.
+        let (tag, code, retry, message, reason) =
+            decode_postcard_exact::<(u32, WireErrorCode, WireRetry, String, u32)>(bytes)
+                .map_err(|_| error.clone())?;
+        if tag != ERROR_FRAME_TAG {
+            return Err(error);
+        }
+        Ok(WireFrame::Error(WireError {
+            code,
+            retry,
+            message,
+            reason: WireErrorReason::from_tag(reason),
+        }))
+    })
+}
+
+/// `WireFrame::Error`'s postcard-v1 enum tag in this wire version.
+const ERROR_FRAME_TAG: u32 = 1;
+
+/// Encode `error` for a client whose `Hello` offered `client_features`: with
+/// its reason ([`WireReasonedError`]) when the client reads one, otherwise as
+/// the [`WireFrame::Error`] every client reads.
+pub fn encode_error_frame_for_client(
+    error: &WireError,
+    client_features: WireFeatures,
+) -> Result<Vec<u8>, postcard::Error> {
+    match error.reason {
+        Some(reason) if client_features & FEATURE_TYPED_ERROR_REASON != 0 => to_allocvec(&(
+            ERROR_FRAME_TAG,
+            WireReasonedError {
+                code: error.code,
+                retry: error.retry,
+                message: error.message.clone(),
+                reason,
+            },
+        )),
+        _ => encode_frame(&WireFrame::Error(error.clone())),
+    }
 }
 
 /// Exercise the owning v6 frame and payload decoders for the generated-host
@@ -848,6 +973,7 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
         | FEATURE_SERIALIZABLE_BRANCH_READS
         | FEATURE_TEXT_AFFIX_PREDICATES
+        | FEATURE_REPLACE_HOLDS
         | runtime_transport_compression_features()
 }
 
@@ -2646,5 +2772,71 @@ mod tests {
 
         let current = encode_error_frame_for_peer(&error, WIRE_PROTOCOL_VERSION).unwrap();
         assert_eq!(decode_frame(&current).unwrap(), WireFrame::Error(error));
+    }
+
+    /// `wire-error-reason-v1` (`fixtures/wire_reasoned_error_v1.json`): a
+    /// client that offered `FEATURE_TYPED_ERROR_REASON` gets the error with
+    /// its reason in exactly these bytes, and reads it back as an `Error`
+    /// naming why; any other client gets the `Error` bytes it always got.
+    #[test]
+    fn a_refusal_names_its_reason_only_to_a_client_that_reads_one() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/wire_reasoned_error_v1.json")).unwrap();
+        let hex = |value: &serde_json::Value| {
+            let text = value.as_str().unwrap();
+            (0..text.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+                .collect::<Vec<u8>>()
+        };
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 6, "one case per WireErrorReason");
+        // A reason tag from a newer server leaves the error unnamed.
+        let mut newer = hex(&cases[0]["reasoned_hex"]);
+        *newer.last_mut().unwrap() = 99;
+        let WireFrame::Error(read) = decode_frame_with_error_reason(&newer).unwrap() else {
+            panic!("an error frame")
+        };
+        assert_eq!(read.reason, None);
+        assert_eq!(read.message, cases[0]["message"].as_str().unwrap());
+        for case in cases {
+            let error = WireError::new(
+                serde_json::from_value(case["code"].clone()).unwrap(),
+                serde_json::from_value(case["retry"].clone()).unwrap(),
+                case["message"].as_str().unwrap(),
+            )
+            .with_reason(serde_json::from_value(case["reason"].clone()).unwrap());
+            let reasoned = hex(&case["reasoned_hex"]);
+            let plain = hex(&case["plain_hex"]);
+            assert_eq!(
+                encode_error_frame_for_client(&error, FEATURE_TYPED_ERROR_REASON).unwrap(),
+                reasoned,
+                "{case}"
+            );
+            assert_eq!(
+                encode_error_frame_for_client(&error, current_wire_features()).unwrap(),
+                plain,
+                "{case}"
+            );
+            assert!(is_wire_error_frame(&reasoned) && is_wire_error_frame(&plain));
+            assert_eq!(
+                decode_frame_with_error_reason(&reasoned).unwrap(),
+                WireFrame::Error(error.clone())
+            );
+            // A receiver that did not offer the feature refuses the bytes.
+            assert!(decode_frame(&reasoned).is_err());
+            // The plain bytes carry no reason; everything else is the same.
+            let mut unnamed = error.clone();
+            unnamed.reason = None;
+            assert_eq!(
+                decode_frame(&plain).unwrap(),
+                WireFrame::Error(unnamed.clone())
+            );
+            assert_eq!(
+                decode_frame_with_error_reason(&plain).unwrap(),
+                WireFrame::Error(unnamed.clone())
+            );
+            assert_eq!(encode_frame(&WireFrame::Error(error)).unwrap(), plain);
+        }
     }
 }

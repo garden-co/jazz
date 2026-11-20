@@ -253,7 +253,7 @@ export function internalSessionFromJwtPayload(payload: JwtPayload): Session | nu
 
 export function sessionFromVerifiedReservedJwtPayload(
   payload: JwtPayload,
-  authMode: Extract<Session["authMode"], "local-first" | "anonymous">,
+  authMode: Extract<Session["authMode"], "device-account" | "anonymous">,
 ): PublicSession | null {
   const internal = internalSessionFromVerifiedReservedJwtPayload(payload, authMode);
   if (!internal) return null;
@@ -263,11 +263,12 @@ export function sessionFromVerifiedReservedJwtPayload(
 /** @internal Verified reserved-token form used by transport/auth plumbing. */
 export function internalSessionFromVerifiedReservedJwtPayload(
   payload: JwtPayload,
-  authMode: Extract<Session["authMode"], "local-first" | "anonymous">,
+  authMode: Extract<Session["authMode"], "device-account" | "anonymous">,
 ): Session | null {
   const subject = asUsableSubjectString(payload.sub);
   const issuer = asUsableSubjectString(payload.iss);
-  const expectedIssuer = authMode === "local-first" ? LOCAL_FIRST_JWT_ISSUER : ANONYMOUS_JWT_ISSUER;
+  const expectedIssuer =
+    authMode === "device-account" ? LOCAL_FIRST_JWT_ISSUER : ANONYMOUS_JWT_ISSUER;
   if (!subject || issuer !== expectedIssuer) return null;
   const publicClaims = claimsFromJwtPayload(reservedJwtPayloadWithoutProof(payload));
   if (!publicClaims) return null;

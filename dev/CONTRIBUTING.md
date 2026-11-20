@@ -95,6 +95,8 @@ in adapter setup.
 
 ```sh
 node dev/gates/local-ci-equivalent.mjs --ci-partition typescript
+# or one shard, as one test-ts matrix job runs it:
+node dev/gates/local-ci-equivalent.mjs --ci-partition typescript-browser-1
 pnpm --filter jazz-tools typecheck:react-native
 ```
 

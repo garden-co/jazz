@@ -249,7 +249,8 @@ fn a_variant_tagged_after_a_recheck_statement_was_kept_is_matched_by_its_tag() {
 /// Retitle docs `ns` in one transaction: the result re-checks them as one
 /// batch of `ns.len()` ids.
 fn retitle_together(db: &Db, ns: &[usize], title: &str) {
-    jazz::db::block_on(db.transaction(async |tx| {
+    jazz::db::block_on(async {
+        let tx = db.mergeable_tx().await?;
         for n in ns {
             tx.update(
                 "docs",
@@ -259,8 +260,8 @@ fn retitle_together(db: &Db, ns: &[usize], title: &str) {
             )
             .await?;
         }
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
 }
 

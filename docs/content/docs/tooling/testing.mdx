@@ -9,7 +9,7 @@ As you develop your Jazz application, you might find yourself needing to test fu
 
 If your application uses a Jazz `Db` directly, you can open a session that keeps Jazz on this device
 only (`serverUrl: null`) and use its `session.db`. It signs in as a
-[device account](/docs/setup/auth/local-first), so it needs no backend:
+[device account](/docs/setup/auth/device-accounts), so it needs no backend:
 
 ```typescript
 import { createJazzClient } from "jazz-tools/client";
@@ -160,7 +160,7 @@ sign in from a Jazz client or you call `jazz.createAccountFor(userId)` (see
 [Users without an account](/docs/setup/deployment/own-server#users-without-an-account)). Test
 that path through `startTestJazz` below.
 
-To test as a guest (a device account), pass `authMode: "local-first"` and leave out `issuer` and
+To test as a guest (a device account), pass `authMode: "device-account"` and leave out `issuer` and
 `account_id`, with empty `claims`. The test app derives a device account key from `user_id` and acts
 exactly like a real device account with that key, including its own account. The guest's
 session uses the subject derived from that key, not the `user_id` you passed:
@@ -174,7 +174,7 @@ throwing.
 const bob = testApp.as({
   user_id: "bob",
   claims: {},
-  authMode: "local-first",
+  authMode: "device-account",
 });
 
 await expect(bob.all(app.todos.where({ id: privateTodo.id }))).resolves.toEqual([]);

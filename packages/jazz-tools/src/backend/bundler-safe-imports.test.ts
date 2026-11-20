@@ -10,7 +10,17 @@ import { describe, expect, it } from "vitest";
 //   import is not enough for that), and an installed one is bundled.
 // - Nothing finds a file through `import.meta.url` at runtime: bundlers
 //   bake the build machine's path into it, which a deployed function lacks.
-const sources = ["vercel-store.ts", "create-jazz.ts", "ws-peer.ts"].map((file) => ({
+// Every backend module a deployed function loads; the optional peers' literal
+// imports live in node-peers.ts, which only Node's entries import.
+const sources = [
+  "vercel-store.ts",
+  "create-jazz.ts",
+  "ws-peer.ts",
+  "node-peers.ts",
+  "node-native.ts",
+  "backend-native.ts",
+  "core-transport.ts",
+].map((file) => ({
   file,
   text: readFileSync(new URL(file, import.meta.url), "utf8"),
 }));
@@ -45,8 +55,8 @@ describe("backend imports under bundlers", () => {
     }
   });
 
-  it("loads ws only through ws-peer.ts", () => {
-    // ws-peer.ts is what bundler-optional-peer.turbopack.test.ts builds
+  it("loads ws only through node-peers.ts", () => {
+    // node-peers.ts is what bundler-optional-peer.turbopack.test.ts builds
     // with Turbopack, without ws.
     const src = new URL("../", import.meta.url);
     const importers = (readdirSync(src, { recursive: true }) as string[])
@@ -56,13 +66,28 @@ describe("backend imports under bundlers", () => {
           readFileSync(new URL(file, src), "utf8"),
         ),
       );
-    expect(importers).toEqual(["backend/ws-peer.ts"]);
+    expect(importers).toEqual(["backend/node-peers.ts"]);
   });
 
   it("finds no file through import.meta.url at runtime", () => {
     for (const { file, text } of sources) {
       expect(text, file).not.toMatch(/createRequire\(import\.meta\.url\)/);
       expect(text, file).not.toMatch(/new URL\([^)]*import\.meta\.url\)/);
+    }
+  });
+
+  it("installs Node's engine through a used binding, never a bare side-effect import", () => {
+    // Turbopack resolves a barrel's re-exports itself and never evaluates
+    // the barrel, dropping its side-effect imports: a Next.js standalone
+    // build then had no engine (503 "no backend engine installed").
+    // scripts/next-trace-napi.test.mjs checks the built route end to end.
+    const entry = readFileSync(new URL("index.ts", import.meta.url), "utf8");
+    expect(entry).not.toMatch(/^import\s+["']\.\/node-native\.js["']/m);
+    for (const name of ["createJazz", "createJazzClient"]) {
+      const defined = new RegExp(
+        `export function ${name}\\([^)]*\\)[^{]*\\{\\s*installNodeEngine\\(\\);`,
+      );
+      expect(entry, name).toMatch(defined);
     }
   });
 });

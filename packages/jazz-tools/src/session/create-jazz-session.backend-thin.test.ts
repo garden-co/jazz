@@ -724,6 +724,21 @@ describe("browser session against the app's backend", () => {
       const served = await listen(jazz);
       cookies(served.origin, "alice:1");
       vi.stubGlobal("document", { visibilityState: "hidden" });
+      // The backend's "who is signed in" answers, as the browser sees them.
+      const answers: Array<{ signedIn: boolean }> = [];
+      const cookieFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const response = await cookieFetch(input, init);
+        if (String(input instanceof Request ? input.url : input).includes("backend-user")) {
+          const body = (await response
+            .clone()
+            .json()
+            .catch(() => null)) as { identity?: unknown } | null;
+          answers.push({ signedIn: response.ok && !!body?.identity });
+        }
+        return response;
+      }) as typeof fetch;
+      cleanups.push(async () => void (globalThis.fetch = cookieFetch));
       const onSignedOut = vi.fn(() => "sign-out" as const);
       const session = await createJazzClient({
         serverUrl: `${served.origin}/jazz`,
@@ -744,12 +759,28 @@ describe("browser session against the app's backend", () => {
       const owner = client.session!.user!;
       await client.db.insert(app.todos, { title: "first", owner }).wait({ tier: "global" });
 
-      // Revoked, but her cookie still holds: the tab reconnects as her.
+      // Revoked, but her cookie still holds: the tab is admitted again as
+      // her, and the admission clears the refusal's reason. `revokeUser`
+      // resolves once the server ended her session, which can be before the
+      // tab hears of it, while it still reads connected with no error: wait
+      // for the refusal itself first, or it lands after the restart below.
+      let refusedAsRevoked = false;
+      const stopAuth = client.db.onAuthChanged(({ error }) => {
+        if (error === "revoked") refusedAsRevoked = true;
+      });
+      cleanups.push(async () => stopAuth());
       expect(await jazz.revokeUser("alice")).toBe(1);
       await expect
-        .poll(() => client.db.getSyncStatus().link, { timeout: 15_000, interval: 20 })
-        .toEqual({ state: "connected" });
-      expect(client.db.getAuthState().error).toBeUndefined();
+        .poll(
+          () => ({
+            refusedAsRevoked,
+            link: client.db.getSyncStatus().link,
+            error: client.db.getAuthState().error,
+          }),
+          { timeout: 15_000, interval: 20 },
+        )
+        .toEqual({ refusedAsRevoked: true, link: { state: "connected" }, error: undefined });
+      stopAuth();
 
       // Later her cookie expires and the server restarts: an ordinary refusal.
       const links: unknown[] = [];
@@ -757,11 +788,19 @@ describe("browser session against the app's backend", () => {
       cleanups.push(async () => stop());
       auth.valid.delete("alice:1");
       await served.close();
+      const before = answers.length;
       await listen(jazz, Number(new URL(served.origin).port));
+      // The refusal says why, and the session asks the backend, which names
+      // no one now.
       await expect
         .poll(() => client.db.getSyncStatus().link, { timeout: 15_000, interval: 20 })
-        .toMatchObject({ state: "offline", reason: "auth" });
-      await new Promise((resolve) => setTimeout(resolve, 5_000));
+        .toMatchObject({ state: "offline", reason: "auth", authReason: "missing" });
+      await expect
+        .poll(() => answers.slice(before).some((answer) => !answer.signedIn), {
+          timeout: 15_000,
+          interval: 20,
+        })
+        .toBe(true);
       // In the background, it waits for focus: not signed out, never "revoked".
       expect(session.getSnapshot().status).toBe("ready");
       expect(onSignedOut).not.toHaveBeenCalled();

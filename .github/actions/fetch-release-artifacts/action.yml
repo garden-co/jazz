@@ -1,0 +1,31 @@
+name: Fetch release artifacts
+description: >-
+  Download named release files (npm tarballs, server binaries, language libs) for a tag or commit into a directory,
+  verify them against the checksum files that list them, and fail if a requested name matches nothing.
+  Today `tag` reads the GitHub release (draft or published). `sha` is reserved for the build-once-per-commit
+  release-artifacts.yml runs (#release-artifacts-on-main adds that source behind the same inputs).
+inputs:
+  tag:
+    description: Release tag, e.g. v2.0.0-alpha.68-rc.1
+    required: false
+  sha:
+    description: Commit whose release-artifacts.yml run to read (not implemented yet)
+    required: false
+  names:
+    description: Newline-separated file globs, e.g. jazz-tools-*.tgz
+    required: true
+  dest:
+    description: Directory to download into
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        FETCH_TAG: ${{ inputs.tag }}
+        FETCH_SHA: ${{ inputs.sha }}
+        FETCH_NAMES: ${{ inputs.names }}
+        FETCH_DEST: ${{ inputs.dest }}
+        FETCH_REPO: ${{ github.repository }}
+      run: bash "${{ github.action_path }}/fetch.sh"

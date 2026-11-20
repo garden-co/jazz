@@ -137,7 +137,7 @@ import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
 
-/** `getLocalFirstIdentityProof` hands out a session's sync proof only with this long left. */
+/** `getDeviceAccountProof` hands out a session's sync proof only with this long left. */
 const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
@@ -427,6 +427,7 @@ const FORWARDED_TO_SUCCESSOR = [
   "updateAuthToken",
   "updateCookieSession",
   "getAuthState",
+  "getDeviceAccountProof",
   "getLocalFirstIdentityProof",
   "onAuthChanged",
   "onMutationError",
@@ -2601,15 +2602,15 @@ export class Db {
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(newToken) ?? {},
-        "local-first",
+        "device-account",
       );
       if (!trustedReservedSession) {
-        throw new Error("Minted local-first token is missing its reserved session identity");
+        throw new Error("Minted device account token is missing its reserved session identity");
       }
       this.applyAuthUpdate(newToken, trustedReservedSession);
       this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
-      console.error("Failed to refresh local-first token:", e);
+      console.error("Failed to refresh device account token:", e);
     }
   }
 
@@ -2845,7 +2846,7 @@ export class Db {
         account.identity.issuer === "urn:jazz:local-first"
           ? internalSessionFromVerifiedReservedJwtPayload(
               parseJwtPayload(token) ?? {},
-              "local-first",
+              "device-account",
             )
           : undefined;
       if (!this.authStateStore.validateJwtToken(token, reserved ?? undefined)) return token;
@@ -2871,10 +2872,10 @@ export class Db {
   }
 
   /**
-   * A short-lived local-first JWT proving possession of the current identity:
-   * what a device account sends its own backend's routes as
+   * A short-lived JWT proving possession of the current device account: what
+   * a device account sends its own backend's routes as
    * `Authorization: Bearer` (`jazz.forReqUser(request)` there). Returns
-   * `null` if the current session is not local-first.
+   * `null` if the current session is not a device account.
    *
    * A Db opened by a session (`createJazzClient`, a provider) doesn't hold the
    * device key: it returns the session's current sync proof, which lasts up
@@ -2883,7 +2884,7 @@ export class Db {
    * (the session renews it). Ask for one per request, and don't log or
    * forward it: until it expires it also opens this account's sync.
    */
-  getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
+  getDeviceAccountProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
     if (!this._localFirstSecret) {
       const token = this.config.jwtToken;
       const payload = token ? parseJwtPayload(token) : null;
@@ -2902,6 +2903,11 @@ export class Db {
     const ttl = options?.ttlSeconds ?? 60;
     const audience = options?.audience ?? clientScope(this.config);
     return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
+  }
+
+  /** @deprecated Renamed to {@link getDeviceAccountProof}; this alias goes in a later release. */
+  getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
+    return this.getDeviceAccountProof(options);
   }
 
   /** @internal This Db's own runtime's auth state changes, which never move to a successor. */
@@ -4872,7 +4878,7 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(jwtToken) ?? {},
-        "local-first",
+        "device-account",
       );
       resolvedConfig = { ...configWithoutAuth, jwtToken };
       setTrustedReservedSession(resolvedConfig, trustedReservedSession);

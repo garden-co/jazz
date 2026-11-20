@@ -100,12 +100,16 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/accounts/link", post(accounts::link_for_admin))
         .route(
             "/accounts/found-local-first",
-            post(accounts::found_local_first_for_admin),
+            post(accounts::found_device_account_for_admin),
         )
         .route("/accounts/revoke", post(accounts::revoke_for_admin))
         .route(
             "/accounts/revoke-sessions",
             post(accounts::revoke_sessions_for_admin),
+        )
+        .route(
+            "/backend-signing-key",
+            get(accounts::backend_signing_key_for_admin),
         )
         .route("/migrations/graph", get(migration_graph_handler))
         .route(

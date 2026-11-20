@@ -35,7 +35,7 @@
 use std::collections::VecDeque;
 
 use crate::options::RemoteLinkHint;
-use crate::wire::{WireError, WireErrorCode, WireRetry};
+use crate::wire::{WireError, WireErrorCode, WireErrorReason, WireRetry};
 
 pub mod host;
 
@@ -97,7 +97,22 @@ pub enum AuthFailureReason {
 }
 
 impl AuthFailureReason {
-    /// Classify a server's refusal message, as the TypeScript client does.
+    /// The refusal a server named. A planned re-authentication is not a
+    /// refusal ([`LinkFailure::from_wire_error`] takes it first); read as one,
+    /// it is `Invalid`: the client asks for a new credential.
+    pub fn from_wire(reason: WireErrorReason) -> Self {
+        match reason {
+            WireErrorReason::Expired => Self::Expired,
+            WireErrorReason::Missing => Self::Missing,
+            WireErrorReason::Invalid | WireErrorReason::Reauthenticate => Self::Invalid,
+            WireErrorReason::Disabled => Self::Disabled,
+            WireErrorReason::Revoked => Self::Revoked,
+        }
+    }
+
+    /// Classify a refusal from an older server, which names its reason only
+    /// in its message (diagnostic text, not a contract: see
+    /// [`WireReasonedError`](crate::wire::WireReasonedError)).
     pub fn from_message(message: &str) -> Self {
         let lower = message.to_ascii_lowercase();
         if lower.contains("expired") {
@@ -191,13 +206,16 @@ impl LinkFailure {
     /// `admitted` says whether the server had sent its hello on this
     /// connection. Decided by `code`, never by `retry` alone: a malformed
     /// frame or a refused credential can carry `later`, and retrying those
-    /// cannot succeed. The message decides only what the wire has no field
-    /// for yet: a planned re-authentication and the refusal's reason.
+    /// cannot succeed. The message decides only for an older server, which
+    /// sends no [`WireErrorReason`]: a planned re-authentication and the
+    /// refusal's reason.
     ///
     /// | error                                   | before hello     | after hello |
     /// |-----------------------------------------|------------------|-------------|
-    /// | `auth_failed`, reauthenticate message   | Reauthenticate   | Reauthenticate |
-    /// | `auth_failed`, anything else            | AuthRejected     | AuthRejected |
+    /// | `auth_failed`, reason `reauthenticate`  | Reauthenticate   | Reauthenticate |
+    /// | `auth_failed`, another reason           | AuthRejected(reason) | AuthRejected(reason) |
+    /// | `auth_failed`, no reason (older server), `after_resume` + reauthenticate message | Reauthenticate | Reauthenticate |
+    /// | `auth_failed`, no reason, anything else | AuthRejected(from message) | AuthRejected(from message) |
     /// | `not_ready` + `later`                   | ServerNotReady   | Network     |
     /// | `backpressure` + `later`                | Refused          | Network     |
     /// | `internal` + `later`                    | Refused          | Network     |
@@ -205,15 +223,19 @@ impl LinkFailure {
     pub fn from_wire_error(error: &WireError, admitted: bool) -> Self {
         let message = error.message.clone();
         if error.code == WireErrorCode::AuthFailed {
-            if error.retry == WireRetry::AfterResume
-                && error.message.starts_with(REAUTHENTICATE_MESSAGE_PREFIX)
-            {
-                return Self::Reauthenticate(message);
-            }
-            return Self::AuthRejected {
-                reason: AuthFailureReason::from_message(&error.message),
-                message,
+            // A server that names its reason is taken at its word; an older
+            // one is read from its message, as before.
+            let reason = match error.reason {
+                Some(WireErrorReason::Reauthenticate) => return Self::Reauthenticate(message),
+                Some(reason) => AuthFailureReason::from_wire(reason),
+                None if error.retry == WireRetry::AfterResume
+                    && error.message.starts_with(REAUTHENTICATE_MESSAGE_PREFIX) =>
+                {
+                    return Self::Reauthenticate(message);
+                }
+                None => AuthFailureReason::from_message(&error.message),
             };
+            return Self::AuthRejected { reason, message };
         }
         // `internal` with `later` is a server that cannot serve this session
         // right now (its runtime is shutting down in a rolling deploy): an

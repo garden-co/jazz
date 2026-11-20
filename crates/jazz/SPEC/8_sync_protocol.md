@@ -57,7 +57,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-21`: Wire messages MUST name nodes by UUID, authors by identity and schemas by version id; node-local codes never leave their database.
 - `INV-SYNC-24`: A fresh subscription MUST receive its whole result; only a resumed one may be sent just the rows changed after the seq it held.
 - `INV-SYNC-25`: A resumed subscription MUST leave the replica with the same rows as a fresh subscription to the same query.
-- `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect.
+- `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect. A hibernating host MAY keep admission and active query registrations on their live socket.
 - `INV-SYNC-28`: Results MUST travel as rows and be assembled into result trees by the receiver.
 - `INV-SYNC-30`: A replica MUST treat a subscription as settled only once an upstream has confirmed that subscription with its own `Settled`, and reports the last such confirmation, at its tier, until another replaces it (through an outage too); what waits for the server (a first load, a `Remote` opening, a relay settling its own sessions' reads) waits for the current connection's `Settled`. A node with no upstream settles locally.
 - `INV-SYNC-44`: The read protocol MUST be rows plus settlement.
@@ -197,6 +197,48 @@ sent, so 120 s also bounds the slowest link a whole 2 MiB message survives
 it on every link and drops the frame before the runtime sees it. The native
 Rust transport (NAPI `remote()`, React Native) does not ask yet and has no
 silence timeout of its own.
+
+##### Typed error reasons
+
+A server refusing a credential says why: `expired`, `missing`, `invalid`,
+`disabled` or `revoked`, or `reauthenticate` for a planned re-authentication
+(`WireErrorReason`). A client that advertises `FEATURE_TYPED_ERROR_REASON`
+(`1 << 14`) in its Hello gets the reason at the end of the `WireFrame::Error`
+body, after the message: same tag (1), then the reason's postcard enum tag
+(encoding `wire-error-reason-v1`, pinned by
+`crates/jazz/layers/protocol/fixtures/wire_reasoned_error_v1.json`). There is
+no new frame tag: after its hello a server's frames are told apart from sync
+messages by their first byte, and every tag past 1 is a sync message's. The
+bit is one-sided: only a client advertises it, the server never does, and
+it is not part of the negotiated features. The server decides by what the
+client offered, so it names the reason before its own hello too. Every
+other client gets the `Error` bytes it always got and reads the reason from
+the message, which is diagnostic text, not a contract
+(`AuthFailureReason::from_message`, `mapAuthReason`).
+
+Compatibility:
+
+- Old client, new server: an old client does not offer the bit, so the server
+  sends the plain `Error` frame. Unchanged.
+- New client, old server: an old server never appends a reason, so the client
+  reads the message as before. Unchanged.
+- New client, new server: the client takes the named reason over the message.
+  A reason tag it does not know (a newer server) is ignored and the message
+  decides.
+- A receiver that did not offer the bit decodes with `decode_frame`, which
+  rejects the extra byte (`INV-WIRE-1` holds for it); only a client that
+  offered it decodes with `decode_frame_with_error_reason`.
+
+An app's backend that relays its clients (`createJazz`, the Rust app
+endpoint) answers them the same way: it reads the client's Hello as it
+passes, and a refusal it sends before the Hello (a sign-in it cannot admit)
+waits for it briefly (up to 1 s), since a client sends it right behind its
+prelude. A refusal that finds no Hello in time goes out plain.
+
+The TypeScript carrier (browsers, Node, workers, the thin client) offers it
+on every link. The native Rust transport does not offer it yet: after its
+hello it does not read error frames at all (they reach the sync decoder), so
+it reads the reason from the message.
 
 In-process links (a worker and its tab, tests) carry `SyncMessage` values
 directly (`sync::duplex`); a byte link frames them with postcard

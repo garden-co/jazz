@@ -962,7 +962,7 @@ impl JazzClient {
             credentials: watch::channel(Credentials {
                 auth: AuthConfig {
                     // With the backend secret, a client's own proof is the
-                    // backend relaying that client (a local-first guest).
+                    // backend relaying that client (a device account).
                     jwt_token: if context.backend_session.is_some() {
                         None
                     } else {
@@ -2817,8 +2817,8 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
         return None;
     }
     let auth_mode = match claims.iss.as_str() {
-        AuthorSubject::LOCAL_FIRST_ISSUER => {
-            crate::model::public_api::session::AuthMode::LocalFirst
+        AuthorSubject::DEVICE_ACCOUNT_ISSUER => {
+            crate::model::public_api::session::AuthMode::DeviceAccount
         }
         AuthorSubject::ANONYMOUS_ISSUER => crate::model::public_api::session::AuthMode::Anonymous,
         _ => crate::model::public_api::session::AuthMode::External,
@@ -2939,7 +2939,7 @@ fn is_registered_jwt_claim(name: &str) -> bool {
 fn auth_mode_claim_value(auth_mode: crate::model::public_api::session::AuthMode) -> &'static str {
     match auth_mode {
         crate::model::public_api::session::AuthMode::External => "external",
-        crate::model::public_api::session::AuthMode::LocalFirst => "local-first",
+        crate::model::public_api::session::AuthMode::DeviceAccount => "device-account",
         crate::model::public_api::session::AuthMode::Anonymous => "anonymous",
     }
 }

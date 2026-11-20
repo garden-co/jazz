@@ -582,7 +582,7 @@ groups multiple facade writes under one `TxId`; the resulting commit unit carrie
 the facade and reports validation conflicts as `WriteRejected` (`INV-API-27`).
 
 Owning Rust transaction handles use idempotent RAII abandonment. Dropping an
-uncommitted `MergeableTx` or `SerializableTx` synchronously records a deduplicated
+uncommitted `MergeableTxHandle` or `SerializableTx` synchronously records a deduplicated
 tombstone outside the storage-owning node, then retires it immediately when the
 node is uncontended or schedules node maintenance. Every transaction open,
 read, stage, and commit operation MUST inspect and drain its id's tombstone
