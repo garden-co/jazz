@@ -1063,6 +1063,44 @@ fn subscriptions_open_rows_and_refresh_when_a_key_arrives() {
     assert_eq!(added(stream.try_next_event()), [text("late")]);
 }
 
+/// Contract: a hooked node with no upstream serves bob's subscription
+/// with the rows it can open. A row it could not open when bob left, and
+/// can once a key arrives (and the runtime refreshes its reads), reaches
+/// bob when he reconnects: his resume point says nothing about rows the
+/// hooks left out, so his read opens fresh.
+///
+/// ```text
+/// hub (hooks, no key) ──opening: no rows──► bob
+///                            bob leaves; the hub gets the key
+/// hub (hooks, key)    ──resume: the row───► bob
+/// ```
+#[test]
+fn a_resumed_read_from_a_hooked_node_ships_rows_it_can_now_open() {
+    let hooks = Fake::new();
+    let hub = client(&hooks);
+    let late = uuid::Uuid::new_v4();
+    hooks.hold(late);
+    let row = block_on(hub.insert("notes", note(late, "late"), Default::default()))
+        .unwrap()
+        .row_uuid();
+    hooks.forget(late);
+
+    let bob = block_on(Db::open(DbConfig::new(schema(), identity(2)))).unwrap();
+    let query = bob.prepare_query(&Query::from("notes")).unwrap();
+    let (upstream, _) = link(&bob, &hub);
+    let _stream = block_on(bob.subscribe(&query, ReadOpts::default())).unwrap();
+    pump(&hub, &bob);
+    assert!(all(&bob, "notes").is_empty());
+    assert!(bob.detach_connection(&upstream));
+
+    hooks.hold(late);
+    hub.refresh_reads_of(&["notes"]).unwrap();
+    let _ = link(&bob, &hub);
+    pump(&hub, &bob);
+    let ids: Vec<RowUuid> = all(&bob, "notes").iter().map(|r| r.row_uuid()).collect();
+    assert_eq!(ids, [row]);
+}
+
 /// Contract: an equality filter on an encrypted column is planned by the
 /// hooks: the prepared query compares tokens, its window applies after the
 /// rows are opened and compared (in a live result too), a new held epoch
