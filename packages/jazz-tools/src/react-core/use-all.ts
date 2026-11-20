@@ -4,6 +4,9 @@ import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
 import { toError } from "../runtime/util.js";
 import type { Db } from "../runtime/db.js";
+import { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
+
+const NO_UNREADABLE: readonly UnreadableRow[] = Object.freeze([]);
 
 type UseAllOptions = {
   suspense?: boolean;
@@ -19,6 +22,8 @@ type UseAllLoadingResult = {
   isLoading: true;
   error: null;
   db: Db;
+  /** Rows the result leaves out because this device could not decrypt them. */
+  unreadable: readonly UnreadableRow[];
 };
 
 type UseAllFulfilledResult<T extends { id: string }> = {
@@ -26,6 +31,8 @@ type UseAllFulfilledResult<T extends { id: string }> = {
   isLoading: false;
   error: null;
   db: Db;
+  /** Rows the result leaves out because this device could not decrypt them. */
+  unreadable: readonly UnreadableRow[];
 };
 
 type UseAllErrorResult = {
@@ -33,6 +40,8 @@ type UseAllErrorResult = {
   isLoading: false;
   error: Error;
   db: Db;
+  /** Rows the result leaves out because this device could not decrypt them. */
+  unreadable: readonly UnreadableRow[];
 };
 
 type UseAllNoQueryResult = {
@@ -40,12 +49,16 @@ type UseAllNoQueryResult = {
   isLoading: false;
   error: null;
   db: Db;
+  /** Rows the result leaves out because this device could not decrypt them. */
+  unreadable: readonly UnreadableRow[];
 };
 
 /** Result of {@link useAllSuspense}: the matching rows plus the {@link Db} handle. */
 export type UseAllSuspenseResult<T extends { id: string }> = {
   data: T[];
   db: Db;
+  /** Rows `data` leaves out because this device could not decrypt them. */
+  unreadable: readonly UnreadableRow[];
 };
 
 // A query that never arrives has nothing to fetch, so the suspense variant
@@ -109,18 +122,24 @@ function useAllBase<T extends { id: string }>(
 
   const result = useMemo<UseAllResult<T> | UseAllNoQueryResult>(() => {
     if (key === null) {
-      return { data: undefined, isLoading: false, error: null, db };
+      return { data: undefined, isLoading: false, error: null, db, unreadable: NO_UNREADABLE };
     }
 
     if (status === "fulfilled") {
-      return { data: data!, isLoading: false, error: null, db };
+      return { data: data!, isLoading: false, error: null, db, unreadable: unreadableRows(data!) };
     }
 
     if (status === "rejected") {
-      return { data: undefined, isLoading: false, error: toError(stateError), db };
+      return {
+        data: undefined,
+        isLoading: false,
+        error: toError(stateError),
+        db,
+        unreadable: NO_UNREADABLE,
+      };
     }
 
-    return { data: undefined, isLoading: true, error: null, db };
+    return { data: undefined, isLoading: true, error: null, db, unreadable: NO_UNREADABLE };
   }, [data, db, key, stateError, status]);
 
   if (suspense) {
@@ -167,6 +186,9 @@ function useAllBase<T extends { id: string }>(
  *   and no results could be loaded.
  * - `db` is the {@link Db} handle for writes (`db.insert`, `db.update`, ...),
  *   so components don't need a separate `useDb()`.
+ * - `unreadable` lists the rows `data` leaves out because this device could
+ *   not decrypt them (empty when nothing was left out); it is current with
+ *   every delivery. `unreadableRows(data)` returns the same list.
  *
  * Use {@link useAllSuspense} when you want loading and errors to flow through
  * Suspense and an error boundary instead.
@@ -203,7 +225,8 @@ export function useAll<T extends { id: string }>(
  *
  * @param query - the database query (e.g. `app.todos.where({done: false})`)
  *
- * @returns `{ data, db }`: the matching rows and the {@link Db} handle for writes
+ * @returns `{ data, db, unreadable }`: the matching rows, the {@link Db} handle
+ *   for writes, and the rows left out because this device could not decrypt them
  */
 export function useAllSuspense<T extends { id: string }>(
   query?: QueryBuilder<T>,
@@ -215,7 +238,19 @@ export function useAllSuspense<T extends { id: string }>(
   // this component and a trailing hook changes the hook order, which surfaces
   // as a hook-order warning and a recoverable concurrent-render error.
   const data = useAllBase(query, options, { suspense: true }) as T[];
-  return suspenseResult(data, db);
+  return suspenseAllResult(data, db);
+}
+
+const suspenseAllResults = new WeakMap<object, UseAllSuspenseResult<{ id: string }>>();
+
+/** `{ data, db, unreadable }` for {@link useAllSuspense}, stable like {@link suspenseResult}. */
+function suspenseAllResult<T extends { id: string }>(data: T[], db: Db): UseAllSuspenseResult<T> {
+  let cached = suspenseAllResults.get(data);
+  if (!cached || cached.db !== db) {
+    cached = { data, db, unreadable: unreadableRows(data) };
+    suspenseAllResults.set(data, cached);
+  }
+  return cached as UseAllSuspenseResult<T>;
 }
 
 const suspenseResults = new WeakMap<object, { data: unknown; db: Db }>();

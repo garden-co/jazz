@@ -2,6 +2,7 @@ import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscr
 import { type DbSubscriptionSource, type QueryBuilder, type QueryOptions } from "./runtime/db.js";
 import { isInspectorLocalQueryOptions } from "./internal/inspector-query.js";
 import type { Session } from "./runtime/context.js";
+import { unreadableRows, withUnreadable } from "./encryption/unreadable.js";
 
 type UseAllStatePending<T> = {
   status: "pending";
@@ -522,8 +523,21 @@ export class SubscriptionsOrchestrator {
             this.trace("delta", entry, delta);
             if (entry.generation !== generation || entry.state.status === "rejected") return;
             const wasPending = entry.state.status === "pending";
-            const data = entry.state.status === "fulfilled" ? [...entry.state.data] : [];
+            const previous = entry.state.status === "fulfilled" ? entry.state.data : undefined;
+            const data = previous ? [...previous] : [];
             applySubscriptionDelta(data, delta);
+            // Carry the rows the result leaves out undecrypted, so
+            // `unreadableRows` works on the entry's data as on `delta.all`.
+            // Every delta's `all` holds the current list; without one, keep
+            // the previous list (unless this delta resets the result).
+            withUnreadable(
+              data,
+              delta.all !== undefined
+                ? unreadableRows(delta.all)
+                : previous && !delta.reset
+                  ? unreadableRows(previous)
+                  : undefined,
+            );
             entry.state = {
               status: "fulfilled",
               data,

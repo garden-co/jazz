@@ -128,8 +128,91 @@ const stop = session.db.subscribe(app.tasks.where({ projectId }), (tasks) => {
 The list stays current: a new row this device cannot open is named in the next result (even when the
 visible rows did not change), a row whose key arrives joins the result and leaves the list in the same
 update, and a row that leaves the query (deleted, or moved out of a page) is no longer named. A
-subscription with `limit` counts these rows toward its page, as a read does. Framework hooks (`useAll`
-and its counterparts) build their own arrays, so they do not carry the list yet.
+subscription with `limit` counts these rows toward its page, as a read does.
+
+The framework hooks carry the list too, as `unreadable` beside `data`, and update it with every result.
+`unreadableRows` is exported from each framework's entry point (and from `jazz-tools/client`), and in
+React it also works on `data` itself.
+
+<Tabs groupId="client-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
+  <Tab value="React">
+    ```tsx title="Tasks.tsx"
+    import { useAll } from "jazz-tools/react";
+    import { app } from "./jazz.generated";
+
+    export function Tasks({ projectId }: { projectId: string }) {
+      const { data: tasks = [], unreadable } = useAll(app.tasks.where({ projectId }));
+      return (
+        <>
+          {tasks.map((task) => (
+            <p key={task.id}>{task.title}</p>
+          ))}
+          {unreadable.length > 0 && <p>{unreadable.length} tasks are still being decrypted</p>}
+        </>
+      );
+    }
+    ```
+
+  </Tab>
+  <Tab value="Vue">
+    ```vue title="Tasks.vue"
+    <script setup lang="ts">
+    import { useAll } from "jazz-tools/vue";
+    import { app } from "./jazz.generated";
+
+    const props = defineProps<{ projectId: string }>();
+    const { data: tasks, unreadable } = useAll(() => app.tasks.where({ projectId: props.projectId }));
+    </script>
+
+    <template>
+      <p v-for="task in tasks ?? []" :key="task.id">{{ task.title }}</p>
+      <p v-if="unreadable.length > 0">{{ unreadable.length }} tasks are still being decrypted</p>
+    </template>
+    ```
+
+  </Tab>
+  <Tab value="Svelte">
+    ```svelte title="Tasks.svelte"
+    <script lang="ts">
+      import { QuerySubscription } from "jazz-tools/svelte";
+      import { app } from "./jazz.generated";
+
+      let { projectId }: { projectId: string } = $props();
+      const tasks = new QuerySubscription(() => app.tasks.where({ projectId }));
+    </script>
+
+    {#each tasks.current ?? [] as task (task.id)}
+      <p>{task.title}</p>
+    {/each}
+    {#if tasks.unreadable.length > 0}
+      <p>{tasks.unreadable.length} tasks are still being decrypted</p>
+    {/if}
+    ```
+
+  </Tab>
+  <Tab value="Solid">
+    ```tsx title="Tasks.tsx"
+    import { For, Show } from "solid-js";
+    import { useAll } from "jazz-tools/solid";
+    import { app } from "./jazz.generated";
+
+    export function Tasks(props: { projectId: string }) {
+      const tasks = useAll(() => ({ query: app.tasks.where({ projectId: props.projectId }) }));
+      return (
+        <>
+          <For each={tasks.data ?? []}>{(task) => <p>{task.title}</p>}</For>
+          <Show when={tasks.unreadable.length > 0}>
+            <p>{tasks.unreadable.length} tasks are still being decrypted</p>
+          </Show>
+        </>
+      );
+    }
+    ```
+
+  </Tab>
+</Tabs>
+
+React Native's and Expo's `useAll` return the same fields as React's.
 
 The runtime also reports each row it could not read, as it happens:
 
