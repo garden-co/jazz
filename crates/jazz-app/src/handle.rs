@@ -1002,7 +1002,7 @@ async fn connect_user(
             let account = key.account(app);
             context.jwt_token = Some(key.mint(app, DEVICE_TOKEN_TTL_SECS)?);
             context.account_id = Some(account);
-            let encryption = plan.device(account, Some(key.to_bytes())).await?;
+            let encryption = plan.device(account, Some(&key)).await?;
             let client =
                 JazzClient::connect_with(context, Some(connector), None, encryption).await?;
             let user = User {

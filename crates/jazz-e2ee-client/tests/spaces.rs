@@ -705,6 +705,104 @@ fn a_backed_off_space_does_not_fail_a_read_of_the_others() {
     });
 }
 
+/// Contract: a device that enrols again after its account was reset
+/// forgets what was reported to the device it was: the listener is told
+/// the withdrawal of its `key-pending`, a listener registered later is
+/// told nothing, and the space it waited on is no longer watched.
+///
+/// ```text
+/// carol ──space, alice a member (no delivery)──► alice's device 1: key-pending
+/// alice's device 2 ──request, reset──► server
+/// device 1 ──verify──► re-enrolled: withdrawn; nothing held; nothing watched
+/// ```
+#[test]
+fn reenrolment_forgets_the_old_devices_reports() {
+    within(|| {
+        let settings = EncryptionSettings {
+            allow_account_reset: true,
+            ..Default::default()
+        };
+        let server = secure_authority_with(&settings, None);
+        // A device under the reset settings.
+        let reset_device = |who, node| {
+            let client = open_account(Rc::new(MemoryStore::new()), who, settings.clone(), None);
+            let (db, link) = session(&client, &server, who, &settings, node, None);
+            Device {
+                who,
+                client,
+                db,
+                _link: Some(link),
+                live: Default::default(),
+            }
+        };
+        let first = reset_device(account(0xa1), 1);
+        first.activate(&server);
+        let carol = reset_device(account(0xc0), 2);
+        carol.activate(&server);
+        let space = new_project(&server, &carol, "plans");
+        add_member(&server, &carol, space, &first.id());
+        write_note(&server, &carol, space, SECRET).unwrap();
+        pump(&server, &carol.db);
+
+        let seen = reports_of(&first);
+        let mut watch = drive(&server, &[&first.db], first.client.watch_spaces(&first.db)).unwrap();
+        first.follow_notes(&server);
+        assert!(read_notes(&server, &first, space).unwrap().is_empty());
+        assert_eq!(codes(&seen), [(UnreadableCode::KeyPending, false)]);
+
+        let second = reset_device(first.who, 3);
+        assert_eq!(
+            drive(
+                &server,
+                &[&second.db],
+                second.client.ensure_account(&second.db)
+            )
+            .unwrap(),
+            AccountStatus::AwaitingApproval
+        );
+        assert_eq!(
+            drive(
+                &server,
+                &[&second.db],
+                second.client.reset_account(&second.db)
+            )
+            .unwrap(),
+            AccountStatus::Active
+        );
+        pump(&server, &first.db);
+        assert_eq!(
+            drive(
+                &server,
+                &[&first.db],
+                first.client.ensure_account(&first.db)
+            )
+            .unwrap(),
+            AccountStatus::Reenrolled
+        );
+        first.client.flush_reports();
+        assert!(
+            seen.borrow().iter().any(|report| matches!(
+                report,
+                Report::Withdrawn {
+                    code: UnreadableCode::KeyPending,
+                    ..
+                }
+            )),
+            "{:?}",
+            seen.borrow()
+        );
+        assert!(reports_of(&first).borrow().is_empty());
+        assert!(first.client.take_reports().is_empty());
+        let synced = drive(
+            &server,
+            &[&first.db],
+            first.client.sync_spaces(&first.db, &mut watch),
+        )
+        .unwrap();
+        assert!(synced.is_empty(), "{synced:?}");
+    });
+}
+
 /// Alice's database at `path`, not linked to any server.
 fn offline_db(client: &E2eeClient, who: AuthorSubject, node: u8, path: &std::path::Path) -> Db {
     let config = jazz::db::DbConfig::new(
@@ -1154,6 +1252,79 @@ fn acquiring_from_a_rolled_back_server_is_stale_state() {
                 ))
             ),
             "{refused:?}"
+        );
+    });
+}
+
+/// Contract: a server restored from an older copy cannot show the author
+/// of a space's root at an earlier state than this device verified (§6.3a):
+/// once bob has read alice's account at a later cut, acquiring her space
+/// from the restored copy is `stale-state`, so a key is never taken from a
+/// view in which a device alice removed could still be active. Bob's own
+/// account passes its floor on the same copy: his own space is acquired.
+///
+/// ```text
+/// alice ──space A (root)──► server   bob ──space B (root)──► server (copy)
+/// bob ──later write; acquire A (floor of alice at c2)──► server
+/// bob ──acquire B──► restored copy: held
+/// bob ──acquire A──► restored copy (alice at c1) ──✗ stale-state
+/// ```
+#[test]
+fn acquiring_with_a_rolled_back_author_is_stale_state() {
+    within(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("server.sqlite");
+        let old = dir.path().join("old.sqlite");
+        let settings = EncryptionSettings::default();
+        let (alice_id, bob) = {
+            let server = secure_authority_with(&settings, Some(&live));
+            let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+            alice.activate(&server);
+            let bob = device(&server, account(0xb0), MemoryStore::new(), 2);
+            bob.activate(&server);
+            let theirs = new_project(&server, &alice, "plans");
+            add_member(&server, &alice, theirs, &bob.id());
+            write_note(&server, &alice, theirs, SECRET).unwrap();
+            pump(&server, &alice.db);
+            let own = new_project(&server, &bob, "mine");
+            write_note(&server, &bob, own, "bob's").unwrap();
+            pump(&server, &bob.db);
+            let theirs = space_address(&bob, theirs);
+            let own = space_address(&bob, own);
+            (alice.id(), (bob.who, bob.client, theirs, own))
+        };
+        let (who, client, theirs, own) = bob;
+        for suffix in ["", "-wal", "-shm"] {
+            let source = format!("{}{suffix}", live.display());
+            if std::path::Path::new(&source).exists() {
+                std::fs::copy(&source, format!("{}{suffix}", old.display())).unwrap();
+            }
+        }
+        {
+            let server = secure_authority_with(&settings, Some(&live));
+            let (db, _link) = session(&client, &server, who, &settings, 3, None);
+            project(&db, "a later write");
+            pump(&server, &db);
+            drive(&server, &[&db], client.acquire(&db, &theirs)).unwrap();
+        }
+        let floor = block_on(client.floor(&alice_id)).expect("alice's account is floored");
+
+        let restored = secure_authority_with(&settings, Some(&old));
+        let (db, _link) = session(&client, &restored, who, &settings, 4, None);
+        let held = drive(&restored, &[&db], client.acquire(&db, &own));
+        assert!(matches!(held, Ok(SpaceKeyState::Held)), "{held:?}");
+        let refused = drive(&restored, &[&db], client.acquire(&db, &theirs));
+        assert!(
+            matches!(
+                refused,
+                Err(ClientError::Protocol(ProtocolError::StaleState))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            block_on(client.floor(&alice_id)),
+            Some(floor),
+            "the floor stays"
         );
     });
 }
@@ -1818,6 +1989,58 @@ fn removing_a_member_rotates_the_space_before_the_next_write() {
         assert_eq!(read_notes(&server, &carol, space).unwrap().len(), 2);
         pump(&server, &bob.db);
         assert_eq!(read_notes(&server, &bob, space).unwrap().len(), 1);
+    });
+}
+
+/// Contract: removing a member is enough for the next write to rotate:
+/// with no pass and no `rotate` called by the app, the remover's next write,
+/// wrapped or a host's, is sealed under a new version that the removed
+/// member never receives, and the queue of removals is served.
+///
+/// ```text
+/// alice deletes bob's member row ──write──► pass: marked ─► rotate ─► note
+/// bob reads only the note from before
+/// ```
+#[test]
+fn a_removal_alone_rotates_the_space_before_the_next_write() {
+    within(|| {
+        for host in [false, true] {
+            let server = secure_authority_with(&EncryptionSettings::default(), None);
+            let (alice, bob, space) = shared_space(&server);
+            assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+            pump(&server, &bob.db);
+            assert_eq!(read_notes(&server, &bob, space).unwrap().len(), 1);
+
+            let member = member_row(&server, &bob.id());
+            block_on(alice.db.delete(MEMBERS, member, Default::default())).unwrap();
+            assert_eq!(alice.client.pending_member_removals(), 1);
+
+            if host {
+                host_write_note(&server, &alice, space, "after");
+            } else {
+                write_note(&server, &alice, space, "after").unwrap();
+            }
+            pump(&server, &alice.db);
+            assert_eq!(
+                count(&server, "__e2ee_space_successors"),
+                1,
+                "the write rotated first (host: {host})"
+            );
+            assert_eq!(alice.client.pending_member_removals(), 0);
+            assert!(
+                !alice
+                    .client
+                    .needs_rotation(&space_address(&alice, space))
+                    .unwrap()
+            );
+
+            pump(&server, &bob.db);
+            assert_eq!(
+                read_notes(&server, &bob, space).unwrap().len(),
+                1,
+                "the note after the removal is not under bob's version (host: {host})"
+            );
+        }
     });
 }
 
@@ -2826,6 +3049,58 @@ fn a_lazy_rotation_that_could_not_be_made_is_retried_on_the_next_write() {
     });
 }
 
+/// Contract: the rotation a write tried is that write's own: while a
+/// `write` call runs, host writes it does not wrap still each get their own
+/// rotation chance after each removal, instead of sealing under the version
+/// a removed member holds because an earlier write's mark was still there.
+///
+/// ```text
+/// write call A runs:
+///   alice removes bob ──host write──► NeedsKey ─ prepare_space: rotate ─► note
+///   alice removes carol ──host write──► NeedsKey ─ prepare_space: rotate ─► note
+/// carol reads neither note
+/// ```
+#[test]
+fn host_writes_inside_a_write_call_each_get_their_own_rotation() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        let carol = device(&server, account(0xc0), MemoryStore::new(), 7);
+        carol.activate(&server);
+        add_member(&server, &alice, space, &carol.id());
+        carol.follow_notes(&server);
+        assert_eq!(deliver(&server, &alice, &[&bob, &carol], space), 2);
+        pump(&server, &carol.db);
+        assert_eq!(read_notes(&server, &carol, space).unwrap().len(), 1);
+
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.write(&alice.db, async || {
+                for (removed, body) in [(&bob, "after bob"), (&carol, "after carol")] {
+                    let member = member_row(&server, &removed.id());
+                    block_on(alice.db.delete(MEMBERS, member, Default::default())).unwrap();
+                    host_write_note(&server, &alice, space, body);
+                }
+                Ok(())
+            }),
+        )
+        .unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(
+            count(&server, "__e2ee_space_successors"),
+            2,
+            "each removal's host write rotated first"
+        );
+        pump(&server, &carol.db);
+        assert_eq!(
+            read_notes(&server, &carol, space).unwrap().len(),
+            1,
+            "carol reads only the note from before"
+        );
+    });
+}
+
 /// Contract: a device whose account is no longer a member never delivers,
 /// though it still holds the key: its pass writes nothing and fails nothing.
 #[test]
@@ -3254,6 +3529,137 @@ fn a_second_repairer_conflicts_and_overwrites_nothing() {
         let expected = vec![Some(text("bob's edit")), Some(text("bob's note"))];
         assert_eq!(bodies(&bob), expected);
         assert_eq!(bodies(&alice), expected);
+    });
+}
+
+/// Contract: a repair interrupted between batches keeps the losing key and
+/// finishes after a restart (protocol §3.2): alice lost the creation race
+/// with more rows than one batch rewrites; her repair is stopped once the
+/// first batch has committed (the second batch's transaction never
+/// commits), her runtime and store are opened again, and the repair
+/// rewrites the rest; bob reads every row.
+///
+/// ```text
+/// alice, bob offline: each creates the space; alice writes 120 notes
+/// bob's root first ──► alice's key refused; bob delivers K
+/// alice repairs: batch 1 (100 rows) commits ──✗ interrupted
+/// alice restarts ──► key still held `refused` ──► repair: the other 20
+/// ```
+#[test]
+fn a_repair_interrupted_between_batches_finishes_after_a_restart() {
+    const ROWS: usize = 120;
+    within(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alice.sqlite");
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let who = account(0xa1);
+        let store = MemoryStore::new();
+        let settings = EncryptionSettings::default();
+        let open_alice = |store: &MemoryStore| {
+            let client = open_account(Rc::new(store.clone()), who, settings.clone(), None);
+            let (db, link) = session(&client, &server, who, &settings, 1, Some(&path));
+            let alice = Device {
+                who,
+                client,
+                db,
+                _link: Some(link),
+                live: Default::default(),
+            };
+            alice.activate(&server);
+            alice.follow_notes(&server);
+            alice
+        };
+        let alice = open_alice(&store);
+        let bob = device(&server, account(0xb0), MemoryStore::new(), 2);
+        bob.activate(&server);
+        let space = new_project(&server, &alice, "plans");
+        add_member(&server, &alice, space, &bob.id());
+        bob.follow_notes(&server);
+        pump(&server, &bob.db);
+
+        // Both create the space offline; bob's root reaches the authority
+        // first, so alice's creation, and her rows, are lost.
+        for (device, rows) in [(&alice, ROWS), (&bob, 1)] {
+            device.client.set_online(false);
+            for n in 0..rows {
+                block_on(device.client.write(&device.db, async || {
+                    device
+                        .db
+                        .insert(
+                            "notes",
+                            note(space, &format!("note {n}")),
+                            Default::default(),
+                        )
+                        .await
+                }))
+                .unwrap();
+            }
+            device.client.set_online(true);
+        }
+        pump(&server, &bob.db);
+        pump(&server, &alice.db);
+        drive(&server, &[&bob.db], bob.client.reconcile(&bob.db)).unwrap();
+        drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
+        assert_eq!(marks(&alice, space), [KeyMark::Refused]);
+        assert_eq!(deliver(&server, &bob, &[&alice], space), 1);
+        pump(&server, &alice.db);
+        let address = space_address(&alice, space);
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.acquire(&alice.db, &address),
+        )
+        .unwrap();
+
+        // What bob's store shows him: his note, and alice's rows once they
+        // are under the real key.
+        let readable = || {
+            let query = Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(space))));
+            all(&bob.db, query).unwrap().len()
+        };
+        assert_eq!(readable(), 1);
+
+        // The repair runs until bob sees its first batch, and is then
+        // dropped, as a closed tab or a killed process stops it.
+        {
+            let repair = alice.client.repair_space(&alice.db, &address);
+            let mut repair = std::pin::pin!(repair);
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let mut interrupted = false;
+            for _ in 0..2_000 {
+                if let std::task::Poll::Ready(done) = repair.as_mut().poll(&mut cx) {
+                    panic!("the repair finished before it was interrupted: {done:?}");
+                }
+                block_on(alice.db.tick()).unwrap();
+                block_on(server.tick()).unwrap();
+                block_on(bob.db.tick()).unwrap();
+                if readable() > 1 {
+                    interrupted = true;
+                    break;
+                }
+            }
+            assert!(interrupted, "the first batch committed");
+        }
+        assert_eq!(readable(), 1 + 100, "one batch of the repair committed");
+
+        // A restart: the runtime and the store are opened again.
+        drop(alice);
+        let alice = open_alice(&store);
+        assert!(
+            marks(&alice, space).contains(&KeyMark::Refused),
+            "the losing key is kept: it still opens the rows not yet repaired"
+        );
+        let rest = drive(
+            &server,
+            &[&alice.db],
+            alice.client.repair_space(&alice.db, &address),
+        )
+        .unwrap();
+        assert_eq!(rest, ROWS - 100);
+        pump(&server, &alice.db);
+        pump(&server, &bob.db);
+        assert_eq!(readable(), 1 + ROWS, "bob reads every row");
+        assert_eq!(read_notes(&server, &alice, space).unwrap().len(), 1 + ROWS);
     });
 }
 

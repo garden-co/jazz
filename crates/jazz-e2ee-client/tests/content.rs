@@ -254,6 +254,135 @@ fn cells_that_do_not_authenticate_are_reported_not_returned() {
     assert_eq!(body_rows, expected);
 }
 
+/// Unreadable reports alice's runtime left since its last call, as
+/// `(row, column, code, space)`, sorted and without repeats.
+fn unreadable(
+    client: &jazz_e2ee_client::E2eeClient,
+) -> Vec<(jazz::ids::RowUuid, Option<String>, UnreadableCode, String)> {
+    let mut out: Vec<_> = client
+        .take_reports()
+        .into_iter()
+        .filter_map(|report| match report {
+            Report::Unreadable(unreadable) => Some((
+                unreadable.id.unwrap(),
+                unreadable.column,
+                unreadable.code,
+                unreadable.space.unwrap().identifier,
+            )),
+            _ => None,
+        })
+        .collect();
+    out.sort_by_key(|(id, column, ..)| (*id, column.clone()));
+    out.dedup();
+    out
+}
+
+/// Contract: a sealed cell's context binds its column (protocol §4.1).
+/// Mallory, writing straight to the authority, copies a row's sealed
+/// `body` into the same row's `note`: the copy does not open, so the row
+/// is left out and its `note` reported `invalid-ciphertext`, while alice's
+/// untouched row still reads.
+///
+/// ```text
+/// alice ──seal──► server ◄── mallory: row.note = row.body
+///   ▲               │
+///   └── reads ◄─────┘   untouched row only; the copy is reported
+/// ```
+#[test]
+fn a_cell_copied_into_another_column_does_not_open() {
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (db, _link, _) = online(&client, &server, None);
+    let plans = project(&db, "plans");
+    hold_new_space(&client, &db, plans);
+    let insert = |body: &str| {
+        block_on(db.insert("notes", note(plans, body), Default::default()))
+            .unwrap()
+            .row_uuid()
+    };
+    let (untouched, copied) = (insert("kept"), insert(SECRET));
+    pump(&server, &db);
+    let stored = all(&server, Query::from("notes")).unwrap();
+    let body = cell(
+        stored.iter().find(|row| row.row_uuid() == copied).unwrap(),
+        "body",
+    );
+    let cells = BTreeMap::from([("note".to_owned(), body)]);
+    block_on(server.update("notes", copied, cells, Default::default())).unwrap();
+    let query = Query::from("notes");
+    let _live =
+        block_on(db.subscribe(&db.prepare_query(&query).unwrap(), Default::default())).unwrap();
+    pump(&server, &db);
+    client.take_reports();
+
+    let rows = all(&db, query).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [untouched]
+    );
+    assert_eq!(
+        unreadable(&client),
+        [(
+            copied,
+            Some("note".to_owned()),
+            UnreadableCode::InvalidCiphertext,
+            plans.to_string()
+        )]
+    );
+}
+
+/// Contract: a sealed cell's context binds its space (protocol §4.1).
+/// Mallory moves alice's row to another space she also holds without
+/// resealing it: no cell opens under the row's new space, each opens only
+/// under the space it was sealed for, so the row is returned and every
+/// encrypted cell is reported `stale-space` naming that space (§4.3: such
+/// a row needs repair and is never reported `invalid-ciphertext`).
+///
+/// ```text
+/// alice ──seal (plans)──► server ◄── mallory: projectId = other
+///   ▲                       │
+///   └── reads, opened under plans ◄── reported stale-space (plans)
+/// ```
+#[test]
+fn a_row_moved_to_another_space_opens_only_under_the_space_it_was_sealed_for() {
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (db, _link, _) = online(&client, &server, None);
+    let (plans, other) = (project(&db, "plans"), project(&db, "other"));
+    hold_new_space(&client, &db, plans);
+    hold_new_space(&client, &db, other);
+    let moved = block_on(db.insert("notes", note(plans, SECRET), Default::default()))
+        .unwrap()
+        .row_uuid();
+    pump(&server, &db);
+    let cells = BTreeMap::from([("projectId".to_owned(), Value::Uuid(other))]);
+    block_on(server.update("notes", moved, cells, Default::default())).unwrap();
+    let query = Query::from("notes");
+    let _live =
+        block_on(db.subscribe(&db.prepare_query(&query).unwrap(), Default::default())).unwrap();
+    pump(&server, &db);
+    client.take_reports();
+
+    let rows = all(&db, query).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        [moved]
+    );
+    assert_eq!(cell(&rows[0], "body"), text(SECRET));
+    let reports = unreadable(&client);
+    let columns: Vec<_> = reports
+        .iter()
+        .map(|(_, column, ..)| column.clone())
+        .collect();
+    assert!(columns.contains(&Some("body".to_owned())), "{reports:?}");
+    assert!(
+        reports.iter().all(|(id, _, code, space)| *id == moved
+            && *code == UnreadableCode::StaleSpace
+            && *space == plans.to_string()),
+        "{reports:?}"
+    );
+}
+
 /// A note as a writer without the hooks stores it: every encrypted column
 /// holds `value` as it is.
 fn unsealed(space: uuid::Uuid, value: Value) -> BTreeMap<String, Value> {
@@ -773,7 +902,7 @@ fn a_self_space_upsert_that_creates_its_row_seals_what_it_omits() {
     let client = open_client(Rc::new(MemoryStore::new()));
     let (db, _link, _) = online(&client, &server, None);
     let vault = uuid::Uuid::now_v7();
-    let held = new_space_key(&client.device(), &address_in(&db, "vaults", vault));
+    let held = new_space_key(&client.device().unwrap(), &address_in(&db, "vaults", vault));
     block_on(client.keep(held)).unwrap();
     let label = |text_value: &str| BTreeMap::from([("label".to_owned(), text(text_value))]);
     let row = jazz::ids::RowUuid(vault);

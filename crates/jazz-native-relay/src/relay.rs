@@ -79,6 +79,9 @@ const NATIVE_RELAY_DRIVE_ROUNDS: usize = 64;
 /// How often the owner re-checks time-bound work (a subscription waiting for
 /// its first answer, a read waiting for the server) while some is pending.
 const NATIVE_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// How often the owner drives a device's encryption runtime while a call
+/// waits on it (see `RelayWorker::wait_interval`).
+const NATIVE_RELAY_ENCRYPTION_POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// Bounds on the per-foreground handles a JavaScript runtime may hold open.
 pub(crate) const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
 const NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX: usize = 64;
@@ -670,13 +673,18 @@ impl NativeRelay {
         &self,
         operation: impl FnOnce(&mut RelayWorker) -> Result<T, RelayError> + Send + 'static,
     ) -> Result<mpsc::Receiver<Result<T, RelayError>>, RelayError> {
+        let (response_tx, response_rx) = mpsc::channel();
+        self.send_job(Box::new(move |worker| {
+            let _ = response_tx.send(operation(worker));
+        }))?;
+        Ok(response_rx)
+    }
+
+    /// Queue `job` for the owner thread.
+    fn send_job(&self, job: RelayJob) -> Result<(), RelayError> {
         if !self.is_alive() {
             return Err(RelayError::Closed);
         }
-        let (response_tx, response_rx) = mpsc::channel();
-        let job: RelayJob = Box::new(move |worker| {
-            let _ = response_tx.send(operation(worker));
-        });
         {
             let commands = self
                 .inner
@@ -692,7 +700,7 @@ impl NativeRelay {
                     mpsc::TrySendError::Disconnected(_) => RelayError::Closed,
                 })?;
         }
-        Ok(response_rx)
+        Ok(())
     }
 
     fn owner_closed(&self) -> RelayError {
@@ -867,24 +875,37 @@ impl NativeRelayClient {
         let ready = op == "ready";
         let progress = ready.then(|| Arc::new(Mutex::new(None)));
         let owner_progress = progress.clone();
-        let operation = move |worker: &mut RelayWorker| {
+        let (respond, response) = mpsc::channel();
+        // The owner starts the call and keeps it among its pending calls:
+        // it goes on serving other jobs and polls the call after each drive
+        // (see `RelayWorker::poll_encryption_calls`), rather than holding
+        // the thread until the call is done.
+        let job: RelayJob = Box::new(move |worker| {
             let timeout = if ready {
                 let remaining = timeout.saturating_sub(started.elapsed());
                 if remaining.is_zero() {
                     // The caller's deadline passed while this job waited
                     // in the queue. The loop already owns any recovery.
-                    return Err(readiness_timeout());
+                    let _ = respond.send(Err(readiness_timeout()));
+                    return;
                 }
                 remaining
             } else {
                 timeout
             };
-            let encryption =
-                worker.client(id)?.encryption.clone().ok_or_else(|| {
-                    RelayError::Drive("this peer holds no encryption keys".into())
-                })?;
-            let end = Instant::now() + timeout;
-            let mut call = if ready {
+            let encryption = match worker.client(id).and_then(|client| {
+                client
+                    .encryption
+                    .clone()
+                    .ok_or_else(|| RelayError::Drive("this peer holds no encryption keys".into()))
+            }) {
+                Ok(encryption) => encryption,
+                Err(error) => {
+                    let _ = respond.send(Err(error));
+                    return;
+                }
+            };
+            let call = if ready {
                 let encryption = encryption.clone();
                 Box::pin(async move {
                     encryption
@@ -895,53 +916,35 @@ impl NativeRelayClient {
             } else {
                 encryption.call(op, args)
             };
-            // Keep the last host-confirmed outcome available while the
-            // owner is asleep or occupied driving the relay.
-            let observe = || -> Result<(), RelayError> {
-                if let Some(progress) = &owner_progress {
-                    let observed = encryption.native_ready_at_deadline();
-                    *progress
-                        .lock()
-                        .map_err(|_| RelayError::Poisoned("encryption readiness"))? =
-                        Some(observed);
-                }
-                Ok(())
-            };
-            observe()?;
-            loop {
-                if let Poll::Ready(done) =
-                    call.as_mut().poll(&mut Context::from_waker(Waker::noop()))
-                {
-                    return done.map_err(RelayError::Drive);
-                }
-                if !ready && Instant::now() >= end {
-                    return Err(RelayError::Drive("the encryption call timed out".into()));
-                }
-                worker.drive();
-                observe()?;
-                thread::sleep(Duration::from_millis(2));
-            }
+            worker.begin_encryption_call(PendingEncryptionCall {
+                client: id,
+                call,
+                // Readiness ends at its own deadline with the loop's
+                // outcome; any other call fails at its timeout.
+                deadline: (!ready).then(|| Instant::now() + timeout),
+                progress: owner_progress.map(|progress| (encryption, progress)),
+                respond,
+            });
+        });
+        self.relay.send_job(job)?;
+        let Some(progress) = progress else {
+            return response.recv().map_err(|_| self.relay.owner_closed())?;
         };
-        if let Some(progress) = progress {
-            let response = self.relay.enqueue(operation)?;
-            match response.recv_timeout(timeout.saturating_sub(started.elapsed())) {
-                Ok(result) => result,
-                Err(mpsc::RecvTimeoutError::Timeout) => progress
-                    .lock()
-                    .map_err(|_| RelayError::Poisoned("encryption readiness"))?
-                    .take()
-                    .map_or_else(
-                        || Err(readiness_timeout()),
-                        |result| {
-                            result
-                                .map(serde_json::Value::from)
-                                .map_err(RelayError::Drive)
-                        },
-                    ),
-                Err(mpsc::RecvTimeoutError::Disconnected) => Err(self.relay.owner_closed()),
-            }
-        } else {
-            self.relay.run(operation)
+        match response.recv_timeout(timeout.saturating_sub(started.elapsed())) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => progress
+                .lock()
+                .map_err(|_| RelayError::Poisoned("encryption readiness"))?
+                .take()
+                .map_or_else(
+                    || Err(readiness_timeout()),
+                    |result| {
+                        result
+                            .map(serde_json::Value::from)
+                            .map_err(RelayError::Drive)
+                    },
+                ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(self.relay.owner_closed()),
         }
     }
 
@@ -1301,6 +1304,57 @@ enum EncryptedBuild {
     Failed(String),
 }
 
+/// The last outcome a readiness call observed, which its caller takes if
+/// its own deadline passes before the owner answers.
+#[cfg(feature = "e2ee-client")]
+type ReadinessProgress = Arc<Mutex<Option<Result<&'static str, String>>>>;
+
+/// An encryption call a device UI peer is waiting on, polled by the owner
+/// after each drive (the runtime's futures progress only as the relay is
+/// driven).
+#[cfg(feature = "e2ee-client")]
+struct PendingEncryptionCall {
+    client: u64,
+    call: Pin<Box<dyn Future<Output = Result<serde_json::Value, String>>>>,
+    /// When the call fails with a timeout; `None` for readiness, which ends
+    /// at its own deadline.
+    deadline: Option<Instant>,
+    /// For readiness: the runtime and where to keep its last outcome.
+    progress: Option<(
+        Rc<jazz_e2ee_client::host::runtime::Encryption>,
+        ReadinessProgress,
+    )>,
+    respond: mpsc::Sender<Result<serde_json::Value, RelayError>>,
+}
+
+#[cfg(feature = "e2ee-client")]
+impl PendingEncryptionCall {
+    /// Poll the call once; `Some` with its answer once it is done.
+    fn poll(&mut self) -> Option<Result<serde_json::Value, RelayError>> {
+        if let Poll::Ready(done) = poll_once(&mut self.call) {
+            return Some(done.map_err(RelayError::Drive));
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Some(Err(RelayError::Drive(
+                "the encryption call timed out".into(),
+            )));
+        }
+        // Keep the last host-confirmed outcome available to a caller whose
+        // deadline passes before the owner answers.
+        if let Some((encryption, progress)) = &self.progress {
+            let observed = encryption.native_ready_at_deadline();
+            match progress.lock() {
+                Ok(mut progress) => *progress = Some(observed),
+                Err(_) => return Some(Err(RelayError::Poisoned("encryption readiness"))),
+            }
+        }
+        None
+    }
+}
+
 pub(crate) struct RelayWorker {
     schema: JazzSchema,
     migrations: Migrations,
@@ -1337,6 +1391,9 @@ pub(crate) struct RelayWorker {
     /// device UI peer brings the runtime's.
     #[cfg(feature = "e2ee-client")]
     keyless: Option<Rc<dyn jazz::e2ee::E2eeHooks>>,
+    /// Encryption calls of device UI peers that are not done yet.
+    #[cfg(feature = "e2ee-client")]
+    encryption_calls: Vec<PendingEncryptionCall>,
 }
 
 /// A binding's tick requests set `dirty`; the owner's drive ticks it.
@@ -1472,6 +1529,8 @@ impl RelayWorker {
             timed: Instant::now(),
             #[cfg(feature = "e2ee-client")]
             keyless,
+            #[cfg(feature = "e2ee-client")]
+            encryption_calls: Vec::new(),
         })
     }
 
@@ -1483,8 +1542,8 @@ impl RelayWorker {
                     Err(mpsc::TryRecvError::Empty) => None,
                     Err(mpsc::TryRecvError::Disconnected) => break,
                 }
-            } else if self.awaits_time() {
-                match receiver.recv_timeout(NATIVE_RELAY_POLL_INTERVAL) {
+            } else if self.awaits_time() || self.awaits_encryption() {
+                match receiver.recv_timeout(self.wait_interval()) {
                     Ok(command) => Some(command),
                     Err(mpsc::RecvTimeoutError::Timeout) => None,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1517,6 +1576,8 @@ impl RelayWorker {
                 self.persistent_dirty.set(true);
             }
             self.drive();
+            #[cfg(feature = "e2ee-client")]
+            self.poll_encryption_calls();
         }
         self.shutdown();
     }
@@ -1525,9 +1586,71 @@ impl RelayWorker {
         self.clients.values().any(Foreground::awaits_time)
     }
 
+    /// How long the owner waits for a command before it drives again. The
+    /// encryption runtime registers no wakers: its loop yields and expects
+    /// the host to drive it again soon. So while a device waits on a call,
+    /// the owner drives it more often, between commands rather than instead
+    /// of them.
+    fn wait_interval(&self) -> Duration {
+        if self.awaits_encryption() {
+            NATIVE_RELAY_ENCRYPTION_POLL_INTERVAL
+        } else {
+            NATIVE_RELAY_POLL_INTERVAL
+        }
+    }
+
+    #[cfg(feature = "e2ee-client")]
+    fn awaits_encryption(&self) -> bool {
+        !self.encryption_calls.is_empty()
+    }
+
+    #[cfg(not(feature = "e2ee-client"))]
+    fn awaits_encryption(&self) -> bool {
+        false
+    }
+
+    /// Start waiting on `call`, answering it at once if it is already done.
+    #[cfg(feature = "e2ee-client")]
+    fn begin_encryption_call(&mut self, mut call: PendingEncryptionCall) {
+        match call.poll() {
+            Some(result) => {
+                let _ = call.respond.send(result);
+            }
+            None => self.encryption_calls.push(call),
+        }
+    }
+
+    /// Answer the pending encryption calls that are done or past their
+    /// deadline.
+    #[cfg(feature = "e2ee-client")]
+    fn poll_encryption_calls(&mut self) {
+        self.encryption_calls.retain_mut(|call| match call.poll() {
+            Some(result) => {
+                let _ = call.respond.send(result);
+                false
+            }
+            None => true,
+        });
+    }
+
+    /// Fail the pending encryption calls of `client` (it detached, or the
+    /// relay is closing): their runtime stops with it.
+    #[cfg(feature = "e2ee-client")]
+    fn end_encryption_calls(&mut self, client: Option<u64>) {
+        self.encryption_calls.retain(|call| {
+            if client.is_some_and(|client| client != call.client) {
+                return true;
+            }
+            let _ = call.respond.send(Err(RelayError::Closed));
+            false
+        });
+    }
+
     fn shutdown(&mut self) {
         #[cfg(feature = "e2ee-client")]
         self.encrypted_opens.clear();
+        #[cfg(feature = "e2ee-client")]
+        self.end_encryption_calls(None);
         for (_, client) in std::mem::take(&mut self.clients) {
             client.close();
         }
@@ -1686,6 +1809,8 @@ impl RelayWorker {
             .clients
             .remove(&id)
             .ok_or(RelayError::UnknownClient(id))?;
+        #[cfg(feature = "e2ee-client")]
+        self.end_encryption_calls(Some(id));
         client.close();
         self.persistent_dirty.set(true);
         self.drive();

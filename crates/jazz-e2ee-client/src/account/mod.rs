@@ -34,7 +34,7 @@ use jazz_e2ee::protocol::records::account::{
 };
 use jazz_e2ee::protocol::{Accepted, Position, ProtocolError};
 
-pub use devices::{DeviceInfo, DeviceStatus, PendingApproval};
+pub use devices::{ApprovedBy, DeviceInfo, DeviceStatus, PendingApproval};
 
 use crate::client::E2eeClient;
 use crate::error::ClientError;
@@ -446,7 +446,7 @@ impl E2eeClient {
 
     async fn step(&self, db: &Db, tx: OpenTransactionId) -> Result<Step, ClientError> {
         let read = self.read_account(db, tx).await?;
-        let device = self.shared.device.borrow().clone();
+        let device = self.shared.device()?.clone();
         let writer = self.writer()?;
         // A device that verified this account before checks every read
         // against its floor before it stages anything: a server that shows
@@ -532,7 +532,7 @@ impl E2eeClient {
 
     async fn reset_step(&self, db: &Db, tx: OpenTransactionId) -> Result<(), ClientError> {
         let read = self.read_account(db, tx).await?;
-        let device = self.shared.device.borrow().clone();
+        let device = self.shared.device()?.clone();
         if self.check_floor_first(&read, &device.id).await? == FloorCheck::NoLongerActive {
             return Err(ProtocolError::DeviceNoLongerActive.into());
         }

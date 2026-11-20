@@ -64,9 +64,10 @@ export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
           // Only a missing marker means a new incarnation; any other error (an I/O error, a
           // garbled marker) is thrown, never taken for a wipe.
           if (!isMissing(error)) throw error;
-          await mkdir(at(scope), { recursive: true });
+          // Only this process's user may list or read the device's keys.
+          await mkdir(at(scope), { recursive: true, mode: 0o700 });
           const incarnation = BigInt(Date.now()) * 1000n + BigInt(randomBytes(2).readUInt16BE());
-          await writeFile(marker, incarnation.toString());
+          await writeFile(marker, incarnation.toString(), { mode: 0o600 });
           return incarnation;
         }
       });

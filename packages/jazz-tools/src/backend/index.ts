@@ -67,10 +67,12 @@ export {
   EncryptionError,
   EncryptionNotDeclaredError,
   EncryptionStoreRequiredError,
+  unreadableRows,
 } from "../encryption/index.js";
 export type {
   Encryption,
   EncryptionReport,
+  UnreadableRow,
   PrivateStore,
   StoredDocument,
 } from "../encryption/index.js";

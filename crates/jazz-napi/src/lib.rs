@@ -1403,13 +1403,32 @@ impl NapiUpstreamLink {
 /// execute on a Send worker pool, whereas a Jazz database is deliberately
 /// `Rc`/thread-affine. The adapter drives this object after its peer
 /// transport makes progress instead of blocking Node.
+///
+/// A one-shot read that left rows out because the encryption runtime could
+/// not open them comes back as one of these even when it is done at once:
+/// [`PendingNativeRead::unreadable`] names those rows.
 #[napi]
 pub struct PendingNativeRead {
     future: RefCell<Option<ReadFuture>>,
+    /// The answer of a read that was done when it was returned.
+    done: RefCell<Option<Vec<u8>>>,
+    /// The rows the read left out, as JSON, once it is done.
+    unreadable: Rc<RefCell<Option<String>>>,
 }
 
 impl PendingNativeRead {
+    fn new(future: ReadFuture) -> Self {
+        Self {
+            future: RefCell::new(Some(future)),
+            done: RefCell::default(),
+            unreadable: Rc::default(),
+        }
+    }
+
     fn poll_once(&self) -> napi::Result<Option<Uint8Array>> {
+        if let Some(bytes) = self.done.borrow_mut().take() {
+            return Ok(Some(bytes.into()));
+        }
         let Some(mut future) = self.future.borrow_mut().take() else {
             return Err(napi::Error::from_reason(
                 "native pending read is already complete",
@@ -1436,17 +1455,64 @@ impl PendingNativeRead {
     #[napi]
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
+        self.done.borrow_mut().take();
+    }
+
+    /// Once the read is done: the rows it left out because they could not
+    /// be opened, as a JSON array of `{ table, id, column, code }`; `null`
+    /// when it left none out.
+    #[napi]
+    pub fn unreadable(&self) -> Option<String> {
+        self.unreadable.borrow().clone()
     }
 }
 
 fn read_or_pending(future: ReadFuture) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
-    let pending = PendingNativeRead {
-        future: RefCell::new(Some(future)),
-    };
+    let pending = PendingNativeRead::new(future);
     Ok(match pending.poll_once()? {
         Some(bytes) => Either::A(bytes),
         None => Either::B(pending),
     })
+}
+
+/// [`read_or_pending`] for a read that reports the rows it left out: such a
+/// read is answered as a [`PendingNativeRead`] even when done at once, so the
+/// rows reach JS with it.
+fn reporting_read_or_pending(
+    future: HostFuture<(Vec<u8>, Vec<jazz::db::UnreadableRow>)>,
+) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+    let unreadable = Rc::<RefCell<Option<String>>>::default();
+    let slot = Rc::clone(&unreadable);
+    let future: ReadFuture = Box::pin(async move {
+        let (bytes, rows) = future.await?;
+        if !rows.is_empty() {
+            let rows: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "table": row.table,
+                        "id": row.id.0.to_string(),
+                        "column": row.column,
+                        "code": row.code,
+                    })
+                })
+                .collect();
+            *slot.borrow_mut() = Some(serde_json::Value::Array(rows).to_string());
+        }
+        Ok(bytes)
+    });
+    let pending = PendingNativeRead {
+        unreadable,
+        ..PendingNativeRead::new(future)
+    };
+    match pending.poll_once()? {
+        Some(bytes) if pending.unreadable.borrow().is_none() => Ok(Either::A(bytes)),
+        Some(bytes) => {
+            *pending.done.borrow_mut() = Some(bytes.to_vec());
+            Ok(Either::B(pending))
+        }
+        None => Ok(Either::B(pending)),
+    }
 }
 
 /// A JavaScript-thread-owned permission preflight waiting for the upstream
@@ -2998,7 +3064,7 @@ impl NapiDb {
     ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
         let read = self
             .binding()?
-            .all(
+            .all_reporting(
                 query.to_vec(),
                 &json_or_null(opts),
                 open_transaction_id.as_deref(),
@@ -3006,7 +3072,7 @@ impl NapiDb {
                 claims,
             )
             .map_err(host_error)?;
-        read_or_pending(read)
+        reporting_read_or_pending(read)
     }
 
     /// Bind receipt-correlation claims to this client's own admitted identity.

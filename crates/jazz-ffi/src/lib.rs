@@ -97,6 +97,9 @@ impl JazzHandle {
             let host: Arc<dyn jazz_app_support::TokenProvider> = Arc::new(host);
             host
         });
+        // The request (key bytes as base64) is the foreign store's from
+        // here: UniFFI hands it over and frees it unwiped; the wrappers
+        // document what they wipe. The answer is the runtime's to wipe.
         let calls: core::StoreCalls = Arc::new(move |request| {
             let reply = store.call(request);
             (reply.ok, reply.payload)

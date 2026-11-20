@@ -63,14 +63,23 @@ public struct EncryptionConfig: Sendable {
 
 /// Answers jazz-ffi's store requests (JSON text: `op`, bytes as base64,
 /// numbers that may exceed 2^53 as decimal text) with a `PrivateStore`.
+///
+/// Requests and answers carry key bytes. The `Data` buffers this bridge owns
+/// (the request's UTF-8, the secret it decodes for `protect`, the secret
+/// `unprotect` returns, the answer's JSON) are zeroed once used; a copy the
+/// store keeps is its own (`Data` copies on write). Swift strings (the
+/// request and answer texts, the base64 in them) and Foundation's parsed JSON
+/// cannot be wiped and stay until their memory is reused. jazz-ffi wipes its
+/// own copies.
 final class StoreBridge: JazzFFI.PrivateStore, @unchecked Sendable {
     let store: any PrivateStore
     init(_ store: any PrivateStore) { self.store = store }
 
     func call(request: String) -> StoreReply {
-        guard let data = request.data(using: .utf8),
-            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-            let op = object["op"] as? String
+        var data = Data(request.utf8)
+        let parsed = try? JSONSerialization.jsonObject(with: data)
+        wipe(&data)
+        guard let object = parsed as? [String: Any], let op = object["op"] as? String
         else { return StoreReply(ok: false, payload: "the private store request is not JSON") }
         func text(_ name: String) throws -> String {
             guard let value = object[name] as? String else { throw StoreRequestError.missing(name) }
@@ -85,10 +94,10 @@ final class StoreBridge: JazzFFI.PrivateStore, @unchecked Sendable {
             return value
         }
         func json(_ value: Any) -> String {
-            guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]),
-                let text = String(data: data, encoding: .utf8)
+            guard var data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed])
             else { return "null" }
-            return text
+            defer { wipe(&data) }
+            return String(data: data, encoding: .utf8) ?? "null"
         }
         do {
             let result: String
@@ -116,9 +125,13 @@ final class StoreBridge: JazzFFI.PrivateStore, @unchecked Sendable {
                 try store.delete(scope: try text("scope"))
                 result = "null"
             case "protect":
-                result = json(try store.protect(try bytes("secret")).base64EncodedString())
+                var secret = try bytes("secret")
+                defer { wipe(&secret) }
+                result = json(try store.protect(secret).base64EncodedString())
             case "unprotect":
-                result = json(try store.unprotect(try bytes("blob")).base64EncodedString())
+                var secret = try store.unprotect(try bytes("blob"))
+                defer { wipe(&secret) }
+                result = json(secret.base64EncodedString())
             default:
                 return StoreReply(ok: false, payload: "unknown private store operation \(op)")
             }
@@ -134,6 +147,12 @@ final class StoreBridge: JazzFFI.PrivateStore, @unchecked Sendable {
 }
 
 enum StoreRequestError: Error { case missing(String) }
+
+/// Zeroes `data`'s bytes in place (a copy shared with someone else is copied
+/// first and left as it was).
+func wipe(_ data: inout Data) {
+    data.resetBytes(in: data.startIndex..<data.endIndex)
+}
 
 /// What the runtime's loop is doing.
 public struct EncryptionState: Decodable, Sendable {

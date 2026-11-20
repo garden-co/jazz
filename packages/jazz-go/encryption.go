@@ -53,7 +53,10 @@ type PrivateStore interface {
 	// incarnation first, then its documents.
 	Delete(scope string) error
 	// Protect protects a secret at rest (encrypt it with a key the platform
-	// keeps); Unprotect recovers it.
+	// keeps); Unprotect recovers it. Jazz clears the secret it passes to
+	// Protect once Protect returns, and the slice Unprotect returns once it
+	// has read it: keep neither (return a copy from Unprotect if you keep the
+	// secret yourself).
 	Protect(secret []byte) ([]byte, error)
 	Unprotect(blob []byte) ([]byte, error)
 }
@@ -113,9 +116,18 @@ type storeRequest struct {
 
 // answerStore runs a request against store: ok with the result as JSON, or
 // not ok with "conflict", "wiped" or the failure's message.
+//
+// Requests and answers carry key bytes as base64. The byte slices this
+// wrapper owns are cleared once used; Go strings (the request, the answer and
+// the base64 texts in them) are immutable and cannot be, so they stay in
+// memory until the garbage collector reuses it. jazz-ffi wipes its own
+// copies, including the C string handed back.
 func answerStore(store PrivateStore, request string) (bool, string) {
 	var r storeRequest
-	if err := json.Unmarshal([]byte(request), &r); err != nil {
+	raw := []byte(request)
+	err := json.Unmarshal(raw, &r)
+	clear(raw)
+	if err != nil {
 		return false, "the private store request is not JSON: " + err.Error()
 	}
 	fail := func(err error) (bool, string) {
@@ -132,7 +144,9 @@ func answerStore(store PrivateStore, request string) (bool, string) {
 		if err != nil {
 			return false, err.Error()
 		}
-		return true, string(b)
+		answer := string(b)
+		clear(b)
+		return true, answer
 	}
 	b64 := base64.StdEncoding
 	switch r.Op {
@@ -197,9 +211,12 @@ func answerStore(store PrivateStore, request string) (bool, string) {
 		}
 		blob, err := store.Protect(secret)
 		if err != nil {
+			clear(secret)
 			return fail(err)
 		}
-		return text(b64.EncodeToString(blob))
+		answer, answerText := text(b64.EncodeToString(blob))
+		clear(secret)
+		return answer, answerText
 	case "unprotect":
 		blob, err := b64.DecodeString(r.Blob)
 		if err != nil {
@@ -209,7 +226,9 @@ func answerStore(store PrivateStore, request string) (bool, string) {
 		if err != nil {
 			return fail(err)
 		}
-		return text(b64.EncodeToString(secret))
+		answer, answerText := text(b64.EncodeToString(secret))
+		clear(secret)
+		return answer, answerText
 	}
 	return false, "unknown private store operation " + r.Op
 }

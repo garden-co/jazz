@@ -188,7 +188,9 @@ JazzHandle *jazz_open_user(const char *config_json, JazzTokenCallback cb, void *
  * the client's thread, one request at a time: a slow store holds the client
  * up. Return 0 with *payload the result as JSON text (a malloc'ed string,
  * Go: C.CString), or non-zero with *payload the error: "conflict", "wiped"
- * or a message.
+ * or a message. Requests and answers carry key bytes: jazz zeroes *payload
+ * before it frees it, and its own copy of the request once the callback
+ * returns, so wipe any copy of either your callback makes.
  */
 typedef int (*JazzStoreCallback)(void *ctx, const char *request, char **payload);
 
