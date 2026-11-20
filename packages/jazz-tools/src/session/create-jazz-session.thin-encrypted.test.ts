@@ -1237,33 +1237,23 @@ describe("a thin session of an app with encrypted columns", () => {
       expect(isThinDb(kept)).toBe(false);
     }, 90_000);
 
-    it("attaches listeners without starting the load, and they fire after a later upgrade", async () => {
+    // That they hear reports after the upgrade is pinned with the handle's
+    // other calls (create-jazz-session.thin-handle-calls.test.ts).
+    it("attaches listeners without starting the load", async () => {
       const host = await serve();
       const { device } = await member(host);
       // The page is still loading, so no background upgrade starts either.
       pageStillLoading();
       const gate = gatedLoader();
       const kept = db(await open(host, device, gate.loader));
-      const unreadable: unknown[] = [];
-      const stop = kept.encryption.onUnreadable((report) => unreadable.push(report));
-      const stopped = kept.encryption.onChallenge(() => {});
+      kept.encryption.onUnreadable(() => {});
+      kept.encryption.onChallenge(() => {})();
       kept.encryption.onReport(() => {});
-      stopped();
       // Attached at start-up, they must not pull in the local-first client.
       await new Promise((resolve) => setTimeout(resolve, 300));
       expect(gate.calls).toBe(0);
       expect(isThinDb(kept)).toBe(true);
-
-      // Some other cause starts the upgrade; the listeners attach with it.
-      const upgrading = kept.upgradeToLocalFirst(gate.loader);
-      gate.release();
-      await upgrading;
-      await expect.poll(() => isThinDb(kept), { timeout: 20_000 }).toBe(false);
-      const real = kept.encryption as unknown as { listeners: Set<unknown> };
-      await expect.poll(() => real.listeners.size, { timeout: 10_000 }).toBe(2);
-      stop();
-      expect(real.listeners.size).toBe(1);
-    }, 90_000);
+    }, 60_000);
 
     it("listeners of a Db that closes without upgrading are dropped, and never fire", async () => {
       const host = await serve();
@@ -1284,7 +1274,9 @@ describe("a thin session of an app with encrypted columns", () => {
       expect(gate.calls).toBe(0);
     }, 90_000);
 
-    it("refuses the synchronous recovery.create() and starts the load", async () => {
+    // That the refusal itself starts the load is pinned with the handle's
+    // other calls (create-jazz-session.thin-handle-calls.test.ts).
+    it("refuses the synchronous recovery.create(), saying when to call it again", async () => {
       const host = await serve();
       const gate = gatedLoader();
       const session = await open(host, undefined, gate.loader);
@@ -1301,7 +1293,6 @@ describe("a thin session of an app with encrypted columns", () => {
       expect((thrown as Error).message).toContain(
         "call it again after `await db.encryption.ready()`",
       );
-      await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
     }, 60_000);
 
     it("refuses without a loader, like any operation", async () => {
