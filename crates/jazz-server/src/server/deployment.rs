@@ -5,7 +5,6 @@ pub(crate) use crate::portable::catalogue::DeploymentResponse;
 pub(crate) use crate::portable::deployment::DeploySchema;
 use crate::portable::deployment::{self as portable, Deployment};
 pub(crate) use crate::portable::deployment::{DeployError, DeployRequest};
-use crate::runtime::StorageConfig;
 #[cfg(any(test, feature = "embedded-server"))]
 use jazz::tools::public_schema::{Schema, TablePolicies};
 use std::sync::Arc;
@@ -62,26 +61,31 @@ pub(crate) async fn deploy(
     let runtime = match state.runtime() {
         Some(runtime) => runtime,
         None => {
-            // Apply on a scratch store first, so a deployment the catalogue
-            // refuses never creates the app's database. The real store
-            // starts as empty as the scratch one, so the same change
-            // applies there; only a storage failure can still fail it, and
-            // then leaves an empty store that the next deployment reuses.
-            let probe =
-                ServerRuntimeHandle::start_with_storage(genesis.clone(), StorageConfig::InMemory)
-                    .map_err(DeployError::internal)?;
-            let applied = match change(&probe, &deployment).await {
-                Ok(change) => probe
-                    .apply_catalogue(change, None)
-                    .await
-                    .map_err(DeployError::from),
-                Err(error) => Err(error),
-            };
-            probe.shutdown().await.map_err(DeployError::internal)?;
-            applied?;
+            let store = state.store.as_ref().ok_or_else(|| {
+                DeployError::unavailable("server runtime storage is not configured")
+            })?;
             state
-                .start_core_server_shell(genesis)
+                .catalogue_store
+                .check_unchanged(staged)
+                .map_err(DeployError::invalid)?;
+            let stored = store
+                .catalogue()
                 .map_err(DeployError::internal)?
+                .read()
+                .map_err(DeployError::internal)?;
+            let change = deployment.catalogue_change(&stored)?;
+            // Initialization and publication commit on the real store together.
+            // Do not expose a runtime until that transaction has succeeded.
+            let started = store.start_deployment(genesis, change);
+            if let Ok(runtime) = &started {
+                *state.core_server_shell.write().unwrap() = Some(runtime.clone());
+            }
+            state
+                .catalogue_store
+                .refresh()
+                .map_err(DeployError::internal)?;
+            started?;
+            return Ok(deployment.staged.response);
         }
     };
     state
