@@ -92,13 +92,39 @@ an encrypted column fail with an error that names the pattern (for example "Read
 A write to a space whose key this device does not hold yet waits for it (up to ten seconds, for a
 member waiting on another member's delivery) before it fails with the reason `key-pending`.
 
-Rows a device cannot read are left out and reported, never read as empty:
+### Rows this device cannot read
+
+A row this device cannot decrypt (it holds no key for it, or the key is still on its way) is never read
+as empty: the read leaves it out and says so. `unreadableRows(result)` returns the rows a read left out,
+each with its `table`, `id`, the `column` that could not be opened and a `code` (`key-pending`,
+`key-unavailable`, `invalid-ciphertext`, ...); it is empty when the result is complete.
+
+```ts
+import { unreadableRows } from "jazz-tools/backend";
+
+const page = await session.db.all(app.tasks.where({ projectId }).limit(20));
+const missing = unreadableRows(page);
+if (missing.length > 0) {
+  // This page is incomplete: `page.length + missing.length` rows matched.
+}
+```
+
+`limit` and `offset` count the rows left out, because they are applied before rows are decrypted. A page
+can come back shorter than its limit, or empty, and still not be the last one: the rows
+`unreadableRows` names make up the difference, and the next page starts after them. (For a query that
+filters on an encrypted column, they may include rows that would not have matched.) A `key-pending` row
+comes back once its key arrives; read again, or use a subscription, which updates by itself.
+
+The runtime also reports each row it could not read, as it happens:
 
 ```ts
 session.db.encryption.onUnreadable((report) => {
   console.warn(report.code, report.table, report.id);
 });
 ```
+
+While no listener is registered, the runtime keeps up to 1,024 reports for the next listener. Past that
+the oldest are dropped, and the next listener first receives a `reports-dropped` report with their count.
 
 ## The backend holds no keys
 
@@ -107,7 +133,8 @@ encryption participant: it has no account, no identity and no keys. Its own data
 and the plain columns of an encrypted table as normal, never sees an encrypted column (the rows come
 back without it), refuses a write that names one ("the backend holds no encryption keys; encrypted
 columns are written by clients") and refuses a filter, ordering or selection of one. A server
-that needs to compute on encrypted content cannot; do that on a client.
+that needs to compute on encrypted content cannot; do that on a client. The generated types are the
+clients' and give an encrypted column its plaintext type; on the backend, that property is `undefined`.
 
 `db.encryption` exists on every `Db`; for an app that declares no encryption, using it throws
 `EncryptionNotDeclaredError`.

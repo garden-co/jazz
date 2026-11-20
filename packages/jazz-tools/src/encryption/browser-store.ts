@@ -21,12 +21,8 @@
  *   Where Web Locks do not exist the key is made with an add-only IndexedDB
  *   write, and the tab that loses uses the key that won.
  */
-import {
-  PrivateStoreConflictError,
-  PrivateStoreWipedError,
-  type PrivateStore,
-  type StoredDocument,
-} from "./private-store.js";
+import type { PrivateStore, StoredDocument } from "./private-store.js";
+import { PrivateStoreConflictError, PrivateStoreWipedError } from "./private-store-errors.js";
 
 /** Where the store keeps its state; one database per origin unless a name is given. */
 const DEFAULT_NAME = "jazz-private-store";

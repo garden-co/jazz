@@ -2373,6 +2373,7 @@ dependencies = [
  "rand_core 0.10.1",
  "sha1",
  "sha2 0.11.1",
+ "subtle",
  "thiserror 2.0.18",
  "zeroize",
 ]
@@ -2387,6 +2388,7 @@ dependencies = [
  "jazz-core",
  "jazz-e2ee",
  "jazz-e2ee-client",
+ "postcard",
  "rusqlite",
  "serde_json",
  "sha2 0.11.1",

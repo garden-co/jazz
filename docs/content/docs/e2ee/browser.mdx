@@ -4,7 +4,7 @@ description: "Encrypted columns in a web app: nothing to configure for the keys,
 languageTabs: backend
 ---
 
-In a browser the client keeps the device's keys for you. You pass your app and encryption works (for now with in-page storage, `driver: { type: "memory" }`; see [limits](/docs/e2ee/limits)):
+In a browser the client keeps the device's keys for you. You pass your app and encryption works, with the default persistent storage (each tab syncing through a shared worker) or in-page storage (`driver: { type: "memory" }`):
 
 ```ts
 import { createJazzClient } from "jazz-tools/client";
@@ -12,7 +12,6 @@ import { app } from "./jazz.generated";
 
 const session = await createJazzClient({
   serverUrl: "/jazz",
-  driver: { type: "memory" },
   encryption: { app },
   client: () => import("jazz-tools/local-first"),
 });
@@ -112,6 +111,21 @@ page can use but can never read out (a non-extractable WebCrypto key). Clearing 
 the keys; the device then enrols again as a new device, like any other new device (see
 [Devices and recovery](/docs/e2ee/devices-and-recovery)). To keep keys somewhere else, pass your own
 `store` next to `app`: it is the [private store](/docs/e2ee/private-store) every platform uses.
+
+### Signing out
+
+By default a sign-out keeps the device's keys, as it keeps the account's local data and, for a device
+account, its key: the user's next sign-in on this browser reads at once, with no new approval. While
+they are kept, a later user of the same browser profile, or any script on your origin, can still ask
+the browser to unprotect them (see [limits](/docs/e2ee/limits)).
+
+On a shared computer, open the client with `clearOnSignOut: true`. A sign-out then wipes the account's
+keys from the private store (yours, if you passed `store`) together with its local data, once no other
+tab of the app holds that account open, and a sign-out the page did not see (on your server, or a tab
+that closed) is wiped on the next page load. The device can no longer read the account's encrypted
+rows: when the user signs in again it is a new device, approved by another device or recovered (see
+[Devices and recovery](/docs/e2ee/devices-and-recovery)). Wiping takes the persistent storage (the
+default); with `driver: { type: "memory" }`, `clearOnSignOut` wipes nothing, keys included.
 
 ## Tabs
 

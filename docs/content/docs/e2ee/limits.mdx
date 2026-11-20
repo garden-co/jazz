@@ -43,13 +43,6 @@ languageTabs: backend
 - **Node and the browser.** These are the Node client (`createJazzClient` from `jazz-tools/backend`) and
   the web client (`createJazzClient` from `jazz-tools/client`, also the client for Deno, Bun and
   command-line apps with a bearer). The native clients follow.
-- **Browser storage with encryption waits for a Jazz fix.** An encrypted app works in a browser page that
-  keeps its data in memory (`driver: { type: "memory" }`) and in Node, Deno and Bun. With the default
-  persistent browser storage, where each tab syncs through a shared worker, a tab's transaction that
-  reads several tables one after another stalls on versions of Jazz that lack a fix to how a tab asks its
-  worker for its next read (the fix is a separate pull request that is still to land), so
-  `db.encryption.ready()` times out. Until you are on a version with the fix, run an encrypted app with
-  in-page storage in the browser.
 - **A script on your page can use the device's keys.** The browser keeps the device's keys protected by a
   key that scripts can use but never read out, and each tab holds the space keys it uses in memory. Any
   script that runs on your page's origin (an injected one, for example through a cross-site scripting
@@ -61,3 +54,7 @@ languageTabs: backend
   suspected injection, check the account's device list from a trusted device and remove the affected
   device and any device you do not recognise (each removal rotates the account);
   keep your page free of untrusted scripts as you would for anything else sensitive.
+- **A sign-out keeps the device's keys unless you pass `clearOnSignOut`.** Until they are wiped, a later
+  user of the same browser profile or a script on your origin can use them as above. With
+  `clearOnSignOut: true` (and the default persistent storage) a sign-out wipes them with the account's
+  local data; see [Signing out](/docs/e2ee/browser#signing-out).

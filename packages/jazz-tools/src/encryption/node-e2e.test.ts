@@ -16,6 +16,7 @@ import {
   EncryptionNotDeclaredError,
   EncryptionStoreRequiredError,
   memoryPrivateStore,
+  unreadableRows,
   type PrivateStore,
 } from "./index.js";
 
@@ -255,7 +256,7 @@ describe("encryption on Node, end to end", () => {
     const project = await makeProject(alice, "plans");
     await addMember(alice, project, bob.account);
     await alice.db
-      .insert(app.tasks, { projectId: project, title: "before" })
+      .insert(app.tasks, { projectId: project, title: "before", label: "1" })
       .wait({ tier: "global" });
     await alice.db.encryption.keys.deliver();
     await until(async () => {
@@ -271,22 +272,50 @@ describe("encryption on Node, end to end", () => {
     const delivered = await alice.db.encryption.keys.rotate({ table: "projects", id: project });
     expect(delivered).toBe(0);
     await alice.db
-      .insert(app.tasks, { projectId: project, title: "after" })
+      .insert(app.tasks, { projectId: project, title: "after", label: "2" })
       .wait({ tier: "global" });
     const later = await alice.db.all(app.tasks.where({ projectId: project }), { tier: "remote" });
     expect(later.map((row) => row.title).sort()).toEqual(["after", "before"]);
+    const after = later.find((row) => row.title === "after")!.id;
     // Bob is sent both rows; the one written before he was removed still
-    // opens under the key he holds, the one after does not and is reported.
+    // opens under the key he holds, the one after does not. His read returns
+    // the first and names the second as left out, with why; the runtime's
+    // reports say so too.
     const reports: { code?: string; table?: string }[] = [];
     bob.db.encryption.onUnreadable((report) => reports.push(report as never));
+    const tasks = app.tasks.where({ projectId: project });
     const bobSees = await until(async () => {
-      const found = await bob.db.all(app.tasks.where({ projectId: project }), { tier: "remote" });
-      return reports.length > 0 ? found : undefined;
-    }, "bob's read of the rotated row to be reported unreadable");
+      const found = await bob.db.all(tasks, { tier: "remote" });
+      return unreadableRows(found).length > 0 ? found : undefined;
+    }, "bob's read to name the rotated row as unreadable");
     expect(bobSees.map((row) => row.title)).toEqual(["before"]);
+    expect(unreadableRows(bobSees)).toEqual([
+      { table: "tasks", id: after, column: "title", code: expect.stringMatching(/^key-/) },
+    ]);
+    await until(async () => (reports.length > 0 ? reports : undefined), "the report");
     expect(
       reports.some((report) => report.table === "tasks" && /^key-/.test(report.code ?? "")),
     ).toBe(true);
+
+    // Pages count the row he cannot open: the second page is empty but
+    // names it, so it does not look like the end; the third is the end.
+    const page = (offset: number) =>
+      bob.db.all(tasks.orderBy("label").limit(1).offset(offset), { tier: "remote" });
+    const first = await page(0);
+    expect(first.map((row) => row.title)).toEqual(["before"]);
+    expect(unreadableRows(first)).toEqual([]);
+    const second = await page(1);
+    expect(second).toEqual([]);
+    expect(unreadableRows(second).map((row) => row.id)).toEqual([after]);
+    const third = await page(2);
+    expect(third).toEqual([]);
+    expect(unreadableRows(third)).toEqual([]);
+    // `limit` alone: one row asked for, none returned, and the result says why.
+    const limited = await bob.db.all(tasks.orderBy("label", "desc").limit(1), { tier: "remote" });
+    expect(limited).toEqual([]);
+    expect(unreadableRows(limited).map((row) => row.id)).toEqual([after]);
+    // Alice holds every key: her results are complete.
+    expect(unreadableRows(later)).toEqual([]);
   }, 90_000);
 
   it("a device account restored from its key on a new device reads again, with no other device", async () => {

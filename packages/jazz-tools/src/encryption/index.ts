@@ -18,6 +18,8 @@ export {
   PrivateStoreWipedError,
 } from "./private-store.js";
 export type { PrivateStore, StoredDocument, StoreTarget } from "./private-store.js";
+export { unreadableRows } from "./unreadable.js";
+export type { UnreadableRow } from "./unreadable.js";
 
 /** The account's state as this device sees it. */
 export type AccountStatus = "active" | "awaiting-approval" | "reenrolled";
@@ -40,7 +42,12 @@ export class EncryptionStoreRequiredError extends Error {
   }
 }
 
-/** A failure of an encryption call; `code` is stable (`approval-answered`, `approval-code-mismatch`, `no-challenge`, `store`, `closed`, `protocol`, ...). */
+/**
+ * A failure of an encryption call; `code` is stable (`approval-answered`,
+ * `approval-code-mismatch`, `no-challenge`, `store`, `closed`, a protocol
+ * refusal's own code such as `recovery-root-mismatch` or `stale-state`, and
+ * `protocol` for a protocol failure without one, ...).
+ */
 export class EncryptionError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
@@ -73,6 +80,11 @@ export type EncryptionReport =
       space: { table: string; id: string } | null;
     }
   | { type: "challenged" }
+  /**
+   * Reports Jazz kept for the app while nothing took them, past its limit:
+   * `count` older ones were dropped (a challenge never is).
+   */
+  | { type: "reports-dropped"; count: number }
   | { type: string; [key: string]: unknown };
 
 /** The native calls the handle is built on. */
@@ -267,7 +279,11 @@ export class Encryption {
     };
   }
 
-  /** The reports of rows left out because they could not be read. */
+  /**
+   * The reports of rows left out because they could not be read, as they
+   * happen. The read that left a row out also says so itself: see
+   * {@link unreadableRows}.
+   */
   onUnreadable(listener: (report: EncryptionReport) => void): () => void {
     return this.onReport((report) => {
       if (report.type === "unreadable") listener(report);
@@ -452,10 +468,19 @@ export class Recovery {
   }
 }
 
-/** The handle of an app that declares no encryption: every use throws. */
+/**
+ * The handle of an app that declares no encryption: every use throws. What
+ * looks at a value without using it is answered instead: `await` and
+ * promise checks (`then`), `JSON.stringify` (`toJSON`), `console.log` and
+ * the inspector (`util.inspect`, other symbols), so logging or awaiting
+ * `db.encryption` is not an error.
+ */
 export function notDeclaredEncryption(): Encryption {
   return new Proxy({} as Encryption, {
-    get() {
+    get(_target, property) {
+      if (property === "then" || property === "toJSON" || typeof property === "symbol") {
+        return undefined;
+      }
       throw new EncryptionNotDeclaredError();
     },
   });

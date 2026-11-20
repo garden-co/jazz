@@ -11,7 +11,12 @@ import type { BoundApp } from "../../src/typed-app.js";
 import type { TestPermissionsFile } from "../../src/testing/test-app.js";
 
 export interface JazzServerBrowserCommands {
-  jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
+  jazzServerInfo(appId?: string, options?: { onDisk?: boolean }): Promise<JazzServerInfo>;
+  /**
+   * Optional: only configs whose tests look at what a core stores register it.
+   * Whether the files of an on-disk core hold each of `needles`.
+   */
+  jazzServerStoreHolds?(serverUrl: string, needles: string[]): Promise<boolean[]>;
   jazzServerStop(serverUrl: string): Promise<void>;
   /**
    * Optional: only configs whose tests deploy from the browser register it.
