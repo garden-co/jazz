@@ -1220,6 +1220,9 @@ impl Foreground {
                         // Not in the foreground ABI yet: a coalesced backlog
                         // reaches React Native as a plain reset.
                         coalesced: _,
+                        // Nor are unreadable rows: React Native has no
+                        // encryption runtime yet.
+                        unreadable: _,
                     } => ForegroundSubscriptionEvent::Delta {
                         reset,
                         settled,

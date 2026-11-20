@@ -45,6 +45,21 @@ fn bindings_expose_plaintext_and_hide_ciphertext() {
     );
 }
 
+/// The TypeScript type map marks each encrypted column `encrypted: true`
+/// (and no plain one), so a keyless backend's types can drop it; the row
+/// and insert types stay the plaintext ones clients use.
+#[test]
+fn typescript_marks_encrypted_columns() {
+    let ts = jazz_codegen::generate(jazz_codegen::Lang::TypeScript, &app_json()).unwrap();
+    assert!(
+        ts.contains(
+            "title: { kind: \"string\"; nullable: false; value: string; encrypted: true };"
+        )
+    );
+    assert!(ts.contains("done: { kind: \"boolean\"; nullable: false; value: boolean };"));
+    assert!(ts.contains("  title: string;\n"));
+}
+
 /// A backend loading its permissions against the bindings' compiled app
 /// computes the bundle the app's files give: the embedded declarations
 /// let it derive the system tables' policies.
