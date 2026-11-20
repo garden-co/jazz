@@ -9134,6 +9134,7 @@ enum WriteCheck {
     Restore,
 }
 
+#[derive(Clone)]
 struct DeferredCheck {
     /// The schema the write was made through, which names its table.
     schema: Rc<Schema>,
@@ -9898,6 +9899,11 @@ struct Batch {
     /// rather than copied, so a stage costs the same however many writes
     /// came before it.
     rows: Arc<GroundedRows>,
+    /// The check of each row's first write in `ops`, by stored table and
+    /// row: the policy a later staged write to that row continues, so
+    /// staging decides the row by its first write as the commit and the
+    /// authority do (SPEC 7).
+    first_checks: HashMap<(String, [u8; 16]), Vec<DeferredCheck>>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
@@ -10509,6 +10515,7 @@ impl Db {
                 reads_state: Rc::default(),
                 ops: Vec::new(),
                 rows: Arc::default(),
+                first_checks: HashMap::new(),
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
                 claims: None,
@@ -10851,6 +10858,20 @@ impl Db {
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         let staged = batch.ops.len();
+        // The extra write's row, and the checks its first staged write
+        // left, which decide it instead of the extra write's own.
+        let extra_row = match extra.as_deref().and_then(|op| Some((op, op.row()?))) {
+            Some((op, row)) => Some((
+                inner.schema.table(op.table())?.stored.clone(),
+                *row.0.as_bytes(),
+            )),
+            None => None,
+        };
+        let first_checks = extra_row
+            .as_ref()
+            .and_then(|key| batch.first_checks.get(key))
+            .cloned()
+            .unwrap_or_default();
         // A row is never evidence for its own check.
         let staged_rows = match extra.as_deref() {
             Some(op) => {
@@ -10917,6 +10938,8 @@ impl Db {
         // A step that is undone leaves no head rows behind.
         let heads = inner.inherited_heads.borrow().clone();
         let joins = extra.is_some();
+        let mut first = Vec::new();
+        let mut first_key = None;
         let applied = match extra {
             Some(op) => inner.counter_deltas(op).and_then(|()| {
                 let schema = inner.schema.clone();
@@ -10925,9 +10948,24 @@ impl Db {
                 // evidence for this one's (SPEC 7), as at the authority
                 // that receives the unit. The commit checks the whole unit.
                 inner.defer_checks();
+                // A row the batch already wrote is decided by its first
+                // write's check on its end state, as on commit, where the
+                // whole unit applies under one `defer_checks`: the extra
+                // write's own check is dropped as a later write's.
+                if let Some(pending) = inner.deferred.borrow_mut().as_mut() {
+                    pending.extend(first_checks);
+                }
                 let applied = inner
                     .apply_all_checking(&[(schema, op.clone())], 0, own)
-                    .and_then(|()| inner.finish_checks_after(own, staged_rows));
+                    .and_then(|()| {
+                        if let Some(key) = &extra_row
+                            && let Some(pending) = inner.deferred.borrow().as_ref()
+                        {
+                            first.extend(pending.iter().cloned());
+                            first_key = Some(key.clone());
+                        }
+                        inner.finish_checks_after(own, staged_rows)
+                    });
                 if applied.is_err() {
                     inner.abandon_checks();
                 }
@@ -10951,6 +10989,13 @@ impl Db {
         }
         if keep && let Some(overlay) = inner.overlay.as_mut() {
             overlay.applied += 1;
+        }
+        if keep
+            && let Some(key) = first_key
+            && !first.is_empty()
+            && let Some(batch) = inner.batches.get_mut(&id)
+        {
+            batch.first_checks.entry(key).or_insert(first);
         }
         result
     }
