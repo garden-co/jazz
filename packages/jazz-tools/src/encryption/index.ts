@@ -398,10 +398,19 @@ export class Recovery {
   }
 }
 
-/** The handle of an app that declares no encryption: every use throws. */
+/**
+ * The handle of an app that declares no encryption: every use throws. What
+ * looks at a value without using it is answered instead: `await` and
+ * promise checks (`then`), `JSON.stringify` (`toJSON`), `console.log` and
+ * the inspector (`util.inspect`, other symbols), so logging or awaiting
+ * `db.encryption` is not an error.
+ */
 export function notDeclaredEncryption(): Encryption {
   return new Proxy({} as Encryption, {
-    get() {
+    get(_target, property) {
+      if (property === "then" || property === "toJSON" || typeof property === "symbol") {
+        return undefined;
+      }
       throw new EncryptionNotDeclaredError();
     },
   });
