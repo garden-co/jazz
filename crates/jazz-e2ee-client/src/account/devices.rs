@@ -509,13 +509,16 @@ impl E2eeClient {
     /// §2.8): a fresh account epoch key delivered to the remaining devices
     /// and to the unretired recovery roots, and the recovery roots the
     /// device held retired in the same rotation. The device never removes
-    /// itself. The spaces the removed device could open are marked for
-    /// rotation (§3.5) by the delivery pass. Verifies the account again
-    /// afterwards. Needs the authority.
+    /// itself. Verifies the account again, then runs the delivery pass over
+    /// every space this device holds keys of, which marks those whose
+    /// current version the removed device could open (§3.5): this device's
+    /// next write to each rotates it first. A space whose pass fails is
+    /// marked anyway (fail closed). Needs the authority.
     pub async fn remove_device(&self, db: &Db, device_id: &str) -> Result<(), ClientError> {
         self.rotate_account(db, RotationTarget::RemoveDevice(device_id.to_owned()))
             .await?;
         self.ensure_account(db).await?;
+        self.mark_after_device_removal(db).await;
         Ok(())
     }
 
@@ -639,6 +642,7 @@ impl E2eeClient {
             outcomes.push((device, outcome));
             if done {
                 self.ensure_account(db).await?;
+                self.mark_after_device_removal(db).await;
             }
         }
     }

@@ -201,7 +201,8 @@ fn space_address(device: &Device, space: uuid::Uuid) -> jazz::e2ee::SpaceAddress
 
 /// Contract: a removed device cannot read rows written after the rotation:
 /// alice's first device removes her second, which holds the space's key;
-/// the removal marks the space for rotation, her next write rotates it, and
+/// the removal marks the space for rotation without a pass by hand
+/// (protocol §2.8), her next write rotates it, and
 /// the second device, which keeps what it held, reads the old note and not
 /// the new one, and is no longer active.
 ///
@@ -233,15 +234,9 @@ fn a_removed_device_cannot_read_rows_written_after_the_rotation() {
         )
         .unwrap();
         let address = space_address(&first, space);
-        drive(
-            &server,
-            &[&first.db],
-            first.client.deliver_space(&first.db, &address),
-        )
-        .unwrap();
         assert!(
             first.client.needs_rotation(&address).unwrap(),
-            "the removal marks the space"
+            "the removal itself marks the space: no pass by hand"
         );
         drive(
             &server,
@@ -277,8 +272,9 @@ fn a_removed_device_cannot_read_rows_written_after_the_rotation() {
 }
 
 /// Contract: a device's removal request is completed by another device (the
-/// requester never holds the new key), the only device's request is refused
-/// with `no-other-device`.
+/// requester never holds the new key), which marks the spaces the requester
+/// could open for rotation; the only device's request is refused with
+/// `no-other-device`.
 #[test]
 fn a_removal_request_is_completed_by_another_device() {
     within(|| {
@@ -305,6 +301,7 @@ fn a_removal_request_is_completed_by_another_device() {
         second.status(&server, &[&first]);
         approve(&server, &first, &second);
         second.status(&server, &[&first]);
+        let space = space_with_a_note(&server, &first, &account_id(alice));
 
         drive(
             &server,
@@ -321,6 +318,13 @@ fn a_removal_request_is_completed_by_another_device() {
         .unwrap();
         assert_eq!(done.len(), 1);
         assert!(done[0].1.is_ok(), "{done:?}");
+        assert!(
+            first
+                .client
+                .needs_rotation(&space_address(&first, space))
+                .unwrap(),
+            "the completed removal marks the space the requester could open"
+        );
         pump(&server, &second.db);
         assert_eq!(second.status(&server, &[&first]), AccountStatus::Reenrolled);
     });
