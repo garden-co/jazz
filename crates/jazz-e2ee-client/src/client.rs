@@ -232,6 +232,7 @@ impl E2eeClient {
             missing: Default::default(),
             settle_backoff: Default::default(),
             member_changes: Default::default(),
+            member_removals: Default::default(),
             held_clock: Default::default(),
             member_change_wait: std::cell::Cell::new(crate::state::MEMBER_CHANGE_WAIT),
             collectors: Default::default(),
@@ -495,6 +496,13 @@ impl E2eeClient {
     #[doc(hidden)]
     pub fn pending_member_changes(&self) -> usize {
         self.shared.member_changes.borrow().len()
+    }
+
+    /// How many member removals this client wrote whose space's pass has not
+    /// run yet. Only for tests of that queue.
+    #[doc(hidden)]
+    pub fn pending_member_removals(&self) -> usize {
+        self.shared.member_removals.borrow().len()
     }
 
     /// Holds the settle back-off's clock still, or moves it on by `by` when

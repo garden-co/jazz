@@ -327,6 +327,71 @@ impl E2eeClient {
         Ok(ready)
     }
 
+    /// Serves the member removals this client wrote (protocol §3.4, §3.5):
+    /// finds each deleted row's space in the local store and runs the pass
+    /// over it, which sets the needs-rotation mark when the removed account
+    /// held the current version, so the next write rotates first. A removal
+    /// is taken off the queue once its space's pass ran, or when the wait
+    /// passed without the row or a pass that succeeded. Offline nothing is
+    /// served: the queue waits for the client to be online. The spaces
+    /// served.
+    pub(crate) async fn serve_removals(
+        &self,
+        db: &Db,
+    ) -> Result<BTreeSet<SpaceAddress>, ClientError> {
+        let pending: Vec<_> = self
+            .shared
+            .member_removals
+            .borrow()
+            .iter()
+            .cloned()
+            .collect();
+        let mut served = BTreeSet::new();
+        if pending.is_empty() || !self.shared.keys.borrow().online {
+            return Ok(served);
+        }
+        let wait = self.shared.member_change_wait.get();
+        let mut opts = ReadOpts::for_read_tier(ReadTier::LocalOnly);
+        opts.read_view.include_deleted = true;
+        let mut done = Vec::new();
+        for (row, staged) in pending {
+            let query = Query::from(rows::SPACE_MEMBERS)
+                .filter(eq(col("id"), lit(jazz::records::Value::Uuid(row.0))));
+            let read = db.all(&db.prepare_query(&query)?, opts.clone()).await?;
+            let space = read
+                .iter()
+                .find(|found| found.row_uuid() == row)
+                .and_then(
+                    |found| match (found.cell("scopeId"), found.cell("identifier")) {
+                        (
+                            Some(jazz::records::Value::Uuid(scope)),
+                            Some(jazz::records::Value::Uuid(id)),
+                        ) => Some(SpaceAddress {
+                            scope_id: scope.to_string(),
+                            identifier: id.to_string(),
+                        }),
+                        _ => None,
+                    },
+                );
+            let passed = match &space {
+                Some(space) if served.contains(space) => true,
+                Some(space) => self.deliver_pass(db, space).await.is_ok(),
+                None => false,
+            };
+            if passed {
+                served.extend(space);
+                done.push(row);
+            } else if staged.elapsed() >= wait {
+                done.push(row);
+            }
+        }
+        self.shared
+            .member_removals
+            .borrow_mut()
+            .retain(|(row, _)| !done.contains(row));
+        Ok(served)
+    }
+
     async fn spaces_of_interest(&self, db: &Db) -> Result<BTreeSet<SpaceAddress>, ClientError> {
         let mut spaces: BTreeSet<SpaceAddress> = BTreeSet::new();
         spaces.extend(self.shared.published.borrow().pending_spaces());
@@ -371,6 +436,9 @@ impl E2eeClient {
         // Member rows this client wrote that have committed: their spaces
         // are served now, in use or not (protocol §3.4).
         let committed = self.committed_member_changes(db).await?;
+        // Member rows this client deleted: their spaces' passes run now, so
+        // a removal marks its space for rotation (protocol §3.5).
+        self.serve_removals(db).await?;
         let changed = joined
             | !committed.is_empty()
             | SpaceWatch::drained(&mut watch.own)

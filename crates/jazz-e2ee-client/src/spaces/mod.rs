@@ -807,6 +807,10 @@ impl E2eeClient {
         // A creation the authority refused since the last write stops
         // the automatic paths before this one stages anything.
         self.settle_pending(db).await?;
+        // A member removal this client wrote is served before anything is
+        // sealed: its pass marks the space for rotation, so the write that
+        // follows rotates first (protocol §3.5).
+        self.serve_removals(db).await?;
         self.shared.creations.borrow_mut().attempt.clear();
         Ok(())
     }
@@ -819,10 +823,15 @@ impl E2eeClient {
         // A space that needs rotation is rotated before the write; refused,
         // offline or undecided, the write seals under the current version
         // (protocol §3.5).
+        // A removal still queued here was staged by the failed call itself
+        // (the attempt served the rest): the write tried again seals under
+        // the current version, and the removal is served once it commits,
+        // before the next write.
+        let removal = !self.shared.member_removals.borrow().is_empty();
         let pending = {
             let mut keys = self.shared.keys.borrow_mut();
             let pending = keys.rotation_pending.contains(&address);
-            if pending {
+            if pending || removal {
                 keys.rotation_tried.insert(address.clone());
             }
             pending

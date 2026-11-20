@@ -238,6 +238,20 @@ impl E2eeHooks for Hooks {
                 web_time::Instant::now(),
             ));
         }
+        // A member row this client deletes, a removal: the space is served
+        // before the next encrypted write, so the pass sets the
+        // needs-rotation mark and that write rotates first (protocol §3.4,
+        // §3.5). A delete names no cells: the runtime finds the space from
+        // the deleted row.
+        if write.table == crate::account::rows::SPACE_MEMBERS
+            && matches!(write.kind, WriteKind::Delete)
+        {
+            let mut removals = self.shared.member_removals.borrow_mut();
+            if removals.len() == crate::state::MAX_REPORTS {
+                removals.pop_front();
+            }
+            removals.push_back((write.row, web_time::Instant::now()));
+        }
         let Some(plan) = self.plan(write.table) else {
             return Ok(());
         };
@@ -335,9 +349,12 @@ impl E2eeHooks for Hooks {
         } else {
             keys
         };
-        // The space needs rotation: the runtime rotates it, and the write
-        // is tried again (protocol §3.5).
-        if keys.rotation_pending.contains(&address) && !tried && keys.online {
+        // The space needs rotation, or a removal this client wrote has not
+        // been served yet and may mark it: the runtime serves the removal,
+        // rotates the space if it needs it, and the write is tried again
+        // (protocol §3.5).
+        let removal = !self.shared.member_removals.borrow().is_empty();
+        if (keys.rotation_pending.contains(&address) || removal) && !tried && keys.online {
             return Err(SealError::NeedsKey {
                 space: db_address(&address),
             });

@@ -441,6 +441,13 @@ pub(crate) struct Shared {
     /// §3.4), or until [`MEMBER_CHANGE_WAIT`] passes without the row: a write
     /// that was rejected or abandoned leaves no row to wait for.
     pub(crate) member_changes: RefCell<VecDeque<(RowUuid, SpaceAddress, web_time::Instant)>>,
+    /// Member rows this client's writes deleted, with when, until their
+    /// space's pass has run (protocol §3.4, §3.5): a removal's pass sets the
+    /// needs-rotation mark, so the next write rotates first. While one is
+    /// queued and the client is online, an encrypted write is held back
+    /// (`NeedsKey`) until the queue is served. A deleted row the local store
+    /// does not show after [`MEMBER_CHANGE_WAIT`] is dropped.
+    pub(crate) member_removals: RefCell<VecDeque<(RowUuid, web_time::Instant)>>,
     /// The settle back-off's clock when a test holds it still (`None`: the
     /// real one), so a wait is stepped, not slept.
     pub(crate) held_clock: std::cell::Cell<Option<web_time::Instant>>,

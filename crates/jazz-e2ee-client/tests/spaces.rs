@@ -1821,6 +1821,58 @@ fn removing_a_member_rotates_the_space_before_the_next_write() {
     });
 }
 
+/// Contract: removing a member is enough for the next write to rotate:
+/// with no pass and no `rotate` called by the app, the remover's next write,
+/// wrapped or a host's, is sealed under a new version that the removed
+/// member never receives, and the queue of removals is served.
+///
+/// ```text
+/// alice deletes bob's member row ──write──► pass: marked ─► rotate ─► note
+/// bob reads only the note from before
+/// ```
+#[test]
+fn a_removal_alone_rotates_the_space_before_the_next_write() {
+    within(|| {
+        for host in [false, true] {
+            let server = secure_authority_with(&EncryptionSettings::default(), None);
+            let (alice, bob, space) = shared_space(&server);
+            assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+            pump(&server, &bob.db);
+            assert_eq!(read_notes(&server, &bob, space).unwrap().len(), 1);
+
+            let member = member_row(&server, &bob.id());
+            block_on(alice.db.delete(MEMBERS, member, Default::default())).unwrap();
+            assert_eq!(alice.client.pending_member_removals(), 1);
+
+            if host {
+                host_write_note(&server, &alice, space, "after");
+            } else {
+                write_note(&server, &alice, space, "after").unwrap();
+            }
+            pump(&server, &alice.db);
+            assert_eq!(
+                count(&server, "__e2ee_space_successors"),
+                1,
+                "the write rotated first (host: {host})"
+            );
+            assert_eq!(alice.client.pending_member_removals(), 0);
+            assert!(
+                !alice
+                    .client
+                    .needs_rotation(&space_address(&alice, space))
+                    .unwrap()
+            );
+
+            pump(&server, &bob.db);
+            assert_eq!(
+                read_notes(&server, &bob, space).unwrap().len(),
+                1,
+                "the note after the removal is not under bob's version (host: {host})"
+            );
+        }
+    });
+}
+
 /// A note written the way a host binding writes: the database call alone,
 /// and after a failure for want of a key, `prepare_space` and the call
 /// again.
