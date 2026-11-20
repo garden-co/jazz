@@ -8,7 +8,9 @@ import type {
 } from "./runtime/db.js";
 import { createInspectorLocalQueryOptions } from "./internal/inspector-query.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
+import { RowChangeKind } from "./runtime/subscription-manager.js";
 import { parseSnapshotRef } from "./runtime/snapshot-ref.js";
+import { unreadableRows, withUnreadable, type UnreadableRow } from "./encryption/unreadable.js";
 import {
   SubscriptionsOrchestrator,
   makeDeferred,
@@ -523,6 +525,42 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
         data: [makeTodo("1")],
         error: null,
       });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("carries the rows each delta's result leaves out onto the entry's data", async () => {
+    const harness = createUnitHarness();
+    const pending = (id: string): UnreadableRow => ({
+      table: "todos",
+      id,
+      column: "title",
+      code: "key-pending",
+    });
+    try {
+      const { entry } = harness.makeEntry();
+      const data = () => (entry.state.status === "fulfilled" ? entry.state.data : []);
+
+      harness.emit(0, makeDelta(withUnreadable([makeTodo("1")], [pending("2")])));
+      expect(data()).toEqual([makeTodo("1")]);
+      expect(unreadableRows(data())).toEqual([pending("2")]);
+
+      // A delta with `all` restates the list, here as empty.
+      harness.emit(0, makeDelta([makeTodo("1")]));
+      expect(unreadableRows(data())).toEqual([]);
+
+      harness.emit(0, makeDelta(withUnreadable([makeTodo("1")], [pending("3")])));
+      // A delta without `all` keeps the previous list.
+      harness.emit(0, {
+        delta: [{ kind: RowChangeKind.Added, id: "4", index: 1, item: makeTodo("4") }],
+      });
+      expect(data()).toEqual([makeTodo("1"), makeTodo("4")]);
+      expect(unreadableRows(data())).toEqual([pending("3")]);
+
+      // A reset replaces it.
+      harness.emit(0, { all: [makeTodo("5")], delta: [], reset: true });
+      expect(unreadableRows(data())).toEqual([]);
     } finally {
       await harness.manager.shutdown();
     }
