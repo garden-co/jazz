@@ -13,6 +13,12 @@ languageTabs: backend
   `key-pending`.
 - **Removing a member** stops later reads through permissions and a rotation; it cannot take back what
   the member could already read.
+- **A device account's secret is the account.** Whoever holds the secret (its 24-word phrase, passkey or
+  exported key) controls the account, encryption included. Removing a device does not lock out a holder:
+  the device recovers by itself at its next start and receives later keys. Retiring the recovery
+  credential does not help either, because the holder can still act as the account. If the secret may
+  have leaked, the only remedy is a new account. For an account your own sign-in manages, retire the
+  recovery credential and register a new secret.
 - **A stale held key may seal.** A device that has not yet seen a removal keeps sealing under the key it
   holds until it updates.
 - **No default store.** The app supplies the private store and its protection.

@@ -3031,8 +3031,15 @@ Limits:
   the member list after syncing.
 - **A device that had the recovery secret may keep it.** Removing a device
   does not retire a recovery root, and a device already active that runs
-  restore writes nothing. To revoke the recovery secret, retire its
-  recovery root and register a new secret (§2.8, §2.9).
+  restore writes nothing. For an externally authenticated account, to revoke
+  the recovery secret, retire its recovery root and register a new secret
+  (§2.8, §2.9). For a device account the recovery secret is the account
+  secret, which is the account (§2.9, §2.11): removing a device does not lock
+  out a holder, because the device re-enrols and restores from the secret at
+  its next start (§2.4) and receives later keys; retiring the root does not
+  help, because the holder can still act as the account (for example, add an
+  account it controls to the spaces the account may change). If the secret
+  may have leaked, the only remedy is a new account.
 - **A creation of unknown outcome keeps its key.** If neither the
   transaction's outcome nor a root of the address can be learnt, writes
   keep sealing under the unpublished key; other members report them

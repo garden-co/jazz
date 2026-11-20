@@ -18,6 +18,16 @@ nothing extra to show or ask:
 - a device that signs in with the restored account secret recovers by itself;
   `db.encryption.ready()` returns `"active"` without another device.
 
+The account secret **is** the account. Whoever holds it controls the account, encryption included.
+Removing a device does not lock out anyone who still has the secret: that device finds it has been
+removed, enrols again as a new device and recovers by itself at its next start, then receives later
+keys. Retiring the recovery credential does not help either, because the holder can still act as the
+account. For example, they can add an account they control to the spaces the account may change. If the
+secret may have leaked, the only remedy is a new account.
+
+An account your own sign-in manages is different: its recovery secret is separate, so you can retire the
+recovery credential and register a new secret.
+
 The account secret stays where the device account keeps it, as before. Encryption reads it from the session for each call and keeps no copy of its own.
 
 ## Approve a device
@@ -45,8 +55,9 @@ A wrong code approves nothing. The code is how a server that substituted keys is
 ## Remove a device and recover with a phrase
 
 `devices.remove(id)` removes a device and rotates the account; `devices.requestRemoval()` asks another
-device to remove this one. An account your own sign-in manages keeps a 24-word recovery phrase, shown
-once:
+device to remove this one. On a device account, removal does not revoke access from anyone who holds the
+account secret (see above). On an account your own sign-in manages, removal ends that device's access,
+and the account keeps a 24-word recovery phrase, shown once:
 
 ```ts
 const phrase = db.encryption.recovery.create(); // keep it; registers nothing
