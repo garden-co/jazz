@@ -31,7 +31,16 @@ if [ "$1" = --run ]; then   # no release: workflow artifacts of a release-artifa
   # An artifact that doesn't exist yet fails at once (gh says "no artifact matches"); other failures are retried.
   get() { local i; for i in 1 2 3; do rm -rf "_$2"; if gh run download "$1" -R "$R" -n "$2" -D "_$2" > "_$2.err" 2>&1; then cp -r "_$2"/. . && rm -rf "_$2" "_$2.err"; return 0; fi
     grep -qiE "no artifact|not found" "_$2.err" && { rm -f "_$2.err"; return 1; }; sleep $((i * 5)); done; rm -f "_$2.err"; return 1; }
-  get "$NPMRUN" rc-npm || { echo "missing artifact rc-npm in run $NPMRUN"; exit 1; }
+  # rc-npm may still be on its way: the RC can start the gate before its rc-tarballs job ends. While the run is in
+  # progress, poll every 5 s up to AG_NPM_WAIT_S (300 s); once it has finished without rc-npm, fail at once.
+  end=$(( $(date +%s) + ${AG_NPM_WAIT_S:-300} ))
+  until get "$NPMRUN" rc-npm; do
+    st=$(ag_retry 3 gh run view "$NPMRUN" -R "$R" --json status -q .status) || st=unknown
+    [ "$st" = completed ] && { echo "missing artifact rc-npm in run $NPMRUN (the run finished without it)"; exit 1; }
+    [ "$(date +%s)" -ge $end ] && { echo "missing artifact rc-npm in run $NPMRUN (not there after ${AG_NPM_WAIT_S:-300} s; run $st)"; exit 1; }
+    sleep 5
+  done
+  echo "rc-npm from run $NPMRUN at $(date -u +%H:%M:%S)"
   # Server binary: release-server (with SHA256SUMS) at ~+9, else the bare jazz-tools-linux-x64 at ~+3.5 (no sums: record ours).
   if need server && ! get "$RUNID" release-server; then get "$RUNID" jazz-tools-linux-x64 || { echo "missing release-server and jazz-tools-linux-x64 in run $RUNID"; exit 1; }
     sha256sum jazz-tools-linux-x64 | tee -a SHA256SUMS; echo "note: jazz-tools-linux-x64 has no published sum yet; recorded above"; fi
