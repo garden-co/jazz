@@ -629,8 +629,8 @@ fn a_recovery_restores_access_and_its_root_is_retired_with_the_device() {
 /// again writes nothing and is refused with `recovery-root-mismatch`, as
 /// explicit recovery with it is: a user re-registering an old phrase must
 /// not believe they have recovery. (The start-up registration of a device
-/// account's own secret writes nothing and goes on: `jazz-ffi`'s
-/// `a_device_account_starts_after_its_secrets_root_is_retired`.)
+/// account's own secret, the host runtime's `recoveryRegister` with
+/// `atStart`, writes nothing and goes on.)
 ///
 /// ```text
 /// first ──register root──► server; first ──retire it──► server

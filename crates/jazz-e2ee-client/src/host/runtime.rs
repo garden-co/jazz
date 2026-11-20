@@ -408,11 +408,17 @@ impl Encryption {
                         .collect::<Vec<_>>()
                 )
             }
+            // `atStart`: the registration a device account runs at each
+            // start with its own secret. It writes nothing when the root is
+            // registered already, and a retired root is not an error there
+            // (the device still starts), where an explicit call refuses it.
             "recoveryRegister" => {
-                client
-                    .register_recovery(db, &secret(&text("secret")?)?)
-                    .await
-                    .map_err(describe)?;
+                let secret = secret(&text("secret")?)?;
+                let registered = match args.get("atStart").and_then(Value::as_bool) {
+                    Some(true) => client.register_recovery_at_start(db, &secret).await,
+                    _ => client.register_recovery(db, &secret).await,
+                };
+                registered.map_err(describe)?;
                 Value::Null
             }
             "recoveryRestore" => {
