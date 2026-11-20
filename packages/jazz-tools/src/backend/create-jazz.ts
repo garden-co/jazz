@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { verifyChallenge } from "../local-first-auth/server.js";
-import { serverSigningKey } from "./signing-key.js";
+import { BACKEND_SIGNING_KEY_ROUTE, backendSigningKeys } from "./signing-key.js";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Http2SecureServer, Http2Server } from "node:http2";
 import type { Duplex } from "node:stream";
@@ -2083,6 +2083,41 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     return JSON.parse(text) as unknown;
   }
 
+  /**
+   * The keys this backend signs its own statements with (link challenges,
+   * session renewal tickets), one per label: derived from the app's secret
+   * when this backend holds it, else from the backend signing key the core
+   * hands it (jazz#5553), so every instance of the backend shares them.
+   */
+  const signingKey = backendSigningKeys({
+    appId: accountAppId(appId),
+    secret: appSecretOf(store, core),
+    fetchShared: async () => {
+      const response = await core.handle(
+        "GET",
+        `/apps/${encodeURIComponent(accountAppId(appId))}/${BACKEND_SIGNING_KEY_ROUTE}`,
+        [["x-jazz-admin-secret", core.adminSecret]],
+        new Uint8Array(),
+        "admin",
+      );
+      // A core from before the route.
+      if (response.status === 404) return null;
+      const text = new TextDecoder().decode(response.body);
+      if (response.status !== 200) {
+        throw Object.assign(
+          new Error(`Jazz backend signing key failed (${response.status}): ${text}`),
+          { status: response.status, code: text.trim() },
+        );
+      }
+      const { key } = JSON.parse(text) as { key?: unknown };
+      const bytes = typeof key === "string" ? Buffer.from(key, "base64url") : undefined;
+      if (!bytes || bytes.length !== 32) {
+        throw new Error("Jazz backend signing key failed: the core's answer holds no 32-byte key");
+      }
+      return bytes;
+    },
+  });
+
   const identity = (userId: string) => ({ issuer, subject: userId });
 
   // A user's account never changes once assigned (linking only adds
@@ -2200,8 +2235,15 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     // A browser renewing its open sync session in place (see
     // `session-renewal-wire.ts`) gets a ticket for it, on this answer.
     const renewing = request.headers.get(SESSION_RENEWAL_HEADER);
-    const renewal =
-      renewing && renewing.length <= 128 ? issueRenewalTicket(user, renewing) : undefined;
+    let renewal: string | undefined;
+    if (renewing && renewing.length <= 128) {
+      // Renewal is an extra: without a ticket (the signing key couldn't be
+      // had from the core) the session reconnects at its expiry instead.
+      renewal = await issueRenewalTicket(user, renewing).catch((error: unknown) => {
+        console.error("jazz: couldn't issue a session renewal ticket", error);
+        return undefined;
+      });
+    }
     return Response.json(
       {
         account,
@@ -2223,44 +2265,37 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
    * A ticket names the user, the one session it renews, the claims it was
    * issued with and the new expiry, and is good for a minute.
    */
-  // A core reached with a backend credential (`vercel()`, `remote()`) holds
-  // only a public stand-in secret here; `remote()`'s own `secret`, when
-  // given, is the app's. Without either, each
-  // instance signs with a key of its own, and a ticket renews only a socket
-  // the instance that issued it holds. Elsewhere, the session reconnects at
-  // its expiry, as without renewal.
-  const appSecret =
-    store.kind === "remote" && store.secret
-      ? store.secret
-      : core.adminSecret !== STAND_IN_SECRET
-        ? core.adminSecret
-        : undefined;
-  const renewalKey =
-    appSecret === undefined
-      ? randomBytes(32)
-      : createHmac("sha256", appSecret)
-          .update(`jazz-session-renewal-v1\0${accountAppId(appId)}`)
-          .digest();
+  // The key is `signingKey`'s (see there): every instance of this backend
+  // has it, except behind an older core reached with a backend credential
+  // alone, where each instance signs with a key of its own and a ticket
+  // renews only a socket the instance that issued it holds. Elsewhere, the
+  // session reconnects at its expiry, as without renewal.
   const RENEWAL_TICKET_TTL_SECONDS = 60;
-  const renewalMac = (payload: string) =>
-    createHmac("sha256", renewalKey).update(payload).digest("base64url");
-  const claimsDigest = (claims: unknown) =>
-    createHmac("sha256", renewalKey)
+  const renewalKey = () => signingKey("jazz-session-renewal-v1");
+  const renewalMac = async (payload: string) =>
+    createHmac("sha256", await renewalKey())
+      .update(payload)
+      .digest("base64url");
+  const claimsDigest = async (claims: unknown) =>
+    createHmac("sha256", await renewalKey())
       .update(stableJson(claims ?? {}))
       .digest("base64url");
 
-  function issueRenewalTicket(user: JazzUser & { expiresAt: number }, session: string): string {
+  async function issueRenewalTicket(
+    user: JazzUser & { expiresAt: number },
+    session: string,
+  ): Promise<string> {
     const payload = Buffer.from(
       JSON.stringify({
         v: 1,
         sub: user.userId,
         ses: session,
-        cl: claimsDigest(user.claims),
+        cl: await claimsDigest(user.claims),
         until: user.expiresAt,
         exp: Math.floor(Date.now() / 1000) + RENEWAL_TICKET_TTL_SECONDS,
       }),
     ).toString("base64url");
-    return `${payload}.${renewalMac(payload)}`;
+    return `${payload}.${await renewalMac(payload)}`;
   }
 
   /**
@@ -2268,15 +2303,15 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
    * `userId` admitted with `claims`, when this backend issued it for that
    * session and it is still fresh; else null.
    */
-  function readRenewalTicket(
+  async function readRenewalTicket(
     ticket: string,
     session: string,
     userId: string,
     claims: unknown,
-  ): number | null {
+  ): Promise<number | null> {
     const [payload, mac, extra] = ticket.split(".");
     if (!payload || !mac || extra !== undefined) return null;
-    const expected = Buffer.from(renewalMac(payload));
+    const expected = Buffer.from(await renewalMac(payload));
     const given = Buffer.from(mac);
     if (expected.length !== given.length || !timingSafeEqual(expected, given)) return null;
     let read: Record<string, unknown>;
@@ -2290,7 +2325,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
       read.v !== 1 ||
       read.sub !== userId ||
       read.ses !== session ||
-      read.cl !== claimsDigest(claims) ||
+      read.cl !== (await claimsDigest(claims)) ||
       typeof read.exp !== "number" ||
       read.exp <= now ||
       typeof read.until !== "number" ||
@@ -2306,34 +2341,32 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
    * Link challenges: a guest links only on a proof made for one challenge,
    * never on its sync token, so a leaked token can't link it to someone
    * else. A challenge names the user it links to and expires quickly; it is
-   * signed with a key only this app's backend holds (derived from the app's
-   * secret, or, where the store has none, this instance's own: see
-   * `serverSigningKey`), and its nonce becomes the link's single-use intent
-   * id at the core, so a proof works once.
+   * signed with a key only this app's backend holds (`signingKey`'s, which
+   * every instance of it shares), and its nonce becomes the link's
+   * single-use intent id at the core, so a proof works once.
    */
-  const challengeKey = serverSigningKey(
-    "jazz-link-challenge-v1",
-    accountAppId(appId),
-    appSecretOf(store, core),
-  );
   const LINK_CHALLENGE_TTL_SECONDS = 120;
-  const challengeMac = (payload: string) =>
-    createHmac("sha256", challengeKey).update(payload).digest("base64url");
+  const challengeMac = async (payload: string) =>
+    createHmac("sha256", await signingKey("jazz-link-challenge-v1"))
+      .update(payload)
+      .digest("base64url");
 
-  function issueLinkChallenge(userId: string): { challenge: string; expiresAt: number } {
+  async function issueLinkChallenge(
+    userId: string,
+  ): Promise<{ challenge: string; expiresAt: number }> {
     const expiresAt = Math.floor(Date.now() / 1000) + LINK_CHALLENGE_TTL_SECONDS;
     const payload = Buffer.from(
       JSON.stringify({ v: 1, sub: userId, nonce: randomUUID(), exp: expiresAt }),
     ).toString("base64url");
-    return { challenge: `${payload}.${challengeMac(payload)}`, expiresAt };
+    return { challenge: `${payload}.${await challengeMac(payload)}`, expiresAt };
   }
 
   /** The nonce of a challenge this backend issued for `userId`, still fresh; else null. */
-  function readLinkChallenge(challenge: unknown, userId: string): string | null {
+  async function readLinkChallenge(challenge: unknown, userId: string): Promise<string | null> {
     if (typeof challenge !== "string" || challenge.length > 1024) return null;
     const [payload, mac, extra] = challenge.split(".");
     if (!payload || !mac || extra !== undefined) return null;
-    const expected = Buffer.from(challengeMac(payload));
+    const expected = Buffer.from(await challengeMac(payload));
     const given = Buffer.from(mac);
     if (expected.length !== given.length || !timingSafeEqual(expected, given)) return null;
     let claims: { v?: unknown; sub?: unknown; nonce?: unknown; exp?: unknown };
@@ -2359,7 +2392,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     if (request.method !== "POST") return new Response(null, { status: 405 });
     const user = await authenticate(request);
     if (!user) return new Response("signed_out", { status: 401 });
-    return Response.json(issueLinkChallenge(user.userId), {
+    return Response.json(await issueLinkChallenge(user.userId), {
       headers: { "Cache-Control": "no-store" },
     });
   }
@@ -2380,7 +2413,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     } catch {
       return new Response("local_first_proof_required", { status: 400 });
     }
-    const nonce = readLinkChallenge(body?.challenge, user.userId);
+    const nonce = await readLinkChallenge(body?.challenge, user.userId);
     if (!nonce) return new Response("invalid_link_challenge", { status: 400 });
     let guest: { issuer: string; subject: string };
     try {
@@ -2647,12 +2680,19 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     let renewalAt = 0;
     // A ticket the client brings back over the socket: extend the session to
     // the expiry `authenticate` gave on the client's renewal request. A
-    // ticket that doesn't hold changes nothing, and the session ends at its
-    // expiry as before.
-    const renew = (ticket: string) => {
+    // ticket that doesn't hold (or one this backend can't check now: its
+    // signing key couldn't be had from the core) changes nothing, and the
+    // session ends at its expiry as before.
+    const renew = async (ticket: string) => {
       if (!renewal || !userId || ended) return;
-      const until = readRenewalTicket(ticket, renewal.session, userId, renewal.claims);
-      if (until === null) return;
+      let until: number | null;
+      try {
+        until = await readRenewalTicket(ticket, renewal.session, userId, renewal.claims);
+      } catch (error) {
+        console.error("jazz: couldn't check a session renewal ticket", error);
+        return;
+      }
+      if (until === null || !renewal || ended) return;
       const now = Date.now();
       const at = reauthenticateAt(now, sessionDeadline(now, until, options.sessionTtlSeconds));
       if (at === null) return;
@@ -2817,7 +2857,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
       if (renewal && chain) {
         const ticket = renewalTicketIn(data);
         if (ticket !== null) {
-          renew(ticket);
+          void renew(ticket);
           return Promise.resolve(true);
         }
       }
