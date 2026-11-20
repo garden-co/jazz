@@ -1365,7 +1365,10 @@ fn a_host_write_that_fails_after_staging_its_root_gets_a_fresh_root() {
             "the note came with a root"
         );
         drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
-        assert_eq!(marks(&alice, space), [KeyMark::Refused, KeyMark::Published]);
+        // Roots are listed by ID, which is random: compare the marks as a set.
+        let mut held = marks(&alice, space);
+        held.sort_by_key(|mark| format!("{mark:?}"));
+        assert_eq!(held, [KeyMark::Published, KeyMark::Refused]);
         let rows = read_notes(&server, &alice, space).unwrap();
         assert_eq!(rows.len(), 1);
     });
