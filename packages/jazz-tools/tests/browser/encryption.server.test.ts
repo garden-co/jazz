@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from "vitest";
-import { createJazzClient } from "../../src/session/create-jazz-session.js";
+import { createJazzClient, openBrowserSessionCore } from "../../src/session/create-jazz-session.js";
 import { browserPrivateStore } from "../../src/encryption/browser-store.js";
-import { encryptionStoreScope } from "../../src/encryption/browser-host.js";
+import { encryptionStoreScope } from "../../src/encryption/store-scope.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
 import { EncryptionNeedsLocalFirstError } from "../../src/runtime/encryption-needs-local-first.js";
 import { isThinDb, type LocalFirstLoader } from "../../src/runtime/local-first-upgrade.js";
@@ -394,8 +394,10 @@ it("with clearOnSignOut, a sign-out wipes the account's keys from the browser's 
   cleanups.push(async () => {
     globalThis.fetch = pageFetch;
   });
+  // The session core, as the clear-on-sign-out tests open it: it can ask the
+  // app's backend again for who is signed in (`reauthenticate`).
   const load = async () => {
-    const session = await createJazzClient({
+    const session = await openBrowserSessionCore({
       scope: appId,
       serverUrl: aliceUrl,
       fetch: jazzAppFetch,
@@ -419,7 +421,7 @@ it("with clearOnSignOut, a sign-out wipes the account's keys from the browser's 
   );
   const db = first.getSnapshot().client!.db;
   expect(await step("ready", db.encryption.ready({ timeoutMs: 40_000 }), 45_000)).toBe("active");
-  const alice = first.getSnapshot().user!.accountId;
+  const alice = first.getSnapshot().account!.id;
   const keys = encryptionStoreScope(appId, "dev", alice);
   expect(await browserPrivateStore().list(keys)).toContain("device");
 
