@@ -27,7 +27,7 @@
   "scripts": {
     "build": "vp pack",
     "prepublishOnly": "pnpm build",
-    "check": "tsc --noEmit",
+    "check": "tsrs --noEmit",
     "test": "pnpm check && vitest run"
   },
   "devDependencies": {

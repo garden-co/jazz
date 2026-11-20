@@ -80,7 +80,7 @@
     "verify:abi": "node scripts/generate-native-relay-abi.mjs --check",
     "test": "node scripts/generate-native-relay-abi.mjs --check && jest",
     "check": "pnpm typecheck && pnpm lint",
-    "typecheck": "tsc",
+    "typecheck": "tsrs",
     "lint": "vp lint .",
     "prepare": "bob build"
   },

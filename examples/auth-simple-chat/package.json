@@ -9,7 +9,7 @@
     "build": "node ../../packages/jazz-tools/dist/cli.js generate && vite build",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.browser.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "express": "^4.18.2",

@@ -39,6 +39,10 @@ catalogs:
     vitest: 5.1.0
     vue-tsc: "^2.1.10"
 
+# Expose Vite+'s tsrs binary to workspace type-check scripts.
+publicHoistPattern:
+  - tsrs
+
 allowBuilds:
   "@swc/core": true
   esbuild: true

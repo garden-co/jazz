@@ -8,7 +8,7 @@
     "prebuild": "node src/lib/check-build-config.mjs",
     "build": "jazz-tools generate && next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test"
   },
