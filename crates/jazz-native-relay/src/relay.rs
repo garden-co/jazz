@@ -393,6 +393,20 @@ impl NativeRelay {
         config: RelayOpenConfig,
         declarations: crate::encryption::Declarations,
     ) -> Result<Self, RelayError> {
+        // The same per-table check deploy and the loaders make; before the
+        // owner thread exists.
+        for (table, entry) in &declarations.tables {
+            jazz::tools::deployment::artifact::encryption::check_entry(
+                table,
+                entry,
+                config.schema.public_schema(),
+            )
+            .map_err(|(at, message)| {
+                RelayError::DeclarationsMismatch(format!(
+                    "tables.{table}.encryption{at}: {message}"
+                ))
+            })?;
+        }
         Self::spawn_with(config, Some(declarations))
     }
 
@@ -3615,6 +3629,8 @@ pub enum RelayError {
     Host(HostError),
     #[error("native relay drive failed: {0}")]
     Drive(String),
+    #[error("the encryption declarations do not match the relay's schema: {0}")]
+    DeclarationsMismatch(String),
     #[error("native relay socket: {0}")]
     Socket(String),
 }

@@ -460,3 +460,57 @@ fn a_queued_relay_readiness_call_uses_its_own_deadline() {
         "the owner continues processing commands after readiness times out"
     );
 }
+
+/// Declarations from another app than the relay's schema are refused before
+/// the owner thread starts, rather than leaving encrypted columns unknown to
+/// the keyless hooks; the app's own declarations open.
+#[test]
+fn a_relay_refuses_declarations_from_another_app() {
+    const OTHER: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": {
+            "projects": { "columns": { "name": "string" } },
+            "docs": {
+                "columns": { "projectId": "uuid", "text": "bytes" },
+                "relations": { "project": { "rel": "projects", "column": "projectId" } },
+                "encryption": { "space": "projectId", "scope": "projects",
+                    "columns": { "text": "string" } }
+            }
+        } }"#;
+    let app_id = jazz::tools::AppId::from_name("relay-encryption");
+    let load = |app: &str| {
+        let (schema, migrations, declarations) =
+            jazz::tools::deployment::artifact::load_client_encrypted(
+                app.as_bytes(),
+                app_id,
+                "test",
+            )
+            .unwrap();
+        (schema, migrations, declarations.unwrap())
+    };
+    let (schema, migrations, declarations) = load(APP);
+    let (_, _, other) = load(OTHER);
+    let directory = tempfile::tempdir().unwrap();
+    let config = || RelayOpenConfig {
+        supported_abi: NativeRelayAbiRange {
+            minimum: NATIVE_RELAY_ABI_V1,
+            maximum: NATIVE_RELAY_ABI_V1,
+        },
+        scope: RelayScope {
+            app_namespace: "app".to_owned(),
+            storage_namespace: "default".to_owned(),
+            auth_scope: Some("alice".to_owned()),
+        },
+        sqlite_path: directory.path().join("relay.sqlite"),
+        schema: jazz::schema::JazzSchema::new(&schema).unwrap(),
+        migrations: migrations.clone(),
+        identity: identity(),
+    };
+    let refused = NativeRelay::spawn_encrypted(config(), other)
+        .err()
+        .expect("another app's declarations are refused");
+    assert!(
+        matches!(refused, RelayError::DeclarationsMismatch(ref why) if why.contains("docs")),
+        "{refused}"
+    );
+    NativeRelay::spawn_encrypted(config(), declarations).expect("the app's own declarations open");
+}
