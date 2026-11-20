@@ -1394,22 +1394,23 @@ const THIN_OPS = [
 function recordSentAhead(): { carrier: WebSocketCarrier; op: string; negotiated: boolean }[] {
   const sent: { carrier: WebSocketCarrier; op: string; negotiated: boolean }[] = [];
   const sendAhead = WebSocketCarrier.prototype.sendAhead;
-  vi.spyOn(WebSocketCarrier.prototype, "sendAhead").mockImplementation(
-    function (this: WebSocketCarrier, frames) {
-      for (const frame of frames) {
-        const reader = new PostcardReader(frame);
-        if (reader.u64() !== 4) continue; // WireFrame::ThinRequest
-        reader.u64(); // its id
-        const op = Number(reader.u64());
-        sent.push({
-          carrier: this,
-          op: THIN_OPS[op] ?? `op ${op}`,
-          negotiated: this.hasNegotiated,
-        });
-      }
-      return sendAhead.call(this, frames);
-    },
-  );
+  vi.spyOn(WebSocketCarrier.prototype, "sendAhead").mockImplementation(function (
+    this: WebSocketCarrier,
+    frames,
+  ) {
+    for (const frame of frames) {
+      const reader = new PostcardReader(frame);
+      if (reader.u64() !== 4) continue; // WireFrame::ThinRequest
+      reader.u64(); // its id
+      const op = Number(reader.u64());
+      sent.push({
+        carrier: this,
+        op: THIN_OPS[op] ?? `op ${op}`,
+        negotiated: this.hasNegotiated,
+      });
+    }
+    return sendAhead.call(this, frames);
+  });
   return sent;
 }
 
