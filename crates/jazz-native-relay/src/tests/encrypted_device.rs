@@ -373,7 +373,9 @@ fn check_recovery_readiness(allow_registration: bool) {
                 if reason.contains("authorization_denied") && reason.contains(system_tables::RECOVERY_ROOTS)),
             "the authority refused the founder's recovery registration: {refused}"
         );
-        (Duration::from_secs(3), "awaiting-approval")
+        // Long enough to finish preparing recovery on a slow CI runner, so the
+        // deadline (not the preparation) decides the answer.
+        (Duration::from_secs(10), "awaiting-approval")
     };
     let phone = relay
         .attach_client_encrypted(identity(0x34), BTreeMap::new(), device(Some(secret)))
