@@ -21,7 +21,7 @@ const session = await createJazzClient({
 Passing `app` is how the client learns which columns are encrypted before the first query, so the
 device's keys are ready when your code reads. A plain app leaves `encryption` out and opens as before.
 Reads, writes and equality filters are the ones in [Getting started](/docs/e2ee/getting-started);
-`db.encryption` is the same handle as on Node.
+`db.encryption` is the same handle as on Node once the local-first client has loaded (see below for before).
 
 `client` is the loader for the local-first client. Without it the app runs on the thin client, which
 holds no keys and so cannot read or write an encrypted column (see the next section).
@@ -36,13 +36,17 @@ column. Until the upgrade has finished:
   client, as in an app without encryption. Deleting a row never touches one.
 - **Anything that touches an encrypted column waits.** Inserting into a table with encrypted columns,
   updating or filtering on an encrypted column, and selecting one all wait for the local-first client,
-  for up to 30 seconds, and start loading it if it has not started. After the wait they run as they
-  would on a local-first client, including its own refusals. If the client fails to load, or has not
-  loaded in 30 seconds, the call rejects with an `EncryptionNeedsLocalFirstError` (its `reason` is
-  `"load-failed"` or `"timeout"`).
+  for up to 30 seconds, and start loading it if it has not started. The 30 seconds cover the load and
+  the new client verifying the account. After the wait they run as they would on a local-first
+  client, including its own refusals. If the client fails to load, or has not finished in 30 seconds,
+  the call rejects with an `EncryptionNeedsLocalFirstError` (its `reason` is `"load-failed"`, with the
+  loader's error as `cause`, or `"timeout"`). Signing out ends every waiting call with
+  `DbClosedError`.
 - **Writes made meanwhile are kept in memory and run in order.** A write that waits holds back the
   writes after it, plain ones too, so they take effect in the order you made them. They are lost if the
-  page closes before the upgrade: a write that has not been sent is not saved.
+  page closes before the upgrade: a write that has not been sent is not saved. If the wait fails, the
+  writes queued behind it fail with the same error, and a write nobody awaited is reported to
+  `db.onMutationError`. A write that waits is not run after the account changes.
 - **A transaction callback may run twice.** `db.transaction(...)` and `db.serializableTransaction(...)`
   start on the thin client. If an operation inside one touches an encrypted column, Jazz rolls the
   transaction back (even if your callback catches the error), waits for the local-first client and runs
@@ -53,13 +57,31 @@ column. Until the upgrade has finished:
   resolved.
 - **Live queries wait.** A live query on encrypted columns emits nothing until the local-first client
   has loaded, then opens. If that takes 30 seconds, Jazz logs one warning naming the table and the query
-  stays loading; it opens if the client loads later.
+  stays loading; it opens if the client loads later. A failed load, a sign-out or closing the `Db`
+  ends it with an error instead.
 - **Without a loader** the same operations fail at once with an `EncryptionNeedsLocalFirstError`
   (reason `"no-loader"`) that says to pass `client`, and Jazz also logs it to the console once per page.
   A thin `Db` opened directly, outside a Jazz session, fails with reason `"direct-thin"`.
 
-Await `db.encryption.ready()` before encrypted work, as on any local-first client: it settles once the
-device's keys are ready, and on a thin client it waits for the upgrade first.
+### `db.encryption` before the client has loaded
+
+In an app that declares encryption, `db.encryption` on a thin `Db` is a stand-in for the real handle,
+which only the local-first client has:
+
+- **Async calls wait like any other operation**: `ready()`, `deviceId()`, `devices.*`, `recovery.*`
+  and `members.*` wait up to 30 seconds for the local-first client, start loading it if it has not
+  started, then run on the real handle. They reject with the same `EncryptionNeedsLocalFirstError` as
+  above (reason `"no-loader"` without a loader). `await db.encryption.ready()` is the way to wait for
+  the keys: it settles once the device's keys are ready.
+- **A handle you took while thin keeps working** after the upgrade; you do not need to read
+  `db.encryption` again.
+- **`onReport`, `onUnreadable` and `onChallenge` attach after the upgrade.** They return a function
+  that stops the listener at any time, before or after it attached. They start the load, as a call
+  does; if it fails, Jazz logs a warning and the listener never attaches.
+- **`recovery.create()` throws** an `EncryptionNeedsLocalFirstError`, because it is synchronous and
+  cannot wait. It starts the load: call it after `await db.encryption.ready()`.
+
+An app that declares no encryption still gets `EncryptionNotDeclaredError` from `db.encryption`.
 
 ## Where the keys live
 

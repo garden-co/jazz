@@ -21,10 +21,7 @@ languageTabs: backend
   recovery credential and register a new secret.
 - **A stale held key may seal.** A device that has not yet seen a removal keeps sealing under the key it
   holds until it updates.
-- **A copied store may answer one more challenge.** A copy of an unapproved device's store, taken while
-  its protection travels with it (a restored backup, a VM snapshot), can answer one more approval
-  challenge with an already revealed nonce. A server that substitutes keys could then pass the approval
-  code for that one approval. Where the protection is bound to the device, a copy opens nothing.
+- **A copied store may answer one more challenge.** See [Copied stores](#copied-stores).
 - **A device protects only what it has seen of another account's history.** A device notices that
   another account's state was rolled back only by comparing it with its own first observation of that
   account in a space read. Before that observation, or after a wipe or re-enrolment, it cannot tell a
@@ -37,7 +34,7 @@ languageTabs: backend
   client; without one they fail with `EncryptionNeedsLocalFirstError`. Writes that wait are kept in
   memory and lost if the page closes first, and writes made after a waiting one (plain ones too) run
   after it, so one delayed write delays the rest. A transaction callback may run twice before the
-  client has loaded. A live query on a client that never loads stays loading after its warning. See
+  client has loaded. A live query on a client that never loads stays loading after its warning, until a failed load, a sign-out or a close ends it. On a thin `Db`, `db.encryption` waits the same way, and `recovery.create()` cannot wait and throws. See
   [Encryption in the browser](/docs/e2ee/browser#before-the-local-first-client-has-loaded).
 - **No default store.** The app supplies the private store and its protection.
 - **Node, the browser and the native clients.** Node (`createJazzClient` from `jazz-tools/backend`), the
@@ -70,3 +67,7 @@ languageTabs: backend
   suspected injection, check the account's device list from a trusted device and remove the affected
   device and any device you do not recognise (each removal rotates the account);
   keep your page free of untrusted scripts as you would for anything else sensitive.
+
+## Copied stores
+
+A copy of an unapproved device's store, taken while its protection travels with it (a restored backup, a VM snapshot), can answer one more approval challenge with an already revealed nonce. A server that substitutes keys could then pass the approval code for that one approval. Where the protection is bound to the device, a copy opens nothing.

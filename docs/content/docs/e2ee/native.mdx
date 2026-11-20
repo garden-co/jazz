@@ -8,8 +8,8 @@ default one: where keys are kept, and what protects them, is your platform's cal
 same seven small operations on every platform (see [Private store](/docs/e2ee/private-store)); each
 language gives you its own interface to implement, and Jazz asks it for what it needs.
 
-What a store holds is small and rarely written: the device's own keys and the key for each space it
-belongs to. Jazz calls the store one request at a time on the client's thread, so keep it quick: a
+What a store holds is small and rarely written: the device's own keys, the key for each space it
+belongs to, and one floor for each other account it has seen (the mark that lets it notice a rolled-back history; see [limits](/docs/e2ee/limits)). Jazz calls the store one request at a time on the client's thread, so keep it quick: a
 store that waits on the network holds up the client while it waits. A synchronous store callback (Go,
 Kotlin, Swift, C) that never returns blocks the client, including closing it, so a store must return or
 fail promptly.
@@ -89,6 +89,10 @@ status, err := db.Encryption().Ready(ctx, 30*time.Second)
 `active`, `awaiting-approval` (another device must approve it, or its recovery phrase does) or
 `reenrolled`.
 
+If readiness fails on one unexpected store or database error, the failure is final for that client:
+close the client and open it again. Your store should throw such an error, not report the device as
+wiped or absent (see [Private store](/docs/e2ee/private-store)).
+
 The same handle gives you the other calls the [web client](/docs/e2ee/devices-and-recovery) has:
 `devices`, `challenge`, `answer`, `approvalCode`, `approve`, `removeDevice`, `keysDeliver`, `keysRotate`
 and the recovery calls. A failure carries a code such as `approval-code-mismatch` or `no-challenge`.
@@ -124,7 +128,7 @@ Keep the protecting key on this device only and out of backups. On iOS, store it
 `...ThisDeviceOnly` accessibility class, such as `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. On
 Android, use an Android Keystore key, and exclude the store's files from Auto Backup. A restored backup
 is a copied device, and a copy whose protection travels with it can answer a device-approval challenge
-as the original would (see [limits](/docs/e2ee/limits#a-copied-store-may-answer-one-more-challenge)).
+as the original would (see [limits](/docs/e2ee/limits#copied-stores)).
 
 ```ts
 import { createJazzClient } from "jazz-tools/react-native";

@@ -38,6 +38,7 @@ import {
 export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
   const at = (scope: string, doc?: string) =>
     [dir, encodeURIComponent(scope), ...(doc ? [encodeURIComponent(doc)] : [])].join("/");
+  const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
   const read = async (scope: string, doc: string) => {
     try {
       const text = await readFile(at(scope, doc), "utf8");
@@ -45,7 +46,7 @@ export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
       return { revision: BigInt(revision), bytes: new Uint8Array(Buffer.from(bytes, "base64")) };
     } catch (error) {
       // Only a missing file means "absent"; any other error must not read as a new device.
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      if (isMissing(error)) return null;
       throw error;
     }
   };
@@ -59,7 +60,10 @@ export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
         const marker = `${at(scope)}/.incarnation`;
         try {
           return BigInt(await readFile(marker, "utf8"));
-        } catch {
+        } catch (error) {
+          // Only a missing marker means a new incarnation; any other error (an I/O error, a
+          // garbled marker) is thrown, never taken for a wipe.
+          if (!isMissing(error)) throw error;
           await mkdir(at(scope), { recursive: true });
           const incarnation = BigInt(Date.now()) * 1000n + BigInt(randomBytes(2).readUInt16BE());
           await writeFile(marker, incarnation.toString());
@@ -69,7 +73,11 @@ export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
     },
     save: (scope, incarnation, doc, bytes, expected) =>
       serial(async () => {
-        const marker = await readFile(`${at(scope)}/.incarnation`, "utf8").catch(() => null);
+        // A missing marker means wiped; any other read error is thrown as it is.
+        const marker = await readFile(`${at(scope)}/.incarnation`, "utf8").catch((error) => {
+          if (isMissing(error)) return null;
+          throw error;
+        });
         if (marker === null || BigInt(marker) !== incarnation) throw new PrivateStoreWipedError();
         const current = await read(scope, doc);
         if ((current?.revision ?? null) !== expected) throw new PrivateStoreConflictError();
@@ -84,7 +92,13 @@ export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
         return revision;
       }),
     list: async (scope) =>
-      (await readdir(at(scope)).catch(() => []))
+      (
+        await readdir(at(scope)).catch((error) => {
+          // No directory means nothing saved; any other error is thrown.
+          if (isMissing(error)) return [];
+          throw error;
+        })
+      )
         .filter((name) => !name.startsWith(".") && !name.endsWith(".tmp"))
         .map(decodeURIComponent),
     delete: (scope) => serial(() => rm(at(scope), { recursive: true, force: true })),
