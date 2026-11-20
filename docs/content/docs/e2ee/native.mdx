@@ -10,7 +10,9 @@ language gives you its own interface to implement, and Jazz asks it for what it 
 
 What a store holds is small and rarely written: the device's own keys and the key for each space it
 belongs to. Jazz calls the store one request at a time on the client's thread, so keep it quick: a
-store that waits on the network holds up the client while it waits.
+store that waits on the network holds up the client while it waits. A synchronous store callback (Go,
+Kotlin, Swift, C) that never returns blocks the client, including closing it, so a store must return or
+fail promptly.
 
 ## What to put in the store
 
