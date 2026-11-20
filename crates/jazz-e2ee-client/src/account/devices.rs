@@ -696,22 +696,36 @@ impl E2eeClient {
         db: &Db,
         secret: &RecoverySecret,
     ) -> Result<AccountStatus, ClientError> {
-        let Some(identity) = &self.device_account else {
+        if self.device_account.is_none() {
             return Err(ClientError::Unsupported(
                 "start_device_account is for a device account: this runtime was opened \
                  without its identity"
                     .to_owned(),
             ));
-        };
-        if DeviceAccountIdentity::from_secret(secret)?.public_key() != identity.public_key() {
-            return Err(ProtocolError::Recovery(RecoveryFailure::RootMismatch).into());
         }
+        self.refuse_foreign_device_secret(secret)?;
         let status = self.ensure_account(db).await?;
         if status != AccountStatus::Active {
             return Ok(status);
         }
         self.register_recovery_at_start(db, secret).await?;
         self.ensure_account(db).await
+    }
+
+    /// Refuses `secret` with `recovery-root-mismatch` when this runtime was
+    /// opened as a device account (`ClientConfig::device_account`) and the
+    /// secret derives another identity: a start-up registration takes only
+    /// the device account's own secret.
+    pub(crate) fn refuse_foreign_device_secret(
+        &self,
+        secret: &RecoverySecret,
+    ) -> Result<(), ClientError> {
+        if let Some(identity) = &self.device_account
+            && DeviceAccountIdentity::from_secret(secret)?.public_key() != identity.public_key()
+        {
+            return Err(ProtocolError::Recovery(RecoveryFailure::RootMismatch).into());
+        }
+        Ok(())
     }
 
     /// The registration a start-up runs with a device account's own secret:

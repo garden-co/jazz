@@ -760,6 +760,58 @@ async fn a_device_account_recovers_a_new_device_from_its_own_key() {
     app.stop().await;
 }
 
+/// Contract: the start-up registration a device account's host runs
+/// (`recoveryRegister` with `automatic`) takes only the secret of the
+/// identity the device was opened as, like `start_device_account`: another
+/// identity's secret is refused with `recovery-root-mismatch` and registers
+/// no root, while the device's own key registers once.
+///
+/// ```text
+/// laptop (key K) ──ready──► root of K
+/// laptop ──recoveryRegister { secret: mallory's, automatic }──✗ recovery-root-mismatch
+/// laptop ──recoveryList──► still only the root of K
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_accounts_automatic_registration_refuses_another_identitys_secret() {
+    let app = App::start().await;
+    let laptop = app.device_of(DeviceKey::generate().unwrap()).await;
+    assert_eq!(
+        laptop
+            .encryption()
+            .ready(Duration::from_secs(30))
+            .await
+            .unwrap(),
+        "active"
+    );
+    let roots = || async {
+        laptop
+            .encryption()
+            .call("recoveryList", json!({}))
+            .await
+            .unwrap()
+    };
+    let before = roots().await;
+    assert_eq!(before.as_array().map(Vec::len), Some(1), "{before}");
+
+    // Not the laptop's key (that one is random): another identity's secret.
+    let mallory = "5f".repeat(32);
+    match laptop
+        .encryption()
+        .call(
+            "recoveryRegister",
+            json!({ "secret": mallory, "automatic": true }),
+        )
+        .await
+    {
+        Err(Error::Encryption { code, .. }) => assert_eq!(code, "recovery-root-mismatch"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(roots().await, before, "no root registered for it");
+
+    laptop.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// A private store with a hook that can fail or hold selected requests.
 fn store_with_hook(
     hook: impl Fn(serde_json::Value) -> futures::future::LocalBoxFuture<'static, Option<String>>
