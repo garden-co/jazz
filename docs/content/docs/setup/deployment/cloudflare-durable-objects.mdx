@@ -120,8 +120,9 @@ The core and the backend each bring a WebAssembly module: the Worker is about 20
 64 MiB limit on every plan, Free included.
 
 The backend is one Durable Object, and every browser's sync socket passes through it, as every
-request does: like the core, it is one object per app. Neither hibernates its sockets yet, so both
-stay awake (and billed for duration) while any browser is connected.
+request does: like the core, it is one object per app. It stays awake (and billed for duration)
+while any browser is connected; only the core can hibernate (see
+[WebSocket hibernation](#websocket-hibernation) below).
 
 ## Connect your backend
 
