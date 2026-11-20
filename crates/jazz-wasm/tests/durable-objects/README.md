@@ -26,5 +26,7 @@ routes) comes next; until then the object serves `JAZZ_SCHEMA`.
 300 KiB note's leaves move to `jazz/<app id>/<sha256>` with their checksum
 and are read back from there after a restart; reclaimed ones are deleted
 from the bucket; a second store on a claimed prefix is refused; failed puts
-are retried until they land; and a store with inline large values moves
-them to the bucket once the binding is added.
+are retried until they land; a store with inline large values moves
+them to the bucket once the binding is added; a store is refused on
+another prefix or bucket than the one it claimed; and a read whose object
+is missing or corrupt answers an error, and reads again once it is back.

@@ -91,10 +91,16 @@ async function each(items, limit, run) {
  * its own prefix, which it claims for its app id before its first op.
  */
 export class LargeValueBucket {
-  constructor(bucket, prefix, appId) {
+  /**
+   * `claimed` records the prefix this store claimed, in its own SQL:
+   * `claimed.get()` is it (or `null` before the first claim), and
+   * `claimed.set(prefix)` records it.
+   */
+  constructor(bucket, prefix, appId, claimed) {
     this.bucket = bucket;
     this.prefix = prefix;
     this.appId = appId;
+    this.claimed = claimed;
     this.claiming = null;
   }
 
@@ -108,8 +114,10 @@ export class LargeValueBucket {
    * Check that this store owns the prefix, claiming it if no store does: a
    * put of `.jazz-owner` only if it is absent (R2's `onlyIf`), which answers
    * `null` when another put got there first. Resolves to `null` once owned,
-   * or to why the store is refused (for good: another store owns it). A
-   * failure to reach the bucket rejects and is tried again next time.
+   * or to why the store is refused (for good: another store owns it, or
+   * the bucket or prefix is not the one this store claimed, where its
+   * values are). A failure to reach the bucket rejects and is tried again
+   * next time.
    */
   claim() {
     this.claiming ??= this.claimNow().catch((error) => {
@@ -124,26 +132,53 @@ export class LargeValueBucket {
     const refused = (owner) =>
       `JAZZ_BLOBS: ${this.prefix} in this bucket belongs to app ${owner}, not this one (${this.appId}); ` +
       "give each store its own bucket or JAZZ_BLOBS_PREFIX";
+    // Once a store claimed a prefix, its moved values are there: another
+    // prefix, or a bucket without its owner object (another bucket bound),
+    // would split them, so it is refused until the binding is set back.
+    const recorded = this.claimed.get();
+    if (recorded !== null && recorded !== this.prefix) {
+      return (
+        `JAZZ_BLOBS: this store's large values are under ${recorded}, but JAZZ_BLOBS_PREFIX now names ${this.prefix}; ` +
+        "set it back (moving a store's large values to another prefix isn't supported yet)"
+      );
+    }
     const owner = async () => (await (await this.bucket.get(key))?.text())?.trim();
     const found = await owner();
-    if (found !== undefined) return found === this.appId ? null : refused(found);
+    if (found !== undefined) {
+      if (found !== this.appId) return refused(found);
+      if (recorded === null) this.claimed.set(this.prefix);
+      return null;
+    }
+    if (recorded !== null) {
+      return (
+        `JAZZ_BLOBS: ${key} is missing from the bound bucket, though this store claimed ${recorded} there: ` +
+        "the binding names another bucket (bind the store's own again), or the owner object was deleted"
+      );
+    }
     const put = await this.bucket.put(key, `${this.appId}\n`, {
       onlyIf: { etagDoesNotMatch: "*" },
     });
-    if (put !== null) return null;
+    if (put !== null) {
+      this.claimed.set(this.prefix);
+      return null;
+    }
     // Another store claimed it first.
     const winner = await owner();
     if (winner === undefined)
       throw new Error("JAZZ_BLOBS: the owner object vanished while claiming");
-    return winner === this.appId ? null : refused(winner);
+    if (winner !== this.appId) return refused(winner);
+    this.claimed.set(this.prefix);
+    return null;
   }
 
   /**
    * Run a batch the core handed out (`{ fetches, puts, deletes }`, keys
    * in hex): one result per op, `undefined` for success, a string for why
-   * it failed; a fetch's bytes, or `null` for no such object.
+   * it failed; a fetch's bytes, or `null` for no such object. A put's
+   * bytes are copied out of the core (`bytesOf(index)`) only as it starts,
+   * so at most `BUCKET_CONCURRENCY` of them are in JS at once.
    */
-  async run({ fetches = [], puts = [], deletes = [] }) {
+  async run({ fetches = [], puts = [], deletes = [] }, bytesOf) {
     let refusal;
     try {
       refusal = await this.claim();
@@ -162,10 +197,16 @@ export class LargeValueBucket {
         const object = await this.bucket.get(this.prefix + key);
         return object === null ? null : new Uint8Array(await object.arrayBuffer());
       }),
-      each(puts, BUCKET_CONCURRENCY, async ({ key, bytes }) => {
-        // A node's name is its bytes' SHA-256: R2 refuses a body that differs.
-        await this.bucket.put(this.prefix + key, bytes, { sha256: key });
-      }),
+      each(
+        puts.map((key, index) => ({ key, index })),
+        BUCKET_CONCURRENCY,
+        async ({ key, index }) => {
+          const bytes = bytesOf(index);
+          if (bytes === undefined) throw new Error("the core that handed this put out is gone");
+          // A node's name is its bytes' SHA-256: R2 refuses a body that differs.
+          await this.bucket.put(this.prefix + key, bytes, { sha256: key });
+        },
+      ),
       this.deleteAll(deletes),
     ]);
     return { fetched, put, deleted };
@@ -182,6 +223,25 @@ export class LargeValueBucket {
       return keys.map(() => why);
     }
   }
+}
+
+/**
+ * The prefix a store claimed in its bucket, kept in the object's own SQL
+ * (`_jazz_host_blobs`, one row) from its first claim on: see
+ * `LargeValueBucket`.
+ */
+function claimedPrefix(sql) {
+  return {
+    get() {
+      sql.exec("CREATE TABLE IF NOT EXISTS _jazz_host_blobs (prefix TEXT NOT NULL)");
+      return sql.exec("SELECT prefix FROM _jazz_host_blobs LIMIT 1").toArray()[0]?.prefix ?? null;
+    },
+    set(prefix) {
+      sql.exec("CREATE TABLE IF NOT EXISTS _jazz_host_blobs (prefix TEXT NOT NULL)");
+      sql.exec("DELETE FROM _jazz_host_blobs");
+      sql.exec("INSERT INTO _jazz_host_blobs (prefix) VALUES (?)", prefix);
+    },
+  };
 }
 
 /** The longest request body read (native's catalogue limit). */
@@ -257,10 +317,9 @@ export function jazzCoreClass(wasm) {
       this.handlers = new WeakMap();
       // Large values in the R2 bucket, if bound (see the top of this file).
       this.bucket = null;
-      this.chunkIo = { out: false, failures: 0, retryAt: 0 };
-      this.chunkFetches = { out: false, failures: 0, retryAt: 0 };
+      this.chunkIo = { out: false, failures: 0, retryAt: 0, logged: false };
+      this.chunkFetches = { out: false, failures: 0, retryAt: 0, logged: false };
       this.bucketTimer = undefined;
-      this.bucketFailureLogged = false;
       for (const ws of ctx.getWebSockets()) {
         if (ws.readyState !== WebSocket.OPEN) continue;
         try {
@@ -300,6 +359,7 @@ export function jazzCoreClass(wasm) {
             this.env.JAZZ_BLOBS,
             LargeValueBucket.prefix(this.env.JAZZ_BLOBS_PREFIX, appId),
             appId,
+            claimedPrefix(this.ctx.storage.sql),
           );
         }
         // What an earlier life left to move or delete goes on now.
@@ -322,11 +382,16 @@ export function jazzCoreClass(wasm) {
         try {
           batch = this.guard(() => core.takeChunkIo(holdFetches));
         } catch (error) {
-          this.logBucketFailure(reason(error));
+          this.logBucketFailure(this.chunkIo, reason(error));
         }
         if (batch !== undefined) {
           this.chunkIo.out = true;
-          this.bucket.run(batch).then((done) => this.finishBucket(core, batch, done, false));
+          const bytesOf = (index) =>
+            this.current() === core ? this.guard(() => core.chunkPutBytes(index)) : undefined;
+          this.bucket
+            .run(batch, bytesOf)
+            .then((done) => this.finishBucket(core, done, false))
+            .catch((error) => this.bucketBroke(core, this.chunkIo, error));
         }
       }
       if (!this.chunkFetches.out && !holdFetches) {
@@ -334,17 +399,20 @@ export function jazzCoreClass(wasm) {
         try {
           fetches = this.guard(() => core.takeChunkFetches());
         } catch (error) {
-          this.logBucketFailure(reason(error));
+          this.logBucketFailure(this.chunkFetches, reason(error));
         }
         if (fetches !== undefined) {
           this.chunkFetches.out = true;
-          this.bucket.run(fetches).then((done) => this.finishBucket(core, fetches, done, true));
+          this.bucket
+            .run(fetches, () => undefined)
+            .then((done) => this.finishBucket(core, done, true))
+            .catch((error) => this.bucketBroke(core, this.chunkFetches, error));
         }
       }
     }
 
     /** A batch (or fetches) came back from the bucket: hand it to its core. */
-    finishBucket(core, batch, done, fetchLane) {
+    finishBucket(core, done, fetchLane) {
       // A core replaced since dropped what it handed out; the new one hands
       // the same work out again.
       if (this.current() !== core) return;
@@ -369,8 +437,8 @@ export function jazzCoreClass(wasm) {
         );
       }
       if (!fetchLane) this.backOff(this.chunkIo, failure !== undefined);
-      if (failure !== undefined) this.logBucketFailure(failure);
-      else if (!fetchLane) this.bucketFailureLogged = false;
+      if (failure !== undefined) this.logBucketFailure(lane, failure);
+      else lane.logged = false;
       this.flush();
       // Wake for what waits out a backoff.
       const wait = Math.max(this.chunkIo.retryAt, this.chunkFetches.retryAt) - Date.now();
@@ -394,11 +462,27 @@ export function jazzCoreClass(wasm) {
       lane.failures += 1;
     }
 
-    /** The first failure of a run, then every tenth while it lasts. */
-    logBucketFailure(failure) {
-      const failures = this.chunkIo.failures;
-      if (this.bucketFailureLogged && failures % 10 !== 0) return;
-      this.bucketFailureLogged = true;
+    /**
+     * Running a batch threw past its own handling (a bug, never the
+     * bucket): the batch was dropped, so its work goes to the next. Back
+     * off as for a failed batch, so a fault that repeats doesn't spin.
+     */
+    bucketBroke(core, lane, error) {
+      if (this.current() !== core) return;
+      lane.out = false;
+      this.backOff(lane, true);
+      this.logBucketFailure(lane, reason(error));
+      clearTimeout(this.bucketTimer);
+      this.bucketTimer = setTimeout(() => {
+        const current = this.current();
+        if (current !== null) this.pumpBucket(current);
+      }, lane.retryAt - Date.now());
+    }
+
+    /** A lane's first failure of a run, then every tenth while it lasts. */
+    logBucketFailure(lane, failure) {
+      if (lane.logged && lane.failures % 10 !== 0) return;
+      lane.logged = true;
       console.error(`Jazz large-value bucket: ${failure}; retrying with backoff`);
     }
 

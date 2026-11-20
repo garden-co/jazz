@@ -1152,28 +1152,20 @@ mod core_host {
         }
     }
 
-    /// A batch as the host runs it: `{ fetches, puts: [{ key, bytes }],
-    /// deletes }`, every key a node's SHA-256 in lowercase hex (its object
-    /// name, and the checksum its put carries).
+    /// A batch as the host runs it: `{ fetches, puts, deletes }`, every
+    /// entry a node's SHA-256 in lowercase hex (its object name, and the
+    /// checksum its put carries). A put's bytes stay here until the host
+    /// starts it (`chunkPutBytes`), so a batch is never held twice whole.
     fn chunk_io_js(io: &jazz::chunk_store::ChunkIo) -> JsValue {
         let keys = |keys: &mut dyn Iterator<Item = jazz::chunk_store::NodeKey>| -> JsValue {
             keys.map(|key| JsValue::from_str(&key.object_name()))
                 .collect::<js_sys::Array>()
                 .into()
         };
-        let puts: js_sys::Array = io
-            .puts()
-            .iter()
-            .map(|(key, bytes)| {
-                object(&[
-                    ("key", JsValue::from_str(&key.object_name())),
-                    ("bytes", js_sys::Uint8Array::from(bytes.as_slice()).into()),
-                ])
-            })
-            .collect();
+        let puts = keys(&mut io.puts().iter().map(|(key, _)| *key));
         object(&[
             ("fetches", keys(&mut io.fetches())),
-            ("puts", puts.into()),
+            ("puts", puts),
             ("deletes", keys(&mut io.deletes().iter().copied())),
         ])
     }
@@ -1683,6 +1675,14 @@ mod core_host {
                 }
                 _ => Ok(JsValue::UNDEFINED),
             }
+        }
+
+        /// The bytes of put `index` of the batch out, as the host starts
+        /// it; `undefined` when no batch is out or it has no such put.
+        #[wasm_bindgen(js_name = chunkPutBytes)]
+        pub fn chunk_put_bytes(&self, index: usize) -> Option<js_sys::Uint8Array> {
+            let (_, bytes) = self.chunk_io.as_ref()?.puts().get(index)?;
+            Some(js_sys::Uint8Array::from(bytes.as_slice()))
         }
 
         /// Hand back the batch `takeChunkIo` gave out: one result per

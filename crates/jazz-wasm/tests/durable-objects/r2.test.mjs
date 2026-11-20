@@ -338,3 +338,86 @@ test("a store with inline large values moves them to R2 once the binding is adde
     rmSync(dirs.root, { recursive: true, force: true });
   }
 });
+
+test("a store is refused on another prefix or bucket than the one it claimed, and works again once set back", async () => {
+  const dirs = scratch();
+  const big = largeTitle(7, 300 * 1024);
+  let mf = start(dirs);
+  try {
+    const id = await appId(mf);
+    const prefix = `jazz/${id}/`;
+    await write(mf, big);
+    await eventually(async () => (await inline(mf)).leafBytes === 0);
+    await mf.dispose();
+
+    // Another prefix: its values are under the one it claimed.
+    mf = start(dirs, { vars: { JAZZ_BLOBS_PREFIX: "elsewhere" } });
+    let ready = await mf.dispatchFetch("http://core/ready");
+    assert.equal(ready.status, 503);
+    let { error } = await ready.json();
+    assert.equal(error.code, "large_value_bucket_refused");
+    assert.match(
+      error.message,
+      new RegExp(`are under ${prefix}, but JAZZ_BLOBS_PREFIX now names elsewhere/`),
+    );
+    assert.deepEqual(await names(mf, "elsewhere/"), [], "nothing is claimed or written there");
+    await mf.dispose();
+
+    // Another bucket: the store's owner object isn't in it.
+    mf = start({ ...dirs, bucket: join(dirs.root, "other-bucket") });
+    ready = await mf.dispatchFetch("http://core/ready");
+    assert.equal(ready.status, 503);
+    ({ error } = await ready.json());
+    assert.match(error.message, /is missing from the bound bucket, though this store claimed/);
+    assert.deepEqual(await names(mf, ""), [], "nothing is claimed or written there");
+    await mf.dispose();
+
+    // Its own bucket and prefix again.
+    mf = start(dirs);
+    assert.equal((await mf.dispatchFetch("http://core/ready")).status, 200);
+    assert.deepEqual(await titles(mf), [big]);
+  } finally {
+    await mf.dispose();
+    rmSync(dirs.root, { recursive: true, force: true });
+  }
+});
+
+test("a read whose object is missing or corrupt in the bucket answers an error, and reads again once it is back", async () => {
+  const dirs = scratch();
+  const big = largeTitle(8, 300 * 1024);
+  let mf = start(dirs);
+  try {
+    const prefix = `jazz/${await appId(mf)}/`;
+    await write(mf, big);
+    await eventually(async () => (await inline(mf)).leafBytes === 0);
+    await mf.dispose();
+
+    mf = start(dirs);
+    const bucket = await mf.getR2Bucket("JAZZ_BLOBS");
+    const [leaf] = (await names(mf, prefix)).filter((name) => nodeName.test(name));
+    const original = new Uint8Array(await (await bucket.get(prefix + leaf)).arrayBuffer());
+    // Corrupt: R2 holds other bytes under the leaf's name (written without its checksum).
+    await bucket.put(prefix + leaf, "not the leaf");
+    const corrupt = await titles(mf);
+    assert.ok(
+      corrupt.error,
+      `a corrupt leaf answers an error, not the value: ${JSON.stringify(corrupt).slice(0, 200)}`,
+    );
+    // Missing.
+    await bucket.delete(prefix + leaf);
+    const missing = await titles(mf);
+    assert.ok(
+      missing.error,
+      `a missing leaf answers an error: ${JSON.stringify(missing).slice(0, 200)}`,
+    );
+    // Back: once the backoff is over, the value reads again.
+    await bucket.put(prefix + leaf, original);
+    await eventually(async () => {
+      const answer = await titles(mf);
+      return Array.isArray(answer) && answer[0] === big;
+    }, 40_000);
+  } finally {
+    await mf.dispose();
+    rmSync(dirs.root, { recursive: true, force: true });
+  }
+});
