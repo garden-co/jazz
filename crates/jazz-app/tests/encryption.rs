@@ -997,3 +997,60 @@ async fn a_store_that_never_answers_fails_the_call_and_the_client_closes() {
         .unwrap();
     app.stop().await;
 }
+
+/// Contract: permission advice on a write to an encrypted column judges the
+/// cells the write would carry. alice's device seals her candidate task as
+/// her insert seals it, so the server's dry run sees ciphertext and agrees
+/// with the insert; mallory holds no key for the space, so her device cannot
+/// seal the candidate and answers `Unknown` without asking. A plain table's
+/// advice is unchanged.
+///
+/// ```text
+/// alice ──can_insert(task, sealed)──► server dry run ✓ ══ insert ✓
+/// mallory ──can_insert(task)──✗ no key: Unknown, nothing sent
+/// mallory ──can_insert(note)──► server dry run ✓
+/// ```
+#[tokio::test]
+async fn advice_on_an_encrypted_write_judges_its_sealed_cells() {
+    use bindings::{NewNote, NewTask};
+    use jazz_app_support::Advice;
+    let app = App::start().await;
+    let alice = app.device().await;
+    let mallory = app.device().await;
+    for device in [&alice, &mallory] {
+        device
+            .encryption()
+            .ready(Duration::from_secs(30))
+            .await
+            .unwrap();
+    }
+    let project = make_project(&alice, "plans").await;
+    // Her first write makes the space's key.
+    add_task(&alice, &project, "first").await.unwrap();
+    let project_id = ObjectId::from_uuid(project.parse().unwrap());
+
+    assert_eq!(
+        alice
+            .can_insert(NewTask::new(project_id, "alice's secret"))
+            .await
+            .unwrap(),
+        Advice::Allowed
+    );
+    add_task(&alice, &project, "alice's secret").await.unwrap();
+
+    assert_eq!(
+        mallory
+            .can_insert(NewTask::new(project_id, "mallory's guess"))
+            .await
+            .unwrap(),
+        Advice::Unknown
+    );
+    assert_eq!(
+        mallory.can_insert(NewNote::new("a note")).await.unwrap(),
+        Advice::Allowed
+    );
+
+    alice.shutdown().await.unwrap();
+    mallory.shutdown().await.unwrap();
+    app.stop().await;
+}
