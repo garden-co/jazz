@@ -45,6 +45,8 @@ export default { fetch: routeJazzRequest };
   "compatibility_date": "2026-04-01",
   "durable_objects": { "bindings": [{ "name": "JAZZ", "class_name": "JazzCore" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["JazzCore"] }],
+  // Large values (files, long text) go to R2: see below.
+  "r2_buckets": [{ "binding": "JAZZ_BLOBS", "bucket_name": "my-app-jazz-blobs" }],
 }
 ```
 
@@ -56,9 +58,32 @@ Give it a core secret: a random string of at least 32 characters (`openssl rand 
 the same across deployments; the core admits only requests that carry it.
 
 ```bash
+npx wrangler r2 bucket create my-app-jazz-blobs
 npx wrangler secret put JAZZ_CORE_SECRET
 npx wrangler deploy
 ```
+
+### Large values in R2 (recommended)
+
+Bind an R2 bucket to the Worker as `JAZZ_BLOBS`, as above. The core then keeps the bytes of large
+values (anything over 64 KiB: files, long text) in the bucket and only their index in the Durable
+Object's SQLite, which stays small. Without the binding the bytes stay in SQLite, which grows with
+every large value, against Durable Objects' per-object storage limit. R2 has to be enabled on your Cloudflare account
+once (Dashboard → R2 Object Storage), which asks for a payment method even within R2's free tier;
+`wrangler r2 bucket create` fails until it is.
+
+- **Where:** objects live under `jazz/<app id>/` in the bucket, one per chunk, named by its
+  SHA-256. Every upload carries that checksum, so R2 itself rejects a corrupted one. Set
+  `JAZZ_BLOBS_PREFIX` (a Worker variable) to use another prefix.
+- **One app per prefix:** the first core claims its prefix with a `.jazz-owner` object. Another core
+  on the same prefix (another Worker, or a local `wrangler dev` with the same bucket and
+  `JAZZ_BLOBS_PREFIX`) is refused: its `/ready` answers 503 saying which app owns it, and its large
+  values stay in its own SQLite. Give each app, and each environment, its own bucket or prefix.
+- **Moving to R2:** a core that already holds large values in SQLite keeps working when you add the
+  binding and moves them to the bucket in the background. Once it has, it needs the binding: a core
+  whose bucket binding is removed refuses to start rather than lose track of its values.
+- **Failures:** a value stays in SQLite until its upload has succeeded, and failed uploads are
+  retried with backoff (logged to the Worker's logs), so an unreachable bucket never loses data.
 
 ## Run your backend in the Worker too
 
@@ -107,10 +132,12 @@ export default { fetch: routeToJazzBackend };
     ],
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["JazzCore", "JazzBackend"] }],
+  "r2_buckets": [{ "binding": "JAZZ_BLOBS", "bucket_name": "my-app-jazz-blobs" }],
 }
 ```
 
-Set `JAZZ_CORE_SECRET` as above (`npx wrangler secret put JAZZ_CORE_SECRET`) and deploy. Browsers
+Create the R2 bucket and set `JAZZ_CORE_SECRET` as above (`npx wrangler r2 bucket create
+my-app-jazz-blobs`, `npx wrangler secret put JAZZ_CORE_SECRET`) and deploy. Browsers
 connect to the Worker's own origin, with `serverUrl: "/jazz"`. Static assets (your built client) can
 come from the same Worker: forward only your API and `/jazz` to `routeToJazzBackend`, and the rest to
 wrangler's `assets` binding. The BandChat example's `react-hono-betterauth` app does this, with Better

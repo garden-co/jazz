@@ -1106,6 +1106,129 @@ mod core_host {
         paused: bool,
         /// The account registry's tables exist (made on first use).
         accounts_open: bool,
+        /// Settled large values move to the host's bucket (`JAZZ_BLOBS`),
+        /// whose I/O the host runs: see `takeChunkIo`.
+        blobs: bool,
+        /// The chunk-store batch out with the host, and the fetches out
+        /// beside it: one of each at a time.
+        chunk_io: Option<jazz::chunk_store::ChunkIo>,
+        chunk_fetches: Option<jazz::chunk_store::ChunkIo>,
+    }
+
+    /// The chunk store of a core whose host runs its I/O (`blobs`): the
+    /// engine hands the host every batch, and calls this only for a read
+    /// outside a session that wants an offloaded node at once, which a
+    /// Durable Object (whose bucket answers asynchronously) refuses.
+    struct HostRunChunkStore;
+
+    fn host_run() -> jazz::db::Error {
+        jazz::db::Error::new(
+            jazz::db::ErrorCode::Storage,
+            "chunk store: the Durable Object host reads its bucket asynchronously; this read cannot wait for it",
+        )
+    }
+
+    impl jazz::chunk_store::ChunkStore for HostRunChunkStore {
+        fn put<'a>(
+            &'a self,
+            _: &'a jazz::chunk_store::NodeKey,
+            _: &'a [u8],
+        ) -> jazz::chunk_store::StoreFuture<'a, ()> {
+            Box::pin(std::future::ready(Err(host_run())))
+        }
+
+        fn get<'a>(
+            &'a self,
+            _: &'a jazz::chunk_store::NodeKey,
+        ) -> jazz::chunk_store::StoreFuture<'a, Option<bytes::Bytes>> {
+            Box::pin(std::future::ready(Err(host_run())))
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _: &'a jazz::chunk_store::NodeKey,
+        ) -> jazz::chunk_store::StoreFuture<'a, ()> {
+            Box::pin(std::future::ready(Err(host_run())))
+        }
+    }
+
+    /// A batch as the host runs it: `{ fetches, puts: [{ key, bytes }],
+    /// deletes }`, every key a node's SHA-256 in lowercase hex (its object
+    /// name, and the checksum its put carries).
+    fn chunk_io_js(io: &jazz::chunk_store::ChunkIo) -> JsValue {
+        let keys = |keys: &mut dyn Iterator<Item = jazz::chunk_store::NodeKey>| -> JsValue {
+            keys.map(|key| JsValue::from_str(&key.object_name()))
+                .collect::<js_sys::Array>()
+                .into()
+        };
+        let puts: js_sys::Array = io
+            .puts()
+            .iter()
+            .map(|(key, bytes)| {
+                object(&[
+                    ("key", JsValue::from_str(&key.object_name())),
+                    ("bytes", js_sys::Uint8Array::from(bytes.as_slice()).into()),
+                ])
+            })
+            .collect();
+        object(&[
+            ("fetches", keys(&mut io.fetches())),
+            ("puts", puts.into()),
+            ("deletes", keys(&mut io.deletes().iter().copied())),
+        ])
+    }
+
+    /// One result per op, as the host hands them back: `undefined` or
+    /// `null` for success, a string for a failure (`fetched`: a
+    /// `Uint8Array` found, `null` for no such object).
+    fn chunk_results<T>(
+        results: &js_sys::Array,
+        ok: impl Fn(JsValue) -> Result<T, String>,
+    ) -> Vec<Result<T, jazz::db::Error>> {
+        results
+            .iter()
+            .map(|result| match result.as_string() {
+                Some(failure) => Err(failure),
+                None => ok(result),
+            })
+            .map(|result| {
+                result.map_err(|failure| {
+                    jazz::db::Error::new(
+                        jazz::db::ErrorCode::Storage,
+                        format!("large-value bucket: {failure}"),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn chunk_done(
+        io: jazz::chunk_store::ChunkIo,
+        fetched: &js_sys::Array,
+        put: &js_sys::Array,
+        deleted: &js_sys::Array,
+    ) -> Result<jazz::chunk_store::ChunkIoDone, jazz::db::Error> {
+        let none = |result: JsValue| {
+            if result.is_undefined() || result.is_null() {
+                Ok(())
+            } else {
+                Err("an unexpected result".to_owned())
+            }
+        };
+        let fetched = chunk_results(fetched, |result| {
+            if result.is_undefined() || result.is_null() {
+                return Ok(None);
+            }
+            result
+                .dyn_into::<js_sys::Uint8Array>()
+                .map(|bytes| Some(bytes::Bytes::from(bytes.to_vec())))
+                .map_err(|_| "a fetch answered neither bytes nor null".to_owned())
+        });
+        io.done(
+            fetched,
+            chunk_results(put, none),
+            chunk_results(deleted, none),
+        )
     }
 
     /// What `accept` answers: the frames to send, and the socket's number
@@ -1165,11 +1288,15 @@ mod core_host {
     impl DurableObjectCore {
         /// Open the core on the object's SQL (`ctx.storage`). `secret`
         /// admits the app's backend; `schema` (the app's public schema as
-        /// JSON) is served until a published catalogue replaces it.
+        /// JSON) is served until a published catalogue replaces it. With
+        /// `blobs`, settled large values move out of the object's SQL to a
+        /// bucket the host reads and writes (`takeChunkIo`); a store that
+        /// moved them is refused without it.
         pub fn open(
             storage: ObjectStorage,
             secret: String,
             schema: Option<String>,
+            blobs: Option<bool>,
         ) -> Result<DurableObjectCore, JsValue> {
             if secret.len() < 32 {
                 return Err(js("the core secret must be at least 32 characters"));
@@ -1196,6 +1323,9 @@ mod core_host {
                 global_held_limit: GLOBAL_HELD_LIMIT,
                 paused: false,
                 accounts_open: false,
+                blobs: blobs.unwrap_or(false),
+                chunk_io: None,
+                chunk_fetches: None,
             };
             this.open_core(schema.as_deref())?;
             Ok(this)
@@ -1526,6 +1656,101 @@ mod core_host {
             self.core.as_ref()?.db().next_chunk_pull_tick_ms()
         }
 
+        /// The next batch of bucket work for a core opened with `blobs`
+        /// (see `chunk_io_js`), or `undefined`: no core, nothing to do, or
+        /// the last batch is still out. With `holdFetches`, reads' fetches
+        /// stay for later (the host is backing them off). Hand what running
+        /// it came to back with `finishChunkIo`.
+        #[wasm_bindgen(js_name = takeChunkIo)]
+        pub fn take_chunk_io(&mut self, hold_fetches: bool) -> Result<JsValue, JsValue> {
+            if !self.blobs || self.chunk_io.is_some() {
+                return Ok(JsValue::UNDEFINED);
+            }
+            let Some(core) = self.core.as_ref() else {
+                return Ok(JsValue::UNDEFINED);
+            };
+            let taken = if hold_fetches {
+                core.db().take_chunk_io_holding_fetches()
+            } else {
+                core.db().take_chunk_io()
+            };
+            // An empty batch ends when it is dropped.
+            match taken.map_err(js)? {
+                Some(io) if !io.is_empty() => {
+                    let batch = chunk_io_js(&io);
+                    self.chunk_io = Some(io);
+                    Ok(batch)
+                }
+                _ => Ok(JsValue::UNDEFINED),
+            }
+        }
+
+        /// Hand back the batch `takeChunkIo` gave out: one result per
+        /// fetch, put and delete, in order (`undefined` or `null` for
+        /// success, a string for why an op failed; a fetch's bytes, or
+        /// `null` for no such object). Failed ops are retried in a later
+        /// batch; the first failure is returned, `undefined` if none.
+        #[wasm_bindgen(js_name = finishChunkIo)]
+        pub fn finish_chunk_io(
+            &mut self,
+            fetched: js_sys::Array,
+            put: js_sys::Array,
+            deleted: js_sys::Array,
+        ) -> Result<Option<String>, JsValue> {
+            let Some(io) = self.chunk_io.take() else {
+                return Err(js("no chunk I/O batch is out"));
+            };
+            let Some(core) = self.core.as_ref() else {
+                return Ok(None);
+            };
+            let done = chunk_done(io, &fetched, &put, &deleted).map_err(js)?;
+            Ok(core.db().finish_chunk_io(done).err().map(|e| e.to_string()))
+        }
+
+        /// The offloaded nodes reads wait on, to fetch beside the batch that
+        /// is out, or `undefined` (none, or fetches already out): `{
+        /// fetches }` as in `takeChunkIo`. Hand them back with
+        /// `finishChunkFetches`.
+        #[wasm_bindgen(js_name = takeChunkFetches)]
+        pub fn take_chunk_fetches(&mut self) -> Result<JsValue, JsValue> {
+            if !self.blobs || self.chunk_fetches.is_some() {
+                return Ok(JsValue::UNDEFINED);
+            }
+            let Some(core) = self.core.as_ref() else {
+                return Ok(JsValue::UNDEFINED);
+            };
+            match core.db().take_chunk_fetches().map_err(js)? {
+                Some(io) => {
+                    let fetches = chunk_io_js(&io);
+                    self.chunk_fetches = Some(io);
+                    Ok(fetches)
+                }
+                None => Ok(JsValue::UNDEFINED),
+            }
+        }
+
+        /// Hand back what `takeChunkFetches` gave out, one result per
+        /// fetch (as `finishChunkIo`'s). Returns the first failure.
+        #[wasm_bindgen(js_name = finishChunkFetches)]
+        pub fn finish_chunk_fetches(
+            &mut self,
+            fetched: js_sys::Array,
+        ) -> Result<Option<String>, JsValue> {
+            let Some(io) = self.chunk_fetches.take() else {
+                return Err(js("no chunk fetches are out"));
+            };
+            let Some(core) = self.core.as_ref() else {
+                return Ok(None);
+            };
+            let none = js_sys::Array::new();
+            let done = chunk_done(io, &fetched, &none, &none).map_err(js)?;
+            Ok(core
+                .db()
+                .finish_chunk_fetches(done)
+                .err()
+                .map(|e| e.to_string()))
+        }
+
         /// How often to tick while sockets are open, in milliseconds.
         #[wasm_bindgen(js_name = idleTickMs)]
         pub fn idle_tick_ms() -> u32 {
@@ -1745,6 +1970,46 @@ mod core_host {
                         .unwrap_or(0);
                     Some(answer(200, serde_json::json!({ "rows": rows })))
                 }
+                // The bytes of large-value leaves the object's SQL still
+                // holds (a leaf moved to the bucket holds none), and how
+                // many nodes it knows.
+                "test/inline-large-values" => {
+                    let count = |sql: &str| {
+                        storage
+                            .prepare_cached(sql)
+                            .and_then(|mut statement| {
+                                statement.query_row([], |row| row.get::<_, i64>(0))
+                            })
+                            .unwrap_or(-1)
+                    };
+                    Some(answer(
+                        200,
+                        serde_json::json!({
+                            "leafBytes": count(
+                                "SELECT coalesce(sum(length(n.bytes)), 0) FROM _jazz_lv_node n \
+                                 WHERE NOT EXISTS (SELECT 1 FROM _jazz_lv_edge e WHERE e.parent = n.hash)",
+                            ),
+                            "nodes": count("SELECT count(*) FROM _jazz_lv_node"),
+                            "queued": count("SELECT count(*) FROM _jazz_lv_offload"),
+                            "receipts": count("SELECT count(*) FROM _jazz_lv_receipt"),
+                            "unpushed": count("SELECT count(*) FROM _jazz_lv_unpushed"),
+                            "uploading": count("SELECT count(*) FROM _jazz_lv_upload_node"),
+                        }),
+                    ))
+                }
+                // Leave every large value unreferenced, as a row's last
+                // version going does (white-box: no public write drops a
+                // committed value that history keeps); the next tick
+                // reclaims them.
+                "test/unreference-large-values" => {
+                    storage
+                        .execute_batch("UPDATE _jazz_lv_root SET refs = 0")
+                        .expect("unreference");
+                    if let Some(core) = self.core.as_mut() {
+                        core.tick();
+                    }
+                    Some(no_content())
+                }
                 // Set the held limits and pause or resume the engine; the
                 // answer is the limits that were in force.
                 "test/limits" => {
@@ -1836,10 +2101,31 @@ mod core_host {
             };
             let any_stored = !rows.schemas.is_empty();
             self.core = Some(
-                ServerCore::open(schema, file, any_stored, Some(self.app_id.clone()))
+                self.open_server_core(schema, file, any_stored)
                     .map_err(js)?,
             );
             Ok(())
+        }
+
+        /// The engine on the object's store, with the host's bucket if it
+        /// has one.
+        fn open_server_core(
+            &self,
+            schema: jazz::schema::JazzSchema,
+            file: jazz::host::StoreFile,
+            any_stored: bool,
+        ) -> Result<ServerCore, String> {
+            let chunk_store = self.blobs.then(|| {
+                std::sync::Arc::new(HostRunChunkStore)
+                    as std::sync::Arc<dyn jazz::chunk_store::ChunkStore>
+            });
+            ServerCore::open_with_chunk_store(
+                schema,
+                file,
+                any_stored,
+                Some(self.app_id.clone()),
+                chunk_store,
+            )
         }
     }
 
@@ -2134,9 +2420,14 @@ mod core_host {
                 }
                 ("GET", backend_signing_key::ROUTE) => credentials.admin(&self.secret)?,
                 #[cfg(feature = "durable-object-tests")]
-                ("POST", "test/panic" | "test/panic-rows" | "test/limits") => {
-                    credentials.admin(&self.secret)?
-                }
+                (
+                    "POST",
+                    "test/panic"
+                    | "test/panic-rows"
+                    | "test/limits"
+                    | "test/inline-large-values"
+                    | "test/unreference-large-values",
+                ) => credentials.admin(&self.secret)?,
                 _ => return Err(not_found()),
             }
             Ok(route)
@@ -2386,7 +2677,7 @@ mod core_host {
                 ))
                 .map_err(DeployError::internal)?;
                 self.core = Some(
-                    ServerCore::open(genesis, file, false, Some(self.app_id.clone()))
+                    self.open_server_core(genesis, file, false)
                         .map_err(DeployError::internal)?,
                 );
             }

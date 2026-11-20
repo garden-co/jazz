@@ -33,7 +33,8 @@ The same app runs entirely on Cloudflare, in one Worker (`server/worker.ts`,
 `wrangler.jsonc`). There is no Node server and no Vercel:
 
 - `JazzCore`, a SQLite-backed Durable Object, is the app's Jazz core and holds
-  its data.
+  its data. Attachments and other large values go to an R2 bucket, bound as
+  `JAZZ_BLOBS`; only their index stays in the object's SQLite.
 - `JazzBackend`, a second Durable Object, runs `createJazz` (on jazz-wasm),
   Better Auth and the Hono routes. A Jazz keeps its socket to the core open
   across requests, which only a Durable Object can.
@@ -42,6 +43,7 @@ The same app runs entirely on Cloudflare, in one Worker (`server/worker.ts`,
 
 ```sh
 pnpm cf:dev                                 # local, with secrets from .dev.vars
+npx wrangler r2 bucket create band-chat-jazz-blobs  # once: the app's large values
 npx wrangler secret put BETTER_AUTH_SECRET  # a random secret
 npx wrangler secret put JAZZ_CORE_SECRET    # 32+ random characters; keep it across deployments
 pnpm cf:deploy                              # set APP_ORIGIN in wrangler.jsonc to the deployed URL first
