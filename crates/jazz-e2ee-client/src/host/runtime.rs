@@ -668,12 +668,18 @@ impl Encryption {
                 json!({ "phrase": phrase.as_str() })
             }
             // `automatic`: the start-up registration of a device account's
-            // own secret, for which a retired root is not an error. Otherwise
-            // a retired root is refused (`recovery-root-mismatch`).
+            // own secret, for which a retired root is not an error. As in
+            // `start_device_account`, a secret of another identity than the
+            // device account the runtime was opened as is refused
+            // (`recovery-root-mismatch`) and nothing is written. Otherwise a
+            // retired root is refused (`recovery-root-mismatch`).
             "recoveryRegister" => {
                 let secret = recovery_secret(args)?;
                 if args.get("automatic").and_then(Value::as_bool) == Some(true) {
-                    client.register_recovery_at_start(db, &secret).await
+                    match client.refuse_foreign_device_secret(&secret) {
+                        Ok(()) => client.register_recovery_at_start(db, &secret).await,
+                        Err(refused) => Err(refused),
+                    }
                 } else {
                     client.register_recovery(db, &secret).await
                 }
