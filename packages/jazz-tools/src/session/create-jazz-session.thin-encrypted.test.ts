@@ -864,6 +864,7 @@ describe("a thin session of an app with encrypted columns", () => {
         thrown = error;
       }
       expect(thrown).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+      expect((thrown as EncryptionNeedsLocalFirstError).reason).toBe("not-loaded");
       expect((thrown as Error).message).toContain(
         "call it again after `await db.encryption.ready()`",
       );

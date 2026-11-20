@@ -14,7 +14,9 @@ export type EncryptionNeedsLocalFirstReason =
   /** The local-first client did not load in time. */
   | "timeout"
   /** The operation was in a transaction begun on the thin client. */
-  | "transaction";
+  | "transaction"
+  /** A synchronous call that can't wait: the load has started, call it again after it. */
+  | "not-loaded";
 
 export interface EncryptionNeedsLocalFirstDetails {
   reason: EncryptionNeedsLocalFirstReason;
@@ -65,6 +67,8 @@ function needsLocalFirstMessage(
       }.`;
     case "timeout":
       return `${lead} The local-first client did not load within 30 seconds.`;
+    case "not-loaded":
+      return `${lead} This call needs the local-first client, now loading; call it again after \`await db.encryption.ready()\`.`;
     case "transaction":
       return `${lead} This transaction began on the thin client and can't commit: begin it again after \`await db.upgradeToLocalFirst(loader)\`.`;
   }

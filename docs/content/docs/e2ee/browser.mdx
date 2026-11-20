@@ -79,7 +79,7 @@ which only the local-first client has:
   Attach them at start-up as you would anywhere: they register at once and begin to fire when the
   local-first client arrives for any other reason. They return a function that stops the listener at
   any time, before or after it attached.
-- **`recovery.create()` throws** an `EncryptionNeedsLocalFirstError` with reason `"load-failed"`,
+- **`recovery.create()` throws** an `EncryptionNeedsLocalFirstError` with reason `"not-loaded"`,
   because it is synchronous and cannot wait. It starts the load: call it again after
   `await db.encryption.ready()`.
 

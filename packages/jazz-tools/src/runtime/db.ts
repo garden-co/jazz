@@ -2556,14 +2556,7 @@ export class Db {
         if (!loader) return refused;
         // Start the load so that a second try, or `await db.encryption.ready()`, finds it done.
         void upgradeDbToLocalFirst(this, loader).catch(() => {});
-        return new EncryptionNeedsLocalFirstError(
-          { reason: "load-failed", operation, table },
-          {
-            cause: new Error(
-              `${operation}() is synchronous and cannot wait: await db.encryption.ready() first`,
-            ),
-          },
-        );
+        return new EncryptionNeedsLocalFirstError({ reason: "not-loaded", operation, table });
       },
       whenLocalFirst: (attach) => this.whenLocalFirst((next) => attach(next.encryption)),
     }));
