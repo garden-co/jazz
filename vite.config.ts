@@ -1,7 +1,6 @@
 import { defineConfig } from "vite-plus";
 
 const sharedIgnores = [
-  "crates/jazz-rn/src/**",
   "examples/*/schema/app.ts",
   "examples/docs/*/schema/app.ts",
   "crates/jazz-napi/index.d.ts",
@@ -21,8 +20,7 @@ export default defineConfig({
   staged: {
     "*.rs": () => "cargo fmt",
     "{*.rs,Cargo.toml}": () => "cargo clippy --workspace -- -D warnings",
-    "*.{ts,tsx,js,jsx,mjs,cjs,md,mdx,json,html}":
-      "vp fmt --no-error-on-unmatched-pattern !crates/jazz-rn/react-native.config.js",
+    "*.{ts,tsx,js,jsx,mjs,cjs,md,mdx,json,html}": "vp fmt --no-error-on-unmatched-pattern",
     "*.{ts,tsx,js,jsx}": "vp lint --fix --no-error-on-unmatched-pattern",
     "examples/docs/**": () => "pnpm turbo run build --filter=./examples/docs/* --only",
     "docs/**": () => "pnpm --filter docs types:check",
@@ -32,6 +30,36 @@ export default defineConfig({
       // Autofixing these spreads changes typed-array map results and Set iteration.
       "unicorn/no-useless-spread": "off",
     },
+    overrides: [
+      {
+        files: ["crates/jazz-rn/**/*.{js,cjs,mjs,ts,tsx}"],
+        plugins: ["unicorn", "typescript", "oxc", "react", "jest"],
+        rules: {
+          "react/rules-of-hooks": "error",
+          "react/exhaustive-deps": "error",
+          "no-restricted-imports": [
+            "warn",
+            {
+              patterns: [
+                {
+                  group: [
+                    "react-native/**",
+                    "!react-native/Libraries/Core/InitializeCore",
+                    "!react-native/src/fb_internal/**",
+                  ],
+                  caseSensitive: true,
+                  message: "Import from the public react-native entry point.",
+                },
+              ],
+            },
+          ],
+          "jest/no-disabled-tests": "warn",
+          "jest/no-focused-tests": "warn",
+          "jest/no-identical-title": "warn",
+          "jest/valid-expect": "warn",
+        },
+      },
+    ],
     ignorePatterns: [
       ...sharedIgnores,
       "examples/*/schema/migration_*.ts",

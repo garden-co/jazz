@@ -83,7 +83,6 @@ function loadRelay(nativeRelay: FixtureNativeRelay | null) {
   }));
   // Each case supplies the native boundary before importing the wrapper. That
   // is the same one-time lookup Metro performs for an installed native build.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
   return require("../relay") as RelayExports;
 }
 
