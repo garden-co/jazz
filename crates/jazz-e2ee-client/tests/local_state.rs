@@ -198,6 +198,15 @@ fn a_damaged_held_key_record_is_skipped_and_reported() {
     drop((db, client));
 
     let client = open_client(Rc::new(store.clone()));
+    let heard = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = heard.clone();
+    client.on_report(move |report| {
+        if let Report::SkippedRecord { document, .. } = report {
+            sink.borrow_mut().push(document.clone());
+        }
+    });
+    client.flush_reports();
+    assert_eq!(*heard.borrow(), std::slice::from_ref(&name));
     assert_eq!(skipped(&client), std::slice::from_ref(&name));
     let (db, _link, _) = online(&client, &server, None);
     block_on(db.insert("notes", note(intact, "fine"), Default::default())).unwrap();
