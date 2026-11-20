@@ -851,6 +851,25 @@ describe("a thin session of an app with encrypted columns", () => {
       expect(real.listeners.size).toBe(1);
     }, 90_000);
 
+    it("listeners of a Db that closes without upgrading are dropped, and never fire", async () => {
+      const host = await serve();
+      const { device } = await member(host);
+      pageStillLoading();
+      const gate = gatedLoader();
+      const session = await open(host, device, gate.loader);
+      const kept = db(session);
+      let fired = 0;
+      kept.encryption.onReport(() => fired++);
+      const waiters = () =>
+        (kept as unknown as { successorWaiters: Set<unknown> }).successorWaiters;
+      expect(waiters().size).toBe(1);
+
+      await session.close();
+      expect(waiters().size).toBe(0);
+      expect(fired).toBe(0);
+      expect(gate.calls).toBe(0);
+    }, 90_000);
+
     it("refuses the synchronous recovery.create() and starts the load", async () => {
       const host = await serve();
       const gate = gatedLoader();

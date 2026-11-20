@@ -2522,7 +2522,13 @@ export class Db {
       return () => {};
     }
     this.successorWaiters.add(then);
-    return () => void this.successorWaiters.delete(then);
+    // A Db that closes or is replaced without upgrading never calls it.
+    const stopOnShutdown = this.onShutdown(() => void this.successorWaiters.delete(then));
+    const cancel = () => {
+      stopOnShutdown();
+      this.successorWaiters.delete(then);
+    };
+    return cancel;
   }
 
   /**
