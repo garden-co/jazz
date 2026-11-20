@@ -1,16 +1,14 @@
-//! Nesting a read's relations reuses, within that one read, each relation's
-//! compiled SQL (rebinding only the parent value) and the rows of each
-//! (relation, parent value). The result must be exactly what the path
-//! without reuse returns: one-shot reads, result trees and live
-//! subscriptions, through read policies, nested ordering on unselected
-//! columns with offsets and limits, and forward relations over arrays of
-//! references with duplicates.
-//!
-//! Nesting also reads a level's rows a relation at a time (one statement
-//! for all of that level's parents, each parent's offset and limit applied
-//! by a correlated subquery, or for an array of references by a window),
-//! which must again read exactly what the per-parent path does, with about
-//! as little work. Every comparison runs the three paths in [`MODES`].
+//! Nesting a read's relations reads a level's rows a relation at a time:
+//! one statement for all of that level's distinct parent values, each
+//! parent's offset and limit applied by a correlated subquery, or for an
+//! array of references by a window. Where a level can't be read that way
+//! it reads one statement per distinct parent value, and the level below
+//! batches again. The result must be exactly what nesting one parent row
+//! at a time returns: one-shot reads, result trees and live subscriptions,
+//! through read policies, nested ordering on unselected columns with
+//! offsets and limits, and forward relations over arrays of references
+//! with duplicates, with about as little work. Every comparison runs both
+//! paths in [`MODES`].
 
 use std::collections::BTreeMap;
 
@@ -20,7 +18,7 @@ use crate::common::{
 use jazz::block_on;
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, SubscriptionEvent, UpdateOptions,
-    set_relation_batch_for_test, set_relation_reuse_for_test,
+    set_relation_batch_for_test,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, OrderDirection, Query, col, eq, lit};
@@ -245,14 +243,22 @@ fn queries() -> Vec<(&'static str, Query)> {
     ]
 }
 
-/// The nesting paths compared, as (reuse, batch): per parent without
-/// reuse, per parent with reuse, and a level at a time (the default).
-pub(crate) const MODES: [(bool, bool); 3] = [(false, false), (true, false), (true, true)];
+/// How a read nests its relations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Nesting {
+    /// One statement per relation per parent row: the path tests compare
+    /// the default with.
+    PerRow,
+    /// One statement per relation per level (the default).
+    Batched,
+}
+
+/// The nesting paths compared: per parent row, and a level at a time.
+pub(crate) const MODES: [Nesting; 2] = [Nesting::PerRow, Nesting::Batched];
 
 /// Nest relations on this thread as `mode` does.
-pub(crate) fn set_mode((reuse, batch): (bool, bool)) {
-    set_relation_reuse_for_test(reuse);
-    set_relation_batch_for_test(batch);
+pub(crate) fn set_mode(mode: Nesting) {
+    set_relation_batch_for_test(mode == Nesting::Batched);
 }
 
 /// `read` in each of [`MODES`]: they must agree.
@@ -263,7 +269,7 @@ fn agree<T: PartialEq + std::fmt::Debug>(what: &str, read: impl Fn() -> T) -> T 
         set_mode(*mode);
         assert_eq!(read(), plain, "{what}: {mode:?}");
     }
-    set_mode((true, true));
+    set_mode(Nesting::Batched);
     plain
 }
 
@@ -275,7 +281,7 @@ fn as_member(db: &Db, query: &Query) -> Vec<jazz::db::CurrentRow> {
 }
 
 #[test]
-fn reused_relations_read_exactly_what_unreused_ones_do() {
+fn batched_relations_read_exactly_what_per_row_ones_do() {
     let db = seeded();
     for (what, query) in queries() {
         let rows = agree(what, || as_member(&db, &query));
@@ -345,11 +351,11 @@ fn drain(subscription: &mut jazz::db::SubscriptionStream) -> (Shown, Shown) {
     (shown(added), shown(updated))
 }
 
-/// Two identical stores keep the same live result, one without reuse and
-/// one with: their openings, and the rows each presence write updates,
+/// Two identical stores keep the same live result, one nesting per row
+/// and one batched: their openings, and the rows each presence write updates,
 /// agree.
 #[test]
-fn a_live_result_re_run_with_reuse_matches_one_without() {
+fn a_live_result_re_run_batched_matches_one_per_row() {
     for (what, query) in queries() {
         let stores = MODES.map(|mode| (mode, seeded()));
         let mut subscriptions: Vec<_> = stores
@@ -396,21 +402,21 @@ fn a_live_result_re_run_with_reuse_matches_one_without() {
         }
         assert!(updated > 0, "{what}: the writes reached the live result");
     }
-    set_mode((true, true));
+    set_mode(Nesting::Batched);
 }
 
 mod randomized {
     //! Small random stores: several readers with different memberships,
     //! foreign keys that are NULL or dangling, a relation keyed by a text
     //! column, arrays of references that are empty or repeat, and ties in
-    //! the orders. Every read path agrees with and without reuse.
+    //! the orders. Every read path agrees per row and batched.
 
     use std::collections::BTreeMap;
 
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
-    use super::{MODES, set_mode};
+    use super::{MODES, Nesting, set_mode};
     use crate::common::{compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq};
     use jazz::block_on;
     use jazz::db::{
@@ -739,8 +745,8 @@ mod randomized {
         super::agree(what, read);
     }
 
-    /// Each reader's live results on two identical stores, one without
-    /// reuse and one with, through random writes.
+    /// Each reader's live results on two identical stores, one nesting
+    /// per row and one batched, through random writes.
     #[test]
     fn live_results_agree_per_reader_through_random_writes() {
         for seed in 0..SEEDS {
@@ -786,7 +792,7 @@ mod randomized {
                 }
             }
         }
-        set_mode((true, true));
+        set_mode(Nesting::Batched);
     }
 
     /// One-shot reads on one store: result trees, nested rows, a snapshot
@@ -837,7 +843,7 @@ mod randomized {
                 });
             }
         }
-        set_mode((true, true));
+        set_mode(Nesting::Batched);
     }
 }
 
@@ -966,6 +972,12 @@ mod batched {
 
     /// Children as wide as a statement may be read per parent: the batched
     /// statement's extra columns would pass Durable Object SQLite's limit.
+    /// The level below them still reads in one statement.
+    ///
+    /// ```
+    /// owners ──1 stmt──► wide (too wide: 1 stmt per owner)
+    ///                      └──1 stmt──► tags of every wide row
+    /// ```
     #[test]
     fn children_too_wide_to_batch_read_per_parent() {
         let mut wide = TableSchemaBuilder::new("wide")
@@ -982,6 +994,12 @@ mod batched {
                         .policies(read_and_allow_all_writes(PolicyExpr::True)),
                 )
                 .table(wide.policies(read_and_allow_all_writes(PolicyExpr::True)))
+                .table(
+                    TableSchemaBuilder::new("tags")
+                        .column("wide", ColumnType::Uuid)
+                        .column("label", ColumnType::Text)
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
                 .build(),
         );
         let db = block_on(Db::open(DbConfig::new(
@@ -1020,25 +1038,52 @@ mod batched {
                 values.push((name.as_str(), Value::String(format!("{name} {w}"))));
             }
             insert("wide", id(10, w), cells(values));
+            for t in 0..2 {
+                insert(
+                    "tags",
+                    id(14, w * 2 + t),
+                    cells(vec![
+                        ("wide", Value::Uuid(id(10, w).0)),
+                        ("label", Value::String(format!("tag {t} of {w}"))),
+                    ]),
+                );
+            }
         }
         block_on(db.tick()).unwrap();
-        // Every text column twice, and the rank.
+        // Every text column twice, the rank and the owner.
         let mut select: Vec<String> = (0..2 * WIDE).map(|c| format!("c{}", c % WIDE)).collect();
         select.push("rank".to_owned());
+        select.push("owner".to_owned());
         let paged = ArraySubquery::new("wide", "wide", "owner", "id")
             .select(select)
             .order_by("rank", OrderDirection::Asc)
             .offset(1)
-            .limit(1);
-        let read = tree(&db, &Query::from("owners").array_subquery(paged));
+            .limit(1)
+            .nested(ArraySubquery::new("tags", "tags", "wide", "id"));
+        let query = Query::from("owners").array_subquery(paged);
+        let read = tree(&db, &query);
         assert!(read.roots.iter().all(|o| relation(o, "wide").len() == 1));
+        assert!(
+            read.roots
+                .iter()
+                .flat_map(|o| relation(o, "wide"))
+                .all(|w| relation(w, "tags").len() == 2)
+        );
+        let prepared = db.prepare_query(&query).unwrap();
+        jazz::db::take_query_statements_for_test();
+        let again = block_on(db.all_result_tree(&prepared, ReadOpts::default())).unwrap();
+        let statements = jazz::db::take_query_statements_for_test();
+        assert_eq!(again, read);
+        // The owners, their wide rows per owner, then every wide row's tags.
+        assert_eq!(statements, 1 + read.roots.len() as u64 + 1);
     }
 
     /// Text columns of [`children_too_wide_to_batch_read_per_parent`]'s
     /// child. A Durable Object table holds at most 100 columns, system
     /// ones included, so a projection this wide selects columns twice:
-    /// with id, `_clock`, `_state` and `_writer`, the per-parent statement
-    /// returns 99 columns, and the batched page would return 101.
+    /// with the rank, the owner, id, `_clock`, `_state` and `_writer`, the
+    /// per-parent statement returns 100 columns, and the batched one,
+    /// adding the parent's index, would return 101.
     const WIDE: usize = 47;
 
     /// Parents keyed by a real number have no exact JSON form, so they are
@@ -1121,6 +1166,108 @@ mod batched {
         );
         assert_eq!(read.roots.len(), 20);
     }
+
+    /// A level read per parent value does not stop the level below it from
+    /// batching: buckets keyed by a real read their points one statement
+    /// per bucket, and then all those points' notes come in one statement,
+    /// not one per point.
+    ///
+    /// ```
+    /// buckets ──1 stmt──► points (real key: 1 stmt per bucket)
+    ///                        └──1 stmt──► notes of every point
+    /// ```
+    #[test]
+    fn a_level_below_one_read_per_parent_still_batches() {
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("buckets")
+                        .column("at", ColumnType::Double)
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .table(
+                    TableSchemaBuilder::new("points")
+                        .column("at", ColumnType::Double)
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("point", ColumnType::Uuid)
+                        .column("body", ColumnType::Text)
+                        .policies(read_and_allow_all_writes(PolicyExpr::True)),
+                )
+                .build(),
+        );
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x35; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let insert = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+            block_on(db.insert(
+                table,
+                values,
+                InsertOptions {
+                    row_id: Some(row),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        };
+        const BUCKETS: usize = 4;
+        for b in 0..BUCKETS {
+            insert(
+                "buckets",
+                id(11, b),
+                cells(vec![("at", Value::F64(b as f64 / 2.0))]),
+            );
+        }
+        for p in 0..20 {
+            insert(
+                "points",
+                id(12, p),
+                cells(vec![("at", Value::F64((p % 5) as f64 / 2.0))]),
+            );
+            for n in 0..p % 3 {
+                insert(
+                    "notes",
+                    id(13, p * 3 + n),
+                    cells(vec![
+                        ("point", Value::Uuid(id(12, p).0)),
+                        ("body", Value::String(format!("note {n} of {p}"))),
+                    ]),
+                );
+            }
+        }
+        block_on(db.tick()).unwrap();
+        let notes = ArraySubquery::new("notes", "notes", "point", "id");
+        let points = ArraySubquery::new("points", "points", "at", "at").nested(notes);
+        let query = Query::from("buckets").array_subquery(points);
+        let read = tree(&db, &query);
+        let pointed: usize = read
+            .roots
+            .iter()
+            .map(|bucket| relation(bucket, "points").len())
+            .sum();
+        assert_eq!(pointed, 16, "four points per bucket");
+        let noted: usize = read
+            .roots
+            .iter()
+            .flat_map(|bucket| relation(bucket, "points"))
+            .map(|point| relation(point, "notes").len())
+            .sum();
+        assert!(noted > 0, "some points have notes");
+        let prepared = db.prepare_query(&query).unwrap();
+        jazz::db::take_query_statements_for_test();
+        let again = block_on(db.all_result_tree(&prepared, ReadOpts::default())).unwrap();
+        let statements = jazz::db::take_query_statements_for_test();
+        assert_eq!(again, read);
+        // The buckets, their points per bucket, then every point's notes.
+        assert_eq!(statements, 1 + BUCKETS as u64 + 1);
+    }
 }
 
 mod branch_views {
@@ -1132,7 +1279,7 @@ mod branch_views {
     //! with ties and per-parent pages must read the same per parent and
     //! batched.
 
-    use super::{MODES, agree, cells, id, set_mode};
+    use super::{MODES, Nesting, agree, cells, id, set_mode};
     use jazz::block_on;
     use jazz::db::{
         Db, DbConfig, DbIdentity, DeleteOptions, ExactWriteTarget, InsertOptions, ReadOpts,
@@ -1557,7 +1704,7 @@ mod branch_views {
                 }
             }
         }
-        set_mode((true, true));
+        set_mode(Nesting::Batched);
     }
 
     type Shown = Vec<(RowUuid, String)>;
@@ -1692,9 +1839,9 @@ mod branch_views {
                     let tree = block_on(db.all_result_tree(&prepared, opts.clone())).unwrap();
                     (tree, jazz::db::take_vm_steps_for_test())
                 };
-                let (per_parent, per_parent_steps) = read((true, false));
-                let (batched, batched_steps) = read((true, true));
-                set_mode((true, true));
+                let (per_parent, per_parent_steps) = read(Nesting::PerRow);
+                let (batched, batched_steps) = read(Nesting::Batched);
+                set_mode(Nesting::Batched);
                 assert_eq!(batched, per_parent, "{view}, offset {offset}");
                 assert!(
                     batched_steps <= 2 * per_parent_steps + 1_000,
@@ -1803,9 +1950,9 @@ fn a_paged_relation_reads_each_parents_page_not_all_its_children() {
             let rows = db.nest_relations(&prepared, roots).unwrap();
             (rows, jazz::db::take_vm_steps_for_test())
         };
-        let (per_parent, per_parent_steps) = read((true, false));
-        let (batched, batched_steps) = read((true, true));
-        set_mode((true, true));
+        let (per_parent, per_parent_steps) = read(Nesting::PerRow);
+        let (batched, batched_steps) = read(Nesting::Batched);
+        set_mode(Nesting::Batched);
         assert_eq!(batched, per_parent, "offset {offset}, limit {limit:?}");
         assert_eq!(batched.len(), rooms);
         // The per-parent statements seek each room's index range; the
