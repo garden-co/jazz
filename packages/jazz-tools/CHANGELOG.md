@@ -1,5 +1,22 @@
 # jazz-tools
 
+## 2.0.0-alpha.70
+
+### Patch Changes
+
+- 9389dc4: Initialize a server database and publish its first schema deployment in one transaction on the real store. A rejected first deployment leaves existing tables unchanged and can be retried with a corrected schema; validation no longer opens a scratch SQLite database.
+- 9e98f4e: **Native clients (Rust, Swift, Kotlin) open without waiting for the server, as the web client does.** Opening a client with a server used to wait for the first connection attempt: up to about 5 s, or up to about 20 s with the HTTP-stream fallback. Now it returns once the local store is open, local-first reads are served from it at once, and the link connects in the background. A refusal from the server now shows up the same way however fast it comes: as the link's status (`upstream_status`, `sync_status`) and `auth_refusals`. Before, a refusal within the handshake deadline failed the open and a slower one did not. Waits on the server (`wait_for_sync`, `GlobalServer` durability) now fail with a connection error once the link has stopped for good (stopped, or refused a credential that can't be renewed), instead of staying pending. A refusal a new token can fix still holds them until the token is updated. Checks this side makes itself still fail the open: a missing transport, a `backend_session` without `bundle`, and the backend sign-in.
+- f393bab: Add `db.getPendingUploadRows(table)` and `db.onPendingUploadRowsChange(table, listener)`: the ids of a table's rows with a write the server has neither accepted nor refused yet, so an app can show "not sent yet" beside a row. In Node and React Native this includes writes recovered from local storage after a restart. `null` means the runtime cannot tell (no client yet, or a native build without the report), never "none pending".
+- 7681047: Raise the minimum supported Node.js version from 22.12 to 22.18.
+- 7ea5229: React Native: `db.getAuthState().error`, and the sync status's `link.authReason`, now clear when the sync server admits the app's connection again after refusing its credential, as they already did in the browser. Before, an earlier refusal's reason could linger after a reconnect.
+- a1d7b75: Allow Jazz to share SQLite databases with unrelated application tables. Discover owned tables from the schema catalogue, reject object-name collisions, and continue refusing unsupported Jazz and legacy Groove storage formats without changing them. Initialize Jazz tables, indexes, triggers and the format stamp transactionally, so a rejected open leaves no new Jazz objects behind. Storage and wire encodings are unchanged.
+- e761c96: A transaction staged at the server that inserts a row and then updates it is no longer refused by the update's permission check (`update.new` / WITH CHECK) when that check compares the row with its committed version. The row isn't committed yet, so its insert decides it, on the state the transaction leaves it in, as it already did when a local-first client committed and uploaded the same writes.
+- c62735c: `vercel()`: a backend no longer stops the core Sandbox session it has just woken. When the core is stopped and waking it takes longer than the 10 s handshake timeout, the reconnects that give up while they wait no longer count as connections that "never reached the core". A wake that brings up a new session also starts that count afresh. Before, those reconnects counted against the session, so the first connection to the woken core that didn't open in time made the instance stop the session it had just woken and wake it again. With every warm instance doing the same, backends could keep failing long after the core was back, until a redeploy (#6028).
+- Updated dependencies [f393bab]
+- Updated dependencies [5376af3]
+  - jazz-rn@2.0.0-alpha.70
+  - jazz-wasm@2.0.0-alpha.70
+
 ## 2.0.0-alpha.69
 
 ### Patch Changes
