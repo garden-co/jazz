@@ -138,23 +138,28 @@ impl JsStore {
             // when the handler wakes it or at the deadline, never in a loop.
             let deadline = Instant::now() + self.timeout.get().unwrap_or(ANSWER_TIMEOUT);
             let mut answer = handler(args.to_string());
-            let mut timed: Option<Waker> = None;
+            // The waker the timer holds for this call, and its entry there:
+            // dropping the entry (a new waker, or the call done or dropped)
+            // takes the waker out of the timer at once.
+            let mut timed: Option<(Waker, Timed)> = None;
             return std::future::poll_fn(|context| {
                 if let Poll::Ready((ok, payload)) = answer.as_mut().poll(context) {
+                    timed = None;
                     return Poll::Ready(decode(ok, &payload));
                 }
                 if Instant::now() >= deadline {
+                    timed = None;
                     return Poll::Ready(late());
                 }
                 // Nothing else is bound to wake this call at its deadline.
                 if timed
                     .as_ref()
-                    .is_none_or(|waker| !waker.will_wake(context.waker()))
+                    .is_none_or(|(waker, _)| !waker.will_wake(context.waker()))
                 {
-                    if wake_at(deadline, context.waker().clone()) {
-                        timed = Some(context.waker().clone());
-                    } else {
-                        context.waker().wake_by_ref();
+                    timed = None;
+                    match wake_at(deadline, context.waker().clone()) {
+                        Some(entry) => timed = Some((context.waker().clone(), entry)),
+                        None => context.waker().wake_by_ref(),
                     }
                 }
                 Poll::Pending
@@ -184,37 +189,69 @@ impl JsStore {
     }
 }
 
-/// Has `waker` woken at `deadline` by the one thread that keeps the
-/// deadlines of every store call waiting on a handler. `false` when there is
-/// no such thread (a browser, or a thread that could not be started): the
-/// caller then wakes itself, as it must to meet its deadline.
+/// A call's entry in the deadline thread (see [`wake_at`]): dropping it
+/// takes the call's waker out at once, so a call that finished long before
+/// its deadline holds nothing there.
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), allow(dead_code))]
+struct Timed {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    id: u64,
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    timer: std::sync::mpsc::Sender<TimerMessage>,
+}
+
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-fn wake_at(deadline: Instant, waker: Waker) -> bool {
+enum TimerMessage {
+    Wake(u64, Instant, Waker),
+    Forget(u64),
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+impl Drop for Timed {
+    fn drop(&mut self) {
+        let _ = self.timer.send(TimerMessage::Forget(self.id));
+    }
+}
+
+/// Has `waker` woken at `deadline` by the one thread that keeps the
+/// deadlines of every store call waiting on a handler, until the returned
+/// entry is dropped. `None` when there is no such thread (a browser, or a
+/// thread that could not be started): the caller then wakes itself, as it
+/// must to meet its deadline.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn wake_at(deadline: Instant, waker: Waker) -> Option<Timed> {
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
-    static TIMER: OnceLock<Option<Sender<(Instant, Waker)>>> = OnceLock::new();
+    static TIMER: OnceLock<Option<Sender<TimerMessage>>> = OnceLock::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let timer = TIMER.get_or_init(|| {
-        let (sender, receiver) = channel::<(Instant, Waker)>();
+        let (sender, receiver) = channel::<TimerMessage>();
         std::thread::Builder::new()
             .name("jazz-store-deadlines".to_owned())
             .spawn(move || {
-                let mut due: Vec<(Instant, Waker)> = Vec::new();
+                let mut due: HashMap<u64, (Instant, Waker)> = HashMap::new();
                 loop {
                     let now = Instant::now();
-                    due.retain(|(at, waker)| {
+                    due.retain(|_, (at, waker)| {
                         let passed = *at <= now;
                         if passed {
                             waker.wake_by_ref();
                         }
                         !passed
                     });
-                    let next = due.iter().map(|(at, _)| *at).min();
+                    let next = due.values().map(|(at, _)| *at).min();
                     let received = match next {
                         Some(at) => receiver.recv_timeout(at.saturating_duration_since(now)),
                         None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
                     };
                     match received {
-                        Ok(entry) => due.push(entry),
+                        Ok(TimerMessage::Wake(id, at, waker)) => {
+                            due.insert(id, (at, waker));
+                        }
+                        Ok(TimerMessage::Forget(id)) => {
+                            due.remove(&id);
+                        }
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => return,
                     }
@@ -223,14 +260,18 @@ fn wake_at(deadline: Instant, waker: Waker) -> bool {
             .ok()
             .map(|_| sender)
     });
-    timer
-        .as_ref()
-        .is_some_and(|sender| sender.send((deadline, waker)).is_ok())
+    let timer = timer.as_ref()?;
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    timer.send(TimerMessage::Wake(id, deadline, waker)).ok()?;
+    Some(Timed {
+        id,
+        timer: timer.clone(),
+    })
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn wake_at(_deadline: Instant, _waker: Waker) -> bool {
-    false
+fn wake_at(_deadline: Instant, _waker: Waker) -> Option<Timed> {
+    None
 }
 
 /// A host's answer as the store call's result: `ok` with a JSON payload, or
@@ -513,6 +554,55 @@ mod tests {
             matches!(&result, Err(StoreError::Failed(message)) if message.contains("did not answer")),
             "{result:?}"
         );
+    }
+
+    /// Contract: a call answered before its deadline leaves nothing with the
+    /// deadline thread: the waker it handed over is dropped when the call
+    /// ends, not kept until the deadline (a minute by default).
+    ///
+    /// Lower-level than a black-box test: the waker the thread holds is only
+    /// observable by counting its references.
+    #[test]
+    fn an_answered_call_leaves_no_waker_with_the_deadline_thread() {
+        struct Counted;
+        impl std::task::Wake for Counted {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let counted = std::sync::Arc::new(Counted);
+        let waker = Waker::from(std::sync::Arc::clone(&counted));
+        let answered = Rc::new(Cell::new(false));
+        let gate = Rc::clone(&answered);
+        let store = JsStore::served_by(Rc::new(move |_| {
+            let gate = Rc::clone(&gate);
+            Box::pin(std::future::poll_fn(move |_| {
+                if gate.get() {
+                    Poll::Ready((true, "null".to_owned()))
+                } else {
+                    Poll::Pending
+                }
+            }))
+        }));
+        let mut call: std::pin::Pin<Box<dyn Future<Output = _>>> =
+            Box::pin(store.call("load", json!({ "scope": "s", "doc": "d" })));
+        let mut context = Context::from_waker(&waker);
+        assert!(call.as_mut().poll(&mut context).is_pending());
+        // The deadline thread holds a clone of the waker while the call waits.
+        let held = std::sync::Arc::strong_count(&counted);
+        assert!(held > 2, "the timer holds the waker: {held}");
+        answered.set(true);
+        assert_eq!(
+            call.as_mut().poll(&mut context),
+            Poll::Ready(Ok(Value::Null))
+        );
+        drop(call);
+        let started = Instant::now();
+        while std::sync::Arc::strong_count(&counted) > 2 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the deadline thread still holds the answered call's waker"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// Contract: a call waiting on a slow asynchronous handler is polled
