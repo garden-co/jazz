@@ -709,7 +709,9 @@ fn describe(error: ClientError) -> String {
         ClientError::NoAccount => "no-account",
         ClientError::Unsupported(_) => "unsupported",
         ClientError::Database(_) => "database",
-        ClientError::Protocol(_) => "protocol",
+        // The protocol's own code when it has one (`recovery-root-mismatch`,
+        // `stale-state`, ...): what a caller tells expected refusals by.
+        ClientError::Protocol(error) => error.code().unwrap_or("protocol"),
         _ => "error",
     };
     format!("{code}: {error}")
@@ -943,6 +945,23 @@ mod tests {
         assert_eq!(newest["index"], MAX_REPORTS + 9);
         assert!(queue.is_empty());
         assert!(queue.take().is_empty(), "the count is reported once");
+    }
+
+    /// Contract: a protocol failure that has a code of its own reaches JS
+    /// with that code, so a caller can tell an expected refusal (nothing to
+    /// recover from) from a failure; one without keeps `protocol`.
+    #[test]
+    fn protocol_failures_carry_their_own_code() {
+        use jazz_e2ee::protocol::error::{ProtocolError, RecoveryFailure};
+        let described = describe(ClientError::Protocol(ProtocolError::Recovery(
+            RecoveryFailure::RootMismatch,
+        )));
+        assert!(
+            described.starts_with("recovery-root-mismatch: "),
+            "{described}"
+        );
+        let described = describe(ClientError::Protocol(ProtocolError::ProviderFailure));
+        assert!(described.starts_with("protocol: "), "{described}");
     }
 
     /// Contract: reports reach JS as JSON with a stable `type`, and the
