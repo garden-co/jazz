@@ -709,28 +709,12 @@ pub fn session(
     node: u8,
     path: Option<&Path>,
 ) -> (Db, Upstream) {
-    session_on(
-        client,
-        server,
-        who,
-        settings,
-        NodeUuid::from_bytes([node; 16]),
-        path,
-    )
-}
-
-/// As `session`, on the node `node`.
-pub fn session_on(
-    client: &E2eeClient,
-    server: &Db,
-    who: AuthorSubject,
-    settings: &EncryptionSettings,
-    node: NodeUuid,
-    path: Option<&Path>,
-) -> (Db, Upstream) {
     let config = DbConfig::new(
         secure_schema_with(settings),
-        DbIdentity { node, author: who },
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author: who,
+        },
     )
     .with_e2ee(client.hooks());
     let db = match path {
