@@ -930,6 +930,36 @@ mod tests {
         assert!(matches!(answered, Ok((7, "valid"))), "{answered:?}");
     }
 
+    /// Contract: each failure that proves a challenge invalid (a bad
+    /// signature or junk envelope, a wrong account or epoch, a malformed
+    /// record, a sealed key of a mechanism this device lacks) is skipped,
+    /// and the older valid challenge is answered.
+    ///
+    /// ```text
+    /// newest: junk ──answer──✗ <proof of invalid> (skipped)
+    /// older:  valid ──answer──► answered
+    /// ```
+    #[test]
+    fn each_failure_that_proves_a_challenge_invalid_is_skipped() {
+        for proof in [
+            ProtocolError::Refused(RefusalCode::InvalidChallenge),
+            ProtocolError::Refused(RefusalCode::StaleChallenge),
+            ProtocolError::InvalidRecord("junk record"),
+            ProtocolError::Crypto(jazz_e2ee::Error::InvalidCiphertext),
+            ProtocolError::Crypto(jazz_e2ee::Error::InvalidInput),
+            ProtocolError::Crypto(jazz_e2ee::Error::NoKeyForMechanism),
+        ] {
+            let answered = newest_answered(["junk", "valid"], |candidate| match *candidate {
+                "valid" => Ok(7),
+                _ => Err(proof),
+            });
+            assert!(
+                matches!(answered, Ok((7, "valid"))),
+                "{proof:?}: {answered:?}"
+            );
+        }
+    }
+
     /// Contract: only a failure that proves the challenge invalid is
     /// skipped. A newer challenge this device cannot judge (an unsupported
     /// mechanism), a provider failure and a random-source failure say
