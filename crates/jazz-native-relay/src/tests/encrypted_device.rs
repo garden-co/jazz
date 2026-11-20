@@ -463,6 +463,82 @@ fn a_queued_relay_readiness_call_uses_its_own_deadline() {
     );
 }
 
+/// Alice's device waits on readiness, which cannot finish with no server to
+/// verify her account against. Meanwhile the relay owner keeps serving her
+/// other foreground commands: a waiting encryption call is polled between
+/// the owner's jobs instead of holding its thread until the call ends.
+///
+/// alice ──ready (2 s)──► owner ◄──other job── alice
+///                          │ answers the job at once
+///                          └── readiness times out at its deadline
+#[test]
+fn a_waiting_encryption_call_does_not_hold_the_relay_owner() {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let app_id = jazz::tools::AppId::from_name("relay-encryption");
+    let (schema, migrations, declarations) =
+        jazz::tools::deployment::artifact::load_client_encrypted(APP.as_bytes(), app_id, "test")
+            .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let relay = NativeRelay::spawn_encrypted(
+        RelayOpenConfig {
+            supported_abi: NativeRelayAbiRange {
+                minimum: NATIVE_RELAY_ABI_V1,
+                maximum: NATIVE_RELAY_ABI_V1,
+            },
+            scope: RelayScope {
+                app_namespace: "relay-encryption".to_owned(),
+                storage_namespace: "default".to_owned(),
+                auth_scope: Some("alice".to_owned()),
+            },
+            sqlite_path: directory.path().join("relay.sqlite"),
+            schema: jazz::schema::JazzSchema::new(&schema).unwrap(),
+            migrations,
+            identity: identity(),
+        },
+        declarations.unwrap(),
+    )
+    .unwrap();
+    let alice = relay
+        .attach_client_encrypted(identity(), BTreeMap::new(), device(None))
+        .unwrap();
+
+    let readiness = Duration::from_secs(2);
+    let (finished, ready_result) = mpsc::channel();
+    thread::scope(|scope| {
+        let started = Instant::now();
+        scope.spawn(|| {
+            finished
+                .send(alice.encryption_call_with_timeout("ready", serde_json::json!({}), readiness))
+                .unwrap();
+        });
+        // Let the readiness call reach the owner and start waiting.
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            ready_result.try_recv().is_err(),
+            "readiness cannot finish without a server"
+        );
+        let answered = Instant::now();
+        alice.pump_foreground().unwrap();
+        assert!(
+            answered.elapsed() < Duration::from_millis(500),
+            "the owner answered another job only after {:?}",
+            answered.elapsed()
+        );
+        assert!(
+            started.elapsed() < readiness,
+            "the other job was answered before readiness ended"
+        );
+        let result = ready_result.recv_timeout(readiness * 2).unwrap();
+        assert!(
+            matches!(result, Err(RelayError::Drive(ref reason)) if reason.starts_with("timeout:")),
+            "readiness times out at its own deadline: {result:?}"
+        );
+    });
+}
+
 /// Declarations from another app than the relay's schema are refused before
 /// the owner thread starts, rather than leaving encrypted columns unknown to
 /// the keyless hooks; the app's own declarations open.

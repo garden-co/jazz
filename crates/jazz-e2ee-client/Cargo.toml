@@ -24,6 +24,7 @@ thiserror = "2"
 uuid = { version = "1.18.1", features = ["v4"] }
 # Elapsed time that works in browsers too, as jazz-core uses (the host loop's clock).
 web-time = "1.1"
+zeroize = { version = "1.8.2", default-features = false, features = ["alloc"] }
 
 # The browser's random source for the crates Jazz uses, as in jazz-wasm.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

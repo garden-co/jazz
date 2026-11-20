@@ -56,7 +56,11 @@ public interface PrivateStore {
     /** Removes the scope and every document in it: its incarnation first, then its documents. */
     public fun delete(scope: String)
 
-    /** Protects a secret at rest (encrypts it with a key the platform keeps); [unprotect] recovers it. */
+    /**
+     * Protects a secret at rest (encrypts it with a key the platform keeps); [unprotect] recovers it.
+     * Jazz zeroes the secret it passes to [protect] once it returns, and the array [unprotect] returns
+     * once it has read it: keep neither (return a copy from [unprotect] if you keep the secret).
+     */
     public fun protect(secret: ByteArray): ByteArray
 
     public fun unprotect(blob: ByteArray): ByteArray
@@ -76,6 +80,11 @@ public class StoreReply(public val ok: Boolean, public val payload: String)
 /**
  * Answers jazz-ffi's store requests (JSON text: `op`, bytes as base64, numbers that
  * may exceed 2^53 as decimal text) with a [PrivateStore].
+ *
+ * Requests and answers carry key bytes. The arrays this bridge owns (the secret it decodes
+ * for `protect`, the secret `unprotect` returns) are zeroed once used. JVM strings (the
+ * request and answer texts, the base64 in them) and the parsed JSON are immutable and stay
+ * until the garbage collector reuses their memory. jazz-ffi wipes its own copies.
  */
 internal class PrivateStoreBridge(private val store: PrivateStore) {
     fun call(request: String): StoreReply {
@@ -106,8 +115,22 @@ internal class PrivateStoreBridge(private val store: PrivateStore) {
                     store.delete(text("scope"))
                     JsonNull
                 }
-                "protect" -> JsonPrimitive(Base64.getEncoder().encodeToString(store.protect(bytes("secret"))))
-                "unprotect" -> JsonPrimitive(Base64.getEncoder().encodeToString(store.unprotect(bytes("blob"))))
+                "protect" -> {
+                    val secret = bytes("secret")
+                    try {
+                        JsonPrimitive(Base64.getEncoder().encodeToString(store.protect(secret)))
+                    } finally {
+                        secret.fill(0)
+                    }
+                }
+                "unprotect" -> {
+                    val secret = store.unprotect(bytes("blob"))
+                    try {
+                        JsonPrimitive(Base64.getEncoder().encodeToString(secret))
+                    } finally {
+                        secret.fill(0)
+                    }
+                }
                 else -> return StoreReply(false, "unknown private store operation $op")
             }
             StoreReply(true, result.toString())
