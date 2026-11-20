@@ -539,3 +539,139 @@ fn foreign_index_names_refuse_initial_and_later_schemas() {
         }
     }
 }
+
+/// Alice's rejected open must leave Bob's SQLite schema exactly as it was,
+/// including no Jazz format stamp or metadata. Both early table collisions and
+/// late trigger collisions roll back; Alice can then retry with a valid schema.
+#[test]
+fn rejected_initialization_leaves_no_jazz_objects() {
+    use jazz::storage::{Storage, managed_emulation::EmulatedObjectSql};
+    for managed in [false, true] {
+        for trigger in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("atomic.sqlite");
+            let backend = EmulatedObjectSql::open_in_memory().unwrap();
+            let observer = if managed {
+                Storage::from_backend(backend.clone())
+            } else {
+                Storage::open(&path).unwrap()
+            };
+            let connect = || {
+                if managed {
+                    Storage::from_backend(backend.clone())
+                } else {
+                    Storage::open(&path).unwrap()
+                }
+            };
+            observer.execute_batch(if trigger {
+                "CREATE TABLE other (value TEXT); INSERT INTO other VALUES ('bob'); CREATE TRIGGER notes__lv_ins AFTER INSERT ON other BEGIN SELECT 1; END;"
+            } else {
+                "CREATE TABLE notes (value TEXT); INSERT INTO notes VALUES ('bob');"
+            }).unwrap();
+            let objects = || {
+                observer
+                    .prepare(
+                        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name",
+                    )
+                    .unwrap()
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            let before = objects();
+            let result = if managed {
+                block_on(Db::open_storage(config(schema(&["notes"])), connect()))
+            } else {
+                block_on(Db::open_at(
+                    config(schema(&["notes"])),
+                    &path,
+                    FileOptions::default(),
+                ))
+            };
+            assert!(result.is_err());
+            drop(result);
+            assert_eq!(objects(), before);
+            let table = if trigger { "other" } else { "notes" };
+            assert_eq!(
+                observer
+                    .query_row(&format!("SELECT value FROM {table}"), [], |row| row
+                        .get::<_, String>(0))
+                    .unwrap(),
+                "bob"
+            );
+            let db = block_on(Db::open_storage(config(schema(&["messages"])), connect())).unwrap();
+            insert(&db, "messages", "alice");
+            drop(db);
+            let reopened =
+                block_on(Db::open_storage(config(schema(&["messages"])), connect())).unwrap();
+            assert_eq!(bodies(&reopened, "messages"), ["alice"]);
+        }
+    }
+}
+
+/// Alice opens a host store without writing, then a failed host write rolls
+/// back its format stamp too. A successful host write stamps the store and
+/// survives a later rejected database initialization on the same store.
+#[test]
+fn host_store_stamps_only_with_a_committed_write() {
+    use jazz::host::{HostTable, HostTables, StoreFile};
+    use jazz::storage::{Storage, managed_emulation::EmulatedObjectSql};
+    for managed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host.sqlite");
+        let backend = EmulatedObjectSql::open_in_memory().unwrap();
+        let observer = if managed {
+            Storage::from_backend(backend.clone())
+        } else {
+            Storage::open(&path).unwrap()
+        };
+        let connect = || {
+            if managed {
+                Storage::from_backend(backend.clone())
+            } else {
+                Storage::open(&path).unwrap()
+            }
+        };
+        let file = StoreFile::from_storage(connect()).unwrap();
+        let count = || {
+            observer
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name GLOB '_jazz_*'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(count(), 0);
+        assert!(file.catalogue().unwrap().schemas.is_empty());
+        assert!(
+            file.host_sql(&mut |conn| {
+                conn.execute_batch("CREATE TABLE _jazz_host_failed (v TEXT)")
+                    .unwrap();
+                Err(jazz::db::Error::new(ErrorCode::Storage, "injected failure"))
+            })
+            .is_err()
+        );
+        assert_eq!(count(), 0);
+        let table = HostTable::new("settings");
+        file.host_put_if_absent(table, b"key", b"alice").unwrap();
+        observer
+            .execute_batch("CREATE TABLE notes (v TEXT)")
+            .unwrap();
+        assert!(block_on(Db::open_file(config(schema(&["notes"])), file)).is_err());
+        let file = StoreFile::from_storage(connect()).unwrap();
+        assert_eq!(
+            file.host_get(table, b"key").unwrap(),
+            Some(b"alice".to_vec())
+        );
+        assert_eq!(count(), 2, "only the committed stamp and host table remain");
+    }
+}

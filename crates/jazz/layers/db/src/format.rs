@@ -44,10 +44,20 @@ pub(crate) fn unsupported(detail: impl std::fmt::Display) -> Error {
     )
 }
 
-/// Admit the file `conn` opened: stamp a new one, accept one in
-/// [`STORAGE_FORMAT`], refuse anything else. Reads only, unless the file is
-/// new.
+/// Stamp a new store inside its caller's initialization/write transaction.
 pub(crate) fn admit(conn: &Storage) -> Result<(), Error> {
+    if !check(conn)? {
+        conn.scope("jazz_format", |conn| {
+            conn.execute_batch(&format!(
+                "CREATE TABLE {STAMP_TABLE} (version INTEGER NOT NULL); INSERT INTO {STAMP_TABLE} (version) VALUES ({STORAGE_FORMAT});"
+            )).map_err(storage)
+        })?;
+    }
+    Ok(())
+}
+
+/// Validate without writing. Whether the store already has a valid stamp.
+pub(crate) fn check(conn: &Storage) -> Result<bool, Error> {
     // Only Jazz owns this namespace; other tables may share the file.
     let stamp: Option<String> = conn
         .query_row(
@@ -70,11 +80,7 @@ pub(crate) fn admit(conn: &Storage) -> Result<(), Error> {
                 "Jazz storage metadata exists without its format stamp, or the file contains a legacy Groove store",
             ));
         }
-        return conn.scope("jazz_format", |conn| {
-            conn.execute_batch(&format!(
-                "CREATE TABLE {STAMP_TABLE} (version INTEGER NOT NULL); INSERT INTO {STAMP_TABLE} (version) VALUES ({STORAGE_FORMAT});"
-            )).map_err(storage)
-        });
+        return Ok(false);
     }
     if stamp.as_deref() != Some("table") {
         return Err(unsupported("Jazz format stamp is not a table"));
@@ -88,7 +94,7 @@ pub(crate) fn admit(conn: &Storage) -> Result<(), Error> {
         })
         .map_err(storage)?;
     match versions.as_slice() {
-        [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => Ok(()),
+        [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => Ok(true),
         [rusqlite::types::Value::Integer(version)] => Err(unsupported(format!(
             "this store was written in Jazz SQLite storage format {version}"
         ))),

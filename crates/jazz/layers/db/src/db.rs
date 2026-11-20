@@ -1948,7 +1948,6 @@ impl Db {
     /// Open on `storage` (a host's SQL: [`Storage::from_backend`]), with
     /// no file: chunks live in the store itself.
     pub async fn open_storage(config: DbConfig, storage: Storage) -> Result<Self, Error> {
-        crate::format::admit(&storage)?;
         Self::open_on(config, storage, None)
     }
 
@@ -1986,8 +1985,20 @@ impl Db {
     }
 
     fn open_on(
-        mut config: DbConfig,
+        config: DbConfig,
         conn: crate::storage::Storage,
+        path: Option<(&std::path::Path, Option<&'static str>)>,
+    ) -> Result<Self, Error> {
+        let conn = Rc::new(conn);
+        conn.scope("jazz_initialize", |_| {
+            crate::format::admit(&conn)?;
+            Self::open_initialized(config, conn.clone(), path)
+        })
+    }
+
+    fn open_initialized(
+        mut config: DbConfig,
+        conn: Rc<crate::storage::Storage>,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement is prepared: the flag is read at
@@ -2074,7 +2085,7 @@ impl Db {
 
     fn open_named(
         config: DbConfig,
-        conn: crate::storage::Storage,
+        conn: Rc<crate::storage::Storage>,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement, so both see all of them.
@@ -2231,7 +2242,7 @@ impl Db {
             view: None,
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
-                conn: Rc::new(conn),
+                conn,
                 validated_shapes: HashSet::new(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
