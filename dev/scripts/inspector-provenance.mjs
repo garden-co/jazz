@@ -5,11 +5,13 @@ import { pathToFileURL } from "node:url";
 
 const shaPattern = /^[a-f0-9]{40}$/;
 const previewPath = ".github/workflows/preview-build.yml";
-const releasePreviewPath = ".github/workflows/preview-jazz-tools-alpha-release.yml";
 const publishPath = ".github/workflows/publish-jazz-tools-alpha.yml";
-// release-artifacts.yml dispatched on the Version Packages branch builds that
-// head itself (its pushes to `release` build a predicted tree instead, which
-// is no commit, so they are not accepted here).
+// Not preview-jazz-tools-alpha-release.yml: its runs are on changeset-release/*,
+// with the cache-scope gap below, and it can still be dispatched there.
+// release-artifacts.yml builds its run's head_sha. Only its `release` runs:
+// a run on changeset-release/* restores an actions/cache scope that any
+// write collaborator can seed today (#supply-chain, 2026-11-19), until
+// release-artifacts.yml restores no cache on untrusted refs.
 const releaseArtifactsPath = ".github/workflows/release-artifacts.yml";
 
 export function inspectorRunSource(run, repository) {
@@ -27,13 +29,8 @@ export function inspectorRunSource(run, repository) {
       run.event === "pull_request" &&
       typeof run.head_branch === "string" &&
       run.head_branch.length > 0) ||
-    (run.path === releasePreviewPath &&
-      releaseEvent &&
-      /^changeset-release\/.+/.test(run.head_branch ?? "")) ||
     (run.path === publishPath && releaseEvent && run.head_branch === "release") ||
-    (run.path === releaseArtifactsPath &&
-      run.event === "workflow_dispatch" &&
-      /^changeset-release\/.+/.test(run.head_branch ?? ""));
+    (run.path === releaseArtifactsPath && releaseEvent && run.head_branch === "release");
   if (!approved)
     throw new Error(
       "Inspector artifact run has an unapproved producer workflow, event or source branch",

@@ -12,7 +12,7 @@ Minimal Wrangler example that proves Jazz can boot inside Cloudflare Workers by 
 
 The smoke example supplies an ephemeral request-local store and sets `serverUrl: null`, so it performs no sync or registry request.
 
-`createJazz` (`jazz-tools/backend`) does not run in a Worker: it loads Jazz's native Node addon (`jazz-napi`), which workerd cannot load. For an authenticated application, run your backend's `createJazz` on Node (your own server or Vercel); its data can live in a Cloudflare Durable Object with the `durableObjects()` store (see the Cloudflare Durable Objects deployment docs).
+For an authenticated application, run your backend's `createJazz` in the Worker too: in a backend Durable Object next to the Jazz core's (`jazzBackend` and `routeToJazzBackend` from `jazz-tools/backend`). See "Run your backend in the Worker too" in the Cloudflare Durable Objects deployment docs, and BandChat's `react-hono-betterauth` app, which runs entirely on Cloudflare.
 
 ## Run locally
 

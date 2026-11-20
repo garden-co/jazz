@@ -24,9 +24,11 @@ name: Release publish
 # validated and dropped), the Go and Swift commits built but not pushed, and
 # the draft left alone. A timing table for every job ends each run.
 #
-# The artifacts come from release-artifacts.yml (a run whose release-manifest
-# has this commit's tree). Until that workflow lands, legacy-run-ids names
-# runs of the existing workflows that hold the same files, which are
+# The artifacts come from a release-artifacts.yml run of this repository on
+# `release` that built a commit with the published tree (the published
+# commit's own run first), whose release-manifest names
+# that commit, the tree and the version (dev/release-publish/producer-run.mjs). For dry runs only,
+# legacy-run-ids names runs of the old workflows holding the same files,
 # repacked under the new names here; see dev/release-publish/resolve-artifacts.sh.
 #
 # It runs beside the existing publish workflows until it is proven; see
@@ -65,11 +67,11 @@ on:
         default: false
         type: boolean
       artifacts-run-id:
-        description: "A release-artifacts.yml run to take the artifacts from. Empty: the newest whose manifest matches the commit's tree."
+        description: "A release-artifacts.yml run to take the artifacts from; it must have built <sha>'s tree on release. Empty: the newest that did, <sha>'s own first."
         required: false
         type: string
       legacy-run-ids:
-        description: "Until release-artifacts.yml exists: space-separated runs of the existing workflows holding the artifacts (preview release, attach-language-artifacts, swift-mirror, publish-jazz-kotlin dry runs)."
+        description: "Dry runs only: space-separated runs of the existing workflows holding the artifacts (preview release, attach-language-artifacts, swift-mirror, publish-jazz-kotlin dry runs). A publish refuses them."
         required: false
         type: string
 
@@ -342,6 +344,8 @@ jobs:
 
       - name: Language artifacts
         working-directory: art/release-languages
+        env:
+          MODE_ARTIFACTS: ${{ needs.resolve.outputs.mode }}
         run: |
           set -euo pipefail
           sha256sum --strict -c SHA256SUMS-languages
@@ -352,8 +356,13 @@ jobs:
             grep -q " ${f}\$" SHA256SUMS-languages || { echo "::error::no ${f}"; exit 1; }
           done
           built=$(tr -d '[:space:]' < libjazz_ffi-source.txt)
+          # Built from the producer's commit (release-artifacts), which has the published tree.
+          if [ "${MODE_ARTIFACTS}" = release-artifacts ] && [ "${built}" != "${SOURCE_SHA}" ]; then
+            echo "::error::libjazz_ffi was built from ${built}, not the producer's ${SOURCE_SHA}"
+            exit 1
+          fi
           built_tree=$(gh api "repos/${GH_REPO}/git/commits/${built}" --jq .tree.sha)
-          [ "${built_tree}" = "${TREE}" ] || [ "${built}" = "${SOURCE_SHA}" ] ||
+          [ "${built_tree}" = "${TREE}" ] ||
             { echo "::error::libjazz_ffi was built from ${built} (tree ${built_tree}), not tree ${TREE}"; exit 1; }
 
       - name: Maven tree (bundled with a throwaway key)

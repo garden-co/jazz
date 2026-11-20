@@ -16,9 +16,9 @@ function run(overrides = {}) {
     status: "completed",
     conclusion: "success",
     head_repository: { full_name: repository },
-    path: ".github/workflows/preview-jazz-tools-alpha-release.yml",
-    event: "workflow_dispatch",
-    head_branch: "changeset-release/release",
+    path: ".github/workflows/release-artifacts.yml",
+    event: "push",
+    head_branch: "release",
     head_sha: artifactSha,
     ...overrides,
   };
@@ -36,16 +36,15 @@ function handoff(overrides = {}) {
   };
 }
 
-test("accepts the successful release-preview dispatch metadata shape and identical merge tree", () => {
-  // Same caller/event/ref shape as release recovery run 35027952996, with synthetic identities.
+test("accepts a release-artifacts run on release with an identical tree", () => {
   assert.equal(verifyInspectorHandoff(handoff()), artifactSha);
 });
 for (const [path, event, head_branch] of [
   ["preview-build.yml", "pull_request", "feature/synthetic"],
-  ["preview-jazz-tools-alpha-release.yml", "push", "changeset-release/release"],
   ["publish-jazz-tools-alpha.yml", "push", "release"],
   ["publish-jazz-tools-alpha.yml", "workflow_dispatch", "release"],
-  ["release-artifacts.yml", "workflow_dispatch", "changeset-release/release"],
+  ["release-artifacts.yml", "workflow_dispatch", "release"],
+  ["release-artifacts.yml", "push", "release"],
 ]) {
   test(`accepts approved caller ${path} on ${event}`, () => {
     assert.equal(
@@ -64,7 +63,7 @@ for (const [name, changes] of [
     "preview workflow on wrong event",
     { path: ".github/workflows/preview-build.yml", event: "workflow_dispatch" },
   ],
-  ["release preview on arbitrary branch", { head_branch: "feature/arbitrary" }],
+  ["release artifacts on an arbitrary branch", { head_branch: "feature/arbitrary" }],
   [
     "publisher on arbitrary branch",
     { path: ".github/workflows/publish-jazz-tools-alpha.yml", head_branch: "feature/arbitrary" },
@@ -78,8 +77,40 @@ for (const [name, changes] of [
     },
   ],
   [
-    "release artifacts built on a release push (a predicted tree)",
-    { path: ".github/workflows/release-artifacts.yml", event: "push", head_branch: "release" },
+    "release artifacts pushed on another branch",
+    { path: ".github/workflows/release-artifacts.yml", event: "push", head_branch: "main" },
+  ],
+  [
+    "release preview dispatched on the Version Packages branch (cache scope)",
+    {
+      path: ".github/workflows/preview-jazz-tools-alpha-release.yml",
+      event: "workflow_dispatch",
+      head_branch: "changeset-release/release",
+    },
+  ],
+  [
+    "release preview pushed on the Version Packages branch (cache scope)",
+    {
+      path: ".github/workflows/preview-jazz-tools-alpha-release.yml",
+      event: "push",
+      head_branch: "changeset-release/release",
+    },
+  ],
+  [
+    "release artifacts dispatched on the Version Packages branch (cache scope)",
+    {
+      path: ".github/workflows/release-artifacts.yml",
+      event: "workflow_dispatch",
+      head_branch: "changeset-release/release",
+    },
+  ],
+  [
+    "release artifacts pushed on the Version Packages branch (cache scope)",
+    {
+      path: ".github/workflows/release-artifacts.yml",
+      event: "push",
+      head_branch: "changeset-release/release",
+    },
   ],
   [
     "release artifacts dispatched on main",

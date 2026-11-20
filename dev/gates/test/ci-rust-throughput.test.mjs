@@ -166,7 +166,7 @@ const sccacheReader =
   "inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''";
 const sccacheS3 =
   "inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')";
-const turboCache = "inputs.trusted-cache";
+const turboCache = "inputs.trusted-cache && inputs.sccache-write";
 const regex = (source) => new RegExp(source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 const assertSccacheTrustBoundary = (source) => {
   assert.match(source, regex(`if: ${sccacheWriter}`));
@@ -484,7 +484,9 @@ const assertTurboSigningKeyTrustBoundary = (typescriptJob) => {
 };
 const assertTurboCredentialConditions = (typescriptJob) => {
   assertTurboSigningKeyTrustBoundary(typescriptJob);
-  const trustedConditions = typescriptJob.match(/^        if: inputs\.trusted-cache$/gm);
+  const trustedConditions = typescriptJob.match(
+    /^        if: inputs\.trusted-cache && inputs\.sccache-write$/gm,
+  );
   assert.equal(
     trustedConditions?.length,
     2,
@@ -1159,7 +1161,10 @@ test("Blacksmith and cache trust contracts reject planted unsafe changes", () =>
   assert.throws(
     () =>
       assertTurboCredentialConditions(
-        typescript.replace("if: inputs.trusted-cache\n        env:", "if: true\n        env:"),
+        typescript.replace(
+          "if: inputs.trusted-cache && inputs.sccache-write\n        env:",
+          "if: inputs.trusted-cache\n        env:",
+        ),
       ),
     /if:/,
   );

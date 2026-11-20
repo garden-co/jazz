@@ -18,7 +18,8 @@ done <<< "$FETCH_NAMES"
 # Always fetch the checksum files that exist, to verify what we download.
 for s in NPM-SHA256SUMS SHA256SUMS SHA256SUMS-languages; do if printf '%s\n' "$assets" | grep -qx "$s"; then want+=("$s"); fi; done
 args=(); for w in $(printf '%s\n' "${want[@]}" | sort -u); do args+=(-p "$w"); done
-gh release download "$tag" -R "$repo" --clobber -D "$dest" "${args[@]}"
+# Retried: one flaky CDN answer must not fail a release gate.
+for i in 1 2 3 4 5; do gh release download "$tag" -R "$repo" --clobber -D "$dest" "${args[@]}" && break; [ "$i" = 5 ] && exit 1; sleep $((i * 5)); done
 cd "$dest"; unverified=0
 for f in $(printf '%s\n' "${want[@]}" | sort -u); do
   case "$f" in NPM-SHA256SUMS|SHA256SUMS|SHA256SUMS-languages) continue;; esac
