@@ -22,13 +22,14 @@ languageTabs: backend
 - **A stale held key may seal.** A device that has not yet seen a removal keeps sealing under the key it
   holds until it updates.
 - **A copied store may answer one more challenge.** See [Copied stores](#copied-stores).
-- **A device protects only what it has seen of another account's history.** A device notices that
-  another account's state was rolled back only by comparing it with its own first observation of that
-  account in a space read. Before that observation, or after a wipe or re-enrolment, it cannot tell a
-  rolled-back history from the real one. A device that never saw the newer history (for example, it
-  never read a space naming that account after the removal) is not protected, and other devices' floors
-  do not protect it. These floors are per device and per account; they are kept next to the held keys
-  and wiped with them.
+- **A device protects only what it has seen of another account's history.** Each device keeps a floor
+  for another account's history in a space: the newest state of it that the device has observed. A
+  floor protects a device only against a rollback after its own first observation, and it advances
+  with each change the device sees. Before that first observation, or after a wipe or re-enrolment,
+  the device cannot tell a rolled-back history from the real one. A device that never saw the newer
+  history (for example, it never read a space naming that account after the removal) is not
+  protected, and other devices' floors do not protect it. These floors are per device and per
+  account; they are kept next to the held keys and wiped with them.
 - **Encrypted columns need the local-first client in the browser.** The thin client holds no keys.
   With a `client` loader, operations on encrypted columns wait up to 30 seconds for the local-first
   client; without one they fail with `EncryptionNeedsLocalFirstError`. Writes that wait are kept in
