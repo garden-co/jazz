@@ -15,7 +15,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::task::Poll;
+use std::task::{Poll, Waker};
 use std::time::Duration;
 use web_time::Instant;
 
@@ -134,9 +134,11 @@ impl JsStore {
             // synchronously (a foreign callback) has answered before this
             // point and cannot be interrupted; an asynchronous one that never
             // answers, or never wakes its task, fails here, its late answer
-            // dropped with its future.
+            // dropped with its future. While it waits, the call is polled
+            // when the handler wakes it or at the deadline, never in a loop.
             let deadline = Instant::now() + self.timeout.get().unwrap_or(ANSWER_TIMEOUT);
             let mut answer = handler(args.to_string());
+            let mut timed: Option<Waker> = None;
             return std::future::poll_fn(|context| {
                 if let Poll::Ready((ok, payload)) = answer.as_mut().poll(context) {
                     return Poll::Ready(decode(ok, &payload));
@@ -145,7 +147,16 @@ impl JsStore {
                     return Poll::Ready(late());
                 }
                 // Nothing else is bound to wake this call at its deadline.
-                context.waker().wake_by_ref();
+                if timed
+                    .as_ref()
+                    .is_none_or(|waker| !waker.will_wake(context.waker()))
+                {
+                    if wake_at(deadline, context.waker().clone()) {
+                        timed = Some(context.waker().clone());
+                    } else {
+                        context.waker().wake_by_ref();
+                    }
+                }
                 Poll::Pending
             })
             .await;
@@ -171,6 +182,55 @@ impl JsStore {
         })
         .await
     }
+}
+
+/// Has `waker` woken at `deadline` by the one thread that keeps the
+/// deadlines of every store call waiting on a handler. `false` when there is
+/// no such thread (a browser, or a thread that could not be started): the
+/// caller then wakes itself, as it must to meet its deadline.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn wake_at(deadline: Instant, waker: Waker) -> bool {
+    use std::sync::OnceLock;
+    use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
+    static TIMER: OnceLock<Option<Sender<(Instant, Waker)>>> = OnceLock::new();
+    let timer = TIMER.get_or_init(|| {
+        let (sender, receiver) = channel::<(Instant, Waker)>();
+        std::thread::Builder::new()
+            .name("jazz-store-deadlines".to_owned())
+            .spawn(move || {
+                let mut due: Vec<(Instant, Waker)> = Vec::new();
+                loop {
+                    let now = Instant::now();
+                    due.retain(|(at, waker)| {
+                        let passed = *at <= now;
+                        if passed {
+                            waker.wake_by_ref();
+                        }
+                        !passed
+                    });
+                    let next = due.iter().map(|(at, _)| *at).min();
+                    let received = match next {
+                        Some(at) => receiver.recv_timeout(at.saturating_duration_since(now)),
+                        None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                    };
+                    match received {
+                        Ok(entry) => due.push(entry),
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+            })
+            .ok()
+            .map(|_| sender)
+    });
+    timer
+        .as_ref()
+        .is_some_and(|sender| sender.send((deadline, waker)).is_ok())
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn wake_at(_deadline: Instant, _waker: Waker) -> bool {
+    false
 }
 
 /// A host's answer as the store call's result: `ok` with a JSON payload, or
@@ -453,6 +513,59 @@ mod tests {
             matches!(&result, Err(StoreError::Failed(message)) if message.contains("did not answer")),
             "{result:?}"
         );
+    }
+
+    /// Contract: a call waiting on a slow asynchronous handler is polled
+    /// when the handler wakes it, not in a loop: its thread does not spin
+    /// while the store works.
+    ///
+    /// ```text
+    /// call ──► handler: pending (answers in 200 ms, then wakes the call)
+    /// block_on polls: once at the start, once when woken ──► the answer
+    /// ```
+    #[test]
+    fn a_slow_handler_does_not_spin_its_thread() {
+        struct Slow {
+            polls: Rc<Cell<usize>>,
+            answered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            started: bool,
+        }
+        impl Future for Slow {
+            type Output = (bool, String);
+            fn poll(
+                mut self: std::pin::Pin<&mut Self>,
+                context: &mut std::task::Context<'_>,
+            ) -> Poll<Self::Output> {
+                self.polls.set(self.polls.get() + 1);
+                if self.answered.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Poll::Ready((true, "null".to_owned()));
+                }
+                if !self.started {
+                    self.started = true;
+                    let answered = std::sync::Arc::clone(&self.answered);
+                    let waker = context.waker().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(200));
+                        answered.store(true, std::sync::atomic::Ordering::SeqCst);
+                        waker.wake();
+                    });
+                }
+                Poll::Pending
+            }
+        }
+        let polls = Rc::new(Cell::new(0));
+        let counted = Rc::clone(&polls);
+        let store = JsStore::served_by(Rc::new(move |_| {
+            Box::pin(Slow {
+                polls: Rc::clone(&counted),
+                answered: Default::default(),
+                started: false,
+            })
+        }));
+        let result =
+            futures::executor::block_on(store.call("load", json!({ "scope": "s", "doc": "d" })));
+        assert_eq!(result, Ok(Value::Null));
+        assert!(polls.get() <= 3, "polled {} times", polls.get());
     }
 
     /// Contract: a call dropped while its request is still queued never
