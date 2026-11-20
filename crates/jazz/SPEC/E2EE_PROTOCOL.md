@@ -490,6 +490,11 @@ the plain columns of an encrypted table work as for any app, and member rows
 are plain, so a trusted backend writes them like any application table
 (§1.3).
 
+**A thin client is not a participant either.** A browser client that has not
+loaded the local-first client holds no keys and no account state: it never
+sends or reads the plaintext of an encrypted column, and an operation that
+touches one waits for the local-first client or fails.
+
 Jazz is the only permission authority. E2EE adds no permission logic of its
 own: replay authenticates signatures, device activity, chains and IDs, but it
 does not decide who may read or update a space, and possession of a key

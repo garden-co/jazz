@@ -14,6 +14,7 @@ import { app } from "./jazz.generated";
 const session = await createJazzClient({
   serverUrl: "/jazz",
   encryption: { app },
+  client: () => import("jazz-tools/local-first"),
 });
 ```
 
@@ -21,6 +22,44 @@ Passing `app` is how the client learns which columns are encrypted before the fi
 device's keys are ready when your code reads. A plain app leaves `encryption` out and opens as before.
 Reads, writes and equality filters are the ones in [Getting started](/docs/e2ee/getting-started);
 `db.encryption` is the same handle as on Node.
+
+`client` is the loader for the local-first client. Without it the app runs on the thin client, which
+holds no keys and so cannot read or write an encrypted column (see the next section).
+
+## Before the local-first client has loaded
+
+With `client`, the app starts on the thin client and upgrades to the local-first client in the
+background. The thin client holds no keys, so it never sends or reads the plaintext of an encrypted
+column. Until the upgrade has finished:
+
+- **Plain data works at once.** Queries and writes that touch no encrypted column run on the thin
+  client, as in an app without encryption. Deleting a row never touches one.
+- **Anything that touches an encrypted column waits.** Inserting into a table with encrypted columns,
+  updating or filtering on an encrypted column, and selecting one all wait for the local-first client,
+  for up to 30 seconds, and start loading it if it has not started. After the wait they run as they
+  would on a local-first client, including its own refusals. If the client fails to load, or has not
+  loaded in 30 seconds, the call rejects with an `EncryptionNeedsLocalFirstError` (its `reason` is
+  `"load-failed"` or `"timeout"`).
+- **Writes made meanwhile are kept in memory and run in order.** A write that waits holds back the
+  writes after it, plain ones too, so they take effect in the order you made them. They are lost if the
+  page closes before the upgrade: a write that has not been sent is not saved.
+- **A transaction callback may run twice.** `db.transaction(...)` and `db.serializableTransaction(...)`
+  start on the thin client. If an operation inside one touches an encrypted column, Jazz rolls the
+  transaction back (even if your callback catches the error), waits for the local-first client and runs
+  the callback once more on it. Before the full client has loaded, therefore, a callback may run twice,
+  so keep side effects (network calls, analytics, counters outside the database) outside it. A
+  transaction that begins with `beginTransaction()` is not rerun: it fails with reason
+  `"transaction"` and starts the load, and you begin it again once `db.upgradeToLocalFirst(loader)` has
+  resolved.
+- **Live queries wait.** A live query on encrypted columns emits nothing until the local-first client
+  has loaded, then opens. If that takes 30 seconds, Jazz logs one warning naming the table and the query
+  stays loading; it opens if the client loads later.
+- **Without a loader** the same operations fail at once with an `EncryptionNeedsLocalFirstError`
+  (reason `"no-loader"`) that says to pass `client`, and Jazz also logs it to the console once per page.
+  A thin `Db` opened directly, outside a Jazz session, fails with reason `"direct-thin"`.
+
+Await `db.encryption.ready()` before encrypted work, as on any local-first client: it settles once the
+device's keys are ready, and on a thin client it waits for the upgrade first.
 
 ## Where the keys live
 

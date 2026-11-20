@@ -200,7 +200,10 @@ export type DbConfig = {
   /**
    * For an app that declares end-to-end encryption: its app and, optionally,
    * where this device keeps its keys (see {@link BrowserEncryptionConfig}).
-   * A plain app leaves it out.
+   * A plain app leaves it out. The browser's thin client holds no keys: an
+   * operation on an encrypted column waits for the local-first client (see
+   * `client` of `createJazzClient`), or fails with
+   * `EncryptionNeedsLocalFirstError` when none can load.
    */
   encryption?: BrowserEncryptionConfig & {
     /** @internal A device account's secret, read from its handle for each use. */

@@ -133,6 +133,13 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      * upgrades to local-first in the background once the page has loaded; a
      * browser that upgraded this account before opens local-first straight
      * away, so it works offline.
+     *
+     * The thin client holds no keys. In an app with end-to-end encryption,
+     * an operation that touches an encrypted column waits (up to 30 seconds)
+     * for the local-first client and starts loading it; without this loader
+     * it fails with `EncryptionNeedsLocalFirstError`. A transaction callback
+     * that touches one may run twice before the local-first client has
+     * loaded, so keep its side effects outside it.
      */
     client?: LocalFirstLoader;
     /**
@@ -142,7 +149,7 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      *   The first paint needs no WASM.
      * - `"now"`: open the local-first client straight away, for every
      *   account. For apps that must work offline from the first render, or
-     *   that use `db.transaction`, which only the local-first client has.
+     *   that need encrypted columns from the first operation.
      *   If the local-first client can't load, the session fails (`retry()`
      *   tries again) rather than running thin.
      *

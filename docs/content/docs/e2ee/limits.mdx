@@ -32,6 +32,13 @@ languageTabs: backend
   never read a space naming that account after the removal) is not protected, and other devices' floors
   do not protect it. These floors are per device and per account; they are kept next to the held keys
   and wiped with them.
+- **Encrypted columns need the local-first client in the browser.** The thin client holds no keys.
+  With a `client` loader, operations on encrypted columns wait up to 30 seconds for the local-first
+  client; without one they fail with `EncryptionNeedsLocalFirstError`. Writes that wait are kept in
+  memory and lost if the page closes first, and writes made after a waiting one (plain ones too) run
+  after it, so one delayed write delays the rest. A transaction callback may run twice before the
+  client has loaded. A live query on a client that never loads stays loading after its warning. See
+  [Encryption in the browser](/docs/e2ee/browser#before-the-local-first-client-has-loaded).
 - **No default store.** The app supplies the private store and its protection.
 - **Node, the browser and the native clients.** Node (`createJazzClient` from `jazz-tools/backend`), the
   web client (`createJazzClient` from `jazz-tools/client`, also the client for Deno, Bun and
