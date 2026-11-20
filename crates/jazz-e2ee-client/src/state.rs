@@ -35,26 +35,20 @@ pub(crate) const MEMBER_CHANGE_WAIT: std::time::Duration = std::time::Duration::
 pub(crate) const RETRY_FIRST: std::time::Duration = std::time::Duration::from_millis(250);
 pub(crate) const RETRY_LAST: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// A space whose settle failed: how many times in a row, when it may be
-/// tried again, and the last failure, which a settle returns until then (its
-/// rows are unresolved, not absent). The first failure is retried at the
-/// next settle; each later one waits [`RETRY_FIRST`], doubling up to
-/// [`RETRY_LAST`].
-#[derive(Debug, Clone)]
+/// A space whose settle failed: how many times in a row, and when it may be
+/// tried again (until then its rows are unresolved, not absent). The first
+/// failure is retried at the next settle; each later one waits
+/// [`RETRY_FIRST`], doubling up to [`RETRY_LAST`].
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct SettleBackoff {
     pub(crate) failures: u32,
     pub(crate) retry_at: web_time::Instant,
-    pub(crate) error: ClientError,
 }
 
 impl SettleBackoff {
-    /// After one more failure, `error`, of a space that had failed
-    /// `previous` times in a row (none: it had not).
-    pub(crate) fn after_failure(
-        previous: Option<&Self>,
-        error: ClientError,
-        now: web_time::Instant,
-    ) -> Self {
+    /// After one more failure of a space that had failed `previous` times
+    /// in a row (none: it had not).
+    pub(crate) fn after_failure(previous: Option<&Self>, now: web_time::Instant) -> Self {
         let failures = previous.map_or(0, |backoff| backoff.failures) + 1;
         let wait = match failures {
             1 => std::time::Duration::ZERO,
@@ -65,7 +59,6 @@ impl SettleBackoff {
         Self {
             failures,
             retry_at: now + wait,
-            error,
         }
     }
 }
@@ -465,15 +458,17 @@ pub(crate) struct Shared {
 /// entry of a space that is not backed off: a backed-off space's entries
 /// are the rows its reads are unresolved for (re-queued ahead of newer
 /// ones), so they go last. When every entry is backed off, `missing` itself
-/// is dropped; a later read reports it again.
+/// is dropped, never silently: the report a row left out for want of a key
+/// gets is returned for it (a later read queues it again).
+#[must_use]
 fn enqueue_missing(
     queue: &mut VecDeque<Missing>,
     backoff: &BTreeMap<SpaceAddress, SettleBackoff>,
     missing: Missing,
     cap: usize,
-) {
+) -> Option<Report> {
     if queue.contains(&missing) {
-        return;
+        return None;
     }
     if queue.len() >= cap {
         match queue
@@ -483,10 +478,17 @@ fn enqueue_missing(
             Some(oldest) => {
                 queue.remove(oldest);
             }
-            None => return,
+            None => {
+                return Some(Report::MissingKey {
+                    table: missing.table,
+                    space: missing.space,
+                    epoch_id: missing.epoch_id,
+                });
+            }
         }
     }
     queue.push_back(missing);
+    None
 }
 
 impl Shared {
@@ -535,13 +537,15 @@ impl Shared {
     }
 
     pub(crate) fn missing(&self, missing: Missing) {
-        let mut queue = self.missing.borrow_mut();
-        enqueue_missing(
-            &mut queue,
+        let dropped = enqueue_missing(
+            &mut self.missing.borrow_mut(),
             &self.settle_backoff.borrow(),
             missing,
             MAX_REPORTS,
         );
+        if let Some(report) = dropped {
+            self.report(report);
+        }
     }
 
     /// Delivers what the hooks reported since the last call to the
@@ -656,11 +660,7 @@ mod missing_queue_tests {
     fn backed_off(space: &str) -> (SpaceAddress, SettleBackoff) {
         (
             entry(space, 0).space,
-            SettleBackoff::after_failure(
-                None,
-                ClientError::Unsupported("x".to_owned()),
-                web_time::Instant::now(),
-            ),
+            SettleBackoff::after_failure(None, web_time::Instant::now()),
         )
     }
 
@@ -670,10 +670,12 @@ mod missing_queue_tests {
     fn a_full_queue_keeps_a_backed_off_spaces_rows() {
         let backoff = BTreeMap::from([backed_off("held")]);
         let mut queue = VecDeque::new();
-        enqueue_missing(&mut queue, &backoff, entry("held", 1), 3);
-        enqueue_missing(&mut queue, &backoff, entry("other", 2), 3);
-        enqueue_missing(&mut queue, &backoff, entry("other", 3), 3);
-        enqueue_missing(&mut queue, &backoff, entry("other", 4), 3);
+        for (space, n) in [("held", 1), ("other", 2), ("other", 3), ("other", 4)] {
+            assert_eq!(
+                enqueue_missing(&mut queue, &backoff, entry(space, n), 3),
+                None
+            );
+        }
         let ids: Vec<u8> = queue.iter().map(|e| e.id.as_bytes()[0]).collect();
         assert_eq!(ids, [1, 3, 4]);
     }
@@ -684,10 +686,33 @@ mod missing_queue_tests {
         let backoff = BTreeMap::from([backed_off("held")]);
         let mut queue = VecDeque::new();
         for n in 1..=3 {
-            enqueue_missing(&mut queue, &backoff, entry("held", n), 3);
+            let _ = enqueue_missing(&mut queue, &backoff, entry("held", n), 3);
         }
-        enqueue_missing(&mut queue, &backoff, entry("other", 4), 3);
+        let _ = enqueue_missing(&mut queue, &backoff, entry("other", 4), 3);
         let ids: Vec<u8> = queue.iter().map(|e| e.id.as_bytes()[0]).collect();
         assert_eq!(ids, [1, 2, 3]);
+    }
+
+    /// A newcomer a full queue of backed-off rows drops is not dropped
+    /// silently: it gets the report of a row left out for want of a key.
+    #[test]
+    fn a_dropped_newcomer_is_reported() {
+        let backoff = BTreeMap::from([backed_off("held")]);
+        let mut queue = VecDeque::new();
+        for n in 1..=3 {
+            assert_eq!(
+                enqueue_missing(&mut queue, &backoff, entry("held", n), 3),
+                None
+            );
+        }
+        let dropped = entry("other", 4);
+        assert_eq!(
+            enqueue_missing(&mut queue, &backoff, dropped.clone(), 3),
+            Some(Report::MissingKey {
+                table: dropped.table,
+                space: dropped.space,
+                epoch_id: dropped.epoch_id,
+            })
+        );
     }
 }

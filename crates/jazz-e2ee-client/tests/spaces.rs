@@ -519,14 +519,14 @@ fn a_failing_space_is_not_read_at_every_settle() {
 }
 
 /// Contract: while a space waits out its back-off, its rows are unresolved,
-/// not absent: a wrapped read of them returns the space's last error, its
-/// entries are kept, and a read of another space neither drops them nor
-/// ends the wait.
+/// not absent: a wrapped read of them leaves them out and reports them
+/// missing without failing, their entries are kept, and a read of another
+/// space neither drops them nor ends the wait.
 ///
 /// ```text
 /// bob reads notes of `first` (member, delivered); the key save keeps failing
 /// read first ×2 ──► error (fail, retry, fail: now waiting)
-/// read first ──► the last error, not an empty result; nothing read
+/// read first ──► no rows, reported missing; nothing read
 /// read second (not a member) ──► settled; first still waits, entries kept
 /// store healthy, wait over ──► the kept entries settle, key held
 /// ```
@@ -572,19 +572,20 @@ fn a_backed_off_space_is_unresolved_not_absent() {
             assert!(matches!(failed, Err(ClientError::Store(_))), "{failed:?}");
         }
         let saves = store.saves.get();
+        bob.client.take_reports();
         let waiting = read_notes(&server, &bob, first);
         assert!(
-            matches!(waiting, Err(ClientError::Store(_))),
-            "a backed-off space's rows are not silently left out: {waiting:?}"
+            waiting.as_ref().is_ok_and(Vec::is_empty),
+            "a backed-off space fails no read: {waiting:?}"
+        );
+        assert!(
+            missing_key_of(&bob, first),
+            "a backed-off space's rows are not silently left out"
         );
 
         assert!(read_notes(&server, &bob, second).unwrap().is_empty());
         let settle = || drive(&server, &[&bob.db], bob.client.settle_reads(&bob.db));
-        let still = settle();
-        assert!(
-            matches!(still, Err(ClientError::Store(_))),
-            "first's entries are kept across another read: {still:?}"
-        );
+        assert!(!settle().unwrap(), "first still waits");
         assert_eq!(
             store.saves.get(),
             saves,
@@ -599,6 +600,108 @@ fn a_backed_off_space_is_unresolved_not_absent() {
             "the kept entries settle once the wait is over"
         );
         assert_eq!(read_notes(&server, &bob, first).unwrap().len(), 1);
+    });
+}
+
+/// Whether the reports since the last look include a row of `space` left
+/// out for want of a key.
+fn missing_key_of(device: &Device, space: uuid::Uuid) -> bool {
+    let address = space_address(device, space);
+    device
+        .client
+        .take_reports()
+        .iter()
+        .any(|report| matches!(report, Report::MissingKey { space, .. } if *space == address))
+}
+
+/// Contract: one backed-off space does not fail a wrapped read of several:
+/// the read returns the healthy spaces' rows and leaves the backed-off
+/// space's rows out, reported missing and kept for a later settle, and no
+/// read during the wait (of all spaces or of the other one) ends it.
+///
+/// ```text
+/// bob is a member of `first` and `second`, both delivered
+/// read second ──► key held, 1 row
+/// key save fails; read first ×2 ──► error (fail, retry, fail: now waiting)
+/// read all ──► second's row; first's reported missing; first not read
+/// read second, read first ──► second's row; none; first still not read
+/// store healthy, wait over ──► read all ──► both rows
+/// ```
+#[test]
+fn a_backed_off_space_does_not_fail_a_read_of_the_others() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let first = new_project(&server, &alice, "one");
+        let second = new_project(&server, &alice, "two");
+        for space in [first, second] {
+            write_note(&server, &alice, space, SECRET).unwrap();
+        }
+        pump(&server, &alice.db);
+        drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
+
+        let settings = EncryptionSettings::default();
+        let store = FaultyStore::default();
+        let client = open_account(
+            Rc::new(store.clone()),
+            account(0xb0),
+            settings.clone(),
+            None,
+        );
+        let (db, link) = session(&client, &server, account(0xb0), &settings, 2, None);
+        let bob = Device {
+            who: account(0xb0),
+            client,
+            db,
+            _link: Some(link),
+            live: Default::default(),
+        };
+        bob.activate(&server);
+        for space in [first, second] {
+            add_member(&server, &alice, space, &bob.id());
+            assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+        }
+        bob.follow_notes(&server);
+
+        bob.client.advance_settle_clock(std::time::Duration::ZERO);
+        assert_eq!(read_notes(&server, &bob, second).unwrap().len(), 1);
+        store.failing.set(true);
+        for _ in 0..2 {
+            let failed = read_notes(&server, &bob, first);
+            assert!(matches!(failed, Err(ClientError::Store(_))), "{failed:?}");
+        }
+        let saves = store.saves.get();
+        bob.client.take_reports();
+
+        let read_all = || {
+            drive(
+                &server,
+                &[&bob.db],
+                bob.client.read(&bob.db, async || {
+                    let prepared = bob.db.prepare_query(&Query::from("notes"))?;
+                    bob.db.all(&prepared, local()).await
+                }),
+            )
+        };
+        let all = read_all();
+        assert_eq!(
+            all.as_ref().map(Vec::len).ok(),
+            Some(1),
+            "the healthy space's row is returned: {all:?}"
+        );
+        assert!(
+            missing_key_of(&bob, first),
+            "the backed-off space's row is reported missing"
+        );
+        assert_eq!(read_notes(&server, &bob, second).unwrap().len(), 1);
+        assert!(read_notes(&server, &bob, first).unwrap().is_empty());
+        assert_eq!(store.saves.get(), saves, "no read during the wait ends it");
+
+        store.failing.set(false);
+        bob.client
+            .advance_settle_clock(std::time::Duration::from_millis(300));
+        assert_eq!(read_all().unwrap().len(), 2, "both once the wait is over");
     });
 }
 
