@@ -2031,7 +2031,6 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const { openTransactionId, session, attribution, preparation } = this.requireBinding("insert");
     let id = options?.id;
     const { values, value } = this.prepareCreation(table, data, id, "Insert");
-    if (!id && (preparation.pending || getOwnerPreparation(client)?.pending)) id = reserveRowId();
     let row: ReturnType<typeof client.insertInternal> | undefined;
     const stage = () => {
       row = client.insertInternal(
@@ -2050,6 +2049,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           if (!preparation.cancelled) stage();
         }),
       );
+    // Not staged yet (waiting for preparation, or for its space's key): the
+    // later staging reads `id`, so it commits the row returned here.
+    if (!row && !id) id = reserveRowId();
     try {
       return (
         value ??
