@@ -41,10 +41,15 @@ column. Until the upgrade has finished:
   client, including its own refusals. If the client fails to load, or has not finished in 30 seconds,
   the call rejects with an `EncryptionNeedsLocalFirstError` (its `reason` is `"load-failed"`, with the
   loader's error as `cause`, or `"timeout"`). Signing out ends every waiting call with
-  `DbClosedError`.
+  `DbClosedError`: the client shuts down first. A call you make on that `Db` afterwards, such as one
+  on a handle you kept, gets `DbReplacedError`.
 - **Plain reads do not see queued plain writes.** While a write waits for the local-first client, a
   plain read on the thin client answers at once, from what the thin client has. It does not see the
   plain writes queued behind the waiting one: they are not sent until the wait ends.
+- **A plain read can wait behind a streaming write that waits.** A streaming write
+  (`insertStreaming`, `updateStreaming`, `upsertStreaming`) that touches an encrypted column waits for
+  the local-first client, and a plain read made meanwhile can wait behind it, for up to 30 seconds.
+  It loses nothing: it runs when the wait ends.
 - **Writes made meanwhile are kept in memory and run in order.** A write that waits holds back the
   writes after it, plain ones too, so they take effect in the order you made them. They are lost if the
   page closes before the upgrade: a write that has not been sent is not saved. If the wait fails, the
@@ -57,7 +62,8 @@ column. Until the upgrade has finished:
   so keep side effects (network calls, analytics, counters outside the database) outside it. A
   transaction that begins with `beginTransaction()` is not rerun: it fails with reason
   `"transaction"` and starts the load, and you begin it again once `db.upgradeToLocalFirst(loader)` has
-  resolved.
+  resolved. Such a transaction is also not held behind a callback transaction that is waiting for the
+  local-first client, so it can begin and fail before it; begin it again after the load.
 - **Live queries wait.** A live query on encrypted columns emits nothing until the local-first client
   has loaded, then opens. If that takes 30 seconds, Jazz logs one warning naming the table and the query
   stays loading; it opens if the client loads later. A failed load, a sign-out or closing the `Db`
@@ -71,14 +77,16 @@ column. Until the upgrade has finished:
 In an app that declares encryption, `db.encryption` on a thin `Db` is a stand-in for the real handle,
 which only the local-first client has:
 
-- **Async calls wait like any other operation**: `ready()`, `deviceId()`, `devices.*`, `recovery.*`
-  and `members.*` wait up to 30 seconds for the local-first client, start loading it if it has not
-  started, then run on the real handle. The 30 seconds cover the load and the new client verifying
-  the account. They reject with the same `EncryptionNeedsLocalFirstError` as
+- **Async calls wait like any other operation**: `ready()`, `deviceId()`, `devices.*`, `recovery.*`,
+  `keys.*` and `members.*` wait up to 30 seconds for the local-first client, start loading it if it
+  has not started, then run on the real handle. The 30 seconds cover the load and the new client
+  verifying the account. While the `Db` is thin that is also the longest `ready({ timeoutMs })`
+  waits, whatever `timeoutMs` you pass: past it the call rejects with reason `"timeout"`. They reject with the same `EncryptionNeedsLocalFirstError` as
   above (reason `"no-loader"` without a loader). `await db.encryption.ready()` is the way to wait for
   the keys: on a thin `Db` it waits for the upgrade first, then for the device's keys to be ready.
 - **A handle you took while thin keeps working** after the upgrade; you do not need to read
-  `db.encryption` again.
+  `db.encryption` again. After a sign-out its calls reject with `DbReplacedError`, and a call still
+  waiting at the sign-out with `DbClosedError`.
 - **`onReport`, `onUnreadable` and `onChallenge` attach after the upgrade, and do not start it.**
   Attach them at start-up as you would anywhere: they register at once and begin to fire when the
   local-first client arrives for any other reason. They return a function that stops the listener at
