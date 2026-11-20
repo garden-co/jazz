@@ -547,6 +547,54 @@ impl E2eeClient {
         self.shared.reports.borrow_mut().drain(..).collect()
     }
 
+    /// Marks this device's approval nonce spent in the private store, and
+    /// returns once the store confirmed the save (protocol §2.5, §6.1): the
+    /// proof that reveals the nonce is only published after this, so a
+    /// device restored from an older copy of its store, whose document
+    /// says spent, answers no challenge. Fails if the document already says
+    /// spent.
+    pub(crate) async fn mark_nonce_spent(&self) -> Result<(), ClientError> {
+        let mut documents = self.documents.lock().await;
+        self.ensure_open()?;
+        let unrecognised = || ClientError::UnrecognisedDocument(DEVICE_DOCUMENT.to_owned());
+        for _ in 0..SAVE_ATTEMPTS {
+            let stored = self
+                .store
+                .load(&self.scope, DEVICE_DOCUMENT)
+                .await?
+                .ok_or_else(unrecognised)?;
+            let mut device = decode_device_document(&stored.bytes)
+                .map_err(|_| unrecognised())?
+                .ok_or_else(unrecognised)?;
+            if matches!(device.approval, StoredApproval::Spent) {
+                return Err(ClientError::ApprovalAnswered);
+            }
+            device.approval = StoredApproval::Spent;
+            let bytes = device.encode_document()?;
+            match self
+                .store
+                .save(
+                    &self.scope,
+                    self.incarnation.get(),
+                    DEVICE_DOCUMENT,
+                    &bytes,
+                    Some(stored.revision),
+                )
+                .await
+            {
+                Ok(_) => {
+                    drop(documents);
+                    return Ok(());
+                }
+                Err(StoreError::Conflict) => continue,
+                Err(StoreError::Wiped) => return Err(self.close()),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let _ = &mut documents;
+        Err(StoreError::Conflict.into())
+    }
+
     /// Calls `listener` with every report from now on, each distinct report
     /// once: `(table, row, column, code)` identifies a report, a
     /// per-space one `(table, space, code)`; a report is withdrawn

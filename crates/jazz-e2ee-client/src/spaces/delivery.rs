@@ -231,6 +231,34 @@ impl E2eeClient {
         Ok(results)
     }
 
+    /// After a device removal this device made: the pass over every space
+    /// it holds keys of, which marks each one whose current version the
+    /// removed device could open (protocol §2.8, §3.5), so that this device's
+    /// next write to it rotates first. A space whose pass fails (offline, a
+    /// refused or failed read) is marked anyway, unless its rotation was
+    /// refused: a needless rotation costs one rotation, but a write sealed
+    /// under a version the removed device holds cannot be undone. A later
+    /// pass that succeeds clears a mark the space does not need.
+    pub(crate) async fn mark_after_device_removal(&self, db: &Db) {
+        let held: Vec<_> = self
+            .shared
+            .keys
+            .borrow()
+            .held
+            .spaces()
+            .iter()
+            .map(|space| space.address().clone())
+            .collect();
+        for address in held {
+            if self.deliver_pass(db, &db_address(&address)).await.is_err() {
+                let mut keys = self.shared.keys.borrow_mut();
+                if !keys.rotation_refused.contains(&address) {
+                    keys.rotation_pending.insert(address);
+                }
+            }
+        }
+    }
+
     /// Whether `space` needs rotation (protocol §3.5): its current version
     /// is held by an account that is no longer a member, or was sealed to an
     /// account epoch a removal superseded. A write to it is then preceded by

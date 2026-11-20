@@ -1492,6 +1492,9 @@ signingPublicKey, signingPrivateKey})` with keys as byte arrays, handed to
   strictly earlier, and not retired at or before the approval. Private key
   authentication applies the same retirement check before letting a recovery
   approval found key lineage.
+  Recovery skips a candidate of an unregistered mechanism or version and
+  reports `account-key-envelope` if it skipped such a candidate and none
+  yields an authenticated key.
 - **List active.** Valid, unretired roots, ordered by position then ID, each
   with `registeredByDeviceId = signerId`. No registration time is recorded.
 - **Retire.** An account rotation with action `retire-recovery-root` (§2.8).
