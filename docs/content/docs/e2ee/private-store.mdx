@@ -43,8 +43,10 @@ export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
       const text = await readFile(at(scope, doc), "utf8");
       const { revision, bytes } = JSON.parse(text);
       return { revision: BigInt(revision), bytes: new Uint8Array(Buffer.from(bytes, "base64")) };
-    } catch {
-      return null;
+    } catch (error) {
+      // Only a missing file means "absent"; any other error must not read as a new device.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
     }
   };
   let queue: Promise<unknown> = Promise.resolve();
