@@ -35,19 +35,22 @@ pub(crate) const MEMBER_CHANGE_WAIT: std::time::Duration = std::time::Duration::
 pub(crate) const RETRY_FIRST: std::time::Duration = std::time::Duration::from_millis(250);
 pub(crate) const RETRY_LAST: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// A space whose settle failed: how many times in a row, and when it may be
-/// tried again. The first failure is retried at the next settle; each later
-/// one waits [`RETRY_FIRST`], doubling up to [`RETRY_LAST`].
-#[derive(Debug, Clone, Copy)]
+/// A space whose settle failed: how many times in a row, when it may be
+/// tried again, and the last failure, which a settle returns until then (its
+/// rows are unresolved, not absent). The first failure is retried at the
+/// next settle; each later one waits [`RETRY_FIRST`], doubling up to
+/// [`RETRY_LAST`].
+#[derive(Debug, Clone)]
 pub(crate) struct SettleBackoff {
     pub(crate) failures: u32,
     pub(crate) retry_at: web_time::Instant,
+    pub(crate) error: ClientError,
 }
 
 impl SettleBackoff {
-    /// After one more failure of a space that had failed `previous` times
-    /// in a row (none: it had not).
-    pub(crate) fn after_failure(previous: Option<Self>) -> Self {
+    /// After one more failure, `error`, of a space that had failed
+    /// `previous` times in a row (none: it had not).
+    pub(crate) fn after_failure(previous: Option<&Self>, error: ClientError) -> Self {
         let failures = previous.map_or(0, |backoff| backoff.failures) + 1;
         let wait = match failures {
             1 => std::time::Duration::ZERO,
@@ -58,6 +61,7 @@ impl SettleBackoff {
         Self {
             failures,
             retry_at: web_time::Instant::now() + wait,
+            error,
         }
     }
 }

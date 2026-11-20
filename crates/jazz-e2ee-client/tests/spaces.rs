@@ -516,6 +516,88 @@ fn a_failing_space_is_not_read_at_every_settle() {
     });
 }
 
+/// Contract: while a space waits out its back-off, its rows are unresolved,
+/// not absent: a wrapped read of them returns the space's last error, its
+/// entries are kept, and a read of another space neither drops them nor
+/// ends the wait.
+///
+/// ```text
+/// bob reads notes of `first` (member, delivered); the key save keeps failing
+/// read first ×2 ──► error (fail, retry, fail: now waiting)
+/// read first ──► the last error, not an empty result; nothing read
+/// read second (not a member) ──► settled; first still waits, entries kept
+/// store healthy, wait over ──► the kept entries settle, key held
+/// ```
+#[test]
+fn a_backed_off_space_is_unresolved_not_absent() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let first = new_project(&server, &alice, "one");
+        let second = new_project(&server, &alice, "two");
+        for space in [first, second] {
+            write_note(&server, &alice, space, SECRET).unwrap();
+        }
+        pump(&server, &alice.db);
+        drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
+
+        let settings = EncryptionSettings::default();
+        let store = FaultyStore::default();
+        let client = open_account(
+            Rc::new(store.clone()),
+            account(0xb0),
+            settings.clone(),
+            None,
+        );
+        let (db, link) = session(&client, &server, account(0xb0), &settings, 2, None);
+        let bob = Device {
+            who: account(0xb0),
+            client,
+            db,
+            _link: Some(link),
+            live: Default::default(),
+        };
+        bob.activate(&server);
+        add_member(&server, &alice, first, &bob.id());
+        assert_eq!(deliver(&server, &alice, &[&bob], first), 1);
+        bob.follow_notes(&server);
+
+        store.failing.set(true);
+        for _ in 0..2 {
+            let failed = read_notes(&server, &bob, first);
+            assert!(matches!(failed, Err(ClientError::Store(_))), "{failed:?}");
+        }
+        let saves = store.saves.get();
+        let waiting = read_notes(&server, &bob, first);
+        assert!(
+            matches!(waiting, Err(ClientError::Store(_))),
+            "a backed-off space's rows are not silently left out: {waiting:?}"
+        );
+
+        assert!(read_notes(&server, &bob, second).unwrap().is_empty());
+        let settle = || drive(&server, &[&bob.db], bob.client.settle_reads(&bob.db));
+        let still = settle();
+        assert!(
+            matches!(still, Err(ClientError::Store(_))),
+            "first's entries are kept across another read: {still:?}"
+        );
+        assert_eq!(
+            store.saves.get(),
+            saves,
+            "another space's read does not end first's wait"
+        );
+
+        store.failing.set(false);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            settle().unwrap(),
+            "the kept entries settle once the wait is over"
+        );
+        assert_eq!(read_notes(&server, &bob, first).unwrap().len(), 1);
+    });
+}
+
 /// Alice's database at `path`, not linked to any server.
 fn offline_db(client: &E2eeClient, who: AuthorSubject, node: u8, path: &std::path::Path) -> Db {
     let config = jazz::db::DbConfig::new(

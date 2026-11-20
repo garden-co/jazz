@@ -515,28 +515,40 @@ impl E2eeClient {
     /// next settle; the first such error is returned once the others are
     /// reported. A space that failed is retried at the next settle, then
     /// after a wait that doubles with each failure in a row (see
-    /// [`SettleBackoff`]): until then its entries are kept and it is not
-    /// read. A success ends the wait.
+    /// [`SettleBackoff`]): until then its entries are kept, it is not read,
+    /// and its last error counts as its failure (its rows are unresolved,
+    /// not absent). A success ends the wait.
     async fn settle_missing(&self, db: &Db, missing: Vec<Missing>) -> Result<bool, ClientError> {
         let mut by_space: BTreeMap<SpaceAddress, Vec<Missing>> = BTreeMap::new();
         for entry in missing {
             by_space.entry(entry.space.clone()).or_default().push(entry);
         }
-        // A space no read waits on any more has nothing to back off from.
-        self.shared
-            .settle_backoff
-            .borrow_mut()
-            .retain(|space, _| by_space.contains_key(space));
+        // A space no read waits on any more, neither this one nor the
+        // entries kept for a later settle, has nothing to back off from.
+        {
+            let queued: BTreeSet<SpaceAddress> = self
+                .shared
+                .missing
+                .borrow()
+                .iter()
+                .map(|entry| entry.space.clone())
+                .collect();
+            self.shared
+                .settle_backoff
+                .borrow_mut()
+                .retain(|space, _| by_space.contains_key(space) || queued.contains(space));
+        }
         let now = web_time::Instant::now();
         let mut reports = Vec::new();
         let mut held = false;
         let mut failure = None;
         for (space, entries) in by_space {
-            let backoff = self.shared.settle_backoff.borrow().get(&space).copied();
-            if backoff.is_some_and(|backoff| now < backoff.retry_at) {
+            let backoff = self.shared.settle_backoff.borrow().get(&space).cloned();
+            if let Some(backoff) = backoff.as_ref().filter(|backoff| now < backoff.retry_at) {
                 for entry in entries {
                     self.shared.missing(entry);
                 }
+                failure.get_or_insert_with(|| backoff.error.clone());
                 continue;
             }
             match self.settle_space(db, &space, &entries).await {
@@ -546,10 +558,8 @@ impl E2eeClient {
                     held |= any_held;
                 }
                 Err(error) => {
-                    self.shared
-                        .settle_backoff
-                        .borrow_mut()
-                        .insert(space, SettleBackoff::after_failure(backoff));
+                    let next = SettleBackoff::after_failure(backoff.as_ref(), error.clone());
+                    self.shared.settle_backoff.borrow_mut().insert(space, next);
                     for entry in entries {
                         self.shared.missing(entry);
                     }
@@ -660,9 +670,14 @@ impl E2eeClient {
         self.ensure_open()?;
         self.reconcile_once(db).await?;
         for round in 0..2 {
-            self.shared.missing.borrow_mut().clear();
+            // What `op` leaves out is settled here; what earlier reads left
+            // (kept for a later settle) stays queued.
+            let kept: Vec<Missing> = self.shared.missing.borrow_mut().drain(..).collect();
             let outcome = op().await;
             let missing: Vec<Missing> = self.shared.missing.borrow_mut().drain(..).collect();
+            for entry in kept {
+                self.shared.missing(entry);
+            }
             let online = self.shared.keys.borrow().online;
             match outcome {
                 Err(error) => {
