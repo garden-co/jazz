@@ -448,8 +448,8 @@ only if all of these hold:
    writes build on it as on any pending commit. A miss therefore costs one fetch
    of the row, never a divergent cache. A replica whose configured author is not
    the identity its link was accepted as has every row stamped otherwise, so each
-   of its writes costs that fetch. Mismatches are counted per replica
-   (`as_written_mismatches`); tests of honest writers assert there are none.
+   of its writes costs that fetch. Tests of honest writers assert that no
+   whole-row fetch is needed.
 
 `Stored { id }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a
