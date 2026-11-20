@@ -3361,6 +3361,137 @@ fn a_second_repairer_conflicts_and_overwrites_nothing() {
     });
 }
 
+/// Contract: a repair interrupted between batches keeps the losing key and
+/// finishes after a restart (protocol §3.2): alice lost the creation race
+/// with more rows than one batch rewrites; her repair is stopped once the
+/// first batch has committed (the second batch's transaction never
+/// commits), her runtime and store are opened again, and the repair
+/// rewrites the rest; bob reads every row.
+///
+/// ```text
+/// alice, bob offline: each creates the space; alice writes 120 notes
+/// bob's root first ──► alice's key refused; bob delivers K
+/// alice repairs: batch 1 (100 rows) commits ──✗ interrupted
+/// alice restarts ──► key still held `refused` ──► repair: the other 20
+/// ```
+#[test]
+fn a_repair_interrupted_between_batches_finishes_after_a_restart() {
+    const ROWS: usize = 120;
+    within(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alice.sqlite");
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let who = account(0xa1);
+        let store = MemoryStore::new();
+        let settings = EncryptionSettings::default();
+        let open_alice = |store: &MemoryStore| {
+            let client = open_account(Rc::new(store.clone()), who, settings.clone(), None);
+            let (db, link) = session(&client, &server, who, &settings, 1, Some(&path));
+            let alice = Device {
+                who,
+                client,
+                db,
+                _link: Some(link),
+                live: Default::default(),
+            };
+            alice.activate(&server);
+            alice.follow_notes(&server);
+            alice
+        };
+        let alice = open_alice(&store);
+        let bob = device(&server, account(0xb0), MemoryStore::new(), 2);
+        bob.activate(&server);
+        let space = new_project(&server, &alice, "plans");
+        add_member(&server, &alice, space, &bob.id());
+        bob.follow_notes(&server);
+        pump(&server, &bob.db);
+
+        // Both create the space offline; bob's root reaches the authority
+        // first, so alice's creation, and her rows, are lost.
+        for (device, rows) in [(&alice, ROWS), (&bob, 1)] {
+            device.client.set_online(false);
+            for n in 0..rows {
+                block_on(device.client.write(&device.db, async || {
+                    device
+                        .db
+                        .insert(
+                            "notes",
+                            note(space, &format!("note {n}")),
+                            Default::default(),
+                        )
+                        .await
+                }))
+                .unwrap();
+            }
+            device.client.set_online(true);
+        }
+        pump(&server, &bob.db);
+        pump(&server, &alice.db);
+        drive(&server, &[&bob.db], bob.client.reconcile(&bob.db)).unwrap();
+        drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
+        assert_eq!(marks(&alice, space), [KeyMark::Refused]);
+        assert_eq!(deliver(&server, &bob, &[&alice], space), 1);
+        pump(&server, &alice.db);
+        let address = space_address(&alice, space);
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.acquire(&alice.db, &address),
+        )
+        .unwrap();
+
+        // What bob's store shows him: his note, and alice's rows once they
+        // are under the real key.
+        let readable = || {
+            let query = Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(space))));
+            all(&bob.db, query).unwrap().len()
+        };
+        assert_eq!(readable(), 1);
+
+        // The repair runs until bob sees its first batch, and is then
+        // dropped, as a closed tab or a killed process stops it.
+        {
+            let repair = alice.client.repair_space(&alice.db, &address);
+            let mut repair = std::pin::pin!(repair);
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let mut interrupted = false;
+            for _ in 0..2_000 {
+                if let std::task::Poll::Ready(done) = repair.as_mut().poll(&mut cx) {
+                    panic!("the repair finished before it was interrupted: {done:?}");
+                }
+                block_on(alice.db.tick()).unwrap();
+                block_on(server.tick()).unwrap();
+                block_on(bob.db.tick()).unwrap();
+                if readable() > 1 {
+                    interrupted = true;
+                    break;
+                }
+            }
+            assert!(interrupted, "the first batch committed");
+        }
+        assert_eq!(readable(), 1 + 100, "one batch of the repair committed");
+
+        // A restart: the runtime and the store are opened again.
+        drop(alice);
+        let alice = open_alice(&store);
+        assert!(
+            marks(&alice, space).contains(&KeyMark::Refused),
+            "the losing key is kept: it still opens the rows not yet repaired"
+        );
+        let rest = drive(
+            &server,
+            &[&alice.db],
+            alice.client.repair_space(&alice.db, &address),
+        )
+        .unwrap();
+        assert_eq!(rest, ROWS - 100);
+        pump(&server, &alice.db);
+        pump(&server, &bob.db);
+        assert_eq!(readable(), 1 + ROWS, "bob reads every row");
+        assert_eq!(read_notes(&server, &alice, space).unwrap().len(), 1 + ROWS);
+    });
+}
+
 /// An update of a note's body through the runtime's write wrapper.
 fn write_update(server: &Db, device: &Device, row: jazz::ids::RowUuid, body: &str) {
     drive(
