@@ -12,6 +12,12 @@ import type { Encryption } from "./index.js";
 export interface PendingEncryptionHost {
   /** The real handle, once the local-first client holds it; rejects when that can't happen. */
   resolve(): Promise<Encryption>;
+  /**
+   * The real handle once this Db handed over to the local-first client;
+   * undefined while it is still thin. Throws the Db's own closed or replaced
+   * error once it shut down without handing over.
+   */
+  live(): Encryption | undefined;
   /** What a synchronous call throws: it can't wait. Starts the load. */
   refuseSync(operation: string): Error;
   /**
@@ -36,20 +42,34 @@ export function pendingEncryption(host: PendingEncryptionHost): Encryption {
       },
       apply(_target, _this, args: unknown[]) {
         const name = path.join(".");
-        if (LIFECYCLE.has(name)) return undefined;
-        if (SYNCHRONOUS.has(name)) throw host.refuseSync(name);
+        const lifecycle = LIFECYCLE.has(name);
+        const synchronous = SYNCHRONOUS.has(name);
+        let real: Encryption | undefined;
+        try {
+          real = host.live();
+        } catch (error) {
+          // A shut-down Db has nothing to stop; a call that needs it gets its error.
+          if (lifecycle) return undefined;
+          if (synchronous) throw error;
+          return Promise.reject(error);
+        }
+        if (real) return call(real, path, args);
+        if (lifecycle) return undefined;
+        if (synchronous) throw host.refuseSync(name);
         if (path.length === 1 && LISTENERS.has(path[0]!)) return listen(path[0]!, args[0]);
-        return host.resolve().then((real) => {
-          let owner: unknown = real;
-          let member: unknown = real;
-          for (const key of path) {
-            owner = member;
-            member = (member as Record<string, unknown>)[key];
-          }
-          return (member as (...a: unknown[]) => unknown).apply(owner, args);
-        });
+        return host.resolve().then((next) => call(next, path, args));
       },
     });
+
+  const call = (real: Encryption, path: readonly string[], args: unknown[]): unknown => {
+    let owner: unknown = real;
+    let member: unknown = real;
+    for (const key of path) {
+      owner = member;
+      member = (member as Record<string, unknown>)[key];
+    }
+    return (member as (...a: unknown[]) => unknown).apply(owner, args);
+  };
 
   /** Attaches once the local-first client arrives, by any other cause; starts nothing. */
   const listen = (name: string, listener: unknown): (() => void) => {

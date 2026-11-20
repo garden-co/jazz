@@ -2587,10 +2587,20 @@ export class Db {
         // Without a loader this throws the refusal; without an upgrader it is the direct-thin advice.
         return (await this.awaitLocalFirst(refused)).encryption;
       },
+      live: () => {
+        const live = this.current();
+        if (live !== this) return live.encryption;
+        if (this.replaced) throw this.replaced;
+        if (this.phase !== "open") throw new DbClosedError(this.phase);
+        return undefined;
+      },
       refuseSync: (operation) => {
         const refused = refusal(operation, upgradable() ? "no-loader" : "direct-thin");
         const loader = localFirstLoaderOf(this);
         if (!loader) return refused;
+        // Handed over: the real handle answers, so there is nothing to load.
+        if (this.successor)
+          return new EncryptionNeedsLocalFirstError({ reason: "not-loaded", operation, table });
         // Start the load so that a second try, or `await db.encryption.ready()`, finds it done.
         void upgradeDbToLocalFirst(this, loader).catch(() => {});
         return new EncryptionNeedsLocalFirstError({ reason: "not-loaded", operation, table });
