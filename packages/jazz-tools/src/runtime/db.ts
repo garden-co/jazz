@@ -162,6 +162,8 @@ const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
  * client before it fails; a live query warns then and keeps waiting.
  */
 const LOCAL_FIRST_WAIT_MS = 30_000;
+/** How often a write tries a local-first client that has not synced yet again. */
+const NOT_OBSERVED_RETRY_MS = 50;
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -3035,7 +3037,7 @@ export class Db {
     if (this.heldWrites)
       // By the time it runs, this Db may have handed over to its successor.
       return this.afterHeldWrites(() =>
-        this.successor ? this.runOnCurrent(schema, write) : this.runWriteNow(schema, write),
+        this.successor ? this.runOnSuccessor(schema, write) : this.runWriteNow(schema, write),
       );
     return this.runWriteNow(schema, write);
   }
@@ -3046,8 +3048,12 @@ export class Db {
   ): T | Promise<T> {
     const client = this.getClient(schema);
     const made = ++this.writesMade;
+    // Made before the hand-over: if it runs only after it, that is on a
+    // local-first client that may not have synced yet.
+    const madeBefore = this.successor === null;
     return runAfterPreparation(client, () => {
-      if (this.successor) return this.runOnCurrent(schema, write);
+      if (this.successor)
+        return madeBefore ? this.runOnSuccessor(schema, write) : this.runOnCurrent(schema, write);
       const retry = (error: unknown) => this.retryOnLocalFirst(error, made, schema, write);
       let result: T | Promise<T>;
       try {
@@ -3074,6 +3080,34 @@ export class Db {
     return client.retryAfterKey(() => write(client, db)) as T | Promise<T>;
   }
 
+  /**
+   * Run `write`, made while this Db was thin, on the local-first client it
+   * handed over to. That client refuses encrypted tables (`not_observed`)
+   * until it has synced their catalogue identities once, which can land
+   * after the hand-over, and after the account's verification that a wait
+   * for it includes. So it is tried again until `deadline`: the 30 seconds
+   * the wait for the local-first client promises.
+   */
+  private runOnSuccessor<T>(
+    schema: WasmSchema,
+    write: (client: JazzClient, db: Db) => T | Promise<T>,
+    deadline = Date.now() + LOCAL_FIRST_WAIT_MS,
+  ): T | Promise<T> {
+    const retry = (error: unknown): Promise<T> => {
+      if (nativeCoreErrorCode(error) !== "not_observed" || Date.now() >= deadline) throw error;
+      return new Promise<void>((resolve) => setTimeout(resolve, NOT_OBSERVED_RETRY_MS)).then(() =>
+        this.runOnSuccessor(schema, write, deadline),
+      );
+    };
+    let result: T | Promise<T>;
+    try {
+      result = this.runOnCurrent(schema, write);
+    } catch (error) {
+      return retry(error);
+    }
+    return result instanceof Promise ? result.catch(retry) : result;
+  }
+
   private retryOnLocalFirst<T>(
     error: unknown,
     made: number,
@@ -3084,11 +3118,12 @@ export class Db {
     const failed = this.failedWait;
     // Queued behind a write whose wait failed: it fails alike.
     if (failed && made <= failed.writesMade) throw failed.error;
+    const deadline = Date.now() + LOCAL_FIRST_WAIT_MS;
     const waited = this.awaitLocalFirst(error);
     this.writesWaiting++;
     return waited
       .then(
-        () => this.runOnCurrent(schema, write),
+        () => this.runOnSuccessor(schema, write, deadline),
         (failure: unknown) => {
           this.failedWait = { error: failure, writesMade: this.writesMade };
           throw failure;

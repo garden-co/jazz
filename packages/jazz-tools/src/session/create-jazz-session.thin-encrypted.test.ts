@@ -127,11 +127,29 @@ async function serve() {
   );
   return {
     jazz,
+    server,
     serverUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/jazz`,
     storePath: `${dir}/core.sqlite`,
   };
 }
 type Host = Awaited<ReturnType<typeof serve>>;
+
+/**
+ * Hold the sync connections `host` is asked for from now on until `release()`:
+ * a client that connects meanwhile syncs nothing, not even the catalogue.
+ */
+function holdNewConnections(host: Host) {
+  const upgrades = host.server.listeners("upgrade") as Array<(...args: unknown[]) => void>;
+  host.server.removeAllListeners("upgrade");
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  host.server.on("upgrade", (...args: unknown[]) => {
+    void released.then(() => {
+      for (const upgrade of upgrades) upgrade.apply(host.server, args);
+    });
+  });
+  return { release };
+}
 
 function memoryStore(): AccountStore {
   let stored: string | null = null;
@@ -1038,6 +1056,36 @@ describe("a thin session of an app with encrypted columns", () => {
     expect(await landedThin).toBe(false);
     const rows = await kept.all(tasks.where({ projectId: project }));
     expect(titles(rows).sort()).toEqual(["deferred", "kept"]);
+  }, 90_000);
+
+  // A write queued on the thin client runs only after the hand-over, on a
+  // local-first client whose first sync (the catalogue identities it needs
+  // for encrypted tables) has not landed yet.
+  it("a write queued before the hand-over waits for the local-first client's first sync", async () => {
+    const host = await serve();
+    const { kept, gate, project } = await thinMember(host);
+    let endStream!: () => void;
+    const streamEnds = new Promise<void>((resolve) => (endStream = resolve));
+    async function* chunks(): AsyncGenerator<string> {
+      yield "streamed ";
+      await streamEnds;
+      yield "note";
+    }
+    const streaming = kept.insertStreaming(app.notes, { text: chunks() });
+    const task = kept.insert(app.tasks, { projectId: project, title: "queued" } as never);
+    const connections = holdNewConnections(host);
+    gate.release();
+    await expect.poll(() => isThinDb(kept), { timeout: 20_000 }).toBe(false);
+
+    // Runs on the local-first client, which has not synced yet.
+    endStream();
+    await (await streaming).wait({ tier: "global" });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    connections.release();
+
+    await task.wait({ tier: "global" });
+    const rows = await kept.all(tasks.where({ projectId: project }));
+    expect(titles(rows).sort()).toEqual(["kept", "queued"]);
   }, 90_000);
 
   it("reruns a callback transaction queued behind a write that waits only once it runs", async () => {
