@@ -9,6 +9,7 @@ import {
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppVisitor,
+  jazzServerStoreHolds,
   startJazzApp,
 } from "./testing-server.js";
 
@@ -29,8 +30,9 @@ afterEach(async () => {
   localStorage.clear();
 });
 
-async function serverAt(name: string) {
-  const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(uniqueDbName(name));
+async function serverAt(name: string, options?: { onDisk?: boolean }) {
+  const core = await getJazzServerInfo(uniqueDbName(name), options);
+  const { appId, serverUrl: coreUrl, adminSecret } = core;
   await deploy({ appId, serverUrl: coreUrl, adminSecret, app, permissions });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
@@ -47,7 +49,7 @@ async function serverAt(name: string) {
   cleanups.push(async () => {
     globalThis.fetch = pageFetch;
   });
-  return { url, appId };
+  return { url, appId, core };
 }
 
 /** A page load: a session with a device account and the app's encryption. */
@@ -74,6 +76,61 @@ async function load(server: { url: string; appId: string }, dbName: string) {
   return session;
 }
 
+/**
+ * Whether this origin's IndexedDB databases (the shared worker's store, the
+ * private store, every other) hold each of `needles` as UTF-8 bytes in any
+ * stored value: what is on this browser's disk.
+ */
+async function indexedDbHolds(needles: string[]): Promise<boolean[]> {
+  const encoder = new TextEncoder();
+  const found = needles.map(() => false);
+  const look = (bytes: Uint8Array) => {
+    needles.forEach((needle, index) => {
+      if (found[index]) return;
+      const wanted = encoder.encode(needle);
+      outer: for (let at = 0; at + wanted.length <= bytes.length; at++) {
+        for (let i = 0; i < wanted.length; i++) if (bytes[at + i] !== wanted[i]) continue outer;
+        found[index] = true;
+        return;
+      }
+    });
+  };
+  const visit = async (value: unknown, seen: Set<unknown>): Promise<void> => {
+    if (value === null || typeof value !== "object") {
+      if (typeof value === "string") look(encoder.encode(value));
+      return;
+    }
+    if (seen.has(value)) return;
+    seen.add(value);
+    if (value instanceof ArrayBuffer) return look(new Uint8Array(value));
+    if (ArrayBuffer.isView(value))
+      return look(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+    if (value instanceof Blob) return look(new Uint8Array(await value.arrayBuffer()));
+    for (const inner of Object.values(value)) await visit(inner, seen);
+  };
+  for (const { name } of await indexedDB.databases()) {
+    if (!name) continue;
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(name);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      for (const store of Array.from(db.objectStoreNames)) {
+        const values = await new Promise<unknown[]>((resolve, reject) => {
+          const request = db.transaction(store).objectStore(store).getAll();
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        await visit(values, new Set());
+      }
+    } finally {
+      db.close();
+    }
+  }
+  return found;
+}
+
 /** Names the step that does not finish, instead of a bare test timeout. */
 function step<T>(name: string, work: Promise<T>, ms = 15_000): Promise<T> {
   return Promise.race([
@@ -85,7 +142,7 @@ function step<T>(name: string, work: Promise<T>, ms = 15_000): Promise<T> {
 }
 
 it("encrypts in a real browser: a device's keys in the browser's own store, a tab behind the shared worker, rows sealed on the server, readable by the device, the same device after a reload", async () => {
-  const server = await serverAt("encryption-browser");
+  const server = await serverAt("encryption-browser", { onDisk: true });
   const dbName = uniqueDbName("encryption-browser-db");
   const first = await step("load", load(server, dbName), 40_000);
   const db = first.getSnapshot().client!.db;
@@ -95,24 +152,44 @@ it("encrypts in a real browser: a device's keys in the browser's own store, a ta
   const account = first.getSnapshot().user!.accountId;
 
   const id = crypto.randomUUID();
+  // A plain value and an encrypted one, each unique: the plain one shows that
+  // a store's bytes can be searched at all, the encrypted one must not be found.
+  const plainName = `plain-name-${crypto.randomUUID()}`;
+  const secretTitle = `secret-title-${crypto.randomUUID()}`;
   const self = await step(
     "member row",
     db.encryption.members.row({ table: "projects", id }, account),
   );
   const written = await db.transaction((tx) => {
-    tx.insert(app.projects, { name: "plans", ownerId: account }, { id });
+    tx.insert(app.projects, { name: plainName, ownerId: account }, { id });
     tx.insert(membersTable, self as never);
   });
   await step("project global", written.wait({ tier: "global" }));
   await step(
     "task global",
-    db.insert(app.tasks, { projectId: id, title: "a secret title" }).wait({ tier: "global" }),
+    db.insert(app.tasks, { projectId: id, title: secretTitle }).wait({ tier: "global" }),
   );
   const read = async (client: typeof db) =>
     await client.all(app.tasks.where({ projectId: id }), {
       tier: "local-first",
     });
-  expect((await step("read", read(db))).map((row) => row.title)).toEqual(["a secret title"]);
+  expect((await step("read", read(db))).map((row) => row.title)).toEqual([secretTitle]);
+
+  // Sealed on the server: its store holds the plain name, and not the title.
+  await waitForCondition(
+    async () => (await jazzServerStoreHolds(server.core, [plainName]))[0]!,
+    30_000,
+    "The server should store the plain row",
+  );
+  expect(await jazzServerStoreHolds(server.core, [plainName, secretTitle])).toEqual([true, false]);
+  // And in this browser: the shared worker's store holds the plain name, and
+  // no IndexedDB database holds the title.
+  await waitForCondition(
+    async () => (await indexedDbHolds([plainName]))[0]!,
+    30_000,
+    "The shared worker should store the plain row",
+  );
+  expect(await indexedDbHolds([plainName, secretTitle])).toEqual([true, false]);
 
   // The device's keys are in the browser's store, protected by a key that
   // cannot be exported.
@@ -127,7 +204,7 @@ it("encrypts in a real browser: a device's keys in the browser's own store, a ta
   );
   expect(await again.encryption.deviceId()).toBe(device);
   await waitForCondition(
-    async () => (await read(again)).some((row) => row.title === "a secret title"),
+    async () => (await read(again)).some((row) => row.title === secretTitle),
     30_000,
     "The reloaded device should read its encrypted row",
   );
