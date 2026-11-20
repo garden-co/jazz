@@ -665,6 +665,66 @@ describe("a thin session of an app with encrypted columns", () => {
     expect(runs).toBe(2);
   }, 60_000);
 
+  // The refusal marks the transaction so it can never commit, even when the
+  // callback catches it: its commit fails with it, which reruns it as a
+  // thrown refusal does.
+  for (const form of ["transaction", "serializableTransaction"] as const) {
+    it(`reruns a ${form} callback that catches its own refusal`, async () => {
+      const host = await serve();
+      const { kept, gate, project } = await thinMember(host);
+      let runs = 0;
+      const result = settled(
+        kept[form]((tx) => {
+          runs++;
+          try {
+            tx.insert(app.tasks, { projectId: project, title: "caught" } as never);
+          } catch {
+            // The app swallows the refusal and carries on.
+          }
+          tx.insert(app.notes, { text: "beside the caught one" } as never);
+          return runs;
+        }),
+      );
+      gate.release();
+
+      const { value: written, error } = await result;
+      expect(error).toBeUndefined();
+      expect(written!.value).toBe(2);
+      await written!.wait({ tier: "global" });
+      expect(runs).toBe(2);
+      // Only the rerun's note: the thin attempt committed nothing.
+      expect(texts(await kept.all(app.notes, { tier: "remote" }))).toEqual([
+        "beside the caught one",
+      ]);
+      const rows = await kept.all(tasks.where({ projectId: project }));
+      expect(titles(rows).sort()).toEqual(["caught", "kept"]);
+    }, 90_000);
+
+    it(`refuses a ${form} callback that catches its own refusal, without a loader`, async () => {
+      const host = await serve();
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const session = await open(host);
+      const kept = db(session);
+      let runs = 0;
+      const result = await settled(
+        kept[form]((tx) => {
+          runs++;
+          try {
+            tx.insert(app.tasks, { projectId: crypto.randomUUID(), title: "caught" } as never);
+          } catch {
+            // The app swallows the refusal and carries on.
+          }
+          tx.insert(app.notes, { text: "beside the caught one" } as never);
+        }),
+      );
+
+      expect(result.error).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+      expect((result.error as EncryptionNeedsLocalFirstError).reason).toBe("no-loader");
+      expect(runs).toBe(1);
+      expect(await kept.all(app.notes, { tier: "remote" })).toEqual([]);
+    }, 60_000);
+  }
+
   it("an explicit transaction says to begin again, and starts the load", async () => {
     const host = await serve();
     pageStillLoading();

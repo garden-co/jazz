@@ -1395,6 +1395,10 @@ export class ThinRuntime implements Runtime {
     return transaction ? transaction.staged || transaction.refused !== undefined : undefined;
   }
 
+  transactionRefusal(id: OpenTransactionId): EncryptionNeedsLocalFirstError | undefined {
+    return this.transactions.get(id)?.refused;
+  }
+
   commitTransaction(id: OpenTransactionId): Promise<TxId> {
     const transaction = this.transactions.get(id);
     if (!transaction) {

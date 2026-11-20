@@ -1729,6 +1729,10 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   let resolvedValue: Awaited<TResult>;
   try {
     resolvedValue = await value;
+    // An operation in it was refused and the callback caught that: it can
+    // never commit, and fails as if the callback had not caught it.
+    const refusal = transaction.refusal();
+    if (refusal) throw refusal;
   } catch (error) {
     try {
       await transaction.rollback();
@@ -1869,6 +1873,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   openTransactionId(): OpenTransactionId {
     return this.requireBinding("openTransactionId").openTransactionId;
+  }
+
+  /**
+   * @internal Why this transaction can only roll back: an operation in it
+   * was refused, even if the callback caught that.
+   */
+  refusal(): Error | undefined {
+    const binding = dbTxHandleBindings.get(this);
+    return binding?.ownerClient.transactionRefusal(binding.openTransactionId);
   }
 
   /**

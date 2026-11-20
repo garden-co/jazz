@@ -201,6 +201,12 @@ export interface Runtime {
    * when this runtime can't tell (the transaction then commits as asked).
    */
   hasStagedTransactionWrites?(id: OpenTransactionId): boolean | undefined;
+  /**
+   * @internal Why open transaction `id` can only roll back: an operation in
+   * it was refused (a thin runtime's, touching an end-to-end encrypted
+   * column), even if the app caught that.
+   */
+  transactionRefusal?(id: OpenTransactionId): Error | undefined;
   /** Capture behind earlier owner operations without waiting for server acceptance. */
   captureSnapshot?(): Promise<SnapshotRef>;
   /** @internal A thin session's transaction request, served by its backend's client (NAPI). */
@@ -1610,6 +1616,11 @@ export class JazzClient {
   hasStagedTransactionWrites(id: OpenTransactionId): boolean | undefined {
     if (this.transactionPreparations.get(id)?.unopened) return false;
     return this.runtime.hasStagedTransactionWrites?.(id);
+  }
+
+  /** @internal See {@link Runtime.transactionRefusal}. */
+  transactionRefusal(id: OpenTransactionId): Error | undefined {
+    return this.runtime.transactionRefusal?.(id);
   }
 
   rollbackTransaction(id: OpenTransactionId): Promise<boolean> {
