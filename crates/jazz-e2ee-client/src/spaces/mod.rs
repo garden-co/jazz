@@ -7,6 +7,8 @@
 //! The creation of spaces is in [`creation`], the watches in [`watch`].
 
 mod creation;
+mod delivery;
+mod repair;
 mod watch;
 
 use std::cell::Cell;
@@ -27,10 +29,11 @@ use crate::account::rows::{self, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
 use crate::hooks::code;
-use crate::state::{Missing, Report};
+use crate::state::{Missing, Report, SettleBackoff, Shared};
 
 pub use creation::SpaceCreation;
-pub use watch::SpaceWatch;
+pub use delivery::MEMBER_LIMIT;
+pub use watch::{SpaceWatch, account_watch_queries, watch_queries};
 
 /// Reads that keep meeting concurrent writes give up after this many
 /// attempts.
@@ -66,6 +69,7 @@ pub(crate) struct Replayed {
     pub(crate) chain: Option<SpaceChain>,
     pub(crate) held: Option<HeldSpace>,
     pub(crate) member: bool,
+    pub(crate) acquisition: Option<jazz_e2ee::protocol::space::Acquisition>,
 }
 
 /// What one acquisition found.
@@ -112,6 +116,22 @@ impl E2eeClient {
         tx: OpenTransactionId,
         address: &ProtocolAddress,
     ) -> Result<SpaceRead, ClientError> {
+        self.read_space_of(db, tx, address, false).await
+    }
+
+    /// [`E2eeClient::read_space`], or with `whole` the whole space: every
+    /// member row and every delivery of the address (protocol §3.4), and
+    /// the public history of every account they name. Deliveries are
+    /// readable to every member (R14), so a delivery another holder writes
+    /// meanwhile is a phantom of this read and makes a transaction that
+    /// read it conflict.
+    pub(crate) async fn read_space_of(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        address: &ProtocolAddress,
+        whole: bool,
+    ) -> Result<SpaceRead, ClientError> {
         let skipped = Cell::new(0);
         let own = self.shared.account_id.clone();
         let scope = uuid_cell(&address.scope_id).ok_or(ProtocolError::InvalidRecord(
@@ -133,25 +153,20 @@ impl E2eeClient {
         let (successors, _) = self
             .read_rows(db, tx, &skipped, of_space(rows::SPACE_SUCCESSORS))
             .await?;
-        let (members, _) = self
-            .read_rows(
-                db,
-                tx,
-                &skipped,
-                of_space(rows::SPACE_MEMBERS).filter(eq(col("accountId"), lit(account.clone()))),
-            )
-            .await?;
-        let (deliveries, _) = self
-            .read_rows(
-                db,
-                tx,
-                &skipped,
-                of_space(rows::SPACE_DELIVERIES)
-                    .filter(eq(col("recipientAccountId"), lit(account))),
-            )
-            .await?;
+        let mut members_query = of_space(rows::SPACE_MEMBERS);
+        let mut deliveries_query = of_space(rows::SPACE_DELIVERIES);
+        if !whole {
+            members_query = members_query.filter(eq(col("accountId"), lit(account.clone())));
+            deliveries_query = deliveries_query.filter(eq(col("recipientAccountId"), lit(account)));
+        }
+        let (members, _) = self.read_rows(db, tx, &skipped, members_query).await?;
+        let (deliveries, _) = self.read_rows(db, tx, &skipped, deliveries_query).await?;
         let space_skipped = skipped.get();
-        let mut ledger = SpaceLedger::one_account(address.clone(), Position(through), &own);
+        let mut ledger = if whole {
+            SpaceLedger::whole_space(address.clone(), Position(through))
+        } else {
+            SpaceLedger::one_account(address.clone(), Position(through), &own)
+        };
         ledger.roots = roots;
         ledger.successors = successors;
         ledger.members = members;
@@ -169,6 +184,13 @@ impl E2eeClient {
                 .iter()
                 .map(|successor| successor.row.author_account_id.clone()),
         );
+        if whole {
+            named.extend(ledger.members.iter().map(|m| m.row.account_id.clone()));
+            for delivery in &ledger.deliveries {
+                named.insert(delivery.row.recipient_account_id.clone());
+                named.insert(delivery.row.sender_account_id.clone());
+            }
+        }
         let named: Vec<String> = named.into_iter().collect();
         let accounts = self
             .read_public_many(db, tx, &skipped, &named, BTreeSet::new())
@@ -222,6 +244,7 @@ impl E2eeClient {
                     chain: None,
                     held: None,
                     member,
+                    acquisition: None,
                 },
                 Some(chain) => {
                     let acquisition =
@@ -231,6 +254,7 @@ impl E2eeClient {
                         chain: Some(chain),
                         held,
                         member,
+                        acquisition: Some(acquisition),
                     }
                 }
             }
@@ -343,10 +367,34 @@ impl E2eeClient {
             chain,
             held,
             member,
+            acquisition,
         } = match self.replay_space(read).await {
             Ok(replayed) => replayed,
             Err(error) => return Err(self.forget_account_on(error)),
         };
+        if let Some(acquisition) = &acquisition {
+            for bad in &acquisition.invalid_deliveries {
+                self.shared.event(
+                    format!("delivery:{}", bad.delivery_id),
+                    Report::InvalidDelivery {
+                        space: space.clone(),
+                        sender: bad.sender_account_id.clone(),
+                        recipient: bad.recipient_account_id.clone(),
+                        key_epoch_id: bad.key_epoch_id.clone(),
+                    },
+                );
+            }
+            for broken in &acquisition.broken_history {
+                self.shared.event(
+                    format!("history:{}", broken.successor_id),
+                    Report::BrokenHistory {
+                        space: space.clone(),
+                        key_epoch_id: broken.key_epoch_id.clone(),
+                        author: broken.author_account_id.clone(),
+                    },
+                );
+            }
+        }
         let incomplete = read.skipped > 0;
         let Some(chain) = chain else {
             self.settle_creations(db, address, None).await?;
@@ -466,22 +514,53 @@ impl E2eeClient {
     /// Every space is settled. One whose acquisition fails reports nothing
     /// (a failure is not a key's absence) and keeps its entries for the
     /// next settle; the first such error is returned once the others are
-    /// reported.
+    /// reported. A space that failed is retried at the next settle, then
+    /// after a wait that doubles with each failure in a row (see
+    /// [`SettleBackoff`]): until then it is not read and fails nothing, so
+    /// the other spaces' rows are still returned; its rows stay unresolved
+    /// (left out, reported `MissingKey` by the read, their entries kept).
+    /// A success ends the wait.
     async fn settle_missing(&self, db: &Db, missing: Vec<Missing>) -> Result<bool, ClientError> {
         let mut by_space: BTreeMap<SpaceAddress, Vec<Missing>> = BTreeMap::new();
         for entry in missing {
             by_space.entry(entry.space.clone()).or_default().push(entry);
         }
+        // A space no read waits on any more, neither this one nor the
+        // entries kept for a later settle, has nothing to back off from.
+        {
+            let queued: BTreeSet<SpaceAddress> = self
+                .shared
+                .missing
+                .borrow()
+                .iter()
+                .map(|entry| entry.space.clone())
+                .collect();
+            self.shared
+                .settle_backoff
+                .borrow_mut()
+                .retain(|space, _| by_space.contains_key(space) || queued.contains(space));
+        }
+        let now = self.shared.now();
         let mut reports = Vec::new();
         let mut held = false;
         let mut failure = None;
         for (space, entries) in by_space {
+            let backoff = self.shared.settle_backoff.borrow().get(&space).copied();
+            if backoff.is_some_and(|backoff| now < backoff.retry_at) {
+                for entry in entries {
+                    self.shared.missing(entry);
+                }
+                continue;
+            }
             match self.settle_space(db, &space, &entries).await {
                 Ok((settled, any_held)) => {
+                    self.shared.settle_backoff.borrow_mut().remove(&space);
                     reports.extend(settled);
                     held |= any_held;
                 }
                 Err(error) => {
+                    let next = SettleBackoff::after_failure(backoff.as_ref(), now);
+                    self.shared.settle_backoff.borrow_mut().insert(space, next);
                     for entry in entries {
                         self.shared.missing(entry);
                     }
@@ -592,9 +671,14 @@ impl E2eeClient {
         self.ensure_open()?;
         self.reconcile_once(db).await?;
         for round in 0..2 {
-            self.shared.missing.borrow_mut().clear();
+            // What `op` leaves out is settled here; what earlier reads left
+            // (kept for a later settle) stays queued.
+            let kept: Vec<Missing> = self.shared.missing.borrow_mut().drain(..).collect();
             let outcome = op().await;
             let missing: Vec<Missing> = self.shared.missing.borrow_mut().drain(..).collect();
+            for entry in kept {
+                self.shared.missing(entry);
+            }
             let online = self.shared.keys.borrow().online;
             match outcome {
                 Err(error) => {
@@ -665,12 +749,10 @@ impl E2eeClient {
     ) -> Result<T, ClientError> {
         self.ensure_open()?;
         self.reconcile_once(db).await?;
+        let call = WrappedWrite::enter(&self.shared);
         for round in 0..ATTEMPTS {
-            // A creation the authority refused since the last write stops
-            // the automatic paths before this one stages anything.
-            self.settle_pending(db).await?;
-            self.shared.creations.borrow_mut().attempt.clear();
-            let outcome = op().await;
+            self.begin_attempt(db).await?;
+            let outcome = call.run(op()).await;
             let staged = std::mem::take(&mut self.shared.creations.borrow_mut().attempt);
             let error = match outcome {
                 Ok(value) => return Ok(value),
@@ -682,7 +764,7 @@ impl E2eeClient {
             let Some(E2eeRefusal::NeedsKey { space }) = E2eeRefusal::of(&error) else {
                 return Err(error.into());
             };
-            if round + 1 == ATTEMPTS || !self.make_ready(db, &space).await? {
+            if round + 1 == ATTEMPTS || !self.make_ready(db, &space, Some(call.id)).await? {
                 return Err(error.into());
             }
         }
@@ -695,20 +777,78 @@ impl E2eeClient {
     /// steps `write` takes between its rounds. `true` when the write can be
     /// tried again; `false` when it cannot yet (a member waits for a
     /// delivery, or the creation was refused), so the caller waits and
-    /// calls again, or gives up.
+    /// calls again, or gives up. The write tried again after a rotation
+    /// this prepared seals under whatever version that left; the write after
+    /// it gets its own rotation, as each call of `write` does.
     pub async fn prepare_space(&self, db: &Db, space: &SpaceAddress) -> Result<bool, ClientError> {
         self.ensure_open()?;
         self.reconcile_once(db).await?;
+        self.begin_attempt(db).await?;
+        self.make_ready(db, space, None).await
+    }
+
+    /// What each attempt of a write starts with, wrapped or not: the
+    /// creations whose staged root the database dropped since are
+    /// abandoned, as `write` abandons what a failed call staged.
+    async fn begin_attempt(&self, db: &Db) -> Result<(), ClientError> {
+        let dropped: Vec<String> = self
+            .shared
+            .creations
+            .borrow()
+            .dropped
+            .iter()
+            .cloned()
+            .collect();
+        for root_id in &dropped {
+            self.abandon_creation(root_id).await?;
+        }
+        // A creation the authority refused since the last write stops
+        // the automatic paths before this one stages anything.
         self.settle_pending(db).await?;
+        // A member removal this client wrote is served before anything is
+        // sealed: its pass marks the space for rotation, so the write that
+        // follows rotates first (protocol §3.5).
+        self.serve_removals(db).await?;
         self.shared.creations.borrow_mut().attempt.clear();
-        self.make_ready(db, space).await
+        Ok(())
     }
 
     /// Gets a key ready for a write to `space`: whether the write can be
-    /// tried again.
-    async fn make_ready(&self, db: &Db, space: &SpaceAddress) -> Result<bool, ClientError> {
+    /// tried again. `call` is the [`E2eeClient::write`] call the write runs
+    /// in (`None` for a write no call wraps), whose mark a rotation tried
+    /// here sets.
+    async fn make_ready(
+        &self,
+        db: &Db,
+        space: &SpaceAddress,
+        call: Option<u64>,
+    ) -> Result<bool, ClientError> {
         let address = protocol_address(space)?;
         let online = self.shared.keys.borrow().online;
+        // A space that needs rotation is rotated before the write; refused,
+        // offline or undecided, the write seals under the current version
+        // (protocol §3.5).
+        // A removal still queued here was staged by the failed call itself
+        // (the attempt served the rest): the write tried again seals under
+        // the current version, and the removal is served once it commits,
+        // before the next write.
+        let removal = !self.shared.member_removals.borrow().is_empty();
+        let pending = {
+            let mut keys = self.shared.keys.borrow_mut();
+            let pending = keys.rotation_pending.contains(&address);
+            if pending || removal {
+                keys.rotation_tried.insert((call, address.clone()));
+            }
+            pending
+        };
+        if pending {
+            // A rotation that succeeded or was refused clears the mark; one
+            // that failed for another reason leaves it for the next write.
+            if online {
+                let _ = self.rotate(db, space).await;
+            }
+            return Ok(true);
+        }
         if online {
             let acquired = self.acquire_full(db, space).await?;
             match acquired.state {
@@ -749,6 +889,8 @@ impl E2eeClient {
             );
             self.keep(space).await?;
         }
+        // Refused and kept: the hooks need not hold the key back any more.
+        self.shared.creations.borrow_mut().dropped.remove(root_id);
         Ok(())
     }
 }
@@ -763,4 +905,64 @@ pub(crate) fn has_unpublished(space: &HeldSpace) -> bool {
     space
         .held()
         .any(|(_, mark)| matches!(mark, KeyMark::Unpublished { .. }))
+}
+
+/// A running [`E2eeClient::write`] call, with its own number: the marks of
+/// `rotation_tried` it sets last for its rounds and are removed when it
+/// returns. Another call to the same space, running at the same time, has
+/// its own marks, so it gets its own rotation chance.
+struct WrappedWrite<'a> {
+    shared: &'a Shared,
+    id: u64,
+}
+
+impl<'a> WrappedWrite<'a> {
+    fn enter(shared: &'a Shared) -> Self {
+        let id = shared.next_write.get();
+        shared.next_write.set(id.wrapping_add(1));
+        Self { shared, id }
+    }
+
+    /// `op` run as this call's: while it is polled, what the hooks seal
+    /// belongs to this call.
+    fn run<F: Future>(&self, op: F) -> InCall<'a, F> {
+        InCall {
+            shared: self.shared,
+            id: self.id,
+            op: Box::pin(op),
+        }
+    }
+}
+
+impl Drop for WrappedWrite<'_> {
+    fn drop(&mut self) {
+        let id = self.id;
+        self.shared
+            .keys
+            .borrow_mut()
+            .rotation_tried
+            .retain(|(call, _)| *call != Some(id));
+    }
+}
+
+/// An operation of a [`WrappedWrite`] call, which names the call as the
+/// current one while it is polled, and restores the one before after.
+struct InCall<'a, F> {
+    shared: &'a Shared,
+    id: u64,
+    op: std::pin::Pin<Box<F>>,
+}
+
+impl<F: Future> Future for InCall<'_, F> {
+    type Output = F::Output;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let before = self.shared.current_write.replace(Some(self.id));
+        let polled = self.op.as_mut().poll(cx);
+        self.shared.current_write.set(before);
+        polled
+    }
 }

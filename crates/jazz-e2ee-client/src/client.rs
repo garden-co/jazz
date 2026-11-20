@@ -230,6 +230,14 @@ impl E2eeClient {
             published: Default::default(),
             creations: Default::default(),
             missing: Default::default(),
+            settle_backoff: Default::default(),
+            member_changes: Default::default(),
+            member_removals: Default::default(),
+            held_clock: Default::default(),
+            member_change_wait: std::cell::Cell::new(crate::state::MEMBER_CHANGE_WAIT),
+            collectors: Default::default(),
+            current_write: Default::default(),
+            next_write: Default::default(),
         });
         let client = Self {
             hooks: Rc::new(Hooks {
@@ -491,6 +499,34 @@ impl E2eeClient {
     /// tokens and match every row of the space instead (protocol §4.5).
     pub fn set_online(&self, online: bool) {
         self.shared.keys.borrow_mut().online = online;
+    }
+
+    /// How many staged member rows are still waited for, and how long to wait
+    /// for one. Only for tests of that queue.
+    #[doc(hidden)]
+    pub fn pending_member_changes(&self) -> usize {
+        self.shared.member_changes.borrow().len()
+    }
+
+    /// How many member removals this client wrote whose space's pass has not
+    /// run yet. Only for tests of that queue.
+    #[doc(hidden)]
+    pub fn pending_member_removals(&self) -> usize {
+        self.shared.member_removals.borrow().len()
+    }
+
+    /// Holds the settle back-off's clock still, or moves it on by `by` when
+    /// already held (tests: a wait is stepped, never slept).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn advance_settle_clock(&self, by: std::time::Duration) {
+        let now = self.shared.now();
+        self.shared.held_clock.set(Some(now + by));
+    }
+
+    #[doc(hidden)]
+    pub fn set_member_change_wait(&self, wait: std::time::Duration) {
+        self.shared.member_change_wait.set(wait);
     }
 
     /// This device: its ID and key pairs. [`ClientError::Closed`] once the

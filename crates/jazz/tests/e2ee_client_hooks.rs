@@ -225,6 +225,8 @@ struct Fake {
     /// Built from an encrypted app's declarations even when they name no
     /// table (a version that keeps the system tables and declares nothing).
     encrypted_app: Cell<bool>,
+    /// The companion rows core said it dropped, call by call.
+    dropped: RefCell<Vec<Vec<(String, RowUuid)>>>,
 }
 
 impl Fake {
@@ -286,6 +288,10 @@ impl E2eeHooks for Fake {
 
     fn built_from_encrypted_app(&self) -> bool {
         self.encrypted_app.get() || !self.declarations().tables.is_empty()
+    }
+
+    fn companions_dropped(&self, rows: &[(String, RowUuid)]) {
+        self.dropped.borrow_mut().push(rows.to_vec());
     }
 
     fn seal_write(&self, write: &mut WriteCells<'_>) -> Result<(), SealError> {
@@ -900,6 +906,84 @@ fn a_handle_transaction_refuses_on_the_staging_call() {
     let roots = all(&alice, "space_roots");
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].cell("space"), Some(Value::Uuid(first)));
+}
+
+/// Contract: the hooks hear of each companion row core will not store, once:
+/// a direct or staged write that fails after sealing, a handle transaction
+/// abandoned or failing to commit, a callback transaction rolled back. A
+/// write or transaction that commits its rows drops none.
+#[test]
+fn the_hooks_hear_of_companion_rows_that_are_not_stored() {
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let fresh = || {
+        let space = uuid::Uuid::new_v4();
+        hooks.hold(space);
+        space
+    };
+    let calls = || hooks.dropped.borrow().len();
+    let bad = |space| {
+        let mut cells = note(space, SECRET);
+        cells.insert("title".to_owned(), Value::I32(1));
+        cells
+    };
+
+    // A direct write: committed, then failing after sealing.
+    block_on(alice.insert("notes", note(fresh(), SECRET), Default::default())).unwrap();
+    assert_eq!(calls(), 0);
+    block_on(alice.insert("notes", bad(fresh()), Default::default())).unwrap_err();
+    assert_eq!(calls(), 1);
+    let rows = hooks.dropped.borrow()[0].clone();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "space_roots");
+
+    // A staged write failing after sealing; the transaction then commits
+    // what stays staged.
+    let id = OpenTransactionId::new();
+    block_on(alice.begin_mergeable(id)).unwrap();
+    block_on(
+        alice
+            .tx_ref(id)
+            .insert("notes", bad(fresh()), Default::default()),
+    )
+    .unwrap_err();
+    assert_eq!(calls(), 2);
+    block_on(
+        alice
+            .tx_ref(id)
+            .insert("notes", note(fresh(), SECRET), Default::default()),
+    )
+    .unwrap();
+    block_on(alice.commit_mergeable_handle(id)).unwrap();
+    assert_eq!(calls(), 2, "a committed transaction drops nothing");
+
+    // A handle transaction abandoned with a staged root.
+    let id = OpenTransactionId::new();
+    block_on(alice.begin_mergeable(id)).unwrap();
+    block_on(
+        alice
+            .tx_ref(id)
+            .insert("notes", note(fresh(), SECRET), Default::default()),
+    )
+    .unwrap();
+    alice.abandon_transaction_handle(id).unwrap();
+    assert_eq!(calls(), 3);
+
+    // A callback transaction: committed, then rolled back.
+    block_on(alice.transaction(async |tx| {
+        tx.insert("notes", note(fresh(), SECRET), Default::default())
+            .await
+    }))
+    .unwrap();
+    assert_eq!(calls(), 3);
+    let rolled_back: Result<((), _), _> = block_on(alice.transaction(async |tx| {
+        tx.insert("notes", note(fresh(), SECRET), Default::default())
+            .await?;
+        Err(jazz::db::Error::new(ErrorCode::Query, "changed my mind"))
+    }));
+    assert!(rolled_back.is_err());
+    assert_eq!(calls(), 4);
+    assert_eq!(all(&alice, "space_roots").len(), 3, "the committed ones");
 }
 
 /// Contract: an update or upsert hands the hooks the space of the row it

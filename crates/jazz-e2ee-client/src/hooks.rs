@@ -7,7 +7,7 @@
 //! lists the versions for the runtime. A held key permits the write
 //! (§5.1): nothing else is checked here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use jazz::db::{CurrentRow, Error, ErrorCode};
@@ -120,15 +120,36 @@ impl Hooks {
     }
 }
 
+/// Whether the stored `cell` names an epoch whose key this device holds only
+/// as the key of a refused or lost creation of `address`.
+fn under_refused_key(keys: &KeyState, address: &SpaceAddress, cell: &[u8]) -> bool {
+    let Ok(record) = read_stored_record(cell) else {
+        return false;
+    };
+    keys.held.roots_of(address).into_iter().any(|space| {
+        space
+            .depth_of(record.epoch_id)
+            .is_some_and(|depth| space.mark(depth) == Some(&KeyMark::Refused))
+    })
+}
+
 /// The key a write to `address` seals under, or the reason it cannot yet
-/// (protocol §3.2, §5.1).
+/// (protocol §3.2, §5.1). The key of a root whose staging was `dropped` is
+/// not used: the runtime abandons that creation first.
 fn write_key<'k>(
     keys: &'k KeyState,
+    dropped: &BTreeSet<String>,
     address: &SpaceAddress,
     refused_here: bool,
 ) -> Result<WriteKey<'k>, SealError> {
     let space = || db_address(address);
     match keys.held.write_key(address, refused_here) {
+        WriteChoice::Key(key)
+            if matches!(key.mark(), KeyMark::Unpublished { .. })
+                && dropped.contains(key.root_id()) =>
+        {
+            Err(SealError::NeedsKey { space: space() })
+        }
         WriteChoice::Key(key) => Ok(key),
         WriteChoice::NeedsKey => Err(SealError::NeedsKey { space: space() }),
         WriteChoice::SpacePending => Err(SealError::SpacePending { space: space() }),
@@ -194,6 +215,43 @@ impl E2eeHooks for Hooks {
     }
 
     fn seal_write(&self, write: &mut WriteCells<'_>) -> Result<(), SealError> {
+        // A member row this client adds or changes: the space is served by
+        // the next pass after the write commits (protocol §3.4).
+        if write.table == crate::account::rows::SPACE_MEMBERS
+            && matches!(
+                write.kind,
+                WriteKind::Insert | WriteKind::Update | WriteKind::Upsert
+            )
+            && let (Some(Value::Uuid(scope)), Some(Value::Uuid(id))) =
+                (write.cells.get("scopeId"), write.cells.get("identifier"))
+        {
+            let mut changes = self.shared.member_changes.borrow_mut();
+            if changes.len() == crate::state::MAX_REPORTS {
+                changes.pop_front();
+            }
+            changes.push_back((
+                write.row,
+                jazz::e2ee::SpaceAddress {
+                    scope_id: scope.to_string(),
+                    identifier: id.to_string(),
+                },
+                web_time::Instant::now(),
+            ));
+        }
+        // A member row this client deletes, a removal: the space is served
+        // before the next encrypted write, so the pass sets the
+        // needs-rotation mark and that write rotates first (protocol §3.4,
+        // §3.5). A delete names no cells: the runtime finds the space from
+        // the deleted row.
+        if write.table == crate::account::rows::SPACE_MEMBERS
+            && matches!(write.kind, WriteKind::Delete)
+        {
+            let mut removals = self.shared.member_removals.borrow_mut();
+            if removals.len() == crate::state::MAX_REPORTS {
+                removals.pop_front();
+            }
+            removals.push_back((write.row, web_time::Instant::now()));
+        }
         let Some(plan) = self.plan(write.table) else {
             return Ok(());
         };
@@ -277,7 +335,35 @@ impl E2eeHooks for Hooks {
         };
         let address = Self::address(&keys, plan, &identifier).map_err(SealError::Refused)?;
         let refused_here = keys.creation_refused.contains(&address);
-        let key = write_key(&keys, &address, refused_here)?;
+        // The marks of the `write` call this write runs in, or of the
+        // writes no call wraps.
+        let mark = (self.shared.current_write.get(), address.clone());
+        let tried = keys.rotation_tried.contains(&mark);
+        // A write no `write` call wraps is the retry the mark was made for:
+        // it takes the mark, and the next write gets its own chance.
+        let keys = if tried && mark.0.is_none() {
+            drop(keys);
+            self.shared.keys.borrow_mut().rotation_tried.remove(&mark);
+            self.shared.keys.borrow()
+        } else {
+            keys
+        };
+        // The space needs rotation, or a removal this client wrote has not
+        // been served yet and may mark it: the runtime serves the removal,
+        // rotates the space if it needs it, and the write is tried again
+        // (protocol §3.5).
+        let removal = !self.shared.member_removals.borrow().is_empty();
+        if (keys.rotation_pending.contains(&address) || removal) && !tried && keys.online {
+            return Err(SealError::NeedsKey {
+                space: db_address(&address),
+            });
+        }
+        let key = write_key(
+            &keys,
+            &self.shared.creations.borrow().dropped,
+            &address,
+            refused_here,
+        )?;
         let catalogue = keys
             .catalogue
             .as_ref()
@@ -357,6 +443,18 @@ impl E2eeHooks for Hooks {
             }
         }
         Ok(())
+    }
+
+    /// A space root a write staged and the database dropped: its creation
+    /// did not happen, and the runtime abandons it before the next write.
+    fn companions_dropped(&self, rows: &[(String, RowUuid)]) {
+        let mut creations = self.shared.creations.borrow_mut();
+        for (table, row) in rows {
+            let id = row.0.to_string();
+            if table == SPACE_ROOTS && creations.staged.remove(&id) {
+                creations.dropped.insert(id);
+            }
+        }
     }
 
     fn open_rows(
@@ -538,6 +636,14 @@ impl E2eeHooks for Hooks {
                     (false, value) => value,
                 };
                 row.set_cell(name, Some(decoded), codec.value_type.clone());
+                // A cell that opened under the key of a refused or lost
+                // creation is for the repair to rewrite (protocol §3.2).
+                if let Some(stored) = stored.as_deref()
+                    && under_refused_key(&keys, &address, stored)
+                {
+                    self.shared
+                        .note_repairable(site.table, row_uuid, &db_address(&address), name);
+                }
                 if let Some(space) = stale {
                     report(&mut outcome, notice(UnreadableCode::StaleSpace, &space));
                 }
@@ -741,7 +847,12 @@ impl E2eeHooks for Hooks {
         }
         .ok_or_else(|| refused("a streamed value names its space"))?;
         let address = Self::address(&keys, plan, &identifier).map_err(SealError::Refused)?;
-        let key = write_key(&keys, &address, keys.creation_refused.contains(&address))?;
+        let key = write_key(
+            &keys,
+            &self.shared.creations.borrow().dropped,
+            &address,
+            keys.creation_refused.contains(&address),
+        )?;
         let catalogue = keys
             .catalogue
             .as_ref()

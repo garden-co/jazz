@@ -991,6 +991,10 @@ struct Inner {
     /// random when it opens: a digest confirms no guessed value elsewhere.
     #[cfg(feature = "e2ee-client")]
     e2ee_salt: [u8; 32],
+    /// The companion rows the open callback transaction's sealed writes
+    /// applied: told to the hooks as dropped if it rolls back.
+    #[cfg(feature = "e2ee-client")]
+    tx_companions: Vec<(String, RowUuid)>,
 }
 
 /// Whether a read decodes its rows' projected cells.
@@ -2472,6 +2476,8 @@ impl Db {
                     salt[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
                     salt
                 },
+                #[cfg(feature = "e2ee-client")]
+                tx_companions: Vec::new(),
             })),
         };
         {
@@ -4084,7 +4090,9 @@ impl Db {
                 "a write as another identity while a transaction is open",
             ));
         }
-        self.with_upload(|| {
+        #[cfg(feature = "e2ee-client")]
+        let mut companions: Vec<(String, RowUuid)> = Vec::new();
+        let written = self.with_upload(|| {
             let table = op.table().to_owned();
             let (prior, mark) = {
                 let inner = self.inner();
@@ -4099,6 +4107,15 @@ impl Db {
                 #[cfg(feature = "e2ee-client")]
                 {
                     ops = inner.seal_op(&mut op, None, streamed)?;
+                    companions = ops
+                        .iter()
+                        .filter_map(|companion| match companion {
+                            StagedOp::Insert(table, _, opts) => {
+                                opts.row_id.map(|row| (table.clone(), row))
+                            }
+                            _ => None,
+                        })
+                        .collect();
                     for companion in &mut ops {
                         inner.apply_authored(companion, who, seq)?;
                     }
@@ -4126,7 +4143,32 @@ impl Db {
                 self.notify();
             }
             Ok(handle)
-        })
+        });
+        #[cfg(feature = "e2ee-client")]
+        if !companions.is_empty() {
+            self.settle_companions(companions, written.is_ok());
+        }
+        written
+    }
+
+    /// Settles the companion rows a direct write's sealing produced: a
+    /// write that failed dropped them; one inside a callback transaction
+    /// keeps them until the transaction commits or rolls back.
+    #[cfg(feature = "e2ee-client")]
+    fn settle_companions(&self, companions: Vec<(String, RowUuid)>, written: bool) {
+        let hooks = {
+            let mut inner = self.inner.borrow_mut();
+            if written {
+                if inner.tx.is_some() {
+                    inner.tx_companions.extend(companions);
+                }
+                return;
+            }
+            inner.e2ee.clone()
+        };
+        if let Some(hooks) = hooks {
+            hooks.companions_dropped(&companions);
+        }
     }
 
     /// On a replica, a local commit and its upload record are one SQLite
@@ -4272,6 +4314,8 @@ impl Db {
             let seq = inner.fresh_seq();
             inner.tx = Some((seq, BTreeSet::new()));
             inner.tx_identity = Some(identity);
+            #[cfg(feature = "e2ee-client")]
+            inner.tx_companions.clear();
         }
         // Until the unit commits or is rolled back below, dropping this
         // future (cancellation) or unwinding out of the callback rolls it
@@ -4325,6 +4369,8 @@ impl Db {
         }
         end_savepoint(&self.inner.borrow().conn, "tx", true)?;
         guard.armed = false;
+        #[cfg(feature = "e2ee-client")]
+        self.inner.borrow_mut().tx_companions.clear();
         self.notify();
         Ok((value, TxReceipt(seq)))
     }
@@ -5270,6 +5316,15 @@ impl Inner {
     fn roll_back_callback_tx(&mut self, restore_seq: Option<u64>) -> Result<(), Error> {
         self.tx = None;
         self.tx_identity = None;
+        // The hooks never call the database: they may hear it while it is
+        // busy.
+        #[cfg(feature = "e2ee-client")]
+        {
+            let dropped = std::mem::take(&mut self.tx_companions);
+            if let (false, Some(hooks)) = (dropped.is_empty(), &self.e2ee) {
+                hooks.companions_dropped(&dropped);
+            }
+        }
         self.capture.clear();
         self.writer = None;
         self.clear_derived();
@@ -10704,6 +10759,10 @@ struct Batch {
     /// (another handle acting for the same user may have registered
     /// others meanwhile).
     claims: Option<BTreeMap<String, Value>>,
+    /// The companion rows its sealed writes staged, told to the encryption
+    /// hooks if the batch goes without committing them.
+    #[cfg(feature = "e2ee-client")]
+    companions: e2ee_write::StagedCompanions,
 }
 
 /// Per-batch identity and admission order; an old future never observes a reused ID.
@@ -11324,6 +11383,8 @@ impl Db {
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
                 claims: None,
+                #[cfg(feature = "e2ee-client")]
+                companions: Default::default(),
             },
         );
         Ok(())
@@ -11587,7 +11648,10 @@ impl Db {
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         crate::db::large_ops::renew_upload_leases(&self.inner(), &batch.uploads)?;
-        self.with_upload(|| self.commit_ops_now(batch, kind))
+        let receipt = self.with_upload(|| self.commit_ops_now(batch, kind))?;
+        #[cfg(feature = "e2ee-client")]
+        batch.companions.committed();
+        Ok(receipt)
     }
 
     /// A transaction handle's commit while a callback transaction is open
