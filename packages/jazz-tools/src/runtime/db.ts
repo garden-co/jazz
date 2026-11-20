@@ -140,6 +140,7 @@ import {
 } from "./connection-manager/index.js";
 import { toError } from "./util.js";
 import {
+  hasLocalFirstUpgrader,
   isThinDb,
   localFirstLoaderOf,
   upgradeDbToLocalFirst,
@@ -149,6 +150,8 @@ import { EncryptionNeedsLocalFirstError } from "./encryption-needs-local-first.j
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
 import { notDeclaredEncryption, type Encryption } from "../encryption/index.js";
+import { pendingEncryption } from "../encryption/pending-handle.js";
+import { resolveSchemaSource } from "../schema-source.js";
 import { declaredEntries, plainSchema } from "../encryption/plain-schema.js";
 import type { BrowserEncryptionConfig } from "../encryption/browser-host.js";
 
@@ -2499,7 +2502,59 @@ export class Db {
     // A thin Db that upgraded is a handle on its local-first successor, which holds the runtime.
     const live = this.current();
     if (live !== this) return live.encryption;
-    return this.runtimeSource?.encryptionHandle() ?? notDeclaredEncryption();
+    const real = this.runtimeSource?.encryptionHandle();
+    if (real) return real;
+    return this.thinEncryption() ?? notDeclaredEncryption();
+  }
+
+  private pendingEncryption: Encryption | undefined;
+
+  /**
+   * A thin `Db` of an app that declares encryption has no handle of its own:
+   * this one waits for the local-first client like any operation, then calls
+   * the real one. Taken once, so a stored handle is the one in use later.
+   */
+  private thinEncryption(): Encryption | undefined {
+    if (this.pendingEncryption) return this.pendingEncryption;
+    const app = this.config.encryption?.app;
+    if (!app || !isThinDb(this)) return undefined;
+    const declared = declaredEntries(resolveSchemaSource(app));
+    const table = Object.keys(declared ?? {}).find(
+      (name) => Object.keys(declared![name]!.columns).length > 0,
+    );
+    if (table === undefined) return undefined;
+    const refusal = (operation: string, reason: "no-loader" | "direct-thin") =>
+      new EncryptionNeedsLocalFirstError({ reason, operation, table });
+    const upgradable = () => hasLocalFirstUpgrader(this);
+    return (this.pendingEncryption = pendingEncryption({
+      resolve: async () => {
+        const live = this.current();
+        if (live !== this) return live.encryption;
+        const refused = refusal("encryption", upgradable() ? "no-loader" : "direct-thin");
+        // Without a loader this throws the refusal; without an upgrader it is the direct-thin advice.
+        return (await this.awaitLocalFirst(refused)).encryption;
+      },
+      refuseSync: (operation) => {
+        const refused = refusal(operation, upgradable() ? "no-loader" : "direct-thin");
+        const loader = localFirstLoaderOf(this);
+        if (!loader) return refused;
+        // Start the load so that a second try, or `await db.encryption.ready()`, finds it done.
+        void upgradeDbToLocalFirst(this, loader).catch(() => {});
+        return new EncryptionNeedsLocalFirstError(
+          { reason: "load-failed", operation, table },
+          {
+            cause: new Error(
+              `${operation}() is synchronous and cannot wait: await db.encryption.ready() first`,
+            ),
+          },
+        );
+      },
+      onAttachFailed: (error) =>
+        console.warn(
+          "An encryption listener could not attach: the local-first client failed.",
+          error,
+        ),
+    }));
   }
 
   /**

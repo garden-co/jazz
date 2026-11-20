@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { acceptDeviceAccounts, createJazz, sqlite } from "../backend/index.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { memoryPrivateStore, type PrivateStore } from "../encryption/index.js";
+import {
+  EncryptionNotDeclaredError,
+  memoryPrivateStore,
+  type PrivateStore,
+} from "../encryption/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { Db } from "../runtime/db.js";
 import { DbClosedError } from "../runtime/graceful-shutdown-error.js";
@@ -783,4 +787,111 @@ describe("a thin session of an app with encrypted columns", () => {
     expect((await result).error).toBe(refused);
     expect(runs).toBe(2);
   }, 60_000);
+
+  describe("db.encryption while thin", () => {
+    it("a handle taken while thin answers after the upgrade", async () => {
+      const host = await serve();
+      const { session, kept, gate } = await thinMember(host);
+      const handle = kept.encryption;
+      const stored = handle.deviceId();
+      const listed = handle.devices.list();
+      await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
+      gate.release();
+
+      const id = await stored;
+      expect(id).toEqual(expect.any(String));
+      expect((await listed).some((device) => device.id === id && device.isThisDevice)).toBe(true);
+      expect(isThinDb(kept)).toBe(false);
+      // The handle taken while thin is still good, and so is the one now.
+      await expect(handle.deviceId()).resolves.toBe(id);
+      await expect(db(session).encryption.deviceId()).resolves.toBe(id);
+    }, 90_000);
+
+    it("ready() starts the upgrade", async () => {
+      const host = await serve();
+      const { device } = await member(host);
+      pageStillLoading();
+      const gate = gatedLoader();
+      const session = await open(host, device, gate.loader);
+      const kept = db(session);
+      expect(gate.calls).toBe(0);
+
+      const ready = kept.encryption.ready({ timeoutMs: 20_000 });
+      await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
+      gate.release();
+      await expect(ready).resolves.toBe("active");
+      expect(isThinDb(kept)).toBe(false);
+    }, 90_000);
+
+    it("attaches listeners after the upgrade, and stops one that never attached", async () => {
+      const host = await serve();
+      const { kept, gate } = await thinMember(host);
+      const unreadable: unknown[] = [];
+      const stop = kept.encryption.onUnreadable((report) => unreadable.push(report));
+      const never = kept.encryption.onChallenge(() => {});
+      never();
+      // A listener starts the load, as a call does.
+      await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
+      gate.release();
+      await expect.poll(() => isThinDb(kept), { timeout: 20_000 }).toBe(false);
+      // A listener taken while thin is the real one's now: it attached.
+      const real = kept.encryption as unknown as { listeners: Set<unknown> };
+      await expect.poll(() => real.listeners.size, { timeout: 10_000 }).toBe(1);
+      stop();
+      expect(real.listeners.size).toBe(0);
+    }, 90_000);
+
+    it("refuses the synchronous recovery.create() and starts the load", async () => {
+      const host = await serve();
+      const gate = gatedLoader();
+      const session = await open(host, undefined, gate.loader);
+      const kept = db(session);
+
+      let thrown: unknown;
+      try {
+        kept.encryption.recovery.create();
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+      await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
+    }, 60_000);
+
+    it("refuses without a loader, like any operation", async () => {
+      const host = await serve();
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const session = await open(host);
+      const kept = db(session);
+
+      const { error } = await settled(kept.encryption.deviceId());
+      expect(error).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+      expect((error as EncryptionNeedsLocalFirstError).reason).toBe("no-loader");
+      expect(() => kept.encryption.recovery.create()).toThrow(EncryptionNeedsLocalFirstError);
+    }, 60_000);
+
+    it("ends a waiting call at sign-out", async () => {
+      const host = await serve();
+      const gate = gatedLoader();
+      const session = await open(host, undefined, gate.loader);
+      const waiting = settled(db(session).encryption.deviceId());
+      await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
+      await session.logout();
+      expect((await waiting).error).toBeInstanceOf(DbClosedError);
+    }, 60_000);
+
+    it("an app that declares no encryption still gets EncryptionNotDeclaredError", async () => {
+      const host = await serve();
+      const session = await openBrowserSessionCore({
+        scope: host.jazz.appId,
+        serverUrl: host.serverUrl,
+        store: memoryStore(),
+        initial: "device",
+        driver: { type: "memory" },
+      });
+      cleanups.push(() => session.close());
+      const kept = db(session);
+      expect(isThinDb(kept)).toBe(true);
+      expect(() => kept.encryption.devices).toThrow(EncryptionNotDeclaredError);
+    }, 60_000);
+  });
 });
