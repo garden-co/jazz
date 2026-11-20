@@ -41,7 +41,6 @@ catalogs:
 allowBuilds:
   "@swc/core": true
   esbuild: true
-  lefthook: true
   protobufjs: true
   sharp: true
   workerd: true

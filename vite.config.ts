@@ -18,6 +18,15 @@ const sharedIgnores = [
 ];
 
 export default defineConfig({
+  staged: {
+    "*.rs": () => "cargo fmt",
+    "{*.rs,Cargo.toml}": () => "cargo clippy --workspace -- -D warnings",
+    "*.{ts,tsx,js,jsx,mjs,cjs,md,mdx,json,html}":
+      "vp fmt --no-error-on-unmatched-pattern !crates/jazz-rn/react-native.config.js",
+    "*.{ts,tsx,js,jsx}": "vp lint --fix --no-error-on-unmatched-pattern",
+    "examples/docs/**": () => "pnpm turbo run build --filter=./examples/docs/* --only",
+    "docs/**": () => "pnpm --filter docs types:check",
+  },
   lint: {
     rules: {
       // Autofixing these spreads changes typed-array map results and Set iteration.

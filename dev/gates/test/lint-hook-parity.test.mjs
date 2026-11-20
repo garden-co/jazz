@@ -4,13 +4,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { parse } from "yaml";
+import config from "../../../vite.config.ts";
 
 // The pre-commit hook must not disagree with CI's lint partition (`pnpm lint`):
 // a commit the hook accepts should not fail CI's lint, and the hook should not
 // block or rewrite code that CI accepts.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const hooks = parse(readFileSync(path.join(root, "lefthook.yml"), "utf8"))["pre-commit"].commands;
+const hooks = config.staged;
 const scripts = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).scripts;
 
 test("the clippy hook runs CI's exact Rust lint command", () => {
@@ -18,16 +18,12 @@ test("the clippy hook runs CI's exact Rust lint command", () => {
   // compiles a different crate than `--workspace` does. Only the identical
   // command gives identical results.
   assert.match(scripts.lint, /(^|&& )pnpm lint:rust$/);
-  assert.equal(hooks.clippy.run, scripts["lint:rust"]);
+  assert.equal(hooks["{*.rs,Cargo.toml}"](), scripts["lint:rust"]);
 });
 
 test("the oxlint hook uses CI's root config and no ignore list of its own", () => {
   assert.match(scripts.lint, /^vp lint \. /);
-  assert.match(
-    hooks.oxlint.run,
-    /^pnpm exec vp lint --fix --no-error-on-unmatched-pattern \{staged_files\}$/,
-  );
-  assert.equal(hooks.oxlint.exclude, undefined);
+  assert.equal(hooks["*.{ts,tsx,js,jsx}"], "vp lint --fix --no-error-on-unmatched-pattern");
 });
 
 test("oxlint skips explicitly passed files covered by the root config", () => {

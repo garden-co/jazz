@@ -29,11 +29,10 @@
     "release:publish:alpha": "changeset publish --tag alpha",
     "test": "turbo run test --only",
     "bench:realistic:profile-browser": "node dev/benchmarks/realistic/profile_browser.mjs",
-    "postinstall": "lefthook install"
+    "postinstall": "vp config --hooks --no-agent"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.8",
-    "lefthook": "^2.0.15",
     "next": "catalog:default",
     "pkg-pr-new": "^0.0.75",
     "playwright": "^1.58.2",
@@ -44,7 +43,7 @@
     "yaml": "2.8.2"
   },
   "engines": {
-    "node": "^22.18.0 || ^24.11.0 || >=26.0.0"
+    "node": "^22.22.1 || ^24.11.0 || >=26.0.0"
   },
   "packageManager": "pnpm@10.14.0"
 }

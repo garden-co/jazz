@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
-// The pre-commit hook runs `vp lint --fix` on staged files (lefthook.yml). These
+// The pre-commit hook runs `vp lint --fix` on staged files (vite.config.ts). These
 // spreads look redundant to a type-unaware rule but change behaviour if removed.
 const fixture = `export function hex(digest: Uint8Array): string {
   return [...digest.slice(0, 16)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
