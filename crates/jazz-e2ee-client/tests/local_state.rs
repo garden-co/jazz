@@ -69,7 +69,7 @@ fn the_device_is_generated_once_and_stored_only_protected() {
     };
     let first = open_client(store(0x5a));
     let (id, sealing, signing, nonce) = {
-        let device = first.device();
+        let device = first.device().unwrap();
         (
             device.id.clone(),
             device.sealing.secret.as_bytes().to_vec(),
@@ -79,9 +79,9 @@ fn the_device_is_generated_once_and_stored_only_protected() {
     };
     drop(first);
     let again = open_client(store(0x5a));
-    assert_eq!(again.device().id, id);
-    assert_eq!(again.device().signing.secret.as_bytes(), signing);
-    assert!(again.device().approval_nonce.is_some());
+    assert_eq!(again.device().unwrap().id, id);
+    assert_eq!(again.device().unwrap().signing.secret.as_bytes(), signing);
+    assert!(again.device().unwrap().approval_nonce.is_some());
 
     let files = documents(&inner);
     assert_eq!(files.len(), 1, "one device document");
@@ -180,7 +180,7 @@ fn a_damaged_held_key_record_is_skipped_and_reported() {
     let client = open_client(Rc::new(store.clone()));
     let (db, _link, _) = online(&client, &server, None);
     let (damaged, intact) = (project(&db, "damaged"), project(&db, "intact"));
-    let damaged_records = new_root(&client.device(), &address(&db, damaged));
+    let damaged_records = new_root(&client.device().unwrap(), &address(&db, damaged));
     let damaged_root = damaged_records.root.id.clone();
     block_on(client.keep(common::held(&damaged_records))).unwrap();
     hold_new_space(&client, &db, intact);
@@ -235,8 +235,8 @@ fn floor(through: u64, generation: u64, keys: KeyColumns) -> AccountFloor {
 }
 
 /// Contract: a floor survives a restart and only moves forward: a floor of
-/// an earlier cut or a lower generation is `stale-state` and changes
-/// nothing; a floor record that fails its signature check is skipped and
+/// an earlier cut, a lower generation or an earlier epoch position is
+/// `stale-state` and changes nothing; a floor record that fails its signature check is skipped and
 /// reported, never used.
 #[test]
 fn floors_only_move_forward_and_survive_a_restart() {
@@ -244,7 +244,7 @@ fn floors_only_move_forward_and_survive_a_restart() {
     let store = MemoryStore::new();
     let client = open_client(Rc::new(store.clone()));
     let keys = {
-        let device = client.device();
+        let device = client.device().unwrap();
         KeyColumns::new(&device.sealing.public, &device.signing.public)
     };
     block_on(client.advance_floor(BOB, &floor(5, 0, keys.clone()))).unwrap();
@@ -257,6 +257,15 @@ fn floors_only_move_forward_and_survive_a_restart() {
     let lower = block_on(client.advance_floor(BOB, &floor(10, 0, keys.clone())));
     assert!(matches!(
         lower,
+        Err(ClientError::Protocol(ProtocolError::StaleState))
+    ));
+    let earlier_epoch = AccountFloor {
+        epoch_position: Position(1),
+        ..floor(10, 1, keys.clone())
+    };
+    let earlier_epoch = block_on(client.advance_floor(BOB, &earlier_epoch));
+    assert!(matches!(
+        earlier_epoch,
         Err(ClientError::Protocol(ProtocolError::StaleState))
     ));
     drop(client);
@@ -287,9 +296,10 @@ fn floors_only_move_forward_and_survive_a_restart() {
 }
 
 /// Contract: a wipe removes alice's device, held keys and floors from the
-/// store and closes the runtime: a later keep, floor or encrypted write
-/// fails and writes nothing, so the store is never recreated; the next
-/// runtime starts as a new device.
+/// store and closes the runtime: the device's secrets leave memory too
+/// (`device()` fails), a later keep, floor or encrypted write fails and
+/// writes nothing, so the store is never recreated; the next runtime
+/// starts as a new device.
 #[test]
 fn a_wipe_removes_everything_and_nothing_recreates_it() {
     let server = authority();
@@ -299,15 +309,17 @@ fn a_wipe_removes_everything_and_nothing_recreates_it() {
     let space = project(&db, "plans");
     hold_new_space(&client, &db, space);
     let keys = {
-        let device = client.device();
+        let device = client.device().unwrap();
         KeyColumns::new(&device.sealing.public, &device.signing.public)
     };
     block_on(client.advance_floor(ALICE, &floor(3, 0, keys.clone()))).unwrap();
-    let old_device = client.device().id.clone();
+    let old_device = client.device().unwrap().id.clone();
+    let late = new_space_key(&client.device().unwrap(), &address(&db, space));
 
     block_on(client.wipe()).unwrap();
     assert!(store.scopes().is_empty());
-    let late = new_space_key(&client.device(), &address(&db, space));
+    // The device's secrets and approval nonce are dropped with the store.
+    assert!(matches!(client.device(), Err(ClientError::Closed)));
     assert!(matches!(
         block_on(client.keep(late)),
         Err(ClientError::Closed)
@@ -325,7 +337,7 @@ fn a_wipe_removes_everything_and_nothing_recreates_it() {
     );
 
     let fresh = open_client(Rc::new(store));
-    assert_ne!(fresh.device().id, old_device);
+    assert_ne!(fresh.device().unwrap().id, old_device);
 }
 
 /// Contract: two runtimes on one store (two tabs) that keep keys of the
@@ -340,7 +352,7 @@ fn two_writers_of_one_document_merge() {
     let (db, _link, _) = online(&first, &server, None);
     let space = project(&db, "plans");
     let address = address(&db, space);
-    let root = new_root(&first.device(), &address);
+    let root = new_root(&first.device().unwrap(), &address);
     let (held, twin) = (common::held(&root), common::held(&root));
     let root = root.root.id.clone();
     block_on(first.keep(held)).unwrap();
@@ -404,7 +416,7 @@ fn a_key_whose_save_fails_is_not_usable() {
     let client = open_client(Rc::new(store.clone()));
     let (db, _link, _) = online(&client, &server, None);
     let space = project(&db, "plans");
-    let held = new_space_key(&client.device(), &address(&db, space));
+    let held = new_space_key(&client.device().unwrap(), &address(&db, space));
     store.failing.set(true);
     assert!(matches!(
         block_on(client.keep(held)),
@@ -431,7 +443,10 @@ fn a_wipe_during_a_keep_closes_it() {
     let store = FaultyStore::default();
     let client = open_client(Rc::new(store.clone()));
     let (db, _link, _) = online(&client, &server, None);
-    let held = new_space_key(&client.device(), &address(&db, project(&db, "plans")));
+    let held = new_space_key(
+        &client.device().unwrap(),
+        &address(&db, project(&db, "plans")),
+    );
     store.contended.set(true);
     let (kept, wiped) = block_on(async { futures::join!(client.keep(held), client.wipe()) });
     assert!(matches!(kept, Err(ClientError::Closed)), "{kept:?}");
@@ -471,7 +486,8 @@ fn a_device_whose_keys_do_not_match_fails_to_open() {
 
 /// Contract: when one tab wipes alice's private state, another tab's
 /// runtime that opened it earlier never recreates it: its next keep or
-/// floor fails with the runtime closed, and the store stays wiped.
+/// floor fails with the runtime closed, its device's secrets are dropped,
+/// and the store stays wiped.
 ///
 /// ```text
 /// tab 1 ──open──┐            tab 2 ──open──┐
@@ -484,9 +500,12 @@ fn another_runtime_never_recreates_a_wiped_store() {
     let first = open_client(Rc::new(store.clone()));
     let second = open_client(Rc::new(store.clone()));
     let (db, _link, _) = online(&first, &server, None);
-    let held = new_space_key(&second.device(), &address(&db, project(&db, "plans")));
+    let held = new_space_key(
+        &second.device().unwrap(),
+        &address(&db, project(&db, "plans")),
+    );
     let keys = {
-        let device = second.device();
+        let device = second.device().unwrap();
         KeyColumns::new(&device.sealing.public, &device.signing.public)
     };
     block_on(first.wipe()).unwrap();
@@ -499,6 +518,8 @@ fn another_runtime_never_recreates_a_wiped_store() {
         Err(ClientError::Closed)
     ));
     assert!(store.scopes().is_empty(), "the wiped store was recreated");
+    // Finding the store wiped dropped its device's secrets as well.
+    assert!(matches!(second.device(), Err(ClientError::Closed)));
 }
 
 /// Contract: a floor record of a format this runtime does not read is
@@ -510,7 +531,7 @@ fn an_unknown_floor_format_is_never_overwritten() {
     let store = MemoryStore::new();
     let client = open_client(Rc::new(store.clone()));
     let keys = {
-        let device = client.device();
+        let device = client.device().unwrap();
         KeyColumns::new(&device.sealing.public, &device.signing.public)
     };
     drop(client);
@@ -539,13 +560,13 @@ fn an_unknown_floor_format_is_never_overwritten() {
 fn opening_during_a_wipe_starts_afresh() {
     let store = FaultyStore::default();
     let before = open_client(Rc::new(store.clone()));
-    let old_device = before.device().id.clone();
+    let old_device = before.device().unwrap().id.clone();
     drop(before);
     block_on(store.inner.delete(&scope())).unwrap();
     store.wiped_first.set(true);
     let fresh = open_client(Rc::new(store.clone()));
-    assert_ne!(fresh.device().id, old_device);
+    assert_ne!(fresh.device().unwrap().id, old_device);
     assert_eq!(store.inner.scopes(), [scope()]);
     let reopened = open_client(Rc::new(store));
-    assert_eq!(reopened.device().id, fresh.device().id);
+    assert_eq!(reopened.device().unwrap().id, fresh.device().unwrap().id);
 }

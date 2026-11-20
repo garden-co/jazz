@@ -366,7 +366,7 @@ fn a_device_left_out_of_a_reset_enrols_again() {
     pump(&server, &first_db);
     assert!(watch.changed(), "the rows already there");
     assert!(!watch.changed());
-    let old_device = first.device().id.clone();
+    let old_device = first.device().unwrap().id.clone();
 
     let second = open_account(Rc::new(MemoryStore::new()), alice, settings.clone(), None);
     let (second_db, _second_link) = session(&second, &server, alice, &settings, 2, None);
@@ -389,7 +389,7 @@ fn a_device_left_out_of_a_reset_enrols_again() {
         drive(&server, &[&first_db], first.ensure_account(&first_db)).unwrap(),
         AccountStatus::Reenrolled
     );
-    assert_ne!(first.device().id, old_device);
+    assert_ne!(first.device().unwrap().id, old_device);
     assert!(first.with_held(|held| held.space(&root_id).is_none()));
     assert!(first.with_account(|_| ()).is_none());
     assert_eq!(
@@ -446,8 +446,10 @@ fn a_failed_reenrolment_closes_the_runtime() {
     first_store.failing.set(false);
     let closed = drive(&server, &[&first_db], first.ensure_account(&first_db));
     assert!(matches!(closed, Err(ClientError::Closed)), "{closed:?}");
+    // Its device's secrets are dropped with the store (§6.4).
+    assert!(matches!(first.device(), Err(ClientError::Closed)));
     let space = project(&first_db, "plans");
-    let held = new_space_key(&first.device(), &address(&first_db, space));
+    let held = new_space_key(&second.device().unwrap(), &address(&first_db, space));
     assert!(matches!(
         block_on(first.keep(held)),
         Err(ClientError::Closed)

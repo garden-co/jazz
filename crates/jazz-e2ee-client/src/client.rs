@@ -216,7 +216,7 @@ impl E2eeClient {
             domain,
             account_id,
             plans,
-            device: device.into(),
+            device: Some(device).into(),
             keys: KeyState {
                 online: true,
                 ..KeyState::default()
@@ -369,7 +369,7 @@ impl E2eeClient {
             return Ok(None);
         };
         let loaded = {
-            let device = self.shared.device.borrow();
+            let device = self.shared.device()?;
             Self::owner_of(&self.shared, &device).load(&decoded)?
         };
         for rejected in &loaded.rejected {
@@ -413,7 +413,7 @@ impl E2eeClient {
         };
         let floor = match FloorRecord::decode(&stored.bytes) {
             Ok(record) => {
-                let device = self.shared.device.borrow();
+                let device = self.shared.device()?;
                 match Self::owner_of(&self.shared, &device).load_floor(account_id, &record)? {
                     Ok(floor) => Some(floor),
                     Err(reason) => {
@@ -425,6 +425,15 @@ impl E2eeClient {
             // A record of this format that does not decode is damaged and
             // may be replaced; anything else is of a format this runtime
             // does not read, refused and never overwritten (§6.1).
+            //
+            // Replacing it does not fail open. A floor guards against an
+            // older account state, not against whoever can write this
+            // store: that writer could as well delete the record, and a
+            // damaged one carries no state this device signed, so it is
+            // treated as absent (§6.3a: skipped and reported, protection
+            // restarting at the next verified state, §8). Refusing to
+            // advance instead would block the account's floor for good,
+            // until a wipe.
             Err(_) if floor_format(&stored.bytes).as_deref() == Some(FLOOR_FORMAT) => {
                 self.skipped(name, "a floor record that does not decode");
                 None
@@ -475,9 +484,11 @@ impl E2eeClient {
         self.shared.keys.borrow_mut().online = online;
     }
 
-    /// This device: its ID and key pairs.
-    pub fn device(&self) -> std::cell::Ref<'_, LocalDevice> {
-        self.shared.device.borrow()
+    /// This device: its ID and key pairs. [`ClientError::Closed`] once the
+    /// store was wiped, here or by another writer: the device's secrets
+    /// are dropped then.
+    pub fn device(&self) -> Result<std::cell::Ref<'_, LocalDevice>, ClientError> {
+        self.shared.device()
     }
 
     /// The account this runtime is for.
@@ -497,11 +508,10 @@ impl E2eeClient {
     }
 
     /// Closes the runtime after finding its scope wiped by another writer:
-    /// the held keys are dropped and nothing more is written.
+    /// the device's secrets and the held keys are dropped and nothing more
+    /// is written.
     fn close(&self) -> ClientError {
-        let mut keys = self.shared.keys.borrow_mut();
-        keys.closed = true;
-        keys.held = Default::default();
+        self.shared.forget_secrets();
         ClientError::Closed
     }
 
@@ -551,7 +561,7 @@ impl E2eeClient {
             self.ensure_open()?;
             let state = documents.held.entry(root_id.clone()).or_default();
             let bytes = {
-                let device = self.shared.device.borrow();
+                let device = self.shared.device()?;
                 Self::owner_of(&self.shared, &device)
                     .seal_document(
                         &staged,
@@ -613,10 +623,10 @@ impl E2eeClient {
     }
 
     /// Stores `floor` as `account_id`'s floor, signed by the device. A floor
-    /// only moves forward: one of an earlier cut or a lower generation than
-    /// the stored floor is `stale-state`, and nothing is written. The
-    /// caller has checked the newer state against the stored floor first
-    /// (`AccountState::check_floor`).
+    /// only moves forward: one of an earlier cut, a lower generation or an
+    /// earlier epoch position than the stored floor is `stale-state`, and
+    /// nothing is written. The caller has checked the newer state against
+    /// the stored floor first (`AccountState::check_floor`).
     pub async fn advance_floor(
         &self,
         account_id: &str,
@@ -633,13 +643,18 @@ impl E2eeClient {
                 Some((current, revision)) => (current.as_ref(), Some(*revision)),
                 None => (None, None),
             };
+            // Every field that orders states moves forward: the cut, the
+            // generation and the current epoch's position (§6.3a). A later
+            // generation's epochs follow the earlier one's on the ledger.
             if current.is_some_and(|current| {
-                floor.through < current.through || floor.generation < current.generation
+                floor.through < current.through
+                    || floor.generation < current.generation
+                    || floor.epoch_position < current.epoch_position
             }) {
                 return Err(ProtocolError::StaleState.into());
             }
             let bytes = {
-                let device = self.shared.device.borrow();
+                let device = self.shared.device()?;
                 Self::owner_of(&self.shared, &device)
                     .seal_floor(account_id, floor)?
                     .encode()?
@@ -708,21 +723,20 @@ impl E2eeClient {
             }
         };
         self.incarnation.set(incarnation);
-        *self.shared.device.borrow_mut() = device;
+        *self.shared.device.borrow_mut() = Some(device);
         Ok(())
     }
 
     /// Wipes this account's private state from the store: the device, every
     /// held key and every floor (§6.4). The runtime is closed first, so no
     /// write still in flight or made later recreates the store; it waits
-    /// for writes in flight, then deletes. A failed deletion is returned:
-    /// the wipe is unfinished, and the runtime stays closed.
+    /// for writes in flight, then deletes. Closing drops the device's
+    /// secrets, its approval nonce and the held keys from memory (each
+    /// zeroed on drop), and [`E2eeClient::device`] fails from then on. A
+    /// failed deletion is returned: the wipe is unfinished, and the runtime
+    /// stays closed.
     pub async fn wipe(&self) -> Result<(), ClientError> {
-        {
-            let mut keys = self.shared.keys.borrow_mut();
-            keys.closed = true;
-            keys.held = Default::default();
-        }
+        self.shared.forget_secrets();
         let mut documents = self.documents.lock().await;
         *documents = Documents::default();
         self.store.delete(&self.scope).await?;
