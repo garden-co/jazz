@@ -1,7 +1,8 @@
 import { afterEach, expect, it } from "vitest";
 import { createJazzClient } from "../../src/session/create-jazz-session.js";
 import { createDb as createLocalFirstDb } from "../../src/runtime/default-create-db.js";
-import { isThinDb } from "../../src/runtime/local-first-upgrade.js";
+import { EncryptionNeedsLocalFirstError } from "../../src/runtime/encryption-needs-local-first.js";
+import { isThinDb, type LocalFirstLoader } from "../../src/runtime/local-first-upgrade.js";
 import { uniqueDbName, waitForCondition } from "./support.js";
 import {
   deploy,
@@ -108,7 +109,9 @@ it("encrypts in a real browser: a device's keys in the browser's own store, a ta
     db.insert(app.tasks, { projectId: id, title: "a secret title" }).wait({ tier: "global" }),
   );
   const read = async (client: typeof db) =>
-    await client.all(app.tasks.where({ projectId: id }), { tier: "local-first" });
+    await client.all(app.tasks.where({ projectId: id }), {
+      tier: "local-first",
+    });
   expect((await step("read", read(db))).map((row) => row.title)).toEqual(["a secret title"]);
 
   // The device's keys are in the browser's store, protected by a key that
@@ -129,3 +132,164 @@ it("encrypts in a real browser: a device's keys in the browser's own store, a ta
     "The reloaded device should read its encrypted row",
   );
 }, 240_000);
+
+/** A thin page load: no wait for the upgrade; `client` loads the local-first client, if given. */
+async function loadThin(
+  server: { url: string; appId: string },
+  dbName: string,
+  client?: LocalFirstLoader,
+) {
+  const session = await createJazzClient({
+    scope: server.appId,
+    serverUrl: server.url,
+    driver: { type: "persistent", dbName },
+    fetch: jazzAppFetch,
+    initial: "device",
+    ...(client ? { client } : {}),
+    encryption: { app },
+  } as never);
+  cleanups.push(() => session.close());
+  return session;
+}
+
+/** Every byte the page sends on a WebSocket or in a fetch body from now on. */
+function recordWire() {
+  const sent: Uint8Array[] = [];
+  const encoder = new TextEncoder();
+  const keep = (data: unknown) => {
+    if (typeof data === "string") sent.push(encoder.encode(data));
+    else if (data instanceof ArrayBuffer) sent.push(new Uint8Array(data));
+    else if (ArrayBuffer.isView(data))
+      sent.push(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+  };
+  const send = WebSocket.prototype.send;
+  WebSocket.prototype.send = function (data) {
+    keep(data);
+    return send.call(this, data);
+  };
+  const pageFetch = globalThis.fetch;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    keep(init?.body);
+    return pageFetch(input, init);
+  }) as typeof fetch;
+  cleanups.push(async () => {
+    WebSocket.prototype.send = send;
+    globalThis.fetch = pageFetch;
+  });
+  const holds = (needle: string) => {
+    const bytes = encoder.encode(needle);
+    return sent.some((frame) => {
+      outer: for (let at = 0; at + bytes.length <= frame.length; at++) {
+        for (let i = 0; i < bytes.length; i++) if (frame[at + i] !== bytes[i]) continue outer;
+        return true;
+      }
+      return false;
+    });
+  };
+  return { holds, frames: () => sent.length };
+}
+
+it("a thin load with a loader writes and subscribes to an encrypted table before the upgrade; both complete after it, a plain read answers at once, and the wire holds no plaintext", async () => {
+  const server = await serverAt("encryption-thin");
+  const dbName = uniqueDbName("encryption-thin-db");
+
+  // An earlier visit, on the local-first client, makes the device a member of a project.
+  const first = await step("load", load(server, dbName), 40_000);
+  const firstDb = first.getSnapshot().client!.db;
+  expect(await step("ready", firstDb.encryption.ready({ timeoutMs: 40_000 }), 45_000)).toBe(
+    "active",
+  );
+  const account = first.getSnapshot().user!.accountId;
+  const project = crypto.randomUUID();
+  const self = await firstDb.encryption.members.row({ table: "projects", id: project }, account);
+  await step(
+    "project global",
+    (
+      await firstDb.transaction((tx) => {
+        tx.insert(app.projects, { name: "plans", ownerId: account }, { id: project });
+        tx.insert(membersTable, self as never);
+      })
+    ).wait({ tier: "global" }),
+  );
+  await step("close first", first.close());
+
+  // A device that already upgraded opens local-first at once; forget that, so
+  // this visit starts thin as a first visit does (the account's keys stay).
+  for (const key of Object.keys(localStorage))
+    if (key.startsWith("jazz-local-first-v1:")) localStorage.removeItem(key);
+
+  // The next visit starts thin; its loader answers only when released.
+  const wire = recordWire();
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const session = await step(
+    "thin load",
+    loadThin(server, dbName, async () => {
+      await released;
+      return { createClient: createLocalFirstDb };
+    }),
+  );
+  const thin = session.getSnapshot().client!.db;
+  expect(isThinDb(thin)).toBe(true);
+
+  const marker = `plaintext-${crypto.randomUUID()}`;
+  const written = thin.insert(app.tasks, {
+    projectId: project,
+    title: marker,
+  } as never);
+  const seen: string[][] = [];
+  const stop = thin.subscribe(app.tasks.where({ projectId: project }), (rows) =>
+    seen.push(rows.map((row) => row.title)),
+  );
+
+  // A plain read answers at once, while the encrypted work waits.
+  await step("plain read", thin.all(app.projects.where({ id: project }), { tier: "remote" }));
+  expect(isThinDb(thin)).toBe(true);
+  expect(seen).toEqual([]);
+
+  release();
+  await step("encrypted write", written.wait({ tier: "global" }));
+  await waitForCondition(
+    async () => seen.some((titles) => titles.includes(marker)),
+    30_000,
+    "The subscription should deliver the row after the upgrade",
+  );
+  stop();
+  expect(isThinDb(thin)).toBe(false);
+  expect(wire.frames()).toBeGreaterThan(0);
+  expect(wire.holds(marker)).toBe(false);
+}, 240_000);
+
+it("a thin load without a loader refuses an encrypted write with EncryptionNeedsLocalFirstError, and writes plain rows", async () => {
+  const server = await serverAt("encryption-thin-none");
+  const session = await loadThin(server, uniqueDbName("encryption-thin-none-db"));
+  const thin = session.getSnapshot().client!.db;
+  const account = session.getSnapshot().user!.accountId;
+
+  const refused = await Promise.resolve()
+    .then(() =>
+      thin.insert(app.tasks, {
+        projectId: crypto.randomUUID(),
+        title: "secret",
+      } as never),
+    )
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+  expect(refused).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+  expect((refused as EncryptionNeedsLocalFirstError).reason).toBe("no-loader");
+
+  const id = crypto.randomUUID();
+  await step(
+    "plain write",
+    thin
+      .insert(app.projects, { name: "plain", ownerId: account }, {
+        id,
+      } as never)
+      .wait({
+        tier: "global",
+      }),
+  );
+  expect(isThinDb(thin)).toBe(true);
+}, 120_000);
