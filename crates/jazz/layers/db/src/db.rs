@@ -1974,6 +1974,28 @@ impl Db {
         )
     }
 
+    /// Initialize the real store and publish its first catalogue atomically.
+    /// Failure leaves existing host and application tables unchanged; the
+    /// returned database is usable only after the outer scope commits.
+    pub fn open_file_with_catalogue(
+        config: DbConfig,
+        file: crate::host::StoreFile,
+        change: crate::catalogue::CatalogueChange,
+    ) -> Result<Self, Error> {
+        let crate::host::StoreFile { conn, path } = file;
+        let conn = Rc::new(conn);
+        conn.scope("jazz_initialize", |_| {
+            crate::format::admit(&conn)?;
+            let db = Self::open_initialized(
+                config,
+                conn.clone(),
+                path.as_ref().map(|(path, vfs)| (path.as_path(), *vfs)),
+            )?;
+            db.apply_catalogue_now(change)?;
+            Ok(db)
+        })
+    }
+
     /// Run `f` on the store's connection, outside any transaction handle's
     /// overlay (see [`crate::host`]).
     pub(crate) fn with_host_connection<T>(
@@ -4020,6 +4042,10 @@ impl Db {
         &self,
         change: crate::catalogue::CatalogueChange,
     ) -> Result<(), Error> {
+        self.apply_catalogue_now(change)
+    }
+
+    fn apply_catalogue_now(&self, change: crate::catalogue::CatalogueChange) -> Result<(), Error> {
         let saved = {
             let inner = self.inner();
             (

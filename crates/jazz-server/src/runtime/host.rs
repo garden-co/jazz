@@ -38,7 +38,8 @@ pub(super) struct Runtime {
 /// Open the runtime on the store.
 pub(super) struct Start {
     pub(super) runtime: Runtime,
-    pub(super) reply: std_mpsc::Sender<Result<(), String>>,
+    pub(super) initial: Option<CatalogueChange>,
+    pub(super) reply: std_mpsc::Sender<Result<(), CatalogueApplyError>>,
 }
 
 /// Sendable handle for the thread that owns one app's store file: its host
@@ -587,8 +588,30 @@ impl AppStore {
         any_stored_catalogue: bool,
         owns_store: bool,
     ) -> Result<ServerRuntimeHandle, String> {
+        self.start_with_catalogue(schema, role, any_stored_catalogue, owns_store, None)
+            .map_err(String::from)
+    }
+
+    pub(crate) fn start_deployment(
+        &self,
+        schema: JazzSchema,
+        change: CatalogueChange,
+    ) -> Result<ServerRuntimeHandle, CatalogueApplyError> {
+        self.start_with_catalogue(schema, NodeRole::Core, true, false, Some(change))
+    }
+
+    fn start_with_catalogue(
+        &self,
+        schema: JazzSchema,
+        role: NodeRole,
+        any_stored_catalogue: bool,
+        owns_store: bool,
+        initial: Option<CatalogueChange>,
+    ) -> Result<ServerRuntimeHandle, CatalogueApplyError> {
         if role == NodeRole::Relay {
-            return Err("relay nodes are not supported yet on SQLite".to_owned());
+            return Err("relay nodes are not supported yet on SQLite"
+                .to_owned()
+                .into());
         }
         let (reply, started) = std_mpsc::channel();
         self.send(Work::Start(Start {
@@ -596,6 +619,7 @@ impl AppStore {
                 schema,
                 any_stored_catalogue,
             },
+            initial,
             reply,
         }))?;
         started
@@ -859,8 +883,10 @@ impl StoreLoop {
             Work::Owner(job) => self.on_owner(job),
             Work::Start(start) => {
                 let started = match &self.state {
-                    State::Running(_) => Err("the server runtime is already running".to_owned()),
-                    State::Idle(_) => self.open_runtime(start.runtime),
+                    State::Running(_) => {
+                        Err("the server runtime is already running".to_owned().into())
+                    }
+                    State::Idle(_) => self.open_runtime(start.runtime, start.initial),
                 };
                 let _ = start.reply.send(started);
             }
@@ -876,15 +902,19 @@ impl StoreLoop {
     /// Open the runtime on the file. If it fails, the file is opened afresh
     /// for the host tables: the failed open consumed the connection, and the
     /// store (even an in-memory one) outlives it.
-    pub(super) fn open_runtime(&mut self, runtime: Runtime) -> Result<(), String> {
+    pub(super) fn open_runtime(
+        &mut self,
+        runtime: Runtime,
+        initial: Option<CatalogueChange>,
+    ) -> Result<(), CatalogueApplyError> {
         let file = match std::mem::replace(&mut self.state, State::Idle(Err(String::new()))) {
             State::Idle(file) => file,
             State::Running(owner) => {
                 self.state = State::Running(owner);
-                return Err("the server runtime is already running".to_owned());
+                return Err("the server runtime is already running".to_owned().into());
             }
         };
-        let opened = file.and_then(|file| {
+        let opened = file.map_err(CatalogueApplyError::from).and_then(|file| {
             catch_unwind(AssertUnwindSafe(|| {
                 Owner::open(
                     runtime.schema.clone(),
@@ -893,13 +923,11 @@ impl StoreLoop {
                     self.wake.clone(),
                     runtime.any_stored_catalogue,
                     self.app.lock().ok().and_then(|app| app.clone()),
+                    initial,
                 )
             }))
             .unwrap_or_else(|panic| {
-                Err(format!(
-                    "opening the runtime panicked: {}",
-                    panic_message(&*panic)
-                ))
+                Err(format!("opening the runtime panicked: {}", panic_message(&*panic)).into())
             })
         });
         match opened {
@@ -953,7 +981,7 @@ impl StoreLoop {
                     .is_none_or(|restarted| restarted.elapsed() >= RESTART_INTERVAL) =>
             {
                 self.restarted = Some(Instant::now());
-                self.open_runtime(runtime)
+                self.open_runtime(runtime, None).map_err(String::from)
             }
             _ => Err("it failed again within a minute of restarting".to_owned()),
         };
