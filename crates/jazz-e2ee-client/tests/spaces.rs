@@ -497,6 +497,7 @@ fn a_failing_space_is_not_read_at_every_settle() {
         let prepared = bob.db.prepare_query(&Query::from("notes")).unwrap();
         assert!(block_on(bob.db.all(&prepared, local())).unwrap().is_empty());
 
+        bob.client.advance_settle_clock(std::time::Duration::ZERO);
         store.failing.set(true);
         let before = store.saves.get();
         let settle = || drive(&server, &[&bob.db], bob.client.settle_reads(&bob.db));
@@ -510,7 +511,8 @@ fn a_failing_space_is_not_read_at_every_settle() {
         );
 
         store.failing.set(false);
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        bob.client
+            .advance_settle_clock(std::time::Duration::from_millis(300));
         assert!(settle().unwrap(), "settled once the wait is over");
         assert_eq!(read_notes(&server, &bob, first).unwrap().len(), 1);
     });
@@ -563,6 +565,7 @@ fn a_backed_off_space_is_unresolved_not_absent() {
         assert_eq!(deliver(&server, &alice, &[&bob], first), 1);
         bob.follow_notes(&server);
 
+        bob.client.advance_settle_clock(std::time::Duration::ZERO);
         store.failing.set(true);
         for _ in 0..2 {
             let failed = read_notes(&server, &bob, first);
@@ -589,7 +592,8 @@ fn a_backed_off_space_is_unresolved_not_absent() {
         );
 
         store.failing.set(false);
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        bob.client
+            .advance_settle_clock(std::time::Duration::from_millis(300));
         assert!(
             settle().unwrap(),
             "the kept entries settle once the wait is over"

@@ -538,7 +538,7 @@ impl E2eeClient {
                 .borrow_mut()
                 .retain(|space, _| by_space.contains_key(space) || queued.contains(space));
         }
-        let now = web_time::Instant::now();
+        let now = self.shared.now();
         let mut reports = Vec::new();
         let mut held = false;
         let mut failure = None;
@@ -558,7 +558,7 @@ impl E2eeClient {
                     held |= any_held;
                 }
                 Err(error) => {
-                    let next = SettleBackoff::after_failure(backoff.as_ref(), error.clone());
+                    let next = SettleBackoff::after_failure(backoff.as_ref(), error.clone(), now);
                     self.shared.settle_backoff.borrow_mut().insert(space, next);
                     for entry in entries {
                         self.shared.missing(entry);

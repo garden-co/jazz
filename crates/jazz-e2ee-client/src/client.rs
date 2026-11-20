@@ -232,6 +232,7 @@ impl E2eeClient {
             missing: Default::default(),
             settle_backoff: Default::default(),
             member_changes: Default::default(),
+            held_clock: Default::default(),
             member_change_wait: std::cell::Cell::new(crate::state::MEMBER_CHANGE_WAIT),
             collectors: Default::default(),
             wrapped_writes: Default::default(),
@@ -494,6 +495,14 @@ impl E2eeClient {
     #[doc(hidden)]
     pub fn pending_member_changes(&self) -> usize {
         self.shared.member_changes.borrow().len()
+    }
+
+    /// Holds the settle back-off's clock still, or moves it on by `by` when
+    /// already held (tests: a wait is stepped, never slept).
+    #[doc(hidden)]
+    pub fn advance_settle_clock(&self, by: std::time::Duration) {
+        let now = self.shared.now();
+        self.shared.held_clock.set(Some(now + by));
     }
 
     #[doc(hidden)]

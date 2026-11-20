@@ -50,7 +50,11 @@ pub(crate) struct SettleBackoff {
 impl SettleBackoff {
     /// After one more failure, `error`, of a space that had failed
     /// `previous` times in a row (none: it had not).
-    pub(crate) fn after_failure(previous: Option<&Self>, error: ClientError) -> Self {
+    pub(crate) fn after_failure(
+        previous: Option<&Self>,
+        error: ClientError,
+        now: web_time::Instant,
+    ) -> Self {
         let failures = previous.map_or(0, |backoff| backoff.failures) + 1;
         let wait = match failures {
             1 => std::time::Duration::ZERO,
@@ -60,7 +64,7 @@ impl SettleBackoff {
         };
         Self {
             failures,
-            retry_at: web_time::Instant::now() + wait,
+            retry_at: now + wait,
             error,
         }
     }
@@ -444,6 +448,9 @@ pub(crate) struct Shared {
     /// §3.4), or until [`MEMBER_CHANGE_WAIT`] passes without the row: a write
     /// that was rejected or abandoned leaves no row to wait for.
     pub(crate) member_changes: RefCell<VecDeque<(RowUuid, SpaceAddress, web_time::Instant)>>,
+    /// The settle back-off's clock when a test holds it still (`None`: the
+    /// real one), so a wait is stepped, not slept.
+    pub(crate) held_clock: std::cell::Cell<Option<web_time::Instant>>,
     /// How long a staged member row is waited for (tests shorten it).
     pub(crate) member_change_wait: std::cell::Cell<std::time::Duration>,
     /// The collectors of the repair reads in flight, each registered for the
@@ -520,6 +527,11 @@ impl Shared {
                 .1
                 .insert(column.to_owned());
         }
+    }
+
+    /// The settle back-off's clock.
+    pub(crate) fn now(&self) -> web_time::Instant {
+        self.held_clock.get().unwrap_or_else(web_time::Instant::now)
     }
 
     pub(crate) fn missing(&self, missing: Missing) {
@@ -644,7 +656,11 @@ mod missing_queue_tests {
     fn backed_off(space: &str) -> (SpaceAddress, SettleBackoff) {
         (
             entry(space, 0).space,
-            SettleBackoff::after_failure(None, ClientError::Unsupported("x".to_owned())),
+            SettleBackoff::after_failure(
+                None,
+                ClientError::Unsupported("x".to_owned()),
+                web_time::Instant::now(),
+            ),
         )
     }
 
