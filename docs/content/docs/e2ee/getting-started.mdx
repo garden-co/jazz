@@ -133,8 +133,20 @@ encryption participant: it has no account, no identity and no keys. Its own data
 and the plain columns of an encrypted table as normal, never sees an encrypted column (the rows come
 back without it), refuses a write that names one ("the backend holds no encryption keys; encrypted
 columns are written by clients") and refuses a filter, ordering or selection of one. A server
-that needs to compute on encrypted content cannot; do that on a client. The generated types are the
-clients' and give an encrypted column its plaintext type; on the backend, that property is `undefined`.
+that needs to compute on encrypted content cannot; do that on a client.
+
+The generated types are the clients': they give an encrypted column its plaintext type. On the backend,
+query through `keyless(app)` from `jazz-tools/backend`, the same app typed as the backend reads it: an
+encrypted column is absent from its rows (`title?: undefined`), its inserts and its filters.
+
+```ts
+import { keyless } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+
+const backendApp = keyless(app);
+// jazz = await createJazz({ app, ... }).ready()
+const tasks = await jazz.db.all(backendApp.tasks); // each task.title is undefined
+```
 
 `db.encryption` exists on every `Db`; for an app that declares no encryption, using it throws
 `EncryptionNotDeclaredError`.
