@@ -162,24 +162,45 @@ pub async fn build(
     build_client(declarations, account_id, store, recovery.as_ref()).await
 }
 
+/// What a native host passes to open an encrypted app's database: as
+/// [`Options`] for the app's `jazz.app.json`, with the device account's
+/// secret as a [`RecoverySecret`], which zeroizes its bytes when dropped,
+/// rather than as hexadecimal text.
+pub struct NativeOptions {
+    /// The app's `jazz.app.json`.
+    pub app_file: Vec<u8>,
+    /// The device account's secret; `None` for an account the app signs in
+    /// itself.
+    pub device_account_secret: Option<RecoverySecret>,
+    pub app_id: String,
+    pub environment: String,
+}
+
 /// Build a native device runtime that handles account-secret recovery at
 /// startup. When a keyless relay supplies its declarations, the device must
 /// use those same declarations, including the app and environment.
 pub async fn build_native(
-    options: Options,
+    options: NativeOptions,
     account_id: String,
     store: Rc<JsStore>,
     relay_declarations: Option<&E2eeDeclarations>,
 ) -> Result<NativeBuilt, String> {
-    let declarations = declarations(&options)?;
+    let NativeOptions {
+        app_file,
+        device_account_secret: recovery,
+        app_id,
+        environment,
+    } = options;
+    let declarations = declarations(&Options {
+        app_file,
+        from_bindings: false,
+        device_account_secret: None,
+        app_id,
+        environment,
+    })?;
     if relay_declarations.is_some_and(|expected| *expected != declarations) {
         return Err("the device's encryption declarations do not match the relay".to_owned());
     }
-    let recovery = options
-        .device_account_secret
-        .as_deref()
-        .map(secret)
-        .transpose()?;
     let built = build_client(declarations, account_id, store, recovery.as_ref()).await?;
     Ok(NativeBuilt { built, recovery })
 }
@@ -1017,12 +1038,12 @@ fn secret(hex: &str) -> Result<RecoverySecret, String> {
     if hex.len() != 64 || !hex.is_ascii() {
         return Err("a recovery secret is 64 hexadecimal characters".to_owned());
     }
-    let mut bytes = [0u8; 32];
+    let mut bytes = jazz_e2ee::Zeroizing::new([0u8; 32]);
     for (index, byte) in bytes.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&hex[2 * index..2 * index + 2], 16)
             .map_err(|_| "a recovery secret is hexadecimal".to_owned())?;
     }
-    Ok(RecoverySecret::from_bytes(bytes))
+    Ok(RecoverySecret::from_bytes(*bytes))
 }
 
 /// A report as the JS events carry it.

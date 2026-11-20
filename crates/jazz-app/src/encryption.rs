@@ -147,7 +147,7 @@ mod plan {
         pub(crate) async fn device(
             &self,
             _account: crate::AccountId,
-            _secret: Option<[u8; 32]>,
+            _secret: Option<&crate::DeviceKey>,
         ) -> Result<Option<jazz::tools::ClientEncryption>> {
             Ok(None)
         }
@@ -223,7 +223,7 @@ mod plan {
         pub(crate) async fn device(
             &self,
             account: crate::AccountId,
-            secret: Option<[u8; 32]>,
+            secret: Option<&crate::DeviceKey>,
         ) -> Result<Option<ClientEncryption>> {
             if self.declarations.is_none() {
                 return Ok(None);
@@ -241,17 +241,14 @@ mod plan {
                     }))
                 }
             });
-            let secret_hex = secret.map(|bytes| {
-                bytes
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>()
-            });
+            // The secret goes straight into a `RecoverySecret`, which
+            // zeroizes it when dropped: no hexadecimal or other copy.
+            let device_account_secret = secret
+                .map(|key| jazz_e2ee_client::host::RecoverySecret::from_bytes(key.to_bytes()));
             let built = host::build_native(
-                host::Options {
+                host::NativeOptions {
                     app_file: self.app_file.clone(),
-                    from_bindings: false,
-                    device_account_secret: secret_hex,
+                    device_account_secret,
                     app_id: self.app_id.to_string(),
                     environment: config.environment.clone(),
                 },
