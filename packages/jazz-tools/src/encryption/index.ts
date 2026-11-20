@@ -200,7 +200,10 @@ export class Encryption {
     const secret = await this.options.accountSecret?.();
     if (secret !== undefined) {
       const hex = toHex(parseSecret(secret));
-      if (status === "active") await this.call("recoveryRegister", { secret: hex });
+      // `automatic`: a retired root of the account secret is not an error
+      // here, so the device still starts.
+      if (status === "active")
+        await this.call("recoveryRegister", { secret: hex, automatic: true });
       else if (status === "awaiting-approval") {
         // A device with no other to approve it recovers with the account
         // secret. `null`: nothing to recover from yet (no registered root

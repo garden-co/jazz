@@ -588,9 +588,12 @@ impl E2eeClient {
 
     /// Registers the recovery root `secret` derives for the account's
     /// current generation, unless a valid root with that ID exists (protocol
-    /// §2.9, "Register") or was retired, which writes nothing: the root,
-    /// signed by this active device, and a delivery of the account key
-    /// sealed to it. When the root and its
+    /// §2.9, "Register"): the root, signed by this active device, and a
+    /// delivery of the account key sealed to it. A root that was retired
+    /// stays retired (§2.9, "Retiring a derived root"): registering its
+    /// secret writes nothing and is refused with `recovery-root-mismatch`,
+    /// the refusal a restore with it gets, so a caller never believes a
+    /// secret that cannot restore is registered. When the root and its
     /// delivery for the current epoch are there and the delivery opens with the
     /// secret's key, nothing is written. What was written is not read back:
     /// a server that altered the rows can leave recovery broken whatever
@@ -602,6 +605,26 @@ impl E2eeClient {
         db: &Db,
         secret: &RecoverySecret,
     ) -> Result<(), ClientError> {
+        self.register(db, secret, false).await
+    }
+
+    /// The registration a start-up runs with a device account's own secret:
+    /// as [`Self::register_recovery`], except that a retired root writes
+    /// nothing and is not an error, so the device still starts.
+    pub(crate) async fn register_recovery_at_start(
+        &self,
+        db: &Db,
+        secret: &RecoverySecret,
+    ) -> Result<(), ClientError> {
+        self.register(db, secret, true).await
+    }
+
+    async fn register(
+        &self,
+        db: &Db,
+        secret: &RecoverySecret,
+        at_start: bool,
+    ) -> Result<(), ClientError> {
         self.serializable(db, async |tx| {
             let read = self.read_account(db, tx).await?;
             let view = self.view(&read).await?;
@@ -611,13 +634,18 @@ impl E2eeClient {
                 view.state.generation,
             )?;
             // Retired: it stays retired (§2.9, "Retiring a derived root"), so
-            // there is nothing to register and a start with this secret goes on.
+            // there is nothing to register. A start with this secret goes on;
+            // an explicit call is refused as a restore with it would be.
             if view
                 .state
                 .retired_recovery_roots
                 .contains_key(&keys.root_id)
             {
-                return Ok(());
+                return if at_start {
+                    Ok(())
+                } else {
+                    Err(ProtocolError::Recovery(RecoveryFailure::RootMismatch).into())
+                };
             }
             // Registered already, with its delivery for the current epoch:
             // nothing to write, so a binding may call this at every start.

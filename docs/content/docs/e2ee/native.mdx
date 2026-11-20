@@ -102,7 +102,9 @@ and the recovery calls. A failure carries a code such as `approval-code-mismatch
   24 words to show the user once; `recoveryRegister(phrase)` registers them from a device that is
   active; on a new device, `recoveryRestore(phrase)` approves it. It is the same kind of phrase as
   the web client's, and a different phrase from a local-first account's own. A wrong phrase fails with
-  `invalid-length`, `invalid-word` or `invalid-checksum` and approves nothing.
+  `invalid-length`, `invalid-word` or `invalid-checksum` and approves nothing. A phrase whose root was
+  retired stays retired: registering it again fails with `recovery-root-mismatch`, as restoring with
+  it does.
 
 ## A backend takes no part
 

@@ -497,7 +497,9 @@ impl Encryption {
         };
         match status {
             AccountStatus::Active => {
-                self.client.register_recovery(&self.db, &secret).await?;
+                self.client
+                    .register_recovery_at_start(&self.db, &secret)
+                    .await?;
                 Ok(Some(status))
             }
             AccountStatus::AwaitingApproval => {
@@ -636,11 +638,17 @@ impl Encryption {
                     .map_err(|error| error.to_string())?;
                 json!({ "phrase": super::phrase::from_secret(&bytes) })
             }
+            // `automatic`: the start-up registration of a device account's
+            // own secret, for which a retired root is not an error. Otherwise
+            // a retired root is refused (`recovery-root-mismatch`).
             "recoveryRegister" => {
-                client
-                    .register_recovery(db, &recovery_secret(args)?)
-                    .await
-                    .map_err(describe)?;
+                let secret = recovery_secret(args)?;
+                if args.get("automatic").and_then(Value::as_bool) == Some(true) {
+                    client.register_recovery_at_start(db, &secret).await
+                } else {
+                    client.register_recovery(db, &secret).await
+                }
+                .map_err(describe)?;
                 Value::Null
             }
             // `automatic`: the device's own recovery with its account secret,

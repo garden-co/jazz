@@ -626,13 +626,15 @@ fn a_recovery_restores_access_and_its_root_is_retired_with_the_device() {
 }
 
 /// Contract: a retired recovery root stays retired. Registering its secret
-/// again (as an app does at every start of an active device) writes
-/// nothing and is not an error; explicit recovery with it is refused with
-/// `recovery-root-mismatch`.
+/// again writes nothing and is refused with `recovery-root-mismatch`, as
+/// explicit recovery with it is: a user re-registering an old phrase must
+/// not believe they have recovery. (The start-up registration of a device
+/// account's own secret writes nothing and goes on: `jazz-ffi`'s
+/// `a_device_account_starts_after_its_secrets_root_is_retired`.)
 ///
 /// ```text
 /// first ──register root──► server; first ──retire it──► server
-/// first ──register the same secret──► Ok, nothing written
+/// first ──register the same secret──► refused: recovery-root-mismatch, nothing written
 /// new device ──recover (secret)──► refused: recovery-root-mismatch
 /// ```
 #[test]
@@ -670,12 +672,20 @@ fn a_retired_recovery_root_stays_retired() {
         };
         let before = rows();
 
-        drive(
+        let again = drive(
             &server,
             &[&first.db],
             first.client.register_recovery(&first.db, &secret),
-        )
-        .expect("a retired root is not registered again, and that is not an error");
+        );
+        assert!(
+            matches!(
+                again,
+                Err(ClientError::Protocol(ProtocolError::Recovery(
+                    jazz_e2ee::protocol::error::RecoveryFailure::RootMismatch
+                )))
+            ),
+            "a retired root is not registered again, and the caller is told: {again:?}"
+        );
         pump(&server, &first.db);
         assert_eq!(rows(), before, "nothing written");
         assert_eq!(

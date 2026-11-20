@@ -40,6 +40,29 @@ it("returns the status the automatic recovery reached", async () => {
   await expect(encryption.ready()).resolves.toBe("active");
 });
 
+it("registers the account secret of an active device as the automatic start-up registration", async () => {
+  // `automatic`: a retired root of the account secret does not stop the start
+  // (an explicit registration of it is refused).
+  const calls: { op: string; args: Record<string, unknown> }[] = [];
+  const native = {
+    encryptionCall: async (op: string, args: Record<string, unknown>) => {
+      calls.push({ op, args });
+      if (op === "ready") return JSON.stringify("active");
+      if (op === "recoveryRegister") return "null";
+      throw new Error(`unexpected op ${op}`);
+    },
+    takeEncryptionReports: () => [],
+    encryptionState: () => JSON.stringify({ status: "active" }),
+  } as unknown as EncryptionNative;
+  const encryption = new Encryption(native, { accountSecret: () => formatSecret(secret) });
+
+  await expect(encryption.ready()).resolves.toBe("active");
+  expect(calls[1]).toEqual({
+    op: "recoveryRegister",
+    args: { secret: "07".repeat(32), automatic: true },
+  });
+});
+
 it.each([
   ["store", "store: keychain unavailable"],
   ["database", "database: the transaction failed"],
