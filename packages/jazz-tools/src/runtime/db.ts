@@ -2538,7 +2538,7 @@ export class Db {
    */
   private thinEncryption(): Encryption | undefined {
     if (this.pendingEncryption) return this.pendingEncryption;
-    const app = this.config.encryption?.app;
+    const app = this.config?.encryption?.app;
     if (!app || !isThinDb(this)) return undefined;
     const declared = declaredEntries(resolveSchemaSource(app));
     const table = Object.keys(declared ?? {}).find(
