@@ -263,4 +263,6 @@ it("refuses a thin transaction's write of an encrypted column in the backend, wh
   await expect(sent.then(() => runtime.commitTransaction(tx))).rejects.toThrow(
     /holds no encryption keys.*tasks\.title/,
   );
+  // The refusal is the server's: it holds no row of the write.
+  expect(await server.jazz.db.all(encryptedApp.tasks)).toEqual([]);
 }, 60_000);
