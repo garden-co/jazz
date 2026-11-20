@@ -367,8 +367,8 @@ fn a_renamed_table_keeps_its_stored_table() {
 fn pending_upload_rows_answers_under_a_renamed_tables_current_name() {
     let path = scratch("pending-rows");
     let db = open_at(v1(), &path);
-    block_on(db.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
-    block_on(db.activate_schema_with_lenses(v3(), &[rename_todos()])).unwrap();
+    let db = reopen(db, &path, system(v2()));
+    let db = reopen(db, &path, system(v3()));
     // An upstream that never answers: the commit stays pending.
     let (client_side, _never_answered) = pipe();
     let _link = block_on(db.connect_upstream(client_side));
