@@ -297,6 +297,15 @@ export abstract class ConnectionManager {
     );
   }
 
+  /**
+   * Ids of `table`'s rows with a write the server has not decided yet, or
+   * `null` while no runtime can tell (none created yet, or one without the
+   * report): never an empty answer for "unknown".
+   */
+  pendingUploadRows(table: string): readonly string[] | null {
+    return this.client?.getRuntime()?.pendingUploadRows?.(table) ?? null;
+  }
+
   /** The upstream connection as the app sees it, including explicit disconnects. */
   linkStatus(): LinkStatus {
     const { config, runtimeSource } = this.host;

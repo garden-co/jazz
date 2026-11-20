@@ -98,6 +98,10 @@ pub struct UploadStatus {
     pub rejected: u64,
     /// The latest of those refusals.
     pub last_rejection: Option<UploadRefusal>,
+    /// Changes whenever a commit joins or leaves the pending set, so a host
+    /// comparing statuses sees every change of [`Db::pending_upload_rows`],
+    /// also one that leaves the count and the oldest time as they were.
+    pub pending_revision: u64,
 }
 
 /// One refused upload, as [`UploadStatus`] names it.
@@ -2138,6 +2142,8 @@ struct PendingQueue {
     /// branch view copies the row from its base branch, so a commit
     /// depends on every branch of the rows it writes.
     by_id: HashMap<(String, RowUuid), BTreeSet<u64>>,
+    /// Bumped whenever a commit joins or leaves the queue.
+    revision: u64,
 }
 
 impl PendingQueue {
@@ -2174,6 +2180,7 @@ impl PendingQueue {
                 .insert(pending.tx);
         }
         self.commits.insert(pending.tx, pending);
+        self.revision += 1;
     }
 
     /// Take back commit `tx`, just pushed.
@@ -2189,6 +2196,7 @@ impl PendingQueue {
     fn remove(&mut self, tx: u64) {
         if let Some(pending) = self.commits.remove(&tx) {
             self.unindex(&pending);
+            self.revision += 1;
         }
     }
 
@@ -2208,6 +2216,19 @@ impl PendingQueue {
                 }
             }
         }
+    }
+
+    /// The ids of `stored` table's rows a pending commit writes, through
+    /// any branch, sorted.
+    fn row_ids(&self, stored: &str) -> Vec<RowUuid> {
+        let mut ids = self
+            .by_id
+            .keys()
+            .filter(|(table, _)| table == stored)
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
     }
 
     /// The pending txs writing any branch of `row`'s row.
@@ -8808,6 +8829,11 @@ impl Client {
 }
 
 impl Client {
+    /// The pending queue's revision (see [`UploadStatus::pending_revision`]).
+    pub(crate) fn pending_revision(&self) -> u64 {
+        self.pending.revision
+    }
+
     /// Why this store refused its current link (see
     /// [`Inner::refuse_upstream`]), if it did: nothing answers a remote
     /// read until a new link does.
@@ -10153,6 +10179,21 @@ impl Db {
             .map_or(0, |client| client.pending.len())
     }
 
+    /// The rows of `table` written by a local commit that awaits the
+    /// upstream's verdict, through any branch: committed here (recovered
+    /// ones included) and not yet accepted or refused. In row order. Empty
+    /// on a database that has never had an upstream; an error for a table
+    /// the schema does not have.
+    pub fn pending_upload_rows(&self, table: &str) -> Result<Vec<RowUuid>, Error> {
+        // Resolved under this handle's own schema, not whichever view ran last.
+        let inner = self.inner();
+        let stored = inner.schema.stored_table(table)?;
+        Ok(inner
+            .client
+            .as_ref()
+            .map_or_else(Vec::new, |client| client.pending.row_ids(stored)))
+    }
+
     /// The ids the pending commits upload under, sorted: a relayed commit
     /// uploads under its session's id, so a host holding both a session and
     /// the store that relays it counts each write once by this id.
@@ -10187,6 +10228,11 @@ impl Db {
             oldest_pending_at,
             rejected: inner.refusals.count,
             last_rejection: inner.refusals.last.clone(),
+            pending_revision: inner.pending_revision_base
+                + inner
+                    .client
+                    .as_ref()
+                    .map_or(0, |client| client.pending.revision),
         }
     }
 

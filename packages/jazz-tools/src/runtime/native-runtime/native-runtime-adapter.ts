@@ -290,6 +290,8 @@ type NativeDb = {
   /** How many local commits still wait for the server's verdict. */
   /** This store's uploads; see {@link UploadStatus}. */
   uploadStatus?(): UploadStatus;
+  /** Ids of `table`'s rows with an undecided write; `null` when the host cannot tell. */
+  pendingUploadRows?(table: string): string[] | null;
   /**
    * A React Native foreground's scope store, deleted by its native relay
    * (see `NativeForegroundDb.deleteNativeStore`), with the writes it dropped.
@@ -1688,6 +1690,13 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) return this.ownerRuntime.uploadStatus();
     if (this.closed) return NO_UPLOADS;
     return this.db?.uploadStatus?.() ?? NO_UPLOADS;
+  }
+
+  /** Ids of `table`'s rows with a write the server has not decided yet; see {@link Runtime}. */
+  pendingUploadRows(table: string): readonly string[] | null {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.pendingUploadRows(table);
+    if (this.closed) return null;
+    return this.db?.pendingUploadRows?.(table) ?? null;
   }
 
   /** The latest time the link failed, and how; it stays after the link recovers. */

@@ -125,6 +125,8 @@ mod parameterized_subscription_routing;
 mod pending_commit_reopen;
 #[path = "../pending_rebase_scope.rs"]
 mod pending_rebase_scope;
+#[path = "../pending_upload_rows.rs"]
+mod pending_upload_rows;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
 #[path = "../policy_check_plans.rs"]

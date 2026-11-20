@@ -1523,6 +1523,7 @@ export class ThinRuntime implements Runtime {
       oldestPendingAt,
       rejected: this.rejected,
       lastRejection: this.lastRejection,
+      pendingRevision: 0,
     };
   }
 
