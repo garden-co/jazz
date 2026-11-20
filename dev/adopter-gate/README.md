@@ -29,7 +29,7 @@ Post-publish: `registry-smoke.sh <version> npm|create-jazz|crates|go|swift|kotli
 
 ```sh
 dev/adopter-gate/fetch-rc.sh v2.0.0-alpha.68-rc.1 [attach-language-artifacts run id]
-# or: AG_EXPECT_SHA=<full commit sha> dev/adopter-gate/fetch-rc.sh --run <release-artifacts run> --npm-run <RC run>
+# or: AG_EXPECT_SHA=<full commit sha> dev/adopter-gate/fetch-rc.sh --run <release-artifacts run> --npm-run <RC run>   # waits up to AG_NPM_WAIT_S (300 s) for rc-npm while the RC run is still going
 dev/adopter-gate/bed.sh t1 && dev/adopter-gate/fixtures.sh && dev/adopter-gate/t9.sh go   # etc.
 node dev/adopter-gate/verdict.mjs dev/adopter-gate/.results
 ```
@@ -45,7 +45,7 @@ Needs Node, pnpm 11, sqlite3 and `ss`, plus cargo, Go, JDK 17 with Gradle, or Sw
 ## Harness rules
 
 - Provenance (#supply-chain's rule): files from another run (`artifacts_run_id`, `rc_npm_run_id`, `language_run_id`) are used only if that run built the commit being gated (`jazz_sha`, or the RC tag's commit) on a `push` or `workflow_dispatch` (never `pull_request*`) in this repository (not a fork), from a producer workflow: `release-artifacts.yml` or `release-candidate.yml` for `artifacts_run_id`, `release-candidate.yml` for `rc_npm_run_id`, and those or `attach-language-artifacts.yml` for `language_run_id`. `provenance.test.sh` tests it against a stubbed `gh` (CI runs it in the `inputs` job). `fetch-rc.sh` fails closed without it (`AG_EXPECT_SHA`) or on a mismatch, and the verdict job requires the artifacts run's `release-manifest` to name the same commit (the `provenance` row).
-- No pass-on-retry: a check that fails once is FAIL (flakes are fixed, not retried). Only network fetches (downloads, installs) retry, and only fetches.
+- No pass-on-retry: a check that fails once is FAIL (flakes are fixed, not retried). Only network fetches (downloads, installs) retry, and only fetches. t9 kotlin fetches its Gradle dependencies in a step of its own (retried on network errors such as Maven Central's 429, 30 s then 60 s backoff), then builds `--offline` once.
 
 - Kill processes by port or PID, never with `pkill -f`. A pattern can match the shell running it.
 - The TS client derives its app id from `serverUrl`. The t9 backend serves the id derived from `http://127.0.0.1:8780/jazz`.
