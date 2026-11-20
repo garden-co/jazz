@@ -2416,7 +2416,7 @@ fn foreground_command(
             let transaction = transaction
                 .map(|handle| client.transaction(handle).map(|(id, _)| id.clone()))
                 .transpose()?;
-            let read = binding.all(
+            let read = binding.all_reporting(
                 query,
                 &json(&options_json)?,
                 transaction.as_deref(),
@@ -2424,7 +2424,10 @@ fn foreground_command(
                 None,
             )?;
             client.pending_or_ready(
-                Box::pin(async move { Ok(Response::Rows { rows: read.await? }) }),
+                Box::pin(async move {
+                    let (rows, unreadable) = read.await?;
+                    Ok(rows_response(rows, &unreadable))
+                }),
                 None,
             )?
         }
@@ -3741,6 +3744,22 @@ pub enum RelayError {
     DeclarationsMismatch(String),
     #[error("native relay socket: {0}")]
     Socket(String),
+}
+
+/// A one-shot read's answer: `ReportedRows` when it left rows out because
+/// the encryption runtime could not open them, else `Rows`.
+pub(crate) fn rows_response(
+    rows: Vec<u8>,
+    unreadable: &[jazz::db::UnreadableRow],
+) -> ForegroundDbCommandResponse {
+    if unreadable.is_empty() {
+        ForegroundDbCommandResponse::Rows { rows }
+    } else {
+        ForegroundDbCommandResponse::ReportedRows {
+            rows,
+            unreadable_json: binding_host::unreadable_json(unreadable),
+        }
+    }
 }
 
 /// One subscription event in the foreground ABI.

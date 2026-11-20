@@ -334,6 +334,55 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     ]);
   });
 
+  it("names the rows a native one-shot read leaves out undecrypted", async () => {
+    installJsiForegroundFactory();
+    const rowId = new Uint8Array(16).fill(7);
+    const rows = encodeRows([{ table: "notes", rowId, title: "Native note" }]);
+    const pending = { table: "notes", id: "x", column: "title", code: "key-pending" };
+    // The first read answers at once; the second suspends and answers on
+    // its poll; the third left nothing out.
+    const reads = [
+      encodeReportedRows(rows, JSON.stringify([pending])),
+      Uint8Array.of(7, 9),
+      encodeBytesResponse(2, rows),
+    ];
+    nativeForegroundTest.execute = (command) => {
+      switch (command[0]) {
+        case 2:
+          return reads.shift()!;
+        case 6:
+          return Uint8Array.of(6, 1);
+        case 7:
+          // Poll of the suspended read.
+          return encodeReportedRows(rows, JSON.stringify([pending, { ...pending, id: "y" }]));
+        case 21:
+          return Uint8Array.of(16, 1, 0, 1, 0);
+        case 22:
+          return encodeNativeSession("reader");
+        case 35:
+          return Uint8Array.of(26, 2, 91, 93, 0, 0); // tickEvents: "[]", no failures
+        case 17:
+          return Uint8Array.from([15, ...command.subarray(1, 17)]);
+        default:
+          throw new Error(`unexpected foreground command ${command[0]}`);
+      }
+    };
+
+    client = await openJazzClient({
+      ...(await accountConfig("react-native-native-foreground-unreadable-read")),
+      nativeRelay: nativeRelayReceipt().config,
+    });
+
+    const first = await client.db.all(app.notes);
+    expect(first).toMatchObject([{ title: "Native note" }]);
+    expect(unreadableRows(first)).toEqual([pending]);
+    const second = await client.db.all(app.notes);
+    expect(unreadableRows(second)).toEqual([pending, { ...pending, id: "y" }]);
+    const third = await client.db.all(app.notes);
+    expect(third).toMatchObject([{ title: "Native note" }]);
+    expect(unreadableRows(third)).toEqual([]);
+  });
+
   it("fails closed on an in-place auth refresh instead of reading through the prior native capability", async () => {
     nativeForegroundTest.close.mockClear();
     installJsiForegroundFactory();
@@ -461,6 +510,12 @@ function varint(value: number): number[] {
 
 function encodeBytesResponse(tag: number, bytes: Uint8Array): Uint8Array {
   return Uint8Array.from([tag, ...varint(bytes.length), ...bytes]);
+}
+
+/** Answer 37: a read's rows with the rows it left out, as JSON. */
+function encodeReportedRows(rows: Uint8Array, unreadable: string): Uint8Array {
+  const json = new TextEncoder().encode(unreadable);
+  return Uint8Array.from([37, ...varint(rows.length), ...rows, ...varint(json.length), ...json]);
 }
 
 function encodeSubscriptionEvents(
