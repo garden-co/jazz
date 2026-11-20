@@ -37,6 +37,7 @@ use super::key::AccountKey;
 use super::ledger::{PrivateAccountLedger, PublicAccountLedger};
 use super::replay::AccountState;
 use super::sealing::SealingKeys;
+use subtle::ConstantTimeEq;
 
 const Z32: [u8; 32] = [0; 32];
 
@@ -767,7 +768,10 @@ pub fn verify_possession(
     if proof.id != challenge.id
         || proof.challenge_id != challenge.id
         || challenge.device_id != requester.id
-        || nonce_commitment(&requester.id, &proof.nonce)?[..] != requester.nonce_commitment[..]
+        || !bool::from(
+            nonce_commitment(&requester.id, &proof.nonce)?[..]
+                .ct_eq(&requester.nonce_commitment[..]),
+        )
     {
         return refuse(RefusalCode::InvalidPossessionProof);
     }
