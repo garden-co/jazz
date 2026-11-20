@@ -29,7 +29,7 @@
     "@types/node": "catalog:default",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react-swc": "^4.3.3",
+    "@vitejs/plugin-react": "catalog:default",
     "@vitest/ui": "5.1.0",
     "happy-dom": "^20.8.4",
     "jsdom": "^28.1.0",
