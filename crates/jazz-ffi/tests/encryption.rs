@@ -628,6 +628,17 @@ async fn the_c_abi_opens_an_encrypted_app_with_a_store_callback() {
             );
             assert!(call(handle, "encryptionCall", json!({ "op": "deviceId" })).is_string());
             assert!(store.calls.lock().unwrap().iter().any(|op| op == "save"));
+            // A negative readiness timeout is refused, not read as the default.
+            let (method, args) = (c"encryptionReady", c"{\"timeoutMs\": -1}");
+            let mut err: *mut c_char = std::ptr::null_mut();
+            let out = jazz_ffi::c_abi::jazz_call(handle, method.as_ptr(), args.as_ptr(), &mut err);
+            assert!(out.is_null(), "a negative timeout is refused");
+            assert!(
+                CStr::from_ptr(err).to_str().unwrap().contains("timeoutMs"),
+                "{:?}",
+                CStr::from_ptr(err)
+            );
+            jazz_ffi::c_abi::jazz_string_free(err);
             jazz_ffi::c_abi::jazz_close(handle);
         }
     })

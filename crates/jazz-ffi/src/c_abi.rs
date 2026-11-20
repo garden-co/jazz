@@ -371,10 +371,17 @@ pub unsafe extern "C" fn jazz_call(
                 &args.get("args").map(Json::to_string).unwrap_or_default(),
             )?,
             "encryptionReady" => {
-                let timeout = args
-                    .get("timeoutMs")
-                    .and_then(Json::as_u64)
-                    .unwrap_or(30_000);
+                // No timeout given is the default; one given must be a
+                // non-negative whole number, not silently replaced by it.
+                let timeout = match args.get("timeoutMs") {
+                    None => 30_000,
+                    Some(given) => given.as_u64().ok_or_else(|| {
+                        refused(
+                            "args_json.timeoutMs must be a non-negative whole number of milliseconds"
+                                .to_owned(),
+                        )
+                    })?,
+                };
                 Json::from(core.encryption_ready(timeout)?).to_string()
             }
             "encryptionState" => core.encryption_state()?,
