@@ -439,6 +439,11 @@ impl E2eeClient {
     /// §4.3), after one acquisition per space: `key-pending` and
     /// `space-pending` once per `(table, space)`, `key-unavailable` and
     /// `invalid-ciphertext` per row. Whether any version is now held.
+    ///
+    /// Every space is settled. One whose acquisition fails reports nothing
+    /// (a failure is not a key's absence) and keeps its entries for the
+    /// next settle; the first such error is returned once the others are
+    /// reported.
     async fn settle_missing(&self, db: &Db, missing: Vec<Missing>) -> Result<bool, ClientError> {
         let mut by_space: BTreeMap<SpaceAddress, Vec<Missing>> = BTreeMap::new();
         for entry in missing {
@@ -446,61 +451,90 @@ impl E2eeClient {
         }
         let mut reports = Vec::new();
         let mut held = false;
+        let mut failure = None;
         for (space, entries) in by_space {
-            let acquired = self.acquire_full(db, &space).await?;
-            let address = protocol_address(&space)?;
-            if acquired.state == SpaceKeyState::Incomplete {
-                // What the read shows missing may not be: neither a key's
-                // absence nor a space's is reported.
-                for table in entries
-                    .iter()
-                    .map(|entry| entry.table.clone())
-                    .collect::<BTreeSet<_>>()
-                {
-                    reports.push(Report::Unreadable(Unreadable {
-                        table,
-                        id: None,
-                        column: None,
-                        code: UnreadableCode::UnsupportedFormat,
-                        space: Some(space.clone()),
-                    }));
+            match self.settle_space(db, &space, &entries).await {
+                Ok((settled, any_held)) => {
+                    reports.extend(settled);
+                    held |= any_held;
                 }
-                continue;
-            }
-            for entry in entries {
-                let settled = self.shared.keys.borrow_mut().held.settle_missing(
-                    &address,
-                    &entry.epoch_id,
-                    acquired.chain.as_ref(),
-                    acquired.member,
-                )?;
-                let unreadable = |code, row: bool| {
-                    Report::Unreadable(Unreadable {
-                        table: entry.table.clone(),
-                        id: row.then_some(entry.id),
-                        column: row.then(|| entry.column.clone()),
-                        code,
-                        space: Some(space.clone()),
-                    })
-                };
-                match settled {
-                    MissingKey::Held => held = true,
-                    MissingKey::Report(error) => {
-                        let code = code(error);
-                        let per_space = matches!(
-                            code,
-                            UnreadableCode::KeyPending | UnreadableCode::SpacePending
-                        );
-                        reports.push(unreadable(code, !per_space));
+                Err(error) => {
+                    for entry in entries {
+                        self.shared.missing(entry);
                     }
-                    // Neither invalid nor known to be pending: no code of
-                    // its own (protocol §4.2).
-                    MissingKey::Unresolved(_) => {}
+                    failure.get_or_insert(error);
                 }
             }
         }
         self.shared.flush(reports);
-        Ok(held)
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(held),
+        }
+    }
+
+    /// Settles the `entries` a read left out of `space`: the reports they
+    /// get, and whether any version is now held.
+    async fn settle_space(
+        &self,
+        db: &Db,
+        space: &SpaceAddress,
+        entries: &[Missing],
+    ) -> Result<(Vec<Report>, bool), ClientError> {
+        let acquired = self.acquire_full(db, space).await?;
+        let address = protocol_address(space)?;
+        let mut reports = Vec::new();
+        let mut held = false;
+        if acquired.state == SpaceKeyState::Incomplete {
+            // What the read shows missing may not be: neither a key's
+            // absence nor a space's is reported.
+            for table in entries
+                .iter()
+                .map(|entry| entry.table.clone())
+                .collect::<BTreeSet<_>>()
+            {
+                reports.push(Report::Unreadable(Unreadable {
+                    table,
+                    id: None,
+                    column: None,
+                    code: UnreadableCode::UnsupportedFormat,
+                    space: Some(space.clone()),
+                }));
+            }
+            return Ok((reports, held));
+        }
+        for entry in entries {
+            let settled = self.shared.keys.borrow_mut().held.settle_missing(
+                &address,
+                &entry.epoch_id,
+                acquired.chain.as_ref(),
+                acquired.member,
+            )?;
+            let unreadable = |code, row: bool| {
+                Report::Unreadable(Unreadable {
+                    table: entry.table.clone(),
+                    id: row.then_some(entry.id),
+                    column: row.then(|| entry.column.clone()),
+                    code,
+                    space: Some(space.clone()),
+                })
+            };
+            match settled {
+                MissingKey::Held => held = true,
+                MissingKey::Report(error) => {
+                    let code = code(error);
+                    let per_space = matches!(
+                        code,
+                        UnreadableCode::KeyPending | UnreadableCode::SpacePending
+                    );
+                    reports.push(unreadable(code, !per_space));
+                }
+                // Neither invalid nor known to be pending: no code of
+                // its own (protocol §4.2).
+                MissingKey::Unresolved(_) => {}
+            }
+        }
+        Ok((reports, held))
     }
 
     /// What a binding whose reads it cannot wrap in [`E2eeClient::read`]

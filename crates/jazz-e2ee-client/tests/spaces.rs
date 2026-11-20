@@ -365,6 +365,93 @@ fn a_member_without_a_delivery_sees_key_pending_once() {
     });
 }
 
+/// Contract: settling what reads left out settles every space, even when
+/// acquiring one fails: the others are reported, the failed space's
+/// entries are kept for the next settle, and its error is returned.
+///
+/// ```text
+/// bob reads notes of `first` (member, delivered) and `second` (not a member)
+/// settle: first ──acquire: key save fails──✗ kept    second ──► key-unavailable
+/// settle again (store healthy): first ──► key held
+/// ```
+#[test]
+fn one_failed_space_does_not_drop_the_others_reports() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let mut spaces = [
+            new_project(&server, &alice, "one"),
+            new_project(&server, &alice, "two"),
+        ];
+        spaces.sort();
+        let [first, second] = spaces;
+        for space in spaces {
+            write_note(&server, &alice, space, SECRET).unwrap();
+        }
+        pump(&server, &alice.db);
+        drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
+
+        let settings = EncryptionSettings::default();
+        let store = FaultyStore::default();
+        let client = open_account(
+            Rc::new(store.clone()),
+            account(0xb0),
+            settings.clone(),
+            None,
+        );
+        let (db, link) = session(&client, &server, account(0xb0), &settings, 2, None);
+        let bob = Device {
+            who: account(0xb0),
+            client,
+            db,
+            _link: Some(link),
+            live: Default::default(),
+        };
+        bob.activate(&server);
+        add_member(&server, &alice, first, &bob.id());
+        assert_eq!(deliver(&server, &alice, &[&bob], first), 1);
+
+        let seen = reports_of(&bob);
+        bob.follow_notes(&server);
+        let prepared = bob.db.prepare_query(&Query::from("notes")).unwrap();
+        assert!(block_on(bob.db.all(&prepared, local())).unwrap().is_empty());
+
+        store.failing.set(true);
+        let failed = drive(&server, &[&bob.db], bob.client.settle_reads(&bob.db));
+        assert!(
+            matches!(failed, Err(ClientError::Store(_))),
+            "the failed space's error is returned: {failed:?}"
+        );
+        let unreadable: Vec<_> = seen
+            .borrow()
+            .iter()
+            .filter_map(|report| match report {
+                Report::Unreadable(u) => Some((u.code, u.space.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            unreadable,
+            vec![
+                (
+                    UnreadableCode::KeyUnavailable,
+                    Some(space_address(&bob, second))
+                );
+                4
+            ],
+            "the other space is settled"
+        );
+
+        store.failing.set(false);
+        assert!(
+            drive(&server, &[&bob.db], bob.client.settle_reads(&bob.db)).unwrap(),
+            "the kept entries are settled on the next call"
+        );
+        assert_eq!(read_notes(&server, &bob, first).unwrap().len(), 1);
+    });
+}
+
 /// Alice's database at `path`, not linked to any server.
 fn offline_db(client: &E2eeClient, who: AuthorSubject, node: u8, path: &std::path::Path) -> Db {
     let config = jazz::db::DbConfig::new(
