@@ -474,6 +474,17 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       const encryption = this.encryption;
+      // The encryption runtime is built in `load` (it waits on the private
+      // store) and given to the first owner runtime, which owns it from then
+      // on. A runtime opened here after that one closed would have none, and
+      // building another cannot happen in this synchronous path: say so,
+      // rather than fail later with the wasm runtime's "not ready". Each
+      // `createDb` has its own source, so a new client is the way back.
+      if (this.ownerRuntime && encryption) {
+        throw new Error(
+          "This database's runtime closed, and its encryption runtime with it: open a new client to use an encrypted app again",
+        );
+      }
       this.ownerRuntime = new NativeRuntimeAdapter(
         this.wasmModule.WasmDb,
         schema,
