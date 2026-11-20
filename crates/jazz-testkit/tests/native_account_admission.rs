@@ -72,10 +72,20 @@ async fn a_relayed_guest_authors_as_its_founding_account_and_cannot_choose_anoth
             client.shutdown().await.unwrap();
             let mut forged = context.clone();
             forged.account_id = Some(AccountId(uuid::Uuid::new_v4()));
-            assert!(
-                connect(forged).await.is_err(),
+            // Opening does not wait for the server: its refusal is the
+            // link's status, and the link stays down.
+            let forged = connect(forged).await.expect("open with the local store");
+            let refused = jazz::tools::test_support::wait_for_refusal(&forged).await;
+            assert_eq!(
+                refused.phase,
+                jazz::link::LinkPhase::AwaitingCredential(jazz::link::AuthFailureReason::Invalid),
                 "registry must reject a copied account identifier"
             );
+            assert_eq!(
+                refused.reason.as_deref(),
+                Some("account does not match authenticated identity assignment")
+            );
+            forged.shutdown().await.unwrap();
             let reconnected = connect(context)
                 .await
                 .expect("same enrolled context reconnects");
