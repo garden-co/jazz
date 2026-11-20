@@ -114,6 +114,8 @@ pub(crate) const NEEDS_DEVICE: &str = "this app declares end-to-end encryption: 
      app's backend, which holds no keys";
 
 pub(crate) use plan::Plan;
+#[cfg(feature = "unstable-endpoint")]
+pub(crate) use plan::keyless;
 
 #[cfg(not(feature = "e2ee-client"))]
 mod plan {
@@ -149,6 +151,14 @@ mod plan {
         ) -> Result<Option<jazz::tools::ClientEncryption>> {
             Ok(None)
         }
+    }
+
+    /// With the feature off there are no keyless hooks.
+    #[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
+    pub(crate) fn keyless(
+        _declarations: Option<E2eeDeclarations>,
+    ) -> Option<jazz::tools::ClientEncryption> {
+        None
     }
 }
 
@@ -206,11 +216,7 @@ mod plan {
 
         /// A backend's keyless hooks.
         pub(crate) fn keyless(&self) -> Option<ClientEncryption> {
-            let declarations = self.declarations.clone()?;
-            Some(ClientEncryption {
-                hooks: jazz_e2ee_client::KeylessHooks::hooks(declarations),
-                start: None,
-            })
+            keyless(self.declarations.clone())
         }
 
         /// A device's runtime for `account`, over the app's store.
@@ -272,6 +278,15 @@ mod plan {
                 start: Some(start),
             }))
         }
+    }
+
+    /// The keyless hooks a backend's client opens an app declaring
+    /// `declarations` with; `None` for an app that declares none.
+    pub(crate) fn keyless(declarations: Option<E2eeDeclarations>) -> Option<ClientEncryption> {
+        Some(ClientEncryption {
+            hooks: jazz_e2ee_client::KeylessHooks::hooks(declarations?),
+            start: None,
+        })
     }
 
     struct Driver(Rc<host::Encryption>);

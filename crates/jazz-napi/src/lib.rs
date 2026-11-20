@@ -975,6 +975,15 @@ pub struct EncryptionProof {
     pub claimed_author: String,
 }
 
+/// A Jazz self-signed client identity for a keyless open: the token, the
+/// app it is for and the author it claims, as the plain open takes them.
+#[napi(object)]
+pub struct KeylessProof {
+    pub token: String,
+    pub app_id: String,
+    pub claimed_author: String,
+}
+
 /// The end-to-end encryption runtime of an app, built over the private store
 /// the app supplies, before the database that uses it opens. The store is
 /// JavaScript: its requests are taken with `takeStoreRequests` and answered
@@ -2587,6 +2596,35 @@ impl NapiDb {
             &config,
             None,
             OpenAs::Backend,
+            Some(Hooks::Keyless(hooks)),
+        )?)
+    }
+
+    /// Open a session's in-memory database for an app that declares
+    /// encryption, with hooks that hold no keys, as the session's own author
+    /// (the configured one, or the one `proof` proves), never SYSTEM: the
+    /// client a backend serves a thin session's transactions with. Encrypted
+    /// writes are refused, encrypted cells unreadable, plain data normal.
+    #[napi(factory, js_name = "openMemoryKeyless")]
+    pub fn open_memory_keyless(
+        schema: Uint8Array,
+        config: Uint8Array,
+        bindings: String,
+        app_id: String,
+        environment: String,
+        proof: Option<KeylessProof>,
+    ) -> js::Result<Self> {
+        let hooks = Self::keyless_hooks(&bindings, &app_id, &environment)?;
+        let (token, author, proof_app) = match proof {
+            Some(proof) => (Some(proof.token), Some(proof.claimed_author), proof.app_id),
+            None => (None, None, app_id),
+        };
+        let how = Self::encrypted_how(&token, &author, &proof_app);
+        Ok(Self::open_as(
+            &schema,
+            &config,
+            None,
+            how,
             Some(Hooks::Keyless(hooks)),
         )?)
     }

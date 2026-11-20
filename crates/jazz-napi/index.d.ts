@@ -136,6 +136,14 @@ export declare class NapiDb {
    */
   static openMemoryAsBackendKeyless(schema: Uint8Array, config: Uint8Array, bindings: string, appId: string, environment: string): NapiDb
   /**
+   * Open a session's in-memory database for an app that declares
+   * encryption, with hooks that hold no keys, as the session's own author
+   * (the configured one, or the one `proof` proves), never SYSTEM: the
+   * client a backend serves a thin session's transactions with. Encrypted
+   * writes are refused, encrypted cells unreadable, plain data normal.
+   */
+  static openMemoryKeyless(schema: Uint8Array, config: Uint8Array, bindings: string, appId: string, environment: string, proof?: KeylessProof | undefined | null): NapiDb
+  /**
    * [`Self::open_memory_as_backend_keyless`] over a durable store in
    * directory `data_path`.
    */
@@ -691,6 +699,16 @@ export interface JazzCoreSocketEvent {
  */
 export type JsonValue =
   any
+
+/**
+ * A Jazz self-signed client identity for a keyless open: the token, the
+ * app it is for and the author it claims, as the plain open takes them.
+ */
+export interface KeylessProof {
+  token: string
+  appId: string
+  claimedAuthor: string
+}
 
 /**
  * Read and check an app's `jazz.app.json` (`app`) and

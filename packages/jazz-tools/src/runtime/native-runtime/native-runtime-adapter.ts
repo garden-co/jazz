@@ -213,6 +213,14 @@ type NativeDbConstructor = {
     appId: string,
     environment: string,
   ): NativeDb;
+  openMemoryKeyless?(
+    schema: Uint8Array,
+    config: Uint8Array,
+    bindings: string,
+    appId: string,
+    environment: string,
+    proof: NativeSelfSignedClientProof | null,
+  ): NativeDb;
   openPersistentAsBackendKeyless?(
     dataPath: string,
     schema: Uint8Array,
@@ -1324,7 +1332,29 @@ export class NativeRuntimeAdapter implements Runtime {
     } else if (opts?.keyless) {
       if (!Runtime) throw new Error("Native runtime constructor required for an encrypted app");
       const { bindings, appId, environment } = opts.keyless;
-      if (opts.persistentPath) {
+      if (!opts.backendMode) {
+        // A session's client (one a backend serves a thin session's
+        // transactions with) holds no keys either, but writes as the
+        // session, never as SYSTEM.
+        if (opts.persistentPath) {
+          throw new Error(
+            "A keyless store of an encrypted app opens in memory unless it is the backend's own",
+          );
+        }
+        if (!Runtime.openMemoryKeyless) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openMemoryKeyless(
+          this.schemaBytes,
+          this.configBytes,
+          bindings,
+          appId,
+          environment,
+          opts.selfSignedClientProof ?? null,
+        );
+      } else if (opts.persistentPath) {
         if (!Runtime.openPersistentAsBackendKeyless) {
           throw new Error(
             "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",

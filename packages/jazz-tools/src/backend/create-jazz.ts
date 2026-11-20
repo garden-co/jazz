@@ -7,7 +7,7 @@ import type { Duplex } from "node:stream";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import * as jazzNapi from "jazz-napi";
-import { declaresEncryption } from "../encryption/node-host.js";
+import { declaresEncryption, keylessBackend } from "../encryption/node-host.js";
 import { JazzCore, type JazzCoreSocketEvent } from "jazz-napi";
 import { registerInProcessTransport } from "../runtime/in-process-transport.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
@@ -58,7 +58,7 @@ import {
   openJazzSession,
   type JazzClient,
 } from "./create-jazz-session.js";
-import type { BackendSchemaInput } from "./create-jazz-context.js";
+import { DEFAULT_ENVIRONMENT, type BackendSchemaInput } from "./create-jazz-context.js";
 import { openThinSessionClient } from "./thin-session-client.js";
 import { asksThinResults, ThinRelay, type ThinTransactionClient } from "./thin-relay.js";
 import {
@@ -1803,6 +1803,10 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
   // A vercel() core says which it opened itself.
   if (store.kind !== "vercel") logStoreOpened(storeOpenedLine(store));
   const appId = core.appId;
+  // The environment the backend's own session opens the app in; the
+  // clients serving thin sessions' transactions build their keyless hooks
+  // for the same one.
+  const environment = DEFAULT_ENVIRONMENT;
   const issuer = BACKEND_USER_ISSUER;
   // An in-memory store's agent tokens last as long as its data: this process.
   const memoryTokenSecret = newTokenSecret();
@@ -1826,6 +1830,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     pin = published ?? (await publish(next));
     const session = await openJazzSession({
       appId,
+      env: environment,
       app: next.app,
       permissions: compiledPermissionsOf(next),
       serverUrl: core.serverUrl,
@@ -2515,6 +2520,9 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
       trusted: link.trusted,
       webSocket,
       migrations: shippedMigrations(resolveSchemaSource(options.app)),
+      // An app that declares encryption: the client holds no keys, as the
+      // backend's own does, and refuses encrypted writes itself.
+      keyless: keylessBackend(options.app, appId, environment),
     });
     thinClients += 1;
     let closed = false;
