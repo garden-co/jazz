@@ -949,7 +949,7 @@ mod tests {
         ] {
             let stopped = newest_answered(["newer", "valid"], |candidate| match *candidate {
                 "valid" => Ok(7),
-                _ => Err(stop.clone()),
+                _ => Err(stop),
             });
             assert!(
                 matches!(&stopped, Err(ClientError::Protocol(error)) if *error == stop),
