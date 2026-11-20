@@ -728,3 +728,105 @@ test("an encrypted app deploys to a Durable Object core, which keeps its declara
     rmSync(persist, { recursive: true, force: true });
   }
 });
+
+// An encrypting app's system tables over a session's socket, under the
+// policies Jazz derives for them:
+//
+//   alice ──device request──► written
+//   alice ──device keys (her own request's)──► written
+//   mallory ──device request──► written
+//   mallory ──device keys naming alice's request──► refused
+test("an encrypting app's system tables take a session's own writes over its socket and refuse another's", async () => {
+  const mf = new Miniflare({
+    modules: true,
+    scriptPath: join(here, "host-worker.mjs"),
+    modulesRoot: join(here, "../.."),
+    modulesRules: [
+      { type: "ESModule", include: ["**/*.js", "**/*.mjs"] },
+      { type: "CompiledWasm", include: ["**/*.wasm"] },
+    ],
+    compatibilityDate: "2026-04-01",
+    durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
+    bindings: { JAZZ_CORE_SECRET: SECRET },
+  });
+  try {
+    const body = fixture.testEncryptedDeployBody(false);
+    const deployed = await mf.dispatchFetch(`http://core/apps/${APP}/admin/bundles`, {
+      method: "POST",
+      headers: { "X-Jazz-Admin-Secret": SECRET, "content-type": "application/json" },
+      body,
+    });
+    assert.equal(deployed.status, 200, await deployed.clone().text());
+    const { bundle } = await deployed.json();
+    const { appId } = await (
+      await mf.dispatchFetch("http://core/app", {
+        headers: { "X-Jazz-Backend-Credential": SECRET, "X-Jazz-Backend-Access": "backend" },
+      })
+    ).json();
+    const { schemas, targetSchemaHash } = JSON.parse(body);
+    const schema = JSON.stringify(schemas.find((entry) => entry.hash === targetSchemaHash).schema);
+
+    // A device account of the app's own namespace, relayed by the backend
+    // as jazz-tools relays a local-first user, past its Hello and schema.
+    const session = async (seed) => {
+      const guest = JSON.parse(
+        fixture.testGuest(seed, appId, BigInt(Math.floor(Date.now() / 1000))),
+      );
+      const socket = await connect(mf, { "X-Jazz-Backend-Credential": SECRET });
+      socket.send(
+        JSON.stringify({
+          peer_identity: guest.peer,
+          auth: { jwt_token: guest.proof, backend_secret: "stated-by-backend-credential" },
+          local_first_audience: appId,
+          bundle,
+        }),
+      );
+      socket.send(fixture.testThinHello());
+      assert.deepEqual(await socket.next(), { hello: true });
+      socket.send(fixture.testThinSchema(1n, schema));
+      assert.deepEqual(await socket.next(), { id: 1, ok: true });
+      return socket;
+    };
+    const alice = await session(3);
+    const mallory = await session(4);
+
+    const device = new Uint8Array(16).fill(0xd1);
+    const keys = {
+      publicKey: [1, 2, 3],
+      mechanism: "m",
+      version: 1,
+      signingPublicKey: [4, 5, 6],
+      signingMechanism: "s",
+      signingVersion: 1,
+    };
+    const insert = (socket, id, table, row, cells) =>
+      socket.send(fixture.testThinInsertRow(id, table, row, JSON.stringify(cells)));
+
+    insert(alice, 2n, "__e2ee_device_requests", device, { ...keys, nonceCommitment: [7] });
+    assert.deepEqual(await alice.next(), { id: 2, written: true });
+    const deviceId = { uuid: "d1d1d1d1-d1d1-d1d1-d1d1-d1d1d1d1d1d1" };
+    insert(alice, 3n, "__e2ee_device_keys", new Uint8Array(16).fill(0xa1), { deviceId, ...keys });
+    assert.deepEqual(await alice.next(), { id: 3, written: true });
+
+    // mallory's session writes its own request, but may not publish keys
+    // for alice's.
+    insert(mallory, 2n, "__e2ee_device_requests", new Uint8Array(16).fill(0xd2), {
+      ...keys,
+      nonceCommitment: [8],
+    });
+    assert.deepEqual(await mallory.next(), { id: 2, written: true });
+    insert(mallory, 3n, "__e2ee_device_keys", new Uint8Array(16).fill(0xb1), { deviceId, ...keys });
+    const refused = await mallory.next();
+    assert.equal(refused.id, 3);
+    assert.match(
+      refused.error ?? "",
+      /INSERT policy denied the new row in `__e2ee_device_keys`/,
+      JSON.stringify(refused),
+    );
+
+    alice.close();
+    mallory.close();
+  } finally {
+    await mf.dispose();
+  }
+});
