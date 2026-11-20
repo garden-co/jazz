@@ -75,11 +75,13 @@ which only the local-first client has:
   the keys: it settles once the device's keys are ready.
 - **A handle you took while thin keeps working** after the upgrade; you do not need to read
   `db.encryption` again.
-- **`onReport`, `onUnreadable` and `onChallenge` attach after the upgrade.** They return a function
-  that stops the listener at any time, before or after it attached. They start the load, as a call
-  does; if it fails, Jazz logs a warning and the listener never attaches.
-- **`recovery.create()` throws** an `EncryptionNeedsLocalFirstError`, because it is synchronous and
-  cannot wait. It starts the load: call it after `await db.encryption.ready()`.
+- **`onReport`, `onUnreadable` and `onChallenge` attach after the upgrade, and do not start it.**
+  Attach them at start-up as you would anywhere: they register at once and begin to fire when the
+  local-first client arrives for any other reason. They return a function that stops the listener at
+  any time, before or after it attached.
+- **`recovery.create()` throws** an `EncryptionNeedsLocalFirstError` with reason `"load-failed"`,
+  because it is synchronous and cannot wait. It starts the load: call it again after
+  `await db.encryption.ready()`.
 
 An app that declares no encryption still gets `EncryptionNotDeclaredError` from `db.encryption`.
 

@@ -14,8 +14,11 @@ export interface PendingEncryptionHost {
   resolve(): Promise<Encryption>;
   /** What a synchronous call throws: it can't wait. Starts the load. */
   refuseSync(operation: string): Error;
-  /** Listeners that never attached because the wait failed. */
-  onAttachFailed(error: unknown): void;
+  /**
+   * Runs `attach` with the real handle once the local-first client is there,
+   * for whatever reason; never starts the load. Returns how to cancel.
+   */
+  whenLocalFirst(attach: (real: Encryption) => void): () => void;
 }
 
 const LISTENERS = new Set(["onReport", "onUnreadable", "onChallenge"]);
@@ -48,21 +51,14 @@ export function pendingEncryption(host: PendingEncryptionHost): Encryption {
       },
     });
 
-  /** Attaches once the real handle exists; the returned function detaches either way. */
+  /** Attaches once the local-first client arrives, by any other cause; starts nothing. */
   const listen = (name: string, listener: unknown): (() => void) => {
-    let stopped = false;
     let detach: (() => void) | undefined;
-    host.resolve().then(
-      (real) => {
-        if (stopped) return;
-        detach = (real as unknown as Record<string, (l: unknown) => () => void>)[name]!(listener);
-      },
-      (error: unknown) => {
-        if (!stopped) host.onAttachFailed(error);
-      },
-    );
+    const cancel = host.whenLocalFirst((real) => {
+      detach = (real as unknown as Record<string, (l: unknown) => () => void>)[name]!(listener);
+    });
     return () => {
-      stopped = true;
+      cancel();
       detach?.();
       detach = undefined;
     };

@@ -823,22 +823,32 @@ describe("a thin session of an app with encrypted columns", () => {
       expect(isThinDb(kept)).toBe(false);
     }, 90_000);
 
-    it("attaches listeners after the upgrade, and stops one that never attached", async () => {
+    it("attaches listeners without starting the load, and they fire after a later upgrade", async () => {
       const host = await serve();
-      const { kept, gate } = await thinMember(host);
+      const { device } = await member(host);
+      // The page is still loading, so no background upgrade starts either.
+      pageStillLoading();
+      const gate = gatedLoader();
+      const kept = db(await open(host, device, gate.loader));
       const unreadable: unknown[] = [];
       const stop = kept.encryption.onUnreadable((report) => unreadable.push(report));
-      const never = kept.encryption.onChallenge(() => {});
-      never();
-      // A listener starts the load, as a call does.
-      await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
+      const stopped = kept.encryption.onChallenge(() => {});
+      kept.encryption.onReport(() => {});
+      stopped();
+      // Attached at start-up, they must not pull in the local-first client.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(gate.calls).toBe(0);
+      expect(isThinDb(kept)).toBe(true);
+
+      // Some other cause starts the upgrade; the listeners attach with it.
+      const upgrading = kept.upgradeToLocalFirst(gate.loader);
       gate.release();
+      await upgrading;
       await expect.poll(() => isThinDb(kept), { timeout: 20_000 }).toBe(false);
-      // A listener taken while thin is the real one's now: it attached.
       const real = kept.encryption as unknown as { listeners: Set<unknown> };
-      await expect.poll(() => real.listeners.size, { timeout: 10_000 }).toBe(1);
+      await expect.poll(() => real.listeners.size, { timeout: 10_000 }).toBe(2);
       stop();
-      expect(real.listeners.size).toBe(0);
+      expect(real.listeners.size).toBe(1);
     }, 90_000);
 
     it("refuses the synchronous recovery.create() and starts the load", async () => {
@@ -854,6 +864,9 @@ describe("a thin session of an app with encrypted columns", () => {
         thrown = error;
       }
       expect(thrown).toBeInstanceOf(EncryptionNeedsLocalFirstError);
+      expect((thrown as Error).message).toContain(
+        "call it again after `await db.encryption.ready()`",
+      );
       await expect.poll(() => gate.calls, { timeout: 10_000 }).toBe(1);
     }, 60_000);
 

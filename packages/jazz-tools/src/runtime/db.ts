@@ -2508,6 +2508,22 @@ export class Db {
   }
 
   private pendingEncryption: Encryption | undefined;
+  private readonly successorWaiters = new Set<(next: Db) => void>();
+
+  /**
+   * @internal Runs `then` with the Db that does this one's work once it is
+   * local-first, however that comes about; never starts the upgrade. At once
+   * if it already is. Returns how to cancel.
+   */
+  whenLocalFirst(then: (next: Db) => void): () => void {
+    const live = this.current();
+    if (live !== this) {
+      then(live);
+      return () => {};
+    }
+    this.successorWaiters.add(then);
+    return () => void this.successorWaiters.delete(then);
+  }
 
   /**
    * A thin `Db` of an app that declares encryption has no handle of its own:
@@ -2549,11 +2565,7 @@ export class Db {
           },
         );
       },
-      onAttachFailed: (error) =>
-        console.warn(
-          "An encryption listener could not attach: the local-first client failed.",
-          error,
-        ),
+      whenLocalFirst: (attach) => this.whenLocalFirst((next) => attach(next.encryption)),
     }));
   }
 
@@ -4753,6 +4765,8 @@ export class Db {
     if (heldBack && this.clientSchema)
       void ownerPreparation(next.getClient(this.clientSchema)).run(() => heldBack);
     this.successor = next;
+    for (const waiter of Array.from(this.successorWaiters)) waiter(next.current());
+    this.successorWaiters.clear();
     // A read still waiting for this runtime's server (the server is down)
     // asks `next` instead: only the drain below waits for that server.
     own?.endUnsentReads?.();
