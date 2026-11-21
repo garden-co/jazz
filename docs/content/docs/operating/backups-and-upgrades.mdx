@@ -95,9 +95,14 @@ a core of its own, separate from production's (a dry run with its own data, not 
 ## Upgrading from alpha.70 to beta.0
 
 `2.0.0-beta.0` is the first beta of Jazz 2. From here on, [Stability](/docs/stability) says what we
-try not to break between betas. Data directories, Vercel and Durable Object cores, and the wire
+try not to break between betas. Data directories, Vercel and Durable Object cores, and the sync
 protocol are unchanged from alpha.70: upgrade by bumping every Jazz package to `2.0.0-beta.0` and
-redeploying, as usual. The only code changes are removals of APIs that earlier alphas deprecated.
+redeploying, as usual.
+
+The code changes are removals of everything earlier alphas deprecated. Each subsection below names
+what was removed, who hits it, and what to use instead. Most of them fail at build time ("not
+exported"), so your typecheck finds whatever a search misses. `jazz-tools upgrade` is removed too:
+these sections are the upgrade path, written so you or an AI coding assistant can follow them.
 
 ### Removed: `useSession()` (Svelte: `getSession()`)
 
@@ -124,6 +129,52 @@ The fields change too, as in [alpha.66](#upgrading-from-alpha65):
 
 `grep -rnE "\b(useSession|getSession)\b" --include='*.ts' --include='*.tsx' --include='*.vue' --include='*.svelte' . --exclude-dir=node_modules`
 finds them. Then run your typecheck: it flags anything the search missed.
+
+### Removed: the alpha.61 auth stubs
+
+In alpha.61 these names became stubs that throw `JAZZ_API_REMOVED` when called. They're gone now, so
+importing one fails at build time. Only apps that still import them hit this, and those apps have
+been throwing at runtime since alpha.61.
+
+| Removed                                                                                                                                  | Use instead                                                                                                               |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `useJazzAuth`, `useJazzSessionOwner`, `useAccountState`, `accountState` (Svelte)                                                         | `useJazzSession()` (Svelte: `getJazzSession()`)                                                                           |
+| `createAccountState`, `createJazzSessionState`                                                                                           | `useJazzSession()`                                                                                                        |
+| `createAccountManager`, `AccountManager`                                                                                                 | `createJazzClient(config)`, whose session signs in (`initial: "device"`, `createDeviceAccount()`, or your backend's user) |
+| `createDb`                                                                                                                               | `createJazzClient(config)`, then `session.db`                                                                             |
+| `createJazzApp`                                                                                                                          | `createJazzClient(config)`, or `<JazzProvider config={…}>`                                                                |
+| `exportLocalFirstSecret`                                                                                                                 | `session.exportDeviceKey()`                                                                                               |
+| `useLocalFirstAuth`, `createUseLocalFirstAuth`, `LocalFirstAuth`, `BrowserAuthSecretStore`, `ExpoAuthSecretStore`, `expoAuthSecretStore` | device accounts on the session: `createDeviceAccount()`, `exportDeviceKey()`, `restoreDeviceAccount(key)`                 |
+| `JazzSessionProvider`                                                                                                                    | `<JazzProvider session={session}>`                                                                                        |
+| `JazzSvelteProvider`                                                                                                                     | `<JazzProvider config={…}>`, or `<JazzSvelteClientProvider client>` for a client you opened yourself                      |
+| `acceptLocalFirstAuth` (`jazz-tools/backend`)                                                                                            | `acceptDeviceAccounts`                                                                                                    |
+
+[Upgrading from alpha.60](#upgrading-from-alpha60) has the same mapping, with more detail. Errors that
+named `loginWithBackend` or `linkWithBackend` now name the session's `refresh()` and
+`linkDeviceAccount()` (for example "refresh() and linkDeviceAccount() need a browser: …"). That only
+matters to tests that match the message.
+
+### Removed: the alpha.68 rename aliases
+
+These were deprecated aliases since the device-account rename (see [Upgrading from alpha.68](#upgrading-from-alpha68)).
+They're gone now, so using one fails at typecheck and build. Only apps that mint device-account
+proofs for their own backend, or annotate `acceptDeviceAccounts()` results with the old type, hit
+this. Nothing on the wire changes.
+
+| Before                                           | After                                                          |
+| ------------------------------------------------ | -------------------------------------------------------------- |
+| `db.getLocalFirstIdentityProof(options)`         | `db.getDeviceAccountProof(options)` (same options, same token) |
+| type `LocalFirstGuest` from `jazz-tools/backend` | type `DeviceAccountsAnswer` from `jazz-tools/backend`          |
+
+`grep -rnE "getLocalFirstIdentityProof|LocalFirstGuest" . --exclude-dir=node_modules` finds them.
+
+### Removed: `hashes` in the server's schema list
+
+The server's `GET …/schemas` response no longer has `hashes`, the list of schema hashes. Read
+`schemas` instead: one `{ hash, publishedAt }` per schema, so `hashes` is
+`schemas.map((s) => s.hash)`. This is the one HTTP response that changes in beta.0; the sync
+protocol is unchanged. Only scripts and tools that call that endpoint directly hit it: `jazz-tools`
+itself already reads `schemas`.
 
 ### For an AI coding assistant
 

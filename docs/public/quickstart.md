@@ -70,9 +70,10 @@
      Fill in what it asks for, then run `generate` again (/docs/schemas/migrations). Never delete or
      move the store to get past a schema error: it means a migration is missing, and the user's
      data is in that store.
-   - An alpha.65 app (`schema.ts` with `s.defineApp`, and `permissions.ts`): run
-     `npx jazz-tools@2.0.0-alpha.66 upgrade` first, before bumping the dependency, and review the
-     diff (/docs/operating/backups-and-upgrades#upgrading-from-alpha65).
+   - An app on an older Jazz 2 release: follow each "Upgrading from …" section from its version up,
+     in order (/docs/operating/backups-and-upgrades), before bumping the dependency, and review the
+     diff. An alpha.65 app (`schema.ts` with `s.defineApp`, and `permissions.ts`) starts at
+     /docs/operating/backups-and-upgrades#upgrading-from-alpha65.
    - In either case, use these Jazz features instead of modeling them yourself:
      - Built-in metadata columns like `$createdBy`, `$createdAt`, `$updatedBy` and `$updatedAt`:
        /docs/reading/metadata
