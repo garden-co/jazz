@@ -255,7 +255,12 @@ export async function createAccountDbWithRuntimeSource(
     // Return a lease the runtime never received before tearing it down.
     await releaseUnusedLease(lease);
     unsubscribe();
-    if (!db) await runtimeSource.shutdown();
+    try {
+      if (db) await db.shutdown();
+      else await runtimeSource.shutdown();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Account context startup failed");
+    }
     throw error;
   }
 }

@@ -28,7 +28,10 @@ secret may have leaked, the only remedy is a new account.
 An account your own sign-in manages is different: its recovery secret is separate, so you can retire the
 recovery credential and register a new secret.
 
-The account secret stays where the device account keeps it, as before. Encryption reads it from the session for each call and keeps no copy of its own.
+The account secret stays where the device account keeps it, as before. On Node and in the browser,
+encryption reads it from the session for each call and keeps no copy of its own. A native client (Rust,
+Swift, Kotlin, Go, React Native and Expo) holds it in memory while it registers or restores recovery at
+start, and drops it once that finishes or fails, or when the client closes.
 
 ## Approve a device
 

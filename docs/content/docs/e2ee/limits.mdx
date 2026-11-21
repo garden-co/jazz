@@ -21,6 +21,7 @@ languageTabs: backend
   recovery credential and register a new secret.
 - **A stale held key may seal.** A device that has not yet seen a removal keeps sealing under the key it
   holds until it updates.
+- **A copied store may answer one more challenge.** See [Copied stores](#copied-stores).
 - **A device protects only what it has seen of another account's history.** Each device keeps a floor
   for another account's history in a space: the newest state of it that the device has observed. A
   floor protects a device only against a rollback after its own first observation, and it advances
@@ -42,9 +43,9 @@ languageTabs: backend
 - **No default store.** The app supplies the private store and its protection.
 - **Node, the browser and the native clients.** Node (`createJazzClient` from `jazz-tools/backend`), the
   web client (`createJazzClient` from `jazz-tools/client`, also the client for Deno, Bun and
-  command-line apps with a bearer), and the Rust, Swift, Kotlin and Go clients (see
-  [Encryption in Rust, Swift, Kotlin and Go](/docs/e2ee/native)).
-- **What the native clients do not do yet.**
+  command-line apps with a bearer), and the Rust, Swift, Kotlin, Go, React Native and Expo clients.
+  See [Encryption in native apps](/docs/e2ee/native).
+- **What the Rust, Swift, Kotlin and Go clients do not do yet.**
   - A subscription holds no key watch. Keys reach a device through the pass that runs at start,
     through reads that left rows out for want of a key, and when the app calls
     `keysDeliver`; a member added while another member's device is running may wait for that device's
@@ -55,8 +56,6 @@ languageTabs: backend
     online.
   - The Swift, Kotlin and Go `Session` (account switching) takes no private store yet: open an encrypted
     app with a client instead.
-  - React Native: the relay opens an encrypted app in Rust; the JavaScript calls and the store are not
-    wired.
 - **A script on your page can use the device's keys.** The browser keeps the device's keys protected by a
   key that scripts can use but never read out, and each tab holds the space keys it uses in memory. Any
   script that runs on your page's origin (an injected one, for example through a cross-site scripting
@@ -72,3 +71,7 @@ languageTabs: backend
   user of the same browser profile or a script on your origin can use them as above. With
   `clearOnSignOut: true` (and the default persistent storage) a sign-out wipes them with the account's
   local data; see [Signing out](/docs/e2ee/browser#signing-out).
+
+## Copied stores
+
+A copy of an unapproved device's store, taken while its protection travels with it (a restored backup, a VM snapshot), can answer one more approval challenge with an already revealed nonce. A server that substitutes keys could then pass the approval code for that one approval. Where the protection is bound to the device, a copy opens nothing.

@@ -697,6 +697,77 @@ it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly 
   );
 });
 
+it("decodes a read's rows with the rows it left out, from the native relay's pinned bytes", () => {
+  const relay = loadRelay(null);
+  // Pinned by reported_rows_answer_has_pinned_bytes in jazz-native-relay.
+  const json = '[{"table":"t","id":"i","column":null,"code":"key-pending"}]';
+  const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
+  const answer = (unreadable: number[]) =>
+    Uint8Array.from([37, 2, 9, 8, unreadable.length, ...unreadable]);
+  expect(relay.decodeNativeForegroundResponse(answer(ascii(json)))).toEqual({
+    type: "rows",
+    rows: Uint8Array.of(9, 8),
+    unreadable: json,
+  });
+  // A read that left none out is the unchanged `Rows` answer.
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(2, 2, 9, 8))).toEqual({
+    type: "rows",
+    rows: Uint8Array.of(9, 8),
+  });
+  for (const malformed of ['{"table":"t"}', "[", ""]) {
+    expect(() => relay.decodeNativeForegroundResponse(answer(ascii(malformed)))).toThrow(
+      /malformed unreadable rows/,
+    );
+  }
+  const whole = answer(ascii(json));
+  expect(() => relay.decodeNativeForegroundResponse(whole.subarray(0, whole.length - 1))).toThrow();
+  expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(37, 5, 9, 8))).toThrow();
+});
+
+it("decodes a delta that names its unreadable rows with the native relay's pinned bytes", () => {
+  const relay = loadRelay(null);
+  // Pinned by unreadable_delta_event_has_pinned_bytes in jazz-native-relay.
+  const json = '[{"table":"t","id":"i","column":null,"code":"key-pending"}]';
+  const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
+  const event = (unreadable: number[]) =>
+    Uint8Array.from([
+      4, // subscription events
+      1, // one event
+      4, // delta with unreadable rows
+      1,
+      0,
+      5,
+      ...ascii("Local"),
+      2,
+      9,
+      8,
+      unreadable.length,
+      ...unreadable,
+    ]);
+  expect(relay.decodeNativeForegroundResponse(event(ascii(json)))).toEqual({
+    type: "subscriptionEvents",
+    events: [
+      {
+        type: "delta",
+        reset: true,
+        settled: false,
+        tier: "Local",
+        delta: Uint8Array.of(9, 8),
+        unreadable: json,
+      },
+    ],
+  });
+  for (const malformed of ['{"table":"t"}', "[", ""]) {
+    expect(() => relay.decodeNativeForegroundResponse(event(ascii(malformed)))).toThrow(
+      /malformed unreadable rows/,
+    );
+  }
+  // Truncated: the list is cut short.
+  expect(() => relay.decodeNativeForegroundResponse(event(ascii(json)).subarray(0, 20))).toThrow(
+    /truncated/,
+  );
+});
+
 it("encodes and decodes the slow-query log commands with the native relay's pinned bytes", () => {
   const relay = loadRelay(null);
   const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));

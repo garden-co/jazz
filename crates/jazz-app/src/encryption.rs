@@ -251,6 +251,7 @@ mod plan {
             let built = host::build_native(
                 host::NativeOptions {
                     app_file: self.app_file.clone(),
+                    from_bindings: false,
                     device_account_secret,
                     app_id: self.app_id.to_string(),
                     environment: config.environment.clone(),

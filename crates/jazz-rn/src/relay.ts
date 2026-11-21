@@ -178,6 +178,11 @@ export type NativeForegroundCommand =
   | { type: "uploadStatus" }
   /** Delete the scope's local store (ABI 6). */
   | { type: "deleteStore" }
+  | { type: "encryptionOpen" }
+  | { type: "takeStoreRequests" }
+  | { type: "replyStore"; id: string; ok: boolean; payload: string }
+  | { type: "encryptionCall"; op: string; argsJson: string }
+  | { type: "takeEncryptionReports" }
   | {
       type: "beginStreamingMutation";
       mutation: "insert" | "update" | "upsert";
@@ -219,7 +224,16 @@ export type NativeForegroundResponse =
     }
   | { type: "probe"; abiVersion: number }
   | { type: "ticked" }
-  | { type: "rows"; rows: Uint8Array }
+  | {
+      type: "rows";
+      rows: Uint8Array;
+      /**
+       * A one-shot read's rows left out because the encryption runtime could
+       * not open them, as a JSON array of `{ table, id, column, code }`;
+       * absent when it left none out.
+       */
+      unreadable?: string;
+    }
   | { type: "subscribed"; subscription: number }
   | { type: "subscriptionEvents"; events: NativeForegroundSubscriptionEvent[] }
   | { type: "unsubscribed"; closed: boolean }
@@ -273,7 +287,12 @@ export type NativeForegroundResponse =
   | { type: "slowQueryThresholdSet" }
   | { type: "pendingUploadCount"; count: number }
   | { type: "uploadStatus"; statusJson: string }
-  | { type: "storeDeleted"; pendingUploads: number };
+  | { type: "storeDeleted"; pendingUploads: number }
+  | { type: "encryptionOpen"; ready: boolean }
+  | { type: "storeRequests"; requests: string[] }
+  | { type: "storeReply"; accepted: boolean }
+  | { type: "encryptionResult"; json: string }
+  | { type: "encryptionReports"; reports: string[] };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -283,6 +302,14 @@ export type NativeForegroundSubscriptionEvent =
       tier: string;
       delta: Uint8Array;
       terminalOperations?: unknown[];
+      /**
+       * The rows the result leaves out because the encryption runtime could
+       * not open them, as a JSON array of `{ table, id, column, code }`. Set
+       * on a delta that changed the list, which it replaces, and on a reset
+       * that leaves rows out; absent when the list is unchanged (on a reset:
+       * none left out).
+       */
+      unreadable?: string;
     }
   | { type: "rejected"; reason: string }
   | { type: "closed" };
@@ -427,6 +454,24 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "pendingUploadCount") return Uint8Array.of(38);
   if (command.type === "uploadStatus") return Uint8Array.of(39);
   if (command.type === "deleteStore") return Uint8Array.of(40);
+  if (command.type === "encryptionOpen") return Uint8Array.of(41);
+  if (command.type === "takeStoreRequests") return Uint8Array.of(42);
+  if (command.type === "replyStore") {
+    return concatForegroundBytes(
+      Uint8Array.of(43),
+      encodeForegroundString(command.id),
+      Uint8Array.of(command.ok ? 1 : 0),
+      encodeForegroundString(command.payload),
+    );
+  }
+  if (command.type === "encryptionCall") {
+    return concatForegroundBytes(
+      Uint8Array.of(44),
+      encodeForegroundString(command.op),
+      encodeForegroundString(command.argsJson),
+    );
+  }
+  if (command.type === "takeEncryptionReports") return Uint8Array.of(45);
   if (command.type === "takeSlowQueryReport") {
     return concatForegroundBytes(
       Uint8Array.of(36),
@@ -846,6 +891,41 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
       pendingUploads: decodeForegroundU64(bytes.subarray(1), "deleted store's pending uploads"),
     };
   }
+  if (tag === 32 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
+    return { type: "encryptionOpen", ready: bytes[1] === 1 };
+  }
+  if (tag === 33) {
+    return { type: "storeRequests", requests: decodeForegroundStrings(bytes, "store requests") };
+  }
+  if (tag === 34 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
+    return { type: "storeReply", accepted: bytes[1] === 1 };
+  }
+  if (tag === 35) {
+    return {
+      type: "encryptionResult",
+      json: decodeForegroundString(bytes.subarray(1), "encryption result"),
+    };
+  }
+  if (tag === 36) {
+    return {
+      type: "encryptionReports",
+      reports: decodeForegroundStrings(bytes, "encryption reports"),
+    };
+  }
+  if (tag === 37) {
+    // ReportedRows: the rows, then the rows left out as JSON.
+    let lengthEnd = 1;
+    while (lengthEnd < bytes.length && (bytes[lengthEnd]! & 0x80) !== 0) lengthEnd++;
+    if (lengthEnd >= bytes.length)
+      throw new Error("Jazz native foreground returned malformed reported rows");
+    const length = decodeForegroundU64(bytes.subarray(1, lengthEnd + 1), "reported rows length");
+    const rowsEnd = lengthEnd + 1 + length;
+    if (rowsEnd > bytes.length)
+      throw new Error("Jazz native foreground returned malformed reported rows");
+    const unreadable = decodeForegroundString(bytes.subarray(rowsEnd), "unreadable rows");
+    assertUnreadableJson(unreadable);
+    return { type: "rows", rows: bytes.slice(lengthEnd + 1, rowsEnd), unreadable };
+  }
   if (
     tag === 16 &&
     bytes.length >= 5 &&
@@ -990,6 +1070,23 @@ function decodeForegroundString(bytes: Uint8Array, label: string): string {
   return decodeForegroundUtf8(encoded, 0, encoded.byteLength, label);
 }
 
+/** A postcard vector of length-prefixed strings, following the command tag. */
+function decodeForegroundStrings(bytes: Uint8Array, label: string): string[] {
+  let end = 1;
+  while (end < bytes.length && (bytes[end]! & 0x80) !== 0) end++;
+  const count = decodeForegroundU64(bytes.subarray(1, end + 1), `${label} count`);
+  let offset = end + 1;
+  if (count > bytes.length - offset) throw new Error(`Malformed native operation ${label}`);
+  const strings: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const [value, next] = decodeForegroundPrefixedString(bytes, offset, label);
+    strings.push(value);
+    offset = next;
+  }
+  if (offset !== bytes.length) throw new Error(`Malformed native operation ${label}`);
+  return strings;
+}
+
 function decodeForegroundSubscriptionEvents(
   bytes: Uint8Array,
 ): NativeForegroundSubscriptionEvent[] {
@@ -1014,7 +1111,7 @@ function decodeForegroundSubscriptionEvents(
   const events: NativeForegroundSubscriptionEvent[] = [];
   for (let index = 0; index < count; index += 1) {
     const tag = readVarint();
-    if (tag === 0 || tag === 3) {
+    if (tag === 0 || tag === 3 || tag === 4) {
       const reset = bytes[offset++];
       const settled = bytes[offset++];
       if ((reset !== 0 && reset !== 1) || (settled !== 0 && settled !== 1))
@@ -1037,6 +1134,13 @@ function decodeForegroundSubscriptionEvents(
           throw new Error("Jazz native foreground returned malformed terminal operations");
         terminalOperations = parsed;
       }
+      let unreadable: string | undefined;
+      if (tag === 4) {
+        const length = readVarint();
+        unreadable = decodeForegroundUtf8(bytes, offset, length, "unreadable rows");
+        offset += length;
+        assertUnreadableJson(unreadable);
+      }
       events.push({
         type: "delta",
         reset: reset === 1,
@@ -1044,6 +1148,7 @@ function decodeForegroundSubscriptionEvents(
         tier,
         delta,
         ...(terminalOperations === undefined ? {} : { terminalOperations }),
+        ...(unreadable === undefined ? {} : { unreadable }),
       });
     } else if (tag === 1) {
       const length = readVarint();
@@ -1056,6 +1161,18 @@ function decodeForegroundSubscriptionEvents(
   if (offset !== bytes.length)
     throw new Error("Jazz native foreground returned trailing subscription bytes");
   return events;
+}
+
+/** Fail closed on a list of unreadable rows that is not a JSON array. */
+function assertUnreadableJson(json: string): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    parsed = undefined;
+  }
+  if (!Array.isArray(parsed))
+    throw new Error("Jazz native foreground returned malformed unreadable rows");
 }
 
 // Bounded so `fromCharCode.apply` stays well under engine argument limits.

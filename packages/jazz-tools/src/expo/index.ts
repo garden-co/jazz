@@ -40,3 +40,18 @@ export {
   useJazzSessionOwner,
   useLocalFirstAuth,
 } from "../removed-api.js";
+
+export {
+  memoryPrivateStore,
+  PrivateStoreConflictError,
+  PrivateStoreWipedError,
+  EncryptionError,
+  EncryptionNotDeclaredError,
+  EncryptionStoreRequiredError,
+} from "../encryption/index.js";
+export type {
+  Encryption,
+  EncryptionReport,
+  PrivateStore,
+  StoredDocument,
+} from "../encryption/index.js";

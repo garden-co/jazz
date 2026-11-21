@@ -19,6 +19,8 @@ pub use account_session::{
 };
 #[cfg(feature = "e2ee-client")]
 pub mod encryption;
+#[cfg(feature = "e2ee-client")]
+mod foreground_readiness;
 mod node_lease;
 mod relay;
 mod text_anchors;
@@ -31,6 +33,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+#[cfg(feature = "e2ee-client")]
+use foreground_readiness::{ForegroundReadiness, ReadinessCommand};
 use jazz::binding_host;
 use jazz::db::{DbIdentity, RemoteLinkHint};
 use jazz::ids::NodeUuid;
@@ -50,10 +54,11 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// refuse to open rather than misread a failure; 3 added its `reason_name`;
 /// 4 ends each subscription delta with its updated rows' splices; 5 attaches
 /// the app's migrations beside its schema's tables; 6 ends a tick's upstream
-/// failure with the refusal's error code.
+/// failure with the refusal's error code; 7 adds encrypted foreground setup
+/// and operations to the private account-owned foreground channel.
 /// Append-only commands use optional native capabilities while existing
 /// command layouts remain stable.
-pub const NATIVE_RELAY_ABI_V1: u16 = 6;
+pub const NATIVE_RELAY_ABI_V1: u16 = 7;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -541,6 +546,19 @@ pub enum ForegroundDbCommandRequest {
     /// store that syncs everything again. Writes the server had not confirmed
     /// are dropped, and counted in the answer.
     DeleteStore,
+    /// Advance the leased foreground's private-store setup without blocking.
+    EncryptionOpen,
+    TakeStoreRequests,
+    ReplyStore {
+        id: String,
+        ok: bool,
+        payload: String,
+    },
+    EncryptionCall {
+        op: String,
+        args_json: String,
+    },
+    TakeEncryptionReports,
 }
 
 /// One refusal of a scope's credential by its upstream. Every refusal gets a
@@ -759,6 +777,30 @@ pub enum ForegroundDbCommandResponse {
     StoreDeleted {
         pending_uploads: u64,
     },
+    EncryptionOpen {
+        ready: bool,
+    },
+    StoreRequests {
+        requests: Vec<String>,
+    },
+    StoreReply {
+        accepted: bool,
+    },
+    EncryptionResult {
+        json: String,
+    },
+    EncryptionReports {
+        reports: Vec<String>,
+    },
+    /// [`Self::Rows`] for a one-shot read that left rows out because the
+    /// encryption runtime could not open them, named as
+    /// `binding_host::unreadable_json` spells them (a JSON array of
+    /// `{ table, id, column, code }`). A read that left none out answers
+    /// `Rows`. Appended last so the earlier responses keep their bytes.
+    ReportedRows {
+        rows: Vec<u8>,
+        unreadable_json: String,
+    },
 }
 
 /// One already-materialized subscription event.  The byte payload deliberately
@@ -783,6 +825,20 @@ pub enum ForegroundSubscriptionEvent {
         tier: String,
         delta: Vec<u8>,
         terminal_operations_json: String,
+    },
+    /// A [`Self::Delta`] that also names the rows its result leaves out
+    /// because the encryption runtime could not open them, as
+    /// `binding_host::unreadable_json` spells them (a JSON array of
+    /// `{ table, id, column, code }`); they replace the list told before.
+    /// Sent instead of `Delta` on an opening, a reset, and a delta that
+    /// changed the list. Appended last so the earlier variants keep their
+    /// postcard bytes.
+    UnreadableDelta {
+        reset: bool,
+        settled: bool,
+        tier: String,
+        delta: Vec<u8>,
+        unreadable_json: String,
     },
 }
 
@@ -843,6 +899,10 @@ pub struct NativeRelayHost {
     /// this separate from the general command handles makes it impossible for
     /// JSI to turn a guessed number into a relay/client pairing.
     foregrounds: BTreeMap<u64, OpenedForeground>,
+    /// Readiness shares this short lock with leases, separately from the
+    /// lifecycle lock that can cover a sibling's SQLite work.
+    #[cfg(feature = "e2ee-client")]
+    foreground_readiness: Arc<Mutex<ForegroundReadiness>>,
     /// Native-relay-owned foreground node leases, partitioned by durable
     /// relay scope. A foreground never chooses or retains this state itself.
     foreground_node_leases: BTreeMap<RelayScope, ForegroundNodeLeasePool>,
@@ -863,6 +923,8 @@ pub struct NativeRelayHost {
 struct AdmittedRelayScope {
     config: RelayOpenConfig,
     claims: BTreeMap<String, Value>,
+    #[cfg(feature = "e2ee-client")]
+    encryption: Option<encryption::ForegroundEncryption>,
 }
 
 struct OpenedRelay {
@@ -1064,6 +1126,8 @@ impl Default for NativeRelayHost {
             relays: BTreeMap::new(),
             clients: BTreeMap::new(),
             foregrounds: BTreeMap::new(),
+            #[cfg(feature = "e2ee-client")]
+            foreground_readiness: Arc::default(),
             foreground_node_leases: BTreeMap::new(),
             next_handle: 1,
             #[cfg(test)]
@@ -1406,7 +1470,7 @@ impl NativeRelayHost {
                 config.supported_abi = supported_abi;
                 let scope = config.scope.clone();
                 let peer_identity = config.identity.author;
-                let relay = self.registry.open_admitted(config).map_err(relay_status)?;
+                let relay = self.open_admitted_relay(admitted_scope, config)?;
                 self.ensure_private_scope_worker(
                     admitted_scope,
                     &scope,
@@ -1594,7 +1658,7 @@ impl NativeRelayHost {
             )
         };
         let scope = config.scope.clone();
-        let relay = self.registry.open_admitted(config).map_err(relay_status)?;
+        let relay = self.open_admitted_relay(admitted_scope, config)?;
         self.ensure_private_scope_worker(admitted_scope, &scope, relay.clone(), author)?;
         let relay_handle = self
             .allocate()
@@ -1611,14 +1675,38 @@ impl NativeRelayHost {
             .allocate()
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let lease = self.acquire_foreground_lease(&scope)?;
-        let client = match relay.attach_foreground_client(
-            DbIdentity {
-                node: lease.node,
-                author,
-            },
-            claims,
-            lease,
-        ) {
+        let identity = DbIdentity {
+            node: lease.node,
+            author,
+        };
+        #[cfg(feature = "e2ee-client")]
+        let attachment =
+            if let Some(encryption) = self.admitted_scopes[&admitted_scope].encryption.clone() {
+                // The first encrypted foreground takes the account secret
+                // for its runtime's recovery at start; the owner keeps no
+                // copy once it attached (a failed attach gives it back).
+                let owner = self
+                    .account_session_owners
+                    .get_mut(&admitted_scope)
+                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+                let secret = owner.device_account_secret.take();
+                let attached = relay.attach_foreground_encrypted(
+                    identity,
+                    claims,
+                    lease,
+                    encryption,
+                    secret.clone(),
+                );
+                if attached.is_err() {
+                    owner.device_account_secret = secret;
+                }
+                attached
+            } else {
+                relay.attach_foreground_client(identity, claims, lease)
+            };
+        #[cfg(not(feature = "e2ee-client"))]
+        let attachment = relay.attach_foreground_client(identity, claims, lease);
+        let client = match attachment {
             Ok(client) => client,
             Err(error) => {
                 // The relay alias was not yet observable to the caller. Undo
@@ -1636,6 +1724,9 @@ impl NativeRelayHost {
                 return Err(relay_status(error));
             }
         };
+        #[cfg(feature = "e2ee-client")]
+        let readiness_client =
+            (runtime_token != DIRECT_FOREGROUND_RUNTIME_TOKEN).then(|| client.clone());
         self.clients.insert(client_handle, (relay_handle, client));
         let foreground = match self.allocate() {
             Ok(foreground) => foreground,
@@ -1667,7 +1758,41 @@ impl NativeRelayHost {
                 lease,
             },
         );
+        #[cfg(feature = "e2ee-client")]
+        if let Some(client) = readiness_client {
+            self.foreground_readiness
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .register(foreground, runtime_token, client);
+        }
         Ok(foreground)
+    }
+
+    #[cfg(feature = "e2ee-client")]
+    fn revoke_foreground_readiness(&self, foregrounds: &[u64]) {
+        let mut readiness = self
+            .foreground_readiness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for foreground in foregrounds {
+            readiness.revoke(*foreground);
+        }
+    }
+
+    fn open_admitted_relay(
+        &self,
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_variables))]
+        capability: AdmissionCapability,
+        config: RelayOpenConfig,
+    ) -> Result<NativeRelay, JazzNativeRelayStatus> {
+        #[cfg(feature = "e2ee-client")]
+        if let Some(encryption) = self.admitted_scopes[&capability].encryption.as_ref() {
+            return self
+                .registry
+                .open_admitted_with(config, Some(encryption.declarations.clone()))
+                .map_err(relay_status);
+        }
+        self.registry.open_admitted(config).map_err(relay_status)
     }
 
     /// Report the relay-owned native socket's reachability to the foreground
@@ -1795,6 +1920,8 @@ impl NativeRelayHost {
         foreground_handle: u64,
         teardown: ForegroundTeardown,
     ) -> Result<bool, JazzNativeRelayStatus> {
+        #[cfg(feature = "e2ee-client")]
+        self.revoke_foreground_readiness(&[foreground_handle]);
         let Some(foreground) = self.foregrounds.remove(&foreground_handle) else {
             return Ok(false);
         };
@@ -1914,6 +2041,8 @@ impl NativeRelayHost {
                 (opened.runtime_token == runtime_token).then_some(*handle)
             })
             .collect::<Vec<_>>();
+        #[cfg(feature = "e2ee-client")]
+        self.revoke_foreground_readiness(&foregrounds);
         let mut failed = false;
         for handle in foregrounds {
             if self
@@ -1977,6 +2106,14 @@ impl NativeRelayHost {
         &mut self,
         request: RelayScopeAdmissionRequest,
     ) -> Result<AdmissionCapability, JazzNativeRelayStatus> {
+        self.admit_scope_with_account(request, None)
+    }
+
+    fn admit_scope_with_account(
+        &mut self,
+        request: RelayScopeAdmissionRequest,
+        owner: Option<&account_session::AccountSessionOwner>,
+    ) -> Result<AdmissionCapability, JazzNativeRelayStatus> {
         RelayScope::from(request.scope.clone())
             .validate()
             .map_err(relay_status)?;
@@ -1988,6 +2125,9 @@ impl NativeRelayHost {
         // ships, if any (`ClientMigrations` in jazz-tools).
         let mut public_schema = serde_json::from_str::<serde_json::Value>(&request.schema_json)
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let bindings = public_schema
+            .as_object_mut()
+            .and_then(|fields| fields.remove("encryptionBindings"));
         let migrations = public_schema
             .as_object_mut()
             .and_then(|fields| fields.remove("migrations"))
@@ -1997,6 +2137,23 @@ impl NativeRelayHost {
         let migrations =
             jazz::tools::deployment::published::lowered_client_migrations(migrations.as_deref())
                 .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        #[cfg(feature = "e2ee-client")]
+        let encryption = bindings
+            .map(|bindings| {
+                encryption::ForegroundEncryption::admit(
+                    bindings
+                        .as_str()
+                        .ok_or(JazzNativeRelayStatus::InvalidCommand)?,
+                    &public_schema,
+                    owner.ok_or(JazzNativeRelayStatus::InvalidHandle)?,
+                )
+            })
+            .transpose()?;
+        #[cfg(not(feature = "e2ee-client"))]
+        if bindings.is_some() {
+            let _ = owner;
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
+        }
         let public_schema = serde_json::from_value(public_schema)
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let schema =
@@ -2021,7 +2178,18 @@ impl NativeRelayHost {
                     || admitted.config.schema.version_id() != config.schema.version_id()
                     || admitted.config.migrations_key() != config.migrations_key()
                     || admitted.config.identity != config.identity
-                    || admitted.claims != request.claims)
+                    || admitted.claims != request.claims
+                    || {
+                        #[cfg(feature = "e2ee-client")]
+                        {
+                            admitted.encryption.as_ref().map(|app| &app.declarations)
+                                != encryption.as_ref().map(|app| &app.declarations)
+                        }
+                        #[cfg(not(feature = "e2ee-client"))]
+                        {
+                            false
+                        }
+                    })
         }) {
             return Err(JazzNativeRelayStatus::LifecycleFailure);
         }
@@ -2031,6 +2199,8 @@ impl NativeRelayHost {
             AdmittedRelayScope {
                 config,
                 claims: request.claims,
+                #[cfg(feature = "e2ee-client")]
+                encryption,
             },
         );
         Ok(handle)
@@ -2151,13 +2321,16 @@ impl NativeRelayHost {
         let schema_json =
             serde_json::to_string(&value).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let socket = pending.socket;
-        let admitted = self.admit_scope(RelayScopeAdmissionRequest {
-            scope: pending.scope,
-            sqlite_path: pending.sqlite_path,
-            schema_json,
-            identity: pending.identity,
-            claims: pending.claims,
-        })?;
+        let admitted = self.admit_scope_with_account(
+            RelayScopeAdmissionRequest {
+                scope: pending.scope,
+                sqlite_path: pending.sqlite_path,
+                schema_json,
+                identity: pending.identity,
+                claims: pending.claims,
+            },
+            runtime_owner.as_ref(),
+        )?;
         if let Some(socket) = socket {
             self.private_socket_sessions.insert(admitted, socket);
         }
@@ -2194,6 +2367,13 @@ impl NativeRelayHost {
             .iter()
             .filter_map(|(handle, opened)| (opened.scope == scope).then_some(*handle))
             .collect::<Vec<_>>();
+        let foregrounds = self
+            .foregrounds
+            .iter()
+            .filter_map(|(handle, opened)| (opened.scope == scope).then_some(*handle))
+            .collect::<Vec<_>>();
+        #[cfg(feature = "e2ee-client")]
+        self.revoke_foreground_readiness(&foregrounds);
         let pending = relay_handles
             .first()
             .and_then(|handle| self.relays.get(handle))
@@ -2201,11 +2381,6 @@ impl NativeRelayHost {
             .unwrap_or(0);
         // The socket worker first: dropping it cancels and joins its socket.
         self.private_scope_workers.remove(&scope);
-        let foregrounds = self
-            .foregrounds
-            .iter()
-            .filter_map(|(handle, opened)| (opened.scope == scope).then_some(*handle))
-            .collect::<Vec<_>>();
         for handle in foregrounds {
             let _ = self.teardown_foreground(handle, ForegroundTeardown::Retire);
         }
@@ -2247,6 +2422,22 @@ impl NativeRelayHost {
         let Some(admitted) = self.admitted_scopes.remove(&admitted_scope) else {
             return Ok(false);
         };
+        let relay_handles = self
+            .relays
+            .iter()
+            .filter_map(|(handle, opened)| {
+                (opened.admitted_scope == admitted_scope).then_some(*handle)
+            })
+            .collect::<Vec<_>>();
+        let foregrounds = self
+            .foregrounds
+            .iter()
+            .filter_map(|(handle, foreground)| {
+                relay_handles.contains(&foreground.relay).then_some(*handle)
+            })
+            .collect::<Vec<_>>();
+        #[cfg(feature = "e2ee-client")]
+        self.revoke_foreground_readiness(&foregrounds);
         // A sibling account context retains the shared upstream owner. Its
         // foreground and bearer outlive this context's normal shutdown.
         let successor = self.admitted_scopes.iter().find_map(|(capability, entry)| {
@@ -2284,25 +2475,11 @@ impl NativeRelayHost {
         {
             self.private_scope_workers.remove(&admitted.config.scope);
         }
-        let relay_handles = self
-            .relays
-            .iter()
-            .filter_map(|(handle, opened)| {
-                (opened.admitted_scope == admitted_scope).then_some(*handle)
-            })
-            .collect::<Vec<_>>();
         // Revocation is an unclean lifecycle boundary. Each foreground must
         // synchronously reject new work, clear its owner wake, abort pending
         // work, and retire its lease after admission has stopped new opens.
         // The old `retain` merely hid aliases and left raw wake contexts plus
         // active node identities behind.
-        let foregrounds = self
-            .foregrounds
-            .iter()
-            .filter_map(|(handle, foreground)| {
-                relay_handles.contains(&foreground.relay).then_some(*handle)
-            })
-            .collect::<Vec<_>>();
         let mut failed = false;
         for foreground in foregrounds {
             if self
@@ -2584,6 +2761,8 @@ pub unsafe extern "C" fn jazz_native_relay_execute(
 #[repr(C)]
 pub struct JazzNativeRelayHost {
     inner: Arc<Mutex<NativeRelayHost>>,
+    #[cfg(feature = "e2ee-client")]
+    foreground_readiness: Arc<Mutex<ForegroundReadiness>>,
 }
 
 impl JazzNativeRelayHost {
@@ -2600,6 +2779,8 @@ impl JazzNativeRelayHost {
 pub struct JazzNativeRelayHostLease {
     inner: Arc<Mutex<NativeRelayHost>>,
     runtime_token: u64,
+    #[cfg(feature = "e2ee-client")]
+    foreground_readiness: Arc<Mutex<ForegroundReadiness>>,
 }
 
 impl JazzNativeRelayHostLease {
@@ -2620,8 +2801,11 @@ impl JazzNativeRelayHostLease {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_host_new() -> *mut JazzNativeRelayHost {
+    let host = NativeRelayHost::default();
     Box::into_raw(Box::new(JazzNativeRelayHost {
-        inner: Arc::new(Mutex::new(NativeRelayHost::default())),
+        #[cfg(feature = "e2ee-client")]
+        foreground_readiness: Arc::clone(&host.foreground_readiness),
+        inner: Arc::new(Mutex::new(host)),
     }))
 }
 
@@ -2655,10 +2839,12 @@ pub unsafe extern "C" fn jazz_native_relay_host_retain(
     if host.is_null() || runtime_token == 0 || runtime_token == DIRECT_FOREGROUND_RUNTIME_TOKEN {
         return std::ptr::null_mut();
     }
-    let inner = unsafe { Arc::clone(&(&*host).inner) };
+    let host = unsafe { &*host };
     Box::into_raw(Box::new(JazzNativeRelayHostLease {
-        inner,
+        inner: Arc::clone(&host.inner),
         runtime_token,
+        #[cfg(feature = "e2ee-client")]
+        foreground_readiness: Arc::clone(&host.foreground_readiness),
     }))
 }
 
@@ -3018,6 +3204,8 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
     request_len: usize,
     out: *mut JazzNativeRelayBytes,
 ) -> JazzNativeRelayStatus {
+    #[cfg(feature = "e2ee-client")]
+    let started = std::time::Instant::now();
     ffi_call(|| {
         unsafe { reset_out(out, JazzNativeRelayBytes::EMPTY)? };
         let lease = unsafe { live_arg(lease)? };
@@ -3025,6 +3213,17 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_execute_foreground(
         let request = unsafe { bytes_arg(request, request_len)? };
         let command = decode_foreground_command(request)
             .map_err(|_| JazzNativeRelayStatus::InvalidCommand)?;
+        // The readiness receipt is scoped to this lease, and neither a
+        // readiness submission nor a poll waits for the lifecycle lock.
+        #[cfg(feature = "e2ee-client")]
+        if let Some(command) = ReadinessCommand::from_foreground(&command) {
+            let response = lease
+                .foreground_readiness
+                .lock()
+                .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?
+                .execute(foreground, lease.runtime_token, command, started)?;
+            return unsafe { write_postcard_out(out, &response) };
+        }
         let mut host = lease.lock_foreground(foreground)?;
         let response = host.execute_foreground_command(foreground, command)?;
         unsafe { write_postcard_out(out, &response) }

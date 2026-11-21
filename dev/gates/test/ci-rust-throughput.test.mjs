@@ -113,6 +113,8 @@ const rnNativeArtifactPushPaths = [
   "Cargo.toml",
   "crates/jazz/**",
   "crates/jazz-compression/**",
+  "crates/jazz-e2ee/**",
+  "crates/jazz-e2ee-client/**",
   "crates/jazz-native-relay/**",
   "crates/jazz-native-transport/**",
   "crates/jazz-rn/**",

@@ -83,7 +83,7 @@ const NATIVE_RELAY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// waits on it (see `RelayWorker::wait_interval`).
 const NATIVE_RELAY_ENCRYPTION_POLL_INTERVAL: Duration = Duration::from_millis(5);
 /// Bounds on the per-foreground handles a JavaScript runtime may hold open.
-const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
+pub(crate) const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
 const NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX: usize = 64;
 /// Committed writes a foreground remembers for later waits by transaction id.
 const NATIVE_RELAY_FOREGROUND_WRITES_MAX: usize = 16 * 1024;
@@ -309,8 +309,12 @@ use crate::encryption::Declarations;
 type Declarations = std::convert::Infallible;
 #[cfg(not(feature = "e2ee-client"))]
 type EncryptedDevice = std::convert::Infallible;
+#[cfg(not(feature = "e2ee-client"))]
+type BuiltDevice = std::convert::Infallible;
 #[cfg(feature = "e2ee-client")]
-use crate::encryption::EncryptedDevice;
+use crate::encryption::{Built as BuiltDevice, EncryptedDevice, ForegroundEncryption};
+#[cfg(feature = "e2ee-client")]
+use jazz_e2ee_client::host::bridge::JsStore;
 
 type RelayJob = Box<dyn FnOnce(&mut RelayWorker) + Send + 'static>;
 
@@ -333,6 +337,7 @@ struct RelayInner {
     schema_version: jazz::ids::SchemaVersionId,
     migrations: MigrationsKey,
     identity: DbIdentity,
+    declarations: Option<Declarations>,
 }
 
 impl RelayInner {
@@ -420,6 +425,10 @@ impl NativeRelay {
         let schema_version = config.schema.version_id();
         let migrations = config.migrations_key();
         let identity = config.identity;
+        #[cfg(feature = "e2ee-client")]
+        let worker_declarations = declarations.clone();
+        #[cfg(not(feature = "e2ee-client"))]
+        let worker_declarations = declarations;
         let alive = Arc::new(AtomicBool::new(true));
         let (commands, receiver) =
             mpsc::sync_channel::<RelayCommand>(NATIVE_RELAY_OWNER_COMMAND_MAX);
@@ -429,7 +438,7 @@ impl NativeRelay {
             .name("jazz-native-relay".to_owned())
             .spawn(move || {
                 let _alive = OwnerAlive(owner_alive);
-                let mut worker = match RelayWorker::open(config, declarations) {
+                let mut worker = match RelayWorker::open(config, worker_declarations) {
                     Ok(worker) => {
                         let _ = started_tx.send(Ok(()));
                         worker
@@ -454,6 +463,7 @@ impl NativeRelay {
                 schema_version,
                 migrations,
                 identity,
+                declarations,
             }),
         })
     }
@@ -514,6 +524,52 @@ impl NativeRelay {
             return Err(RelayError::ScopeConfigurationMismatch);
         }
         let id = self.run(move |worker| worker.attach(identity, claims, lease.high_water, None))?;
+        Ok(NativeRelayClient {
+            relay: self.clone(),
+            id,
+        })
+    }
+
+    #[cfg(feature = "e2ee-client")]
+    pub(crate) fn attach_foreground_encrypted(
+        &self,
+        identity: DbIdentity,
+        claims: BTreeMap<String, Value>,
+        lease: ForegroundNodeLease,
+        encryption: ForegroundEncryption,
+        device_account_secret: Option<zeroize::Zeroizing<String>>,
+    ) -> Result<NativeRelayClient, RelayError> {
+        if identity.author != self.inner.identity.author
+            || self.inner.declarations.as_ref() != Some(&encryption.declarations)
+        {
+            return Err(RelayError::ScopeConfigurationMismatch);
+        }
+        let id = self.run(move |worker| {
+            let account = identity
+                .author
+                .account_id()
+                .ok_or(RelayError::ScopeConfigurationMismatch)?;
+            let store = Rc::new(JsStore::default());
+            let build = encryption.build(
+                account.0.to_string(),
+                device_account_secret,
+                Rc::clone(&store),
+            );
+            worker.next_client += 1;
+            let id = worker.next_client;
+            worker.encrypted_opens.insert(
+                id,
+                EncryptedOpen {
+                    identity,
+                    claims,
+                    high_water: lease.high_water,
+                    store,
+                    build: EncryptedBuild::Building(Box::pin(build)),
+                    wake: None,
+                },
+            );
+            Ok(id)
+        })?;
         Ok(NativeRelayClient {
             relay: self.clone(),
             id,
@@ -658,6 +714,106 @@ fn readiness_timeout() -> RelayError {
     RelayError::Drive("timeout: the account was not verified in time".to_owned())
 }
 
+/// A foreground waiter is polled by JavaScript without waiting on the relay
+/// owner. The owner alone requests and observes verification.
+#[cfg(feature = "e2ee-client")]
+#[derive(Clone)]
+pub(crate) struct ForegroundReady {
+    request: Arc<Mutex<ForegroundReadyState>>,
+    started: Instant,
+    timeout: Duration,
+}
+
+#[cfg(feature = "e2ee-client")]
+type ReadyOutcome = Result<&'static str, String>;
+
+#[cfg(feature = "e2ee-client")]
+enum ForegroundReadyState {
+    Waiting(Option<ReadyOutcome>),
+    Settled(ReadyOutcome),
+    Cancelled,
+}
+
+#[cfg(feature = "e2ee-client")]
+impl ForegroundReady {
+    pub(crate) fn new(started: Instant, timeout: Duration) -> Self {
+        Self {
+            request: Arc::new(Mutex::new(ForegroundReadyState::Waiting(None))),
+            started,
+            timeout,
+        }
+    }
+
+    fn expired(&self) -> bool {
+        self.started.elapsed() >= self.timeout
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, ForegroundReadyState> {
+        self.request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn cancel(&self) {
+        *self.state() = ForegroundReadyState::Cancelled;
+    }
+
+    pub(crate) fn poll(&self) -> Option<ForegroundDbCommandResponse> {
+        let mut state = self.state();
+        if matches!(*state, ForegroundReadyState::Waiting(_)) && !self.expired() {
+            return None;
+        }
+        let result = match std::mem::replace(&mut *state, ForegroundReadyState::Cancelled) {
+            ForegroundReadyState::Settled(result) | ForegroundReadyState::Waiting(Some(result)) => {
+                result
+            }
+            _ => Err(
+                "timeout: the account was not verified in time (waiting: relay owner)".to_owned(),
+            ),
+        };
+        Some(operation_response(
+            result
+                .map(|status| ForegroundDbCommandResponse::EncryptionResult {
+                    json: serde_json::Value::from(status).to_string(),
+                })
+                .map_err(HostError::Argument),
+        ))
+    }
+
+    fn admit(
+        &self,
+        encryption: Option<&jazz_e2ee_client::host::runtime::Encryption>,
+    ) -> Option<u64> {
+        let mut state = self.state();
+        if !matches!(*state, ForegroundReadyState::Waiting(_)) || self.expired() {
+            return None;
+        }
+        match encryption {
+            Some(encryption) => Some(encryption.request_foreground_ready()),
+            None => {
+                *state = ForegroundReadyState::Settled(Err(
+                    "the app does not declare encryption".to_owned()
+                ));
+                None
+            }
+        }
+    }
+
+    /// Returns true while the owner should keep observing this waiter.
+    fn observe(&self, encryption: &jazz_e2ee_client::host::runtime::Encryption, pass: u64) -> bool {
+        let mut state = self.state();
+        if !matches!(*state, ForegroundReadyState::Waiting(_)) || self.expired() {
+            return false;
+        }
+        if let Some(result) = encryption.foreground_ready_outcome(pass, false) {
+            *state = ForegroundReadyState::Settled(result);
+            return false;
+        }
+        *state = ForegroundReadyState::Waiting(encryption.foreground_ready_outcome(pass, true));
+        true
+    }
+}
+
 /// Stable handle for one process-local UI peer.
 #[derive(Clone)]
 pub struct NativeRelayClient {
@@ -668,6 +824,30 @@ pub struct NativeRelayClient {
 impl NativeRelayClient {
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    #[cfg(feature = "e2ee-client")]
+    pub(crate) fn enqueue_foreground_ready(
+        &self,
+        ready: ForegroundReady,
+    ) -> Result<(), RelayError> {
+        let id = self.id;
+        self.relay.enqueue(move |worker| {
+            let client = worker.clients.get_mut(&id);
+            let encryption = client
+                .as_ref()
+                .and_then(|client| client.encryption.as_deref());
+            if let Some(pass) = ready.admit(encryption)
+                && ready.observe(encryption.expect("encrypted foreground"), pass)
+            {
+                client
+                    .expect("encrypted foreground")
+                    .readiness
+                    .push((ready, pass));
+            }
+            Ok(())
+        })?;
+        Ok(())
     }
 
     /// One end-to-end encryption operation of this device's runtime by name
@@ -773,6 +953,10 @@ impl NativeRelayClient {
     pub(crate) fn pump_foreground(&self) -> Result<(), RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
+            #[cfg(feature = "e2ee-client")]
+            if worker.encrypted_opens.contains_key(&id) {
+                return Ok(());
+            }
             worker.client(id)?;
             worker.drive();
             match worker.drive_error.take() {
@@ -799,6 +983,11 @@ impl NativeRelayClient {
     ) -> Result<(), RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
+            #[cfg(feature = "e2ee-client")]
+            if let Some(open) = worker.encrypted_opens.get_mut(&id) {
+                open.wake = wake.map(|wake| (foreground, wake));
+                return Ok(());
+            }
             let client = worker.client_mut(id)?;
             client.wake = wake.map(|wake| (foreground, wake));
             Ok(())
@@ -809,8 +998,13 @@ impl NativeRelayClient {
     /// lease's next holder starts above it.
     pub(crate) fn minted_high_water(&self) -> Result<u64, RelayError> {
         let id = self.id;
-        self.relay
-            .run(move |worker| Ok(worker.client(id)?.binding.db.seq_high_water()))
+        self.relay.run(move |worker| {
+            #[cfg(feature = "e2ee-client")]
+            if let Some(open) = worker.encrypted_opens.get(&id) {
+                return Ok(open.high_water);
+            }
+            Ok(worker.client(id)?.binding.db.seq_high_water())
+        })
     }
 
     /// Run an operation against this UI peer's database on the owner thread.
@@ -915,6 +1109,8 @@ struct Foreground {
     /// A device's encryption runtime, driven with each drive of the relay.
     #[cfg(feature = "e2ee-client")]
     encryption: Option<Rc<jazz_e2ee_client::host::runtime::Encryption>>,
+    #[cfg(feature = "e2ee-client")]
+    readiness: Vec<(ForegroundReady, u64)>,
 }
 
 impl Foreground {
@@ -1015,32 +1211,12 @@ impl Foreground {
                 && let Some(event) = subscription.stream.try_next_event()
             {
                 subscription.opened = true;
-                let event = match binding_host::event_chunk(event).map_err(|e| e.to_string())? {
-                    EventChunk::Delta {
-                        delta,
-                        reset,
-                        settled,
-                        tier,
-                        // Not in the foreground ABI yet: a coalesced backlog
-                        // reaches React Native as a plain reset.
-                        coalesced: _,
-                        // Nor are unreadable rows: React Native has no
-                        // encryption runtime yet.
-                        unreadable: _,
-                    } => ForegroundSubscriptionEvent::Delta {
-                        reset,
-                        settled,
-                        tier,
-                        delta,
-                    },
-                    EventChunk::Rejected { detail, .. } => {
-                        ForegroundSubscriptionEvent::Rejected { reason: detail }
-                    }
-                    EventChunk::Closed => {
-                        subscription.closed = true;
-                        ForegroundSubscriptionEvent::Closed
-                    }
-                };
+                let event = foreground_subscription_event(
+                    binding_host::event_chunk(event).map_err(|e| e.to_string())?,
+                );
+                if event == ForegroundSubscriptionEvent::Closed {
+                    subscription.closed = true;
+                }
                 subscription.buffer.push_back(event);
                 self.notify = true;
             }
@@ -1050,6 +1226,10 @@ impl Foreground {
 
     /// Whether time-bound work is pending that a drive must re-check.
     fn awaits_time(&self) -> bool {
+        #[cfg(feature = "e2ee-client")]
+        if !self.readiness.is_empty() {
+            return true;
+        }
         !self.pending.is_empty() || self.subscriptions.values().any(|s| !s.opened)
     }
 
@@ -1089,6 +1269,22 @@ fn poll_once<T>(future: &mut Pin<Box<dyn Future<Output = T>>>) -> Poll<T> {
     future
         .as_mut()
         .poll(&mut Context::from_waker(Waker::noop()))
+}
+
+#[cfg(feature = "e2ee-client")]
+struct EncryptedOpen {
+    identity: DbIdentity,
+    claims: BTreeMap<String, Value>,
+    high_water: u64,
+    store: Rc<JsStore>,
+    build: EncryptedBuild,
+    wake: Option<(u64, Arc<ForegroundWakeState>)>,
+}
+
+#[cfg(feature = "e2ee-client")]
+enum EncryptedBuild {
+    Building(Pin<Box<dyn Future<Output = Result<BuiltDevice, String>>>>),
+    Failed(String),
 }
 
 /// The last outcome a readiness call observed, which its caller takes if
@@ -1150,6 +1346,8 @@ pub(crate) struct RelayWorker {
     upstream: Option<UpstreamConnection>,
     generation: u64,
     clients: BTreeMap<u64, Foreground>,
+    #[cfg(feature = "e2ee-client")]
+    encrypted_opens: BTreeMap<u64, EncryptedOpen>,
     next_client: u64,
     /// The last drive failed; reported by the next foreground tick.
     drive_error: Option<String>,
@@ -1300,6 +1498,8 @@ impl RelayWorker {
             upstream: None,
             generation: 0,
             clients: BTreeMap::new(),
+            #[cfg(feature = "e2ee-client")]
+            encrypted_opens: BTreeMap::new(),
             next_client: 0,
             drive_error: None,
             refusal: None,
@@ -1431,6 +1631,8 @@ impl RelayWorker {
 
     fn shutdown(&mut self) {
         #[cfg(feature = "e2ee-client")]
+        self.encrypted_opens.clear();
+        #[cfg(feature = "e2ee-client")]
         self.end_encryption_calls(None);
         for (_, client) in std::mem::take(&mut self.clients) {
             client.close();
@@ -1467,14 +1669,8 @@ impl RelayWorker {
             .db
             .check_serves(identity.author)
             .map_err(|error| RelayError::Host(error.into()))?;
-        // A device brings the runtime's hooks; any other peer of an
-        // encrypted relay is keyless like the relay.
-        #[allow(unused_mut)]
-        let mut db_config = self.db_config(self.schema.clone(), identity);
         #[cfg(feature = "e2ee-client")]
-        let mut runtime = None;
-        #[cfg(feature = "e2ee-client")]
-        if let Some(device) = device {
+        let runtime = if let Some(device) = device {
             let account = identity
                 .author
                 .account_id()
@@ -1483,10 +1679,39 @@ impl RelayWorker {
             let keyless = self.keyless.as_ref().ok_or_else(|| {
                 RelayError::Drive("the relay does not declare encryption".to_owned())
             })?;
-            let built = crate::encryption::build(device, account, keyless.declarations())
-                .map_err(RelayError::Drive)?;
-            db_config = db_config.with_e2ee(built.built.client().hooks());
-            runtime = Some(built);
+            Some(
+                crate::encryption::build(device, account, keyless.declarations())
+                    .map_err(RelayError::Drive)?,
+            )
+        } else {
+            None
+        };
+        #[cfg(not(feature = "e2ee-client"))]
+        let runtime = None;
+        self.next_client += 1;
+        let id = self.next_client;
+        self.finish_attach(id, identity, claims, high_water, runtime)?;
+        self.drive();
+        Ok(id)
+    }
+
+    fn finish_attach(
+        &mut self,
+        id: u64,
+        identity: DbIdentity,
+        claims: BTreeMap<String, Value>,
+        high_water: u64,
+        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_variables))] runtime: Option<
+            BuiltDevice,
+        >,
+    ) -> Result<(), RelayError> {
+        // A device brings the runtime's hooks; any other peer of an
+        // encrypted relay is keyless like the relay.
+        #[allow(unused_mut)]
+        let mut db_config = self.db_config(self.schema.clone(), identity);
+        #[cfg(feature = "e2ee-client")]
+        if let Some(runtime) = &runtime {
+            db_config = db_config.with_e2ee(runtime.built.client().hooks());
         }
         let db = block_on(binding_host::open_memory(db_config))
             .map_err(|error| RelayError::Host(error.into()))?;
@@ -1530,8 +1755,6 @@ impl RelayWorker {
         let link = binding.connect_upstream();
         // The foreground store and this relay run the same build.
         link.set_features(jazz::wire::current_wire_features());
-        self.next_client += 1;
-        let id = self.next_client;
         self.clients.insert(
             id,
             Foreground {
@@ -1553,13 +1776,18 @@ impl RelayWorker {
                 next_handle: 0,
                 #[cfg(feature = "e2ee-client")]
                 encryption,
+                #[cfg(feature = "e2ee-client")]
+                readiness: Vec::new(),
             },
         );
-        self.drive();
-        Ok(id)
+        Ok(())
     }
 
     fn detach(&mut self, id: u64) -> Result<(), RelayError> {
+        #[cfg(feature = "e2ee-client")]
+        if self.encrypted_opens.remove(&id).is_some() {
+            return Ok(());
+        }
         let client = self
             .clients
             .remove(&id)
@@ -1579,6 +1807,10 @@ impl RelayWorker {
             .set_identity_claims(author, claims.clone());
         self.persistent.hooks.progress.wake_all();
         self.persistent_dirty.set(true);
+        #[cfg(feature = "e2ee-client")]
+        for open in self.encrypted_opens.values_mut() {
+            open.claims = claims.clone();
+        }
         for client in self.clients.values() {
             client
                 .binding
@@ -1829,9 +2061,12 @@ impl RelayWorker {
         // A device's encryption runtime goes on as far as it can without
         // waiting.
         #[cfg(feature = "e2ee-client")]
-        for client in self.clients.values() {
+        for client in self.clients.values_mut() {
             if let Some(encryption) = &client.encryption {
                 encryption.drive();
+                client
+                    .readiness
+                    .retain(|(ready, pass)| ready.observe(encryption, *pass));
             }
         }
         // A refused upstream syncs nothing: stop its connection and say why,
@@ -1865,12 +2100,63 @@ impl RelayWorker {
         id: u64,
         command: ForegroundDbCommandRequest,
     ) -> Result<ForegroundDbCommandResponse, RelayError> {
+        #[cfg(feature = "e2ee-client")]
+        use ForegroundDbCommandRequest as Request;
+        #[cfg(feature = "e2ee-client")]
+        if self.encrypted_opens.contains_key(&id) {
+            let response = match command {
+                Request::EncryptionOpen => self.finish_encrypted_open(id),
+                Request::TakeStoreRequests => Ok(ForegroundDbCommandResponse::StoreRequests {
+                    requests: self.encrypted_opens[&id].store.take_requests(),
+                }),
+                Request::ReplyStore {
+                    id: request,
+                    ok,
+                    payload,
+                } => reply_store(&self.encrypted_opens[&id].store, &request, ok, &payload),
+                _ => Err("the encrypted foreground is still opening".into()),
+            };
+            return Ok(operation_response(response));
+        }
         let client = self.client_mut(id)?;
         let response = match foreground_command(client, command) {
             Ok(response) => response,
             Err(error) => operation_error(error),
         };
         Ok(response)
+    }
+
+    #[cfg(feature = "e2ee-client")]
+    fn finish_encrypted_open(&mut self, id: u64) -> Result<ForegroundDbCommandResponse, HostError> {
+        let open = self.encrypted_opens.get_mut(&id).expect("encrypted open");
+        let built = match &mut open.build {
+            EncryptedBuild::Building(build) => match poll_once(build) {
+                Poll::Pending => {
+                    return Ok(ForegroundDbCommandResponse::EncryptionOpen { ready: false });
+                }
+                Poll::Ready(built) => built,
+            },
+            EncryptedBuild::Failed(reason) => return Err(reason.clone().into()),
+        };
+        let mut open = self.encrypted_opens.remove(&id).expect("encrypted open");
+        let result = built.and_then(|built| {
+            self.finish_attach(
+                id,
+                open.identity,
+                open.claims.clone(),
+                open.high_water,
+                Some(built),
+            )
+            .map_err(|error| error.to_string())
+        });
+        if let Err(reason) = result {
+            open.build = EncryptedBuild::Failed(reason.clone());
+            self.encrypted_opens.insert(id, open);
+            return Err(reason.into());
+        }
+        self.clients.get_mut(&id).expect("attached client").wake = open.wake;
+        self.drive();
+        Ok(ForegroundDbCommandResponse::EncryptionOpen { ready: true })
     }
 }
 
@@ -1893,6 +2179,82 @@ fn operation_response(
     result: Result<ForegroundDbCommandResponse, HostError>,
 ) -> ForegroundDbCommandResponse {
     result.unwrap_or_else(operation_error)
+}
+
+#[cfg(feature = "e2ee-client")]
+fn reply_store(
+    store: &JsStore,
+    request: &str,
+    ok: bool,
+    payload: &str,
+) -> Result<ForegroundDbCommandResponse, HostError> {
+    let request = request
+        .parse()
+        .map_err(|_| HostError::Argument("invalid store request ID".to_owned()))?;
+    Ok(ForegroundDbCommandResponse::StoreReply {
+        accepted: store.reply(request, ok, payload),
+    })
+}
+
+#[cfg(feature = "e2ee-client")]
+fn foreground_encryption(
+    client: &Foreground,
+) -> Result<Rc<jazz_e2ee_client::host::runtime::Encryption>, HostError> {
+    client
+        .encryption
+        .clone()
+        .ok_or_else(|| "the app does not declare encryption".into())
+}
+
+#[cfg(feature = "e2ee-client")]
+fn foreground_encryption_call(
+    client: &mut Foreground,
+    op: String,
+    args_json: &str,
+) -> Result<ForegroundDbCommandResponse, HostError> {
+    let encryption = foreground_encryption(client)?;
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).map_err(|error| HostError::Argument(error.to_string()))?;
+    let result = |value: serde_json::Value| ForegroundDbCommandResponse::EncryptionResult {
+        json: value.to_string(),
+    };
+    let string = |name: &str| {
+        args.get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| HostError::Argument(format!("missing encryption argument {name}")))
+    };
+    let flag = |name: &str| {
+        args.get(name)
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| HostError::Argument(format!("missing encryption argument {name}")))
+    };
+    let value = match op.as_str() {
+        "state" => encryption.state(),
+        "spaces" => encryption.spaces.clone(),
+        "useSpace" => {
+            encryption.use_space(flag("open")?, string("table")?, string("id")?);
+            serde_json::Value::Null
+        }
+        "setOnline" => {
+            encryption.set_online(flag("online")?);
+            serde_json::Value::Null
+        }
+        "ready" => return Err("readiness must start at the foreground host".into()),
+        _ => {
+            return client.pending_or_ready(
+                Box::pin(async move {
+                    let value = encryption
+                        .call(op, args)
+                        .await
+                        .map_err(HostError::Argument)?;
+                    Ok(result(value))
+                }),
+                None,
+            );
+        }
+    };
+    Ok(result(value))
 }
 
 /// A `MutationErrorEvent` for transaction `tx` rejected with `error` (by
@@ -2054,7 +2416,7 @@ fn foreground_command(
             let transaction = transaction
                 .map(|handle| client.transaction(handle).map(|(id, _)| id.clone()))
                 .transpose()?;
-            let read = binding.all(
+            let read = binding.all_reporting(
                 query,
                 &json(&options_json)?,
                 transaction.as_deref(),
@@ -2062,7 +2424,10 @@ fn foreground_command(
                 None,
             )?;
             client.pending_or_ready(
-                Box::pin(async move { Ok(Response::Rows { rows: read.await? }) }),
+                Box::pin(async move {
+                    let (rows, unreadable) = read.await?;
+                    Ok(rows_response(rows, &unreadable))
+                }),
                 None,
             )?
         }
@@ -2474,6 +2839,35 @@ fn foreground_command(
                 row_id: *row.as_bytes(),
             }
         }
+        #[cfg(feature = "e2ee-client")]
+        Request::EncryptionOpen => {
+            foreground_encryption(client)?;
+            Response::EncryptionOpen { ready: true }
+        }
+        #[cfg(feature = "e2ee-client")]
+        Request::TakeStoreRequests => Response::StoreRequests {
+            requests: foreground_encryption(client)?.store.take_requests(),
+        },
+        #[cfg(feature = "e2ee-client")]
+        Request::ReplyStore { id, ok, payload } => {
+            return reply_store(&foreground_encryption(client)?.store, &id, ok, &payload);
+        }
+        #[cfg(feature = "e2ee-client")]
+        Request::EncryptionCall { op, args_json } => {
+            return foreground_encryption_call(client, op, &args_json);
+        }
+        #[cfg(feature = "e2ee-client")]
+        Request::TakeEncryptionReports => Response::EncryptionReports {
+            reports: foreground_encryption(client)?.take_reports(),
+        },
+        #[cfg(not(feature = "e2ee-client"))]
+        Request::EncryptionOpen
+        | Request::TakeStoreRequests
+        | Request::ReplyStore { .. }
+        | Request::EncryptionCall { .. }
+        | Request::TakeEncryptionReports => {
+            return Err("this build does not support encrypted foregrounds".into());
+        }
         // Host-level commands never reach a foreground's owner.
         Request::Probe
         | Request::Tick
@@ -2569,6 +2963,14 @@ pub struct NativeRelayRegistry {
 
 impl NativeRelayRegistry {
     pub fn open_admitted(&self, config: RelayOpenConfig) -> Result<NativeRelay, RelayError> {
+        self.open_admitted_with(config, None)
+    }
+
+    pub(crate) fn open_admitted_with(
+        &self,
+        config: RelayOpenConfig,
+        declarations: Option<Declarations>,
+    ) -> Result<NativeRelay, RelayError> {
         config.validate()?;
         let mut relays = self
             .relays
@@ -2579,6 +2981,7 @@ impl NativeRelayRegistry {
                 || existing.inner.schema_version != config.schema.version_id()
                 || existing.inner.migrations != config.migrations_key()
                 || existing.inner.identity != config.identity
+                || existing.inner.declarations != declarations
             {
                 return Err(RelayError::ScopeConfigurationMismatch);
             }
@@ -2597,7 +3000,7 @@ impl NativeRelayRegistry {
         {
             return Err(RelayError::StorageAlreadyOwned);
         }
-        let relay = NativeRelay::spawn(config.clone())?;
+        let relay = NativeRelay::spawn_with(config.clone(), declarations)?;
         relays.insert(config.scope, relay.clone());
         Ok(relay)
     }
@@ -3341,6 +3744,66 @@ pub enum RelayError {
     DeclarationsMismatch(String),
     #[error("native relay socket: {0}")]
     Socket(String),
+}
+
+/// A one-shot read's answer: `ReportedRows` when it left rows out because
+/// the encryption runtime could not open them, else `Rows`.
+pub(crate) fn rows_response(
+    rows: Vec<u8>,
+    unreadable: &[jazz::db::UnreadableRow],
+) -> ForegroundDbCommandResponse {
+    if unreadable.is_empty() {
+        ForegroundDbCommandResponse::Rows { rows }
+    } else {
+        ForegroundDbCommandResponse::ReportedRows {
+            rows,
+            unreadable_json: binding_host::unreadable_json(unreadable),
+        }
+    }
+}
+
+/// One subscription event in the foreground ABI.
+pub(crate) fn foreground_subscription_event(chunk: EventChunk) -> ForegroundSubscriptionEvent {
+    match chunk {
+        EventChunk::Delta {
+            delta,
+            reset,
+            settled,
+            tier,
+            // Not in the foreground ABI yet: a coalesced backlog reaches
+            // React Native as a plain reset.
+            coalesced: _,
+            unreadable,
+        } => match unreadable {
+            // A reset with no rows left out is a plain reset: the reader
+            // takes a reset without a list as an empty one. So an app
+            // without encryption keeps event 0.
+            Some(json) if reset && json == "[]" => ForegroundSubscriptionEvent::Delta {
+                reset,
+                settled,
+                tier,
+                delta,
+            },
+            // The list changed, or a reset restates a non-empty one.
+            Some(unreadable_json) => ForegroundSubscriptionEvent::UnreadableDelta {
+                reset,
+                settled,
+                tier,
+                delta,
+                unreadable_json,
+            },
+            None => ForegroundSubscriptionEvent::Delta {
+                reset,
+                settled,
+                tier,
+                delta,
+            },
+        },
+        EventChunk::Rejected { detail, .. } => {
+            ForegroundSubscriptionEvent::Rejected { reason: detail }
+        }
+        EventChunk::Closed => ForegroundSubscriptionEvent::Closed,
+    }
 }
 
 #[cfg(test)]
