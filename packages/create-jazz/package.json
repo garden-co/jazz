@@ -1,6 +1,6 @@
 {
   "name": "create-jazz",
-  "version": "2.0.0-alpha.65",
+  "version": "2.0.0-alpha.70",
   "description": "Print the Jazz agent brief: setup instructions for your coding agent.",
   "license": "MIT",
   "repository": {
@@ -25,19 +25,19 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --out-dir dist",
+    "build": "vp pack",
     "prepublishOnly": "pnpm build",
-    "check": "tsc --noEmit",
+    "check": "tsrs --noEmit",
     "test": "pnpm check && vitest run"
   },
   "devDependencies": {
     "@types/node": "catalog:default",
-    "tsup": "^8.5.0",
     "typescript": "catalog:default",
+    "vite-plus": "catalog:default",
     "vitest": "catalog:default",
     "yaml": "^2.7.0"
   },
   "engines": {
-    "node": ">=22.12"
+    "node": ">=22.18"
   }
 }

@@ -1,3 +1,4 @@
+import { installNodeEngine } from "../backend/node-native.js";
 import { Context, Effect, Layer } from "effect";
 import { HttpServerRequest } from "effect/http";
 import {
@@ -73,6 +74,8 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
             // createJazz opens on first use; the layer opens it up front so
             // a store that cannot open fails the layer, not a later request.
             try: async () => {
+              // Node's engine, by direct reference (see node-native.ts).
+              installNodeEngine();
               const jazz = createJazz(options);
               try {
                 await jazz.ready();

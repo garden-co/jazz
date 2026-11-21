@@ -6,12 +6,13 @@ import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
 import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
 import { CoreTickFailedError, isCoreTickFailedError } from "../core-tick-failed-error.js";
-import { formatUuid, formatUuidAt } from "../hex.js";
+import { formatUuid, parseUuidBytes } from "../hex.js";
 
 export { formatUuid };
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import { writeRow } from "../write-row.js";
+import { assertBacklogRows } from "../backlog-rows.js";
 import { RemoteLinkStatePublisher, type RemoteLinkState } from "../remote-link-state.js";
 import {
   CONNECTED,
@@ -112,7 +113,7 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
-  isReauthenticateWireError,
+  isLocalProtocolWireError,
   isSocketDropWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
@@ -121,7 +122,6 @@ import {
   type WebSocketConstructor,
   type WebSocketNegotiation,
   type WireError,
-  wireAuthFailureReason,
 } from "./websocket.js";
 import { isRenewableAuthFailure, mapAuthReason } from "../auth-state.js";
 import {
@@ -252,6 +252,10 @@ type NativeRestoreOptions = NativeWriteOptions & {
 
 type NativeDb = {
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
+  /** A thin session's transaction request, as its backend's client serves it. */
+  serveThinTransaction?(request: Uint8Array): NativeReadResult;
+  /** End the thin session's open transactions. */
+  releaseThinTransactions?(): NativeReadResult;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
     tier: string,
@@ -267,6 +271,8 @@ type NativeDb = {
   waitForSync?(
     tier: string,
     writer?: Uint8Array | null,
+    /** WASM: settling it stops the wait (napi ignores it). */
+    cancelled?: Promise<void>,
   ): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
@@ -284,6 +290,8 @@ type NativeDb = {
   /** How many local commits still wait for the server's verdict. */
   /** This store's uploads; see {@link UploadStatus}. */
   uploadStatus?(): UploadStatus;
+  /** Ids of `table`'s rows with an undecided write; `null` when the host cannot tell. */
+  pendingUploadRows?(table: string): string[] | null;
   /**
    * A React Native foreground's scope store, deleted by its native relay
    * (see `NativeForegroundDb.deleteNativeStore`), with the writes it dropped.
@@ -486,6 +494,8 @@ type NativeDb = {
   takeSlowQueryReport?(app?: string): string[];
   /** Report query runs of at least `ms` milliseconds; 0 turns the log off. */
   setSlowQueryThresholdMs?(ms: number): void;
+  /** Coalesce a subscription's undelivered deltas past `rows` changed rows. */
+  setSubscriptionBacklogRows?(rows: number): void;
   close?(): void;
   free?(): void;
 };
@@ -617,10 +627,13 @@ type ServerConnectionAttempt = {
  * and the timer and steps the machine with one JSON document per input.
  */
 type NativeUpstreamLink = { handle(nowMs: number, input: string): string };
-type UpstreamLinkFailure = {
-  kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
-  message: string;
-};
+type UpstreamLinkFailure =
+  | {
+      kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal" | "reauthenticate";
+      message: string;
+    }
+  /** A server's `WireError`, classified by the link. */
+  | { kind: "wire"; code: string; retry: string; message: string; admitted: boolean };
 type UpstreamLinkInput =
   | { type: "serverConfigured"; configured: boolean }
   | { type: "setOffline"; offline: boolean }
@@ -659,31 +672,20 @@ type UpstreamLinkStep = {
   status: UpstreamLinkStatus;
 };
 
-/** How the link machine should treat a server connection that ended with `error`. */
-function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLinkFailure {
-  const message = error.message;
-  // The server's session reached the expiry the app's auth gave it: a
-  // planned reconnect, so the app's auth decides again with this client's
-  // current credential (see `isReauthenticateWireError`).
-  if (isReauthenticateWireError(error)) return { kind: "reauthenticate", message };
-  if (wireAuthFailureReason(error)) return { kind: "authRejected", message };
-  // The server's bootstrap and overload signals. Before its hello, `not_ready`
-  // means the server is still starting; `backpressure` means it answered and
-  // refused this connection for now (such as the connection cap per user),
-  // which is retried like an outage but published at once with the server's
-  // reason. After its hello both end a link like an outage.
-  if (isReconnectLaterWireError(error)) {
-    if (negotiated) return { kind: "network", message };
-    return { kind: error.code === "backpressure" ? "refused" : "serverNotReady", message };
-  }
+/**
+ * How a server connection that ended with `error` is reported to the link.
+ * The carrier's own socket drops are a network outage; anything the server
+ * said goes to the link as it arrived, which classifies it in Rust
+ * (`LinkFailure::from_wire_error`) as it does for every host.
+ */
+function upstreamLinkFailure(error: WireError, admitted: boolean): UpstreamLinkFailure {
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
-  if (isSocketDropWireError(error)) {
-    return { kind: "network", message };
-  }
-  // Anything else (a protocol error, an incompatible server) cannot succeed
-  // by retrying.
-  return { kind: "fatal", message };
+  if (isSocketDropWireError(error)) return { kind: "network", message: error.message };
+  // This client could not read what the server sent: a local protocol
+  // failure, not something the server said, so it stops as it always did.
+  if (isLocalProtocolWireError(error)) return { kind: "fatal", message: error.message };
+  return { kind: "wire", ...error, admitted };
 }
 
 function joinServerTransportRetirements(
@@ -914,6 +916,29 @@ export function slowQuerySummary(line: string): string {
   return plan === -1 ? line : line.slice(0, plan);
 }
 
+/**
+ * Where a {@link NativeRuntimeAdapter} is in its life. It only moves forward:
+ *
+ * - `open`: it admits work.
+ * - `quiesced`: a foreground lease handoff closed mutation admission to read
+ *   the final HLC high-water (`quiesceForegroundTxTimeHighWater`).
+ * - `storageCleared`: its native store was deleted (`clearClientStorage`).
+ * - `closing`: `close()` is tearing it down.
+ * - `closed`: torn down, by `close()` or `discard()`.
+ *
+ * `quiesced` and `storageCleared` admit nothing, but leave the teardown to
+ * `close()`: neither reaches `closed` on its own.
+ */
+export type NativeRuntimePhase = "open" | "quiesced" | "storageCleared" | "closing" | "closed";
+
+const NATIVE_RUNTIME_PHASE_ORDER: Record<NativeRuntimePhase, number> = {
+  open: 0,
+  quiesced: 1,
+  storageCleared: 1,
+  closing: 2,
+  closed: 3,
+};
+
 export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
@@ -960,6 +985,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private drainingSubscriptionPool = false;
   private subscriptionPoolDirty = false;
   private authFailureCallback: ((reason: string) => void) | null = null;
+  private authRestoredCallback: (() => void) | null = null;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
   private serverTransportErrorCallback:
     | ((error: Error, state: { retrying: boolean }) => void)
@@ -1011,6 +1037,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverTransportErrorRetrying = false;
   private serverTransportErrorAwaitsAuth = false;
   private nativeAuthRefusalRenewable = false;
+  /** A native host reported a refusal whose admission it has not shown since. */
+  private nativeAuthRefused = false;
   private nativeLinkEverConnected = false;
   private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
   private firstLoadWaitSeen = false;
@@ -1056,11 +1084,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpRunning = false;
   private serverPumpAgain = false;
   private serverConnectionGeneration = 0;
-  private closed = false;
-  // A foreground lease handoff closes mutation admission before it snapshots
-  // the native HLC, but physical native disposal still happens through the
-  // ordinary client shutdown path.
-  private foregroundLeaseQuiesced = false;
+  /** See {@link NativeRuntimePhase}. Only {@link advancePhase} moves it. */
+  private phase: NativeRuntimePhase = "open";
   // A concurrent ordinary close must not dispose native state between a lease
   // handoff's mutation drain and its HLC readout.
   private foregroundLeaseCapture: Promise<bigint> | null = null;
@@ -1069,7 +1094,6 @@ export class NativeRuntimeAdapter implements Runtime {
   // admission deadlines). Mutation admission stays closed, but core progress
   // must continue, or the HLC readout waits behind them forever.
   private foregroundLeaseDraining = false;
-  private physicalCloseStarted = false;
   private nextSubscriptionId = 1;
 
   static fromDb(
@@ -1081,7 +1105,7 @@ export class NativeRuntimeAdapter implements Runtime {
     historyComplete: boolean,
     opts?: Pick<
       NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[6]>,
-      "selfSignedClientProof" | "scopeIsolatedRelay" | "slowQueryLog"
+      "selfSignedClientProof" | "scopeIsolatedRelay" | "slowQueryLog" | "subscriptionBacklogRows"
     >,
   ): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, {
@@ -1089,6 +1113,7 @@ export class NativeRuntimeAdapter implements Runtime {
       selfSignedClientProof: opts?.selfSignedClientProof,
       scopeIsolatedRelay: opts?.scopeIsolatedRelay,
       slowQueryLog: opts?.slowQueryLog,
+      subscriptionBacklogRows: opts?.subscriptionBacklogRows,
     });
   }
 
@@ -1131,6 +1156,8 @@ export class NativeRuntimeAdapter implements Runtime {
       owner?: NativeRuntimeAdapter;
       /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
       slowQueryLog?: SlowQueryLogOptions;
+      /** See {@link DbConfig.subscriptionBacklogRows}. */
+      subscriptionBacklogRows?: number;
       /** How this runtime opens its server socket, when not the platform's own WebSocket. */
       webSocket?: WebSocketConstructor;
       /** The app's versions and migrations: see {@link ClientMigrations}. */
@@ -1202,6 +1229,11 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       this.db.setSlowQueryThresholdMs?.(threshold);
     }
+    const backlogRows = opts?.subscriptionBacklogRows;
+    if (backlogRows !== undefined) {
+      assertBacklogRows(backlogRows, "subscriptionBacklogRows");
+      this.db.setSubscriptionBacklogRows?.(backlogRows);
+    }
     if (typeof this.db.setTickScheduler !== "function") {
       throw new Error("Native runtime requires db.setTickScheduler");
     }
@@ -1221,6 +1253,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // unavailable and remote subscriptions fail once it stops retrying,
     // while local work keeps running (#4337).
     this.db.onUpstreamFailure?.((failure) => {
+      this.noteNativeAuthRestored();
       if (!failure) {
         this.nativeAuthRefusalRenewable = false;
         return this.clearRemoteServerTransportError();
@@ -1375,10 +1408,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return this.ownerRuntime.quiesceForegroundTxTimeHighWater();
     }
     if (this.foregroundLeaseCapture) return this.foregroundLeaseCapture;
-    if (this.closed) throw new Error("Native runtime is already closed");
-    this.closed = true;
+    if (this.closed) throw new Error(`Native runtime is already ${this.phase}`);
+    this.advancePhase("quiesced");
     this.clearCoreDeadline();
-    this.foregroundLeaseQuiesced = true;
     this.foregroundLeaseDraining = true;
     const capture = this.captureForegroundTxTimeHighWater().finally(() => {
       this.foregroundLeaseDraining = false;
@@ -1593,7 +1625,10 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private linkChanged(): void {
-    if (this === this.ownerRuntime) this.noteLinkFailure();
+    if (this === this.ownerRuntime) {
+      this.noteNativeAuthRestored();
+      this.noteLinkFailure();
+    }
     this.remoteLink.changed();
     this.linkStatusPublisher.changed();
     this.syncStatusPublisher.changed();
@@ -1640,8 +1675,13 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db?.deleteNativeStore) {
       throw new Error("Runtime does not support client storage reset.");
     }
+    if (this.closed) {
+      throw new Error(`Cannot clear client storage: native runtime is ${this.phase}`);
+    }
     const deleted = this.db.deleteNativeStore();
-    this.closed = true;
+    // The store is gone and admits nothing more; `close()` still tears this
+    // runtime down (its subscriptions, link and native handle).
+    this.advancePhase("storageCleared");
     return deleted;
   }
 
@@ -1650,6 +1690,13 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) return this.ownerRuntime.uploadStatus();
     if (this.closed) return NO_UPLOADS;
     return this.db?.uploadStatus?.() ?? NO_UPLOADS;
+  }
+
+  /** Ids of `table`'s rows with a write the server has not decided yet; see {@link Runtime}. */
+  pendingUploadRows(table: string): readonly string[] | null {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.pendingUploadRows(table);
+    if (this.closed) return null;
+    return this.db?.pendingUploadRows?.(table) ?? null;
   }
 
   /** The latest time the link failed, and how; it stays after the link recovers. */
@@ -1756,17 +1803,36 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime.closed;
   }
 
+  /** Whether this runtime admits no more work: any phase past `open`. */
+  private get closed(): boolean {
+    return this.phase !== "open";
+  }
+
+  /** Move to `next`, which must lie ahead of the current phase. */
+  private advancePhase(next: NativeRuntimePhase): void {
+    if (NATIVE_RUNTIME_PHASE_ORDER[next] <= NATIVE_RUNTIME_PHASE_ORDER[this.phase]) {
+      throw new Error(`Native runtime cannot move from ${this.phase} back to ${next}`);
+    }
+    this.phase = next;
+  }
+
+  /**
+   * Tear this runtime down, from any phase before `closing`: `open`,
+   * `quiesced` (a lease handoff read its high-water) or `storageCleared` (its
+   * store was deleted). Each of those stopped admitting work but left the
+   * teardown to this call. Once `closing`, a repeated call returns at once.
+   */
   async close(): Promise<void> {
     if (this !== this.ownerRuntime) {
+      if (this.phase === "closed") return;
+      this.advancePhase("closed");
       this.closeRuntimeState();
       return;
     }
-    if (this.physicalCloseStarted) return;
-    if (this.closed && !this.foregroundLeaseQuiesced) return;
-    this.physicalCloseStarted = true;
+    if (this.phase === "closing" || this.phase === "closed") return;
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
-    this.closed = true;
+    this.advancePhase("closing");
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
@@ -1778,15 +1844,25 @@ export class NativeRuntimeAdapter implements Runtime {
       await Promise.all(this.pendingLocalSettlements);
     }
     await this.coreOperation?.completion.catch(() => undefined);
-    this.closeRuntimeState(true);
-    await this.db.close?.();
+    try {
+      this.closeRuntimeState();
+      await this.db.close?.();
+    } finally {
+      this.advancePhase("closed");
+    }
     // wasm-bindgen futures may retain this receiver after logical closure.
     // Its registered finalizer owns physical release; explicit `free()` here
     // creates a second, unsynchronised lifetime and can corrupt the WASM heap.
   }
 
-  /** Discard a runtime whose persistence epoch is no longer usable. */
+  /**
+   * Discard a runtime whose persistence epoch is no longer usable: an `open`
+   * one stops at once and goes straight to `closed`, without native disposal.
+   * One past `open` already admits nothing, and `close()` finishes it.
+   */
   discard(): void {
+    if (this.phase !== "open") return;
+    this.advancePhase("closed");
     // Do not explicitly free the WASM wrapper here. A forced IndexedDB close
     // can reject a storage Promise while a WASM future is still unwinding;
     // freeing its receiver in that window is unsafe. Sever all runtime work
@@ -1794,9 +1870,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.closeRuntimeState();
   }
 
-  private closeRuntimeState(alreadyMarkedClosed = false): boolean {
-    if (this.closed && !alreadyMarkedClosed) return false;
-    this.closed = true;
+  /** Drop this runtime's work and links. The caller moved its phase past `open`. */
+  private closeRuntimeState(): void {
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
@@ -1809,7 +1884,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // schema-view wrapper. Eagerly freeing a wasm-bindgen receiver here is a
       // use-after-free; let GC release the Rc-backed view after those promises
       // drop their references.
-      return false;
+      return;
     }
     for (const write of this.writes.values()) {
       write.close?.();
@@ -1843,7 +1918,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerUpstreamAttached = false;
     this.serverCarrier?.close();
     this.serverCarrier = null;
-    return true;
   }
 
   /** Row identity/defaults only; physical validation and staging happen on insertion. */
@@ -2434,6 +2508,31 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
+  /**
+   * @internal Serve one of a thin session's transaction requests (its wire
+   * frame) as the backend's client linked to the core as that session
+   * (SPEC 8.14); the answer is the response frame. A commit answers once the
+   * core accepted it. One request at a time.
+   */
+  serveThinTransaction(request: Uint8Array): Promise<Uint8Array> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.serveThinTransaction(request);
+    if (this.closed) return Promise.reject(new Error("the native runtime is closed"));
+    if (!this.db.serveThinTransaction)
+      return Promise.reject(new Error("this native binding serves no thin transactions"));
+    const served = this.db.serveThinTransaction(request);
+    this.scheduleCoreTick();
+    return this.awaitNativeRead(served);
+  }
+
+  /** @internal End the thin session's open transactions: nothing of them reached the core. */
+  async releaseThinTransactions(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.releaseThinTransactions();
+    if (this.closed || !this.db.releaseThinTransactions) return;
+    const released = this.db.releaseThinTransactions();
+    this.scheduleCoreTick();
+    await this.awaitNativeRead(released);
+  }
+
   captureSnapshot(): Promise<SnapshotRef> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.captureSnapshot();
     if (this.closed)
@@ -2865,6 +2964,8 @@ export class NativeRuntimeAdapter implements Runtime {
       case "live":
         // Writes' Global waits armed through the outage keep waiting.
         if (previous?.outagePublished) this.forgetServerTransportError();
+        // Admitted: whatever refused the credential before holds no more.
+        if (previous?.phase !== "live") this.authRestoredCallback?.();
         return;
       case "connecting":
       case "backoff":
@@ -3267,8 +3368,33 @@ export class NativeRuntimeAdapter implements Runtime {
       // that as a terminal upstream failure. A credential the app renews
       // restarts it, so treat it as the web socket path does (#3923).
       this.nativeAuthRefusalRenewable = isRenewableAuthFailure(mapAuthReason(reason));
+      this.nativeAuthRefused = true;
       this.authFailureCallback?.(reason);
     });
+  }
+
+  /**
+   * A native host reports a refused credential but not the admission after
+   * it: once its link is connected again with no refusal, whatever refused
+   * the credential holds no more, as the link machine's `live` says (#6049).
+   */
+  private noteNativeAuthRestored(): void {
+    if (!this.nativeAuthRefused || this.closed) return;
+    let admitted = false;
+    try {
+      const status = this.db?.nativeConnectionStatus?.();
+      admitted = Boolean(status?.connected && !status.authRejected);
+    } catch {
+      return;
+    }
+    if (!admitted) return;
+    this.nativeAuthRefused = false;
+    this.authRestoredCallback?.();
+  }
+
+  onAuthRestored(callback: () => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onAuthRestored(callback);
+    this.authRestoredCallback = callback;
   }
 
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
@@ -3294,6 +3420,17 @@ export class NativeRuntimeAdapter implements Runtime {
   onServerTransportError(callback: (error: Error, state: { retrying: boolean }) => void): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onServerTransportError(callback);
     this.serverTransportErrorCallback = callback;
+  }
+
+  /**
+   * The upstream failure remote waits fail on now, and whether the client
+   * keeps reconnecting through it; null while there is none. A durable
+   * worker relays this as state to the tabs attached to it.
+   */
+  upstreamFailure(): { error: Error; retrying: boolean } | null {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.upstreamFailure();
+    const error = this.serverTransportError;
+    return error ? { error, retrying: this.serverTransportErrorRetrying } : null;
   }
 
   /**
@@ -3415,6 +3552,7 @@ export class NativeRuntimeAdapter implements Runtime {
           ? this.db.waitForSync(
               tier,
               this.trustedWriteIdentity(sessionFromWriteContext(sync.writeContext)) ?? null,
+              cancelled,
             )
           : this.db.waitForPendingWrites(tier, cancelled, true);
       const wait = this.awaitNativeRead(
@@ -3890,10 +4028,10 @@ export class NativeRuntimeAdapter implements Runtime {
       !session.account_id ||
       !isTrustedReservedSession(session, trustedReservedSessionToken(session))
     ) {
-      throw new Error("Local-first native admission requires a verified account session");
+      throw new Error("Device account native admission requires a verified account session");
     }
     if (!this.db.admitLocalFirstSession)
-      throw new Error("Native runtime lacks local-first session admission");
+      throw new Error("Native runtime lacks device account session admission");
     this.db.admitLocalFirstSession(
       token,
       appId,
@@ -4253,6 +4391,7 @@ export class NativeRuntimeAdapter implements Runtime {
           // terminal.
           throw new CoreTickFailedError(error);
         }
+        this.ownerRuntime.noteNativeAuthRestored();
         // Commits and the server's verdicts change the pending count.
         this.syncStatusPublisher.changed();
         this.reportSlowQueries();
@@ -4401,6 +4540,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.schema,
       chunk.reset === true,
       subscription.outputColumns,
+      chunk.coalesced === true,
     );
     delta.terminalOperations = decodeRuntimeTerminalOperations(
       chunk.terminalOperations,
@@ -5120,7 +5260,7 @@ function assertPublicSessionIssuer(
   if (
     isReservedJazzIssuer(issuer) &&
     !(
-      (authMode === "local-first" || authMode === "anonymous" || authMode === "external") &&
+      (authMode === "device-account" || authMode === "anonymous" || authMode === "external") &&
       isTrustedReservedSession(
         { issuer, user_id: userId, authMode, account_id: accountId },
         trustedToken,
@@ -5892,6 +6032,8 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   schema_version_not_deployed: "write_rejected",
   // A refused subscriber, never a write's fate.
   identity_mismatch: "write_rejected",
+  // A skipped catalogue version, never a write's fate.
+  schema_version_unsupported: "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */
@@ -7034,6 +7176,7 @@ export function decodeSubscriptionDelta(
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
+  coalesced = false,
 ): RuntimeSubscriptionDelta {
   const decodeRows = (
     batches: NativeRowBatch[],
@@ -7080,6 +7223,7 @@ export function decodeSubscriptionDelta(
           ],
     ),
     ...(reset ? { reset: true } : {}),
+    ...(reset && coalesced ? { reason: "backlog" as const } : {}),
   };
 }
 
@@ -7362,6 +7506,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
   | {
       type: "delta";
       reset?: boolean;
+      coalesced?: boolean;
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
     }
@@ -7380,6 +7525,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     delta?: unknown;
     reason?: unknown;
     reset?: unknown;
+    coalesced?: unknown;
     terminalOperations?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
@@ -7389,6 +7535,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     return {
       type: "delta",
       reset: record.reset === true,
+      coalesced: record.coalesced === true,
       delta: readNativeSubscriptionDelta(
         new PostcardReader(assertBytes(record.delta, "subscription delta")),
       ),
@@ -7579,12 +7726,8 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 export function parseUuid(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid uuid ${value}`);
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 16; i += 1) {
-    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
+  const bytes = parseUuidBytes(value);
+  if (!bytes) throw new Error(`invalid uuid ${value}`);
   return bytes;
 }
 

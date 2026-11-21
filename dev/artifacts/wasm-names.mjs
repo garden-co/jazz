@@ -166,6 +166,24 @@ export function assertNoOmittedSqliteExtensions(module) {
     );
 }
 
+// What only jazz-wasm's backend build (`--features backend`,
+// crates/jazz-wasm/src/backend.rs) exports, by wasm-bindgen's export names
+// (`wasmdb_serveThinTransaction`, `__wbg_wasmthinrouter_free`, ...). The
+// browser build leaves it out so browsers never download it.
+const BACKEND_EXPORT =
+  /serveThinTransaction|releaseThinTransactions|admitLocalFirstSession|wasmdb_waitForSync|wasmthinrouter|wasmthinstep|loadBackendApp/i;
+
+/** Throw when `module` (the browser build) exports what only the backend build has. */
+export function assertNoBackendExports(module) {
+  const found = WebAssembly.Module.exports(new WebAssembly.Module(module))
+    .map(({ name }) => name)
+    .filter((name) => BACKEND_EXPORT.test(name));
+  if (found.length)
+    throw new Error(
+      `the browser WASM exports the backend's ${found.join(", ")}; it belongs behind jazz-wasm's \`backend\` feature (backend/pkg)`,
+    );
+}
+
 /** Rewrite the WASM file at `path` in place. */
 export function stripSymbolHashesInFile(path) {
   writeFileSync(path, stripSymbolHashes(readFileSync(path)));

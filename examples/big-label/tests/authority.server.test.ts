@@ -23,21 +23,21 @@ describe("BigLabel deployed tenant authority", () => {
       user_id: "admin",
       account_id: accountFor("admin"),
       claims: {},
-      authMode: "local-first",
+      authMode: "device-account",
     });
     const member = testApp.as({
       issuer,
       user_id: "member",
       account_id: accountFor("member"),
       claims: {},
-      authMode: "local-first",
+      authMode: "device-account",
     });
     const outsider = testApp.as({
       issuer,
       user_id: "outsider",
       account_id: accountFor("outsider"),
       claims: {},
-      authMode: "local-first",
+      authMode: "device-account",
     });
 
     // First-tenant admission belongs only to the backend bootstrap route. No

@@ -3,11 +3,13 @@
 //! This is a lower-level test on purpose: the browser WASM build validates
 //! JSON columns with a JS validator instead of the `jsonschema` crate, and
 //! `fixtures/json_schema_parity.json` is the shared contract between the two.
-//! This test pins that the native validator gives the fixture's verdicts;
+//! This test pins that the native validator gives the fixture's verdicts and
+//! that Jazz refuses exactly the schemas the browser cannot evaluate;
 //! `packages/jazz-tools/src/runtime/json-schema-validator.test.ts` runs the
 //! same fixture through the browser's validator.
 
 use jazz_model::model::json_schema::{JsonSchemaError, check_schema, validate};
+use jazz_model::model::json_schema_support::check_supported;
 use serde_json::Value;
 
 #[derive(serde::Deserialize)]
@@ -34,12 +36,18 @@ fn check(schema: &Value, instance: &Value) -> Result<(), JsonSchemaError> {
     validate(schema, instance)
 }
 
-/// Every fixture value gets the verdict the fixture records, and every schema
-/// the fixture marks invalid is rejected before any value is checked.
+/// Every schema Jazz accepts validates alike in every runtime: the fixture
+/// records each value's verdict, which this test pins natively and
+/// `json-schema-validator.test.ts` pins in the browser's validator. Schemas
+/// the fixture marks invalid are rejected before any value is checked, and
+/// the ones it marks `browserUnsupported` (valid natively, refused by the
+/// browser) are refused by deployments everywhere,
+/// so no deployed schema is enforced differently by the two.
 ///
 /// ```
-/// declared schema ──check_schema──► accepted ──validate(value)──► verdict
-///                         │
+/// declared schema ──check_schema──► accepted ──check_supported──► supported ──validate(value)──► verdict
+///                         │                            │
+///                         │                            └──► Unsupported (fixture: browserUnsupported)
 ///                         └──► InvalidSchema (fixture: invalidSchema)
 /// ```
 #[test]
@@ -56,12 +64,20 @@ fn native_validator_matches_the_browser_parity_fixture() {
             );
             continue;
         }
-        // Schemas the browser rejects as unsupported are valid natively; the
-        // fixture records that divergence explicitly.
         check_schema(&case.schema).unwrap_or_else(|error| panic!("{description}: {error:?}"));
         if case.browser_unsupported {
+            let refusal = check_supported(&case.schema)
+                .expect_err(&format!("{description}: Jazz should refuse the schema"));
+            assert!(
+                refusal
+                    .to_string()
+                    .contains("is not supported in Jazz JSON Schemas yet"),
+                "{description}: {refusal}",
+            );
             continue;
         }
+        check_supported(&case.schema)
+            .unwrap_or_else(|refusal| panic!("{description}: Jazz should accept: {refusal}"));
         for value in &case.valid {
             assert_eq!(
                 check(&case.schema, value),

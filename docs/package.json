@@ -9,7 +9,7 @@
     "predev": "fumadocs-mdx",
     "start": "next start",
     "test": "vitest run",
-    "types:check": "fumadocs-mdx && next typegen && tsc --noEmit",
+    "types:check": "fumadocs-mdx && next typegen && tsrs --noEmit",
     "postinstall": "fumadocs-mdx",
     "test:perf-timeline": "node --experimental-strip-types --test lib/perf-timeline/*.test.ts lib/showcase/*.test.ts ../dev/benchmarks/metadata/metadata.test.ts",
     "render:walkthroughs": "node --experimental-strip-types scripts/example-videos/render.mjs",
@@ -22,7 +22,7 @@
     "@vercel/analytics": "^2.0.1",
     "feed": "^5.2.1",
     "fumadocs-core": "16.6.2",
-    "fumadocs-mdx": "14.2.7",
+    "fumadocs-mdx": "14.2.10",
     "fumadocs-ui": "16.6.2",
     "lucide-react": "^0.563.0",
     "next": "catalog:default",
@@ -31,7 +31,7 @@
     "react-dom": "19.2.4",
     "simple-icons": "^16.17.0",
     "tailwind-merge": "^3.4.0",
-    "zod": "^4.3.6"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.18",

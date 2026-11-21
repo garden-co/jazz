@@ -131,6 +131,7 @@ export const jazz = createJazz({
   store: vercel({
     namespace: ({ environment, branch }) =>
       environment === "production" ? "production" : perBranch(branch),
+    region: "iad1", // your functions' region; fixed once the core exists
   }),
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });

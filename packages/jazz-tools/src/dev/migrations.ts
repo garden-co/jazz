@@ -10,14 +10,21 @@ import {
 } from "../schema-dsl/readable-app.js";
 import { compileApp } from "./codegen-napi.js";
 
-/** The engine's hash of a schema in its JSON form (`{ "tables": … }`), through jazz-napi. */
-async function schemaHashOf(engineSchemaJson: string): Promise<string> {
+/** The jazz-napi functions this module calls, on schemas in the engine's JSON form (`{ "tables": … }`). */
+async function jazzNapi(): Promise<{
+  schemaHash(engineSchemaJson: string): string;
+  schemasAreCompatible(leftJson: string, rightJson: string): boolean;
+  migrationDiff(fromJson: string, toJson: string): string;
+  versionTables(engineSchemaJson: string): string;
+}> {
   // A specifier bundlers can't follow: this module is Node tooling only.
   const specifier = "jazz-napi";
-  const napi = (await import(/* @vite-ignore */ specifier)) as {
-    schemaHash(engineSchemaJson: string): string;
-  };
-  return napi.schemaHash(engineSchemaJson);
+  return import(/* @vite-ignore */ specifier);
+}
+
+/** The engine's hash of a schema in its JSON form (`{ "tables": … }`), through jazz-napi. */
+async function schemaHashOf(engineSchemaJson: string): Promise<string> {
+  return (await jazzNapi()).schemaHash(engineSchemaJson);
 }
 import type {
   ColumnDescriptor,
@@ -25,49 +32,7 @@ import type {
   WasmSchema,
   Value,
 } from "../drivers/types.js";
-import { columnTypeSignature, shortSchemaHash, tableSchemasEqual } from "./schema-utils.js";
-import { enumVariantChange, onlyAddsEnumVariants } from "../runtime/schema-metadata.js";
-
-function changedTableNames(fromSchema: WasmSchema, toSchema: WasmSchema): string[] {
-  const names = new Set([...Object.keys(fromSchema), ...Object.keys(toSchema)]);
-  return [...names].filter(
-    (tableName) => !tableSchemasEqual(fromSchema[tableName], toSchema[tableName]),
-  );
-}
-
-type TableRenameSuggestion = {
-  oldTableName: string;
-  newTableName: string;
-};
-
-function detectPossibleTableRenames(
-  fromSchema: WasmSchema,
-  toSchema: WasmSchema,
-): TableRenameSuggestion[] {
-  const removedTables = Object.keys(fromSchema)
-    .filter((tableName) => !toSchema[tableName])
-    .sort();
-  const addedTables = Object.keys(toSchema)
-    .filter((tableName) => !fromSchema[tableName])
-    .sort();
-  const matches = removedTables
-    .map((oldTableName) => {
-      const candidateAddedTables = addedTables.filter((newTableName) =>
-        tableSchemasEqual(fromSchema[oldTableName], toSchema[newTableName]),
-      );
-      return candidateAddedTables.length === 1
-        ? ([oldTableName, candidateAddedTables[0]!] as const)
-        : undefined;
-    })
-    .filter((match) => match !== undefined);
-
-  return matches.flatMap(([oldTableName, newTableName], i) => {
-    const isDuplicateNewTableMatch = matches.some(([_, otherNewTableName], j) => {
-      return i !== j && newTableName === otherNewTableName;
-    });
-    return !isDuplicateNewTableMatch ? [{ oldTableName, newTableName }] : [];
-  });
-}
+import { shortSchemaHash } from "./schema-utils.js";
 
 function pickWitnessSchema(schema: WasmSchema, tableNames: readonly string[]): WasmSchema {
   const visited = new Set(tableNames);
@@ -235,12 +200,6 @@ function renderSchemaWitness(schema: WasmSchema): string {
   return `{\n${indentBlock(tableEntries.join(",\n"), 2)}\n}`;
 }
 
-type TableSuggestion = {
-  tableName: string;
-  comments: string[];
-  properties: string[];
-};
-
 /**
  * Render a migration column operation such as `m.add.string({ default: null })`.
  * `drop` operations carry their default under `backwardsDefault`.
@@ -287,16 +246,6 @@ function renderColumnOperationExpression(
   }
 }
 
-// A column added in another's place starts every existing row at its
-// default: say how to keep the values instead of suggesting a swap that
-// silently drops them.
-const KEEP_VALUES_ADVICE =
-  "A migration can add, drop or rename a column but not convert its values, and a column " +
-  "added in its place starts every existing row at its default. To keep the values, add " +
-  "the new column under another name next to this one, copy the values into it from your " +
-  "backend, and drop this column in a later release. Clients on the older schema keep " +
-  "writing this column until then, so copy again before you drop it.";
-
 /**
  * The TODOs a generated stub leaves where a step needs the author's value:
  * a migration file that still holds one does not reproduce its target
@@ -306,166 +255,103 @@ export const UNFILLED_STUB_TODO =
   /\/\/ TODO: ((?:Added|Removed)(?: required)? column "([^"]+)" (?:needs an explicit (?:default|backwardsDefault)|may be a rename of [^:]+:[^\n]*)\.)/;
 
 /**
- * A column kept under the same name must keep its type and optionality: no
- * migration step changes them in place, so a stub for such a change could
- * never typecheck (#2163). That includes a JSON column's schema. An enum
- * column (or an array of enums) may gain variants at the end of its list,
- * since the rows it holds pass unchanged and sort as before, but not lose
- * one (renaming or removing a variant needs a value mapping no migration
- * step has yet) or reorder them. Refuse those with the supported
- * alternative.
+ * What a migration between two snapshots does, as Rust decides it
+ * (jazz-napi `migrationDiff`, the diff `jazz.app.json`'s `migrations create`
+ * writes too). It refuses a change no step does (a kept column's type or
+ * optionality, a reference moving to another table).
  */
-function refuseUnsupportedSharedColumnChanges(
-  tableName: string,
+export interface MigrationDiff {
+  createTables: string[];
+  dropTables: string[];
+  renameTables: { from: string; to: string }[];
+  migrate: {
+    table: string;
+    steps: MigrationDiffStep[];
+    addedVariants: { column: string; variants: string[] }[];
+    /** When there are no steps or added variants: what changed instead. */
+    unchangedRows: string[];
+  }[];
+}
+
+export type MigrationDiffStep =
+  | { step: "add"; column: string; needsDefault: boolean }
+  | { step: "drop"; column: string; needsBackwardsDefault: boolean }
+  | { step: "maybeRenamed"; column: string; candidates: string[] }
+  | { step: "maybeRenamedAway"; column: string };
+
+async function migrationDiff(fromSchema: WasmSchema, toSchema: WasmSchema): Promise<MigrationDiff> {
+  const napi = await jazzNapi();
+  return JSON.parse(
+    napi.migrationDiff(
+      JSON.stringify({ tables: fromSchema }),
+      JSON.stringify({ tables: toSchema }),
+    ),
+  ) as MigrationDiff;
+}
+
+/** A table's steps as stub lines: `// TODO:` where only the author can decide. */
+function renderTableSteps(
   fromTable: WasmSchema[string],
   toTable: WasmSchema[string],
-): void {
-  for (const column of toTable.columns) {
-    const source = fromTable.columns.find((candidate) => candidate.name === column.name);
-    if (!source) continue;
-    const name = `${tableName}.${column.name}`;
-    if (source.nullable !== column.nullable) {
-      throw new Error(
-        `Changing column ${JSON.stringify(name)} from ${source.nullable ? "optional" : "required"} ` +
-          `to ${column.nullable ? "optional" : "required"} is not supported yet. ` +
-          KEEP_VALUES_ADVICE,
-      );
-    }
-    if (columnTypeSignature(source.column_type) !== columnTypeSignature(column.column_type)) {
-      if (onlyAddsEnumVariants(source.column_type, column.column_type)) continue;
-      const enumChange = enumVariantChange(source.column_type, column.column_type);
-      if (enumChange && enumChange.dropped.length === 0) {
-        throw new Error(
-          `Changing the order of the enum variants of column ${JSON.stringify(name)} is not ` +
-            `supported: add new variants at the end of the list. A variant's position is its ` +
-            `sort order, so moving one would change how existing rows sort and rewrite every ` +
-            `stored value of the column.`,
+  table: MigrationDiff["migrate"][number],
+): string[] {
+  const column = (schema: WasmSchema[string], name: string) =>
+    schema.columns.find((candidate) => candidate.name === name)!;
+  const fill = (descriptor: ColumnDescriptor) =>
+    descriptor.default === undefined ? "null" : defaultExpression(descriptor.default);
+  const lines: string[] = [];
+  for (const step of table.steps) {
+    const name = JSON.stringify(step.column);
+    switch (step.step) {
+      case "maybeRenamed": {
+        const of = step.candidates.map((candidate) => JSON.stringify(candidate)).join(" or ");
+        lines.push(
+          `// TODO: Added column ${name} may be a rename of ${of}: to keep its values, ` +
+            `give it the step m.renameFrom(${JSON.stringify(step.candidates[0])}); to start it empty, ` +
+            `add it with m.add and drop the old column with m.drop.`,
         );
+        break;
       }
-      if (enumChange) {
-        const dropped = enumChange.dropped.map((variant) => JSON.stringify(variant)).join(", ");
-        throw new Error(
-          `Changing the enum variants of column ${JSON.stringify(name)} is not supported yet: ` +
-            `it no longer declares ${dropped}. A migration can add enum variants, but renaming ` +
-            `or removing one is planned for a later release. ` +
-            KEEP_VALUES_ADVICE,
+      case "maybeRenamedAway":
+        // Decided with the added column it may have been renamed to.
+        break;
+      case "add": {
+        const descriptor = column(toTable, step.column);
+        lines.push(
+          step.needsDefault
+            ? `// TODO: Added required column ${name} needs an explicit default.`
+            : `${name}: ${renderColumnOperationExpression("add", descriptor, fill(descriptor))},`,
         );
+        break;
       }
-      // A migration can only add, drop or rename a column, so a column's
-      // JSON Schema is part of its type too.
-      const change =
-        source.column_type.type === "Json" && column.column_type.type === "Json"
-          ? "the JSON Schema of"
-          : "the type of";
-      throw new Error(
-        `Changing ${change} column ${JSON.stringify(name)} is not supported yet. ` +
-          KEEP_VALUES_ADVICE,
-      );
+      case "drop": {
+        const descriptor = column(fromTable, step.column);
+        lines.push(
+          step.needsBackwardsDefault
+            ? `// TODO: Removed required column ${name} needs an explicit backwardsDefault.`
+            : `${name}: ${renderColumnOperationExpression("drop", descriptor, fill(descriptor))},`,
+        );
+        break;
+      }
     }
   }
-}
-
-/**
- * The kept columns that gain enum variants, as notes for the stub: their
- * rows pass unchanged, so they need no step.
- */
-function enumVariantAdditionNotes(fromTable: WasmSchema[string], toTable: WasmSchema[string]) {
-  return toTable.columns.flatMap((column) => {
-    const source = fromTable.columns.find((candidate) => candidate.name === column.name);
-    if (!source) return [];
-    const change = enumVariantChange(source.column_type, column.column_type);
-    if (
-      !change ||
-      change.added.length === 0 ||
-      !onlyAddsEnumVariants(source.column_type, column.column_type)
-    )
-      return [];
-    const added = change.added.map((variant) => JSON.stringify(variant)).join(", ");
-    return [
-      `Column ${JSON.stringify(column.name)} gains enum variant${change.added.length === 1 ? "" : "s"} ` +
-        `${added}: existing rows are unchanged, so it needs no step.`,
-    ];
-  });
-}
-
-function inferTableSuggestions(
-  tableName: string,
-  fromTable: WasmSchema[string],
-  toTable: WasmSchema[string],
-): TableSuggestion {
-  const fromColumns = new Map(fromTable.columns.map((column) => [column.name, column]));
-  const toColumns = new Map(toTable.columns.map((column) => [column.name, column]));
-  const comments: string[] = [];
-  const properties: string[] = [];
-
-  const removedColumns = [...fromColumns.keys()].filter((name) => !toColumns.has(name));
-  const addedColumns = [...toColumns.keys()].filter((name) => !fromColumns.has(name));
-
-  // An added column with the same shape as a removed one may be that column
-  // renamed. Adding one and dropping the other would start every row empty,
-  // so neither gets a step: the author says which it is, and validate
-  // refuses the file until they do.
-  const sameShape = (removed: ColumnDescriptor, added: ColumnDescriptor) =>
-    removed.nullable === added.nullable &&
-    removed.references === added.references &&
-    columnTypeSignature(removed.column_type) === columnTypeSignature(added.column_type);
-  const undecided = new Set<string>();
-  for (const addedName of addedColumns) {
-    const added = toColumns.get(addedName)!;
-    const candidates = removedColumns.filter((name) => sameShape(fromColumns.get(name)!, added));
-    if (candidates.length === 0) continue;
-    undecided.add(addedName);
-    for (const name of candidates) undecided.add(name);
-    const of = candidates.map((name) => JSON.stringify(name)).join(" or ");
-    comments.push(
-      `Added column ${JSON.stringify(addedName)} may be a rename of ${of}: to keep its values, ` +
-        `give it the step m.renameFrom(${JSON.stringify(candidates[0])}); to start it empty, ` +
-        `add it with m.add and drop the old column with m.drop.`,
+  for (const { column: name, variants } of table.addedVariants) {
+    lines.push(
+      `// Column ${JSON.stringify(name)} gains enum variant${variants.length === 1 ? "" : "s"} ` +
+        `${variants.map((variant) => JSON.stringify(variant)).join(", ")}: existing rows are ` +
+        `unchanged, so it needs no step.`,
     );
   }
-
-  for (const columnName of addedColumns) {
-    if (undecided.has(columnName)) continue;
-    const column = toColumns.get(columnName)!;
-    if (column.nullable || column.default !== undefined) {
-      // Existing rows take the column's declared default.
-      const fill = column.default === undefined ? "null" : defaultExpression(column.default);
-      properties.push(
-        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("add", column, fill)},`,
-      );
-    } else {
-      comments.push(
-        `Added required column ${JSON.stringify(columnName)} needs an explicit default.`,
-      );
-    }
+  if (table.unchangedRows.length > 0) {
+    lines.push(`// Rows pass unchanged: only ${table.unchangedRows.join(", ")} changed.`);
   }
-
-  for (const columnName of removedColumns) {
-    if (undecided.has(columnName)) continue;
-    const column = fromColumns.get(columnName)!;
-    if (column.nullable || column.default !== undefined) {
-      // Older clients read the dropped column back as its declared default.
-      const fill = column.default === undefined ? "null" : defaultExpression(column.default);
-      properties.push(
-        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("drop", column, fill)},`,
-      );
-    } else {
-      comments.push(
-        `Removed required column ${JSON.stringify(columnName)} needs an explicit backwardsDefault.`,
-      );
-    }
-  }
-
-  return {
-    tableName,
-    comments,
-    properties,
-  };
+  return lines;
 }
 
 function renderMigrationBody(
   fromSchema: WasmSchema,
   toSchema: WasmSchema,
+  diff: MigrationDiff,
 ): {
   migrateBody?: string;
   renameTablesBody?: string;
@@ -474,29 +360,17 @@ function renderMigrationBody(
   witnessFrom: WasmSchema;
   witnessTo: WasmSchema;
 } {
-  const renameSuggestions = detectPossibleTableRenames(fromSchema, toSchema);
-  const renamedOldTables = new Set(renameSuggestions.map((suggestion) => suggestion.oldTableName));
-  const renamedNewTables = new Set(renameSuggestions.map((suggestion) => suggestion.newTableName));
-  const addedTables = Object.keys(toSchema)
-    .filter((tableName) => !fromSchema[tableName])
-    .sort();
-  const removedTables = Object.keys(fromSchema)
-    .filter((tableName) => !toSchema[tableName])
-    .sort();
-  const explicitAddedTables = addedTables.filter((tableName) => !renamedNewTables.has(tableName));
-  const explicitRemovedTables = removedTables.filter(
-    (tableName) => !renamedOldTables.has(tableName),
-  );
-  const changedTables = changedTableNames(fromSchema, toSchema);
-  const migratableTables = changedTables.filter(
-    (tableName) => fromSchema[tableName] !== undefined && toSchema[tableName] !== undefined,
-  );
-  const witnessFromTables = [...migratableTables, ...explicitRemovedTables];
-  const witnessToTables = [...migratableTables, ...explicitAddedTables];
-  for (const renameSuggestion of renameSuggestions) {
-    witnessFromTables.push(renameSuggestion.oldTableName);
-    witnessToTables.push(renameSuggestion.newTableName);
-  }
+  const migrated = diff.migrate.map((table) => table.table);
+  const witnessFromTables = [
+    ...migrated,
+    ...diff.dropTables,
+    ...diff.renameTables.map((rename) => rename.from),
+  ];
+  const witnessToTables = [
+    ...migrated,
+    ...diff.createTables,
+    ...diff.renameTables.map((rename) => rename.to),
+  ];
   // Include dependencies on both sides so unchanged referenced tables are not
   // mistaken for newly created or removed tables by the public migration DSL.
   const dependencies = new Set([
@@ -513,94 +387,36 @@ function renderMigrationBody(
   } while (dependencies.size !== count);
   const witnessFrom = pickWitnessSchema(fromSchema, [...dependencies]);
   const witnessTo = pickWitnessSchema(toSchema, [...dependencies]);
+
   const lines: string[] = [];
-
-  for (const tableName of migratableTables) {
-    const fromTable = fromSchema[tableName]!;
-    const toTable = toSchema[tableName]!;
-
-    refuseUnsupportedSharedColumnChanges(tableName, fromTable, toTable);
-    const suggestion = inferTableSuggestions(tableName, fromTable, toTable);
-    lines.push(`${JSON.stringify(tableName)}: {`);
-    for (const comment of suggestion.comments) {
-      lines.push(`  // TODO: ${comment}`);
-    }
-    for (const property of suggestion.properties) {
-      lines.push(`  ${property}`);
-    }
-    const enumNotes = enumVariantAdditionNotes(fromTable, toTable);
-    for (const note of enumNotes) {
-      lines.push(`  // ${note}`);
-    }
-    if (
-      suggestion.comments.length === 0 &&
-      suggestion.properties.length === 0 &&
-      enumNotes.length === 0
-    ) {
-      const referenceAddition = toTable.columns.some(
-        (column) =>
-          column.references &&
-          fromTable.columns.some(
-            (source) =>
-              source.name === column.name &&
-              !source.references &&
-              source.nullable === column.nullable &&
-              source.merge_strategy === column.merge_strategy &&
-              columnTypeSignature(source.column_type) === columnTypeSignature(column.column_type),
-          ),
-      );
-      lines.push(
-        referenceAddition &&
-          fromTable.columns.length === toTable.columns.length &&
-          fromTable.columns.every((source) =>
-            toTable.columns.some(
-              (column) =>
-                column.name === source.name &&
-                (!source.references || source.references === column.references) &&
-                source.nullable === column.nullable &&
-                source.merge_strategy === column.merge_strategy &&
-                columnTypeSignature(source.column_type) === columnTypeSignature(column.column_type),
-            ),
-          )
-          ? "  // Add reference metadata with an identity lens; existing UUID values are preserved."
-          : "  // TODO: No safe migration steps were inferred automatically.",
-      );
-    }
+  for (const table of diff.migrate) {
+    lines.push(`${JSON.stringify(table.table)}: {`);
+    for (const line of renderTableSteps(fromSchema[table.table]!, toSchema[table.table]!, table))
+      lines.push(`  ${line}`);
     lines.push("},");
     lines.push("");
   }
-
-  if (lines.length === 0) {
-    if (
-      renameSuggestions.length === 0 &&
-      explicitAddedTables.length === 0 &&
-      explicitRemovedTables.length === 0
-    ) {
-      lines.push(
-        changedTables.length === 0
-          ? "// TODO: No schema differences were detected."
-          : "// TODO: No column-level migration steps were required for the detected schema changes.",
-      );
-    }
+  if (
+    lines.length === 0 &&
+    diff.renameTables.length === 0 &&
+    diff.createTables.length === 0 &&
+    diff.dropTables.length === 0
+  ) {
+    lines.push("// TODO: No schema differences were detected.");
   }
 
+  const tableFlags = (tables: string[]) =>
+    tables.length > 0
+      ? tables.map((tableName) => `${JSON.stringify(tableName)}: true,`).join("\n")
+      : undefined;
   return {
     migrateBody: lines.length > 0 ? lines.join("\n").trimEnd() : undefined,
-    createTablesBody:
-      explicitAddedTables.length > 0
-        ? explicitAddedTables.map((tableName) => `${JSON.stringify(tableName)}: true,`).join("\n")
-        : undefined,
-    dropTablesBody:
-      explicitRemovedTables.length > 0
-        ? explicitRemovedTables.map((tableName) => `${JSON.stringify(tableName)}: true,`).join("\n")
-        : undefined,
+    createTablesBody: tableFlags(diff.createTables),
+    dropTablesBody: tableFlags(diff.dropTables),
     renameTablesBody:
-      renameSuggestions.length > 0
-        ? renameSuggestions
-            .map(
-              (renameSuggestion) =>
-                `${renameSuggestion.newTableName}: m.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`,
-            )
+      diff.renameTables.length > 0
+        ? diff.renameTables
+            .map((rename) => `${rename.to}: m.renameTableFrom(${JSON.stringify(rename.from)}),`)
             .join("\n")
         : undefined,
     witnessFrom,
@@ -608,13 +424,14 @@ function renderMigrationBody(
   };
 }
 
-export function renderMigrationStub(input: {
+export async function renderMigrationStub(input: {
   fromHash: string;
   toHash: string;
   fromSchema: WasmSchema;
   toSchema: WasmSchema;
-}): string {
-  const rendered = renderMigrationBody(input.fromSchema, input.toSchema);
+}): Promise<string> {
+  const diff = await migrationDiff(input.fromSchema, input.toSchema);
+  const rendered = renderMigrationBody(input.fromSchema, input.toSchema, diff);
   const sections: string[] = [];
 
   if (rendered.renameTablesBody) {
@@ -742,111 +559,14 @@ export async function snapshotFromVersion(
   return { hash: current.hash, schema };
 }
 
-const ENGINE_TYPE_NAMES: Record<string, string> = {
-  Text: "string",
-  Integer: "int",
-  BigInt: "bigint",
-  Double: "float",
-  Boolean: "boolean",
-  Timestamp: "timestamp",
-  Uuid: "uuid",
-  Bytea: "bytes",
-};
-
-function engineType(type: WasmColumnType): ReadableJson {
-  const name = ENGINE_TYPE_NAMES[type.type];
-  if (name) return name;
-  switch (type.type) {
-    case "Enum":
-      return { enum: [...type.variants] };
-    case "Json":
-      return { json: (type.schema as ReadableJson | undefined) ?? true };
-    case "Array":
-      return { array: engineType(type.element) };
-    default:
-      throw new Error(`a ${type.type} column can't be written to jazz.app.json`);
-  }
-}
-
-function base64(bytes: ArrayLike<number>): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
-  return btoa(binary);
-}
-
-function engineValue(value: Value, type: WasmColumnType): ReadableJson {
-  switch (value.type) {
-    case "Null":
-      return null;
-    case "Integer":
-    case "Double":
-    case "Timestamp":
-      return Number(value.value);
-    case "BigInt":
-      return String(structuralBigInt(value.value));
-    case "Boolean":
-      return value.value;
-    case "Text":
-      return type.type === "Json" ? (JSON.parse(value.value) as ReadableJson) : value.value;
-    case "Uuid":
-      return value.value;
-    case "Bytea": {
-      const bytes = value.value as unknown;
-      if (typeof bytes === "string") return bytes;
-      return base64(bytes as ArrayLike<number>);
-    }
-    case "Array": {
-      const element = type.type === "Array" ? type.element : type;
-      return value.value.map((item) => engineValue(item, element));
-    }
-    default:
-      throw new Error(`a ${value.type} default can't be written to jazz.app.json`);
-  }
-}
-
-const MERGE_NAMES: Record<string, string> = {
-  Counter: "counter",
-  GSet: "g-set",
-  Text: "text",
-  Markdown: "markdown",
-  Html: "html",
-};
-
-function engineColumn(column: ColumnDescriptor): ReadableJson {
-  const type = engineType(column.column_type);
-  const plain =
-    column.default === undefined && column.merge_strategy === undefined && !column.references;
-  if (plain && typeof type === "string") return column.nullable ? `${type}?` : type;
-  return {
-    ...(typeof type === "string" ? { type } : (type as Record<string, ReadableJson>)),
-    ...(column.nullable ? { optional: true } : {}),
-    ...(column.default === undefined
-      ? {}
-      : { default: engineValue(column.default, column.column_type) }),
-    ...(column.merge_strategy ? { merge: MERGE_NAMES[column.merge_strategy]! } : {}),
-    ...(column.references ? { references: column.references } : {}),
-  };
-}
-
-/** A snapshot (engine schema) as a readable history version: columns with `references`, no relations. */
-export function snapshotToVersion(schema: WasmSchema): ReadableVersion {
-  const tables: Record<string, ReadableTable> = {};
-  for (const [name, table] of Object.entries(schema)) {
-    const entry: ReadableTable = {
-      columns: Object.fromEntries(
-        table.columns.map((column) => [column.name, engineColumn(column)]),
-      ),
-    };
-    const indexes: ReadableJson[] = [
-      ...(table.indexed_columns ?? []),
-      ...(table.composite_indexes ?? []).map((index) => [...index]),
-    ];
-    if (indexes.length > 0) entry.indexes = indexes;
-    if (table.branchBy?.length) entry.branchBy = [...table.branchBy];
-    if (table.history) entry.history = table.history;
-    tables[name] = entry;
-  }
-  return { tables };
+/**
+ * A snapshot (engine schema) as a readable history version: columns with
+ * `references`, no relations. Rust's `versionTables` (jazz-napi), the form
+ * `jazz.app.json`'s writer prints a `history` version in.
+ */
+export async function snapshotToVersion(schema: WasmSchema): Promise<ReadableVersion> {
+  const tables = (await jazzNapi()).versionTables(JSON.stringify({ tables: schema }));
+  return { tables: JSON.parse(tables) as Record<string, ReadableTable> };
 }
 
 /** A migration witness table as a readable version table (references, no relations). */
@@ -1029,13 +749,13 @@ export async function loadMigrationHistory(options: {
   if (files.length === 0) return { history: {}, migrations: [], current: current.hash };
 
   const versions = new Map<string, Record<string, ReadableTable>>();
-  versions.set(currentShort, snapshotToVersion(current.schema).tables);
+  versions.set(currentShort, (await snapshotToVersion(current.schema)).tables);
   for (const snapshot of await listSnapshots(options.migrationsDir))
-    versions.set(shortSchemaHash(snapshot.hash), snapshotToVersion(snapshot.schema).tables);
+    versions.set(shortSchemaHash(snapshot.hash), (await snapshotToVersion(snapshot.schema)).tables);
 
   // Derive what no snapshot holds, walking migrations until nothing changes.
   const failures = new Map<string, string>();
-  for (let progress = true; progress; ) {
+  for (let progress = true; progress;) {
     progress = false;
     for (const entry of files) {
       for (const [known, unknown, direction] of [
@@ -1114,25 +834,16 @@ function normalizeMigrationName(name: string): string {
   return normalized;
 }
 
-/** Whether rows of `from` need a step to read as `to` (tables or columns differ beyond enum additions). */
-function requiresMigration(from: WasmSchema, to: WasmSchema): boolean {
-  const names = (schema: WasmSchema) => Object.keys(schema).sort().join("\0");
-  if (names(from) !== names(to)) return true;
-  return Object.keys(from).some((table) => {
-    const left = new Map(from[table]!.columns.map((c) => [c.name, c]));
-    const right = to[table]!.columns;
-    if (left.size !== right.length) return true;
-    return right.some((column) => {
-      const source = left.get(column.name);
-      if (!source) return true;
-      if (source.nullable !== column.nullable || source.references !== column.references)
-        return true;
-      return (
-        columnTypeSignature(source.column_type) !== columnTypeSignature(column.column_type) &&
-        !onlyAddsEnumVariants(source.column_type, column.column_type)
-      );
-    });
-  });
+/**
+ * Whether `to` needs a migration from `from`: Rust's `schemasAreCompatible`
+ * (jazz-napi), the rule a deployment uses to connect versions without one.
+ */
+async function requiresMigration(from: WasmSchema, to: WasmSchema): Promise<boolean> {
+  const napi = await jazzNapi();
+  return !napi.schemasAreCompatible(
+    JSON.stringify({ tables: from }),
+    JSON.stringify({ tables: to }),
+  );
 }
 
 function snapshotText(schema: WasmSchema): string {
@@ -1199,7 +910,7 @@ export async function createMigration(options: {
     return { changed: true, initial: true, toHash: current.hash, snapshot: await writeSnapshot() };
   }
   if (baseline.hash === current.hash) return { changed: false };
-  if (!requiresMigration(baseline.schema, current.schema)) {
+  if (!(await requiresMigration(baseline.schema, current.schema))) {
     return {
       changed: true,
       migrationRequired: false,
@@ -1210,7 +921,7 @@ export async function createMigration(options: {
   }
   const name = options.name ? normalizeMigrationName(options.name) : "unnamed";
   const file = `${timestamp}-${name}-${shortSchemaHash(baseline.hash)}-${toShort}.ts`;
-  const stub = renderMigrationStub({
+  const stub = await renderMigrationStub({
     fromHash: baseline.hash,
     toHash: current.hash,
     fromSchema: baseline.schema,

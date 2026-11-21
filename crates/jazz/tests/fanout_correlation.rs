@@ -47,11 +47,41 @@ impl std::ops::Deref for Store {
     }
 }
 
+impl Store {
+    /// The store reopened under `schema` on `node`, shipping `lenses`: how
+    /// a deployment installs a schema (see [`common::reinstall`]).
+    pub(crate) fn reinstall(
+        self,
+        schema: JazzSchema,
+        node: u8,
+        lenses: Vec<MigrationLens>,
+    ) -> Store {
+        let path = self._dir.path().join("store.sqlite");
+        let Store { db, _dir } = self;
+        let config = DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        );
+        Store {
+            db: common::reinstall(db, &path, config, lenses),
+            _dir,
+        }
+    }
+}
+
 pub(crate) fn open(schema: JazzSchema, node: u8) -> Store {
     open_as(schema, node, AuthorSubject::SYSTEM)
 }
 
 pub(crate) fn open_as(schema: JazzSchema, node: u8, author: AuthorSubject) -> Store {
+    // Every in-place refresh is also checked against a full run, inside
+    // the engine (declared types included, which no snapshot shows).
+    jazz::db::set_fanout_oracle_for_test(true);
+    // Every kept statement is also compared with one compiled afresh.
+    jazz::db::set_plan_oracle_for_test(true);
     let dir = tempfile::tempdir().unwrap();
     let path: PathBuf = dir.path().join("store.sqlite");
     let config = DbConfig::new(
@@ -70,7 +100,7 @@ pub(crate) struct Live {
     pub(crate) name: String,
     query: PreparedQuery,
     identity: Option<AuthorSubject>,
-    stream: SubscriptionStream,
+    pub(crate) stream: SubscriptionStream,
     pub(crate) rows: Snapshot,
 }
 
@@ -115,9 +145,23 @@ pub(crate) fn subscribe_with(
     }
 }
 
-/// Applies queued deltas to the maintained result.
-pub(crate) fn apply(live: &mut Live) {
-    while let Some(event) = live.stream.try_next_event() {
+/// Applies queued deltas to the maintained result; returns the ids the
+/// deltas reported as added or updated.
+pub(crate) fn apply(live: &mut Live) -> BTreeSet<RowUuid> {
+    let events: Vec<SubscriptionEvent> =
+        std::iter::from_fn(|| live.stream.try_next_event()).collect();
+    apply_events(live, events)
+}
+
+/// Applies one delta to the maintained result.
+pub(crate) fn apply_event(live: &mut Live, event: SubscriptionEvent) {
+    apply_events(live, vec![event]);
+}
+
+/// [`apply`] for events already taken from the stream.
+fn apply_events(live: &mut Live, events: Vec<SubscriptionEvent>) -> BTreeSet<RowUuid> {
+    let mut reported = BTreeSet::new();
+    for event in events {
         let SubscriptionEvent::Delta {
             reset,
             added,
@@ -140,9 +184,11 @@ pub(crate) fn apply(live: &mut Live) {
         let mut placed: Vec<_> = added.iter().chain(updated.iter()).collect();
         placed.sort_by_key(|row| row.index);
         for row in placed {
+            reported.insert(row.row_uuid());
             live.rows.insert(row.index, (row.row_uuid(), owned(row)));
         }
     }
+    reported
 }
 
 pub(crate) fn fresh(db: &Db, live: &Live, opts: ReadOpts) -> Snapshot {
@@ -164,7 +210,7 @@ pub(crate) fn check_with(
     lives
         .iter_mut()
         .map(|live| {
-            apply(live);
+            let _ = apply(live);
             let now = fresh(db, live, opts.clone());
             assert_eq!(
                 live.rows, now,
@@ -954,19 +1000,19 @@ fn comments_lens(from: &JazzSchema, to: &JazzSchema, ops: Vec<LensOp>) -> Migrat
     .unwrap()
 }
 
-/// F6. Stored names change on a schema reset: after `post` is renamed away
-/// and a new `post` is added (a stored column of its own), the live
-/// relation `comments WHERE post = posts.id` correlates on the new stored
-/// column, so filters are rebuilt with the watches.
+/// F6. Stored names change when the store reopens under a new schema:
+/// after `post` is renamed away and a new `post` is added (a stored column
+/// of its own), the relation `comments WHERE post = posts.id` correlates
+/// on the new stored column.
 ///
 /// ```
-/// v1: comments.post ──rename to old_post, add a new post──► v3
-/// alice: posts, comments by post (re-read under each version)
+/// v1: comments.post ──rename to old_post, add a new post──► reopen as v3
+/// alice: posts, comments by post (subscribed under each version)
 /// writer ──insert comment(post = P1) under v3──► P1.comments gains it
 /// ```
 #[test]
 fn f6_filters_follow_stored_names_across_a_schema_reset() {
-    let db = open(posts_v1(), 1);
+    let mut db = open(posts_v1(), 1);
     let post = |n| id(CHATS, n);
     let comment = |n| id(MESSAGES, n);
     for n in 1..=2 {
@@ -1003,17 +1049,17 @@ fn f6_filters_follow_stored_names_across_a_schema_reset() {
             to: "old_post".into(),
         }],
     );
-    block_on(db.activate_schema_with_lenses(posts_v3(), &[rename])).unwrap();
-    // The live result is re-read under v3, where `post` names another
-    // stored column; a fresh subscription under v3 runs beside it.
-    lives.push(subscribe(
+    drop(lives);
+    db = db.reinstall(posts_v3(), 1, vec![rename]);
+    // Under v3 `post` names another stored column.
+    let mut lives = vec![subscribe(
         &db,
         "posts with comments under v3",
         Query::from("posts")
             .array_subquery(ArraySubquery::new("comments", "comments", "post", "id")),
         None,
-    ));
-    check(&db, &mut lives, "activate v3");
+    )];
+    check(&db, &mut lives, "reopen as v3");
     // The old column names a post outside the result from here on, so
     // only the new column can tie these comments to a held post.
     update(&db, "comments", comment(1), &[("old_post", uuid(post(9)))]);
@@ -1070,7 +1116,7 @@ fn kinds_schema(variants: &[&str]) -> JazzSchema {
 /// ```
 #[test]
 fn f6_enum_correlations_compare_as_stored() {
-    let db = open(kinds_schema(&["a", "b"]), 1);
+    let mut db = open(kinds_schema(&["a", "b"]), 1);
     insert(&db, "labels", id(1, 1), &[("kind", text("a"))]);
     insert(&db, "labels", id(1, 2), &[("kind", text("b"))]);
     let query = || {
@@ -1094,7 +1140,8 @@ fn f6_enum_correlations_compare_as_stored() {
         Vec::new(),
     )
     .unwrap();
-    block_on(db.activate_schema_with_lenses(wider, &[lens])).unwrap();
+    drop(lives);
+    db = db.reinstall(wider, 1, vec![lens]);
     let mut lives = vec![subscribe(
         &db,
         "labels with items, wider enum",
@@ -1498,6 +1545,651 @@ fn a_self_relation_keeps_its_root_key() {
     assert!(after.woken - before.woken <= 3, "{before:?} -> {after:?}");
 }
 
+// ---- refreshes without a re-run --------------------------------------------
+//
+// A woken result with relations is refreshed in place when the write
+// reached only some of its roots: their rows re-checked by id, or their
+// relations nested again where a correlated level holds the write. In the
+// stores opened here every such refresh is also compared, inside the
+// engine, with a full run (rows, cells and declared types; see
+// `open_as`); here each result is compared
+// with a fresh read after every write, and the counters show which path
+// ran.
+
+/// The fan-out counters' change across `write`, with every result
+/// checked after it, and the ids each result's deltas reported.
+fn refreshed(
+    db: &Db,
+    lives: &mut [Live],
+    what: &str,
+    write: impl FnOnce(),
+) -> (jazz::db::FanoutStats, Vec<BTreeSet<RowUuid>>) {
+    let before = db.fanout_stats();
+    write();
+    let reported: Vec<BTreeSet<RowUuid>> = lives.iter_mut().map(apply).collect();
+    check(db, lives, what);
+    let after = db.fanout_stats();
+    let delta = jazz::db::FanoutStats {
+        shared_joins: after.shared_joins - before.shared_joins,
+        woken: after.woken - before.woken,
+        skipped: after.skipped - before.skipped,
+        rechecked: after.rechecked - before.rechecked,
+        renested: after.renested - before.renested,
+        renested_narrowly: after.renested_narrowly - before.renested_narrowly,
+        reran: after.reran - before.reran,
+        uncorrelated: after.uncorrelated - before.uncorrelated,
+        unevidenced: after.unevidenced - before.unevidenced,
+        kept_plans: after.kept_plans - before.kept_plans,
+        kept_root_plans: after.kept_root_plans - before.kept_root_plans,
+        coalesced: after.coalesced - before.coalesced,
+    };
+    (delta, reported)
+}
+
+/// The message's author, under a name of its own: a relation named as
+/// one of its parent's columns is not correlated (its cell is read by
+/// that name, and the column comes first).
+fn writer() -> ArraySubquery {
+    ArraySubquery::new("writer", "users", "id", "author")
+}
+
+fn by(db: &Db, message: usize, person: usize) {
+    update(
+        db,
+        "messages",
+        id(MESSAGES, message),
+        &[("author", uuid(id(USERS, person)))],
+    );
+}
+
+/// R1. A root write to a result with optional relations re-checks the
+/// written root by id and nests its relations again: the other roots stay
+/// as they were, and nothing re-runs.
+///
+/// ```
+/// thread: messages WHERE chat = 0, writer (users)
+/// writer ──update m1.author = u1──► m1 re-checked, writer [u1]
+/// writer ──rename u1──────────────► m1 nested again
+/// ```
+#[test]
+fn r1_a_root_write_rechecks_a_result_with_relations() {
+    let db = open(chat_schema(None), 1);
+    for u in 0..2 {
+        person(&db, u, &format!("u{u}"));
+    }
+    chat(&db, 0, "c0");
+    for n in 0..3 {
+        message(&db, n, 0, n as i64, None);
+        by(&db, n, 0);
+    }
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(writer()),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let (stats, reported) = refreshed(&db, &mut lives, "m1 changes author", || by(&db, 1, 1));
+    assert_eq!(
+        (stats.reran, stats.rechecked, stats.renested),
+        (0, 1, 0),
+        "a re-check, no re-run: {stats:?}"
+    );
+    assert_eq!(reported[0], BTreeSet::from([id(MESSAGES, 1)]));
+    // What the result holds moved with the re-check: u1 now reaches m1.
+    let (stats, reported) = refreshed(&db, &mut lives, "u1 renamed", || {
+        update(&db, "users", id(USERS, 1), &[("name", text("renamed"))])
+    });
+    assert_eq!((stats.reran, stats.renested), (0, 1), "{stats:?}");
+    assert_eq!(reported[0], BTreeSet::from([id(MESSAGES, 1)]));
+    let (stats, _) = refreshed(&db, &mut lives, "u0 renamed", || {
+        update(&db, "users", id(USERS, 0), &[("name", text("renamed"))])
+    });
+    assert_eq!(
+        (stats.reran, stats.renested),
+        (0, 1),
+        "u0 still writes m0 and m2: {stats:?}"
+    );
+}
+
+/// R2. A write to a relation's table that one root's relation holds
+/// nests that root's relations again; the other roots are not re-read or
+/// reported, and nothing re-runs.
+///
+/// ```
+/// chat list: chats, messages (by chat)
+/// writer ──insert m9(chat 1)──► chat 1's messages nested again
+/// ```
+#[test]
+fn r2_a_child_write_renests_only_the_roots_holding_its_parent() {
+    let db = open(chat_schema(None), 1);
+    for c in 0..3 {
+        chat(&db, c, &format!("c{c}"));
+        message(&db, c, c, c as i64, None);
+    }
+    let mut lives = vec![subscribe(
+        &db,
+        "chat list",
+        Query::from("chats").array_subquery(
+            ArraySubquery::new("messages", "messages", "chat", "id")
+                .order_by("sent_at", OrderDirection::Asc),
+        ),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let (stats, reported) = refreshed(&db, &mut lives, "a message in chat 1", || {
+        message(&db, 9, 1, 9, None)
+    });
+    assert_eq!(
+        (stats.reran, stats.rechecked, stats.renested),
+        (0, 1, 1),
+        "a re-nest, no re-run: {stats:?}"
+    );
+    assert_eq!(reported[0], BTreeSet::from([id(CHATS, 1)]));
+    let (stats, reported) = refreshed(&db, &mut lives, "chat 1's message leaves", || {
+        delete(&db, "messages", id(MESSAGES, 9))
+    });
+    assert_eq!((stats.reran, stats.renested), (0, 1), "{stats:?}");
+    assert_eq!(reported[0], BTreeSet::from([id(CHATS, 1)]));
+}
+
+/// R3. A write under one of two relations nests only that one again; the
+/// other keeps its cells.
+///
+/// ```
+/// thread: messages WHERE chat = 0, writer (users), marks (read_marks)
+/// writer ──insert mark(m1)──► m1's marks nested again, writer kept
+/// ```
+#[test]
+fn r3_a_write_under_one_relation_reads_only_that_relation_again() {
+    let db = open(chat_schema(None), 1);
+    person(&db, 0, "u0");
+    chat(&db, 0, "c0");
+    for n in 0..3 {
+        message(&db, n, 0, n as i64, None);
+        by(&db, n, 0);
+    }
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(writer())
+            .array_subquery(ArraySubquery::new("marks", "read_marks", "message", "id")),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let (stats, reported) = refreshed(&db, &mut lives, "a read mark on m1", || {
+        insert(
+            &db,
+            "read_marks",
+            id(MARKS, 1),
+            &[
+                ("message", uuid(id(MESSAGES, 1))),
+                ("reader", subject(0)),
+                ("at", Value::I64(1)),
+            ],
+        )
+    });
+    assert_eq!(
+        (stats.reran, stats.renested, stats.renested_narrowly),
+        (0, 1, 1),
+        "only `marks` is nested again: {stats:?}"
+    );
+    assert_eq!(reported[0], BTreeSet::from([id(MESSAGES, 1)]));
+}
+
+/// R4. A write at a nested level nests again only the relations on its
+/// path: the relation above it keeps its rows' own cells and its other
+/// nested relations, and the merged cell is typed as a full run types it,
+/// an emptied nested relation included.
+///
+/// ```
+/// chat list: chats, last (messages, 1) { writer (users), marks }
+/// writer ──rename u1──► chat 1's last.writer nested again
+/// writer ──delete u1──► chat 1's last.writer empty
+/// ```
+#[test]
+fn r4_a_nested_write_reads_only_down_its_path() {
+    let db = open(chat_schema(None), 1);
+    for u in 0..3 {
+        person(&db, u, &format!("u{u}"));
+    }
+    for c in 0..3 {
+        chat(&db, c, &format!("c{c}"));
+        message(&db, c, c, c as i64, None);
+        by(&db, c, c);
+        insert(
+            &db,
+            "read_marks",
+            id(MARKS, c),
+            &[
+                ("message", uuid(id(MESSAGES, c))),
+                ("reader", subject(c)),
+                ("at", Value::I64(1)),
+            ],
+        );
+    }
+    let mut lives = vec![subscribe(
+        &db,
+        "chat list",
+        Query::from("chats").array_subquery(
+            ArraySubquery::new("last", "messages", "chat", "id")
+                .order_by("sent_at", OrderDirection::Desc)
+                .limit(1)
+                .nested(writer())
+                .nested(ArraySubquery::new("marks", "read_marks", "message", "id")),
+        ),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let (stats, reported) = refreshed(&db, &mut lives, "u1 renamed", || {
+        update(&db, "users", id(USERS, 1), &[("name", text("renamed"))])
+    });
+    assert_eq!(
+        (stats.reran, stats.renested, stats.renested_narrowly),
+        (0, 1, 1),
+        "only last.writer is nested again: {stats:?}"
+    );
+    assert_eq!(reported[0], BTreeSet::from([id(CHATS, 1)]));
+    let (stats, reported) = refreshed(&db, &mut lives, "u1 deleted", || {
+        delete(&db, "users", id(USERS, 1))
+    });
+    assert_eq!((stats.reran, stats.renested_narrowly), (0, 1), "{stats:?}");
+    assert_eq!(reported[0], BTreeSet::from([id(CHATS, 1)]));
+}
+
+/// R5. An edit of a root row that another root's relation holds (a
+/// self-relation: a quoted message) re-checks the edited row and nests
+/// again only the relations that hold it; a root no relation holds is only
+/// re-checked. Nothing re-runs.
+///
+/// ```
+/// thread: messages WHERE chat = 0, reply (messages)
+/// m1 replies to m0
+/// writer ──edit m0──► m0 re-checked, m1's reply nested again
+/// writer ──edit m2──► m2 re-checked
+/// ```
+#[test]
+fn r5_an_edit_of_a_quoted_root_renests_where_it_is_quoted() {
+    let db = open(chat_schema(None), 1);
+    chat(&db, 0, "c0");
+    message(&db, 0, 0, 0, None);
+    message(&db, 1, 0, 1, Some(0));
+    message(&db, 2, 0, 2, None);
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(reply()),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let (stats, reported) = refreshed(&db, &mut lives, "m0 edited", || {
+        update(
+            &db,
+            "messages",
+            id(MESSAGES, 0),
+            &[("body", text("edited"))],
+        )
+    });
+    assert_eq!(
+        (stats.reran, stats.rechecked, stats.renested),
+        (0, 1, 1),
+        "a re-check and a re-nest, no re-run: {stats:?}"
+    );
+    assert_eq!(
+        reported[0],
+        BTreeSet::from([id(MESSAGES, 0), id(MESSAGES, 1)])
+    );
+    let (stats, reported) = refreshed(&db, &mut lives, "m2 edited", || {
+        update(
+            &db,
+            "messages",
+            id(MESSAGES, 2),
+            &[("body", text("edited"))],
+        )
+    });
+    assert_eq!(
+        (stats.reran, stats.rechecked, stats.renested),
+        (0, 1, 0),
+        "a re-check only: {stats:?}"
+    );
+    assert_eq!(reported[0], BTreeSet::from([id(MESSAGES, 2)]));
+    // m2 now quotes m0: m0's next edit reaches m1 and m2.
+    let (stats, _) = refreshed(&db, &mut lives, "m2 quotes m0", || {
+        update(
+            &db,
+            "messages",
+            id(MESSAGES, 2),
+            &[("reply_to", uuid(id(MESSAGES, 0)))],
+        )
+    });
+    assert_eq!(stats.reran, 0, "{stats:?}");
+    let (stats, reported) = refreshed(&db, &mut lives, "m0 edited again", || {
+        update(&db, "messages", id(MESSAGES, 0), &[("body", text("again"))])
+    });
+    assert_eq!((stats.reran, stats.renested), (0, 1), "{stats:?}");
+    assert_eq!(
+        reported[0],
+        BTreeSet::from([id(MESSAGES, 0), id(MESSAGES, 1), id(MESSAGES, 2)])
+    );
+}
+
+/// R6. What a result holds at each level is kept per root row and moves
+/// with it: after a re-nest replaces chat 1's last message, a read mark on
+/// the new one reaches the result and a read mark on the old one does not.
+///
+/// ```
+/// chat list: chats, last (messages, 1) { marks }
+/// writer ──insert m9(chat 1)──► last [m9]
+/// writer ──mark m9──► chat 1 nested again
+/// writer ──mark m1──► skipped: no root holds m1 now
+/// ```
+#[test]
+fn r6_held_rows_follow_a_renest() {
+    let db = open(chat_schema(None), 1);
+    for c in 0..3 {
+        chat(&db, c, &format!("c{c}"));
+        message(&db, c, c, c as i64, None);
+    }
+    let mut lives = vec![subscribe(
+        &db,
+        "chat list",
+        Query::from("chats").array_subquery(
+            ArraySubquery::new("last", "messages", "chat", "id")
+                .order_by("sent_at", OrderDirection::Desc)
+                .limit(1)
+                .nested(ArraySubquery::new("marks", "read_marks", "message", "id")),
+        ),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let mark = |n: usize, message: usize| {
+        insert(
+            &db,
+            "read_marks",
+            id(MARKS, n),
+            &[
+                ("message", uuid(id(MESSAGES, message))),
+                ("reader", subject(0)),
+                ("at", Value::I64(n as i64)),
+            ],
+        )
+    };
+    let (stats, _) = refreshed(&db, &mut lives, "a new last message in chat 1", || {
+        message(&db, 9, 1, 9, None)
+    });
+    assert_eq!((stats.reran, stats.renested), (0, 1), "{stats:?}");
+    let (stats, reported) = refreshed(&db, &mut lives, "a mark on m9", || mark(1, 9));
+    assert_eq!((stats.reran, stats.renested), (0, 1), "{stats:?}");
+    assert_eq!(reported[0], BTreeSet::from([id(CHATS, 1)]));
+    let (stats, reported) = refreshed(&db, &mut lives, "a mark on m1", || mark(2, 1));
+    assert_eq!(
+        (stats.woken, stats.uncorrelated),
+        (0, 1),
+        "m1 left chat 1's last: {stats:?}"
+    );
+    assert!(reported[0].is_empty());
+}
+
+/// R7. A relation may share its name with one of its parent's columns:
+/// a re-nest replaces the relation's cell and keeps the column.
+///
+/// ```
+/// thread: messages WHERE chat = 0, sender (users by author) beside the
+///         message's own `sender` column (NULL here)
+/// writer ──rename u0──► the roots u0 wrote nested again, column kept
+/// ```
+#[test]
+fn r7_a_relation_named_like_a_column_keeps_the_column() {
+    let db = open(chat_schema(None), 1);
+    person(&db, 0, "u0");
+    chat(&db, 0, "c0");
+    for n in 0..2 {
+        message(&db, n, 0, n as i64, None);
+        by(&db, n, 0);
+    }
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(ArraySubquery::new("sender", "users", "id", "author")),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let (stats, reported) = refreshed(&db, &mut lives, "u0 renamed", || {
+        update(&db, "users", id(USERS, 0), &[("name", text("renamed"))])
+    });
+    assert_eq!((stats.reran, stats.renested), (0, 1), "{stats:?}");
+    assert_eq!(
+        reported[0],
+        BTreeSet::from([id(MESSAGES, 0), id(MESSAGES, 1)])
+    );
+}
+
+/// The events `live` has been sent since it last read, without applying
+/// them.
+fn pending(live: &mut Live) -> Vec<SubscriptionEvent> {
+    std::iter::from_fn(|| live.stream.try_next_event()).collect()
+}
+
+/// R8. A re-check followed by a re-nest (an edit of a root row another
+/// root's relation holds) reaches a member as one delta: the edited row
+/// and the row quoting it change together, never one without the other.
+///
+/// ```
+/// thread: messages WHERE chat = 0, reply (messages)
+/// writer ──edit m0 (m1 quotes it)──► one delta: m0 and m1
+/// ```
+#[test]
+fn r8_a_recheck_and_its_renest_reach_a_member_as_one_delta() {
+    let db = open(chat_schema(None), 1);
+    chat(&db, 0, "c0");
+    chat(&db, 9, "c9");
+    message(&db, 0, 0, 0, None);
+    message(&db, 1, 0, 1, Some(0));
+    message(&db, 2, 0, 2, None);
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(reply()),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let before = db.fanout_stats();
+    update(
+        &db,
+        "messages",
+        id(MESSAGES, 0),
+        &[("body", text("edited"))],
+    );
+    let after = db.fanout_stats();
+    assert_eq!(
+        (after.reran - before.reran, after.renested - before.renested),
+        (0, 1),
+        "a re-check and a re-nest: {after:?}"
+    );
+    let events = pending(&mut lives[0]);
+    let [
+        SubscriptionEvent::Delta {
+            reset: false,
+            added,
+            updated,
+            removed,
+            ..
+        },
+    ] = events.as_slice()
+    else {
+        panic!("one delta for one commit, got {events:?}");
+    };
+    assert!(added.is_empty() && removed.is_empty(), "{events:?}");
+    let ids: Vec<(RowUuid, Option<usize>, usize)> = updated
+        .iter()
+        .map(|row| (row.row_uuid(), row.previous_index, row.index))
+        .collect();
+    assert_eq!(
+        ids,
+        vec![(id(MESSAGES, 0), Some(0), 0), (id(MESSAGES, 1), Some(1), 1)]
+    );
+    // Applied as a member applies it, the delta is the fresh read.
+    apply_events(&mut lives[0], events);
+    check(&db, &mut lives, "m0 edited");
+    // The same with the edit moving m0 out of the thread: m0 leaves and
+    // m1's reply empties, in one delta.
+    update(
+        &db,
+        "messages",
+        id(MESSAGES, 0),
+        &[("chat", uuid(id(CHATS, 9)))],
+    );
+    let events = pending(&mut lives[0]);
+    assert_eq!(events.len(), 1, "one delta for one commit, got {events:?}");
+    apply_events(&mut lives[0], events);
+    check(&db, &mut lives, "m0 moved out");
+}
+
+/// R9. A re-check that fails (a read error, not missing chunks) ends the
+/// subscription: no re-nest follows it, and nothing is sent after the
+/// rejection.
+#[test]
+fn r9_no_renest_follows_a_rejected_recheck() {
+    let db = open(chat_schema(None), 1);
+    chat(&db, 0, "c0");
+    message(&db, 0, 0, 0, None);
+    message(&db, 1, 0, 1, Some(0));
+    let mut lives = vec![subscribe(
+        &db,
+        "thread",
+        Query::from("messages")
+            .filter(in_chat(0))
+            .order_by("sent_at", OrderDirection::Asc)
+            .array_subquery(reply()),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    let before = db.fanout_stats();
+    jazz::db::fail_rechecks_for_test(1);
+    update(
+        &db,
+        "messages",
+        id(MESSAGES, 0),
+        &[("body", text("edited"))],
+    );
+    jazz::db::fail_rechecks_for_test(0);
+    let after = db.fanout_stats();
+    assert_eq!(
+        (after.reran - before.reran, after.renested - before.renested),
+        (0, 0),
+        "no re-nest, no re-run after the rejection: {after:?}"
+    );
+    let events = pending(&mut lives[0]);
+    assert!(
+        matches!(events.as_slice(), [SubscriptionEvent::Rejected { .. }]),
+        "the rejection, and nothing after it: {events:?}"
+    );
+}
+
+/// R10. A partial re-nest types a merged nested relation as a full run
+/// does: as the widest of its non-empty siblings' types, not the first
+/// sibling's. Chat 0's first message has no replies, so its `replies` is
+/// empty and keeps the type the last run declared; its second message has
+/// one reply, by u0. A rename and then a delete of u0 nest again only
+/// `messages.replies.writer`, merging `messages` and `replies` in part.
+/// The delete empties the reply's `writer`, which narrows that message's
+/// `replies` type: the chat's `messages` must take it from that message,
+/// not from the empty first one.
+///
+/// ```
+/// chat list: chats, messages { replies (messages) { writer (users) } }
+/// writer ──rename u0──► chat 0's messages.replies.writer nested again
+/// writer ──delete u0──► chat 0's m1.replies[m3].writer empty
+/// ```
+#[test]
+fn r10_a_partial_renest_types_a_nested_relation_as_its_widest_sibling() {
+    let db = open(chat_schema(None), 1);
+    person(&db, 0, "u0");
+    chat(&db, 0, "c0");
+    chat(&db, 1, "c1");
+    message(&db, 0, 0, 0, None);
+    message(&db, 1, 0, 1, None);
+    // m1's reply sits in another chat, by u0; m0 has none.
+    message(&db, 3, 1, 3, Some(1));
+    by(&db, 3, 0);
+    let mut lives = vec![subscribe(
+        &db,
+        "chat list",
+        Query::from("chats").array_subquery(
+            ArraySubquery::new("messages", "messages", "chat", "id")
+                .order_by("sent_at", OrderDirection::Asc)
+                .nested(replies().nested(writer())),
+        ),
+        None,
+    )];
+    check(&db, &mut lives, "subscribe");
+    for (what, write) in [
+        (
+            "u0 renamed",
+            Box::new(|| update(&db, "users", id(USERS, 0), &[("name", text("renamed"))]))
+                as Box<dyn Fn()>,
+        ),
+        (
+            "u0 deleted",
+            Box::new(|| {
+                block_on(db.delete("users", id(USERS, 0), Default::default())).unwrap();
+            }),
+        ),
+    ] {
+        let before = db.fanout_stats();
+        write();
+        let after = db.fanout_stats();
+        assert_eq!(
+            (
+                after.reran - before.reran,
+                after.renested - before.renested,
+                after.renested_narrowly - before.renested_narrowly,
+            ),
+            (0, 1, 1),
+            "{what}: a partial re-nest of chat 0, no re-run: {after:?}"
+        );
+        let events = pending(&mut lives[0]);
+        let sent: Vec<(RowUuid, Vec<jazz::records::ValueType>)> = events
+            .iter()
+            .flat_map(|event| match event {
+                SubscriptionEvent::Delta { updated, .. } => updated
+                    .iter()
+                    .map(|row| (row.row_uuid(), row.cell_types().to_vec()))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let full =
+            block_on(db.all_nested_for_test(&lives[0].query, ReadOpts::default(), None)).unwrap();
+        let full: Vec<(RowUuid, Vec<jazz::records::ValueType>)> = full
+            .iter()
+            .filter(|row| row.row_uuid() == id(CHATS, 0))
+            .map(|row| (row.row_uuid(), row.cell_types().to_vec()))
+            .collect();
+        assert_eq!(
+            sent, full,
+            "{what}: the re-nested chat is declared as a full run declares it"
+        );
+        apply_events(&mut lives[0], events);
+        check(&db, &mut lives, what);
+    }
+}
+
 // ---- randomized differentials ----------------------------------------------
 
 struct Rng(u64);
@@ -1829,6 +2521,7 @@ fn seed_world(db: &Db) -> World {
 #[test]
 fn correlated_results_match_one_shot_reads_under_random_writes() {
     let mut totals = [(0u64, 0u64); 2];
+    let (mut renested, mut narrowly) = (0, 0);
     for seed in [3, 17, 29, 64, 101] {
         let on = differential_run(seed, true);
         let off = differential_run(seed, false);
@@ -1840,8 +2533,17 @@ fn correlated_results_match_one_shot_reads_under_random_writes() {
             total.0 += stats.reran;
             total.1 += stats.uncorrelated;
         }
+        assert_eq!(off.1.renested, 0, "watches off: nothing is re-nested");
+        renested += on.1.renested;
+        narrowly += on.1.renested_narrowly;
     }
     let [(filtered, skipped), (full, none)] = totals;
+    // The random writes reach the in-place refreshes, each checked here
+    // and by the engine's own oracle against a full run.
+    assert!(
+        renested > narrowly && narrowly > 0,
+        "re-nests {renested}, narrow {narrowly}"
+    );
     assert_eq!(none, 0, "watches off: no correlation skips");
     assert!(skipped > 0, "the filter skipped changes: {skipped}");
     assert!(

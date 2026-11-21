@@ -1,0 +1,790 @@
+{
+  "description": "How the upstream link classifies a server's WireError (LinkFailure::from_wire_error), for every code, retry, admission and message shape. Rust checks its classifier against it; hosts that cannot call Rust (the thin client) check theirs. Regenerate only with a deliberate change to the rule.",
+  "version": 1,
+  "cases": [
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_protocol_version",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "unsupported_feature",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "malformed_frame",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "reauthenticate"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "reauthenticate"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "authRejected"
+    },
+    {
+      "code": "auth_failed",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "authRejected"
+    },
+    {
+      "code": "backpressure",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "backpressure",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "refused"
+    },
+    {
+      "code": "backpressure",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "network"
+    },
+    {
+      "code": "backpressure",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "refused"
+    },
+    {
+      "code": "backpressure",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "network"
+    },
+    {
+      "code": "internal",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "internal",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "refused"
+    },
+    {
+      "code": "internal",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "network"
+    },
+    {
+      "code": "internal",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "refused"
+    },
+    {
+      "code": "internal",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "network"
+    },
+    {
+      "code": "not_ready",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "never",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "never",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "after_auth",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "after_auth",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "after_resume",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "after_resume",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "fatal"
+    },
+    {
+      "code": "not_ready",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": false,
+      "kind": "serverNotReady"
+    },
+    {
+      "code": "not_ready",
+      "retry": "later",
+      "message": "token expired",
+      "admitted": true,
+      "kind": "network"
+    },
+    {
+      "code": "not_ready",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": false,
+      "kind": "serverNotReady"
+    },
+    {
+      "code": "not_ready",
+      "retry": "later",
+      "message": "reauthenticate: the session reached its expiry",
+      "admitted": true,
+      "kind": "network"
+    }
+  ]
+}

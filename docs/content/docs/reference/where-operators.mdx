@@ -33,19 +33,19 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#where-eq-ne-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-eq-ne-swift
     </include>
 
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-eq-ne-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-eq-ne-kotlin
     </include>
 
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#where-eq-ne-go
+      ../examples/docs/todo-client-go/snippets_test.go#where-eq-ne-go
     </include>
 
   </Tab>
@@ -72,19 +72,19 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#where-numeric-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-numeric-swift
     </include>
 
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-numeric-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-numeric-kotlin
     </include>
 
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#where-numeric-go
+      ../examples/docs/todo-client-go/snippets_test.go#where-numeric-go
     </include>
 
   </Tab>
@@ -111,19 +111,19 @@ import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#where-contains-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-contains-swift
     </include>
 
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-contains-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-contains-kotlin
     </include>
 
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#where-contains-go
+      ../examples/docs/todo-client-go/snippets_test.go#where-contains-go
     </include>
 
   </Tab>
@@ -152,19 +152,19 @@ In TypeScript, `isNull: true` matches missing values and `isNull: false` matches
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#where-null-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-null-swift
     </include>
 
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#where-null-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-null-kotlin
     </include>
 
   </Tab>
   <Tab value="Go">
     <include cwd lang="go">
-      ../examples/stage-plan/apps/go-cli/docs_snippets_test.go#where-null-go
+      ../examples/docs/todo-client-go/snippets_test.go#where-null-go
     </include>
 
   </Tab>
@@ -174,7 +174,7 @@ In TypeScript, `isNull: true` matches missing values and `isNull: false` matches
 
 All predicates passed to `where(...)` / chained `filter_*` calls are AND-combined:
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-and-ts
@@ -191,9 +191,21 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
     </include>
 
   </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-and-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-filters-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-and-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#where-and-go
     </include>
 
   </Tab>
@@ -201,7 +213,7 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
 
 ### Combining with ordering and limits
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-order-limit-ts
@@ -218,13 +230,31 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
     </include>
 
   </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-order-limit-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-order-limit-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#where-order-limit-go
+    </include>
+
+  </Tab>
 </Tabs>
 
 ## Live subscriptions with WHERE
 
 `useAll` and query subscriptions accept the same query builders as `db.all`. The subscription stays active and updates whenever any row enters or exits the filter:
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-subscription-ts
@@ -241,9 +271,21 @@ All predicates passed to `where(...)` / chained `filter_*` calls are AND-combine
     </include>
 
   </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#where-subscription-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#reading-subscriptions-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#where-subscription-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#where-subscription-go
     </include>
 
   </Tab>

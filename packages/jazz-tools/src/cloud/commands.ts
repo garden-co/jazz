@@ -148,9 +148,9 @@ ${CLOUD_DEPRECATED}
   apps claim <appId> --name <name> [--team <id>] [--admin-secret <secret>]
                                 Move an unclaimed app into a team
   apps delete <appId> --confirm <app name>
-  apps auth get <appId>         Show the app's local-first auth setting
-  apps auth set <appId> --allow-local-first-auth true|false
-                                Allow or refuse local-first guests
+  apps auth get <appId>         Show whether the app allows device accounts
+  apps auth set <appId> --allow-device-accounts true|false
+                                Allow or refuse device accounts (guests)
   apps secrets rotate <appId>   Rotate the admin and backend secrets; prints them once
   apps status <appId> [--wait]  Show rollout status (--wait polls until ready)
   apps upgrade <appId>          List available stable-release upgrades
@@ -306,7 +306,7 @@ const REMOVED_JWT_FLAGS = [
 ];
 
 function describeAuth(auth: AppAuth): string {
-  return `  local-first auth:   ${auth.allowLocalFirstAuth ? "allowed" : "disabled"}\n`;
+  return `  device accounts:    ${auth.allowLocalFirstAuth ? "allowed" : "disabled"}\n`;
 }
 
 function secretsText(result: {
@@ -569,14 +569,25 @@ async function appAuth(
         "Sign users in through your app's backend (createJazz({ authenticate })).",
     );
   }
-  allowOnly(parsed, ["--allow-local-first-auth"]);
+  // `--allow-local-first-auth` is the flag's name from before device accounts
+  // were renamed; it still works. The Cloud API's field keeps its old name.
+  allowOnly(parsed, ["--allow-device-accounts", "--allow-local-first-auth"]);
   const body: Record<string, unknown> = {};
-  const localFirst = flag(parsed, "--allow-local-first-auth");
-  if (localFirst !== undefined) {
-    if (localFirst !== "true" && localFirst !== "false") {
-      throw new UsageError("--allow-local-first-auth must be true or false.");
+  const given = ["--allow-device-accounts", "--allow-local-first-auth"].filter((name) =>
+    parsed.flags.has(name),
+  );
+  if (given.length > 1) {
+    throw new UsageError(
+      "Pass --allow-device-accounts only (--allow-local-first-auth is its old name).",
+    );
+  }
+  const name = given[0];
+  const allow = name === undefined ? undefined : flag(parsed, name);
+  if (allow !== undefined) {
+    if (allow !== "true" && allow !== "false") {
+      throw new UsageError(`${name} must be true or false.`);
     }
-    body.allowLocalFirstAuth = localFirst === "true";
+    body.allowLocalFirstAuth = allow === "true";
   }
   if (Object.keys(body).length === 0)
     throw new UsageError("Nothing to change. See `jazz-tools apps --help`.");

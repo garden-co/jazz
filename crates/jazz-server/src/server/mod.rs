@@ -13,10 +13,9 @@ mod catalogue_storage;
 mod data_dir_corpus;
 #[cfg(feature = "embedded-server")]
 mod embedded;
+mod identity;
 pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
-pub mod alpha59_alpha60;
 pub(crate) mod deployment;
-mod permissions_validation;
 pub mod routes;
 #[cfg(any(test, feature = "embedded-server"))]
 pub(crate) mod runtime_catalogue;
@@ -30,6 +29,10 @@ pub(crate) use catalogue_storage::CatalogueStorage;
 #[cfg(feature = "embedded-server")]
 pub use embedded::{
     EmbeddedOutgoing, EmbeddedServer, EmbeddedSocketPeer, EmbeddedSocketSender, OpenSocketRefused,
+};
+pub use identity::{
+    IdentityOpen, RecordedIdentity, StoreIdentity, detach_store_identity, open_store_identity,
+    read_store_identity, set_store_app_id,
 };
 pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]
@@ -98,6 +101,11 @@ pub struct ServerState {
     /// trusted workload's token, or the admin secret.
     pub(crate) backend_credential: Option<Arc<crate::middleware::workload::BackendCredential>>,
     pub(crate) workload_secrets: Option<crate::middleware::workload::InternalSecrets>,
+    /// The configured admin secret the app's backend signing key derives
+    /// from (`crate::portable::backend_signing_key`); `None` on a core that
+    /// trusts a workload or has no admin secret, which keeps a generated key
+    /// in its store instead.
+    pub(crate) backend_signing_secret: Option<String>,
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<ServerRuntimeHandle>>,
     /// Per-state admission owner for policy-scoped WebSocket connections.
@@ -155,6 +163,7 @@ impl ServerState {
         self.runtime()
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     pub(crate) fn start_core_server_shell(
         &self,
         schema: jazz::schema::JazzSchema,

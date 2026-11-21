@@ -47,7 +47,12 @@ describe("context with real $state", () => {
 
     expect(handle.current).toBe(null);
 
-    const session = { user: "alice", claims: { role: "admin" }, authMode: "external" as const };
+    const session = {
+      user: "alice",
+      identity: { issuer: "test", subject: "alice" },
+      claims: { role: "admin" },
+      authMode: "external" as const,
+    };
     ctx.session = session;
 
     expect(handle.current).toStrictEqual(session);
@@ -59,7 +64,12 @@ describe("context with real $state", () => {
 
     expect(handle.current).toBeNull();
 
-    const alice = { user: "alice", claims: { role: "admin" }, authMode: "external" as const };
+    const alice = {
+      user: "alice",
+      identity: { issuer: "test", subject: "alice" },
+      claims: { role: "admin" },
+      authMode: "external" as const,
+    };
     ctx.session = alice;
     expect(handle.current).toStrictEqual(alice);
 
@@ -71,7 +81,12 @@ describe("context with real $state", () => {
     const ctx = initJazzContext();
 
     const mockDb = { shutdown: vi.fn() } as any;
-    const mockSession = { user: "bob", claims: {}, authMode: "external" as const };
+    const mockSession = {
+      user: "bob",
+      identity: { issuer: "test", subject: "bob" },
+      claims: {},
+      authMode: "external" as const,
+    };
     ctx.db = mockDb;
     ctx.session = mockSession;
 

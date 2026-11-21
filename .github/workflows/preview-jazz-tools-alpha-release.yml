@@ -5,9 +5,17 @@ on:
     branches:
       - changeset-release/*
   workflow_dispatch:
+  # The release candidate gate (release-candidate.yml): the preview of the
+  # release-artifacts run it verified, without rebuilding.
+  workflow_call:
+    inputs:
+      artifacts_run_id:
+        required: true
+        type: string
 
 concurrency:
-  group: preview-jazz-tools-alpha-${{ github.ref }}
+  # Called, github.workflow is the caller's: one group per calling run.
+  group: preview-jazz-tools-alpha-${{ github.ref }}${{ inputs.artifacts_run_id && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -41,14 +49,16 @@ jobs:
     uses: ./.github/workflows/publish-jazz-tools-alpha.yml
     # GitHub validates the full reusable-workflow permission graph before it
     # evaluates dry-run guards. Match the publisher's maximum permission
-    # ceiling only on this job; dry-run never executes its write steps.
+    # ceiling only on this job; dry-run never executes its write steps
+    # (nor dispatch-crates, which needs actions: write).
     permissions:
-      actions: read
+      actions: write
       contents: write
       id-token: write
       pull-requests: read
     with:
       mode: dry-run
+      artifacts_run_id: ${{ inputs.artifacts_run_id || '' }}
     secrets: inherit
 
   mark-preview-final:

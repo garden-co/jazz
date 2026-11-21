@@ -1,0 +1,200 @@
+---
+title: Cloudflare Durable Objects (experimental)
+description: "Learn how to keep your app's data in a Cloudflare Durable Object, with your own backend in front for auth."
+languageTabs: main-backend
+---
+
+<Callout type="warn" title="Experimental">
+  Running the Jazz core in a Durable Object is new in this release. Try it, and tell us what breaks;
+  keep production data on [your own server](/docs/setup/deployment/own-server) or
+  [Vercel](/docs/setup/deployment/vercel) for now.
+</Callout>
+
+Your app's core (the part of Jazz that stores and syncs its data) runs in one Durable Object, in a
+Cloudflare Worker you deploy. Your own backend sits in front of it: browsers talk only to your
+backend, which signs users in with your auth and reaches the core with a secret only the two of them
+know.
+
+Your backend can run in the same Worker, so the whole app is on Cloudflare
+([below](#run-your-backend-in-the-worker-too)), or anywhere else (Node, Vercel, your own server), where
+it reaches the Worker by its URL ([Connect your backend](#connect-your-backend)).
+
+This page sets up your **main backend**: the backend that runs `createJazz`, serves sync to your
+browsers and apps, and decides who each user is. Other trusted machines reach Jazz through it as
+[backend clients](/docs/setup/backend-client).
+
+<include>../../../partials/install-alpha.mdx</include>
+
+## Deploy the core's Worker
+
+The Worker holds one SQLite-backed Durable Object for your app. It runs on the Workers Free plan:
+the Jazz core makes the Worker about 6 MB, well under Workers' 64 MiB limit. Its module
+exports the object's class and forwards every request to it:
+
+```ts title="worker/index.ts"
+import { JazzCore, routeJazzRequest } from "jazz-tools/durable-object";
+
+export { JazzCore };
+export default { fetch: routeJazzRequest };
+```
+
+```jsonc title="worker/wrangler.jsonc"
+{
+  "name": "my-app-jazz",
+  "main": "index.ts",
+  "compatibility_date": "2026-04-01",
+  "durable_objects": { "bindings": [{ "name": "JAZZ", "class_name": "JazzCore" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["JazzCore"] }],
+  // Large values (files, long text) go to R2: see below.
+  "r2_buckets": [{ "binding": "JAZZ_BLOBS", "bucket_name": "my-app-jazz-blobs" }],
+}
+```
+
+The object is the app: it holds your app's data, and the app's ID, which it makes on its first
+start. One Worker serves one app, whatever app ID a request's path names. Keep the Worker's name, the `JazzCore` class and its migration as they are: a renamed Worker or
+a new class starts a new, empty app, and your backend publishes onto it without noticing.
+
+Give it a core secret: a random string of at least 32 characters (`openssl rand -hex 32`). Keep it
+the same across deployments; the core admits only requests that carry it.
+
+```bash
+npx wrangler r2 bucket create my-app-jazz-blobs
+npx wrangler secret put JAZZ_CORE_SECRET
+npx wrangler deploy
+```
+
+### Large values in R2 (recommended)
+
+Bind an R2 bucket to the Worker as `JAZZ_BLOBS`, as above. The core then keeps the bytes of large
+values (anything over 64 KiB: files, long text) in the bucket and only their index in the Durable
+Object's SQLite, which stays small. Without the binding the bytes stay in SQLite, which grows with
+every large value, against Durable Objects' per-object storage limit. R2 has to be enabled on your Cloudflare account
+once (Dashboard → R2 Object Storage), which asks for a payment method even within R2's free tier;
+`wrangler r2 bucket create` fails until it is.
+
+- **Where:** objects live under `jazz/<app id>/` in the bucket, one per chunk, named by its
+  SHA-256. Every upload carries that checksum, so R2 itself rejects a corrupted one. Set
+  `JAZZ_BLOBS_PREFIX` (a Worker variable) to use another prefix.
+- **One app per prefix:** the first core claims its prefix with a `.jazz-owner` object. Another core
+  on the same prefix (another Worker, or a local `wrangler dev` with the same bucket and
+  `JAZZ_BLOBS_PREFIX`) is refused: its `/ready` answers 503 saying which app owns it, and its large
+  values stay in its own SQLite. Give each app, and each environment, its own bucket or prefix.
+- **Keep the bucket and prefix:** a core's large values stay where it first put them. Once a core
+  has claimed its prefix, binding another bucket or changing `JAZZ_BLOBS_PREFIX` doesn't move them:
+  the core refuses that bucket (its `/ready` answers 503 saying what changed) until you set the
+  binding back. Moving a core's large values to another bucket isn't supported yet.
+- **Moving to R2:** a core that already holds large values in SQLite keeps working when you add the
+  binding and moves them to the bucket in the background. Once it has, it needs the binding: a core
+  whose bucket binding is removed refuses to start rather than lose track of its values.
+- **Failures:** a value stays in SQLite until its upload has succeeded, and failed uploads are
+  retried with backoff (logged to the Worker's logs), so an unreachable bucket never loses data.
+
+## Run your backend in the Worker too
+
+`createJazz` runs in a second Durable Object of the same Worker, next to the core: a Jazz keeps its
+socket to the core open across requests, which a Worker's `fetch` can't. `jazzBackend` makes that
+object's class from your `createJazz` and your own routes (a Hono app, say), and
+`routeToJazzBackend` forwards the Worker's requests to it. Under the `workerd` condition, which
+wrangler uses, `jazz-tools/backend` runs on WebAssembly instead of the native Node addon.
+
+```ts title="worker.ts"
+import { Hono } from "hono";
+import { createJazz, durableObjects, jazzBackend, routeToJazzBackend } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
+
+export { JazzCore } from "jazz-tools/durable-object";
+
+export const JazzBackend = jazzBackend((env: Env) => {
+  const jazz = createJazz({
+    app,
+    permissions,
+    // The core in this Worker, through its binding.
+    store: durableObjects({ binding: env.JAZZ, secret: env.JAZZ_CORE_SECRET }),
+    // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+    authenticate: async (request) => null,
+  });
+  const routes = new Hono();
+  routes.get("/api/todos", async (c) => c.json(await jazz.db.all(app.todos)));
+  // Requests under /jazz (sync and sign-in) are Jazz's; everything else goes to `fetch`.
+  return { jazz, fetch: routes.fetch };
+});
+
+export default { fetch: routeToJazzBackend };
+```
+
+```jsonc title="wrangler.jsonc"
+{
+  "name": "my-app",
+  "main": "worker.ts",
+  "compatibility_date": "2026-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "JAZZ", "class_name": "JazzCore" },
+      { "name": "JAZZ_BACKEND", "class_name": "JazzBackend" },
+    ],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["JazzCore", "JazzBackend"] }],
+  "r2_buckets": [{ "binding": "JAZZ_BLOBS", "bucket_name": "my-app-jazz-blobs" }],
+}
+```
+
+Create the R2 bucket and set `JAZZ_CORE_SECRET` as above (`npx wrangler r2 bucket create
+my-app-jazz-blobs`, `npx wrangler secret put JAZZ_CORE_SECRET`) and deploy. Browsers
+connect to the Worker's own origin, with `serverUrl: "/jazz"`. Static assets (your built client) can
+come from the same Worker: forward only your API and `/jazz` to `routeToJazzBackend`, and the rest to
+wrangler's `assets` binding. The BandChat example's `react-hono-betterauth` app does this, with Better
+Auth on Jazz (`examples/band-chat/apps/react-hono-betterauth`, "Deploy to Cloudflare").
+
+The core and the backend each bring a WebAssembly module: the Worker is about 20 MB, under Workers'
+64 MiB limit on every plan, Free included.
+
+The backend is one Durable Object, and every browser's sync socket passes through it, as every
+request does: like the core, it is one object per app. It stays awake (and billed for duration)
+while any browser is connected; only the core can hibernate (see
+[WebSocket hibernation](#websocket-hibernation) below).
+
+## Connect your backend
+
+Put the Worker's values in your backend's environment. They stay server-side; the core secret is
+like a database password:
+
+```bash title=".env"
+JAZZ_DO_URL="https://my-app-jazz.<your subdomain>.workers.dev"
+JAZZ_CORE_SECRET="<the same core secret>"
+```
+
+Then point `createJazz` at it with the `durableObjects()` store:
+
+```ts title="jazz.server.ts"
+import { createJazz, durableObjects } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
+
+export const jazz = createJazz({
+  app,
+  permissions,
+  store: durableObjects({
+    url: process.env.JAZZ_DO_URL!,
+    secret: process.env.JAZZ_CORE_SECRET!,
+  }),
+  // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
+  authenticate: async (request) => null,
+});
+```
+
+<include>../../../partials/main-backend-config.mdx</include>
+
+## Websocket hibernation
+
+Open WebSockets keep the object awake by default. If you want your Jazz core to hibernate when inactive (even when there are WebSockets connected), pass the `lifecycle: "hibernate"` option to the `durableObjects()` store. On wake, the core restores live query watches. Each subscription update will send its full current result on its first matching change.
+
+## What a Durable Object core doesn't do yet
+
+- **Transactions run in your backend**, as with every core: the core never holds one open between
+  calls.
+- **No HTTP-stream fallback** between your backend and the core: they talk over WebSockets.
+- **In a Worker, only `durableObjects()` stores** run: `sqlite()` and `memory()` run their core in
+  the backend's process, which a Worker can't. The Inspector's query explanations aren't available
+  there yet.

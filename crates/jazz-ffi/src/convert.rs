@@ -6,8 +6,11 @@
 //! any JSON; bytes → base64 string; array → JSON array; optional → null.
 
 use base64::Engine as _;
+use jazz_app_support::jazz::query::where_condition::{WhereValueRole, decode_where_condition};
 use jazz_app_support::jazz::query::{self as q, OrderDirection, Predicate};
 use jazz_app_support::jazz::records::Value as CoreValue;
+use jazz_app_support::jazz::tools::deployment::artifact::load_relations;
+use jazz_app_support::jazz::tools::deployment::artifact::relations::RelationKind;
 use jazz_app_support::jazz::tools::{
     ColumnType, ObjectId, OrderedRowDelta, QueryResultField, Schema, TableName, TableSchema, Value,
 };
@@ -281,56 +284,36 @@ pub(crate) struct Relation {
 }
 
 impl Relations {
-    /// From the text of `jazz.app.json` (already checked by the loader).
-    pub(crate) fn read(app: &str) -> Self {
-        let Ok(app) = serde_json::from_str::<Json>(app) else {
-            return Self::default();
-        };
-        let tables = app.get("tables").and_then(Json::as_object);
-        let forward = |table: &str, name: &str| -> Option<(String, String)> {
-            let relation = tables?.get(table)?.get("relations")?.get(name)?;
-            Some((
-                relation.get("rel")?.as_str()?.to_owned(),
-                relation.get("column")?.as_str()?.to_owned(),
-            ))
-        };
-        let mut relations = std::collections::HashMap::new();
-        for (table, spec) in tables.into_iter().flatten() {
-            let mut list = Vec::new();
-            for (name, relation) in spec
-                .get("relations")
-                .and_then(Json::as_object)
-                .into_iter()
-                .flatten()
-            {
-                if let (Some(to_table), Some(column)) = (
-                    relation.get("rel").and_then(Json::as_str),
-                    relation.get("column").and_then(Json::as_str),
-                ) {
-                    list.push(Relation {
-                        name: name.clone(),
-                        to_table: to_table.to_owned(),
-                        column: column.to_owned(),
-                        forward: true,
-                    });
-                } else if let (Some(to_table), Some(via)) = (
-                    relation.get("reverse").and_then(Json::as_str),
-                    relation.get("relation").and_then(Json::as_str),
-                ) && let Some((target, column)) = forward(to_table, via)
-                    // A reverse relation reverses a forward one pointing here.
-                    && target == *table
-                {
-                    list.push(Relation {
-                        name: name.clone(),
-                        to_table: to_table.to_owned(),
-                        column,
-                        forward: false,
-                    });
-                }
-            }
-            relations.insert(table.clone(), list);
-        }
-        Self(relations)
+    /// From the text of `jazz.app.json`, as jazz resolves them: an app
+    /// whose relations don't resolve is refused. Only relations are checked
+    /// here; opening checks the rest as for any client.
+    pub(crate) fn read(app: &str) -> Result<Self> {
+        let relations = load_relations(app.as_bytes())
+            .map_err(|error| refused(format!("app files: {error}")))?;
+        Ok(Self(
+            relations
+                .iter()
+                .map(|(table, relations)| {
+                    let relations = relations
+                        .iter()
+                        .map(|relation| {
+                            let forward = relation.kind == RelationKind::Forward;
+                            Relation {
+                                name: relation.name.clone(),
+                                to_table: relation.to_table.clone(),
+                                column: if forward {
+                                    relation.from_column.clone()
+                                } else {
+                                    relation.to_column.clone()
+                                },
+                                forward,
+                            }
+                        })
+                        .collect();
+                    (table.clone(), relations)
+                })
+                .collect(),
+        ))
     }
 
     pub(crate) fn get(&self, table: &str, name: &str) -> Option<&Relation> {
@@ -763,70 +746,23 @@ pub(crate) fn predicate(
     condition: &Json,
     path: &str,
 ) -> Result<Predicate> {
-    let name = condition
-        .get("column")
-        .and_then(Json::as_str)
-        .ok_or_else(|| refused(format!("{path} needs a \"column\"")))?;
-    let op = condition
-        .get("op")
-        .and_then(Json::as_str)
-        .ok_or_else(|| refused(format!("{path} needs an \"op\"")))?;
-    let column = column(table, table_name, name)?;
-    let value = condition.get("value");
+    let decoded =
+        decode_where_condition(condition).map_err(|error| refused(format!("{path}: {error}")))?;
+    let column = column(table, table_name, decoded.column)?;
     let path = format!("{path}.value");
-    let literal = || -> Result<q::Operand> {
-        let value = value.ok_or_else(|| refused(format!("{path} is missing")))?;
-        if value.is_null() {
-            return Err(refused(format!(
-                "{path} is null: use \"isNull\" or \"isNotNull\""
-            )));
-        }
-        Ok(lit(to_value(value, &column.column_type, false, &path)?))
-    };
-    let compare = |compare: fn(q::Operand, q::Operand) -> Predicate| -> Result<Predicate> {
-        Ok(compare(q::col(column.name), literal()?))
-    };
-    Ok(match op {
-        "eq" => compare(q::eq)?,
-        "ne" => compare(q::ne)?,
-        "lt" => compare(q::lt)?,
-        "lte" => compare(q::lte)?,
-        "gt" => compare(q::gt)?,
-        "gte" => compare(q::gte)?,
-        "in" => {
-            let values = value
-                .and_then(Json::as_array)
-                .ok_or_else(|| refused(format!("{path} must be an array for \"in\"")))?;
-            let operands = values
-                .iter()
-                .enumerate()
-                .map(|(at, value)| {
-                    Ok(lit(to_value(
-                        value,
-                        &column.column_type,
-                        false,
-                        &format!("{path}[{at}]"),
-                    )?))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            q::in_list(q::col(column.name), operands)
-        }
-        "contains" => {
-            let value = value.ok_or_else(|| refused(format!("{path} is missing")))?;
-            let part = match column.column_type.as_ref() {
-                ColumnType::Text => to_value(value, &ColumnType::Text, false, &path)?,
-                ColumnType::Array { element } => to_value(value, element, false, &path)?,
-                _ => {
-                    return Err(refused(format!(
-                        "\"contains\" needs a string or array column; {name} is neither"
-                    )));
-                }
-            };
-            q::contains(q::col(column.name), lit(part))
-        }
-        "isNull" => q::is_null(q::col(column.name)),
-        "isNotNull" => q::not(q::is_null(q::col(column.name))),
-        other => return Err(refused(format!("{path}: unknown op {other:?}"))),
+    decoded.to_predicate(q::col(column.name), |value, role| {
+        let column_type = match (role, column.column_type.as_ref()) {
+            (WhereValueRole::Whole, column_type) => column_type,
+            (WhereValueRole::ContainsPart, ColumnType::Text) => &ColumnType::Text,
+            (WhereValueRole::ContainsPart, ColumnType::Array { element }) => element,
+            (WhereValueRole::ContainsPart, _) => {
+                return Err(refused(format!(
+                    "\"contains\" needs a string or array column; {} is neither",
+                    column.name
+                )));
+            }
+        };
+        Ok(lit(to_value(value, column_type, false, &path)?))
     })
 }
 

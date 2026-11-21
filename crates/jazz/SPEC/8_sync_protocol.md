@@ -57,9 +57,9 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-21`: Wire messages MUST name nodes by UUID, authors by identity and schemas by version id; node-local codes never leave their database.
 - `INV-SYNC-24`: A fresh subscription MUST receive its whole result; only a resumed one may be sent just the rows changed after the seq it held.
 - `INV-SYNC-25`: A resumed subscription MUST leave the replica with the same rows as a fresh subscription to the same query.
-- `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect.
+- `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect. A hibernating host MAY keep admission and active query registrations on their live socket.
 - `INV-SYNC-28`: Results MUST travel as rows and be assembled into result trees by the receiver.
-- `INV-SYNC-30`: A replica MUST treat a subscription as settled only when its connected upstream has confirmed that subscription with its own `Settled`; a node with no upstream settles locally.
+- `INV-SYNC-30`: A replica MUST treat a subscription as settled only once an upstream has confirmed that subscription with its own `Settled`, and reports the last such confirmation, at its tier, until another replaces it (through an outage too); what waits for the server (a first load, a `Remote` opening, a relay settling its own sessions' reads) waits for the current connection's `Settled`. A node with no upstream settles locally.
 - `INV-SYNC-44`: The read protocol MUST be rows plus settlement.
 - `INV-SYNC-45`: Rows MUST be shipped raw, by the authority's stored table and column names, whatever schema version the subscriber declared; a replica mirrors its upstream's catalogue and applies the lenses locally.
 - `INV-SYNC-46`: A replica missing the chunks of a large value MUST request them and install the row only once its chunks are present; a writer pushes a value's new chunks before the commit that uses them.
@@ -198,6 +198,48 @@ it on every link and drops the frame before the runtime sees it. The native
 Rust transport (NAPI `remote()`, React Native) does not ask yet and has no
 silence timeout of its own.
 
+##### Typed error reasons
+
+A server refusing a credential says why: `expired`, `missing`, `invalid`,
+`disabled` or `revoked`, or `reauthenticate` for a planned re-authentication
+(`WireErrorReason`). A client that advertises `FEATURE_TYPED_ERROR_REASON`
+(`1 << 14`) in its Hello gets the reason at the end of the `WireFrame::Error`
+body, after the message: same tag (1), then the reason's postcard enum tag
+(encoding `wire-error-reason-v1`, pinned by
+`crates/jazz/layers/protocol/fixtures/wire_reasoned_error_v1.json`). There is
+no new frame tag: after its hello a server's frames are told apart from sync
+messages by their first byte, and every tag past 1 is a sync message's. The
+bit is one-sided: only a client advertises it, the server never does, and
+it is not part of the negotiated features. The server decides by what the
+client offered, so it names the reason before its own hello too. Every
+other client gets the `Error` bytes it always got and reads the reason from
+the message, which is diagnostic text, not a contract
+(`AuthFailureReason::from_message`, `mapAuthReason`).
+
+Compatibility:
+
+- Old client, new server: an old client does not offer the bit, so the server
+  sends the plain `Error` frame. Unchanged.
+- New client, old server: an old server never appends a reason, so the client
+  reads the message as before. Unchanged.
+- New client, new server: the client takes the named reason over the message.
+  A reason tag it does not know (a newer server) is ignored and the message
+  decides.
+- A receiver that did not offer the bit decodes with `decode_frame`, which
+  rejects the extra byte (`INV-WIRE-1` holds for it); only a client that
+  offered it decodes with `decode_frame_with_error_reason`.
+
+An app's backend that relays its clients (`createJazz`, the Rust app
+endpoint) answers them the same way: it reads the client's Hello as it
+passes, and a refusal it sends before the Hello (a sign-in it cannot admit)
+waits for it briefly (up to 1 s), since a client sends it right behind its
+prelude. A refusal that finds no Hello in time goes out plain.
+
+The TypeScript carrier (browsers, Node, workers, the thin client) offers it
+on every link. The native Rust transport does not offer it yet: after its
+hello it does not read error frames at all (they reach the sync decoder), so
+it reads the reason from the message.
+
 In-process links (a worker and its tab, tests) carry `SyncMessage` values
 directly (`sync::duplex`); a byte link frames them with postcard
 (`WireTransportAdapter`).
@@ -209,6 +251,17 @@ as its first WebSocket message (text, or binary with the same bytes). The
 server then requires one binary message that decodes to exactly one
 `WireFrame::Hello`. The prelude and that Hello each have the two-second
 handshake read deadline. Only the first message is a prelude.
+
+A client may send more binary messages right behind its `Hello`, without
+waiting for the server's. The server reads none of them until it has
+admitted the connection and sent its own `Hello`. Then it reads them in the
+order sent, as on any open connection. A connection refused before the
+server's `Hello` (a `WireFrame::Error`, then close) never reads them, so
+nothing sent ahead takes effect, and the client sends it again on its next
+connection. The prelude and the `Hello` stay messages of their own, and the
+`Hello`'s message holds the `Hello` alone. The `createJazz` relay and the
+HTTP stream transport keep this order: they pass a session's messages on one
+at a time, behind the prelude's admission.
 
 The prelude object has these server-owned fields:
 
@@ -279,10 +332,10 @@ an encoded message, so a change to how commits travel never strands a
 write a user made offline:
 
 - `_jazz_pending (tx, node, seq, clock, snapshot, own, acting, author,
-claims)`: the commit's writer and HLC, a serializable commit's snapshot
+  claims)`: the commit's writer and HLC, a serializable commit's snapshot
   and own commits (NULL when mergeable), and who it acts as.
 - `_jazz_pending_ops (tx, n, op, tbl, id, target, move_from, move_to, at,
-has_cells, bases, proof_key, proof_seq)`: each op, by position `n`.
+  has_cells, bases, proof_key, proof_seq)`: each op, by position `n`.
 - `_jazz_pending_cells (tx, n, list, col, ty, nulls, value)`: each cell an op
   writes (`list` 0) or an upsert creates its row with (`list` 1): the kind
   of value (`ty`), how many present-nullable wrappers hold it (`nulls`), and
@@ -395,8 +448,8 @@ only if all of these hold:
    writes build on it as on any pending commit. A miss therefore costs one fetch
    of the row, never a divergent cache. A replica whose configured author is not
    the identity its link was accepted as has every row stamped otherwise, so each
-   of its writes costs that fetch. Mismatches are counted per replica
-   (`as_written_mismatches`); tests of honest writers assert there are none.
+   of its writes costs that fetch. Tests of honest writers assert that no
+   whole-row fetch is needed.
 
 `Stored { id }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a
@@ -415,6 +468,14 @@ not hold them either way).
 `Read { id, query, binding, include_deleted, tier, wait, view, span }` asks
 for one query's result:
 
+- `query` may hold text prefix/suffix predicates (`StartsWith`/`EndsWith`,
+  in `Predicate` tags 13/14 and `RelationPredicate` tags 11/12; bytewise on
+  UTF-8, NULL never matches). An older server cannot decode them and drops
+  the link, so a client sends such a read, or a serializable commit whose
+  reads hold one, only over a link that negotiated
+  `FEATURE_TEXT_AFFIX_PREDICATES` (`1 << 13`). On any other link it refuses
+  the read (`Refused`, "not supported yet by this server") or the commit (a
+  rejected fate) itself, without sending it.
 - `view` is the read view the result is of: the current state, a branch view
   (head over an optional live or frozen base), or a snapshot. It is part of
   the read's identity (`INV-BVIEW-12`): the server keeps a live read in its
@@ -443,7 +504,7 @@ for one query's result:
   in the view its effective row is the head's version, which the reader's
   policy denies, so the view leaves the row out, as the authority's own
   evaluation of the view does. The server sends `AccessLost { hidden: true
-}` for it (§8.6) once: a later write to either version sends nothing
+  }` for it (§8.6) once: a later write to either version sends nothing
   while the reader still may not read the head's, so the reader learns that
   the row is hidden, not when it is edited. The replica keeps a marker of it in
   `_jazz_withheld` that masks the base's row of the id in every branch view
@@ -496,7 +557,12 @@ opening, never before it; later ones carry only changes, after the tick's
 `Rows` and `AccessLost` and before its `Settled`. The replica keeps each live
 read's set in memory and across reconnects, replacing it with the read's
 first `Holds` on the new connection; neither side stores it. A row a
-replacing `Holds` drops stays cached until a later `members` leaves it out.
+replacing `Holds` drops that no live read holds, and that no `members` listing
+evicted, is no longer kept current for the reader: the replica asks for it
+again with `ResendWhole`, and the server ships it whole if the reader may still
+read it, else its `AccessLost`. So support the reader lost while the replica
+was away (a deleted membership row, say) leaves with the read that rested on
+it (`INV-SYNC-14`).
 `global` says the answer is the global authority's (directly, or through
 relays that settle by their upstream), not a relay's own store.
 
@@ -541,9 +607,14 @@ for each row, its newest version at or before the lowest position a live read
 or `known` reads at; a table that keeps less (latest-only) cannot be read
 through a cut.
 
-A replica treats a read as settled only once its connected upstream confirmed
-it with `Settled`; while the upstream is unanswered, offline or failing the
-read stays unsettled, and a node with no upstream settles locally
+A replica treats a read as settled only once an upstream confirmed it with
+`Settled`, and a subscription keeps reporting the last confirmation, at its
+tier, while the link is down: a client tells a current result as one that is
+settled while its link is up. Each connection starts every read over (its
+answer, refusal and first `Holds` are that connection's alone, a transport
+swapped in without a detach included), so what waits for the server (a first
+load, a `Remote` opening, a relay's settles to its own sessions) waits for the
+current connection's `Settled`. A node with no upstream settles locally
 (`INV-SYNC-30`). A `Remote` read never reports rows the answer no longer lists
 (`INV-SYNC-48`); `LocalFirst` and `LocalOnly` reads keep them.
 
@@ -825,6 +896,26 @@ catalogue.
   identity; a version only the replica admitted has none until the authority
   admits it too.
 
+Each `CatalogueVersion` decodes on its own. A version whose public schema
+names a variant this build does not know (a column type or other enum case
+from a newer Jazz) does not fail the message: the replica skips it, with its
+`CatalogueCell`s, and reports it with `Reason::SchemaVersionUnsupported`
+(`Db::unsupported_schema_versions`); the versions it can read are taken as
+below, and the link stays up. Rows written under a skipped version still
+arrive, with the columns of the versions the replica knows. A version that is
+corrupt (malformed JSON, truncated bytes, a wrong type for a known key, or a
+known shape that does not compile) still fails the message, as before. A key
+this build does not know is dropped when reading, so a version read without
+it may be another version than the one sent. A replica therefore takes a
+version only if the id it computes for it is the id sent (`INV-LENS-1`);
+otherwise the version carries keys this build ignores and is skipped the
+same way. A skipped version is never admitted. The wire is unchanged.
+
+A relay serves only the versions it can read: it skips the others as any
+replica does and does not pass them on. A relay must therefore be at least
+as new as the app's schema; a client on a version its relay cannot read
+gets that version from no one.
+
 The replica admits each version under the authority's stored names, renaming
 tables and columns it had named otherwise while it did not know them (for
 example, a table created offline under a newer local schema). It then runs the
@@ -1058,7 +1149,12 @@ those bytes are refused with it at once until the fetch backoff ends.
   declare it. Every later request is resolved against that admitted version,
   governed by the current schema's policies, as a sync session's declared
   version is (§8.9). A version the store has not admitted is refused with
-  `SchemaNotDeployed`; nothing else is served before a version.
+  `SchemaNotDeployed`; nothing else is served before a version. The server
+  runs a session's requests in order, so a client may send its schema and
+  first requests together, right behind its `Hello` (§8.1.2), and each
+  resolves against the schema declared before it. The TypeScript thin client
+  sends its schema and live queries this way, and other requests once the
+  schema is bound.
 - Request options are the JSON the native bindings take for the same call:
   read options (`tier`, `include_deleted`, `read_view` with branch head and
   frozen base, ...) on `Query` and `Subscribe`, and write options (`rowId`,
@@ -1129,11 +1225,59 @@ those bytes are refused with it at once until the fetch backoff ends.
   unknown.
 - `Begin` opens a mergeable or serializable transaction under a
   client-chosen open-transaction id, owned by that session. A write naming it
-  is staged and answered `Staged`; a refusal while staging is kept and
-  reported by `Commit`, as the bindings report it. A `Query` naming it reads
-  the transaction's own staged writes. `Commit` answers `Written` with the
-  commit's seq; `Rollback` abandons it. A connection that closes abandons its
-  open transactions.
+  is staged and answered `Staged`; a refusal decided by the row's state, or a
+  serializable conflict, is kept and reported by `Commit`, as the bindings
+  report it. A `Query` naming it reads the transaction's own staged writes.
+  `Commit` answers `Written` with the commit's seq; `Rollback` abandons it. A
+  connection that closes abandons its open transactions.
+- The app's backend (`createJazz`, the Rust endpoint) serves a thin
+  connection's transaction requests itself, so the core never holds a
+  transaction open between calls: `Begin`, `Commit`, `Rollback`, every
+  request naming an open transaction, and the chunks, finish and abort of a
+  stream begun in one. It splits the connection's frames
+  (`jazz::thin_transactions::ThinRouter`) and passes the rest to the core
+  unchanged, keeping the client's order: a request for the backend waits
+  until the core answered every earlier one it answers (a live query and
+  its closing excepted), and frames for the core wait until the backend
+  answered every earlier request for it. The transaction requests are
+  served (`ThinTransactions`) by a client of the session's own, in memory,
+  started on its first transaction request and ended with the connection,
+  linked to the core with the admission the backend gave the connection
+  (the same vouched session, a device account's own token, or, for a
+  trusted backend client, the backend's link) and acting with its identity.
+  So the core reads and checks for it exactly as for the session, and only
+  accepts the finished transaction, as an upload (§8.2):
+  - A mergeable transaction's read fetches from the core first, then reads
+    in the transaction, so it sees the core's current rows with the
+    transaction's staged writes; a serializable one's read hydrates at the
+    transaction's snapshot, as on any replica.
+  - A write to an existing row loads the row from the core first. A staged
+    write the backend refuses outright (invalid values, a row that does not
+    exist) is answered with its refusal, and the transaction's commit fails
+    with it.
+  - The core checks the transaction as a whole when it is committed, in the
+    state it leaves behind (SPEC 7): the order of its writes does not
+    matter.
+  - `Commit` answers once the core accepted the upload, or with the core's
+    refusal; a serializable refusal is answered `transaction_conflict`. A
+    commit the core does not confirm within 30 s is answered
+    `commit_outcome_unknown`: it may have applied. Any other request waiting
+    on the core that long is answered `not_observed`.
+  - A connection whose requests wait 60 s past the last answer for one that
+    does not come is closed (1011), and the client reconnects.
+  - A backend serves at most so many sessions' transactions at once (256 by
+    default); past that, a session's transaction requests are refused with
+    `backpressure`.
+  - The session's client opens on the schema version the connection bound
+    (`ThinOp::Schema`), which the core serves pinned to it, as for an older
+    replica (§8.9): a client built against an earlier version of the app
+    is served as before.
+
+  This holds for a thin connection through the app's backend. The core
+  still serves thin transactions itself for one that reaches it otherwise
+  (or through a backend from before this), staging each write in order,
+  until such connections are gone.
+
 - `CaptureSnapshot` answers `Snapshot` with the persisted snapshot reference
   of the authority's current frontier, for frozen branch bases.
 - `BeginStream` starts a large-value insert, update or upsert of one

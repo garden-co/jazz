@@ -76,23 +76,19 @@ export function toWriteOps(table: string, changes: InspectorChanges): InspectWri
   const encode = (values: Record<string, unknown>) =>
     Object.fromEntries(Object.entries(values).map(([key, value]) => [key, toJsonValue(value)]));
   return [
-    ...changes.updates.map(
-      ({ rowId, updates }): InspectWriteOp => ({
-        kind: "update",
-        table,
-        id: rowId,
-        values: encode(updates),
-      }),
-    ),
+    ...changes.updates.map(({ rowId, updates }): InspectWriteOp => ({
+      kind: "update",
+      table,
+      id: rowId,
+      values: encode(updates),
+    })),
     ...changes.deletes.map((id): InspectWriteOp => ({ kind: "delete", table, id })),
-    ...changes.inserts.map(
-      ({ id, values }): InspectWriteOp => ({
-        kind: "insert",
-        table,
-        id,
-        values: encode(values),
-      }),
-    ),
+    ...changes.inserts.map(({ id, values }): InspectWriteOp => ({
+      kind: "insert",
+      table,
+      id,
+      values: encode(values),
+    })),
   ];
 }
 

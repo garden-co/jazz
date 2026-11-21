@@ -19,6 +19,7 @@ mod app_file;
 pub mod expr;
 pub mod json;
 mod permissions_file;
+pub mod relations;
 
 use std::collections::BTreeMap;
 
@@ -27,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalogue::{BundleId, Permissions, bundle_id, permissions_of};
 use crate::schema::JazzSchema;
 use crate::tools::public_schema::{
-    ColumnType, Schema, SchemaHash, TableName, TablePolicies, TableSchema,
+    ColumnType, OperationPolicy, Schema, SchemaHash, TableName, TablePolicies, TableSchema,
 };
 
 use super::published::{
@@ -513,6 +514,7 @@ pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, Artif
 /// code generators and `jazz validate` read.
 #[derive(Debug, Clone)]
 pub struct AppDefinition {
+    relations: relations::Relations,
     history: History,
     codegen: Codegen,
     warnings: Vec<String>,
@@ -540,6 +542,11 @@ impl AppDefinition {
 
     pub fn codegen(&self) -> &Codegen {
         &self.codegen
+    }
+
+    /// Every table's relations, resolved ([`relations::resolve_relations`]).
+    pub fn relations(&self) -> &relations::Relations {
+        &self.relations
     }
 
     /// What loaded but is ignored, as `jazz.app.json: <path>: <why>` lines.
@@ -576,12 +583,13 @@ pub fn load_app(json: &[u8]) -> Result<AppDefinition, ArtifactError> {
     let history = check_history(&app_file)?;
     check_decoded_client_migrations(history.bundle(), history.current)
         .map_err(|error| ArtifactError::new(format!("migrations: {error}")))?;
-    check_codegen(&app_file.codegen, history.current_schema())?;
+    let relations = check_codegen(&app_file.codegen, history.current_schema())?;
     // Lowering for a client must succeed too.
     lower_client_migrations(history.bundle())
         .map_err(|error| ArtifactError::new(format!("{error}; {REGENERATE}")))?;
     let stranded = history.stranded.clone();
     Ok(AppDefinition {
+        relations,
         history,
         codegen: app_file.codegen,
         warnings: app_file
@@ -766,6 +774,19 @@ pub fn schema_hash(schema_json: &[u8]) -> Result<SchemaHash, ArtifactError> {
     Ok(SchemaHash::compute(&structural(schema)))
 }
 
+/// [`super::schemas_are_compatible`] of two schemas in the engine's JSON
+/// form, as [`schema_hash`] reads them.
+pub fn schemas_are_compatible(left_json: &[u8], right_json: &[u8]) -> Result<bool, ArtifactError> {
+    let read = |json: &[u8]| {
+        serde_json::from_slice::<Schema>(json)
+            .map_err(|error| ArtifactError::new(format!("not an engine schema: {error}")))
+    };
+    Ok(super::schemas_are_compatible(
+        &read(left_json)?,
+        &read(right_json)?,
+    ))
+}
+
 /// Read a `jazz.app.json` for a client: the schema versions and lenses it
 /// opens along. Its references are checked as [`load`] checks them and
 /// every lens is lowered; the deployment's review of each lens is the
@@ -790,6 +811,15 @@ pub fn load_client_current(json: &[u8]) -> Result<(Schema, crate::db::Migrations
         history.current_schema().clone(),
         crate::db::Migrations { schemas, lenses },
     ))
+}
+
+/// The relations `jazz.app.json` declares, resolved against its current
+/// schema ([`relations::resolve_relations`]), and nothing else checked: what
+/// a client that follows relations itself (the FFI) needs at open.
+pub fn load_relations(json: &[u8]) -> Result<relations::Relations, ArtifactError> {
+    let app_file = read_app(json)?;
+    relations::resolve_relations(&app_file.codegen, &app_file.current)
+        .map_err(|(path, message)| ArtifactError::at(APP_FILE, (path, message)))
 }
 
 fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
@@ -1296,7 +1326,16 @@ fn compute_bundle(
     }
     let refuse = |error: String| ArtifactError::in_file(PERMISSIONS_FILE, error);
     let compiled = JazzSchema::new(&target).map_err(|error| {
-        let mut message = format!("permissions: {error}");
+        // A refused policy is named as this file names it, by its table
+        // and operation: the engine's path names its own slots.
+        let rule = error.rule().and_then(|(table, slot)| {
+            let policies = permissions.get(&TableName::from(table))?;
+            Some(format!("tables.{table}.{}", rule_path(policies, slot)?))
+        });
+        let mut message = match rule {
+            Some(rule) => format!("{rule}: {}", error.message()),
+            None => format!("permissions: {error}"),
+        };
         // The engine checks a relation's `outer.` columns, which the loader
         // can't place; say so when the one it misses is a computed field.
         if let Some((_, field)) = error
@@ -1317,7 +1356,49 @@ fn compute_bundle(
     .map_err(|error| refuse(format!("permissions: {error}")))
 }
 
-fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactError> {
+/// Where the permissions file holds the engine's policy `slot`
+/// (`select.using`, `update.with_check`, …) of a table with `policies`:
+/// `read`, `update.new`, `read.withCheck`, as [`permissions_file::read`]
+/// reads them.
+fn rule_path(policies: &TablePolicies, slot: &str) -> Option<String> {
+    let (operation, side) = slot.split_once('.')?;
+    let two_sided = |policy: &OperationPolicy, usual_using: bool| {
+        if usual_using {
+            policy.with_check.is_some()
+        } else {
+            policy.using.is_some()
+        }
+    };
+    let side_key = if side == "using" {
+        "using"
+    } else {
+        "withCheck"
+    };
+    Some(match operation {
+        "select" | "delete" | "insert" => {
+            let (name, policy, usual_using) = match operation {
+                "select" => ("read", &policies.select, true),
+                "delete" => ("delete", &policies.delete, true),
+                _ => ("insert", &policies.insert, false),
+            };
+            if two_sided(policy, usual_using) {
+                format!("{name}.{side_key}")
+            } else {
+                name.to_string()
+            }
+        }
+        "update" if policies.update.using == policies.update.with_check => "update".to_string(),
+        "update" => format!("update.{}", if side == "using" { "old" } else { "new" }),
+        _ => return None,
+    })
+}
+
+fn check_codegen(
+    codegen: &Codegen,
+    current: &Schema,
+) -> Result<relations::Relations, ArtifactError> {
+    let resolved = relations::resolve_relations(codegen, current)
+        .map_err(|(path, message)| ArtifactError::new(format!("{path}: {message}")))?;
     let table = |path: &str, name: &str| {
         current.get(&TableName::from(name)).ok_or_else(|| {
             ArtifactError::new(format!(
@@ -1326,65 +1407,10 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
             ))
         })
     };
-    let column_of = |schema: &TableSchema, column: &str| {
-        schema
-            .columns
-            .columns
-            .iter()
-            .find(|c| c.name_str() == column)
-            .cloned()
-    };
+    let column_of = |schema: &TableSchema, column: &str| relations::column(schema, column).cloned();
     let has_column = |schema: &TableSchema, column: &str| column_of(schema, column).is_some();
     for (name, entry) in &codegen.tables {
         let schema = table(&format!("tables.{name}"), name)?;
-        for (relation, target) in &entry.relations {
-            let path = format!("tables.{name}.relations.{relation}");
-            match target {
-                CodegenRelation::Forward {
-                    table: other,
-                    column,
-                } => {
-                    table(&path, other)?;
-                    let Some(stored) = column_of(schema, column) else {
-                        return Err(ArtifactError::new(format!(
-                            "{path}: table {name} has no column {column}"
-                        )));
-                    };
-                    if let Some(target) = stored.references.filter(|t| t.as_str() != other) {
-                        return Err(ArtifactError::new(format!(
-                            "{path}: column {column} references {target}, so a relation over it \
-                             leads to {target}, not {other}"
-                        )));
-                    }
-                }
-                CodegenRelation::Reverse {
-                    table: other,
-                    relation: forward,
-                } => {
-                    table(&path, other)?;
-                    let points_back = codegen
-                        .tables
-                        .get(other)
-                        .and_then(|other| other.relations.get(forward))
-                        .is_some_and(|forward| {
-                            matches!(forward, CodegenRelation::Forward { table, .. } if table == name)
-                        });
-                    if !points_back {
-                        return Err(ArtifactError::new(format!(
-                            "{path}: {other} has no forward relation {forward} to {name}"
-                        )));
-                    }
-                }
-            }
-        }
-        for relation in entry.relations.keys() {
-            if relation == "id" || has_column(schema, relation) {
-                return Err(ArtifactError::new(format!(
-                    "tables.{name}.relations.{relation}: table {name} already has a column \
-                     {relation}; a relation needs its own name, e.g. `{relation}Row`"
-                )));
-            }
-        }
         let columns = || schema.columns.columns.iter().map(|c| c.name_str());
         for (index, field) in entry.computed.iter().enumerate() {
             let path = format!("tables.{name}.computed.{}", field.name);
@@ -1447,7 +1473,7 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
             }
         }
     }
-    Ok(())
+    Ok(resolved)
 }
 
 /// A schema in the readable form of a `history` version's `tables` (no
@@ -1455,6 +1481,14 @@ fn check_codegen(codegen: &Codegen, current: &Schema) -> Result<(), ArtifactErro
 pub fn version_tables(schema: &Schema) -> Result<Json, ArtifactError> {
     app_file::write_version_tables(schema)
         .map_err(|error| ArtifactError::unsupported(APP_FILE, error))
+}
+
+/// [`version_tables`] of a schema in the engine's JSON form, as
+/// [`schema_hash`] reads it, printed.
+pub fn version_tables_json(schema_json: &[u8]) -> Result<String, ArtifactError> {
+    let schema: Schema = serde_json::from_slice(schema_json)
+        .map_err(|error| ArtifactError::new(format!("not an engine schema: {error}")))?;
+    Ok(json::print(&version_tables(&schema)?))
 }
 
 /// A column type in the file's form (`"string"`, `{ "enum": […] }`).

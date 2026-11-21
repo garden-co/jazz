@@ -83,12 +83,12 @@ earlier versions throw "empty mergeable transaction has no committed unit").
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-transaction-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#writing-transaction-swift
     </include>
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-transaction-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#writing-transaction-kotlin
     </include>
 
   </Tab>
@@ -154,7 +154,7 @@ A transaction can fail at three points:
 3. The authority can reject a committed transaction later. In TypeScript, `wait(...)` then rejects
    with `PersistedWriteRejectedError` and Jazz removes the rejected local changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-errors-ts
@@ -165,9 +165,27 @@ A transaction can fail at three points:
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-errors-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-transaction-errors-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#writing-transaction-errors-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-transaction-errors-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#writing-transaction-errors-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#writing-transaction-errors-go
     </include>
 
   </Tab>
@@ -192,14 +210,14 @@ Each write is checked against the state the transaction leaves behind:
   can use a row as evidence and delete it, such as admitting a member and removing their join
   request.
 - Writes from other transactions don't count until the server has accepted them.
-- For a local-first client or a backend, the order of the writes inside the transaction doesn't
-  matter.
+- The order of the writes inside the transaction doesn't matter, for a local-first client, a thin
+  client connected through your backend, or a backend.
 
 For example:
 
 - **A task inserted with the show it needs.** If a task's insert policy requires its show to
-  exist, a local-first client or a backend can create the show and the task in one transaction, in
-  either order. Checked alone, the task insert would be refused, because the show doesn't exist yet;
+  exist, a client or a backend can create the show and the task in one transaction, in either
+  order. Checked alone, the task insert would be refused, because the show doesn't exist yet;
   checked with the rest of the transaction, it's allowed. The show insert itself still has to be
   allowed by its own policy: rows a transaction writes can't grant each other access in a cycle.
 - **Demoting yourself while making an admin-only write.** If documents may only be created by an
@@ -207,10 +225,21 @@ For example:
   member is rejected, even if the document insert comes first. In the state the transaction leaves
   behind, you're no longer an admin.
 
-A thin client (`jazz-tools/thin`) stages each write of a transaction at the server as you make it,
-and the server checks each one when it's staged, against the rows the transaction staged before
-it. There, order matters: stage the show before the task that needs it, or the task is refused and
-the whole transaction fails when you commit it.
+A thin client (`jazz-tools/thin`) that connects through your app's backend (`createJazz`) runs its
+transactions there: the backend stages the writes as you make them and sends the finished
+transaction to the server when you commit, so the server checks it as a whole, as above. (A thin
+client connected straight to the server has each write checked as it's staged, in order.)
+Two things differ from a local-first client:
+
+- A staged write the backend refuses outright, such as one with invalid values or an update of a
+  row that doesn't exist, fails at once, and so does the whole transaction: committing it anyway
+  fails with that refusal, and nothing of it is written.
+- If the server doesn't confirm a commit within 30 seconds, the commit fails with
+  `ThinCommitOutcomeUnknownError` (code `commit_outcome_unknown`). The transaction may have been
+  applied, or may still be: don't run it again as if it failed. Read the rows it wrote to find out.
+
+A thin client's open transactions end with its connection, as before: a commit after a reconnect
+fails with `ThinTransactionLostError`, and nothing of the transaction is written.
 
 To check whether an action is allowed before or between steps, for example to show or hide a
 button, use `db.canInsert()`, `db.canUpdate()`, `db.canDelete()` or `db.canRead()` (see
@@ -225,7 +254,7 @@ A serializable transaction reads from a stable transaction snapshot. The authori
 and writes, then accepts or rejects the transaction as one serialisable unit. This is useful when a
 write is valid only if the data you just read has not changed in a conflicting transaction.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-serializable-transaction-ts
@@ -239,6 +268,18 @@ write is valid only if the data you just read has not changed in a conflicting t
   <Tab value="Rust">
     <include cwd lang="rust">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-serializable-transaction-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#writing-serializable-transaction-swift
+    </include>
+
+  </Tab>
+  <Tab value="Kotlin">
+    <include cwd lang="kotlin">
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#writing-serializable-transaction-kotlin
     </include>
 
   </Tab>
@@ -274,9 +315,19 @@ retry it.
 Use `beginTransaction()` when the work cannot fit in one callback. You then own the transaction and
 must call `commit()` or `rollback()`.
 
-<include cwd lang="ts" meta='title="app.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-manual-transaction-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-manual-transaction-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-manual-transaction-rust
+    </include>
+
+  </Tab>
+</Tabs>
 
 For a serializable transaction, use `beginSerializableTransaction()` instead. Call `wait()` on the
 commit result to wait for the authority to accept or reject the transaction. You do not choose a

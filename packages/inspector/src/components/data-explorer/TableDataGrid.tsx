@@ -1101,14 +1101,12 @@ export function TableDataGrid() {
         header: "ID",
         enableSorting: true,
       },
-      ...schemaColumns.map(
-        (column): GridColumn => ({
-          id: column.name,
-          accessorKey: column.name,
-          header: column.name,
-          enableSorting: isColumnSortable(column.column_type),
-        }),
-      ),
+      ...schemaColumns.map((column): GridColumn => ({
+        id: column.name,
+        accessorKey: column.name,
+        header: column.name,
+        enableSorting: isColumnSortable(column.column_type),
+      })),
       ...PROVENANCE_GRID_COLUMNS,
     ],
     [schemaColumns],

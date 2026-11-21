@@ -90,13 +90,13 @@ Mutations are methods on the database handle. All three take a table as their fi
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-crud-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#writing-crud-swift
     </include>
 
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-crud-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#writing-crud-kotlin
     </include>
 
   </Tab>
@@ -114,7 +114,7 @@ Use `upsert(...)` when your app already knows the row ID and wants to create tha
 not exist, or update it if it does. Like `insert`, `update`, and `delete`, it returns a
 `MutationResult<void>` that can be awaited for durability.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-upsert-ts
@@ -125,9 +125,27 @@ not exist, or update it if it does. Like `insert`, `update`, and `delete`, it re
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-upsert-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-upsert-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#writing-upsert-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-upsert-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#writing-upsert-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#writing-upsert-go
     </include>
 
   </Tab>
@@ -149,7 +167,7 @@ if (existing?.$deletedAt) db.restore(app.todos, id, values);
 else db.update(app.todos, id, values);
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-restore-ts
@@ -160,9 +178,27 @@ else db.update(app.todos, id, values);
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-restore-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-restore-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#writing-restore-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-restore-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#writing-restore-kotlin
+    </include>
+
+  </Tab>
+  <Tab value="Go">
+    <include cwd lang="go">
+      ../examples/docs/todo-client-go/snippets_test.go#writing-restore-go
     </include>
 
   </Tab>
@@ -194,13 +230,13 @@ Required fields cannot be set to `null`.
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-nullable-update-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#writing-nullable-update-swift
     </include>
 
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-nullable-update-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#writing-nullable-update-kotlin
     </include>
 
   </Tab>
@@ -262,7 +298,10 @@ db.update(
 ```
 
 For byte-oriented text, use `{ fromUtf8, toUtf8 }` in `within` and
-`{ atUtf8, deleteUtf8, insert }` in each splice. Jazz rejects out-of-range
+`{ atUtf8, deleteUtf8, insert }` in each splice. In Rust, text pages and
+splices count UTF-8 bytes (`str` indices): `jazz.splice(id, column,
+Page::text(from..to), vec![Splice::text(at, delete, "revised")])`, and an
+offset inside a code point fails with `Error::TextOffset`. Jazz rejects out-of-range
 coordinates and text boundaries that split a code point or surrogate pair. This
 revision does not add a page-staleness/CAS check; keep page coordinates aligned
 with the value your application last read. `update(..., { applyDiffs })` is for
@@ -303,7 +342,12 @@ Store a file in a `bytes` column next to its metadata:
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  files: s.table({ name: s.string(), type: s.string(), size: s.int(), content: s.bytes() }),
+  files: s.table({
+    name: s.string(),
+    type: s.string(),
+    size: s.int(),
+    content: s.bytes(),
+  }),
 });
 ```
 
@@ -365,7 +409,7 @@ lasts. Both choices apply the initial mutation locally and upload it when connec
 
 A `global` wait fails early only when the client stops trying to reach Core: a
 protocol error, a closed client, or a credential the server refuses that nothing
-renews. Only an account context's refresh cycle and a local-first token the Db
+renews. Only an account context's refresh cycle and a device account's token the Db
 mints itself count as renewing a credential, so their waits outlast an expired
 token. With a static token or a backend secret, a refused credential ends the
 wait. To bound how long you wait, pass `timeoutMs`. The wait then rejects with
@@ -400,12 +444,12 @@ try {
   </Tab>
   <Tab value="Swift">
     <include cwd lang="swift">
-      ../examples/stage-plan/apps/swift-cli/Sources/StagePlan/DocsSnippets.swift#writing-durability-tier-swift
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#writing-durability-tier-swift
     </include>
   </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-durability-tier-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#writing-durability-tier-kotlin
     </include>
 
   </Tab>
@@ -455,18 +499,61 @@ is reset automatically. To sync with the new server, reset the local store: in t
 `await db.deleteClientStorage()`; in Node, delete the client's data directory and open
 it again. Writes that never reached the old server are lost with the store.
 
-In the browser, tabs that sync through a shared worker may not yet see this: a tab's `global` waits
-can keep waiting after the worker's link was refused. Treat `authority-changed` in a multi-tab app as
-best effort for now.
+In the browser, every tab that syncs through the shared worker sees this too, including a tab opened
+or reloaded after the refusal: its `global` waits fail the same way and its sync status shows
+`offline` with the reason `authority-changed`, while local reads and writes keep working.
 
 In the browser, `offline` can also have the reason `held-by-another-tab`, with `retrying: true`.
-When a guest signs up in one tab, another tab may still hold the account's local store as the
-guest. The signed-up tab shows `connecting` and joins once that tab follows or closes. If that
+One local store serves one sign-in and one schema at a time, so a tab waits for it when:
+
+- a guest signs up in one tab while another tab still holds the account's local store as the
+  guest. The signed-up tab waits for that tab to follow the sign-up or close.
+- a deploy changed the app's schema, and a tab of another build has the store open, but Jazz can't
+  tell which build is newer (see below). The tab waits for that one to reload or close.
+
+Meanwhile the waiting tab shows `connecting`, and it joins once the other tab lets go. If that
 hasn't happened after 30 seconds (the other tab may be frozen in the background), the link reports
 `held-by-another-tab`, and waits fail with a `StoreHeldByAnotherTabError` (check with
 `isStoreHeldByAnotherTabError`), so the app can ask the user to close or reload the other tab. The
 tab keeps trying and joins as soon as it can. Writes made meanwhile stay in that tab's memory until
 then, so a reload before it joins loses them.
+
+### A new deploy and tabs of the previous build
+
+After a deploy that changes the schema, the newer build takes the local store, and tabs of the
+previous build reload. Each build knows its schema history (the versions and migrations in
+`jazz.generated.ts`), so Jazz can tell which build came later: the one whose history contains the
+other's.
+
+- When a tab of the newer build opens, each tab of the older build stops taking writes (new writes,
+  queries and transaction commits throw until it reloads). It makes the writes it already took
+  durable in the local store and lets go of the store. Then it reloads, which loads the newer build.
+  A tab that doesn't let go within 5 seconds (frozen in the background, say) is closed, as a crashed
+  tab would be: the writes it had already handed to the shared worker are kept, and whatever it
+  hadn't sent yet is lost. The newer tab then opens the store with its schema and reads the older
+  rows through its migrations. Writes the older build made but hadn't uploaded yet stay in the store
+  and upload as they are, so keep the previous schema version published until they have.
+- A tab of the older build that opens while the newer one has the store (a stale tab, a page restored
+  from history) reloads too. If it loads the very same build again (a CDN that hasn't caught up, or
+  a rollback to the previous build, which Jazz orders as older), it doesn't reload again in that tab's
+  session: it waits as described above, and joins once the newer build's tabs have gone.
+- Builds Jazz can't order, because neither history contains the other (unrelated builds on one
+  origin) or one ships none, don't take the store from each other: the newer tab waits.
+
+To decide when the old tab reloads (after a "a new version is available" notice, or once a form is
+saved), pass `onNewerBuild` to `createJazzClient`. It gets the reload to call:
+
+```ts
+const session = await createJazzClient({
+  // ...
+  onNewerBuild: (reload) => {
+    showNotice("A new version of this app is available.", { action: "Reload", onAction: reload });
+  },
+});
+```
+
+Until it calls `reload()`, the tab keeps showing what it already shows; new writes, queries and
+commits throw.
 
 A brief drop shows as `connecting`, not `offline`, so a status badge doesn't flicker. `synced` is
 `true` when nothing waits for upload and the link is `connected` (or `local-only`).
@@ -500,6 +587,22 @@ write recovered after a reload or made in another tab may still be waiting when 
 await db.waitForSync({ timeoutMs: 10_000 });
 ```
 
+### Which rows are still waiting
+
+To mark individual rows as not yet saved, such as a message that has not reached the server, ask
+for the rows a table's pending transactions wrote:
+
+```ts
+const pending = db.getPendingUploadRows(app.messages); // ["0193…", …] or null
+const unsubscribe = db.onPendingUploadRowsChange(app.messages, (ids) => renderMarks(ids));
+```
+
+A row is listed from the moment a transaction that wrote it is committed until the server accepts
+or rejects that transaction, including transactions recovered from local storage after a restart
+(with the same browser caveat as `pendingUploads`). The IDs are sorted, and the listener fires only
+when the set changes. The result is `null` while the Db cannot name rows yet, for example while it
+still runs on a thin startup runtime; treat `null` as "unknown", not as "nothing pending".
+
 ## Handling mutation errors
 
 A mutation can fail when you call it or while you wait:
@@ -510,7 +613,7 @@ A mutation can fail when you call it or while you wait:
   `PersistedWriteRejectedError` on the local-first client, and with a `ThinRemoteError` (code
   `WriteRejected`) on the thin client.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Kotlin", "Go"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust", "Swift", "Kotlin", "Go"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
@@ -521,9 +624,21 @@ A mutation can fail when you call it or while you wait:
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-mutation-errors-effect
     </include>
   </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rust">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-mutation-errors-rust
+    </include>
+
+  </Tab>
+  <Tab value="Swift">
+    <include cwd lang="swift">
+      ../examples/docs/todo-client-swift/Sources/TodoDocs/DocsSnippets.swift#writing-mutation-errors-swift
+    </include>
+
+  </Tab>
   <Tab value="Kotlin">
     <include cwd lang="kotlin">
-      ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-mutation-errors-kotlin
+      ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#writing-mutation-errors-kotlin
     </include>
 
   </Tab>

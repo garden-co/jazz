@@ -449,7 +449,9 @@ fn a_subscription_filtered_by_its_author_sees_new_rows() {
 #[test]
 fn a_transaction_for_an_identity_attributes_its_writes_and_fixes_their_identity() {
     let db = db();
-    block_on(db.transaction_for_identity(user(1), async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx_for_identity(user(1)).await?;
+
         tx.insert(
             "notes",
             body("a"),
@@ -458,8 +460,9 @@ fn a_transaction_for_an_identity_attributes_its_writes_and_fixes_their_identity(
                 ..Default::default()
             },
         )
-        .await
-    }))
+        .await?;
+        tx.commit().await
+    })
     .unwrap();
     let staged = block_on(db.mergeable_tx_for_identity(user(2))).unwrap();
     block_on(staged.insert(
@@ -484,9 +487,11 @@ fn a_transaction_for_an_identity_attributes_its_writes_and_fixes_their_identity(
     assert_eq!(subject_of(1), user(1).principal_parts().1);
     assert_eq!(subject_of(2), user(2).principal_parts().1);
 
-    let error = block_on(db.transaction_for_identity(user(1), async |tx| {
-        tx.insert("notes", body("c"), as_user(2, row(3))).await
-    }))
+    let error = block_on(async {
+        let tx = db.mergeable_tx_for_identity(user(1)).await?;
+        tx.insert("notes", body("c"), as_user(2, row(3))).await?;
+        tx.commit().await
+    })
     .unwrap_err();
     assert!(
         error

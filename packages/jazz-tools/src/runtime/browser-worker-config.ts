@@ -18,7 +18,7 @@ import {
 
 import { normalizeOtlpEndpoint } from "./sync-telemetry.js";
 
-const SHARED_RUNTIME_PROTOCOL_VERSION = "jazz-shared-runtime-v2";
+const SHARED_RUNTIME_PROTOCOL_VERSION = "jazz-shared-runtime-v3";
 // Coupled to IndexedDbPageStore's durable epoch. Keeping it in the database
 // scope prevents an old worker from opening incompatible root metadata.
 const BROWSER_STORAGE_FORMAT_VERSION = "idbtree-v1";
@@ -258,11 +258,21 @@ function browserAuthScope(config: DbConfig): BrowserAuthScope {
 
   return {
     kind: "principal",
-    authMode: session.authMode,
+    authMode: storageAuthMode(session.authMode),
     // Reuse the public/session and row-authorship identity codec. JSON array
     // encoding preserves exact issuer + subject boundaries and spelling.
     user: canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
   };
+}
+
+/**
+ * The auth mode as browser storage names it. Device accounts were called
+ * local-first before 2026-11, and that spelling is part of every existing
+ * IndexedDB name and owner marker: changing it would open an empty store
+ * beside the device's data. Keep it until a storage migration moves them.
+ */
+function storageAuthMode(authMode: "external" | "device-account"): "external" | "local-first" {
+  return authMode === "device-account" ? "local-first" : authMode;
 }
 
 function browserStorageScope(
@@ -365,5 +375,5 @@ function resolveAuthClass(config: DbConfig): string {
     trustedReservedSession: getTrustedReservedSession(config),
   });
   if (!session?.user_id || session.authMode === "anonymous") return "anonymous";
-  return `${session.authMode}:${canonicalAuthorSubject(session.issuer, session.user_id, session.account_id)}`;
+  return `${storageAuthMode(session.authMode)}:${canonicalAuthorSubject(session.issuer, session.user_id, session.account_id)}`;
 }

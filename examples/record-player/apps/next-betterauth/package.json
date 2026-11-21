@@ -13,7 +13,7 @@
     "test:browser": "pnpm test:topology",
     "test:provider": "vitest run --config vitest.config.provider.ts",
     "test:selection": "node --test tests/test-selection.test.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "test:e2e": "playwright test"
   },
   "dependencies": {

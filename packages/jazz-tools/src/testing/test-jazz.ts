@@ -1,3 +1,4 @@
+import { installNodeEngine } from "../backend/node-native.js";
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
@@ -18,6 +19,9 @@ import {
   type StartLocalJazzServerOptions,
 } from "../dev/dev-server.js";
 import type { DeployResult } from "../dev/catalogue.js";
+
+// Node's engine, by direct reference (see node-native.ts).
+installNodeEngine();
 
 /** What a client needs to sync as a signed-in user, spread into its config. */
 export interface TestUserConfig {

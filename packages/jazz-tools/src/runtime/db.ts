@@ -7,7 +7,7 @@ import { Utf8Decoder } from "./utf8.js";
 import { parseSnapshotRef, type SnapshotRef } from "./snapshot-ref.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { AccountHandle } from "../accounts/state.js";
-import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
+import { DbClosedError, GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
 import { assertAccountConfig, copyAccountConfigAdmission } from "../accounts/config-capability.js";
 /**
@@ -57,7 +57,8 @@ import {
   validateWriteWaitTimeout,
   WriteWaitTimeoutError,
 } from "./client.js";
-import { sameSyncStatus, type SyncStatus } from "./sync-status.js";
+import { assertBacklogRows } from "./backlog-rows.js";
+import { samePendingUploadRows, sameSyncStatus, type SyncStatus } from "./sync-status.js";
 import type { TextAnchors } from "./text-anchors.js";
 import {
   type BrowserForegroundNodeLease,
@@ -80,6 +81,7 @@ import {
   type ColumnTransformMap,
   type ColumnTransformRegistry,
 } from "./column-transforms.js";
+
 export type {
   ColumnTransform,
   ColumnTransformMap,
@@ -94,7 +96,9 @@ import {
 } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
+import { accountAppId } from "../accounts/local-first.js";
 import {
+  LOCAL_FIRST_JWT_ISSUER,
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
@@ -132,6 +136,9 @@ import { toError } from "./util.js";
 import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
+
+/** `getDeviceAccountProof` hands out a session's sync proof only with this long left. */
+const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -189,6 +196,14 @@ export type DbConfig = {
    * log off).
    */
   slowQueryThresholdMs?: number;
+  /**
+   * How many changed rows a subscription's undelivered deltas may hold before
+   * they are coalesced into one update of its current result, marked
+   * `reason: "backlog"` (default 10000). It bounds the memory a subscriber
+   * that falls behind a fast writer holds, and cannot be turned off. A query
+   * can set its own with `backlogRows`.
+   */
+  subscriptionBacklogRows?: number;
 } & (
   | {
       /** Local-first auth via a local seed. */
@@ -271,6 +286,13 @@ export type QueryOptions = ReadTierOptions & {
    * (see {@link DbSubscriptionUpdate}). One-shot reads ignore it.
    */
   splices?: readonly string[];
+  /**
+   * How many changed rows a subscription's undelivered deltas may hold before
+   * they are replaced by one update of the current result (marked
+   * `reason: "backlog"`). Overrides {@link DbConfig.subscriptionBacklogRows}
+   * (default 10000). A whole number, at least 1. One-shot reads ignore it.
+   */
+  backlogRows?: number;
 };
 
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
@@ -305,6 +327,13 @@ export interface DbSubscriptionUpdate {
    * say): read its new value from the rows instead.
    */
   splices: ReadonlyMap<string, ValueSplices>;
+  /**
+   * `"backlog"` when this update replaced the result wholesale because the
+   * subscriber fell too far behind to be told every change (more than
+   * `backlogRows` changed rows waited undelivered): the rows are current,
+   * the intermediate states were skipped, and `splices` is empty.
+   */
+  reason?: "backlog";
 }
 
 /** Package-internal callbacks for incremental subscription consumers. */
@@ -341,6 +370,11 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
       throw new Error("splices must be an array of column names.");
     }
     if (splices.length > 0) lowered.splices = [...splices];
+  }
+  const backlogRows = (candidate as { backlogRows?: unknown }).backlogRows;
+  if (backlogRows !== undefined) {
+    assertBacklogRows(backlogRows, "backlogRows");
+    lowered.backlogRows = backlogRows;
   }
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
   return lowered;
@@ -393,11 +427,13 @@ const FORWARDED_TO_SUCCESSOR = [
   "updateAuthToken",
   "updateCookieSession",
   "getAuthState",
+  "getDeviceAccountProof",
   "getLocalFirstIdentityProof",
   "onAuthChanged",
   "onMutationError",
   "textAnchors",
   "getSyncStatus",
+  "getPendingUploadRows",
   "waitForSync",
   "getConfig",
   "setDevMode",
@@ -2245,18 +2281,6 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * Read data is scoped to this transaction.
    */
   all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    // The core's transaction read path does not apply a branch view yet: it
-    // would return rows outside the requested branch (jazz#5806). Refuse
-    // rather than silently answer from the wrong view. Branch writes inside a
-    // transaction are unaffected.
-    const candidate = options as { branch?: unknown; base?: unknown } | undefined;
-    if (candidate?.branch !== undefined || candidate?.base !== undefined) {
-      return Promise.reject(
-        new Error(
-          "Reading through a branch (`branch`/`base`) inside a transaction is not supported yet (jazz#5806). Read outside the transaction with db.all/db.one instead.",
-        ),
-      );
-    }
     const reading = this.readAll(query, options);
     this.pendingReads.add(reading);
     const settled = () => this.pendingReads.delete(reading);
@@ -2352,6 +2376,23 @@ export interface ShutdownOptions {
   waitForSync?: boolean;
 }
 
+/**
+ * Where a {@link Db} is in its life. It only moves forward:
+ *
+ * - `open`: it reads and writes. A graceful shutdown (`waitForSync`) drains
+ *   here first: while it waits for pending writes to upload, the Db takes no
+ *   new work, but its connection stays up and keeps recovering, since the
+ *   upload needs it. A drain that fails or is cancelled rejects with a
+ *   {@link GracefulShutdownSyncError} and leaves the Db open: the shutdown
+ *   never started, so nothing moved back, and the app may retry it (an
+ *   offline sign-out does).
+ * - `closing`: teardown started. Final: nothing reopens the Db, and its
+ *   connection manager stops recovering its connection.
+ * - `closed`: teardown ended. If it failed, the shutdown promise says so;
+ *   the Db stays closed either way.
+ */
+export type DbPhase = "open" | "closing" | "closed";
+
 export class Db {
   private config: DbConfig;
   private readonly runtimeSource: AnyRuntimeSource;
@@ -2361,7 +2402,17 @@ export class Db {
   private localFirstRefreshOwned = false;
   private readonly localFirstRenewals = new AuthRenewalBackoff();
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  private shutdownPromise: Promise<void> | null = null;
+  /** See {@link DbPhase}. Only {@link beginTeardown} and its end move it. */
+  private phase: DbPhase = "open";
+  /** A graceful shutdown waiting for pending writes, while still `open`. */
+  private gracefulDrain: {
+    done: Promise<void>;
+    cancel(): void;
+    /** A plain shutdown arrived meanwhile: a failed drain still tears down. */
+    teardownAnyway: boolean;
+  } | null = null;
+  /** Teardown's outcome, from the moment the Db enters `closing`. */
+  private teardown: Promise<void> | null = null;
   /** Set once the session that owned this Db moved on to another one. */
   private replaced: DbReplacedError | null = null;
   /** Ends each live subscription with a terminal error. */
@@ -2372,6 +2423,7 @@ export class Db {
   private readonly movable = new Set<{ move(next: Db): void }>();
   private readonly shutdownAbort = new AbortController();
   private syncStatusSnapshot: SyncStatus | null = null;
+  private pendingUploadRowsSnapshots = new Map<string, readonly string[] | null>();
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
     StoredActiveQuerySubscriptionTrace
@@ -2445,8 +2497,11 @@ export class Db {
       get runtimeSource() {
         return thisDb.runtimeSource;
       },
-      get isShuttingDown() {
-        return thisDb.shutdownPromise !== null;
+      get phase() {
+        return thisDb.phase;
+      },
+      get draining() {
+        return thisDb.gracefulDrain !== null;
       },
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
       renewsCredential: (reason) =>
@@ -2538,7 +2593,7 @@ export class Db {
   }
 
   private refreshLocalFirstToken(): void {
-    if (!this._localFirstSecret || this.shutdownPromise) return;
+    if (!this._localFirstSecret || this.stopping) return;
 
     try {
       const ttlSeconds = 3600;
@@ -2549,15 +2604,15 @@ export class Db {
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(newToken) ?? {},
-        "local-first",
+        "device-account",
       );
       if (!trustedReservedSession) {
-        throw new Error("Minted local-first token is missing its reserved session identity");
+        throw new Error("Minted device account token is missing its reserved session identity");
       }
       this.applyAuthUpdate(newToken, trustedReservedSession);
       this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
-      console.error("Failed to refresh local-first token:", e);
+      console.error("Failed to refresh device account token:", e);
     }
   }
 
@@ -2793,7 +2848,7 @@ export class Db {
         account.identity.issuer === "urn:jazz:local-first"
           ? internalSessionFromVerifiedReservedJwtPayload(
               parseJwtPayload(token) ?? {},
-              "local-first",
+              "device-account",
             )
           : undefined;
       if (!this.authStateStore.validateJwtToken(token, reserved ?? undefined)) return token;
@@ -2819,17 +2874,42 @@ export class Db {
   }
 
   /**
-   * Mint a short-lived local-first JWT proving possession of the current identity.
-   * Returns `null` if the current session is not local-first.
+   * A short-lived JWT proving possession of the current device account: what
+   * a device account sends its own backend's routes as
+   * `Authorization: Bearer` (`jazz.forReqUser(request)` there). Returns
+   * `null` if the current session is not a device account.
+   *
+   * A Db opened by a session (`createJazzClient`, a provider) doesn't hold the
+   * device key: it returns the session's current sync proof, which lasts up
+   * to an hour and is for this app, so `ttlSeconds` doesn't apply and any
+   * other `audience` returns `null`, as does one with under 30 seconds left
+   * (the session renews it). Ask for one per request, and don't log or
+   * forward it: until it expires it also opens this account's sync.
    */
-  getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
+  getDeviceAccountProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
     if (!this._localFirstSecret) {
-      return null;
+      const token = this.config.jwtToken;
+      const payload = token ? parseJwtPayload(token) : null;
+      if (
+        !token ||
+        payload?.iss !== LOCAL_FIRST_JWT_ISSUER ||
+        typeof payload.exp !== "number" ||
+        // One about to expire could lapse on its way to the backend.
+        payload.exp <= Date.now() / 1000 + SESSION_PROOF_MIN_REMAINING_SECONDS ||
+        (options?.audience !== undefined && payload.aud !== accountAppId(options.audience))
+      )
+        return null;
+      return token;
     }
 
     const ttl = options?.ttlSeconds ?? 60;
     const audience = options?.audience ?? clientScope(this.config);
     return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
+  }
+
+  /** @deprecated Renamed to {@link getDeviceAccountProof}; this alias goes in a later release. */
+  getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
+    return this.getDeviceAccountProof(options);
   }
 
   /** @internal This Db's own runtime's auth state changes, which never move to a successor. */
@@ -2911,7 +2991,7 @@ export class Db {
    * agents and tests read the same through `window.__jazz.status()`.
    */
   getSyncStatus(): SyncStatus {
-    const next = this.connection.syncStatus();
+    const next = withAuthReason(this.connection.syncStatus(), this.authStateStore.getState().error);
     if (this.syncStatusSnapshot && sameSyncStatus(next, this.syncStatusSnapshot)) {
       return this.syncStatusSnapshot;
     }
@@ -2954,11 +3034,101 @@ export class Db {
       { once: true },
     );
     let published = this.getSyncStatus();
-    this.connection.onSyncStatusChange(() => {
+    const publish = () => {
       const status = this.getSyncStatus();
       if (status === published) return;
       published = status;
       listener(status);
+    };
+    this.connection.onSyncStatusChange(publish, subscription.signal);
+    // Why the server refused the credential may be known after the link
+    // went offline: the status says it then (`authReason`).
+    const stopAuth = this.authStateStore.onChange(publish);
+    subscription.signal.addEventListener("abort", stopAuth, { once: true });
+    return end;
+  }
+
+  /**
+   * Ids of `table`'s rows with a write the server has neither accepted nor
+   * refused yet, sorted: the rows to show as "not sent yet". In Node and
+   * React Native this includes writes recovered from local storage after a
+   * restart; a browser tab names its own writes, as
+   * {@link SyncStatus.pendingUploads} counts them.
+   *
+   * `null` when this Db cannot tell (its client is not created yet, or its
+   * runtime does not report rows), which is not "none pending". The same
+   * array is returned until the rows change, so it can back
+   * `useSyncExternalStore` directly.
+   */
+  getPendingUploadRows<T, Init>(table: TableProxy<T, Init>): readonly string[] | null {
+    return this.pendingUploadRowsSnapshot(
+      table._table,
+      this.connection.pendingUploadRows(table._table),
+    );
+  }
+
+  private pendingUploadRowsSnapshot(
+    table: string,
+    next: readonly string[] | null,
+  ): readonly string[] | null {
+    const last = this.pendingUploadRowsSnapshots.get(table);
+    if (last !== undefined && samePendingUploadRows(last, next)) return last;
+    this.pendingUploadRowsSnapshots.set(table, next);
+    return next;
+  }
+
+  /**
+   * Call `listener` whenever {@link getPendingUploadRows} of `table` changes.
+   *
+   * @returns an unsubscribe callback
+   */
+  onPendingUploadRowsChange<T, Init>(
+    table: TableProxy<T, Init>,
+    listener: (ids: readonly string[] | null) => void,
+  ): () => void {
+    let last = this.getPendingUploadRows(table);
+    const deliver = (ids: readonly string[] | null) => {
+      if (samePendingUploadRows(ids, last)) return;
+      last = ids;
+      listener(ids);
+    };
+    return this.registerMovable((db) => {
+      const stop = db.pendingUploadRowsChangeRegistration(table, deliver);
+      // Moved at the upgrade: the rows now cover both runtimes.
+      if (db.successor) deliver(db.getPendingUploadRows(table));
+      return stop;
+    }, true);
+  }
+
+  /** How this Db reports pending row changes: its own, or combined with its successor's. */
+  private pendingUploadRowsChangeRegistration<T, Init>(
+    table: TableProxy<T, Init>,
+    listener: (ids: readonly string[] | null) => void,
+  ): () => void {
+    return this.onPendingUploadRowsChangeHere(table, listener);
+  }
+
+  private onPendingUploadRowsChangeHere<T, Init>(
+    table: TableProxy<T, Init>,
+    listener: (ids: readonly string[] | null) => void,
+  ): () => void {
+    const subscription = new AbortController();
+    const end = () => subscription.abort();
+    this.shutdownAbort.signal.addEventListener("abort", end, { once: true });
+    subscription.signal.addEventListener(
+      "abort",
+      () => this.shutdownAbort.signal.removeEventListener("abort", end),
+      { once: true },
+    );
+    let published = this.getPendingUploadRows(table);
+    // The raw upload-status signal, not `getSyncStatus`: a write that joins
+    // as another settles keeps the public status equal, and on React Native
+    // this subscription is what keeps the relay's store polled.
+    this.connection.onSyncStatusChange(() => {
+      const ids = this.getPendingUploadRows(table);
+      if (ids === published) return;
+      published = ids;
+      listener(ids);
     }, subscription.signal);
     return end;
   }
@@ -3034,7 +3204,7 @@ export class Db {
    * {@link reconnect} to resume sync using the same Db instance.
    */
   async disconnect(): Promise<void> {
-    if (this.shutdownPromise) {
+    if (this.stopping) {
       throw new Error("Cannot disconnect a Db that is shutting down.");
     }
 
@@ -3049,7 +3219,7 @@ export class Db {
   async reconnect(): Promise<void> {
     // Sync recovery is safe before teardown starts; it must remain available
     // while a graceful transition waits for previously committed writes.
-    if (this.shutdownPromise && !this.cancelSyncShutdown) {
+    if (this.phase !== "open") {
       throw new Error("Cannot reconnect a Db that is shutting down.");
     }
 
@@ -3665,7 +3835,7 @@ export class Db {
    * sign-out or sign-in failed keeps a usable Db rather than ending in error.
    */
   isUsable(): boolean {
-    return !this.shutdownPromise && !this.replaced && this.connection.isUsable();
+    return !this.stopping && !this.replaced && this.connection.isUsable();
   }
 
   /**
@@ -3782,7 +3952,10 @@ export class Db {
             splices.set(change.id, change.splices);
           }
         }
-        onUpdate(update.all, { splices });
+        onUpdate(update.all, {
+          splices,
+          ...(update.reset && update.reason ? { reason: update.reason } : {}),
+        });
       },
       ...(onError === undefined ? {} : { onError }),
     };
@@ -4024,7 +4197,7 @@ export class Db {
         // Native initial snapshots may arrive synchronously. Defer the next
         // generation to avoid recursive installation as new inputs are found.
         queueMicrotask(() => {
-          if (!this.shutdownPromise) startNativeSubscription(replacement);
+          if (!this.stopping) startNativeSubscription(replacement);
         });
       }
     };
@@ -4123,7 +4296,7 @@ export class Db {
     };
     const ready = initialReadiness
       ?.then(() => {
-        if (unsubscribed || terminalized || activeSubscription === null || this.shutdownPromise) {
+        if (unsubscribed || terminalized || activeSubscription === null || this.stopping) {
           return;
         }
         deliveryReady = true;
@@ -4133,7 +4306,7 @@ export class Db {
         }
       })
       .catch((error: unknown) => {
-        if (unsubscribed || terminalized || activeSubscription === null || this.shutdownPromise) {
+        if (unsubscribed || terminalized || activeSubscription === null || this.stopping) {
           return;
         }
         // Admission failed after native registration. Terminalize the same
@@ -4163,7 +4336,7 @@ export class Db {
       void this.ensureReady(requirement, readyAbort.signal)
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
-          if (unsubscribed || readyAbort.signal.aborted || this.shutdownPromise) return;
+          if (unsubscribed || readyAbort.signal.aborted || this.stopping) return;
           terminalizeSubscription(initialSubscription, error);
         });
     } else {
@@ -4244,8 +4417,42 @@ export class Db {
       if (combined && sameSyncStatus(status, combined)) return combined;
       return (combined = status);
     };
+    // While this Db's runtime still uploads, its rows count too; a runtime
+    // that cannot name them makes the whole answer unknown.
+    const combinedRows = new Map<string, readonly string[] | null>();
+    const pendingUploadRows = <T, Init>(table: TableProxy<T, Init>): readonly string[] | null => {
+      const ahead = next.getPendingUploadRows(table);
+      if (!draining) return ahead;
+      const own = Db.prototype.getPendingUploadRows.call(this, table) as readonly string[] | null;
+      const rows = ahead === null || own === null ? null : [...new Set([...ahead, ...own])].sort();
+      const last = combinedRows.get(table._table);
+      if (last !== undefined && samePendingUploadRows(last, rows)) return last;
+      combinedRows.set(table._table, rows);
+      return rows;
+    };
     const overrides: Record<string, (...args: never[]) => unknown> = {
       getSyncStatus: syncStatus,
+      getPendingUploadRows: pendingUploadRows,
+      pendingUploadRowsChangeRegistration: <T, Init>(
+        table: TableProxy<T, Init>,
+        listener: (ids: readonly string[] | null) => void,
+      ) => {
+        let published = pendingUploadRows(table);
+        const publish = () => {
+          const ids = pendingUploadRows(table);
+          if (ids === published) return;
+          published = ids;
+          listener(ids);
+        };
+        const stopAhead = next.onPendingUploadRowsChange(table, publish);
+        const stopOwn = draining ? this.onPendingUploadRowsChangeHere(table, publish) : () => {};
+        drainListeners.add(publish);
+        return () => {
+          stopAhead();
+          stopOwn();
+          drainListeners.delete(publish);
+        };
+      },
       syncStatusChangeRegistration: (listener: (status: SyncStatus) => void) => {
         let published = syncStatus();
         const publish = () => {
@@ -4290,6 +4497,10 @@ export class Db {
     Object.defineProperty(this, "syncStatusChangeRegistration", {
       configurable: true,
       value: overrides.syncStatusChangeRegistration,
+    });
+    Object.defineProperty(this, "pendingUploadRowsChangeRegistration", {
+      configurable: true,
+      value: overrides.pendingUploadRowsChangeRegistration,
     });
     // An app that took the thin Db offline keeps the local-first one offline.
     // The last toggle the app asked for counts, even while it is in flight.
@@ -4386,68 +4597,121 @@ export class Db {
    * Shutdown the Db and release all resources.
    * Closes the Db's runtime client.
    *
+   * With `waitForSync`, pending writes upload first (see {@link DbPhase}): if
+   * that fails, this rejects with a `GracefulShutdownSyncError` and the Db
+   * stays open. Otherwise, or once they uploaded, the Db moves to `closing`
+   * and on to `closed`, for good.
+   *
+   * A plain shutdown (no `waitForSync`) always ends `closed`. One asked for
+   * while a drain runs waits for that drain, as before, but if the drain
+   * fails it tears down anyway: the drain's own caller still gets the
+   * `GracefulShutdownSyncError`, but the Db no longer stays open.
+   *
    * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
   shutdown(options: ShutdownOptions = {}): Promise<void> {
-    if (this.shutdownPromise) return this.shutdownPromise;
-    // Publish the promise before teardown can synchronously call back into Db.
-    let resolveShutdown!: (result: Promise<void>) => void;
-    const shutdown = new Promise<void>((resolve) => {
-      resolveShutdown = resolve;
+    if (this.teardown) return this.teardown;
+    if (this.gracefulDrain) {
+      if (options.waitForSync) return this.gracefulDrain.done;
+      this.gracefulDrain.teardownAnyway = true;
+      return this.gracefulDrain.done.catch(() => this.beginTeardown());
+    }
+    if (!options.waitForSync) return this.beginTeardown();
+    // Publish the drain before it starts: waiting can call back into the Db.
+    let resolveDrain!: (result: Promise<void>) => void;
+    const done = new Promise<void>((resolve) => {
+      resolveDrain = resolve;
     });
-    this.shutdownPromise = shutdown;
-    resolveShutdown(this.runShutdown(options));
-    return shutdown;
+    const syncAbort = new AbortController();
+    let rejectCancelled!: (error: Error) => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      rejectCancelled = reject;
+    });
+    const drain = {
+      done,
+      cancel: () => {
+        syncAbort.abort();
+        rejectCancelled(new Error("Graceful shutdown cancelled"));
+      },
+      teardownAnyway: false,
+    };
+    this.gracefulDrain = drain;
+    resolveDrain(
+      (async () => {
+        try {
+          await Promise.race([
+            this.runtimeSource.waitForPendingWrites?.(syncAbort.signal) ??
+              this.connection.waitForPendingWrites({
+                inFlightStreams: this.streamsMayFinish?.signal,
+              }),
+            cancelled,
+          ]);
+        } catch (error) {
+          syncAbort.abort();
+          if (this.gracefulDrain === drain) this.gracefulDrain = null;
+          // The Db never left `open`, and takes work again, unless a plain
+          // shutdown asked for it meanwhile: that one closes it now, with no
+          // moment in between where it reads as open.
+          if (drain.teardownAnyway) void this.beginTeardown().catch(() => {});
+          throw new GracefulShutdownSyncError(error);
+        }
+        // Teardown takes over from here: a caller that shares this promise
+        // waits for it, and the Db is no longer draining but closing.
+        const teardown = this.beginTeardown();
+        if (this.gracefulDrain === drain) this.gracefulDrain = null;
+        return teardown;
+      })(),
+    );
+    void cancelled.catch(() => {});
+    return done;
   }
-
-  private cancelSyncShutdown: (() => void) | undefined;
 
   /** @internal Credential invalidation must interrupt a graceful sync wait. */
   abortGracefulShutdown(): void {
-    this.cancelSyncShutdown?.();
+    this.gracefulDrain?.cancel();
+  }
+
+  /** Whether the Db takes no new work: it is draining for a shutdown, or past `open`. */
+  private get stopping(): boolean {
+    return this.phase !== "open" || this.gracefulDrain !== null;
   }
 
   protected assertOpen(): void {
     if (this.replaced) throw this.replaced;
-    if (this.shutdownPromise) {
-      throw new Error("Cannot operate on a Db that is shutting down or closed.");
-    }
+    if (this.phase !== "open") throw new DbClosedError(this.phase);
+    if (this.gracefulDrain) throw new DbClosedError("draining");
   }
 
   private readonly shutdownListeners = new Set<() => void>();
 
   /** @internal Dispose account refresh and invalidation observers with the context. */
   onShutdown(listener: () => void): () => void {
-    if (this.shutdownPromise) listener();
+    // A drain may fail and leave the Db open: a listener registered during
+    // one waits for the teardown, if it comes.
+    if (this.phase !== "open") listener();
     else this.shutdownListeners.add(listener);
     return () => this.shutdownListeners.delete(listener);
   }
 
-  private async runShutdown(options: ShutdownOptions): Promise<void> {
-    if (options.waitForSync) {
-      const syncAbort = new AbortController();
-      const cancelled = new Promise<never>((_resolve, reject) => {
-        this.cancelSyncShutdown = () => {
-          syncAbort.abort();
-          reject(new Error("Graceful shutdown cancelled"));
-        };
-      });
-      try {
-        await Promise.race([
-          this.runtimeSource.waitForPendingWrites?.(syncAbort.signal) ??
-            this.connection.waitForPendingWrites({
-              inFlightStreams: this.streamsMayFinish?.signal,
-            }),
-          cancelled,
-        ]);
-      } catch (error) {
-        syncAbort.abort();
-        this.shutdownPromise = null;
-        throw new GracefulShutdownSyncError(error);
-      } finally {
-        this.cancelSyncShutdown = undefined;
-      }
-    }
+  /** Move `open` → `closing`, and to `closed` once teardown ends, however it ends. */
+  private beginTeardown(): Promise<void> {
+    if (this.teardown) return this.teardown;
+    this.phase = "closing";
+    // Publish the promise before teardown can synchronously call back into Db.
+    let resolveTeardown!: (result: Promise<void>) => void;
+    const teardown = new Promise<void>((resolve) => {
+      resolveTeardown = resolve;
+    });
+    this.teardown = teardown;
+    resolveTeardown(
+      this.runTeardown().finally(() => {
+        this.phase = "closed";
+      }),
+    );
+    return teardown;
+  }
+
+  private async runTeardown(): Promise<void> {
     for (const listener of this.shutdownListeners) {
       try {
         listener();
@@ -4739,7 +5003,7 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(jwtToken) ?? {},
-        "local-first",
+        "device-account",
       );
       resolvedConfig = { ...configWithoutAuth, jwtToken };
       setTrustedReservedSession(resolvedConfig, trustedReservedSession);
@@ -4827,4 +5091,11 @@ function isRuntimeClosed(error: unknown): boolean {
   for (let current = error; current instanceof Error; current = current.cause)
     if (current instanceof RuntimeClosedError) return true;
   return false;
+}
+
+/** The status with why the server refused the credential, while the link is offline for it. */
+function withAuthReason(status: SyncStatus, reason: AuthFailureReason | undefined): SyncStatus {
+  const { link } = status;
+  if (link.state !== "offline" || link.reason !== "auth" || reason === undefined) return status;
+  return { ...status, link: { ...link, authReason: reason } };
 }

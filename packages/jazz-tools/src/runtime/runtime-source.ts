@@ -21,6 +21,8 @@ export interface RuntimeClientContext<RuntimeConfig extends DbConfig = DbConfig>
   /** The migrations the app defining `schema` ships (see {@link ClientMigrations}). */
   migrations?: ClientMigrations;
   onAuthFailure: (reason: AuthFailureReason) => void;
+  /** The server admitted the client's link (again): an earlier refusal no longer holds. */
+  onAuthRestored?: () => void;
   /**
    * Browser-only identity leased by the durable SharedWorker before the
    * synchronous foreground client is constructed.
@@ -60,11 +62,19 @@ export interface BrowserWorkerConnection {
   /** Only a rejected initial configuration admission permits a later API call to retry. */
   canRetryInitialConfigurationAdmission?(): boolean;
   /**
-   * The worker refused this connection because another tab holds the store
-   * under another sign-in to the same account: the tab tries again on its
-   * own (see `BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN`).
+   * The worker refused this connection because another tab holds the store:
+   * under another sign-in to the same account (`"sign-in"`, see
+   * `BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN`), or with another build's schema
+   * (`"build"`, see `BROWSER_STORE_HELD_BY_ANOTHER_BUILD`). The tab tries
+   * again on its own; `false` for any other refusal.
    */
-  waitsForAnotherSignIn?(): boolean;
+  waitsForAnotherTab?(): "sign-in" | "build" | false;
+  /**
+   * The worker refused this connection because a newer build of the app has
+   * the store open (see `BROWSER_STORE_OPEN_WITH_NEWER_BUILD`): this tab
+   * reloads to pick it up. It also `waitsForAnotherTab()`, as a fallback.
+   */
+  isOlderThanStore?(): boolean;
   ready(): Promise<void>;
   getWorkerRealmId?(): string | undefined;
   waitForServerConnection(): Promise<void>;
@@ -118,6 +128,12 @@ export interface BrowserWorkerConnectionContext<RuntimeConfig extends DbConfig =
   onFailure: (error: unknown) => void;
   onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;
+  /**
+   * A tab of a newer build of the app (its schema history extends this
+   * one's) wants the store: this tab closes its connection and reloads (see
+   * `BrowserConnectionManager.yieldToNewerBuild`).
+   */
+  onNewerBuild?: () => void;
 }
 
 export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig = DbConfig> {
@@ -133,6 +149,12 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
   onFailure: (error: unknown) => void;
   onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;
+  /**
+   * A tab of a newer build of the app (its schema history extends this
+   * one's) wants the store: this tab closes its connection and reloads (see
+   * `BrowserConnectionManager.yieldToNewerBuild`).
+   */
+  onNewerBuild?: () => void;
 }
 
 /**

@@ -88,11 +88,6 @@ const config = {
         destination: "/docs/reference/nextjs-better-auth",
         permanent: false,
       },
-      {
-        source: "/docs/setup/rust",
-        destination: "/docs/setup/backend-client",
-        permanent: false,
-      },
       // Older create-jazz builds fetch the agent brief from its old URL.
       { source: "/agent-brief.md", destination: "/quickstart.md", permanent: false },
       {
@@ -152,7 +147,7 @@ const config = {
       },
       {
         source: "/docs/setup/web-client/local-first-auth",
-        destination: "/docs/setup/auth/local-first",
+        destination: "/docs/setup/auth/device-accounts",
         permanent: false,
       },
       {
@@ -176,9 +171,20 @@ const config = {
         destination: "/docs/setup/auth/backend#lifecycle",
         permanent: false,
       },
+      // Local-first auth was renamed to device accounts.
+      {
+        source: "/docs/setup/auth/local-first",
+        destination: "/docs/setup/auth/device-accounts",
+        permanent: false,
+      },
+      {
+        source: "/docs/reference/local-first-auth-internals",
+        destination: "/docs/reference/device-accounts-internals",
+        permanent: false,
+      },
       {
         source: "/docs/auth/local-first-auth",
-        destination: "/docs/setup/auth/local-first",
+        destination: "/docs/setup/auth/device-accounts",
         permanent: false,
       },
       { source: "/docs/auth/permissions", destination: "/docs/schemas/policies", permanent: false },
