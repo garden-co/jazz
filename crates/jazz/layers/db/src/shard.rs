@@ -583,7 +583,9 @@ impl Inner {
     pub(crate) fn forget_hold(&self, commit: CommitRef) -> Result<(), Error> {
         // Every durable hold, standing or queued, is loaded on reopen, so a
         // store holding nothing in memory has none on disk either.
-        if self.shard.holds.is_empty() && self.shard.fixed.is_empty() && self.shard.queued.is_empty()
+        if self.shard.holds.is_empty()
+            && self.shard.fixed.is_empty()
+            && self.shard.queued.is_empty()
         {
             return Ok(());
         }
@@ -700,11 +702,9 @@ impl ShardRole<'_> {
         }
         // A row another part holds, or one a queued hold waits for, queues
         // this hold behind them: holds are granted in the order asked.
-        let behind_queued = inner
-            .shard
-            .queued
-            .iter()
-            .any(|(queued, ahead, _)| *queued != commit && ahead.iter().any(|row| rows.contains(row)));
+        let behind_queued = inner.shard.queued.iter().any(|(queued, ahead, _)| {
+            *queued != commit && ahead.iter().any(|row| rows.contains(row))
+        });
         if inner.shard.blocks(commit, rows) || behind_queued {
             if !inner
                 .shard
