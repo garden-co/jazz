@@ -979,6 +979,7 @@ fn a_new_leader_restarted_mid_wait_waits_again() {
     let path = dir.path().join("replica.sqlite");
     let now = Rc::new(Cell::new(NOW));
     let db = shard_at(&path, &now);
+    insert(&db, "applied from its old leader");
     db.shard().lead().unwrap();
     assert!(db.shard().waits_out().is_some(), "the new leader waits");
     drop(db);
