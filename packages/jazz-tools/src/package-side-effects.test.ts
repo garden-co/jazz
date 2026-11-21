@@ -109,7 +109,6 @@ const REVIEWED_CALLS = new Set([
   "prosemirror/sync.ts: PluginKey",
   "react-core/provider.tsx: createContext",
   "react-core/session-context.ts: createContext",
-  "removed-api.ts: removed",
   "runtime/author-id.ts: Utf8Decoder",
   "runtime/native-runtime/native-codec.ts: Utf8Decoder",
   "runtime/native-runtime/native-row-codec.ts: Utf8Decoder",

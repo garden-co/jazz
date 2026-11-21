@@ -6,7 +6,7 @@ import { createJazz, memory } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { createAccountManager } from "../accounts/create-account-manager.js";
+import { createTestAccountManager } from "../runtime/testing/account-fixtures.js";
 import { openBrowserSessionCore as createJazzClient } from "./create-jazz-session.js";
 
 // A host without cookies (Node, a CLI) whose user the app's backend signs in
@@ -163,7 +163,7 @@ describe("a host without cookies signing in with the app's bearer", () => {
   it("is refused in a browser, whose sync connection can't carry it", async () => {
     vi.stubGlobal("document", {});
     await expect(
-      createAccountManager({
+      createTestAccountManager({
         serverUrl: "https://app.example/jazz",
         store: memoryStore(),
         bearer: () => "token-alice",
@@ -174,7 +174,7 @@ describe("a host without cookies signing in with the app's bearer", () => {
   it("is refused on React Native, whose own entry sends the bearer", async () => {
     vi.stubGlobal("navigator", { product: "ReactNative" });
     await expect(
-      createAccountManager({
+      createTestAccountManager({
         serverUrl: "https://app.example/jazz",
         store: memoryStore(),
         bearer: () => "token-alice",
