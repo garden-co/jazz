@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createJazzClient } from "../../src/backend/index.js";
-import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import { createTestAccountManager } from "../../src/runtime/testing/account-fixtures.js";
 import { createClient as createThinClient } from "../../src/thin/index.js";
 import { testPermissions } from "../../src/testing/index.js";
 import { app } from "./backend-app.generated.js";
@@ -92,7 +92,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz in a Cloudflare Worke
     const { url } = await worker();
     const appId = await (await fetch(`${url}/app-id`)).text();
     let stored: string | null = null;
-    const accounts = await createAccountManager({
+    const accounts = await createTestAccountManager({
       appId,
       serverUrl: `${url}/jazz`,
       store: {

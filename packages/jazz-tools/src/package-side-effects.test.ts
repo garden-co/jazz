@@ -112,7 +112,6 @@ const REVIEWED_CALLS = new Set([
   "prosemirror/sync.ts: PluginKey",
   "react-core/provider.tsx: createContext",
   "react-core/session-context.ts: createContext",
-  "removed-api.ts: removed",
   // Each builds a throwing stub (or a frozen object of them) for the module to export.
   "removed-schema-api.ts: removedNamespace",
   "removed-schema-api.ts: removedSchemaApi",

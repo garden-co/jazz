@@ -16,7 +16,7 @@ export interface JazzContext {
 
 /**
  * Initialize the Jazz context for descendant Svelte components.
- * Called internally by {@link JazzSvelteProvider} and {@link JazzSvelteClientProvider}.
+ * Called internally by `JazzProvider` and `JazzSvelteClientProvider`.
  */
 export function initJazzContext(): JazzContext {
   const ctx: JazzContext = $state({
