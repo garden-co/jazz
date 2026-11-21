@@ -168,6 +168,25 @@ this. Nothing on the wire changes.
 
 `grep -rnE "getLocalFirstIdentityProof|LocalFirstGuest" . --exclude-dir=node_modules` finds them.
 
+### Removed: the alpha.64 schema DSL names
+
+Since alpha.65 these were stubs that threw `JAZZ_API_REMOVED`. They're no longer exported, so using
+one fails at build time. The `jazz-tools/permissions` subpath is removed, and so are the `schema` and
+`migration` exports of `jazz-tools/react-native`. Only apps whose `schema.ts`, `permissions.ts` or
+`migrations/index.ts` are still alpha.64-style hit this.
+
+| Removed                                                                                                 | Use instead                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `defineApp`                                                                                             | `s.defineSchema({ … })` in `schema.ts`; runtime code imports `app` from `./jazz.generated`                                                                 |
+| root `defineSchema`, `table`                                                                            | `s.defineSchema`, `s.table` (`import { schema as s } from "jazz-tools"`)                                                                                   |
+| `definePermissions`, `anyOf`, `allOf`, `createSessionContext` (root, `s.*` or `jazz-tools/permissions`) | the defined schema's own `definePermissions`, `anyOf`, `allOf` and `session` (`const { definePermissions } = schema`), compiled to `jazz.permissions.json` |
+| `defineMigration`, `renameTableFrom`                                                                    | `m.defineMigration`, `m.renameTableFrom` (`import { migration as m } from "jazz-tools"`)                                                                   |
+| `defineSliceableApp`, `schemaToWasm`                                                                    | nothing: slicing is gone, and `jazz.generated.ts` embeds the compiled schema                                                                               |
+| `schema`, `migration` from `jazz-tools/react-native`                                                    | write `schema.ts` against `jazz-tools`; runtime code imports `./jazz.generated`                                                                            |
+
+An app in this shape is an alpha.64 or alpha.65 app: convert it with
+`npx jazz-tools@2.0.0-alpha.70 upgrade` before moving to beta.0 (see [Removed: `jazz-tools upgrade`](#removed-jazz-tools-upgrade)).
+
 ### Removed: `hashes` in the server's schema list
 
 **This changes an HTTP response.** `GET /apps/<appId>/schemas` (admin secret required) no longer
