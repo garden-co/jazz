@@ -21,19 +21,6 @@ export {
 export { schema } from "./schema-namespace.js";
 export { migration } from "./migration-namespace.js";
 
-// Removed in alpha.65: stubs that throw, pointing at `jazz-tools upgrade`.
-export {
-  defineApp,
-  defineSchema,
-  defineSliceableApp,
-  definePermissions,
-  defineMigration,
-  renameTableFrom,
-  schemaToWasm,
-  table,
-  anyOf,
-  allOf,
-} from "./removed-schema-api.js";
 export type { JsonValue, JsonPrimitive } from "./json-value.js";
 
 export type {
