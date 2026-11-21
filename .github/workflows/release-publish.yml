@@ -39,7 +39,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish, e.g. 2.0.0-alpha.68 (tag v<version>)."
+        description: "Version to publish, e.g. 2.0.0-beta.0 (tag v<version>)."
         required: true
         type: string
       sha:
@@ -152,9 +152,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${MODE}" = publish ]; then
-            pattern='^2\.0\.0-alpha\.[0-9]+$'
+            pattern='^2\.0\.0-(alpha|beta)\.[0-9]+$'
           else
-            pattern='^2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$'
+            pattern='^2\.0\.0-(alpha|beta)\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$'
           fi
           [[ "${VERSION}" =~ ${pattern} ]] || { echo "::error::version '${VERSION}' doesn't match ${pattern}"; exit 1; }
           [[ "${SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full commit SHA"; exit 1; }

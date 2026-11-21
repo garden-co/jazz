@@ -91,8 +91,8 @@ jobs:
           if [ -z "${TAG}" ]; then
             sha="${EVENT_SHA}"
           else
-            if ! [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
-              echo "::error::tag must look like v2.0.0-alpha.N, got '${TAG}'"
+            if ! [[ "${TAG}" =~ ^v2\.0\.0-(alpha|beta)\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
+              echo "::error::tag must look like v2.0.0-(alpha|beta).N, got '${TAG}'"
               exit 1
             fi
             # The tag's commit (peeled, for annotated tags); never a branch
