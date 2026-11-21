@@ -1,5 +1,15 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.70
+
+### Patch Changes
+
+- f393bab: Add `db.getPendingUploadRows(table)` and `db.onPendingUploadRowsChange(table, listener)`: the ids of a table's rows with a write the server has neither accepted nor refused yet, so an app can show "not sent yet" beside a row. In Node and React Native this includes writes recovered from local storage after a restart. `null` means the runtime cannot tell (no client yet, or a native build without the report), never "none pending".
+- 5376af3: A React Native app pointed at a plaintext (`http`/`ws`) sync server other than this machine now fails with an error that says why and what to do, and whose `code` is `remote_plaintext_endpoint`. Plaintext stays limited to localhost, loopback addresses and the Android emulator hosts, so the session's token never travels unencrypted. The React Native setup docs describe how to develop on a physical device: `adb reverse` on Android, or a TLS tunnel.
+- Updated dependencies [82ac3a8]
+  - jazz-rn-android@2.0.0-alpha.70
+  - jazz-rn-ios@2.0.0-alpha.70
+
 ## 2.0.0-alpha.69
 
 ### Patch Changes

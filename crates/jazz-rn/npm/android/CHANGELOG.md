@@ -1,5 +1,11 @@
 # jazz-rn-android
 
+## 2.0.0-alpha.70
+
+### Patch Changes
+
+- 82ac3a8: Strip debug info from the bundled Android relay static libraries, cutting the package from 100.8 MB to about 82 MB unpacked.
+
 ## 2.0.0-alpha.69
 
 ## 2.0.0-alpha.68
