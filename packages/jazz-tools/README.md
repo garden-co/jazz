@@ -58,7 +58,7 @@ JavaScript, declaring a subclass may be inert; calling its inherited constructor
 or accessing Classic static operations raises the diagnostic. A constructor that
 deliberately bypasses the Classic base does not execute that base's diagnostic.
 
-Svelte's `JazzSvelteProvider` and Vue's `JazzProvider` are still supported Jazz 2
+Svelte's and Vue's `JazzProvider` are still supported Jazz 2
 components, and Svelte's `getJazzContext` remains supported. These providers take
 `config`, not Classic `sync` or `AccountSchema` props. Supplying those old props
 (including `accountSchema` / `account-schema` spellings, even with an undefined

@@ -29,7 +29,7 @@ import { ReadTier, type DbConfig } from "../../src/index.js";
 import { app } from "./apps/indexeddb-corpus/jazz.generated.js";
 import permissions from "./apps/indexeddb-corpus/jazz.permissions.json";
 import { app as corruptionApp } from "./apps/indexeddb-corruption/jazz.generated.js";
-import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import { createTestAccountManager } from "../../src/runtime/testing/account-fixtures.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createBrowserPhysicalDatabaseName } from "../../src/runtime/browser-worker-config.js";
 import { type Db } from "../../src/runtime/db.js";
@@ -484,7 +484,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     const cleanup = new TestCleanup();
     const dbName = uniqueDbName("jazz-storage-compat");
     const appId = "browser-storage-compat-corruption";
-    const accounts = await createAccountManager({
+    const accounts = await createTestAccountManager({
       appId,
       serverUrl: "https://storage-fixture.example",
     });
@@ -557,7 +557,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     const serverBase = new URL(registry);
     serverBase.pathname = registry.pathname.slice(0, -registrySuffix.length);
     expect(accountRegistryUrl(serverBase.href, owner.appId)).toBe(owner.auth.registry);
-    const accounts = await createAccountManager({
+    const accounts = await createTestAccountManager({
       appId: owner.appId,
       serverUrl: serverBase.href,
     });
@@ -604,7 +604,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     secret: string,
     server: Awaited<ReturnType<typeof getJazzServerInfo>>,
   ): Promise<DbConfig> {
-    const accounts = await createAccountManager({
+    const accounts = await createTestAccountManager({
       appId: server.appId,
       serverUrl: server.serverUrl,
     });
