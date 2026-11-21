@@ -1,7 +1,5 @@
 import { SessionKey } from "./session-key.js";
-import { warnSessionHookDeprecated } from "../session/deprecated-session-hook.js";
 import {
-  computed,
   defineComponent,
   inject,
   onUnmounted,
@@ -9,12 +7,10 @@ import {
   shallowRef,
   triggerRef,
   watch,
-  type ComputedRef,
   type InjectionKey,
   type PropType,
   type ShallowRef,
 } from "vue";
-import type { PublicSession } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import {
@@ -138,25 +134,6 @@ export function injectOptionalJazzClient(): ShallowRef<JazzClientContextValue | 
  */
 export function useDb(): Db {
   return useJazzClient().db;
-}
-
-/**
- * Subscribe to the current Jazz {@link PublicSession}.
- * Returns a {@link ComputedRef} whose `.value` updates automatically as the user
- * logs in or out — use it in templates or computed properties.
- *
- * @deprecated Use `useJazzSession().snapshot.value.user`: the same user, with
- * `user` as `accountId`. Warns once in development; removed in a later alpha.
- */
-export function useSession(): ComputedRef<PublicSession | null> {
-  warnSessionHookDeprecated("useSession()", "useJazzSession().snapshot.value.user");
-  const ctx = inject(JazzContextKey, null);
-  if (!ctx) {
-    throw new Error(
-      "Jazz Vue composables must be used within <JazzProvider> or <JazzClientProvider>",
-    );
-  }
-  return computed(() => ctx.value?.session ?? null);
 }
 
 export { JazzProvider, type JazzProviderProps } from "./session.js";

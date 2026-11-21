@@ -1,9 +1,5 @@
 import type { PublicSession } from "../runtime/context.js";
-import {
-  useDb as useCoreDb,
-  useJazzClient as useCoreJazzClient,
-  useSession,
-} from "../react-core/provider.js";
+import { useDb as useCoreDb, useJazzClient as useCoreJazzClient } from "../react-core/provider.js";
 import {
   JazzSessionProvider,
   type JazzSessionSourceProps,
@@ -72,7 +68,5 @@ export function useJazzClient(): JazzClientContextValue {
 export function useDb(): CreatedJazzClient["db"] {
   return useCoreDb<CreatedJazzClient["db"]>();
 }
-
-export { useSession };
 
 export type { JazzClientContextValue };

@@ -10,7 +10,6 @@ export {
   JazzClientProvider,
   useDb,
   useJazzClient,
-  useSession,
   type JazzClientContextValue,
   type JazzClientProviderProps,
 } from "./provider.js";
