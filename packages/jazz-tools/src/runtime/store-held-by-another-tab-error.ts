@@ -2,17 +2,23 @@
 export const STORE_HELD_BY_ANOTHER_TAB_ERROR_CODE = "store_held_by_another_tab";
 
 /**
- * Another tab of this browser holds this account's local store under
- * another sign-in, so this tab cannot open it yet.
+ * Another tab of this browser holds this account's local store, so this tab
+ * cannot open it yet. One store serves one sign-in and one schema at a time:
  *
- * This happens when a guest signs up (or in) in one tab while another tab is
- * still the guest: the store is the same account's, and one store serves one
- * sign-in at a time. The other tab normally follows the sign-up within
- * moments, or closes, and this tab joins on its own. Until then its sync
- * status is `connecting`.
+ * - A guest signs up (or in) in one tab while another tab is still the
+ *   guest. The other tab normally follows the sign-up within moments, or
+ *   closes.
+ * - A deploy changed the app's schema, and another tab runs a build Jazz
+ *   can't order against this one (neither's schema history contains the
+ *   other's, or one ships none). That tab reloads, or closes. (Builds it can
+ *   order don't wait: the newer one takes the store and the older tabs
+ *   reload, see `createJazzClient`'s `onNewerBuild`.)
+ *
+ * Either way this tab joins on its own once the other tab lets go. Until
+ * then its sync status is `connecting`.
  *
  * If the other tab does not let go for a while (it is frozen in the
- * background, or runs an app build that does not follow sign-ups), the
+ * background, or the user keeps the other build open), the
  * status becomes `{ state: "offline", reason: "held-by-another-tab",
  * retrying: true }`, and reads and waits that were waiting for the store
  * fail with this error, so the app can ask the user to close or reload the

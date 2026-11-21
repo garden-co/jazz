@@ -9,6 +9,7 @@ import {
   deserializeBrowserRelayError,
   type BrowserFollowerPortEvent,
   type BrowserFollowerPortRequest,
+  type BrowserWorkerLinkFate,
   type InspectorAttachmentBinding,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
@@ -92,6 +93,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private probeNonce: number | null = null;
   private watchdogTimer: number | NodeJS.Timeout | null = null;
   private watchdogEpoch = 0;
+  /**
+   * The parts of the worker's link fate this connection last applied;
+   * `undefined` until its first one arrives (with its admission).
+   */
+  private appliedFailure: string | null | undefined = undefined;
+  private appliedAuthFailure: string | null | undefined = undefined;
 
   constructor(
     private readonly runtime: NativeRuntimeAdapter,
@@ -107,6 +114,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       | "onFailure"
       | "onStorageReset"
       | "onStorageInvalidated"
+      | "onNewerBuild"
     >,
     private readonly traceRelay = false,
     inspectorBinding?: InspectorAttachmentBinding,
@@ -471,23 +479,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       else this.pendingFrames.push(message.frames);
       return;
     }
-    if (message.type === "auth-failure") {
-      this.callbacks.onAuthFailure(message.reason as AuthFailureReason);
-      return;
-    }
-    if (message.type === "auth-restored") {
-      this.callbacks.onAuthRestored();
-      return;
-    }
     if (message.type === "transport-state") {
       this.callbacks.onExplicitOfflineChange?.(message.explicitlyDisconnected);
       return;
     }
-    if (message.type === "remote-link") {
-      // The worker keeps reconnecting after a published outage. Once it is
-      // live again, release the relayed error so Global reads work again.
-      if (message.state === "connected") this.runtime.clearRemoteServerTransportError();
-      this.callbacks.onRemoteLinkChange?.(message.state, message.link);
+    if (message.type === "link-fate") {
+      this.applyLinkFate(message.fate);
       return;
     }
     if (message.type === "mutation-error") {
@@ -496,16 +493,6 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     }
     if (message.type === "storage-failure") {
       this.runtime.reportLocalStorageFailure(message.message);
-      return;
-    }
-    if (message.type === "transport-error") {
-      // Keep this distinct from a fate rejection. The runtime records the
-      // error before any later port teardown so active Global waits and
-      // remote subscriptions wake, while Local durability stays valid.
-      this.runtime.reportRemoteServerTransportError(
-        deserializeBrowserRelayError(message.error),
-        message.retrying === true,
-      );
       return;
     }
     if (message.type === "storage-reset") {
@@ -520,6 +507,20 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         resetId: message.resetId,
       } satisfies BrowserFollowerPortRequest);
       this.callbacks.onStorageReset?.(message.resetId);
+      return;
+    }
+    if (message.type === "newer-build-waiting") {
+      this.callbacks.onNewerBuild?.();
+      return;
+    }
+    if (message.type === "closed-for-newer-build") {
+      // As after a worker failure: the manager opens a new connection, which
+      // the worker refuses as an older build's.
+      this.fail(
+        new BrowserWorkerUnresponsiveError(
+          "The shared worker closed this tab's connection for a newer build of the app",
+        ),
+      );
       return;
     }
     if (message.type === "storage-invalidated") {
@@ -551,6 +552,41 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       pending.resolve({ pendingUploads: message.pendingUploads });
     }
   };
+
+  /**
+   * Make this tab's runtime hold the worker's link fate. A fate arriving with
+   * admission and one arriving later are applied alike (#4808): the upstream
+   * failure fails the tab's Global and Remote waits without rejecting its
+   * writes, the link status follows the worker's, and an auth refusal holds
+   * until the worker's clears. Unchanged parts are not applied again.
+   */
+  private applyLinkFate(fate: BrowserWorkerLinkFate): void {
+    const failure = fate.failure && JSON.stringify(fate.failure);
+    if (fate.failure && failure !== this.appliedFailure) {
+      // Keep this distinct from a fate rejection. The runtime records the
+      // error before any later port teardown so active Global waits and
+      // remote subscriptions wake, while Local durability stays valid.
+      this.runtime.reportRemoteServerTransportError(
+        deserializeBrowserRelayError(fate.failure.error),
+        fate.failure.retrying,
+      );
+    } else if (!fate.failure && (this.appliedFailure || fate.state === "connected")) {
+      // The worker's failure ended (it reconnected): Global reads work again.
+      this.runtime.clearRemoteServerTransportError();
+    }
+    this.appliedFailure = failure;
+    if (fate.authFailure !== this.appliedAuthFailure) {
+      // A connection's first fate also clears what a previous connection's
+      // worker refused, if this one's no longer does.
+      if (fate.authFailure !== null) {
+        this.callbacks.onAuthFailure(fate.authFailure as AuthFailureReason);
+      } else {
+        this.callbacks.onAuthRestored();
+      }
+      this.appliedAuthFailure = fate.authFailure;
+    }
+    this.callbacks.onRemoteLinkChange?.(fate.state, fate.link);
+  }
 
   private readonly onMessageError = (): void => {
     this.fail(new Error("Browser follower port message error"));

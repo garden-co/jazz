@@ -1,3 +1,4 @@
+/// <reference path="./native-url-types.d.ts" />
 import { URL as NativeURL } from "whatwg-url-without-unicode";
 import { toASCII } from "tr46";
 

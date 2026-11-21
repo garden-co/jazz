@@ -1,0 +1,9 @@
+// t9 kotlin: resolve every resolvable configuration (plugins, compile and runtime classpaths, the Kotlin compiler's)
+// so the build after it can run --offline. Run as: gradle -I gradle-fetch.init.gradle agFetchDeps
+allprojects {
+  tasks.register("agFetchDeps") {
+    doLast {
+      (project.buildscript.configurations + project.configurations).findAll { it.canBeResolved }.each { it.resolve() }
+    }
+  }
+}

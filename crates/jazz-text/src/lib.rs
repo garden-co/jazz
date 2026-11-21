@@ -6,6 +6,11 @@
 //!   the text around it (W3C text quote selectors). Tools and LLMs can author
 //!   them from the current value alone.
 //!
+//!   Positions count UTF-16 code units (JavaScript, Kotlin), and the `_utf8`
+//!   methods take and return UTF-8 byte offsets (`str` indices) instead, as
+//!   Rust and Go count them. Either way the anchor itself is the same, so
+//!   hosts that count differently share them.
+//!
 //! Neither depends on storage, so both also build for WASM and native hosts.
 
 mod anchor;
@@ -15,6 +20,47 @@ mod range;
 pub use anchor::{Anchor, CONTEXT_UNITS, Resolved, Side};
 pub use merge::{MERGE_WORK_BUDGET, merge3, merge3_within, try_merge3, try_merge3_within};
 pub use range::{Range, ResolvedRange};
+
+/// A UTF-8 byte offset given to a `_utf8` method that is not on a char
+/// boundary of the text: inside a code point, or past its end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotCharBoundary {
+    /// The offset refused.
+    pub offset: usize,
+}
+
+impl std::fmt::Display for NotCharBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "UTF-8 offset {} is not on a char boundary of the text",
+            self.offset
+        )
+    }
+}
+
+impl std::error::Error for NotCharBoundary {}
+
+/// The UTF-16 offset of the UTF-8 byte offset `byte` of `text`.
+pub(crate) fn utf8_to_utf16(text: &str, byte: usize) -> Result<usize, NotCharBoundary> {
+    if !text.is_char_boundary(byte) {
+        return Err(NotCharBoundary { offset: byte });
+    }
+    Ok(text[..byte].encode_utf16().count())
+}
+
+/// The UTF-8 byte offset of the UTF-16 offset `units` of `text`, rounded
+/// down to a char boundary and clamped to its end.
+pub(crate) fn utf16_to_utf8(text: &str, units: usize) -> usize {
+    let mut counted = 0;
+    for (byte, character) in text.char_indices() {
+        counted += character.len_utf16();
+        if counted > units {
+            return byte;
+        }
+    }
+    text.len()
+}
 
 /// How a text-merging column's values are cut into the units a merge never
 /// splits.
@@ -26,4 +72,28 @@ pub enum TextFormat {
     Markdown,
     /// Plain units, plus tags and entities.
     Html,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NotCharBoundary, utf8_to_utf16, utf16_to_utf8};
+
+    #[test]
+    fn utf8_and_utf16_offsets_convert_on_char_boundaries() {
+        // "é" is 2 bytes / 1 unit, "😀" 4 bytes / 2 units.
+        let text = "aé😀b";
+        for (byte, unit) in [(0, 0), (1, 1), (3, 2), (7, 4), (8, 5)] {
+            assert_eq!(utf8_to_utf16(text, byte), Ok(unit));
+            assert_eq!(utf16_to_utf8(text, unit), byte);
+        }
+        for byte in [2, 4, 5, 6, 9] {
+            assert_eq!(
+                utf8_to_utf16(text, byte),
+                Err(NotCharBoundary { offset: byte })
+            );
+        }
+        // Inside the surrogate pair rounds down; past the end clamps.
+        assert_eq!(utf16_to_utf8(text, 3), 3);
+        assert_eq!(utf16_to_utf8(text, 99), text.len());
+    }
 }

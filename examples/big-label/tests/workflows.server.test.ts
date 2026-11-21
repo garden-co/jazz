@@ -36,7 +36,7 @@ const as = (actor: Actor): TestDb =>
     user_id: actor,
     account_id: accounts[actor],
     claims: {},
-    authMode: "local-first",
+    authMode: "device-account",
   });
 
 describe("BigLabel workflows", () => {

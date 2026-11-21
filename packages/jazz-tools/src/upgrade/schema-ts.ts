@@ -17,7 +17,7 @@
 import { relative } from "node:path";
 import type * as TS from "typescript";
 import { applyEdits, type TextEdit } from "./edits.js";
-import { notSupportedYet } from "./errors.js";
+import { UpgradeRefusal, notSupportedYet } from "./errors.js";
 import type { MovedExport } from "./extras.js";
 
 type Ts = typeof TS;
@@ -53,10 +53,137 @@ export interface SchemaCodemod {
   spreads: SpreadModule[];
   /** Whether schema.ts declared permissions itself (`s.definePermissions(app, …)`). */
   inlinePermissions: boolean;
+  /** The name schema.ts has jazz-tools' `schema` namespace under (`s`). */
+  dsl: string;
   changes: string[];
 }
 
 export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
+  // `import { schema } from "jazz-tools"`: the new export needs the name, so the
+  // namespace becomes `s` (`schema.table(…)` → `s.table(…)`) first.
+  const bare = bareSchemaImport(input.ts, input.file, input.text, input.root);
+  if (bare) {
+    const result = codemodSchema({ ...input, text: bare.text });
+    result.changes.unshift(
+      `${relative(input.root, input.file) || input.file}:${bare.line}: \`import { schema }\` from jazz-tools → \`import { schema as s }\`, the namespace renamed \`s\``,
+    );
+    return result;
+  }
+  return codemodSchemaText(input);
+}
+
+/**
+ * The text with a bare `schema` import from jazz-tools renamed `s`, or
+ * undefined when there's none. Only what resolves to the import changes, by
+ * the TypeScript checker on the file alone: a property key stays (`{ schema }`
+ * becomes `{ schema: s }`), and a local `schema` (a destructured binding, a
+ * parameter, a class field) and its uses are left as they are. Refuses what
+ * the rename can't keep: an unaliased re-export of the namespace (alpha.66's
+ * schema.ts exports its own `schema`), or an `s` the file already binds or uses.
+ */
+function bareSchemaImport(
+  ts: Ts,
+  file: string,
+  text: string,
+  root: string,
+): { text: string; line: number } | undefined {
+  // A program of this file alone: enough for the checker to resolve its names.
+  const options: TS.CompilerOptions = { noLib: true, noResolve: true, types: [], allowJs: false };
+  const host = ts.createCompilerHost(options);
+  const parsed = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  host.getSourceFile = (name) => (name === file ? parsed : undefined);
+  host.fileExists = (name) => name === file;
+  host.readFile = (name) => (name === file ? text : undefined);
+  const program = ts.createProgram([file], options, host);
+  const source = program.getSourceFile(file)!;
+  const checker = program.getTypeChecker();
+  const where = (node: TS.Node) =>
+    `${relative(root, file) || file}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}`;
+  let element: TS.ImportSpecifier | undefined;
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier))
+      continue;
+    if (statement.moduleSpecifier.text !== "jazz-tools") continue;
+    const named = statement.importClause?.namedBindings;
+    if (!named || !ts.isNamedImports(named)) continue;
+    element ??= named.elements.find((e) => !e.propertyName && e.name.text === "schema");
+  }
+  if (!element) return undefined;
+
+  /** A name's use as a value or type, not as a property name or key. */
+  const isReference = (node: TS.Identifier): boolean => {
+    const parent = node.parent;
+    if (ts.isPropertyAccessExpression(parent) && parent.name === node) return false;
+    if (ts.isQualifiedName(parent) && parent.right === node) return false;
+    if (
+      (ts.isPropertyAssignment(parent) ||
+        ts.isPropertySignature(parent) ||
+        ts.isPropertyDeclaration(parent) ||
+        ts.isMethodDeclaration(parent) ||
+        ts.isMethodSignature(parent) ||
+        ts.isGetAccessor(parent) ||
+        ts.isSetAccessor(parent) ||
+        ts.isEnumMember(parent)) &&
+      parent.name === node
+    )
+      return false;
+    if (ts.isImportSpecifier(parent) && parent.propertyName === node) return false;
+    if (ts.isExportSpecifier(parent) && parent.name === node && parent.propertyName) return false;
+    if (ts.isBindingElement(parent) && parent.propertyName === node) return false;
+    if (ts.isLabeledStatement(parent) || ts.isBreakOrContinueStatement(parent)) return false;
+    return true;
+  };
+
+  const edits: TextEdit[] = [
+    { start: element.getStart(source), end: element.getEnd(), text: "schema as s" },
+  ];
+  let takenAt: TS.Node | undefined;
+  let reexport: TS.Node | undefined;
+  const imported = checker.getSymbolAtLocation(element.name);
+  const visit = (node: TS.Node) => {
+    if (ts.isIdentifier(node) && node !== element!.name) {
+      if (node.text === "s" && isReference(node)) takenAt ??= node;
+      if (node.text === "schema" && imported) {
+        const parent = node.parent;
+        if (ts.isShorthandPropertyAssignment(parent) && parent.name === node) {
+          // The identifier is the key too: keep it.
+          if (checker.getShorthandAssignmentValueSymbol(parent) === imported) {
+            edits.push({ start: node.getStart(source), end: node.getEnd(), text: "schema: s" });
+          }
+        } else if (ts.isExportSpecifier(parent)) {
+          if (checker.getExportSpecifierLocalTargetSymbol(parent) === imported) {
+            // `export { schema as ns }` keeps its exported name; a bare `export { schema }` can't.
+            if (parent.propertyName) {
+              edits.push({ start: node.getStart(source), end: node.getEnd(), text: "s" });
+            } else reexport ??= parent;
+          }
+        } else if (isReference(node) && checker.getSymbolAtLocation(node) === imported) {
+          edits.push({ start: node.getStart(source), end: node.getEnd(), text: "s" });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  if (reexport) {
+    throw new UpgradeRefusal(
+      "schema.ts re-exports jazz-tools' `schema` namespace, but alpha.66's schema.ts exports its own `schema` (the tables): " +
+        "import the namespace from jazz-tools where it's used instead, then run upgrade again",
+      where(reexport),
+    );
+  }
+  if (takenAt) {
+    throw new UpgradeRefusal(
+      "schema.ts imports `schema` from jazz-tools bare and already uses `s`, the name upgrade gives it: " +
+        "import it as `schema as s` (or another name) yourself, then run upgrade again",
+      where(takenAt),
+    );
+  }
+  const line = source.getLineAndCharacterOfPosition(element.getStart(source)).line + 1;
+  return { text: applyEdits(text, edits), line };
+}
+
+function codemodSchemaText(input: SchemaCodemodInput): SchemaCodemod {
   const { ts, file, text } = input;
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const where = (node: TS.Node) =>
@@ -366,6 +493,7 @@ export function codemodSchema(input: SchemaCodemodInput): SchemaCodemod {
   if (tablesName && tablesName !== "schema")
     out = renameIdentifier(ts, file, out, tablesName, "schema");
   return {
+    dsl: dsl!,
     text: out.replace(/\n{3,}/g, "\n\n").replace(/\s*$/, "\n"),
     spreads,
     inlinePermissions,

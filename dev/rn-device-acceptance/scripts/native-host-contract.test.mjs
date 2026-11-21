@@ -75,8 +75,8 @@ function assertRnDeviceWorkflowContract(workflow) {
   );
   assert.match(
     android,
-    /github\.event_name == 'workflow_dispatch' \|\| \( contains\(github\.event\.pull_request\.labels\.\*\.name, 'rn-preview-release'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \)/,
-    "native device jobs run only when manually dispatched or for a same-repository RN-preview PR",
+    /github\.event_name == 'workflow_dispatch' \|\| inputs\.artifacts_run_id != '' \|\| \( contains\(github\.event\.pull_request\.labels\.\*\.name, 'rn-preview-release'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \)/,
+    "native device jobs run only when manually dispatched, handed prebuilt artifacts, or for a same-repository RN-preview PR",
   );
 }
 
@@ -1218,7 +1218,7 @@ test("dispatch device workflow uses Blacksmith KVM while source jobs remain chea
   );
   assert.match(
     workflow,
-    /android-device-acceptance:[\s\S]*runs-on: blacksmith-4vcpu-ubuntu-2404[\s\S]*Grant the runner user access to KVM[\s\S]*setfacl -m "u:\$\{USER\}:rw" \/dev\/kvm/,
+    /android-device-acceptance:[\s\S]*runs-on: blacksmith-16vcpu-ubuntu-2404[\s\S]*Grant the runner user access to KVM[\s\S]*setfacl -m "u:\$\{USER\}:rw" \/dev\/kvm/,
   );
   assert.match(workflow, /android-source-scaffold:[\s\S]*runs-on: blacksmith-4vcpu-ubuntu-2404/);
   assert.match(workflow, /ios-source-scaffold:[\s\S]*runs-on: blacksmith-6vcpu-macos-15/);

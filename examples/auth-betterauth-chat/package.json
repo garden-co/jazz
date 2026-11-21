@@ -11,7 +11,7 @@
     "test:server": "vitest run --config vitest.config.server.ts",
     "test:browser": "vitest run --config vitest.config.browser.ts",
     "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "better-auth": "1.7.22",

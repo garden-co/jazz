@@ -33,7 +33,7 @@ describe("JazzDbProvider — stable config deps", () => {
    * unnecessarily, at least one setTimeout call will occur.
    */
   it("does not release when an equivalent config is rebuilt in another property order", async () => {
-    const alice = makeFakeClient({ authMode: "local-first", userId: "alice", claims: {} });
+    const alice = makeFakeClient({ authMode: "device-account", userId: "alice", claims: {} });
     const openJazzClient = vi.fn().mockResolvedValue(alice);
 
     // Track setTimeout calls made after initial mount so we can detect spurious
@@ -87,12 +87,12 @@ describe("JazzDbProvider — stable config deps", () => {
 
   it("replaces the client when its factory identity changes", async () => {
     const firstClient = makeFakeClient({
-      authMode: "local-first",
+      authMode: "device-account",
       userId: "first",
       claims: {},
     });
     const secondClient = makeFakeClient({
-      authMode: "local-first",
+      authMode: "device-account",
       userId: "second",
       claims: {},
     });
@@ -132,7 +132,11 @@ describe("JazzDbProvider — stable config deps", () => {
     const shutdownFinished = new Promise<void>((resolve) => {
       finishShutdown = resolve;
     });
-    const anonymous = makeFakeClient({ authMode: "local-first", userId: "anonymous", claims: {} });
+    const anonymous = makeFakeClient({
+      authMode: "device-account",
+      userId: "anonymous",
+      claims: {},
+    });
     anonymous.shutdown = vi.fn(() => shutdownFinished);
     const authenticated = makeFakeClient({ authMode: "external", userId: "alice", claims: {} });
     const openJazzClient = vi

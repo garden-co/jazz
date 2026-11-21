@@ -159,7 +159,10 @@ function MetricCard({
             {previous && (
               <>
                 {" · "}
-                <Change previous={previous.point.median} current={summary.headline.median} /> vs{" "}
+                <Change
+                  previous={previous.point.median}
+                  current={summary.headline.median}
+                /> vs{" "}
                 {summary.basis === "release" ? previous.label : "previous run"}
               </>
             )}

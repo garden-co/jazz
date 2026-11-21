@@ -11,6 +11,7 @@ import {
   jazzAppRequest,
   jazzAppUser,
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   stopJazzServerByUrl,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
@@ -39,10 +40,9 @@ export default defineConfig({
     "process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED":
       JSON.stringify(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED) ?? "undefined",
   },
-  plugins: [wasm(), topLevelAwait(), react()],
+  plugins: [jazzBrowserServerLifecycle, wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
-    globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
       trace: "retain-on-failure",

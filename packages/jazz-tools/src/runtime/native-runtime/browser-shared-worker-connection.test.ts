@@ -1219,7 +1219,7 @@ describe("browser SharedWorker realm identity", () => {
     );
 
     expect(current).not.toBe(next);
-    expect(current).toContain('"protocolVersion":"jazz-shared-runtime-v2"');
+    expect(current).toContain('"protocolVersion":"jazz-shared-runtime-v3"');
   });
 });
 

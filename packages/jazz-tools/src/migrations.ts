@@ -97,9 +97,9 @@ type DeclaredAddedTableName<TCreateTables> = Extract<keyof CreateTables<TCreateT
 type DeclaredRemovedTableName<TDropTables> = Extract<keyof DropTables<TDropTables>, string>;
 
 type RenamedSourceTableName<TRenameTables> = {
-  [TTable in RenamedTargetTableName<TRenameTables>]: RenameTables<TRenameTables>[TTable] extends RenameTableFromOp<
-    infer TOldName extends string
-  >
+  [
+    TTable in RenamedTargetTableName<TRenameTables>
+  ]: RenameTables<TRenameTables>[TTable] extends RenameTableFromOp<infer TOldName extends string>
     ? TOldName
     : never;
 }[RenamedTargetTableName<TRenameTables>];
@@ -484,12 +484,9 @@ type RemovedColumnOperationErrors<
   TMigrate,
 > = {
   [TTable in MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>]: {
-    [TColumn in RemovedColumnName<
-      TFrom,
-      TTo,
-      TRenameTables,
-      TTable
-    >]: ValidateRemovedColumnOperation<TFrom, TTo, TRenameTables, TTable, TColumn, TMigrate>;
+    [
+      TColumn in RemovedColumnName<TFrom, TTo, TRenameTables, TTable>
+    ]: ValidateRemovedColumnOperation<TFrom, TTo, TRenameTables, TTable, TColumn, TMigrate>;
   }[RemovedColumnName<TFrom, TTo, TRenameTables, TTable>];
 }[MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>];
 
@@ -499,11 +496,9 @@ type UnsupportedSharedColumnChanges<
   TRenameTables,
 > = {
   [TTable in MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>]: {
-    [TColumn in CommonColumnName<
-      TTo,
-      TTable,
-      SourceColumnName<TFrom, TTo, TRenameTables, TTable>
-    >]: SharedBuildersCompatible<
+    [
+      TColumn in CommonColumnName<TTo, TTable, SourceColumnName<TFrom, TTo, TRenameTables, TTable>>
+    ]: SharedBuildersCompatible<
       BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TColumn>,
       BuilderForTargetColumn<TTo, TTable, TColumn>,
       TRenameTables

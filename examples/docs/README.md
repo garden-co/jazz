@@ -19,3 +19,4 @@ These examples are intentionally allowed to optimize for documentation clarity a
 - `todo-server-ts`
 - `todo-effect` (Effect v4 versions of the TypeScript client and server snippets)
 - `todo-server-rs`
+- `todo-client-kotlin` (the Kotlin client snippets, over `jazz-kotlin`)

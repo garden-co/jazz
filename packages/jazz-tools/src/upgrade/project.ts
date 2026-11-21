@@ -223,7 +223,7 @@ function findSchemaDir(root: string, option: string | undefined): string {
 
 function permissionsSources(ts: Ts, permissionsFile: string | undefined): string[] {
   const out: string[] = [];
-  for (let file = permissionsFile; file && !out.includes(file); ) {
+  for (let file = permissionsFile; file && !out.includes(file);) {
     out.push(file);
     const source = ts.createSourceFile(
       file,

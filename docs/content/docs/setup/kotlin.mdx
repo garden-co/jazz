@@ -139,6 +139,11 @@ A `"merge": "text"` column (like StagePlan's `tasks.notes`) is written as an edi
 read, so concurrent edits merge. `jazz.edit(table, id) { … }` also splices text and bytes and sets
 values inside JSON columns.
 
+Text positions are UTF-16 code units, Kotlin's `String` indices, as Android's `EditText`
+selections and `Spannable` ranges count them: `splice(column, from, to, …)` and `column.range(from,
+to)` take them as they are. Pass `SpliceUnits.Utf8` for UTF-8 byte offsets, and `SpliceUnits.Bytes`
+for a `bytea` column.
+
 <include cwd lang="kotlin" meta='title="DocsSnippets.kt"'>
   ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#writing-text-edit-kotlin
 </include>

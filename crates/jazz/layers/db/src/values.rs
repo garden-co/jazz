@@ -1,5 +1,6 @@
 //! Jazz values in SQLite cells, the schema as SQLite sees it, and rows.
 
+use crate::storage::Storage;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -27,18 +28,8 @@ pub(crate) fn query_error(what: impl std::fmt::Display) -> Error {
 pub(crate) trait CachedRow {
     fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
     where
-        P: rusqlite::Params,
-        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
-}
-
-impl CachedRow for rusqlite::Connection {
-    fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
-    where
-        P: rusqlite::Params,
-        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
-    {
-        self.prepare_cached(sql)?.query_row(params, f)
-    }
+        P: crate::storage::Params,
+        F: FnOnce(&crate::storage::Row<'_>) -> rusqlite::Result<T>;
 }
 
 pub(crate) fn storage(error: rusqlite::Error) -> Error {
@@ -51,16 +42,39 @@ pub(crate) fn storage(error: rusqlite::Error) -> Error {
 }
 
 /// Open `SAVEPOINT name`; [`end_savepoint`] closes it.
-pub(crate) fn begin_savepoint(conn: &rusqlite::Connection, name: &str) -> Result<(), Error> {
+pub(crate) fn begin_savepoint(conn: &Storage, name: &str) -> Result<(), Error> {
+    if conn.is_managed() {
+        return Err(not_on_managed_storage(name));
+    }
     conn.execute_batch(&format!("SAVEPOINT {name}"))
         .map_err(storage)?;
+    open_tag_undo(conn);
+    Ok(())
+}
+
+/// The typed refusal for what managed storage (a Durable Object's SQL)
+/// cannot do: keep savepoint `name` open past the call that opened it. A
+/// transaction handle's staged writes stay open between calls; on managed
+/// storage they are refused.
+pub(crate) fn not_on_managed_storage(name: &str) -> Error {
+    Error::new(
+        ErrorCode::Query,
+        format!(
+            "keeping a transaction open between calls (savepoint `{name}`) is not supported on \
+             managed storage (Durable Objects) yet: a core there only accepts finished transactions"
+        ),
+    )
+}
+
+/// Open a tag-undo log for a scope opening on `conn` ([`close_tag_undo`]
+/// closes it).
+pub(crate) fn open_tag_undo(conn: &Storage) {
     TAG_UNDO.with(|undo| {
         undo.borrow_mut()
             .entry(undo_key(conn))
             .or_default()
             .push(Vec::new())
     });
-    Ok(())
 }
 
 thread_local! {
@@ -70,16 +84,14 @@ thread_local! {
         RefCell::default();
 }
 
-/// A connection's key in [`TAG_UNDO`]: its SQLite handle, which moving the
-/// `Connection` keeps.
-fn undo_key(conn: &rusqlite::Connection) -> usize {
-    // SAFETY: the handle is only compared, never dereferenced.
-    unsafe { conn.handle() as usize }
+/// A store's key in [`TAG_UNDO`] ([`Storage::key`]).
+fn undo_key(conn: &Storage) -> usize {
+    conn.key()
 }
 
 /// Drop `conn`'s undo logs as it closes: a savepoint left open dies with
 /// it, and a later connection may get its handle's address.
-pub(crate) fn forget_tag_undo(conn: &rusqlite::Connection) {
+pub(crate) fn forget_tag_undo(conn: &Storage) {
     TAG_UNDO.with(|undo| undo.borrow_mut().remove(&undo_key(conn)));
     ROLLBACKS.with(|rollbacks| rollbacks.borrow_mut().remove(&undo_key(conn)));
 }
@@ -92,7 +104,7 @@ thread_local! {
 }
 
 /// How many rollbacks `conn` has seen (see [`ROLLBACKS`]).
-pub(crate) fn rollbacks(conn: &rusqlite::Connection) -> u64 {
+pub(crate) fn rollbacks(conn: &Storage) -> u64 {
     ROLLBACKS.with(|rollbacks| {
         rollbacks
             .borrow()
@@ -108,13 +120,13 @@ pub(crate) fn note_rollback(key: usize) {
 }
 
 /// `conn`'s key for [`note_rollback`], for a hook that cannot borrow it.
-pub(crate) fn rollback_key(conn: &rusqlite::Connection) -> usize {
+pub(crate) fn rollback_key(conn: &Storage) -> usize {
     undo_key(conn)
 }
 
 /// Stored enum column `tags` is about to change on `conn`: the innermost
 /// open savepoint logs how it was, once, to put back if it rolls back.
-pub(crate) fn tags_changing(conn: &rusqlite::Connection, tags: &ColumnTags) {
+pub(crate) fn tags_changing(conn: &Storage, tags: &ColumnTags) {
     TAG_UNDO.with(|undo| {
         if let Some(frame) = undo
             .borrow_mut()
@@ -131,7 +143,7 @@ pub(crate) fn tags_changing(conn: &rusqlite::Connection, tags: &ColumnTags) {
 /// the enclosing savepoint's (the outermost's are committed); rolled back,
 /// its columns' tags are put back. `all` closes every open log (SQLite
 /// rolled the whole transaction back).
-fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
+pub(crate) fn close_tag_undo(conn: &Storage, kept: bool, all: bool) {
     TAG_UNDO.with(|undo| {
         let mut undo = undo.borrow_mut();
         let key = undo_key(conn);
@@ -155,6 +167,7 @@ fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
                 (false, _) => {
                     for (tags, before) in frame.into_iter().rev() {
                         *tags.borrow_mut() = before;
+                        tags_changed();
                     }
                 }
             }
@@ -168,11 +181,7 @@ fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
 /// Release `SAVEPOINT name` (`keep`), or roll back everything since it. SQLite
 /// rolls a whole transaction back by itself after some errors (a full disk,
 /// an I/O error); then the savepoint is gone and there is nothing to undo.
-pub(crate) fn end_savepoint(
-    conn: &rusqlite::Connection,
-    name: &str,
-    keep: bool,
-) -> Result<(), Error> {
+pub(crate) fn end_savepoint(conn: &Storage, name: &str, keep: bool) -> Result<(), Error> {
     let sql = if keep {
         format!("RELEASE {name}")
     } else {
@@ -205,18 +214,6 @@ pub(crate) fn end_savepoint(
             }
         }
     }
-}
-
-/// Run `f` inside `SAVEPOINT name`: kept if it succeeds, undone if not.
-pub(crate) fn in_savepoint<T>(
-    conn: &rusqlite::Connection,
-    name: &str,
-    f: impl FnOnce() -> Result<T, Error>,
-) -> Result<T, Error> {
-    begin_savepoint(conn, name)?;
-    let result = f();
-    end_savepoint(conn, name, result.is_ok())?;
-    result
 }
 
 /// One SQLite value, as bound or read. Text holds raw bytes, which SQLite
@@ -267,6 +264,19 @@ impl Sql {
             Sql::Real(v) => ValueRef::Real(*v),
             Sql::Text(v) => ValueRef::Text(v),
             Sql::Blob(v) => ValueRef::Blob(v),
+        }
+    }
+}
+
+impl Sql {
+    /// The value as SQLite holds it, borrowed.
+    pub fn as_value_ref(&self) -> ValueRef<'_> {
+        match self {
+            Self::Null => ValueRef::Null,
+            Self::Integer(n) => ValueRef::Integer(*n),
+            Self::Real(n) => ValueRef::Real(*n),
+            Self::Text(bytes) => ValueRef::Text(bytes),
+            Self::Blob(bytes) => ValueRef::Blob(bytes),
         }
     }
 }
@@ -709,6 +719,7 @@ impl EnumTags {
     }
 
     pub(crate) fn insert(&mut self, name: String, tag: i64) {
+        tags_changed();
         self.by_tag.insert(tag, name.clone());
         self.by_name.insert(name, tag);
     }
@@ -790,6 +801,32 @@ impl EnumTags {
 /// A stored enum column's tags, shared by the schemas storing it.
 pub type ColumnTags = Rc<RefCell<EnumTags>>;
 
+thread_local! {
+    /// Counts every change to enum tags made on this thread (a variant
+    /// interned, a column renumbered, tags put back by a rollback or a
+    /// restore). SQL compiled while the tags were different may bind a
+    /// variant name as text where it now has a tag, or read cells through
+    /// a stale `CASE`: a kept statement compiled at another epoch is
+    /// compiled again.
+    ///
+    /// Per thread, not per process: a store's tags are [`ColumnTags`]
+    /// (`Rc`), so they are changed and read only on the thread that holds
+    /// the store, and that thread's counter sees every change to the tags
+    /// a statement compiled there depends on. Stores on other threads do
+    /// not move it.
+    static TAG_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// This thread's [`TAG_EPOCH`].
+pub(crate) fn tag_epoch() -> u64 {
+    TAG_EPOCH.with(std::cell::Cell::get)
+}
+
+/// Note that enum tags of a store on this thread changed.
+pub(crate) fn tags_changed() {
+    TAG_EPOCH.with(|epoch| epoch.set(epoch.get().wrapping_add(1)));
+}
+
 /// Every stored enum column's tags on a store, by (stored table, stored
 /// column). Schemas built for the store take their columns' entries from
 /// it, so a tag the store interns reaches every schema at once.
@@ -830,6 +867,7 @@ impl TagRegistry {
     /// An entry made or moved since keeps no tags: a schema still holding
     /// it reads none it did not have.
     pub(crate) fn restore(&self, snapshot: TagSnapshot) {
+        tags_changed();
         let mut map = self.map.borrow_mut();
         for tags in map.values() {
             if !snapshot.0.iter().any(|(_, kept, _)| Rc::ptr_eq(kept, tags)) {
@@ -1725,6 +1763,14 @@ impl Table {
         }
     }
 
+    pub(crate) fn index_name(&self, index: &[String]) -> String {
+        format!(
+            "{}__ix({})",
+            self.stored,
+            self.stored_index(index).join(",")
+        )
+    }
+
     /// One index. Its name is its stored key list, so re-creating it on a
     /// store that already has it (under any schema version) is a no-op.
     pub fn index_ddl(&self, index: &[String]) -> String {
@@ -1734,6 +1780,7 @@ impl Table {
         } else {
             "_branch, "
         };
+        let name = table.index_name(index);
         let index = table.stored_index(index);
         let keys: Vec<String> = index
             .iter()
@@ -1744,7 +1791,7 @@ impl Table {
             .collect();
         format!(
             "CREATE INDEX IF NOT EXISTS {} ON {}({lead}{}, id);\n",
-            quote(&format!("{}__ix({})", table.stored, index.join(","))),
+            quote(&name),
             quote(&table.stored),
             keys.join(", ")
         )
@@ -2210,7 +2257,7 @@ fn relation_is_empty(child: &CurrentRow, index: usize) -> bool {
 
 /// The narrowest type both relation types' values fit: nullable if either
 /// is, record fields widened pairwise.
-fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
+pub(crate) fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
     if a == b {
         return Ok(a.clone());
     }
@@ -2259,7 +2306,7 @@ fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
 }
 
 /// `value` re-encoded as `ty`, a type [`widen`] produced from its own.
-fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
+pub(crate) fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
     Ok(match (value, ty) {
         (Value::Nullable(None), _) => Value::Nullable(None),
         (Value::Nullable(Some(inner)), ValueType::Nullable(t)) => {

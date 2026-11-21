@@ -129,9 +129,12 @@ export {
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
+  LocalFirstUnavailable,
 } from "./session/jazz-session.js";
+export { NativeArtifactMismatchError } from "./runtime/native-artifact-mismatch-error.js";
 export { NoKeptDeviceAccountError } from "./session/no-kept-device-account-error.js";
 export { DeviceAccountNeedsStoreError } from "./accounts/process-store.js";
 

@@ -398,7 +398,8 @@ impl OpenTransaction {
             .await
     }
 
-    /// [`Jazz::splice`] staged in the transaction.
+    /// [`Jazz::splice`] staged in the transaction, in the same units (UTF-8
+    /// bytes on a text column).
     pub async fn splice<T: Table, V: crate::LargeColumn>(
         &self,
         id: ObjectId,

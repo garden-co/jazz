@@ -833,3 +833,28 @@ fn a_replica_numbers_at_its_leaders_positions_and_waits_out_the_bound_to_lead() 
     insert(&replica, "two");
     assert_eq!(newest(&replica), hlc(replica_now.get()), "at its own clock");
 }
+
+/// A queued hold is checked again once granted, when it is already held
+/// but not yet fixed: the check is a trial and lands nothing, so it runs
+/// (INV-SHARD-25) though the part itself waits for its fix (INV-SHARD-27).
+#[test]
+fn a_granted_part_is_checked_before_it_is_fixed() {
+    let (db, _now) = shard(1);
+    let (writer, _upstream, sent_up, _sent_down) = writer_of(&db);
+    let session = AuthorSubject::for_test_bytes([5; 16]);
+    let part = upload(&writer, &sent_up, None);
+    held_at(&db, part, &[]);
+    db.check_part(
+        session,
+        None,
+        Acting::Own,
+        (part.node, part.tx),
+        uploaded_ops(&sent_up),
+    )
+    .expect("a held, unfixed part is checked");
+    assert_eq!(
+        db.shard().resolution(part).unwrap(),
+        None,
+        "and nothing landed"
+    );
+}

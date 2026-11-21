@@ -158,33 +158,31 @@ export const stagePlanBenchmarks: BenchmarkMetadata[] = [
   ...[
     [600, 60],
     [6000, 60],
-  ].map(
-    ([rows, lists]): BenchmarkMetadata => ({
-      name: `stage_plan_crew_dashboard[(${rows}, ${lists})]`,
-      title: `StagePlan · crew dashboard with ${lists} live lists`,
-      description:
-        "Open a crew member's dashboard: one overview plus 60 department lists, each an independent subscription from Core to an in-memory foreground; wait for every list to settle.",
-      fixture: `Two crews of ${rows.toLocaleString("en-US")} tasks each; 60 departments per crew. Inherited crew-member permission excludes the other crew's rows. One overview plus ${lists} separately opened department lists.`,
-      storage: "Three independent in-memory Jazz runtimes",
-      includes: [
-        "Query preparation and subscription admission",
-        "Core and foreground progress",
-        "Initial result consumption",
-      ],
-      excludes: [
-        "Seeding, database opening and connection setup",
-        "Teardown, mutation correctness checks",
-        "Serialization, network latency, IndexedDB and React",
-      ],
-      work: {
-        count: lists + 1,
-        unit: "subscriptions/s",
-        explanation:
-          "All initial settled subscriptions per measured dashboard opening; not row throughput.",
-      },
-      source,
-    }),
-  ),
+  ].map(([rows, lists]): BenchmarkMetadata => ({
+    name: `stage_plan_crew_dashboard[(${rows}, ${lists})]`,
+    title: `StagePlan · crew dashboard with ${lists} live lists`,
+    description:
+      "Open a crew member's dashboard: one overview plus 60 department lists, each an independent subscription from Core to an in-memory foreground; wait for every list to settle.",
+    fixture: `Two crews of ${rows.toLocaleString("en-US")} tasks each; 60 departments per crew. Inherited crew-member permission excludes the other crew's rows. One overview plus ${lists} separately opened department lists.`,
+    storage: "Three independent in-memory Jazz runtimes",
+    includes: [
+      "Query preparation and subscription admission",
+      "Core and foreground progress",
+      "Initial result consumption",
+    ],
+    excludes: [
+      "Seeding, database opening and connection setup",
+      "Teardown, mutation correctness checks",
+      "Serialization, network latency, IndexedDB and React",
+    ],
+    work: {
+      count: lists + 1,
+      unit: "subscriptions/s",
+      explanation:
+        "All initial settled subscriptions per measured dashboard opening; not row throughput.",
+    },
+    source,
+  })),
   board(
     "stage_plan_update_under_policy[9000]",
     "memory",

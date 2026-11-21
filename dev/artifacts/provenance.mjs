@@ -252,7 +252,7 @@ function trackedInputContents(root, paths) {
   );
   const contents = new Map();
   const batchLimit = 256 * 1024;
-  for (let start = 0; start < cleanPaths.length; ) {
+  for (let start = 0; start < cleanPaths.length;) {
     let bytes = 0;
     let end = start;
     while (end < cleanPaths.length) {
@@ -509,15 +509,9 @@ function packageInputsFingerprint(root, kind) {
   return inputHash.digest("hex");
 }
 
-export function expectedManifest(root, kind, profile, targetOverride, options = {}) {
-  const packageInputs = packageInputsFingerprint(root, kind);
-  const cargoLock = join(root, "Cargo.lock");
-  const toolchain = join(root, "rust-toolchain.toml");
-  const injectedGit =
-    process.env.JAZZ_ARTIFACT_GIT_HEAD &&
-    process.env.JAZZ_ARTIFACT_GIT_TREE &&
-    process.env.JAZZ_ARTIFACT_GIT_DIRTY_DIFF;
-  const tools = {
+/** The tool versions (and Linux NAPI build baseline) an artifact of `kind` is built with. */
+export function artifactTools(root, kind) {
+  return {
     rustc: toolVersion(root, "rustc", ["-Vv"]),
     wasmPack: kind === "wasm" ? toolVersion(root, "wasm-pack") : "not-applicable",
     wasmBindgen: kind === "wasm" ? wasmPackToolVersion(root, "wasm-bindgen") : "not-applicable",
@@ -534,6 +528,17 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
         }
       : {}),
   };
+}
+
+export function expectedManifest(root, kind, profile, targetOverride, options = {}) {
+  const packageInputs = packageInputsFingerprint(root, kind);
+  const cargoLock = join(root, "Cargo.lock");
+  const toolchain = join(root, "rust-toolchain.toml");
+  const injectedGit =
+    process.env.JAZZ_ARTIFACT_GIT_HEAD &&
+    process.env.JAZZ_ARTIFACT_GIT_TREE &&
+    process.env.JAZZ_ARTIFACT_GIT_DIRTY_DIFF;
+  const tools = artifactTools(root, kind);
   return {
     schema: 1,
     kind,

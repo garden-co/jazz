@@ -337,6 +337,48 @@ class VectorMutableBuffer final : public facebook::jsi::MutableBuffer {
   std::vector<uint8_t> bytes_;
 };
 
+/// The `error.code` a relay status throws with: its C name, lowercased
+/// without the `JAZZ_NATIVE_RELAY_` prefix.
+const char *relayStatusCode(jazz_native_relay_status status) {
+  switch (status) {
+    case JAZZ_NATIVE_RELAY_OK:
+      return "ok";
+    case JAZZ_NATIVE_RELAY_INVALID_ARGUMENT:
+      return "invalid_argument";
+    case JAZZ_NATIVE_RELAY_INVALID_COMMAND:
+      return "invalid_command";
+    case JAZZ_NATIVE_RELAY_ENCODE_FAILURE:
+      return "encode_failure";
+    case JAZZ_NATIVE_RELAY_INVALID_HANDLE:
+      return "invalid_handle";
+    case JAZZ_NATIVE_RELAY_LIFECYCLE_FAILURE:
+      return "lifecycle_failure";
+    case JAZZ_NATIVE_RELAY_INVALID_ABI_RANGE:
+      return "invalid_abi_range";
+    case JAZZ_NATIVE_RELAY_INCOMPATIBLE_ABI:
+      return "incompatible_abi";
+    case JAZZ_NATIVE_RELAY_BACKPRESSURE:
+      return "backpressure";
+    case JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT:
+      return "remote_plaintext_endpoint";
+    case JAZZ_NATIVE_RELAY_UNSUPPORTED_STORAGE_CODECS:
+      return "unsupported_storage_codecs";
+  }
+  return "unknown_status";
+}
+
+/// Throw a JS `Error` with `message` and `code` set.
+[[noreturn]] void throwCodedError(Runtime &runtime, const std::string &message,
+                                  const char *code) {
+  auto error = runtime.global()
+                   .getPropertyAsFunction(runtime, "Error")
+                   .callAsConstructor(runtime,
+                                      facebook::jsi::String::createFromUtf8(runtime, message))
+                   .asObject(runtime);
+  error.setProperty(runtime, "code", code);
+  throw JSError(runtime, Value(runtime, error));
+}
+
 [[noreturn]] void throwStatus(Runtime &runtime, jazz_native_relay_status status,
                               const char *operation) {
   switch (status) {
@@ -347,29 +389,33 @@ class VectorMutableBuffer final : public facebook::jsi::MutableBuffer {
       throw JSError(runtime, std::string("Jazz native foreground runtime is busy during ") +
                                 operation + "; retry after the next scheduled tick");
     case JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT:
-      throw JSError(runtime,
-                    "Remote HTTP sessions require HTTPS; local development endpoints "
-                    "remain supported.");
-    case JAZZ_NATIVE_RELAY_UNSUPPORTED_STORAGE_CODECS: {
-      // Thrown as an Error carrying the stable code every platform uses, so
-      // the app can detect the refusal, delete the store and resync.
-      auto error = runtime.global()
-                       .getPropertyAsFunction(runtime, "Error")
-                       .callAsConstructor(
-                           runtime,
-                           facebook::jsi::String::createFromUtf8(
-                               runtime,
-                               std::string("Unsupported storage format: the local Jazz store was "
-                                           "written by an older version and cannot be opened "
-                                           "during ") +
-                                   operation + "; delete it and resync from Core"))
-                       .asObject(runtime);
-      error.setProperty(runtime, "code", "unsupported_storage_codecs");
-      throw JSError(runtime, Value(runtime, error));
-    }
+      // The session's bearer would travel in plaintext: only this machine
+      // (localhost, a loopback address, an Android emulator's host) may be
+      // reached without TLS. Coded, so the app can tell it apart (#3595).
+      throwCodedError(runtime,
+                      "Jazz on React Native syncs over plaintext (http/ws) only with localhost, "
+                      "a loopback address or an Android emulator's host (10.0.2.2, 10.0.3.2): "
+                      "the session's token would otherwise travel unencrypted. Use an https/wss "
+                      "server URL for any other host, a LAN address or .local name included. "
+                      "To develop on a physical device, run `adb reverse tcp:<port> tcp:<port>` "
+                      "and use localhost (Android), or put the server behind a TLS tunnel "
+                      "(see https://jazz.tools/docs/setup/react-native).",
+                      "remote_plaintext_endpoint");
+    case JAZZ_NATIVE_RELAY_UNSUPPORTED_STORAGE_CODECS:
+      // The stable code every platform uses, so the app can detect the
+      // refusal, delete the store and resync.
+      throwCodedError(runtime,
+                      std::string("Unsupported storage format: the local Jazz store was "
+                                  "written by an older version and cannot be opened during ") +
+                          operation + "; delete it and resync from Core",
+                      "unsupported_storage_codecs");
     default:
-      throw JSError(runtime, std::string("Jazz native foreground runtime failed during ") +
-                                operation);
+      // The status travels as `error.code`, so JS tells an unknown command
+      // (an older native build) from a lifecycle or encode failure without
+      // reading the message.
+      throwCodedError(runtime,
+                      std::string("Jazz native foreground runtime failed during ") + operation,
+                      relayStatusCode(status));
   }
 }
 

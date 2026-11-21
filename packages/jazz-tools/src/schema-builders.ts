@@ -25,11 +25,13 @@ export { defineSchema, claims } from "./schema-dsl/define-schema.js";
 /** @deprecated Removed: define the schema with `s.defineSchema({ … })`; throws, pointing at `npx jazz-tools upgrade`. */
 export const defineApp: RemovedApi = /*#__PURE__*/ removedSchemaApi("schema.defineApp");
 /** @deprecated Removed: schema slicing is gone; throws, pointing at `npx jazz-tools upgrade`. */
-export const defineSliceableApp: RemovedApi =
-  /*#__PURE__*/ removedSchemaApi("schema.defineSliceableApp");
+export const defineSliceableApp: RemovedApi = /*#__PURE__*/ removedSchemaApi(
+  "schema.defineSliceableApp",
+);
 /** @deprecated Removed: use `schema.definePermissions({ … })`; throws, pointing at `npx jazz-tools upgrade`. */
-export const definePermissions: RemovedApi =
-  /*#__PURE__*/ removedSchemaApi("schema.definePermissions");
+export const definePermissions: RemovedApi = /*#__PURE__*/ removedSchemaApi(
+  "schema.definePermissions",
+);
 
 export const string = schemaColumns.string;
 export const uuid = schemaColumns.uuid;
@@ -51,6 +53,8 @@ export type {
   ValueKind,
   ValueHandle,
   Policy,
+  NestedPolicy,
+  Inherits,
   Rel,
   Permissions,
   ColumnHandle,
@@ -143,6 +147,7 @@ export type {
   Exists,
   AllowedTarget,
   AllowedTo,
+  AllowedPolicy,
   DefinePermissions,
   PermissionTools,
 } from "./permissions/dsl.js";

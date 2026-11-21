@@ -549,7 +549,7 @@ part of the policy program rather than a post-filter outside the query graph.
 
 - a literal claim value, the degenerate seed used by earlier policies
 - a set-valued keyed lookup, written as `seededBy(seed_table, user_col =
-claim(path), group_col)`
+  claim(path), group_col)`
 
 The set-valued form includes same-table seeds. For example, a team table can
 seed reachability by projecting its own `id` column from rows where
