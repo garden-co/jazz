@@ -501,12 +501,6 @@ export interface DeviceAccountsAnswer {
 }
 
 /**
- * @deprecated Renamed to {@link DeviceAccountsAnswer}; this alias goes in a later release.
- * An interface (not a type alias), so code that merges declarations into it keeps compiling.
- */
-export interface LocalFirstGuest extends DeviceAccountsAnswer {}
-
-/**
  * The marker's brand, registered globally like `createJazz`'s store registry:
  * a bundler may load this module more than once (Next dev evaluates it per
  * route), and a shared Jazz must still recognise a marker made by another copy.
