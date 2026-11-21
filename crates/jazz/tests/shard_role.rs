@@ -858,3 +858,21 @@ fn a_granted_part_is_checked_before_it_is_fixed() {
         "and nothing landed"
     );
 }
+
+/// A follower that takes over as leader and restarts before its wait ends
+/// still waits out the offset bound on reopen (INV-SHARD-21).
+#[test]
+fn a_new_leader_restarted_mid_wait_waits_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replica.sqlite");
+    let now = Rc::new(Cell::new(NOW));
+    let db = shard_at(&path, &now);
+    db.shard().lead().unwrap();
+    assert!(db.shard().waits_out().is_some(), "the new leader waits");
+    drop(db);
+    let db = shard_at(&path, &now);
+    assert!(
+        db.shard().waits_out().is_some(),
+        "and waits again after a restart mid-wait"
+    );
+}

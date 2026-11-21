@@ -184,6 +184,17 @@ the shard ownership above are outside this repository and stay exploratory
   the decider aborts it and the hold is released. The leases and the
   protocol that carries these questions live with the gateway.
 
+- **Replicas.** A shard may run as a replicated log with one leader; the
+  log and elections are the gateway's (jazz-private). A follower applies
+  its leader's entries at the leader's positions (`number_at`), takes the
+  leader's fixed and observed positions uncapped by its own clock
+  (`follow`), and stamps the leader's writes with the leader's time
+  (`stamp_of` / `stamp`). A follower that takes over (`lead`) waits until
+  its clock passes the highest position it applied plus
+  `HLC_MAX_OFFSET_MS` before it numbers, and a restart during that wait
+  waits again (`INV-SHARD-21`), so it never numbers below a position its
+  old leader handed out.
+
 ## Open Questions
 
 - 🔶 [#1781](https://github.com/garden-co/jazz/issues/1781) — Sharding design.

@@ -832,7 +832,7 @@ impl ShardRole<'_> {
         self.db.inner.borrow().seq
     }
 
-    /// A replica applies its leader's log (SPEC 15 §15.6, replicas): the
+    /// A replica applies its leader's log (SPEC 15 §15.3, replicas): the
     /// next position it numbers (a commit, a local write or a hold) is
     /// `position`, where its leader numbered the same entry. `position`
     /// must be above everything the store numbered or observed. A replica
@@ -897,6 +897,12 @@ impl ShardRole<'_> {
         inner.shard.pinned = None;
         let after = hlc_ms(inner.seq).saturating_add(HLC_MAX_OFFSET_MS);
         inner.shard.resumes_after = Some(after);
+        // A new leader that restarts mid-wait waits again on reopen, as a
+        // shard that observed past what it numbered does (INV-SHARD-21).
+        if !inner.shard.observed {
+            inner.persist_meta(SHARD_OBSERVED, 1)?;
+            inner.shard.observed = true;
+        }
         Ok(())
     }
 
