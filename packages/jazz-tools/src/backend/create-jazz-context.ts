@@ -1,6 +1,8 @@
 import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import { clientScope } from "../runtime/client-scope.js";
+import { keylessBackend } from "../encryption/node-host.js";
+import { declaredEntries } from "../encryption/plain-schema.js";
 import { isWhitespaceOnlySecret, WHITESPACE_BACKEND_SECRET } from "../accounts/registry-client.js";
 import {
   NapiDb,
@@ -86,6 +88,9 @@ export interface BackendNodeClock {
 }
 
 type FlushableRuntime = Runtime & { flush?: () => void };
+
+/** The environment a backend context opens the app in when its config names none. */
+export const DEFAULT_ENVIRONMENT = "dev";
 
 /** Pre-listener mutation errors a backend context retains for its first listener. */
 export const MAX_PENDING_MUTATION_ERROR_EVENTS = 256;
@@ -234,7 +239,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     }
 
     this.initializedSchemaJson = schemaJson;
-    const env = this.config.env ?? "dev";
+    const env = this.config.env ?? DEFAULT_ENVIRONMENT;
     // SYSTEM provenance names this stable node. A persistent store keeps its
     // transaction counter, so it writes as that node too. A memory store
     // starts its counter over on every open, so it writes as a random node:
@@ -265,6 +270,12 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         },
         subscriptionBacklogRows: this.config.subscriptionBacklogRows,
         migrations,
+        plainEntries: this.config.app
+          ? declaredEntries(resolveSchemaSource(this.config.app))
+          : undefined,
+        keyless: this.config.app
+          ? keylessBackend(this.config.app, this.config.appId, env)
+          : undefined,
       },
     );
 

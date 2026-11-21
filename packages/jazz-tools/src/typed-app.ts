@@ -35,6 +35,11 @@ export interface ColumnTypes {
   readonly nullable: boolean;
   /** The stored value's TS type (for a transformed column, before its transform). */
   readonly value: unknown;
+  /**
+   * An encrypted column (`value` is then its plaintext type): only a client
+   * holding the keys reads it; a keyless backend never does (`KeylessTypes`).
+   */
+  readonly encrypted?: true;
 }
 
 /**
@@ -1384,6 +1389,13 @@ export type TableHandle<TTable extends string, TSchema extends SchemaLike> = Tab
 
 export type App<TSchema extends SchemaLike> = Simplify<
   {
+    /**
+     * The types the app was bound with: on its type only (never set at
+     * runtime), so a type can map them, as `keyless` does for a backend.
+     * A string key, so declarations of an app name it without an import.
+     */
+    readonly "~types"?: TSchema;
+  } & {
     [TTable in TableName<TSchema>]: Table<TTable, TSchema>;
   } & {
     /** Read-only queries over accepted content versions of each table. */

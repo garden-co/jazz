@@ -45,6 +45,21 @@ fn bindings_expose_plaintext_and_hide_ciphertext() {
     );
 }
 
+/// The TypeScript type map marks each encrypted column `encrypted: true`
+/// (and no plain one), so a keyless backend's types can drop it; the row
+/// and insert types stay the plaintext ones clients use.
+#[test]
+fn typescript_marks_encrypted_columns() {
+    let ts = jazz_codegen::generate(jazz_codegen::Lang::TypeScript, &app_json()).unwrap();
+    assert!(
+        ts.contains(
+            "title: { kind: \"string\"; nullable: false; value: string; encrypted: true };"
+        )
+    );
+    assert!(ts.contains("done: { kind: \"boolean\"; nullable: false; value: boolean };"));
+    assert!(ts.contains("  title: string;\n"));
+}
+
 /// A backend loading its permissions against the bindings' compiled app
 /// computes the bundle the app's files give: the embedded declarations
 /// let it derive the system tables' policies.
@@ -56,4 +71,31 @@ fn a_backend_from_bindings_derives_the_same_bundle() {
     let from_files = artifact::load(&app_json(), PERMISSIONS.as_bytes()).unwrap();
     assert_eq!(from_bindings.bundle(), from_files.bundle());
     assert_eq!(from_bindings.encryption(), from_files.encryption());
+}
+
+/// A client that has the bindings but not `jazz.app.json` reads the same
+/// declarations the files give; an app that declares none gives `None`.
+///
+/// ```text
+/// jazz.app.json ──compile_app──► bindings ──bound_declarations──► declarations
+///        └──────────load_client_encrypted──────────────────────────► same
+/// ```
+#[test]
+fn a_client_from_bindings_reads_the_same_declarations() {
+    let app_id = jazz::tools::AppId::from_name("encrypted-app");
+    let bound = jazz_codegen::compile_app(&app_json()).unwrap();
+    let from_bindings = artifact::bound_declarations(bound.as_bytes(), app_id, "test")
+        .unwrap()
+        .expect("declared");
+    let (_, _, from_files) = artifact::load_client_encrypted(&app_json(), app_id, "test").unwrap();
+    assert_eq!(from_bindings, from_files.expect("declared"));
+
+    let plain = br#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "title": "string" } } } }"#;
+    let bound = jazz_codegen::compile_app(plain).unwrap();
+    assert!(
+        artifact::bound_declarations(bound.as_bytes(), app_id, "test")
+            .unwrap()
+            .is_none()
+    );
 }

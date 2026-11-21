@@ -7,6 +7,7 @@ import { Utf8Decoder } from "./utf8.js";
 import { parseSnapshotRef, type SnapshotRef } from "./snapshot-ref.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { AccountHandle } from "../accounts/state.js";
+import { plainSchema } from "../encryption/plain-schema.js";
 import { DbClosedError, GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
 import { assertAccountConfig, copyAccountConfigAdmission } from "../accounts/config-capability.js";
@@ -822,7 +823,7 @@ function toWriteRecordForOperation(
   tableName: string,
 ) {
   try {
-    return toWriteRecord(data, schema, tableName);
+    return toWriteRecord(data, plainSchema(schema), tableName);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`${operation} failed: WriteError("${escapeWriteErrorReason(message)}")`);

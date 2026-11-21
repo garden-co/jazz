@@ -2381,6 +2381,7 @@ dependencies = [
 name = "jazz-e2ee-client"
 version = "2.0.0-alpha.67"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "getrandom 0.2.17",
  "jazz-core",
@@ -2578,6 +2579,8 @@ dependencies = [
  "futures",
  "jazz-codegen",
  "jazz-core",
+ "jazz-e2ee",
+ "jazz-e2ee-client",
  "jazz-native-relay",
  "jazz-otel",
  "jazz-server",
@@ -2589,9 +2592,11 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -475,6 +475,21 @@ empty byte string (never written) and the 5-byte cleared marker
 
 ### 1.4 Permissions
 
+**The backend is not an encryption participant.** An app's backend (the
+trusted process that relays its clients and runs its own code) has no account,
+no identity and no keys in this protocol, and never will: every device and
+every key belongs to a client. A backend starts for an app that declares
+encryption and relays its clients as for any app; its own database opens with
+keyless hooks built from the app's declarations. Through them encrypted
+columns are never readable to it (a read returns the rows of an encrypted
+table without those columns and their equality tokens, never stored bytes),
+a write that names an encrypted column is refused ("the backend holds no
+encryption keys; encrypted columns are written by clients"), and a query that
+filters, orders or selects one is refused naming the pattern. Plain tables and
+the plain columns of an encrypted table work as for any app, and member rows
+are plain, so a trusted backend writes them like any application table
+(§1.3).
+
 Jazz is the only permission authority. E2EE adds no permission logic of its
 own: replay authenticates signatures, device activity, chains and IDs, but it
 does not decide who may read or update a space, and possession of a key

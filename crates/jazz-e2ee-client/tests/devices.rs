@@ -821,7 +821,8 @@ fn an_app_account_is_not_started_as_a_device_account() {
 /// again writes nothing and is refused with `recovery-root-mismatch`, as
 /// explicit recovery with it is: a user re-registering an old phrase must
 /// not believe they have recovery. (The start-up registration of a device
-/// account's own secret writes nothing and goes on:
+/// account's own secret, the host runtime's `recoveryRegister` with
+/// `atStart`, writes nothing and goes on:
 /// `a_device_account_starts_after_its_secrets_root_is_retired`.)
 ///
 /// ```text

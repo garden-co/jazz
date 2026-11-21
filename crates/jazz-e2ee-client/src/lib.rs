@@ -7,7 +7,7 @@
 //! the protocol as pure functions, and does the I/O around them:
 //!
 //! - [`store`]: the host's private storage of one device's encryption
-//!   state ([`PrivateStore`]), with the platform's
+//!   state ([`PrivateStore`]), in memory or in files, with the platform's
 //!   protection of secrets at rest.
 //! - [`E2eeClient`]: the runtime of one account on this device. It loads
 //!   and stores the device (generated on first use), the keys it holds per
@@ -51,6 +51,8 @@ mod account;
 mod client;
 mod error;
 mod hooks;
+pub mod host;
+mod keyless;
 mod mechanisms;
 mod spaces;
 mod state;
@@ -62,6 +64,7 @@ pub use account::{
 };
 pub use client::{ClientConfig, E2eeClient};
 pub use error::ClientError;
+pub use keyless::KeylessHooks;
 pub use spaces::{
     MEMBER_LIMIT, SpaceCreation, SpaceKeyState, SpaceWatch, account_watch_queries, watch_queries,
 };

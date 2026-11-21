@@ -4,6 +4,10 @@ import { afterEach, expect, it } from "vitest";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, testApp, type TestJazz } from "../testing/index.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
+import { createOpenTransactionId } from "../runtime/client.js";
+import type { ThinRuntime } from "../thin/thin-runtime.js";
+import type { ThinOp } from "../thin/wire.js";
+import { encodeCellsForRow, parseUuid } from "../runtime/native-runtime/native-runtime-adapter.js";
 import {
   openBrowserSessionCore as createJazzClient,
   type BrowserJazzSession,
@@ -129,4 +133,136 @@ it("runs the transaction of a client built against the app's previous schema", a
     "after the redeploy",
     "before",
   ]);
+}, 60_000);
+
+// An app that declares encryption: a task's title is sealed in its
+// project's space; notes are plain, and readable only by their author.
+const encryptedApp = testApp({
+  format: 1,
+  tables: {
+    projects: { columns: { name: "string", ownerId: "uuid" } },
+    tasks: {
+      columns: { projectId: "uuid", title: "bytes" },
+      relations: { project: { rel: "projects", column: "projectId" } },
+      encryption: { space: "projectId", scope: "projects", columns: { title: "string" } },
+    },
+    notes: { columns: { text: "string" } },
+  },
+});
+const encryptedPermissions = {
+  $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  tables: {
+    projects: {
+      read: "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)",
+      insert: "$createdBy.account = session.user",
+    },
+    tasks: { read: "true", insert: "true" },
+    notes: { read: "$createdBy = session.user", insert: "true" },
+  },
+} as never;
+
+it("runs a user's transaction on a plain table of an encrypted app, as them", async () => {
+  server = await startTestJazz({
+    app: encryptedApp,
+    permissions: encryptedPermissions,
+    coreOptions: { inMemory: true },
+  });
+  const session = await thinSession({
+    serverUrl: server.url,
+    bearer: async () => server!.bearer("alice"),
+  });
+  await session.loginWithBackend();
+  const db = session.getSnapshot().client!.db;
+  expect(isThinDb(db)).toBe(true);
+
+  const alice = session.getSnapshot().client!.session!.user!;
+
+  // The backend's client stages the write as alice, never as the backend
+  // itself: read back in the transaction, the row is hers.
+  const committed = await db.transaction(async (tx) => {
+    tx.insert(encryptedApp.notes, { text: "alice's plain note" });
+    return (await tx.all(encryptedApp.notes.select("text", "$createdBy"))).map((note) => [
+      note.text,
+      note.$createdBy.account,
+    ]);
+  });
+  expect(await committed.wait({ tier: "global" })).toEqual([["alice's plain note", alice]]);
+  // Readable only by its author: committed as alice.
+  expect((await db.all(encryptedApp.notes)).map((note) => note.text)).toEqual([
+    "alice's plain note",
+  ]);
+}, 60_000);
+
+it("runs a guest's transaction on a plain table of an encrypted app, as the guest", async () => {
+  server = await startTestJazz({
+    app: encryptedApp,
+    permissions: encryptedPermissions,
+    coreOptions: { inMemory: true },
+  });
+  // An app that encrypts columns serves device accounts founded for its own
+  // app id only.
+  const session = await thinSession({
+    scope: server.appId,
+    serverUrl: server.url,
+    initial: "device",
+  });
+  const client = session.getSnapshot().client!;
+  expect(isThinDb(client.db)).toBe(true);
+  const guest = client.session!.user!;
+
+  const committed = await client.db.transaction(async (tx) => {
+    tx.insert(encryptedApp.notes, { text: "the guest's plain note" });
+    return (await tx.all(encryptedApp.notes.select("text", "$createdBy"))).map((note) => [
+      note.text,
+      note.$createdBy.account,
+    ]);
+  });
+  expect(await committed.wait({ tier: "global" })).toEqual([["the guest's plain note", guest]]);
+}, 60_000);
+
+it("refuses a thin transaction's write of an encrypted column in the backend, which holds no keys", async () => {
+  server = await startTestJazz({
+    app: encryptedApp,
+    permissions: encryptedPermissions,
+    coreOptions: { inMemory: true },
+  });
+  const session = await thinSession({
+    serverUrl: server.url,
+    bearer: async () => server!.bearer("alice"),
+  });
+  await session.loginWithBackend();
+  const db = session.getSnapshot().client!.db;
+  expect(isThinDb(db)).toBe(true);
+
+  // Plaintext bytes in the sealed column, as a thin client without the
+  // client's guard would send them: the request is encoded raw
+  // (`encodeThinRequest`) and handed to the runtime's sender, past the guard
+  // that now refuses it first. The server must refuse it itself.
+  // (A first read binds the connection to the app's schema.)
+  expect(await db.all(encryptedApp.notes)).toEqual([]);
+  const runtime = db.currentRuntime() as ThinRuntime;
+  const raw = runtime as unknown as {
+    definition(table: string): never;
+    requestWith(op: ThinOp): { answer: Promise<unknown> };
+  };
+  const tx = runtime.beginTransaction("mergeable", createOpenTransactionId());
+  const sent = raw.requestWith({
+    type: "insert",
+    table: "tasks",
+    cells: encodeCellsForRow(
+      raw.definition("tasks"),
+      {
+        projectId: { type: "Uuid", value: crypto.randomUUID() },
+        title: { type: "Bytea", value: new TextEncoder().encode("PLAINTEXT") },
+      },
+      "tasks",
+    ),
+    options: { rowId: parseUuid(crypto.randomUUID()) },
+    transaction: tx,
+  } as ThinOp).answer;
+  await expect(sent.then(() => runtime.commitTransaction(tx))).rejects.toThrow(
+    /holds no encryption keys.*tasks\.title/,
+  );
+  // The refusal is the server's: it holds no row of the write.
+  expect(await server.jazz.db.all(encryptedApp.tasks)).toEqual([]);
 }, 60_000);
