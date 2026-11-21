@@ -243,7 +243,7 @@ schema, so the old list is `schemas.map((s) => s.hash)`. The sync protocol is un
 ```
 
 Only scripts that call this endpoint directly and read `hashes` are affected. `jazz-tools`
-(`fetchSchemaHashes()`, `deploy`, the inspector) reads `schemas`, from beta.0 and alpha.70 servers
+(`fetchSchemaHashes()` and the inspector) reads `schemas`, from beta.0 and alpha.70 servers
 alike.
 
 ### Removed: `jazz-tools upgrade`
