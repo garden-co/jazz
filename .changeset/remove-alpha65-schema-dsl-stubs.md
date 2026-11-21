@@ -2,7 +2,7 @@
 "jazz-tools": patch
 ---
 
-**Breaking:** the alpha.64 schema, permissions and migrations DSL names, kept since alpha.65 as stubs that threw `JAZZ_API_REMOVED`, are no longer exported. Importing one is now a bundler/TypeScript "not exported" error, and `jazz-tools/permissions` is no longer a package subpath. `npx jazz-tools upgrade` still converts an alpha.64 or alpha.65 app.
+**Breaking:** the alpha.64 schema, permissions and migrations DSL names, kept since alpha.65 as stubs that threw `JAZZ_API_REMOVED`, are no longer exported. Importing one is now a bundler/TypeScript "not exported" error, and `jazz-tools/permissions` is no longer a package subpath. To convert an alpha.64 or alpha.65 app, run `npx jazz-tools@2.0.0-alpha.70 upgrade` before moving to beta.0 (see [Upgrading from alpha.70 to beta.0](https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0)).
 
 | Removed                                                                                                                                   | Use instead                                                                                                                                             |
 | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |

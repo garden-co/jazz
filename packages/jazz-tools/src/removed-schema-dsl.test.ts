@@ -5,7 +5,8 @@ import * as root from "./index.js";
 
 // The alpha.64 schema/permissions/migrations DSL was removed in alpha.65 and
 // kept as throwing stubs until beta.0. Since beta.0 the names are not
-// exported at all; `npx jazz-tools upgrade` still converts alpha.64/65 apps.
+// exported at all. alpha.64/65 apps convert with the pinned
+// `npx jazz-tools@2.0.0-alpha.70 upgrade` before moving to beta.0.
 
 const ROOT_NAMES = [
   "defineApp",
