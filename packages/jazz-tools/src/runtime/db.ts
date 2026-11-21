@@ -428,7 +428,6 @@ const FORWARDED_TO_SUCCESSOR = [
   "updateCookieSession",
   "getAuthState",
   "getDeviceAccountProof",
-  "getLocalFirstIdentityProof",
   "onAuthChanged",
   "onMutationError",
   "textAnchors",
@@ -2905,11 +2904,6 @@ export class Db {
     const ttl = options?.ttlSeconds ?? 60;
     const audience = options?.audience ?? clientScope(this.config);
     return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
-  }
-
-  /** @deprecated Renamed to {@link getDeviceAccountProof}; this alias goes in a later release. */
-  getLocalFirstIdentityProof(options?: { ttlSeconds?: number; audience?: string }): string | null {
-    return this.getDeviceAccountProof(options);
   }
 
   /** @internal This Db's own runtime's auth state changes, which never move to a successor. */
