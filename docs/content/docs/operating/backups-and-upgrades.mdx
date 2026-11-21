@@ -79,6 +79,11 @@ can't talk to a newer backend.
 Back up before you upgrade. Releases don't migrate a data directory back to an older format, so
 rolling back means restoring the backup.
 
+From `2.0.0-beta.0` on, we try not to break the APIs, formats and backends that
+[Stability](/docs/stability) lists as stable. When a beta release must, it gets an "Upgrading from …"
+section below, and where feasible the old API keeps working for a deprecation period first.
+Experimental parts can change in any release.
+
 On Vercel, there's no supported way to back up or export a `vercel()` core's data yet
 ([jazz#5441](https://github.com/garden-co/jazz/issues/5441)). Upgrading keeps the data as long as
 `namespace` names the same core, and a different namespace opens a new, empty one. Keeping the old
@@ -86,6 +91,46 @@ deployment isn't a fallback: the core always runs the newest `jazz-tools` its Dr
 once the new deployment has woken it, promoting the old deployment again doesn't roll back its data.
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
+
+## Upgrading from alpha.70 to beta.0
+
+`2.0.0-beta.0` is the first beta of Jazz 2. From here on, [Stability](/docs/stability) says what we
+try not to break between betas. Data directories, Vercel and Durable Object cores, and the wire
+protocol are unchanged from alpha.70: upgrade by bumping every Jazz package to `2.0.0-beta.0` and
+redeploying, as usual. The only code changes are removals of APIs that earlier alphas deprecated.
+
+### Removed: `useSession()` (Svelte: `getSession()`)
+
+Deprecated since alpha.66, these hooks are no longer exported, so code that imports them fails to
+build. Read the signed-in user from the session instead:
+
+| Entry point                                                                               | Before                 | After                                                    |
+| ----------------------------------------------------------------------------------------- | ---------------------- | -------------------------------------------------------- |
+| `jazz-tools/react`, `jazz-tools/react-core`, `jazz-tools/react-native`, `jazz-tools/expo` | `useSession()`         | `useJazzSession().user`                                  |
+| `jazz-tools/vue`                                                                          | `useSession()`         | `useJazzSession().snapshot.value.user`                   |
+| `jazz-tools/solid`                                                                        | `useSession()`         | `useJazzSession().snapshot().user`                       |
+| `jazz-tools/svelte`                                                                       | `getSession().current` | `const session = getJazzSession()`, then `$session.user` |
+
+The fields change too, as in [alpha.66](#upgrading-from-alpha65):
+
+| Old session               | New user                   |
+| ------------------------- | -------------------------- |
+| `session.user`            | `user.accountId`           |
+| `session.identity`        | `user.identity`            |
+| `session.claims`          | `user.claims`              |
+| `authMode: "external"`    | `user?.kind === "backend"` |
+| `authMode: "local-first"` | `user?.kind === "device"`  |
+| `authMode: "anonymous"`   | `user === null`            |
+
+`grep -rnE "\b(useSession|getSession)\b" --include='*.ts' --include='*.tsx' --include='*.vue' --include='*.svelte' . --exclude-dir=node_modules`
+finds them. Then run your typecheck: it flags anything the search missed.
+
+### For an AI coding assistant
+
+Give it this section and a prompt such as: "Upgrade this app to jazz-tools 2.0.0-beta.0 following
+the 'Upgrading from alpha.70 to beta.0' section. Replace each removed API with the one it names,
+then run the typecheck and `npx jazz-tools generate`, and show me the diff." Review the diff before
+you deploy.
 
 ## Upgrading from alpha.68
 

@@ -122,7 +122,8 @@ All docs links are paths on https://jazz.tools. Append `.md` to any docs page fo
 full docs index is https://jazz.tools/llms.txt. To search the docs, fetch
 https://jazz.tools/api/search?q=<words>&format=md (add `&full=1` to include the top three pages).
 
-**This guide is for Jazz 2,** which is in alpha and leaves alpha soon. Install the current version
-with `npm install jazz-tools` (plus `jazz-rn` for React Native); it is a 2.0 alpha, and that's
-expected. Versions before 2.0 are Classic Jazz, a different API: don't pin `jazz-tools` to 0.x, and
+**This guide is for Jazz 2,** which is in beta. Install the current version with
+`npm install jazz-tools` (plus `jazz-rn` for React Native); it is a 2.0 beta, and that's expected.
+What stays stable between betas and what is experimental (the Rust, Swift, Kotlin and Go clients,
+and the backend in a Cloudflare Worker): /docs/stability. Versions before 2.0 are Classic Jazz, a different API: don't pin `jazz-tools` to 0.x, and
 don't follow Classic examples (`co.map`, `CoValue`, `Group`) from memory or the web.

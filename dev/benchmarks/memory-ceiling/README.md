@@ -9,7 +9,7 @@ says when a tenant's server is OOM-killed.
 # Measure the shipped release: install it once, outside the workspace, and
 # fetch its server binary, a GitHub release asset since alpha.60.
 mkdir -p /tmp/jazz-release && cd /tmp/jazz-release && echo '{"private":true}' > package.json
-npm install jazz-tools@alpha jazz-napi@alpha
+npm install jazz-tools jazz-napi
 version=$(node -p 'require("jazz-tools/package.json").version')
 gh release download "v$version" -R garden-co/jazz -p jazz-tools-linux-x64 -p SHA256SUMS
 grep jazz-tools-linux-x64 SHA256SUMS | sha256sum -c - && chmod +x jazz-tools-linux-x64

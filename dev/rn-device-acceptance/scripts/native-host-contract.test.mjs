@@ -18,8 +18,8 @@ const prose = (text) => text.replace(/[`*]/g, "").replace(/\s+/g, " ").trim();
 function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   assert.match(
     packageReadme,
-    /supported React Native alpha/,
-    "the package must describe the supported alpha client",
+    /supported React Native client/,
+    "the package must describe the supported client",
   );
   assert.match(
     packageReadme,
@@ -33,8 +33,8 @@ function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   );
   assert.match(
     installGuide,
-    /supported as an alpha.*jazz-tools\/react-native.*jazz-rn.*matching development or release build.*Expo Go is unsupported/i,
-    "the public install guide must retain the alpha native-build boundary",
+    /supported in the beta.*jazz-tools\/react-native.*jazz-rn.*matching development or release build.*Expo Go is unsupported/i,
+    "the public install guide must retain the native-build boundary",
   );
   assert.match(
     spec,
@@ -806,7 +806,7 @@ test("Expo config plugin describes the real iOS receipt boundary without claimin
   assert.doesNotMatch(plugin, /this workflow is source-only/);
 });
 
-test("RN packaging and public docs describe the proven alpha boundary semantically", () => {
+test("RN packaging and public docs describe the proven RN boundary semantically", () => {
   const packageReadme = prose(
     fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/README.md"), "utf8"),
   );

@@ -1,0 +1,56 @@
+---
+title: Stability
+description: "What Jazz 2's beta keeps stable between releases, what is still experimental, and how breaking changes are announced."
+---
+
+Jazz 2 is in **beta**, starting with `2.0.0-beta.0`. Beta means the core of Jazz is ready to build on:
+we try not to break the parts listed as stable below between beta releases. When we must, the
+release comes with a section in [Backups and upgrades](/docs/operating/backups-and-upgrades) that
+says what to change, and, where feasible, the old API keeps working for a deprecation period first.
+
+## Stable between betas
+
+- **The TypeScript client and backend APIs:** `jazz-tools` and its entry points
+  (`jazz-tools/backend`, `jazz-tools/client`, `jazz-tools/react` and the other framework bindings).
+- **The schema and permissions DSL:** what you write in `schema.ts`, and the migrations
+  `npx jazz-tools migrations create` writes.
+- **The storage format:** a data directory a beta release wrote opens in later beta releases.
+- **The wire protocol** between clients, backends and cores.
+- **Running your main backend** with `createJazz`, on [your own server](/docs/setup/deployment/own-server),
+  on [Vercel](/docs/setup/deployment/vercel) with `vercel()`, with its core [on another machine](/docs/setup/deployment/own-server#data-on-another-machine) through `remote()`,
+  or with the core in a [Cloudflare Durable Object](/docs/setup/deployment/cloudflare-durable-objects)
+  with `durableObjects()` (and large values in R2).
+
+## Experimental
+
+These may change in any release, without a deprecation period. Try them, and tell us what breaks.
+
+- **The Rust, Swift, Kotlin and Go clients.** See [Language Support](/docs/reference/language-support)
+  for what each one does and doesn't support yet.
+- **[Transformed columns](/docs/schemas/column-types#transformed-columns)** (`.transform()` and
+  their transforms in `jazz.computed.ts`), the one part of the schema DSL that is still experimental.
+- **Running your backend in a Cloudflare Worker** with `jazzBackend`
+  ([Run your backend in the Worker too](/docs/setup/deployment/cloudflare-durable-objects#run-your-backend-in-the-worker-too)).
+
+## Jazz Cloud
+
+[Jazz Cloud](/docs/setup/deployment/jazz-cloud) stays deprecated for new apps: use your own backend
+on [Vercel](/docs/setup/deployment/vercel) or [your own server](/docs/setup/deployment/own-server).
+Existing Jazz Cloud apps keep running, and we'll announce any change well ahead.
+
+## Breaking changes
+
+Every release's notes are in the [Changelog](/docs/changelog). A release that breaks a stable part:
+
+- says so in its release notes;
+- adds an "Upgrading from …" section to [Backups and upgrades](/docs/operating/backups-and-upgrades),
+  written so you or an AI coding assistant can make the changes in one pass;
+- where feasible, deprecates the old API in an earlier release, so it keeps working (and your
+  typecheck or the CLI tells you what to rename) before it is removed.
+
+Back up before you upgrade: releases don't migrate a data directory back to an older format.
+
+## Found something that breaks?
+
+Open an issue on [GitHub](https://github.com/garden-co/jazz/issues) with what you upgraded from and
+to, or ask on [Discord](https://discord.gg/RN9UKh52be).

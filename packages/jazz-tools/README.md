@@ -95,7 +95,7 @@ npx jazz-tools upgrade           # convert an alpha.64 app (schema.ts, permissio
 
 If your platform is not supported in the npm package, install with Cargo from source.
 
-## React Native alpha boundary
+## React Native boundary
 
 The `jazz-tools/react-native` entry point requires a matching installed
 `jazz-rn` native artifact. Persistent databases use native account admission
