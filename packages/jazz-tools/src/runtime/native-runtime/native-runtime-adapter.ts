@@ -6085,6 +6085,10 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   identity_mismatch: "write_rejected",
   // A skipped catalogue version, never a write's fate.
   schema_version_unsupported: "write_rejected",
+  // Refused when the call is made (the key or the space's root is missing),
+  // never a write's fate once it is accepted.
+  "key-pending": "write_rejected",
+  "space-pending": "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */
