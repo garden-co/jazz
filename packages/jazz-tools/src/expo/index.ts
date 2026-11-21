@@ -22,7 +22,7 @@ export {
 } from "../react-core/session.js";
 
 export { JazzProvider, type JazzProviderProps } from "./provider.js";
-export { useDb, useJazzClient, useSession } from "../react-native/provider.js";
+export { useDb, useJazzClient } from "../react-native/provider.js";
 export { useAll, useAllSuspense } from "../react-native/use-all.js";
 export { useOne, useOneSuspense } from "../react-native/use-one.js";
 export { useSyncStatus } from "../react-core/use-sync-status.js";

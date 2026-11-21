@@ -1,7 +1,7 @@
 export { CoState, AccountCoState, InviteListener, SyncConnectionStatus } from "../classic-api.js";
 export { default as JazzSvelteClientProvider } from "./JazzSvelteClientProvider.svelte";
 export type { JazzClient } from "./create-jazz-client.js";
-export { getDb, getSession, getJazzContext, type JazzContext } from "./context.svelte.js";
+export { getDb, getJazzContext, type JazzContext } from "./context.svelte.js";
 export { QuerySubscription, QuerySubscriptionOne } from "./query-subscription.svelte.js";
 export type { DurabilityTier, QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 export { generateAuthSecret } from "../runtime/auth-secret-store.js";
