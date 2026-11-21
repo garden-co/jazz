@@ -118,3 +118,7 @@ required-features = ["test"]
 [[test]]
 name = "admin_secret_credential"
 required-features = ["test"]
+
+[[test]]
+name = "encrypted_testing_server"
+required-features = ["test"]

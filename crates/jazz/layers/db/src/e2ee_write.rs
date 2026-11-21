@@ -17,6 +17,7 @@ use crate::options::{Error, ErrorCode};
 use crate::records::Value;
 use crate::tools::OpenTransactionId;
 use crate::values::{CachedRow, Sql};
+use jazz_protocol::protocol::PermissionAdviceAction;
 
 impl Db {
     /// Stage `op` in batch `id` sealed by the encryption hooks, as `kind`
@@ -447,5 +448,63 @@ impl Inner {
             return Some(Value::Uuid(row.0));
         }
         cells.get(&entry.space).cloned()
+    }
+}
+
+impl Db {
+    /// `action` as the authority will see the write it previews: an insert's
+    /// or update's cells sealed by the encryption hooks, as the write itself
+    /// seals them, so the dry run judges the cells the write would carry and
+    /// no encrypted column's plaintext leaves this device. Reads, deletes and
+    /// any action of a database without hooks pass through as they are.
+    ///
+    /// `None` when the advice cannot be judged from the one action: the
+    /// hooks refuse to seal it (no held key, a pending space, a keyless
+    /// backend writing an encrypted column), or sealing it would also stage
+    /// internal rows (a space's first root), which the write commits with it
+    /// and a single-action dry run leaves out.
+    pub(crate) fn sealed_advice(
+        &self,
+        action: PermissionAdviceAction,
+    ) -> Option<PermissionAdviceAction> {
+        let Some(hooks) = self.inner.borrow().e2ee.clone() else {
+            return Some(action);
+        };
+        let mut op = match action {
+            PermissionAdviceAction::Insert { table, cells } => StagedOp::Insert(
+                table,
+                cells,
+                InsertOptions {
+                    // The authority draws its own id for the candidate.
+                    row_id: Some(RowUuid::from_bytes(*uuid::Uuid::new_v4().as_bytes())),
+                    ..InsertOptions::default()
+                },
+            ),
+            PermissionAdviceAction::Update { table, row, patch } => {
+                StagedOp::Update(table, row, patch, UpdateOptions::default())
+            }
+            other => return Some(other),
+        };
+        let companions = self.inner.borrow().seal_op(&mut op, None, None).ok()?;
+        if !companions.is_empty() {
+            let rows: Vec<(String, RowUuid)> = companions
+                .iter()
+                .filter_map(|companion| match companion {
+                    StagedOp::Insert(table, _, opts) => opts.row_id.map(|row| (table.clone(), row)),
+                    _ => None,
+                })
+                .collect();
+            hooks.companions_dropped(&rows);
+            return None;
+        }
+        match op {
+            StagedOp::Insert(table, cells, _) => {
+                Some(PermissionAdviceAction::Insert { table, cells })
+            }
+            StagedOp::Update(table, row, patch, _) => {
+                Some(PermissionAdviceAction::Update { table, row, patch })
+            }
+            _ => unreachable!("only inserts and updates are sealed"),
+        }
     }
 }

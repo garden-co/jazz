@@ -10327,19 +10327,31 @@ impl Db {
     /// backend acts for, with its claims); wait with
     /// [`Db::permission_advice`]. Without a connected upstream the answer
     /// is `Unknown`: a replica's own policy evidence may be incomplete, so
-    /// it never decides locally.
+    /// it never decides locally. An insert or update goes up with its cells
+    /// sealed, as the write would carry them; one that cannot be sealed on
+    /// its own is `Unknown` too (see [`Db::sealed_advice`]).
     pub fn request_permission_advice(
         &self,
         action: PermissionAdviceAction,
         session: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     ) -> u64 {
+        if self.inner.borrow().client.is_none() {
+            return 0;
+        }
+        #[cfg(feature = "e2ee-client")]
+        let action = self.sealed_advice(action);
+        #[cfg(not(feature = "e2ee-client"))]
+        let action = Some(action);
         let mut inner = self.inner.borrow_mut();
         let Some(client) = inner.client.as_mut() else {
             return 0;
         };
         let id = client.next_advice;
         client.next_advice += 1;
-        if client.transport.is_some() && may_wait(client.hint.get()) {
+        if let Some(action) = action
+            && client.transport.is_some()
+            && may_wait(client.hint.get())
+        {
             client.advice.insert(id, None);
             let acting = match session {
                 Some((author, claims)) => Acting::Session {
