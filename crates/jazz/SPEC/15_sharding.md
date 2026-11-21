@@ -27,7 +27,7 @@ Invariant digest:
 - `INV-SHARD-22`: A hold MUST keep its part's data until the part lands or is released, so the shard can land the part without its gateway (§15.3).
 - `INV-SHARD-23`: A cross-shard commit MUST be decided once, on its decider: committed when the decider's part lands, aborted when an abort records the part refused first. Either MUST stand as the part's recorded fate, which a resend of the part, a later hold of it and every later resolution answer, however late (§15.3).
 - `INV-SHARD-24`: A queued hold MUST be as durable as a standing one: a reopened shard MUST still hold it queued, with its part's data, in the order asked, and grant it once its rows are free (§15.3).
-- `INV-SHARD-25`: A part MUST be checked when it is held (and a queued one when it is granted), as its writer's session would commit it, with nothing written; once held, it MUST land as checked, so its fix is never refused (§15.3).
+- `INV-SHARD-25`: A part MUST be checked when it is held (and a queued one when it is granted), as its writer's session would commit it, with nothing written; once held, nothing else writes its rows, so it lands as checked (§15.3). Known limit: rows its policies only read are not held, so a change to one between the check and the fix can still refuse the part; not supported yet.
 - `INV-SHARD-26`: A held part MUST take the position its commit is fixed at whenever that is within twice `HLC_MAX_OFFSET_MS` of the shard's clock, and nothing the shard numbers later lands at or below it; a fixed position further ahead MUST be refused (§15.3).
 - `INV-SHARD-27`: A held part MUST land only at the position fixed for its commit: until it is fixed or released its commit waits, and it MUST NOT be numbered on its own (§15.3).
 - `INV-SHARD-21`: A reopened shard MUST wait out its clock plus `HLC_MAX_OFFSET_MS` at reopen before numbering its sessions' commits (a fixed part's and a resend's aside), so it never numbers at or below a position it served or observed before it stopped (§15.3).
@@ -152,8 +152,10 @@ the shard ownership above are outside this repository and stay exploratory
   is granted, over what the part it waited for wrote (`INV-SHARD-25`). A
   part refused there is never held, so its commit is refused before it is
   decided. Once held, nothing else writes its rows, and the part lands as
-  checked, over the shard's own trusted link, attributed to its writer:
-  its fix is never refused.
+  checked, over the shard's own trusted link, attributed to its writer.
+  Not supported yet: holding the rows the part's policies only read (a
+  membership, say). A change to one of those between the check and the
+  fix can still refuse the part after its commit was decided.
 - **Parts and decisions.** A hold keeps its part's data (`part`,
   `INV-SHARD-22`), so a shard lands its part without its gateway once it
   learns the decision. One participant of a cross-shard commit decides it

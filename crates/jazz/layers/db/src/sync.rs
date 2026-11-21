@@ -16102,6 +16102,24 @@ impl Db {
                     Vec::new(),
                 ));
             }
+            // Every other writer of a held part's rows waited while its hold
+            // stood (INV-SHARD-19), so none of them is newer than its fixed
+            // position. Checked in debug builds.
+            #[cfg(debug_assertions)]
+            if let Some(at) = fixed {
+                for op in &ops {
+                    let Some(row) = op.row() else { continue };
+                    let newest = inner
+                        .schema
+                        .stored_table(op.table())
+                        .and_then(|table| inner.newest_seq(table, row))
+                        .map_err(|e| (e, Vec::new()))?;
+                    debug_assert!(
+                        newest.is_none_or(|newest| newest.seq <= at),
+                        "a row of a fixed cross-shard part was written above its position (INV-SHARD-19)"
+                    );
+                }
+            }
             let seq = fixed.unwrap_or_else(|| inner.next_seq());
             let prior = inner.seq;
             // A relay holds the session's commit at its clock as bounded
