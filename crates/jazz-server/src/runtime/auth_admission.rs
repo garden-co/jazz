@@ -310,9 +310,6 @@ pub fn admit_bearer_jwt(
 
 /// Issuer required for device-account admission tokens.
 pub const DEVICE_ACCOUNT_JWT_ISSUER: &str = AuthorSubject::DEVICE_ACCOUNT_ISSUER;
-/// Deprecated alias of [`DEVICE_ACCOUNT_JWT_ISSUER`].
-#[deprecated(note = "renamed to DEVICE_ACCOUNT_JWT_ISSUER")]
-pub const LOCAL_FIRST_JWT_ISSUER: &str = DEVICE_ACCOUNT_JWT_ISSUER;
 /// Reserved issuer for subjects admitted by the process-local static bearer gate.
 pub const STATIC_BEARER_ISSUER: &str = AuthorSubject::STATIC_BEARER_ISSUER;
 /// Reserved issuer for sessions admitted without an external credential.
@@ -384,15 +381,6 @@ pub fn admit_device_account_jwt(
         provider_claims,
         source: AdmissionSource::DeviceAccountJwt,
     })
-}
-
-/// Deprecated alias of [`admit_device_account_jwt`].
-#[deprecated(note = "renamed to admit_device_account_jwt")]
-pub fn admit_local_first_jwt(
-    config: &AuthAdmissionConfig,
-    bearer: Option<&str>,
-) -> Result<AdmittedSession, AuthAdmissionError> {
-    admit_device_account_jwt(config, bearer)
 }
 
 pub use crate::portable::session::admitted_session_claims;
