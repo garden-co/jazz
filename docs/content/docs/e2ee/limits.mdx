@@ -29,6 +29,32 @@ languageTabs: backend
   history (for example, it never read a space naming that account after the removal) is not
   protected, and other devices' floors do not protect it. These floors are per device and per
   account; they are kept next to the held keys and wiped with them.
+- **Encrypted columns need the local-first client in the browser.** The thin client holds no keys.
+  With a `client` loader, operations on encrypted columns wait up to 30 seconds for the local-first
+  client; without one they fail with `EncryptionNeedsLocalFirstError`. Writes that wait are kept in
+  memory and lost if the page closes first, and writes made after a waiting one (plain ones too) run
+  after it, so one delayed write delays the rest, and a plain read made behind a streaming write that
+  waits can wait up to 30 seconds too. A transaction callback may run twice before the
+  client has loaded; a transaction you open with `beginTransaction()` is not held behind a waiting
+  callback transaction, so begin it again after the load. A callback transaction refused only at
+  commit also holds later writes until its rerun starts. A live query on a client that never loads stays loading after its warning, until a failed load, a sign-out or a close ends it. On a thin `Db`, `db.encryption` waits the same way (`keys.*` included, and `ready({ timeoutMs })` waits at most 30 seconds), and `recovery.create()` cannot wait and throws. A sign-out ends waiting calls with `DbClosedError`; a call made afterwards gets `DbReplacedError`. See
+  [Encryption in the browser](/docs/e2ee/browser#before-the-local-first-client-has-loaded).
 - **No default store.** The app supplies the private store and its protection.
-- **Node first.** This is the Node client (`createJazzClient` from `jazz-tools/backend`). The browser and
-  native clients follow.
+- **Node and the browser.** These are the Node client (`createJazzClient` from `jazz-tools/backend`) and
+  the web client (`createJazzClient` from `jazz-tools/client`, also the client for Deno, Bun and
+  command-line apps with a bearer). The native clients follow.
+- **A script on your page can use the device's keys.** The browser keeps the device's keys protected by a
+  key that scripts can use but never read out, and each tab holds the space keys it uses in memory. Any
+  script that runs on your page's origin (an injected one, for example through a cross-site scripting
+  hole; a worker does not change this) can ask the browser to unprotect the device's stored keys and read
+  the space keys from the tab's memory. It can then read what the device is given later, and act as the
+  device (including approving another device), until the device is **removed**. Rotating a space does not
+  stop it. It cannot reach other devices' keys, and it loses access when the device is removed, except through a
+  device it approved while it had access: that device keeps access until it is removed too. After a
+  suspected injection, check the account's device list from a trusted device and remove the affected
+  device and any device you do not recognise (each removal rotates the account);
+  keep your page free of untrusted scripts as you would for anything else sensitive.
+- **A sign-out keeps the device's keys unless you pass `clearOnSignOut`.** Until they are wiped, a later
+  user of the same browser profile or a script on your origin can use them as above. With
+  `clearOnSignOut: true` (and the default persistent storage) a sign-out wipes them with the account's
+  local data; see [Signing out](/docs/e2ee/browser#signing-out).

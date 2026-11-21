@@ -30,12 +30,21 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
 
+/// The hooks a worker's database opens with: keyless ones, for an app that
+/// declares encryption.
+#[cfg(all(target_arch = "wasm32", feature = "e2ee-client"))]
+type BrowserHooks = Rc<dyn jazz::e2ee::E2eeHooks>;
+#[cfg(all(target_arch = "wasm32", not(feature = "e2ee-client")))]
+type BrowserHooks = std::convert::Infallible;
+
 #[cfg(target_arch = "wasm32")]
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
 #[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
 mod durable_object;
+#[cfg(feature = "e2ee-client")]
+mod encryption;
 #[cfg(target_arch = "wasm32")]
 mod idb_vfs;
 mod identity;
@@ -412,6 +421,9 @@ fn not_supported(what: &str) -> JsValue {
 #[derive(Default)]
 struct Host {
     tick_scheduler: RefCell<Option<js_sys::Function>>,
+    /// The end-to-end encryption runtime, when the app declares encryption.
+    #[cfg(feature = "e2ee-client")]
+    encryption: RefCell<Option<Rc<jazz_e2ee_client::host::runtime::Encryption>>>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<js_sys::Function>>,
     #[cfg(target_arch = "wasm32")]
@@ -747,19 +759,34 @@ impl WasmUpstreamLink {
 
 type WasmReadFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, JsValue>> + 'static>>;
 
+/// A read waiting for the server, driven by the adapter after its peer
+/// transport makes progress.
+///
+/// A one-shot read that left rows out because the encryption runtime could
+/// not open them comes back as one of these even when it is done at once:
+/// `unreadable()` names those rows, as napi's `PendingNativeRead` does.
 #[wasm_bindgen(js_name = PendingNativeRead)]
 pub struct WasmPendingNativeRead {
     future: Rc<RefCell<Option<WasmReadFuture>>>,
+    /// The answer of a read that was done when it was returned.
+    done: RefCell<Option<Vec<u8>>>,
+    /// The rows the read left out, as JSON, once it is done.
+    unreadable: Rc<RefCell<Option<String>>>,
 }
 
 impl WasmPendingNativeRead {
     fn new(future: WasmReadFuture) -> Self {
         Self {
             future: Rc::new(RefCell::new(Some(future))),
+            done: RefCell::default(),
+            unreadable: Rc::default(),
         }
     }
 
     fn poll_once(&self) -> Result<Option<Vec<u8>>, JsValue> {
+        if let Some(bytes) = self.done.borrow_mut().take() {
+            return Ok(Some(bytes));
+        }
         let Some(mut future) = self.future.borrow_mut().take() else {
             return Err(JsValue::from_str("native pending read is already complete"));
         };
@@ -785,6 +812,14 @@ impl WasmPendingNativeRead {
 
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
+        self.done.borrow_mut().take();
+    }
+
+    /// Once the read is done: the rows it left out because they could not
+    /// be opened, as a JSON array of `{ table, id, column, code }`; `null`
+    /// when it left none out.
+    pub fn unreadable(&self) -> Option<String> {
+        self.unreadable.borrow().clone()
     }
 }
 
@@ -1285,8 +1320,12 @@ impl WasmDb {
         Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
     }
 
-    fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {
-        initialize_wasm_tracing();
+    /// The configuration, identity and trust of an open.
+    fn prepare_open(
+        schema: &[u8],
+        config: &[u8],
+        how: OpenAs<'_>,
+    ) -> Result<(jazz::db::DbConfig, jazz::db::DbIdentity, bool), JsValue> {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
@@ -1295,6 +1334,12 @@ impl WasmDb {
             config.migrations.as_deref(),
         )
         .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        Ok((db_config, identity, trusted))
+    }
+
+    fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
+        let (db_config, identity, trusted) = Self::prepare_open(schema, config, how)?;
         let db = block_on(binding_host::open_memory(db_config)).map_err(to_js_error)?;
         Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
     }
@@ -1346,7 +1391,39 @@ impl WasmDb {
         config: Vec<u8>,
         database: String,
     ) -> Result<WasmDb, JsValue> {
-        Self::open_browser_as(storage, schema, config, database, OpenAs::Untrusted).await
+        Self::open_browser_as(storage, schema, config, database, OpenAs::Untrusted, None).await
+    }
+
+    /// Open the durable store a browser worker owns for an app that declares
+    /// encryption. The worker holds and relays sealed rows and no keys: it
+    /// opens with keyless hooks built from the app's compiled bindings
+    /// (`bindings`, JSON of `{ schema, relations }`), and the tabs, which
+    /// hold the keys, sync with it.
+    // Flat arguments: the wasm-bindgen ABI, as the neighbouring opens.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(all(target_arch = "wasm32", feature = "e2ee-client"))]
+    #[wasm_bindgen(js_name = openBrowserKeyless)]
+    pub async fn open_browser_keyless(
+        storage: JsValue,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        database: String,
+        bindings: String,
+        app_id: String,
+        environment: String,
+        token: Option<String>,
+        claimed_author: Option<String>,
+    ) -> Result<WasmDb, JsValue> {
+        let hooks = encryption::keyless_hooks(&bindings, &app_id, &environment)?;
+        let how = match (&token, &claimed_author) {
+            (Some(token), Some(claimed_author)) => OpenAs::SelfSigned {
+                token,
+                app_id: &app_id,
+                claimed_author,
+            },
+            _ => OpenAs::Untrusted,
+        };
+        Self::open_browser_as(storage, schema, config, database, how, Some(hooks)).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1365,7 +1442,7 @@ impl WasmDb {
             app_id: &app_id,
             claimed_author: &claimed_author,
         };
-        Self::open_browser_as(storage, schema, config, database, how).await
+        Self::open_browser_as(storage, schema, config, database, how, None).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1375,6 +1452,7 @@ impl WasmDb {
         config: Vec<u8>,
         database: String,
         how: OpenAs<'_>,
+        keyless: Option<BrowserHooks>,
     ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         let (schema, mut config) =
@@ -1389,6 +1467,13 @@ impl WasmDb {
             config.migrations.as_deref(),
         )
         .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        #[cfg(feature = "e2ee-client")]
+        let db_config = match keyless {
+            Some(hooks) => db_config.with_e2ee(hooks),
+            None => db_config,
+        };
+        #[cfg(not(feature = "e2ee-client"))]
+        let _ = keyless;
         let (db, store) = browser::open(&spec, db_config).await?;
         // Commits reach IndexedDB only after they return.
         db.defer_durability_acks();
@@ -1529,7 +1614,7 @@ impl WasmDb {
     ) -> Result<JsValue, JsValue> {
         let read = self
             .binding()?
-            .all(
+            .all_reporting(
                 query,
                 &options(opts),
                 open_transaction_id.as_deref(),
@@ -1537,7 +1622,7 @@ impl WasmDb {
                 json(claims)?,
             )
             .map_err(host_error)?;
-        wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
+        wasm_reporting_read_or_pending(read)
     }
 
     /// Bind correlation claims to this already-open client's own identity.
@@ -2139,6 +2224,35 @@ fn wasm_read_or_pending(future: WasmReadFuture) -> Result<JsValue, JsValue> {
     let pending = WasmPendingNativeRead::new(future);
     match pending.poll_once()? {
         Some(bytes) => bytes_to_js(bytes),
+        None => Ok(pending.into()),
+    }
+}
+
+/// [`wasm_read_or_pending`] for a read that reports the rows it left out:
+/// such a read is answered as a [`WasmPendingNativeRead`] even when done at
+/// once, so the rows reach JS with it.
+fn wasm_reporting_read_or_pending(
+    future: binding_host::HostFuture<(Vec<u8>, Vec<jazz::db::UnreadableRow>)>,
+) -> Result<JsValue, JsValue> {
+    let unreadable = Rc::<RefCell<Option<String>>>::default();
+    let slot = Rc::clone(&unreadable);
+    let future: WasmReadFuture = Box::pin(async move {
+        let (bytes, rows) = future.await.map_err(host_error)?;
+        if !rows.is_empty() {
+            *slot.borrow_mut() = Some(binding_host::unreadable_json(&rows));
+        }
+        Ok(bytes)
+    });
+    let pending = WasmPendingNativeRead {
+        unreadable,
+        ..WasmPendingNativeRead::new(future)
+    };
+    match pending.poll_once()? {
+        Some(bytes) if pending.unreadable.borrow().is_none() => bytes_to_js(bytes),
+        Some(bytes) => {
+            *pending.done.borrow_mut() = Some(bytes);
+            Ok(pending.into())
+        }
         None => Ok(pending.into()),
     }
 }

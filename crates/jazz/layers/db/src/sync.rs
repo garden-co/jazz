@@ -10289,6 +10289,16 @@ impl Db {
         })
     }
 
+    /// Whether requests or commits wait for the next send: a read asked from
+    /// a continuation, after an earlier answer, or a commit staged by a
+    /// caller that did not ask the host to tick. A host that ticks when asked
+    /// should tick.
+    pub fn owes_requests_sent(&self) -> bool {
+        self.inner.borrow().client.as_ref().is_some_and(|client| {
+            client.transport.is_some() && (!client.outbox.is_empty() || !client.unsent.is_empty())
+        })
+    }
+
     /// Whether a read recorded chunk requests that only the next send
     /// carries upstream: a host that ticks when asked should tick.
     pub fn owes_chunk_requests(&self) -> bool {

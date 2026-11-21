@@ -15,7 +15,10 @@ import { boundApp } from "../typed-app.js";
 
 export type PlainEntries = Record<
   string,
-  { columns: Record<string, { type: { columnType: ColumnType; nullable: boolean } }> }
+  {
+    columns: Record<string, { type: { columnType: ColumnType; nullable: boolean } }>;
+    equality?: readonly string[];
+  }
 >;
 
 /** Per stored schema: per declarations (or {@link DERIVED}), per keyless. */
@@ -54,10 +57,11 @@ export function plainSchema(
   for (const [table, entry] of Object.entries(entries)) {
     const stored = schema[table];
     if (!stored) continue;
+    const equalityTokens = new Set(entry.equality?.map((name) => `__e2ee_eq_${name}`));
     plain[table] = {
       ...stored,
       columns: stored.columns
-        .filter((column) => !column.name.startsWith("__e2ee_eq_"))
+        .filter((column) => !equalityTokens.has(column.name))
         .map((column) => {
           const declaredColumn = entry.columns[column.name];
           return declaredColumn

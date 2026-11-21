@@ -45,6 +45,11 @@ import {
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
 import { randomNodeUuidBytes } from "./runtime-entropy.js";
+import { buildBrowserEncryption } from "../encryption/browser-host.js";
+import { declaresEncryption, compiledBindings } from "../encryption/build.js";
+import { resolveSchemaSource } from "../schema-source.js";
+import { declaredEntries } from "../encryption/plain-schema.js";
+import { Encryption } from "../encryption/index.js";
 import { accountConfigBearer } from "../accounts/config-capability.js";
 import { bearerWebSocket } from "./credentialed-transport.js";
 import type { WebSocketConstructor } from "./native-runtime/websocket.js";
@@ -166,8 +171,50 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     return this.module;
   }
 
+  /** The end-to-end encryption runtime built for this tab's account, for an app that declares encryption. */
+  private encryption:
+    | {
+        runtime: unknown;
+        store: import("../encryption/private-store.js").PrivateStore;
+        accountSecret?: () => string | undefined;
+        app: import("../schema-source.js").SchemaSourceInput;
+      }
+    | undefined;
+
   override async load(config: DbConfig): Promise<void> {
     this.module ??= await loadWasmModule(config.runtimeSources);
+    if (config.encryption && !this.encryption) {
+      if (!config.accountId) {
+        throw new Error("End-to-end encryption needs an account: sign in before opening the app");
+      }
+      const host = (this.module as unknown as { EncryptionRuntime?: never }).EncryptionRuntime;
+      if (!declaresEncryption(config.encryption.app)) return;
+      if (!host) {
+        throw new Error(
+          "The WASM runtime does not support encrypted apps; rebuild the matching Jazz WASM artifact",
+        );
+      }
+      const secret = config.encryption.accountSecret?.();
+      const built = await buildBrowserEncryption({
+        host,
+        config: config.encryption,
+        appId: clientScope(config),
+        environment: config.env ?? "dev",
+        accountId: config.accountId,
+        deviceAccountSecret: secret,
+      });
+      if (built) {
+        this.encryption = {
+          ...built,
+          accountSecret: config.encryption.accountSecret,
+          app: config.encryption.app,
+        };
+      }
+    }
+  }
+
+  override encryptionHandle(): Encryption | undefined {
+    return this.ownerRuntime?.encryptionHandle();
   }
 
   override admitConfig(config: DbConfig): void {
@@ -357,6 +404,15 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         sessionClaims: sessionFromConfig(config)?.claims ?? {},
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
+        // The worker holds and relays sealed rows and no keys: the tabs hold them.
+        ...(this.encryption
+          ? {
+              keyless: {
+                bindings: compiledBindings(this.encryption.app),
+                environment: config.env ?? "dev",
+              },
+            }
+          : {}),
       },
       createBrowserWorkerFingerprint(config, dbName, getRuntimeSchemaCacheKey(schema)),
       {
@@ -417,6 +473,18 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     subscriptionBacklogRows?: number,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
+      const encryption = this.encryption;
+      // The encryption runtime is built in `load` (it waits on the private
+      // store) and given to the first owner runtime, which owns it from then
+      // on. A runtime opened here after that one closed would have none, and
+      // building another cannot happen in this synchronous path: say so,
+      // rather than fail later with the wasm runtime's "not ready". Each
+      // `createDb` has its own source, so a new client is the way back.
+      if (this.ownerRuntime && encryption) {
+        throw new Error(
+          "This database's runtime closed, and its encryption runtime with it: open a new client to use an encrypted app again",
+        );
+      }
       this.ownerRuntime = new NativeRuntimeAdapter(
         this.wasmModule.WasmDb,
         schema,
@@ -432,6 +500,17 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           subscriptionBacklogRows,
           migrations,
           webSocket,
+          ...(encryption
+            ? {
+                encryption: {
+                  runtime: encryption.runtime,
+                  store: encryption.store,
+                  createHandle: (native) =>
+                    new Encryption(native, { accountSecret: encryption.accountSecret }),
+                },
+                plainEntries: declaredEntries(resolveSchemaSource(encryption.app)),
+              }
+            : {}),
         },
       );
       return this.ownerRuntime;

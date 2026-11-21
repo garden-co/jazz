@@ -23,6 +23,7 @@ import {
   handOffThinWrites,
 } from "../thin/index.js";
 import {
+  isThinDb,
   setLocalFirstUpgrader,
   type LocalFirstLoader,
   type LocalFirstModule,
@@ -44,7 +45,7 @@ import {
   ownJazzSession,
   type JazzSession,
 } from "./jazz-session.js";
-import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
+import { clientScope, DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
 import {
   backendAnswered,
@@ -117,8 +118,9 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
     /**
      * On sign-out (or a switch to another user), wipe the account's local
-     * storage instead of keeping it for that user's next sign-in. For shared
-     * devices. Jazz first waits up to 5 seconds for pending writes to upload;
+     * storage instead of keeping it for that user's next sign-in, and, in an
+     * app with end-to-end encryption, its keys in the private store. For
+     * shared devices. Jazz first waits up to 5 seconds for pending writes to upload;
      * writes still unsynced then are lost. A sign-out the page doesn't see
      * (on your server, or another user signing in, before a reload) is
      * wiped on the next page load, once your backend names someone else or
@@ -133,6 +135,13 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      * upgrades to local-first in the background once the page has loaded; a
      * browser that upgraded this account before opens local-first straight
      * away, so it works offline.
+     *
+     * The thin client holds no keys. In an app with end-to-end encryption,
+     * an operation that touches an encrypted column waits (up to 30 seconds)
+     * for the local-first client and starts loading it; without this loader
+     * it fails with `EncryptionNeedsLocalFirstError`. A transaction callback
+     * that touches one may run twice before the local-first client has
+     * loaded, so keep its side effects outside it.
      */
     client?: LocalFirstLoader;
     /**
@@ -142,7 +151,7 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      *   The first paint needs no WASM.
      * - `"now"`: open the local-first client straight away, for every
      *   account. For apps that must work offline from the first render, or
-     *   that use `db.transaction`, which only the local-first client has.
+     *   that need encrypted columns from the first operation.
      *   If the local-first client can't load, the session fails (`retry()`
      *   tries again) rather than running thin.
      *
@@ -178,6 +187,7 @@ const BROWSER_SESSION_OPTIONS = {
   store: true,
   fetch: true,
   bearer: true,
+  encryption: true,
 } as const satisfies Record<Exclude<keyof JazzClientConfig, "appId" | "backendSecret">, true>;
 
 /** @internal A browser session's core, which follows your auth's signed-in user. */
@@ -190,6 +200,9 @@ export type BrowserJazzSession = UserFollowingSession<JazzClient>;
  */
 function refuseUnkeptOptions(clientConfig: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(clientConfig)) {
+    // The encryption option carries the app's own store: a live handle the
+    // client uses and does not keep as configuration.
+    if (key === "encryption") continue;
     let kept = value;
     if (key === "runtimeSources" && value && typeof value === "object") {
       // Live handles the Db leaves out of its config.
@@ -285,11 +298,24 @@ export async function openBrowserSessionCore(
     const deleteLocalFirstStore =
       (await loadLocalFirst!()).deleteLocalFirstStore ??
       (await import("../runtime/delete-local-first-store.js")).deleteLocalFirstStore;
-    return deleteLocalFirstStore({
+    const outcome = await deleteLocalFirstStore({
       ...clientConfig,
       accountId: account,
       accountRegistryAuthority: registry,
     });
+    // The account's encryption keys go with its data: on a shared device the
+    // next user, or any script on the origin, could otherwise still use them.
+    // Only once the store is gone: a tab that still holds it keeps its keys.
+    if (outcome === "deleted" && clientConfig.encryption) {
+      const { wipeEncryptionKeys } = await import("../encryption/wipe-keys.js");
+      await wipeEncryptionKeys({
+        store: clientConfig.encryption.store,
+        appId: clientScope(clientConfig),
+        environment: clientConfig.env ?? "dev",
+        accountId: account,
+      });
+    }
+    return outcome;
   };
   // The lifecycle of this device's per-account stores (see `replicaLifecycle`).
   const replicas = wipesOnSignOut && loadLocalFirst ? openReplicaLifecycle() : undefined;
@@ -417,12 +443,21 @@ export async function openBrowserSessionCore(
       createThinDb,
     );
     let pending: Promise<void> | undefined;
-    setLocalFirstUpgrader(thin.db, (loader) => {
-      pending ??= upgrade(loader).finally(() => {
-        pending = undefined;
-      });
-      return pending;
-    });
+    // With the app's loader, an operation on an encrypted column waits for
+    // the upgrade, and starts it if it hasn't started.
+    setLocalFirstUpgrader(
+      thin.db,
+      (loader) => {
+        // Already handed over: a late call (a refusal's deferred start, or a
+        // wait that began before the hand-over) has nothing left to upgrade.
+        if (!isThinDb(thin.db)) return Promise.resolve();
+        pending ??= upgrade(loader).finally(() => {
+          pending = undefined;
+        });
+        return pending;
+      },
+      loadLocalFirst,
+    );
     return upgradableClient(thin);
   };
 

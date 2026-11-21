@@ -387,6 +387,35 @@ describe("browser session", () => {
     expect(await kept.all(app.notes, { tier: "remote" })).toEqual([]);
   }, 60_000);
 
+  // Only an app that declares encryption follows the commit of a callback
+  // transaction made behind a queued write (one there may yet wait for the
+  // local-first client). A plain app's resolves once its callback has run.
+  it("resolves a plain app's callback transaction made behind a stream in flight at once", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const stream = gatedStream();
+    const streaming = kept.insertStreaming(app.notes, { text: stream.chunks() });
+    await expect.poll(() => stream.firstPartSent).toBe(true);
+
+    let resolved = false;
+    const result = kept
+      .transaction((tx) => {
+        tx.insert(app.notes, { text: "in a transaction" });
+      })
+      .then((written) => {
+        resolved = true;
+        return written;
+      });
+    await expect.poll(() => resolved, { timeout: 5_000 }).toBe(true);
+    stream.release();
+
+    await (await streaming).wait({ tier: "global" });
+    await (await result).wait({ tier: "global" });
+    const texts = (await kept.all(app.notes, { tier: "remote" })).map((row) => row.text);
+    expect(texts).toContain("in a transaction");
+  }, 60_000);
+
   it("doesn't hold a waiting shutdown of a thin client that never upgraded for a stream in flight", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());

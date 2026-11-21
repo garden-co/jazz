@@ -8,6 +8,7 @@ import {
   servePrivateStore,
   type PrivateStore,
 } from "../encryption/index.js";
+import { encryptionStoreScope } from "../encryption/store-scope.js";
 import { RecoveryPhrase } from "../local-first-auth/recovery-phrase.js";
 import { testApp } from "../testing/test-app.js";
 import { openConfig } from "./native-runtime/native-codec.js";
@@ -82,7 +83,11 @@ describe("encryption on the Node binding", () => {
     const first = await openEncrypted(store, "device-a");
     const id = await first.encryption.deviceId();
     expect(typeof id).toBe("string");
-    expect(JSON.parse(first.db.encryptionState())).toEqual({ status: null, error: null });
+    expect(JSON.parse(first.db.encryptionState())).toEqual({
+      status: null,
+      error: null,
+      stage: expect.any(String),
+    });
     expect(first.db.takeEncryptionReports()).toEqual([]);
     await first.close();
     // The device's keys went through the store's protection and its documents.
@@ -90,6 +95,14 @@ describe("encryption on the Node binding", () => {
     const again = await openEncrypted(store, "device-a");
     expect(await again.encryption.deviceId()).toBe(id);
     await again.close();
+    // The scope the runtime keeps the device in is the one a sign-out wipes
+    // (`encryptionStoreScope`): wiping it makes the next open a new device.
+    const scope = encryptionStoreScope("napi-encryption-test", "test", testAccountId("device-a"));
+    expect(await store.list(scope)).toContain("device");
+    await store.delete(scope);
+    const wiped = await openEncrypted(store, "device-a");
+    expect(await wiped.encryption.deviceId()).not.toBe(id);
+    await wiped.close();
     // Another store is another device.
     const elsewhere = await openEncrypted(memoryPrivateStore(), "device-a");
     expect(await elsewhere.encryption.deviceId()).not.toBe(id);

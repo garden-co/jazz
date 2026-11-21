@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => {
   const acquireBrowserPhysicalDatabaseEpoch = vi.fn();
   const openBrowser = vi.fn();
   const openBrowserWithSelfSignedProof = vi.fn();
+  const openBrowserKeyless = vi.fn();
   const fromDb = vi.fn();
   const encodeSchema = vi.fn(() => new Uint8Array());
   const openConfig = vi.fn((_node: Uint8Array, ..._rest: unknown[]) => new Uint8Array());
@@ -62,6 +63,7 @@ const mocks = vi.hoisted(() => {
     WasmDb: {
       openBrowser,
       openBrowserWithSelfSignedProof,
+      openBrowserKeyless,
     },
   };
 
@@ -72,6 +74,7 @@ const mocks = vi.hoisted(() => {
     acquireBrowserPhysicalDatabaseEpoch,
     openBrowser,
     openBrowserWithSelfSignedProof,
+    openBrowserKeyless,
     fromDb,
     encodeSchema,
     openConfig,
@@ -122,6 +125,7 @@ const mocks = vi.hoisted(() => {
       }));
       openBrowser.mockReset().mockImplementation(async () => createBrowserDb());
       openBrowserWithSelfSignedProof.mockReset().mockImplementation(async () => createBrowserDb());
+      openBrowserKeyless.mockReset().mockImplementation(async () => createBrowserDb());
       fromDb.mockReset().mockImplementation(() => {
         const subscriber = {
           close: vi.fn(() => true),
@@ -1398,6 +1402,44 @@ describe("broker worker context initialization", () => {
       type: "runtime-ready",
     });
     expect(mocks.loadWasmModule).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens an encrypted app keyless under its proof's app id, and refuses a proof minted for another app", async () => {
+    const keyless = { bindings: "{}", environment: "dev" };
+    const proof = (appId: string) => ({
+      token: "token",
+      appId,
+      claimedAuthor: "author",
+    });
+    const matching = {
+      ...options("keyless-matching"),
+      keyless,
+      selfSignedClientProof: proof("worker-initialization-test"),
+    };
+    expect((await connect(matching, "matching-tab")).outcome).toEqual({ type: "runtime-ready" });
+    expect(mocks.openBrowserKeyless).toHaveBeenCalledOnce();
+    expect(mocks.openBrowserKeyless.mock.calls[0]!.slice(4)).toEqual([
+      "{}",
+      "worker-initialization-test",
+      "dev",
+      "token",
+      "author",
+    ]);
+
+    const mismatch = {
+      ...options("keyless-mismatch"),
+      keyless,
+      selfSignedClientProof: proof("another-app"),
+    };
+    expect((await connect(mismatch, "mismatch-tab")).outcome).toMatchObject({
+      type: "runtime-error",
+      error: {
+        message:
+          "The encrypted app's id (worker-initialization-test) is not the one its client proof names (another-app)",
+      },
+    });
+    expect(mocks.openBrowserKeyless).toHaveBeenCalledOnce();
+    expect(mocks.openBrowserWithSelfSignedProof).not.toHaveBeenCalled();
   });
 
   it("acknowledges a lease probe before touching its durable root", async () => {

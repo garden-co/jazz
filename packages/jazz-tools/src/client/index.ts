@@ -5,6 +5,10 @@ export type { CacheEntryHandle, UseAllState } from "../subscription-store-intern
 export { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
 
 export * from "../accounts/exports.js";
+export {
+  EncryptionNeedsLocalFirstError,
+  type EncryptionNeedsLocalFirstReason,
+} from "../runtime/encryption-needs-local-first.js";
 
 export { accountRegistryUrl } from "../accounts/context.js";
 

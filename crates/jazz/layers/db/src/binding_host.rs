@@ -1614,11 +1614,12 @@ impl Binding {
                 db.all_serialized_query_reporting(&query, opts, open_tx, admission, coverage)
             );
             // A row whose large values are missing records their chunks for
-            // the next send; ask for the tick that sends it, or the read
-            // waits on unrelated sync traffic.
+            // the next send, and a serializable read asks its next remote
+            // read from here once the last one is answered; ask for the tick
+            // that sends them, or the read waits on unrelated sync traffic.
             let result = std::future::poll_fn(|context| {
                 let poll = read.as_mut().poll(context);
-                if poll.is_pending() && db.owes_chunk_requests() {
+                if poll.is_pending() && (db.owes_chunk_requests() || db.owes_requests_sent()) {
                     hooks.schedule_tick();
                 }
                 poll

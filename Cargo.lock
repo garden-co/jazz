@@ -2845,6 +2845,7 @@ dependencies = [
  "getrandom 0.3.4",
  "indexed_db_futures",
  "jazz-core",
+ "jazz-e2ee-client",
  "jazz-server",
  "jazz-text",
  "jazz-wasm-tracing",
