@@ -11,6 +11,12 @@
 //! callback) gives the store a [`Handler`] instead ([`JsStore::served_by`]):
 //! the same request texts and answers, with no queue to drain. [`serve`]
 //! makes a handler of a Rust [`PrivateStore`].
+//!
+//! Request and answer texts carry key bytes (`protect`'s secret,
+//! `unprotect`'s answer, the device's saved documents). What Rust holds of
+//! them is wiped once used: the texts it writes and reads, and the JSON
+//! values they come from or go to. A handler that takes a request text owns
+//! it and wipes it ([`serve`] does); what crosses into JavaScript cannot be.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -25,6 +31,7 @@ use base64::engine::general_purpose::STANDARD;
 use futures::future::LocalBoxFuture;
 use jazz_e2ee::Zeroizing;
 use serde_json::{Value, json};
+use zeroize::Zeroize;
 
 /// How long a store call may wait for its answer (JavaScript's, or a
 /// [`Handler`]'s).
@@ -137,15 +144,19 @@ impl JsStore {
             // dropped with its future. While it waits, the call is polled
             // when the handler wakes it or at the deadline, never in a loop.
             let deadline = Instant::now() + self.timeout.get().unwrap_or(ANSWER_TIMEOUT);
-            let mut answer = handler(args.to_string());
+            let text = text_of(&args);
+            wipe(&mut args);
+            let mut answer = handler(text);
             // The waker the timer holds for this call, and its entry there:
             // dropping the entry (a new waker, or the call done or dropped)
             // takes the waker out of the timer at once.
             let mut timed: Option<(Waker, Timed)> = None;
             return std::future::poll_fn(|context| {
-                if let Poll::Ready((ok, payload)) = answer.as_mut().poll(context) {
+                if let Poll::Ready((ok, mut payload)) = answer.as_mut().poll(context) {
                     timed = None;
-                    return Poll::Ready(decode(ok, &payload));
+                    let result = decode(ok, &payload);
+                    payload.zeroize();
+                    return Poll::Ready(result);
                 }
                 if Instant::now() >= deadline {
                     timed = None;
@@ -173,8 +184,9 @@ impl JsStore {
         self.outstanding.borrow_mut().insert(id);
         self.queue.borrow_mut().push_back(Request {
             id,
-            text: args.to_string(),
+            text: text_of(&args),
         });
+        wipe(&mut args);
         let _abandon = Abandon(self, id);
         if let Some(wake) = self.wake.borrow().as_ref() {
             wake();
@@ -274,6 +286,37 @@ fn wake_at(_deadline: Instant, _waker: Waker) -> Option<Timed> {
     None
 }
 
+/// `value` as JSON text, written into a buffer of its exact size so that
+/// no partial copy of it is left behind by a growing buffer.
+fn text_of(value: &Value) -> String {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).expect("a JSON value always serializes");
+    let mut text = Vec::with_capacity(count.0);
+    serde_json::to_writer(&mut text, value).expect("a JSON value always serializes");
+    String::from_utf8(text).expect("JSON text is UTF-8")
+}
+
+/// Wipe every text in `value`: the base64 of key bytes a request or an
+/// answer carried.
+fn wipe(value: &mut Value) {
+    match value {
+        Value::String(text) => text.zeroize(),
+        Value::Array(items) => items.iter_mut().for_each(wipe),
+        Value::Object(fields) => fields.values_mut().for_each(wipe),
+        _ => {}
+    }
+}
+
 /// A host's answer as the store call's result: `ok` with a JSON payload, or
 /// an error text (`conflict`, `wiped`, or a message).
 fn decode(ok: bool, payload: &str) -> Result<Value, StoreError> {
@@ -311,16 +354,20 @@ impl PrivateStore for JsStore {
         doc: &'a str,
     ) -> LocalBoxFuture<'a, Result<Option<Stored>, StoreError>> {
         Box::pin(async move {
-            let answer = self
+            let mut answer = self
                 .call("load", json!({ "scope": scope, "doc": doc }))
                 .await?;
             if answer.is_null() {
                 return Ok(None);
             }
-            Ok(Some(Stored {
-                bytes: bytes_of(&answer["bytes"])?,
-                revision: number_of(&answer["revision"])?,
-            }))
+            let stored = (|| {
+                Ok(Some(Stored {
+                    bytes: bytes_of(&answer["bytes"])?,
+                    revision: number_of(&answer["revision"])?,
+                }))
+            })();
+            wipe(&mut answer);
+            stored
         })
     }
 
@@ -375,11 +422,12 @@ impl PrivateStore for JsStore {
 
     fn protect<'a>(&'a self, secret: &'a [u8]) -> LocalBoxFuture<'a, Result<Vec<u8>, StoreError>> {
         Box::pin(async move {
-            bytes_of(
-                &self
-                    .call("protect", json!({ "secret": STANDARD.encode(secret) }))
-                    .await?,
-            )
+            let mut answer = self
+                .call("protect", json!({ "secret": STANDARD.encode(secret) }))
+                .await?;
+            let blob = bytes_of(&answer);
+            wipe(&mut answer);
+            blob
         })
     }
 
@@ -388,11 +436,12 @@ impl PrivateStore for JsStore {
         blob: &'a [u8],
     ) -> LocalBoxFuture<'a, Result<Zeroizing<Vec<u8>>, StoreError>> {
         Box::pin(async move {
-            Ok(Zeroizing::new(bytes_of(
-                &self
-                    .call("unprotect", json!({ "blob": STANDARD.encode(blob) }))
-                    .await?,
-            )?))
+            let mut answer = self
+                .call("unprotect", json!({ "blob": STANDARD.encode(blob) }))
+                .await?;
+            let secret = bytes_of(&answer).map(Zeroizing::new);
+            wipe(&mut answer);
+            secret
         })
     }
 }
@@ -400,11 +449,17 @@ impl PrivateStore for JsStore {
 /// A [`Handler`] that runs each request against a Rust store, for a host
 /// whose app supplies a [`PrivateStore`] directly.
 pub fn serve(store: Rc<dyn PrivateStore>) -> Handler {
-    Rc::new(move |text| {
+    Rc::new(move |mut text: String| {
         let store = Rc::clone(&store);
         Box::pin(async move {
-            match run(&*store, &text).await {
-                Ok(value) => (true, value.to_string()),
+            let result = run(&*store, &text).await;
+            text.zeroize();
+            match result {
+                Ok(mut value) => {
+                    let answer = text_of(&value);
+                    wipe(&mut value);
+                    (true, answer)
+                }
                 Err(StoreError::Conflict) => (false, "conflict".to_owned()),
                 Err(StoreError::Wiped) => (false, "wiped".to_owned()),
                 Err(error) => (false, error.to_string()),
@@ -415,18 +470,27 @@ pub fn serve(store: Rc<dyn PrivateStore>) -> Handler {
 
 async fn run(store: &dyn PrivateStore, text: &str) -> Result<Value, StoreError> {
     let bad = |what: &str| StoreError::Failed(format!("a store request {what}"));
-    let request: Value = serde_json::from_str(text).map_err(|_| bad("is not JSON"))?;
+    let mut request: Value = serde_json::from_str(text).map_err(|_| bad("is not JSON"))?;
+    let answer = answer(store, &request).await;
+    wipe(&mut request);
+    answer
+}
+
+async fn answer(store: &dyn PrivateStore, request: &Value) -> Result<Value, StoreError> {
+    let bad = |what: &str| StoreError::Failed(format!("a store request {what}"));
     let text_of = |name: &str| -> Result<&str, StoreError> {
         request[name].as_str().ok_or_else(|| bad("lacks a field"))
     };
     let number = |name: &str| -> Result<u64, StoreError> { number_of(&request[name]) };
-    let bytes = |name: &str| -> Result<Vec<u8>, StoreError> { bytes_of(&request[name]) };
+    let bytes = |name: &str| -> Result<Zeroizing<Vec<u8>>, StoreError> {
+        bytes_of(&request[name]).map(Zeroizing::new)
+    };
     Ok(match request["op"].as_str() {
         Some("openScope") => json!(store.open_scope(text_of("scope")?).await?.to_string()),
         Some("load") => match store.load(text_of("scope")?, text_of("doc")?).await? {
             None => Value::Null,
             Some(found) => json!({
-                "bytes": STANDARD.encode(found.bytes),
+                "bytes": STANDARD.encode(&*Zeroizing::new(found.bytes)),
                 "revision": found.revision.to_string(),
             }),
         },

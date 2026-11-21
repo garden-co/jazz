@@ -140,6 +140,6 @@ func (db *DB) Shutdown(ctx context.Context) error {
 	var cerr uintptr
 	ffi.closeWithin(db.handle, uint64(timeout.Milliseconds()), &cerr)
 	db.handle = 0
-	providers.Delete(db.provider)
+	releaseCallbacks(db.provider, db.store)
 	return takeError(cerr)
 }

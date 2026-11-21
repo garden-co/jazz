@@ -179,6 +179,35 @@ typedef int (*JazzTokenCallback)(void *ctx, const char *reason, char **token);
 JazzHandle *jazz_open_user(const char *config_json, JazzTokenCallback cb, void *ctx,
                            char **err);
 
+/*
+ * A private store's callback, for an app that declares end-to-end
+ * encryption: the device's keys live where the app puts them (a Keychain, an
+ * OS key store). `request` is JSON text {"op": ...}: "openScope", "load",
+ * "save", "list", "delete", "protect", "unprotect"; bytes are base64 and
+ * numbers that may exceed 2^53 are decimal text (see the README). Called on
+ * the client's thread, one request at a time: a slow store holds the client
+ * up. Return 0 with *payload the result as JSON text (a malloc'ed string,
+ * Go: C.CString), or non-zero with *payload the error: "conflict", "wiped"
+ * or a message. Requests and answers carry key bytes: jazz zeroes *payload
+ * before it frees it, and its own copy of the request once the callback
+ * returns, so wipe any copy of either your callback makes.
+ */
+typedef int (*JazzStoreCallback)(void *ctx, const char *request, char **payload);
+
+/*
+ * Opens an app that declares end-to-end encryption as an end user
+ * ("auth": {"deviceKey": ...}, or {"bearer": true} with a token callback;
+ * "environment": the deployment's, default "dev"). store_cb and store_ctx
+ * (and the token callback) stay valid, from any thread, until jazz_close
+ * returns. The encryption calls go through jazz_call: "encryptionReady"
+ * {"timeoutMs"?}, "encryptionCall" {"op", "args"?}, "encryptionState" and
+ * "encryptionReports" (see the README). An app that declares encryption
+ * opened without a store (jazz_open) is refused.
+ */
+JazzHandle *jazz_open_encrypted(const char *config_json, JazzTokenCallback token_cb,
+                                void *token_ctx, JazzStoreCallback store_cb, void *store_ctx,
+                                char **err);
+
 typedef struct JazzWatch JazzWatch;
 
 /*

@@ -2396,6 +2396,7 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "web-time",
+ "zeroize",
 ]
 
 [[package]]
@@ -2554,6 +2555,7 @@ dependencies = [
  "tokio-tungstenite",
  "uniffi",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2610,6 +2612,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "jazz-core",
+ "jazz-e2ee-client",
  "jazz-native-transport",
  "jazz-server",
  "jazz-testkit",
@@ -2625,6 +2628,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "zeroize",
 ]
 
 [[package]]

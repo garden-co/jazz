@@ -73,6 +73,70 @@ impl JazzHandle {
         Ok(Arc::new(Self { core }))
     }
 
+    /// Opens an app that declares end-to-end encryption as an end user:
+    /// `store` is this device's private store, which the app supplies (the
+    /// config's `"environment"` names the deployment's environment, default
+    /// `dev`). `tokens` is for `"auth": { "bearer": true }`, as in
+    /// [`Self::open_with_tokens`].
+    #[uniffi::constructor]
+    pub fn open_with_store(
+        config_json: String,
+        store: Arc<dyn PrivateStore>,
+        tokens: Option<Arc<dyn TokenProvider>>,
+    ) -> Result<Arc<Self>> {
+        let contract = serde_json::from_str::<serde_json::Value>(&config_json)
+            .ok()
+            .and_then(|c| c.get("contract").and_then(serde_json::Value::as_u64))
+            .unwrap_or(1);
+        let host = tokens.map(|tokens| {
+            let host = core::HostTokens(Arc::new(move |reason: &str| {
+                tokens
+                    .token(reason.to_owned())
+                    .map_err(|error| error.to_string())
+            }));
+            let host: Arc<dyn jazz_app_support::TokenProvider> = Arc::new(host);
+            host
+        });
+        // The request (key bytes as base64) is the foreign store's from
+        // here: UniFFI hands it over and frees it unwiped; the wrappers
+        // document what they wipe. The answer is the runtime's to wipe.
+        let calls: core::StoreCalls = Arc::new(move |request| {
+            let reply = store.call(request);
+            (reply.ok, reply.payload)
+        });
+        let core = core::Core::open_with(&config_json, host, Some(calls))
+            .map_err(|error| JazzError::from(error).for_contract(contract))?;
+        Ok(Arc::new(Self { core }))
+    }
+
+    /// One end-to-end encryption operation by name, its arguments and result
+    /// as JSON: `deviceId`, `devices`, `challenge`, `answer`, `approvalCode`,
+    /// `approve`, `remove`, `requestRemoval`, `completeRemovals`,
+    /// `recoveryRegister`, `recoveryRestore`, `recoveryRetire`,
+    /// `recoveryList`, `keysDeliver`, `keysRotate` (see the README).
+    pub fn encryption_call(&self, op: String, args_json: String) -> Result<String> {
+        self.core
+            .surface(self.core.encryption_call(&op, &args_json))
+    }
+
+    /// Verifies the account and enrols or recovers this device, waiting up to
+    /// `timeout_ms`: `active`, `awaiting-approval` or `reenrolled`.
+    pub fn encryption_ready(&self, timeout_ms: u64) -> Result<String> {
+        self.core.surface(self.core.encryption_ready(timeout_ms))
+    }
+
+    /// What the encryption runtime's loop is doing, as JSON
+    /// (`{ status, error, stage }`).
+    pub fn encryption_state(&self) -> Result<String> {
+        self.core.surface(self.core.encryption_state())
+    }
+
+    /// The encryption reports waiting (`unreadable`, `missing-key`,
+    /// `challenged`, ...), each as a JSON text.
+    pub fn encryption_reports(&self) -> Result<Vec<String>> {
+        self.core.surface(self.core.encryption_reports())
+    }
+
     /// The end user's session as JSON: `{"status": "signedIn", "user":
     /// {...}}`, `{"status": "expired", ...}` or `{"status": "signedOut"}`;
     /// `None` for a local app.
@@ -659,6 +723,28 @@ impl std::fmt::Debug for JazzHandle {
 #[uniffi::export(with_foreign)]
 pub trait TokenProvider: Send + Sync {
     fn token(&self, reason: String) -> Result<Option<String>>;
+}
+
+/// A device's private store, which an app that declares end-to-end
+/// encryption supplies: where the device keeps its keys, protected at rest
+/// (Keychain on Apple, the Android Keystore, an OS key store elsewhere).
+///
+/// Called on the client's thread, one request at a time; a slow store holds
+/// the client up, so answer quickly. `request` is JSON text
+/// `{ "op", ... }`: `openScope`, `load`, `save`, `list`, `delete`,
+/// `protect`, `unprotect`; bytes are base64 and numbers that may exceed 2^53
+/// are decimal text (see the README).
+#[uniffi::export(with_foreign)]
+pub trait PrivateStore: Send + Sync {
+    fn call(&self, request: String) -> StoreReply;
+}
+
+/// A private store's answer: `ok` with the result as JSON text, or not ok
+/// with `conflict`, `wiped` or a message.
+#[derive(uniffi::Record)]
+pub struct StoreReply {
+    pub ok: bool,
+    pub payload: String,
 }
 
 /// A watch's last state when the app closes (signed out, closed, its store
