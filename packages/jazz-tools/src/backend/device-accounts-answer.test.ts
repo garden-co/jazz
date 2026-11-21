@@ -1,12 +1,11 @@
-import { describe, expectTypeOf, it } from "vitest";
-import { acceptDeviceAccounts, type DeviceAccountsAnswer, type LocalFirstGuest } from "./index.js";
+import { describe, expect, it } from "vitest";
+import * as backend from "./index.js";
 
-describe("LocalFirstGuest (deprecated name of DeviceAccountsAnswer)", () => {
-  it("is assignable to and from DeviceAccountsAnswer", () => {
-    expectTypeOf<LocalFirstGuest>().toMatchTypeOf<DeviceAccountsAnswer>();
-    expectTypeOf<DeviceAccountsAnswer>().toMatchTypeOf<LocalFirstGuest>();
-    const answer: LocalFirstGuest = acceptDeviceAccounts(new Request("http://localhost/"));
-    const renamed: DeviceAccountsAnswer = answer;
-    expectTypeOf(renamed).toEqualTypeOf<DeviceAccountsAnswer>();
+describe("DeviceAccountsAnswer", () => {
+  it("its alpha.68 name LocalFirstGuest was removed in beta.0", () => {
+    // @ts-expect-error LocalFirstGuest was removed: use DeviceAccountsAnswer.
+    type Removed = backend.LocalFirstGuest;
+    void (null as unknown as Removed);
+    expect(backend.acceptDeviceAccounts(new Request("http://localhost/"))).toBeTruthy();
   });
 });
