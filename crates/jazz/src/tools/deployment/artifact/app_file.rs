@@ -250,7 +250,7 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
     if root.get("slices").is_some() {
         warnings.push(
             "slices: schema slicing is gone in alpha.66, so `slices` is ignored; \
-             `jazz-tools upgrade` removes it"
+             remove it"
                 .to_string(),
         );
     }

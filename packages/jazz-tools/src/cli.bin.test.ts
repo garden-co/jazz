@@ -146,7 +146,8 @@ describe("bin integration", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(
         "TS is the source in alpha.66: this app has jazz.app.json but no schema.ts. " +
-          "Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema hashes and bundle id), " +
+          "Write schema.ts from it with `npx jazz-tools@2.0.0-alpha.70 upgrade` (it keeps the schema hashes and bundle id; " +
+          "see https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0), " +
           "then edit schema.ts beside your app's manifest (package.json, Cargo.toml, go.mod, Package.swift, build.gradle, …) " +
           "and run `npx jazz-tools generate`.",
       );
@@ -176,14 +177,32 @@ describe("bin integration", () => {
     expect(result.stderr).toContain("found schema.ts in both");
   });
 
-  it("points the renamed validate command at generate", async () => {
+  it("refuses the removed upgrade command and points at the upgrade guide", async () => {
+    const { root } = await createWorkspace();
+    await writeAppFiles(root);
+    const before = await readFile(join(root, "jazz.app.json"), "utf8");
+
+    const result = runBin(["upgrade", "--dir", root]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("`jazz-tools upgrade` was removed in 2.0.0-beta.0");
+    expect(result.stderr).toContain("`npx jazz-tools@2.0.0-alpha.70 upgrade`");
+    expect(result.stderr).toContain(
+      "https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0",
+    );
+    expect(await readFile(join(root, "jazz.app.json"), "utf8")).toBe(before);
+    expect(await fileExists(join(root, "schema.ts"))).toBe(false);
+  });
+
+  it("treats the old validate command as unknown", async () => {
     const { root } = await createWorkspace();
     await writeAppFiles(root);
 
     const result = runBin(["validate", "--schema-dir", root]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("renamed to `jazz-tools generate`");
+    expect(result.stdout).toContain("Usage:");
+    expect(result.stderr).not.toContain("renamed to `jazz-tools generate`");
     expect(await fileExists(join(root, "jazz.generated.ts"))).toBe(false);
   });
 

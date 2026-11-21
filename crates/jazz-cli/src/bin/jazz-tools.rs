@@ -368,7 +368,7 @@ fn finish_app_files(result: Result<jazz_cli::app_files::Outcome, String>) -> ! {
 }
 
 /// Where a TS app keeps its `schema.ts`, relative to the app's directory
-/// (jazz-tools' `SCHEMA_ROOTS`, `packages/jazz-tools/src/upgrade/project.ts`).
+/// (jazz-tools' `SCHEMA_ROOTS`, `packages/jazz-tools/src/dev/ts-project.ts`).
 const SCHEMA_ROOTS: &[&str] = &[".", "src", "src/lib"];
 
 /// The app's `schema.ts`, when it is authored in TypeScript.
@@ -383,16 +383,18 @@ fn ts_schema(dir: &std::path::Path) -> Option<std::path::PathBuf> {
 /// only authoring source): shared with `npx jazz-tools`
 /// (`packages/jazz-tools/src/dev/ts-project.ts`).
 const JSON_ONLY_APP: &str = "TS is the source in alpha.66: this app has jazz.app.json but no \
-     schema.ts. Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema \
-     hashes and bundle id), then edit schema.ts beside your app's manifest (package.json, \
-     Cargo.toml, go.mod, Package.swift, build.gradle, …) and run `npx jazz-tools generate`.";
+     schema.ts. Write schema.ts from it with `npx jazz-tools@2.0.0-alpha.70 upgrade` (it keeps \
+     the schema hashes and bundle id; see \
+     https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0), \
+     then edit schema.ts beside your app's manifest (package.json, Cargo.toml, go.mod, \
+     Package.swift, build.gradle, …) and run `npx jazz-tools generate`.";
 
 /// Refuse to write an app's files: TypeScript is the only authoring source,
 /// so `jazz.app.json`, `jazz.permissions.json` and the bindings are written
 /// from `schema.ts` by `npx jazz-tools generate` (and migrations by `npx
 /// jazz-tools migrations create`), which this binary can't run. An app
-/// with `jazz.app.json` but no `schema.ts` is pointed at `npx jazz-tools
-/// upgrade`, which writes its `schema.ts`.
+/// with `jazz.app.json` but no `schema.ts` is pointed at alpha.70's `npx
+/// jazz-tools upgrade`, which writes its `schema.ts`.
 fn refuse_writing(dir: &std::path::Path, command: &str) -> String {
     if let Some(schema) = ts_schema(dir) {
         return format!(

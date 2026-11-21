@@ -93,7 +93,7 @@ fn a_json_only_app_is_pointed_at_npx_jazz_tools_upgrade() {
         assert!(
             stderr.contains(
                 "TS is the source in alpha.66: this app has jazz.app.json but no schema.ts. \
-                 Run `npx jazz-tools upgrade` to write schema.ts from it"
+                 Write schema.ts from it with `npx jazz-tools@2.0.0-alpha.70 upgrade`"
             ),
             "{args:?}: {stderr}"
         );

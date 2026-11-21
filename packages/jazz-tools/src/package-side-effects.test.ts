@@ -102,8 +102,6 @@ const REVIEWED_CALLS = new Set([
   "permissions/dsl.ts: TYPED",
   // The alpha.64 names in the `schema` namespace, as throwing stubs.
   "schema-builders.ts: removedSchemaApi",
-  "upgrade/index.ts: join",
-  "upgrade/project.ts: join",
   "dev/inspector-overlay/loader.ts: HostBinding",
   "inspect/mcp.ts: WHERE_OPERATORS.join",
   "local-first-auth/identity.ts: utf8",
