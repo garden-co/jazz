@@ -1,5 +1,9 @@
 # jazz-napi
 
+## 2.0.0-beta.0
+
+## 2.0.0-beta.0
+
 ## 2.0.0-alpha.70
 
 ### Patch Changes
@@ -25,6 +29,7 @@
 - a58dd33: `jazz.revokeUser` now ends a user's sessions on every backend instance, not only on the one that runs it. On serverless hosts (Vercel and the like) the sign-out handler usually runs on a different instance from the user's sockets and HTTP streams. The revocation is now recorded at the core, which closes the user's live sessions on any instance, idle ones included. It also refuses sessions that any instance admits later on an `authenticate` answer from before the call, such as a sign-in still in flight or an HTTP stream's reused answer. A sign-in that starts after the call works as before. `revokeUser` still resolves with the number of sessions it ended on the calling instance.
 
   **Upgrade the core before backends to get cross-instance revocation.** A newer backend in front of an older core warns once and ends only its own instance's sessions, as before. An older backend in front of a newer core is unaffected.
+
   - **Rollback:** an older core opens the same store. The revocation marks live in a new table (`_jazz_host_account_session_revocations`) that an older core never reads. After a rollback, recorded revocations stop applying, and sessions on other instances end at their `expiresAt` again.
   - **Clients:** no client changes. The backend ends a revoked session with the same refused close it already sends for `revokeUser`, so every client that handles that close today handles this one.
 
@@ -46,15 +51,19 @@
   import { schema as s } from "jazz-tools";
 
   export const schema = s.defineSchema({
-    chats: s.table({ isPublic: s.boolean() }, { membersViaChat: s.reverse("chatMembers", "chat") }),
+    chats: s.table(
+      { isPublic: s.boolean() },
+      { membersViaChat: s.reverse("chatMembers", "chat") }
+    ),
     chatMembers: s.table(
       { chatId: s.uuid(), userId: s.uuid() },
-      { chat: s.rel("chats", "chatId") },
+      { chat: s.rel("chats", "chatId") }
     ),
   });
 
   const { definePermissions, exists, session, anyOf } = schema;
-  const isMember = (chatId: s.Uuid) => exists.chatMembers({ chatId, userId: session.user });
+  const isMember = (chatId: s.Uuid) =>
+    exists.chatMembers({ chatId, userId: session.user });
 
   export const permissions = definePermissions({
     chats: { read: (chat) => anyOf({ isPublic: true }, isMember(chat.id)) },
@@ -75,6 +84,7 @@
   - **Tests:** `createPolicyTestApp`, `startTestJazz`, `deploy` and backend clients take the generated `app` and permissions file; `jazz-tools/testing` adds `testApp(appJson)` and `testPermissions(app, permissionsJson)` for apps a test defines inline.
 
   **Upgrade:** run `npx jazz-tools@2.0.0-alpha.66 upgrade` in each app _before_ bumping `jazz-tools`, then review the diff. It first checks with your installed alpha.65 (or .64) that the committed JSON is fresh, then:
+
   - rewrites `schema.ts` from `defineApp(schema, { migrations })` to `export const schema = s.defineSchema({ … })`, keeping your comments;
   - prints the permissions from the committed `jazz.permissions.json` into `schema.ts` in the new DSL (or a separate `permissions.ts` when the old one was large), factoring repeated checks into named helpers and keeping the old file's named constants;
   - converts Better Auth's module to export `tables` and `permissions`;
@@ -107,6 +117,7 @@
 ### Patch Changes
 
 - 7390fbf: **Breaking:** a core no longer has its own switch for local-first guests (device accounts). Which guests sync is decided only by the app's `createJazz` `authenticate` returning `acceptDeviceAccounts(request)`, and a core admits only the sockets its backend opens. Before, a core could refuse every guest while the app accepted them (`serveCore` and `jazz-tools server` with `NODE_ENV=production` did unless told otherwise), which left guests offline. Removed with it:
+
   - `jazz-tools server` no longer takes `--allow-local-first-auth`. It refuses to start with `JAZZ_ALLOW_LOCAL_FIRST_AUTH` set to a false value, since a core can no longer turn guests away itself; a true value is ignored.
   - `serveCore()`, `JazzCore.open()` and `JazzServer.start()` (jazz-napi) refuse an `allowLocalFirstAuth` option as unknown, and `startLocalJazzServer()` / `startTestJazz({ coreOptions })` no longer take it.
   - Rust: `AuthConfig` has no `allow_local_first_auth` field, `ServerBuilder::with_local_first_auth` and the test server's `without_local_first_auth` are gone.
@@ -133,12 +144,14 @@
 - 56c8214: A blob dir is claimed exclusively by one data dir (also on file systems without hard links), blob dir paths resolve symlinks, and `jazz-tools server` locks its data dir with the same lock embedded cores take.
 - 0aec19c: Fix live combined aggregate subscriptions missing changes when the first aggregate value stays unchanged. Complete summaries now identify replacements without changing group occurrences or limiting large multi-output summaries.
 - c04380b: **Breaking:** a sync server (core) admits only its app's backend. Browsers, React Native apps and other clients sync through the app's `createJazz` handler (`serverUrl: "/jazz"` or the backend's `/jazz` URL); a client that connects straight to a core is refused with "this core admits only its app's backend". Local-first guests keep working: the backend relays their proofs. Removed with it:
+
   - **Server JWT verification.** `jazz-tools server` no longer takes `--jwks-url`, `--jwt-public-key`, `--jwt-issuer`, `--jwt-audience`, `--auth-cookie-name` or `--trust-proxy`, and refuses to start while their `JAZZ_*` environment variables are set, naming them. `JazzServer.start()` (jazz-napi) rejects `jwksUrl`, `jwtIssuer` and `jwtAudience` (and any other unknown option) instead of ignoring them; `JazzCore.open()` no longer takes `jwtPublicKey` and the other JWT options. `startLocalJazzServer()` drops its `jwksUrl`, `jwtIssuer` and `jwtAudience` options. The `JAZZ_JWKS_CACHE_TTL_SECS` and `JAZZ_JWKS_MAX_STALE_SECS` variables are gone. Trusted workloads (`--trusted-workload-*`) still verify their OIDC tokens.
   - **Public account routes.** `/apps/:id/accounts/register`, `login`, `login-or-register` and `found-local-first` are gone. The backend vouches for its users at `/apps/:id/admin/accounts/*` with its backend secret (or admin secret), which `createJazz` does for you.
   - **Test helpers.** jazz-napi no longer exports `TestJwtIssuer`. `startTestJwtIssuer().jwtForUser()` is now async and its default claims are `{}` (it was `{ role: "user" }`); pass the claims a test needs.
   - **Cloud CLI.** `jazz-tools apps auth set` takes only `--allow-local-first-auth`; `--jwks-url`, `--jwt-issuer`, `--jwt-audience`, `--jwt-public-key` and `--jwt-public-key-file` are refused as not supported.
 
   ### Migrating
+
   - A web or React Native app: add `createJazz` to your backend with `remote({ url, appId, secret })` (your sync server, your app id and its admin secret), mount it at `/jazz`, and point the client's `serverUrl` there. Sign users in with your backend's own session (`authenticate`), as the client-signs-in-through-backend changeset describes.
   - A Rust or other native service that held a user JWT: it is the app's backend now. Give it the core's backend secret and state the user it acts for (`AppContext { backend_secret, backend_session: Some(Session::new("jazz:backend", user_id)), .. }`), after resolving that user's account at `/admin/accounts/login-or-register`. `examples/todo-server-rs` shows this.
   - Drop `--jwks-url` and the other JWT settings from your sync server's command line and environment; it fails to start while they are set.
@@ -229,6 +242,7 @@
 - 144326e: ### Upgrading from alpha.59
 
   alpha.60 is a breaking release for every app. Upgrade in this order:
+
   1. **Sync server first.** An alpha.60 sync server (core) speaks wire protocol v6 and admits only its app's backend, so alpha.59 clients can't reach it, and `createJazz` refuses to start against an older core. Plan one cutover per app, and ship the new backend and clients with it, because both change. Clients can't sync from the moment the alpha.59 server stops until the new backend and client bundle are live, so plan for that downtime, and let clients finish syncing first: writes still queued in alpha.59 browsers are not carried over. On Jazz Cloud you start the upgrade yourself, when your new backend and clients are ready to ship; we don't move your app for you. On your own server, stop it, move its data dir with the alpha59-alpha60 importer, and drop the JWT flags and their `JAZZ_*` variables (see core-admits-only-its-backend). Download the `jazz-alpha59-alpha60-export` and `jazz-alpha59-alpha60-import` binaries for your platform from this release's GitHub assets, export the old data dir with the exporter, then run `jazz-alpha59-alpha60-import import` and `jazz-alpha59-alpha60-import verify` before your backend first starts on the new dir (see alpha59-migration and the Backups & Upgrades docs page). The import checks the result against what alpha.59 reads, and links each user's old identity to `(jazz:backend, sub)`, so returning users keep their accounts when your `authenticate` answers with their old `sub`. Later releases keep the importer, so you can upgrade from alpha.59 whenever you're ready.
   2. **Your backend.** Add `createJazz` with `remote({ url, appId, secret })` (or `sqlite({ path })` on the imported data dir) and an `authenticate` that reads your app's own session (an app that signed users in with a JWT can use `fromJWT()`, which answers with the token's `sub`), and mount it at `/jazz` (see client-signs-in-through-backend). If your app has local-first guests, return `acceptLocalFirstAuth(request)` from `authenticate` for them, or the backend refuses them (see local-first-guests-opt-in). Other machines that used `createJazzSession` call `createJazzClient` now. Your backend now publishes the schema, permissions and migrations when it starts. `jazz-tools deploy` and the dev plugins are gone, and so are the starters: `npm create jazz` now prints a brief for your coding agent instead of scaffolding an app.
   3. **Your schema.** Import `schema as s` and `migration as m` instead of `col`, add `import { migrations } from "./migrations"` and pass them to `s.defineApp(schema, { migrations })`, then run `jazz-tools validate`, which writes `migrations/index.ts`. `defineApp` throws without migrations, so add the import before running the CLI.
@@ -265,6 +279,7 @@
 - d3d8ba5: Remove server edges. Clients connect to Core, which authorizes reads and writes and confirms global durability. Browser workers and native local persistence relays remain supported, as do local queries and optimistic writes.
 
   For applications using the old durability options:
+
   - Replace write waits using `{ tier: "edge" }` with `{ tier: "global" }` when the write must reach the server. Keep `{ tier: "local" }` for local persistence.
   - Use `ReadTier.Remote` for reads that need Core confirmation, or `ReadTier.LocalFirst` for immediate local reads.
   - Remove server upstream/edge configuration. A server now runs Core; a connection gateway may still route traffic without running a Jazz database.
@@ -315,6 +330,7 @@
   **Large values are ordinary columns.** Store files and streams in `s.bytes()`, large JSON documents in `s.json()`, and text in `s.string()`. Read complete values or stream supported ranges and JSON subpaths; update them with byte patches, appends, JSON edits or string splices. Content-based chunking in a Prolly Tree makes these operations efficient while retaining ordinary column permissions and query semantics. JSON and rich-text merge strategies are planned for a later release.
 
   ### API migration checklist
+
   - Replace `Db.subscribeAll` with `Db.subscribe` for complete current results.
   - React and React Native `useAll` now return `{ data, isLoading, error }`; `useAllSuspense` still returns rows.
   - Replace `localUpdates` and `propagation` options with read-tier selection.
@@ -414,6 +430,7 @@
 ### Patch Changes
 
 - 4d67804: Promote `authMode` to a first-class typed field, add anonymous auth, and overhaul the React provider.
+
   - **`Session.authMode`** is now `"external" | "local-first" | "anonymous"`, derived from the JWT `iss` claim instead of an opaque string in `claims`. The permissions DSL exposes `session.authMode` and supports `session.where({ authMode })`.
   - **Anonymous auth**: when `DbConfig` has neither `secret` nor `jwtToken`, the client mints an ephemeral token. Anonymous sessions can read but are structurally denied writes (checked before policy evaluation); failures surface as `AnonymousWriteDeniedError` on the client.
   - **`DbConfig` flattened**: `auth: { localFirstSecret }` → `secret`.
@@ -451,21 +468,25 @@
 - 848e94d: Replace HTTP `/sync` + SSE `/events` with a single Rust-owned WebSocket `/ws` transport, and wire JWT rotation and server-side auth rejection end-to-end across all bindings.
 
   **Transport rewrite**
+
   - New `TransportManager` in `jazz-tools` owns the WebSocket connection, framing (4-byte big-endian length + JSON), reconnect with exponential backoff, periodic heartbeat, and a `TransportControl` channel that observes `Shutdown` / `UpdateAuth` in every phase (connect, backoff, handshake, connected). Dropped `TransportHandle` triggers an implicit shutdown.
   - New `install_transport` helper on `RuntimeCore` centralises the boilerplate (create manager → seed catalogue state hash → register handle → spawn) so all four bindings converge on one code path.
   - `NativeWsStream` (tokio-tungstenite + rustls) and `WasmWsStream` (ws_stream_wasm) implement the shared `StreamAdapter` trait.
 
   **Auth refresh**
+
   - `JazzClient.updateAuthToken(jwt)` now pushes the refreshed credentials into the live transport via `runtime.updateAuth`, which routes through `TransportControl::UpdateAuth` and triggers a reconnect with the new auth. Previously the call only mutated local context.
   - `ConnectSyncRuntimeOptions.onAuthFailure` is now wired to `runtime.onAuthFailure` and fires whenever the server rejects the WS handshake with `Unauthorized`. NAPI exposes a `ThreadsafeFunction`-based callback; React Native exposes a UniFFI `callback_interface`; WASM keeps its existing `Function` callback.
   - The worker posts `auth-failed` back to the main thread when `runtime.updateAuth` throws, and supports `update-auth` / `disconnect-upstream` / `reconnect-upstream` messages from the bridge.
 
   **Bindings**
+
   - WASM, NAPI, and React Native all now expose `connect`, `disconnect`, `update_auth`, `on_auth_failure`.
   - React Native: `JazzRnRuntimeAdapter` forwards `updateAuth` and `onAuthFailure` to the UniFFI binding (previously missing — auth refresh was a silent no-op on RN).
   - `JazzClient.updateAuthToken` carries `admin_secret` and `backend_secret` forward from context (previously the serialised payload only included `jwt_token`, silently erasing privileged credentials on every refresh).
 
   **Breaking changes**
+
   - `POST /sync` and `GET /events` HTTP routes are deleted; external callers receive 404. Use the WebSocket `/ws` route via `runtime.connect(url, authJson)`.
   - `RuntimeCore<S, Sch, Sy>` is now `RuntimeCore<S, Sch>` — the `SyncSender` generic parameter has been removed.
   - `NapiSyncSender` and `RnSyncSender` are removed; bindings use `runtime.connect` instead.
@@ -473,6 +494,7 @@
   - Cargo features `transport` and `transport-http` are removed; transport types are default-on, and `transport-websocket` enables the WS implementation.
 
   **Tests**
+
   - Inline `TransportManager` tests cover shutdown and `update_auth` in every phase (connect / backoff / handshake / connected).
   - Re-enabled two previously-`#[ignore]`d sync-reliability tests after fixing a debounce-flag race in `TokioScheduler::schedule_batched_tick`.
   - Integration tests migrated from `/events` to `/ws`.

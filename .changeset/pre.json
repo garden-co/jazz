@@ -99,6 +99,7 @@
     "backend-watch-channel-leak",
     "background-coverage-timeout",
     "batch-wrong-object-fetch",
+    "beta0-dry-run",
     "better-auth-1-7-22",
     "better-auth-engine-sort",
     "better-auth-nullable-sort",

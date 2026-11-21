@@ -1,5 +1,9 @@
 # jazz-wasm
 
+## 2.0.0-beta.0
+
+## 2.0.0-beta.0
+
 ## 2.0.0-alpha.70
 
 ### Patch Changes
@@ -106,6 +110,7 @@
 - 144326e: ### Upgrading from alpha.59
 
   alpha.60 is a breaking release for every app. Upgrade in this order:
+
   1. **Sync server first.** An alpha.60 sync server (core) speaks wire protocol v6 and admits only its app's backend, so alpha.59 clients can't reach it, and `createJazz` refuses to start against an older core. Plan one cutover per app, and ship the new backend and clients with it, because both change. Clients can't sync from the moment the alpha.59 server stops until the new backend and client bundle are live, so plan for that downtime, and let clients finish syncing first: writes still queued in alpha.59 browsers are not carried over. On Jazz Cloud you start the upgrade yourself, when your new backend and clients are ready to ship; we don't move your app for you. On your own server, stop it, move its data dir with the alpha59-alpha60 importer, and drop the JWT flags and their `JAZZ_*` variables (see core-admits-only-its-backend). Download the `jazz-alpha59-alpha60-export` and `jazz-alpha59-alpha60-import` binaries for your platform from this release's GitHub assets, export the old data dir with the exporter, then run `jazz-alpha59-alpha60-import import` and `jazz-alpha59-alpha60-import verify` before your backend first starts on the new dir (see alpha59-migration and the Backups & Upgrades docs page). The import checks the result against what alpha.59 reads, and links each user's old identity to `(jazz:backend, sub)`, so returning users keep their accounts when your `authenticate` answers with their old `sub`. Later releases keep the importer, so you can upgrade from alpha.59 whenever you're ready.
   2. **Your backend.** Add `createJazz` with `remote({ url, appId, secret })` (or `sqlite({ path })` on the imported data dir) and an `authenticate` that reads your app's own session (an app that signed users in with a JWT can use `fromJWT()`, which answers with the token's `sub`), and mount it at `/jazz` (see client-signs-in-through-backend). If your app has local-first guests, return `acceptLocalFirstAuth(request)` from `authenticate` for them, or the backend refuses them (see local-first-guests-opt-in). Other machines that used `createJazzSession` call `createJazzClient` now. Your backend now publishes the schema, permissions and migrations when it starts. `jazz-tools deploy` and the dev plugins are gone, and so are the starters: `npm create jazz` now prints a brief for your coding agent instead of scaffolding an app.
   3. **Your schema.** Import `schema as s` and `migration as m` instead of `col`, add `import { migrations } from "./migrations"` and pass them to `s.defineApp(schema, { migrations })`, then run `jazz-tools validate`, which writes `migrations/index.ts`. `defineApp` throws without migrations, so add the import before running the CLI.
@@ -141,6 +146,7 @@
 - d3d8ba5: Remove server edges. Clients connect to Core, which authorizes reads and writes and confirms global durability. Browser workers and native local persistence relays remain supported, as do local queries and optimistic writes.
 
   For applications using the old durability options:
+
   - Replace write waits using `{ tier: "edge" }` with `{ tier: "global" }` when the write must reach the server. Keep `{ tier: "local" }` for local persistence.
   - Use `ReadTier.Remote` for reads that need Core confirmation, or `ReadTier.LocalFirst` for immediate local reads.
   - Remove server upstream/edge configuration. A server now runs Core; a connection gateway may still route traffic without running a Jazz database.
@@ -182,6 +188,7 @@
   **Large values are ordinary columns.** Store files and streams in `s.bytes()`, large JSON documents in `s.json()`, and text in `s.string()`. Read complete values or stream supported ranges and JSON subpaths; update them with byte patches, appends, JSON edits or string splices. Content-based chunking in a Prolly Tree makes these operations efficient while retaining ordinary column permissions and query semantics. JSON and rich-text merge strategies are planned for a later release.
 
   ### API migration checklist
+
   - Replace `Db.subscribeAll` with `Db.subscribe` for complete current results.
   - React and React Native `useAll` now return `{ data, isLoading, error }`; `useAllSuspense` still returns rows.
   - Replace `localUpdates` and `propagation` options with read-tier selection.
@@ -271,6 +278,7 @@
 ### Patch Changes
 
 - 4d67804: Promote `authMode` to a first-class typed field, add anonymous auth, and overhaul the React provider.
+
   - **`Session.authMode`** is now `"external" | "local-first" | "anonymous"`, derived from the JWT `iss` claim instead of an opaque string in `claims`. The permissions DSL exposes `session.authMode` and supports `session.where({ authMode })`.
   - **Anonymous auth**: when `DbConfig` has neither `secret` nor `jwtToken`, the client mints an ephemeral token. Anonymous sessions can read but are structurally denied writes (checked before policy evaluation); failures surface as `AnonymousWriteDeniedError` on the client.
   - **`DbConfig` flattened**: `auth: { localFirstSecret }` → `secret`.
@@ -305,21 +313,25 @@
 - 848e94d: Replace HTTP `/sync` + SSE `/events` with a single Rust-owned WebSocket `/ws` transport, and wire JWT rotation and server-side auth rejection end-to-end across all bindings.
 
   **Transport rewrite**
+
   - New `TransportManager` in `jazz-tools` owns the WebSocket connection, framing (4-byte big-endian length + JSON), reconnect with exponential backoff, periodic heartbeat, and a `TransportControl` channel that observes `Shutdown` / `UpdateAuth` in every phase (connect, backoff, handshake, connected). Dropped `TransportHandle` triggers an implicit shutdown.
   - New `install_transport` helper on `RuntimeCore` centralises the boilerplate (create manager → seed catalogue state hash → register handle → spawn) so all four bindings converge on one code path.
   - `NativeWsStream` (tokio-tungstenite + rustls) and `WasmWsStream` (ws_stream_wasm) implement the shared `StreamAdapter` trait.
 
   **Auth refresh**
+
   - `JazzClient.updateAuthToken(jwt)` now pushes the refreshed credentials into the live transport via `runtime.updateAuth`, which routes through `TransportControl::UpdateAuth` and triggers a reconnect with the new auth. Previously the call only mutated local context.
   - `ConnectSyncRuntimeOptions.onAuthFailure` is now wired to `runtime.onAuthFailure` and fires whenever the server rejects the WS handshake with `Unauthorized`. NAPI exposes a `ThreadsafeFunction`-based callback; React Native exposes a UniFFI `callback_interface`; WASM keeps its existing `Function` callback.
   - The worker posts `auth-failed` back to the main thread when `runtime.updateAuth` throws, and supports `update-auth` / `disconnect-upstream` / `reconnect-upstream` messages from the bridge.
 
   **Bindings**
+
   - WASM, NAPI, and React Native all now expose `connect`, `disconnect`, `update_auth`, `on_auth_failure`.
   - React Native: `JazzRnRuntimeAdapter` forwards `updateAuth` and `onAuthFailure` to the UniFFI binding (previously missing — auth refresh was a silent no-op on RN).
   - `JazzClient.updateAuthToken` carries `admin_secret` and `backend_secret` forward from context (previously the serialised payload only included `jwt_token`, silently erasing privileged credentials on every refresh).
 
   **Breaking changes**
+
   - `POST /sync` and `GET /events` HTTP routes are deleted; external callers receive 404. Use the WebSocket `/ws` route via `runtime.connect(url, authJson)`.
   - `RuntimeCore<S, Sch, Sy>` is now `RuntimeCore<S, Sch>` — the `SyncSender` generic parameter has been removed.
   - `NapiSyncSender` and `RnSyncSender` are removed; bindings use `runtime.connect` instead.
@@ -327,6 +339,7 @@
   - Cargo features `transport` and `transport-http` are removed; transport types are default-on, and `transport-websocket` enables the WS implementation.
 
   **Tests**
+
   - Inline `TransportManager` tests cover shutdown and `update_auth` in every phase (connect / backoff / handshake / connected).
   - Re-enabled two previously-`#[ignore]`d sync-reliability tests after fixing a debounce-flag race in `TokioScheduler::schedule_batched_tick`.
   - Integration tests migrated from `/events` to `/ws`.

@@ -1,5 +1,9 @@
 # create-jazz
 
+## 2.0.0-beta.0
+
+## 2.0.0-beta.0
+
 ## 2.0.0-alpha.70
 
 ### Patch Changes
@@ -60,6 +64,7 @@
   Follow this order when upgrading from alpha.55 to alpha.56:
 
   Run these commands from the app package directory. The examples assume its schema is in `src`; replace `src` with the actual schema directory in every command. Repeat the checks for each independently defined app schema, keeping separate snapshots.
+
   1. **Before upgrading Jazz packages**, export the public compiled schema with the existing alpha.55 packages and schema. Keep this file outside the schema directory and preserve it through the upgrade:
 
      ```sh
@@ -130,7 +135,7 @@
         author: s.rel("users", "authorId"),
         editor: s.rel("users", "editorId"),
         reviewers: s.rel("users", "reviewerIds"),
-      },
+      }
     ),
     users: s.table(
       { name: s.string() },
@@ -138,12 +143,13 @@
         postsViaAuthor: s.reverse("posts", "author"),
         postsViaEditor: s.reverse("posts", "editor"),
         postsViaReviewers: s.reverse("posts", "reviewers"),
-      },
+      }
     ),
   });
   ```
 
   The required `authorId`, optional `editorId`, and array `reviewerIds` keep their names and still point to `users`. The array also keeps its `[]` default.
+
   - Declare a forward relation for **every former reference column**, including references not currently used by an include.
   - Declare reverse relations explicitly if your queries or permissions use them. The second argument to `s.reverse` is the **forward relationship name**, not its UUID column. No reverse navigation is added automatically.
   - You can keep previous navigation names, as above, or choose names such as `authoredPosts`. For example, renaming `author` to `writer` keeps `authorId` unchanged, but requires `s.reverse("posts", "writer")` and `.include({ writer: true })` in place of the old names. Update `hopTo`, relation-based query filters, and permission `hopTo` calls too, including names used in untyped query objects.
@@ -206,6 +212,7 @@
   **Large values are ordinary columns.** Store files and streams in `s.bytes()`, large JSON documents in `s.json()`, and text in `s.string()`. Read complete values or stream supported ranges and JSON subpaths; update them with byte patches, appends, JSON edits or string splices. Content-based chunking in a Prolly Tree makes these operations efficient while retaining ordinary column permissions and query semantics. JSON and rich-text merge strategies are planned for a later release.
 
   ### API migration checklist
+
   - Replace `Db.subscribeAll` with `Db.subscribe` for complete current results.
   - React and React Native `useAll` now return `{ data, isLoading, error }`; `useAllSuspense` still returns rows.
   - Replace `localUpdates` and `propagation` options with read-tier selection.
