@@ -79,10 +79,10 @@ can't talk to a newer backend.
 Back up before you upgrade. Releases don't migrate a data directory back to an older format, so
 rolling back means restoring the backup.
 
-From `2.0.0-beta.0` on, we try not to break the APIs, formats and backends that
-[Stability](/docs/stability) lists as stable. When a beta release must, it gets an "Upgrading from …"
-section below, and where feasible the old API keeps working for a deprecation period first.
-Experimental parts can change in any release.
+From `2.0.0-beta.0` on, we try not to break the parts that [What beta means](#what-beta-means)
+lists as stable. When a beta release must, it gets an "Upgrading from …" section below, and where
+feasible the old API keeps working for a deprecation period first. Experimental parts can change in
+any release.
 
 On Vercel, there's no supported way to back up or export a `vercel()` core's data yet
 ([jazz#5441](https://github.com/garden-co/jazz/issues/5441)). Upgrading keeps the data as long as
@@ -94,8 +94,7 @@ a core of its own, separate from production's (a dry run with its own data, not 
 
 ## Upgrading from alpha.70 to beta.0
 
-`2.0.0-beta.0` is the first beta of Jazz 2. From here on, [Stability](/docs/stability) says what we
-try not to break between betas. Data directories, Vercel and Durable Object cores, and the sync
+`2.0.0-beta.0` is the first beta of Jazz 2. Data directories, Vercel and Durable Object cores, and the sync
 protocol are unchanged from alpha.70: upgrade by bumping every Jazz package to `2.0.0-beta.0` and
 redeploying, as usual.
 
@@ -103,6 +102,29 @@ The code changes are removals of everything earlier alphas deprecated. Each subs
 what was removed, who hits it, and what to use instead. Most of them fail at build time ("not
 exported"), so your typecheck finds whatever a search misses. `jazz-tools upgrade` is removed too:
 these sections are the upgrade path, written so you or an AI coding assistant can follow them.
+
+### What beta means
+
+From beta.0 on, we try not to break these between beta releases:
+
+- the TypeScript client and backend APIs (`jazz-tools` and its entry points);
+- the schema and permissions DSL in `schema.ts`, and the migrations `migrations create` writes;
+- the storage format: a data directory a beta wrote opens in later betas;
+- the wire protocol between clients, backends and cores;
+- running your main backend with `createJazz`, on your own server, on Vercel with `vercel()`, with
+  its core on another machine through `remote()`, or with the core in a Cloudflare Durable Object
+  with `durableObjects()` (and large values in R2).
+
+When a beta must break one of them, its release notes say so, it gets an "Upgrading from …" section
+here, and where feasible the old API keeps working for a deprecation period first.
+
+These stay **experimental** and may change in any release: the Rust, Swift, Kotlin and Go clients
+([Language Support](/docs/reference/language-support)),
+[transformed columns](/docs/schemas/column-types#transformed-columns), and running your backend in a
+Cloudflare Worker with `jazzBackend`.
+
+[Jazz Cloud](/docs/setup/deployment/jazz-cloud) stays deprecated for new apps; existing apps keep
+running.
 
 ### Removed: `useSession()` (Svelte: `getSession()`)
 
