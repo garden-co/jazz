@@ -15042,7 +15042,9 @@ impl Db {
             // at: landing it anywhere else would split the commit across
             // shards (INV-SHARD-27). A session's commit waits for its fix
             // (`commit_waits`), so only a caller that skipped that gets here.
-            if fixed.is_none() && inner.shard.awaits(part) {
+            // A trial (`check_part` of a queued hold once granted) lands
+            // nothing, so it runs before the fix.
+            if !trial && fixed.is_none() && inner.shard.awaits(part) {
                 return Err((
                     Error::new(
                         ErrorCode::Protocol,
