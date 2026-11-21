@@ -4,8 +4,8 @@
 use std::path::Path;
 
 use jazz::db::Migrations;
-use jazz::tools::Schema;
 use jazz::tools::deployment::artifact::{self, LoadedApp};
+use jazz::tools::{AppId, Schema};
 
 use crate::error::{Error, Result};
 
@@ -56,44 +56,78 @@ impl AppFiles {
         self
     }
 
+    /// The bytes of `jazz.app.json`.
+    #[cfg_attr(not(feature = "e2ee-client"), allow(dead_code))]
+    pub(crate) fn app_bytes(&self) -> &[u8] {
+        &self.app
+    }
+
     pub(crate) fn has_permissions(&self) -> bool {
         self.permissions.is_some()
     }
 
     /// Checks the files, as a client (schema history only) or as a backend
     /// (also the permissions, and the bundle it publishes).
-    pub(crate) fn load(&self) -> Result<LoadedFiles> {
+    ///
+    /// With `encryption` (the app and its environment), an app that declares
+    /// encryption loads, with its declarations, for the client to open with
+    /// hooks; without it such an app is refused.
+    pub(crate) fn load(&self, encryption: Option<(AppId, &str)>) -> Result<LoadedFiles> {
         let refused = |error: artifact::ArtifactError| Error::App(error.to_string());
         match &self.permissions {
             Some(permissions) => {
                 let loaded = artifact::load(&self.app, permissions).map_err(refused)?;
-                refuse_encrypted(
-                    loaded
-                        .current_schema()
-                        .keys()
-                        .any(|name| artifact::system_tables::is_system_table(name.as_str())),
-                )?;
+                let encrypted = loaded
+                    .current_schema()
+                    .keys()
+                    .any(|name| artifact::system_tables::is_system_table(name.as_str()));
+                let declarations = match encryption {
+                    Some((app_id, environment)) => {
+                        artifact::load_client_encrypted(&self.app, app_id, environment)
+                            .map_err(refused)?
+                            .2
+                    }
+                    None => {
+                        refuse_encrypted(encrypted)?;
+                        None
+                    }
+                };
                 Ok(LoadedFiles {
                     schema: loaded.current_schema().clone(),
                     migrations: loaded.client_migrations(),
                     backend: Some(loaded),
+                    declarations,
                 })
             }
-            None => {
-                let (schema, migrations) =
-                    artifact::load_client_current(&self.app).map_err(refused)?;
-                Ok(LoadedFiles {
-                    schema,
-                    migrations,
-                    backend: None,
-                })
-            }
+            None => match encryption {
+                Some((app_id, environment)) => {
+                    let (schema, migrations, declarations) =
+                        artifact::load_client_encrypted(&self.app, app_id, environment)
+                            .map_err(refused)?;
+                    Ok(LoadedFiles {
+                        schema,
+                        migrations,
+                        backend: None,
+                        declarations,
+                    })
+                }
+                None => {
+                    let (schema, migrations) = artifact::load_client_current(&self.app)
+                        .map_err(|error| Error::App(error.to_string()))?;
+                    Ok(LoadedFiles {
+                        schema,
+                        migrations,
+                        backend: None,
+                        declarations: None,
+                    })
+                }
+            },
         }
     }
 }
 
-/// A client has no encryption hooks yet, so it refuses an app whose files
-/// declare encryption (`declared`).
+/// A client without encryption hooks refuses an app whose files declare
+/// encryption (`declared`).
 fn refuse_encrypted(declared: bool) -> Result<()> {
     if declared {
         return Err(Error::App(
@@ -108,4 +142,7 @@ pub(crate) struct LoadedFiles {
     pub migrations: Migrations,
     /// With permissions: what a backend publishes.
     pub backend: Option<LoadedApp>,
+    /// The app's encryption declarations, when it declares encryption and
+    /// the client has hooks to open it with.
+    pub declarations: Option<jazz::tools::public_schema::E2eeDeclarations>,
 }

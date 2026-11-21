@@ -629,6 +629,72 @@ fn a_recovery_restores_access_and_its_root_is_retired_with_the_device() {
     });
 }
 
+/// Contract: the host's `recoveryRegister` call honours `automatic`: with a
+/// retired root's secret, the start-up registration (`automatic: true`)
+/// writes nothing and succeeds, an explicit one (`false`, or absent) is
+/// refused with `recovery-root-mismatch`.
+///
+/// ```text
+/// alice registers a secret, then retires its root
+/// recoveryRegister { automatic: true }  ──► null, nothing written
+/// recoveryRegister { automatic: false } ──► recovery-root-mismatch
+/// ```
+#[test]
+fn the_host_registers_a_retired_root_only_when_automatic() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let client = open_account(memory(), alice, settings.clone(), None);
+        let (db, _link) = session(&client, &server, alice, &settings, 1, None);
+        let (client, db) = (Rc::new(client), Rc::new(db));
+        let runtime = jazz_e2ee_client::host::runtime::Encryption::new(
+            jazz_e2ee_client::host::runtime::Built {
+                spaces: serde_json::json!({}),
+                client: Rc::clone(&client),
+                reports: Rc::default(),
+            },
+            Rc::new(jazz_e2ee_client::host::bridge::JsStore::default()),
+            Rc::clone(&db),
+        );
+        drive(&server, &[&db], client.ensure_account(&db)).unwrap();
+        let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([5; 32]);
+        drive(&server, &[&db], client.register_recovery(&db, &secret)).unwrap();
+        drive(&server, &[&db], client.ensure_account(&db)).unwrap();
+        let root = client
+            .with_account(|account| account.state.recovery_roots[0].row.id.clone())
+            .unwrap();
+        drive(&server, &[&db], client.retire_recovery_root(&db, &root)).unwrap();
+        pump(&server, &db);
+        let rows = || {
+            (
+                count(&server, "__e2ee_recovery_roots"),
+                count(&server, "__e2ee_recovery_deliveries"),
+            )
+        };
+        let before = rows();
+        let register = |automatic: Option<bool>| {
+            let mut args = serde_json::json!({ "secret": "05".repeat(32) });
+            if let Some(automatic) = automatic {
+                args["automatic"] = serde_json::json!(automatic);
+            }
+            drive(
+                &server,
+                &[&db],
+                runtime.call("recoveryRegister".to_owned(), args),
+            )
+        };
+
+        assert_eq!(register(Some(true)), Ok(serde_json::Value::Null));
+        for explicit in [Some(false), None] {
+            let refused = register(explicit).unwrap_err();
+            assert_eq!(refused, "recovery-root-mismatch: E2EE recovery failed");
+        }
+        pump(&server, &db);
+        assert_eq!(rows(), before, "nothing written");
+    });
+}
+
 /// lena's device of her device-account account, opened with her identity.
 fn lena_device(server: &Db, seed: u8, node: u8) -> (Device, AuthorSubject) {
     let (lena, identity) = device_account(seed);
@@ -822,7 +888,7 @@ fn an_app_account_is_not_started_as_a_device_account() {
 /// explicit recovery with it is: a user re-registering an old phrase must
 /// not believe they have recovery. (The start-up registration of a device
 /// account's own secret, the host runtime's `recoveryRegister` with
-/// `atStart`, writes nothing and goes on:
+/// `automatic`, writes nothing and goes on:
 /// `a_device_account_starts_after_its_secrets_root_is_retired`.)
 ///
 /// ```text

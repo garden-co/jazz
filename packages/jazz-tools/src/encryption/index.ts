@@ -107,9 +107,6 @@ export interface EncryptionOptions {
   reportIntervalMs?: number;
 }
 
-/** A restore's refusals that mean there is nothing to recover from. */
-const NOTHING_TO_RECOVER = new Set(["recovery-root-mismatch", "recovery-delivery-missing"]);
-
 const toHex = (bytes: Uint8Array) =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 
@@ -208,22 +205,20 @@ export class Encryption {
     const secret = await this.options.accountSecret?.();
     if (secret !== undefined) {
       const hex = toHex(parseSecret(secret));
-      // Runs at every start: the runtime writes nothing when the root is
-      // registered already, and a retired root does not stop the device.
-      if (status === "active") {
-        await this.call("recoveryRegister", { secret: hex, atStart: true });
-      } else if (status === "awaiting-approval") {
+      // `automatic`: a retired root of the account secret is not an error
+      // here, so the device still starts.
+      if (status === "active")
+        await this.call("recoveryRegister", { secret: hex, automatic: true });
+      else if (status === "awaiting-approval") {
         // A device with no other to approve it recovers with the account
-        // secret. Without a root registered for it (or with no delivery for
-        // the current key) there is nothing to recover from, and the device
-        // stays awaiting approval; any other failure is the caller's.
-        try {
-          status = await this.call<AccountStatus>("recoveryRestore", { secret: hex });
-        } catch (error) {
-          if (!(error instanceof EncryptionError) || !NOTHING_TO_RECOVER.has(error.code)) {
-            throw error;
-          }
-        }
+        // secret. `null`: nothing to recover from yet (no registered root
+        // or delivery for it), so it stays awaiting approval. Any other
+        // failure (store, database, a refused recovery) is the caller's.
+        const restored = await this.call<AccountStatus | null>("recoveryRestore", {
+          secret: hex,
+          automatic: true,
+        });
+        if (restored !== null) status = restored;
       }
     }
     return status;

@@ -69,6 +69,7 @@ mod backend_client;
 mod branch;
 mod config;
 mod edit;
+mod encryption;
 #[cfg(feature = "unstable-endpoint")]
 pub mod endpoint;
 mod error;
@@ -96,6 +97,11 @@ pub use backend_client::{BackendClientKind, CLOSE_TIMEOUT};
 pub use branch::{Branch, BranchView, OnBranch, Snapshot};
 pub use config::{Backend, Config, Storage};
 pub use edit::{Edits, TextColumn};
+pub use encryption::Encryption;
+#[cfg(feature = "e2ee-client")]
+pub use encryption::EncryptionConfig;
+#[doc(hidden)]
+pub use encryption::with_key_wait;
 #[cfg(feature = "unstable-endpoint")]
 pub use endpoint::Endpoint;
 pub use error::{Error, Result};

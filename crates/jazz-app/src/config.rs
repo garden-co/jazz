@@ -48,6 +48,11 @@ pub struct Config {
     /// host other than this machine (a dev server on the LAN). Off: they
     /// go over `https://`, or to `localhost`.
     pub allow_insecure_http: bool,
+    /// Where an end user's device keeps its encryption keys, for an app that
+    /// declares end-to-end encryption: its private store (the app supplies
+    /// one; none ships). A backend takes none: it holds no keys.
+    #[cfg(feature = "e2ee-client")]
+    pub encryption: Option<crate::EncryptionConfig>,
 }
 
 impl Config {
@@ -60,6 +65,8 @@ impl Config {
             backend: None,
             user: None,
             allow_insecure_http: false,
+            #[cfg(feature = "e2ee-client")]
+            encryption: None,
         }
     }
 
@@ -97,6 +104,14 @@ impl Config {
             unreachable!("Auth::bearer is a bearer")
         };
         self.user(Auth::Credential(bearer))
+    }
+
+    /// The private store of an end user's device, for an app that declares
+    /// end-to-end encryption (see [`crate::EncryptionConfig`]).
+    #[cfg(feature = "e2ee-client")]
+    pub fn encryption(mut self, encryption: crate::EncryptionConfig) -> Self {
+        self.encryption = Some(encryption);
+        self
     }
 
     /// See [`Config::allow_insecure_http`].

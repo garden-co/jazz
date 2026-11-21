@@ -8,8 +8,15 @@
 //!   store, its long-lived loop (account verification, key watches, the
 //!   delivery pass), the calls the TypeScript handle makes, and the reports.
 //!
+//! - [`phrase`]: the recovery phrase, 24 words of a 32-byte recovery secret.
+//!
 //! A binding adds only what is its own: how a future is polled and how a
 //! result becomes a promise.
 
 pub mod bridge;
+pub mod phrase;
 pub mod runtime;
+
+/// The device account's secret as native hosts pass it (see
+/// [`runtime::NativeOptions`]): its bytes are zeroized when it is dropped.
+pub use jazz_e2ee::protocol::derive::RecoverySecret;

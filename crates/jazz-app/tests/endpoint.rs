@@ -1896,3 +1896,145 @@ async fn a_thin_socket_whose_answer_never_comes_is_closed() {
     assert_eq!(frame.reason.as_str(), "an answer never came");
     app.stop().await;
 }
+
+/// An app that declares encryption, opened by its backend, which holds no
+/// keys, and served by the backend's endpoint.
+#[cfg(feature = "e2ee-client")]
+async fn start_encrypted() -> App {
+    const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/encrypted");
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .expect("start a Jazz server");
+    let backend = Jazz::open(
+        AppFiles::read(DIR).unwrap(),
+        Config::new(app_id)
+            .server(server.base_url())
+            .backend(Backend::new(
+                server.backend_secret(),
+                server.admin_secret(),
+                "service",
+            )),
+    )
+    .await
+    .expect("an encrypted app opens as a backend, which holds no keys");
+    let endpoint = Endpoint::new(&backend, authenticate).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/jazz", listener.local_addr().unwrap());
+    let admitted = Arc::new(Mutex::new(Vec::new()));
+    let host = tokio::spawn(host(listener, endpoint.clone(), admitted.clone()));
+    App {
+        app_id,
+        server,
+        backend,
+        endpoint,
+        url,
+        admitted,
+        host,
+    }
+}
+
+/// The rows of `table` the core holds, read by the thin client outside a
+/// transaction.
+#[cfg(feature = "e2ee-client")]
+async fn core_rows(thin: &mut ThinSocket, table: &str) -> usize {
+    let query = postcard::to_allocvec(&jazz_app_support::jazz::query::Query::from(table)).unwrap();
+    rows_of(
+        thin.call(jazz_app_support::jazz::thin::ThinOp::Query {
+            query,
+            options: Vec::new(),
+            transaction: None,
+        })
+        .await,
+    )
+}
+
+/// A thin client of an app that declares encryption has its transactions
+/// on plain tables served by a session client that holds no keys: the
+/// commit reaches the core.
+#[cfg(feature = "e2ee-client")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thin_transaction_on_a_plain_table_of_an_encrypted_app_commits() {
+    use jazz_app_support::jazz::thin::{ThinBody, ThinOp};
+    let app = start_encrypted().await;
+    let mut carol = ThinSocket::open(&app, "token-carol", "carol").await;
+    let tx = jazz_app_support::jazz::tools::OpenTransactionId::new().to_string();
+    assert_eq!(
+        carol
+            .call(ThinOp::Begin {
+                transaction: tx.clone(),
+                kind: "mergeable".into(),
+            })
+            .await,
+        ThinBody::Ok
+    );
+    let staged = carol
+        .call(ThinOp::Insert {
+            table: "notes".into(),
+            cells: cells(&[("text", text("plain note"))]),
+            options: Vec::new(),
+            transaction: Some(tx.clone()),
+        })
+        .await;
+    assert!(matches!(staged, ThinBody::Staged { .. }), "{staged:?}");
+    let committed = carol.call(ThinOp::Commit { transaction: tx }).await;
+    assert!(
+        matches!(committed, ThinBody::Written { .. }),
+        "{committed:?}"
+    );
+    assert_eq!(core_rows(&mut carol, "notes").await, 1);
+    app.stop().await;
+}
+
+/// The session's client refuses a thin transaction's write of an encrypted
+/// column itself, whatever the thin client sends: it holds no keys, and
+/// nothing of the write reaches the core.
+#[cfg(feature = "e2ee-client")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thin_transaction_writing_an_encrypted_column_is_refused_by_the_backend() {
+    use jazz_app_support::jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
+    use jazz_app_support::jazz::thin::{ThinBody, ThinOp};
+    let app = start_encrypted().await;
+    let mut carol = ThinSocket::open(&app, "token-carol", "carol").await;
+    let tx = jazz_app_support::jazz::tools::OpenTransactionId::new().to_string();
+    assert_eq!(
+        carol
+            .call(ThinOp::Begin {
+                transaction: tx.clone(),
+                kind: "mergeable".into(),
+            })
+            .await,
+        ThinBody::Ok
+    );
+    // A cell of the encrypted column, as plaintext bytes a thin client
+    // (which has no keys either) could send.
+    let descriptor = RecordDescriptor::new([
+        ("projectId".to_owned(), ValueType::Uuid),
+        ("title".to_owned(), ValueType::Bytes),
+    ]);
+    let values = [
+        Value::Uuid(*jazz_app_support::jazz::tools::ObjectId::new().uuid()),
+        Value::Bytes(b"PLAINTEXT".to_vec()),
+    ];
+    let record = OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor);
+    let refused = carol
+        .call(ThinOp::Insert {
+            table: "tasks".into(),
+            cells: jazz_app_support::jazz::binding_codec::encode_named_cells(&record).unwrap(),
+            options: Vec::new(),
+            transaction: Some(tx.clone()),
+        })
+        .await;
+    let ThinBody::Error { message, .. } = &refused else {
+        panic!("an encrypted write is refused, got {refused:?}");
+    };
+    assert!(
+        message.contains("holds no encryption keys") && message.contains("tasks.title"),
+        "{message}"
+    );
+    let _ = carol.call(ThinOp::Commit { transaction: tx }).await;
+    assert_eq!(core_rows(&mut carol, "tasks").await, 0);
+    app.stop().await;
+}

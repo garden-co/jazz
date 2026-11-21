@@ -6,10 +6,16 @@
 //! against the app's store, and answers (`replyStore`); the runtime's future
 //! is polled again by the host and finds its answer. Bytes travel as base64,
 //! numbers that may exceed 2^53 as decimal text.
+//!
+//! A host that can answer on the spot (a native app, a foreign-language
+//! callback) gives the store a [`Handler`] instead ([`JsStore::served_by`]):
+//! the same request texts and answers, with no queue to drain. [`serve`]
+//! makes a handler of a Rust [`PrivateStore`].
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::task::Poll;
+use std::rc::Rc;
+use std::task::{Poll, Waker};
 use std::time::Duration;
 use web_time::Instant;
 
@@ -20,8 +26,15 @@ use futures::future::LocalBoxFuture;
 use jazz_e2ee::Zeroizing;
 use serde_json::{Value, json};
 
-/// How long a store call may wait for JavaScript's answer.
+/// How long a store call may wait for its answer (JavaScript's, or a
+/// [`Handler`]'s).
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Answers a request text on the spot: `ok` and the JSON payload, or the
+/// error text, as [`JsStore::reply`] takes them. An answer that has not come
+/// by the deadline fails the call; one that is synchronous cannot be cut
+/// short, so a handler that never returns blocks its thread.
+pub type Handler = Rc<dyn Fn(String) -> LocalBoxFuture<'static, (bool, String)>>;
 
 /// A store call waiting for JavaScript.
 pub struct Request {
@@ -41,9 +54,20 @@ pub struct JsStore {
     timeout: Cell<Option<Duration>>,
     /// Called when a request is queued, so the host polls the queue soon.
     wake: RefCell<Option<Box<dyn Fn()>>>,
+    /// Answers requests instead of the queue (see [`JsStore::served_by`]).
+    handler: Option<Handler>,
 }
 
 impl JsStore {
+    /// A store whose requests `handler` answers where they are made: nothing
+    /// is queued and nothing waits for a host turn.
+    pub fn served_by(handler: Handler) -> Self {
+        Self {
+            handler: Some(handler),
+            ..Self::default()
+        }
+    }
+
     pub fn set_wake(&self, wake: Box<dyn Fn()>) {
         *self.wake.borrow_mut() = Some(wake);
     }
@@ -73,16 +97,7 @@ impl JsStore {
         if !self.outstanding.borrow().contains(&id) {
             return false;
         }
-        let result = if ok {
-            serde_json::from_str(payload).map_err(|error| StoreError::Failed(error.to_string()))
-        } else {
-            Err(match payload {
-                "conflict" => StoreError::Conflict,
-                "wiped" => StoreError::Wiped,
-                other => StoreError::Failed(other.to_owned()),
-            })
-        };
-        self.replies.borrow_mut().insert(id, result);
+        self.replies.borrow_mut().insert(id, decode(ok, payload));
         true
     }
 
@@ -108,6 +123,49 @@ impl JsStore {
                 self.0.replies.borrow_mut().remove(&self.1);
             }
         }
+        let late = || {
+            Err(StoreError::Failed(format!(
+                "the private store did not answer `{op}` in time"
+            )))
+        };
+        if let Some(handler) = &self.handler {
+            args["op"] = json!(op);
+            // The same deadline as a queued request. A handler that runs
+            // synchronously (a foreign callback) has answered before this
+            // point and cannot be interrupted; an asynchronous one that never
+            // answers, or never wakes its task, fails here, its late answer
+            // dropped with its future. While it waits, the call is polled
+            // when the handler wakes it or at the deadline, never in a loop.
+            let deadline = Instant::now() + self.timeout.get().unwrap_or(ANSWER_TIMEOUT);
+            let mut answer = handler(args.to_string());
+            // The waker the timer holds for this call, and its entry there:
+            // dropping the entry (a new waker, or the call done or dropped)
+            // takes the waker out of the timer at once.
+            let mut timed: Option<(Waker, Timed)> = None;
+            return std::future::poll_fn(|context| {
+                if let Poll::Ready((ok, payload)) = answer.as_mut().poll(context) {
+                    timed = None;
+                    return Poll::Ready(decode(ok, &payload));
+                }
+                if Instant::now() >= deadline {
+                    timed = None;
+                    return Poll::Ready(late());
+                }
+                // Nothing else is bound to wake this call at its deadline.
+                if timed
+                    .as_ref()
+                    .is_none_or(|(waker, _)| !waker.will_wake(context.waker()))
+                {
+                    timed = None;
+                    match wake_at(deadline, context.waker().clone()) {
+                        Some(entry) => timed = Some((context.waker().clone(), entry)),
+                        None => context.waker().wake_by_ref(),
+                    }
+                }
+                Poll::Pending
+            })
+            .await;
+        }
         let id = self.next.get() + 1;
         self.next.set(id);
         args["id"] = json!(id.to_string());
@@ -124,12 +182,109 @@ impl JsStore {
         let deadline = Instant::now() + self.timeout.get().unwrap_or(ANSWER_TIMEOUT);
         std::future::poll_fn(|_| match self.replies.borrow_mut().remove(&id) {
             Some(result) => Poll::Ready(result),
-            None if Instant::now() >= deadline => Poll::Ready(Err(StoreError::Failed(format!(
-                "the private store did not answer `{op}` in time"
-            )))),
+            None if Instant::now() >= deadline => Poll::Ready(late()),
             None => Poll::Pending,
         })
         .await
+    }
+}
+
+/// A call's entry in the deadline thread (see [`wake_at`]): dropping it
+/// takes the call's waker out at once, so a call that finished long before
+/// its deadline holds nothing there.
+#[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), allow(dead_code))]
+struct Timed {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    id: u64,
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    timer: std::sync::mpsc::Sender<TimerMessage>,
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+enum TimerMessage {
+    Wake(u64, Instant, Waker),
+    Forget(u64),
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+impl Drop for Timed {
+    fn drop(&mut self) {
+        let _ = self.timer.send(TimerMessage::Forget(self.id));
+    }
+}
+
+/// Has `waker` woken at `deadline` by the one thread that keeps the
+/// deadlines of every store call waiting on a handler, until the returned
+/// entry is dropped. `None` when there is no such thread (a browser, or a
+/// thread that could not be started): the caller then wakes itself, as it
+/// must to meet its deadline.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn wake_at(deadline: Instant, waker: Waker) -> Option<Timed> {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
+    static TIMER: OnceLock<Option<Sender<TimerMessage>>> = OnceLock::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let timer = TIMER.get_or_init(|| {
+        let (sender, receiver) = channel::<TimerMessage>();
+        std::thread::Builder::new()
+            .name("jazz-store-deadlines".to_owned())
+            .spawn(move || {
+                let mut due: HashMap<u64, (Instant, Waker)> = HashMap::new();
+                loop {
+                    let now = Instant::now();
+                    due.retain(|_, (at, waker)| {
+                        let passed = *at <= now;
+                        if passed {
+                            waker.wake_by_ref();
+                        }
+                        !passed
+                    });
+                    let next = due.values().map(|(at, _)| *at).min();
+                    let received = match next {
+                        Some(at) => receiver.recv_timeout(at.saturating_duration_since(now)),
+                        None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                    };
+                    match received {
+                        Ok(TimerMessage::Wake(id, at, waker)) => {
+                            due.insert(id, (at, waker));
+                        }
+                        Ok(TimerMessage::Forget(id)) => {
+                            due.remove(&id);
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+            })
+            .ok()
+            .map(|_| sender)
+    });
+    let timer = timer.as_ref()?;
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    timer.send(TimerMessage::Wake(id, deadline, waker)).ok()?;
+    Some(Timed {
+        id,
+        timer: timer.clone(),
+    })
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn wake_at(_deadline: Instant, _waker: Waker) -> Option<Timed> {
+    None
+}
+
+/// A host's answer as the store call's result: `ok` with a JSON payload, or
+/// an error text (`conflict`, `wiped`, or a message).
+fn decode(ok: bool, payload: &str) -> Result<Value, StoreError> {
+    if ok {
+        serde_json::from_str(payload).map_err(|error| StoreError::Failed(error.to_string()))
+    } else {
+        Err(match payload {
+            "conflict" => StoreError::Conflict,
+            "wiped" => StoreError::Wiped,
+            other => StoreError::Failed(other.to_owned()),
+        })
     }
 }
 
@@ -242,6 +397,68 @@ impl PrivateStore for JsStore {
     }
 }
 
+/// A [`Handler`] that runs each request against a Rust store, for a host
+/// whose app supplies a [`PrivateStore`] directly.
+pub fn serve(store: Rc<dyn PrivateStore>) -> Handler {
+    Rc::new(move |text| {
+        let store = Rc::clone(&store);
+        Box::pin(async move {
+            match run(&*store, &text).await {
+                Ok(value) => (true, value.to_string()),
+                Err(StoreError::Conflict) => (false, "conflict".to_owned()),
+                Err(StoreError::Wiped) => (false, "wiped".to_owned()),
+                Err(error) => (false, error.to_string()),
+            }
+        })
+    })
+}
+
+async fn run(store: &dyn PrivateStore, text: &str) -> Result<Value, StoreError> {
+    let bad = |what: &str| StoreError::Failed(format!("a store request {what}"));
+    let request: Value = serde_json::from_str(text).map_err(|_| bad("is not JSON"))?;
+    let text_of = |name: &str| -> Result<&str, StoreError> {
+        request[name].as_str().ok_or_else(|| bad("lacks a field"))
+    };
+    let number = |name: &str| -> Result<u64, StoreError> { number_of(&request[name]) };
+    let bytes = |name: &str| -> Result<Vec<u8>, StoreError> { bytes_of(&request[name]) };
+    Ok(match request["op"].as_str() {
+        Some("openScope") => json!(store.open_scope(text_of("scope")?).await?.to_string()),
+        Some("load") => match store.load(text_of("scope")?, text_of("doc")?).await? {
+            None => Value::Null,
+            Some(found) => json!({
+                "bytes": STANDARD.encode(found.bytes),
+                "revision": found.revision.to_string(),
+            }),
+        },
+        Some("save") => {
+            let expected = match request["expected"].as_str() {
+                None => None,
+                Some(_) => Some(number("expected")?),
+            };
+            let revision = store
+                .save(
+                    text_of("scope")?,
+                    number("incarnation")?,
+                    text_of("doc")?,
+                    &bytes("bytes")?,
+                    expected,
+                )
+                .await?;
+            json!(revision.to_string())
+        }
+        Some("list") => json!(store.list(text_of("scope")?).await?),
+        Some("delete") => {
+            store.delete(text_of("scope")?).await?;
+            Value::Null
+        }
+        Some("protect") => json!(STANDARD.encode(store.protect(&bytes("secret")?).await?)),
+        Some("unprotect") => {
+            json!(STANDARD.encode(&*store.unprotect(&bytes("blob")?).await?))
+        }
+        _ => return Err(bad("names an unknown operation")),
+    })
+}
+
 // Lower-level than the usual black-box tests, because the bridge's queue and
 // its refusal of stray answers are only observable by playing JavaScript's
 // side by hand; the TypeScript suite runs the same bridge end to end.
@@ -316,6 +533,131 @@ mod tests {
         );
     }
 
+    /// Contract: a handler that never answers fails the call at the same
+    /// deadline, even under an executor that polls only when woken and a
+    /// handler that never wakes it.
+    #[test]
+    fn a_silent_handler_fails_the_call_in_time() {
+        let (done, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let store = JsStore::served_by(Rc::new(|_| Box::pin(std::future::pending())));
+            store.set_timeout(Duration::from_millis(20));
+            let result = futures::executor::block_on(
+                store.call("load", json!({ "scope": "s", "doc": "d" })),
+            );
+            let _ = done.send(result);
+        });
+        let result = outcome
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the call ends at its deadline");
+        assert!(
+            matches!(&result, Err(StoreError::Failed(message)) if message.contains("did not answer")),
+            "{result:?}"
+        );
+    }
+
+    /// Contract: a call answered before its deadline leaves nothing with the
+    /// deadline thread: the waker it handed over is dropped when the call
+    /// ends, not kept until the deadline (a minute by default).
+    ///
+    /// Lower-level than a black-box test: the waker the thread holds is only
+    /// observable by counting its references.
+    #[test]
+    fn an_answered_call_leaves_no_waker_with_the_deadline_thread() {
+        struct Counted;
+        impl std::task::Wake for Counted {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let counted = std::sync::Arc::new(Counted);
+        let waker = Waker::from(std::sync::Arc::clone(&counted));
+        let answered = Rc::new(Cell::new(false));
+        let gate = Rc::clone(&answered);
+        let store = JsStore::served_by(Rc::new(move |_| {
+            let gate = Rc::clone(&gate);
+            Box::pin(std::future::poll_fn(move |_| {
+                if gate.get() {
+                    Poll::Ready((true, "null".to_owned()))
+                } else {
+                    Poll::Pending
+                }
+            }))
+        }));
+        let mut call: std::pin::Pin<Box<dyn Future<Output = _>>> =
+            Box::pin(store.call("load", json!({ "scope": "s", "doc": "d" })));
+        let mut context = Context::from_waker(&waker);
+        assert!(call.as_mut().poll(&mut context).is_pending());
+        // The deadline thread holds a clone of the waker while the call waits.
+        let held = std::sync::Arc::strong_count(&counted);
+        assert!(held > 2, "the timer holds the waker: {held}");
+        answered.set(true);
+        assert_eq!(
+            call.as_mut().poll(&mut context),
+            Poll::Ready(Ok(Value::Null))
+        );
+        drop(call);
+        let started = Instant::now();
+        while std::sync::Arc::strong_count(&counted) > 2 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the deadline thread still holds the answered call's waker"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Contract: a call waiting on a slow asynchronous handler is polled
+    /// when the handler wakes it, not in a loop: its thread does not spin
+    /// while the store works.
+    ///
+    /// ```text
+    /// call ──► handler: pending (answers in 200 ms, then wakes the call)
+    /// block_on polls: once at the start, once when woken ──► the answer
+    /// ```
+    #[test]
+    fn a_slow_handler_does_not_spin_its_thread() {
+        struct Slow {
+            polls: Rc<Cell<usize>>,
+            answered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            started: bool,
+        }
+        impl Future for Slow {
+            type Output = (bool, String);
+            fn poll(
+                mut self: std::pin::Pin<&mut Self>,
+                context: &mut std::task::Context<'_>,
+            ) -> Poll<Self::Output> {
+                self.polls.set(self.polls.get() + 1);
+                if self.answered.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Poll::Ready((true, "null".to_owned()));
+                }
+                if !self.started {
+                    self.started = true;
+                    let answered = std::sync::Arc::clone(&self.answered);
+                    let waker = context.waker().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(200));
+                        answered.store(true, std::sync::atomic::Ordering::SeqCst);
+                        waker.wake();
+                    });
+                }
+                Poll::Pending
+            }
+        }
+        let polls = Rc::new(Cell::new(0));
+        let counted = Rc::clone(&polls);
+        let store = JsStore::served_by(Rc::new(move |_| {
+            Box::pin(Slow {
+                polls: Rc::clone(&counted),
+                answered: Default::default(),
+                started: false,
+            })
+        }));
+        let result =
+            futures::executor::block_on(store.call("load", json!({ "scope": "s", "doc": "d" })));
+        assert_eq!(result, Ok(Value::Null));
+        assert!(polls.get() <= 3, "polled {} times", polls.get());
+    }
+
     /// Contract: a call dropped while its request is still queued never
     /// reaches JavaScript (its step had not begun); one already sent is
     /// left to JavaScript and its late answer is refused.
@@ -334,5 +676,31 @@ mod tests {
         let taken = store.take_requests();
         drop(sent);
         assert!(!store.reply(id_of(&taken[0]), true, "null"));
+    }
+
+    /// Contract: a store served on the spot behaves as the store it wraps:
+    /// what one call saves the next loads, a stale save conflicts, and a
+    /// request that is not one is refused, not answered with a guess.
+    #[test]
+    fn a_served_store_is_the_store_it_wraps() {
+        fn block<T>(future: impl Future<Output = T>) -> T {
+            jazz::db::block_on(future)
+        }
+        let store = JsStore::served_by(serve(Rc::new(crate::MemoryStore::new())));
+        let scope = block(store.open_scope("device")).unwrap();
+        assert_eq!(block(store.load("device", "doc")).unwrap(), None);
+        let first = block(store.save("device", scope, "doc", b"one", None)).unwrap();
+        let found = block(store.load("device", "doc")).unwrap().unwrap();
+        assert_eq!((found.bytes, found.revision), (b"one".to_vec(), first));
+        assert!(matches!(
+            block(store.save("device", scope, "doc", b"two", None)),
+            Err(StoreError::Conflict)
+        ));
+        assert_eq!(block(store.list("device")).unwrap(), vec!["doc".to_owned()]);
+        let handler = serve(Rc::new(crate::MemoryStore::new()));
+        let (ok, _) = block(handler("{\"op\":\"nothing\"}".to_owned()));
+        assert!(!ok);
+        let (ok, _) = block(handler("not json".to_owned()));
+        assert!(!ok);
     }
 }
