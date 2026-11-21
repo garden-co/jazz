@@ -605,6 +605,12 @@ impl E2eeHooks for Hooks {
                         outcome
                             .missing_epochs
                             .push((db_address(&address), epoch_id));
+                        // Not reported yet: the runtime acquires the epoch
+                        // and settles the report. The read itself says the
+                        // row was left out, pending its key.
+                        outcome
+                            .unreadable
+                            .push(notice(UnreadableCode::KeyPending, &address));
                         readable = false;
                         None
                     }

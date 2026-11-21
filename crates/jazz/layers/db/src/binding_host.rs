@@ -36,8 +36,8 @@ use crate::db::{
     InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier, RemoteLinkHint,
     RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
     StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError,
-    UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle,
-    WriteIdentity, block_on,
+    UnreadableRow, UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter,
+    WriteHandle, WriteIdentity, block_on,
 };
 
 /// Named cells, as the binding codec decodes them.
@@ -1562,6 +1562,21 @@ impl Binding {
         author: Option<&[u8]>,
         claims: Option<serde_json::Value>,
     ) -> HostResult<HostFuture<Vec<u8>>> {
+        let read = self.all_reporting(query, opts, open_transaction_id, author, claims)?;
+        Ok(Box::pin(async move { Ok(read.await?.0) }))
+    }
+
+    /// [`Binding::all`], with the rows the read left out because the
+    /// client's encryption hooks could not open them
+    /// ([`Db::all_serialized_query_reporting`]).
+    pub fn all_reporting<O: HostObject>(
+        &self,
+        query: Vec<u8>,
+        opts: &O,
+        open_transaction_id: Option<&str>,
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<HostFuture<(Vec<u8>, Vec<UnreadableRow>)>> {
         let opts = read_opts(opts)?;
         let open_tx = open_transaction_id.map(open_transaction).transpose()?;
         // A transaction bound to a session reads as it.
@@ -1595,8 +1610,9 @@ impl Binding {
         let hooks = Rc::clone(&self.hooks);
         Ok(Box::pin(self.parked(async move {
             let coverage: Option<&dyn Fn() -> bool> = require_coverage.then_some(&expired);
-            let mut read =
-                std::pin::pin!(db.all_serialized_query(&query, opts, open_tx, admission, coverage));
+            let mut read = std::pin::pin!(
+                db.all_serialized_query_reporting(&query, opts, open_tx, admission, coverage)
+            );
             // A row whose large values are missing records their chunks for
             // the next send; ask for the tick that sends it, or the read
             // waits on unrelated sync traffic.
@@ -1608,12 +1624,14 @@ impl Binding {
                 poll
             })
             .await?;
-            Ok(match result {
+            let (result, unreadable) = result;
+            let bytes = match result {
                 SerializedReadResult::Rows(rows) => crate::binding_codec::encode_rows(&rows),
                 SerializedReadResult::Relation(snapshot) => {
                     crate::binding_codec::encode_relation_snapshot(&snapshot)
                 }
-            }?)
+            }?;
+            Ok((bytes, unreadable))
         })))
     }
 
@@ -2154,6 +2172,11 @@ pub enum EventChunk {
         settled: bool,
         /// The durability tier, as `Debug`-spelled.
         tier: String,
+        /// The rows the result leaves out because the encryption hooks
+        /// could not open them, as [`unreadable_json`] spells them, when
+        /// the reader is told them (an opening, a reset, or a change):
+        /// they replace the list told before.
+        unreadable: Option<String>,
     },
     /// `{ type: "closed" }`.
     Closed,
@@ -2169,6 +2192,25 @@ pub enum EventChunk {
     },
 }
 
+/// Rows a read or a subscription left out because the encryption hooks
+/// could not open them, as the JSON array of `{ table, id, column, code }`
+/// a host hands to JavaScript.
+pub fn unreadable_json(rows: &[UnreadableRow]) -> String {
+    serde_json::Value::Array(
+        rows.iter()
+            .map(|row| {
+                serde_json::json!({
+                    "table": row.table,
+                    "id": row.id.0.to_string(),
+                    "column": row.column,
+                    "code": row.code,
+                })
+            })
+            .collect(),
+    )
+    .to_string()
+}
+
 /// Encode one subscription event.
 pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
     Ok(match event {
@@ -2180,6 +2222,7 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             settled,
             tier,
             coalesced,
+            unreadable,
             ..
         } => EventChunk::Delta {
             delta: crate::binding_codec::encode_subscription_delta(&added, &updated, &removed)?,
@@ -2187,6 +2230,7 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             coalesced,
             settled,
             tier: format!("{tier:?}"),
+            unreadable: unreadable.map(|rows| unreadable_json(&rows)),
         },
         SubscriptionEvent::Closed => EventChunk::Closed,
         SubscriptionEvent::Rejected { code, reason, .. } => EventChunk::Rejected {

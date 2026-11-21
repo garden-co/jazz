@@ -1,0 +1,34 @@
+---
+title: Encryption Limits
+description: "What encrypted columns do not do yet, and what is left to the app."
+languageTabs: backend
+---
+
+- **Equality only.** Encrypted columns can be filtered by equality when they are listed in `equality`.
+  Ordering, ranges, aggregates and text search on an encrypted column fail with an error naming the
+  pattern.
+- **The backend cannot compute on encrypted content.** It relays it and works on plain columns.
+- **Keys follow members.** A member's device gets a key from another member's device; if no member
+  device that holds it is online, a new member waits, and a write waits ten seconds before it fails
+  `key-pending`.
+- **Removing a member** stops later reads through permissions and a rotation; it cannot take back what
+  the member could already read.
+- **A device account's secret is the account.** Whoever holds the secret (its 24-word phrase, passkey or
+  exported key) controls the account, encryption included. Removing a device does not lock out a holder:
+  the device recovers by itself at its next start and receives later keys. Retiring the recovery
+  credential does not help either, because the holder can still act as the account. If the secret may
+  have leaked, the only remedy is a new account. For an account your own sign-in manages, retire the
+  recovery credential and register a new secret.
+- **A stale held key may seal.** A device that has not yet seen a removal keeps sealing under the key it
+  holds until it updates.
+- **A device protects only what it has seen of another account's history.** Each device keeps a floor
+  for another account's history in a space: the newest state of it that the device has observed. A
+  floor protects a device only against a rollback after its own first observation, and it advances
+  with each change the device sees. Before that first observation, or after a wipe or re-enrolment,
+  the device cannot tell a rolled-back history from the real one. A device that never saw the newer
+  history (for example, it never read a space naming that account after the removal) is not
+  protected, and other devices' floors do not protect it. These floors are per device and per
+  account; they are kept next to the held keys and wiped with them.
+- **No default store.** The app supplies the private store and its protection.
+- **Node first.** This is the Node client (`createJazzClient` from `jazz-tools/backend`). The browser and
+  native clients follow.

@@ -415,10 +415,20 @@ export declare class PendingNativePermissionAdvice {
  * execute on a Send worker pool, whereas a Jazz database is deliberately
  * `Rc`/thread-affine. The adapter drives this object after its peer
  * transport makes progress instead of blocking Node.
+ *
+ * A one-shot read that left rows out because the encryption runtime could
+ * not open them comes back as one of these even when it is done at once:
+ * [`PendingNativeRead::unreadable`] names those rows.
  */
 export declare class PendingNativeRead {
   poll(): Uint8Array | null
   cancel(): void
+  /**
+   * Once the read is done: the rows it left out because they could not
+   * be opened, as a JSON array of `{ table, id, column, code }`; `null`
+   * when it left none out.
+   */
+  unreadable(): string | null
 }
 
 /**
@@ -840,6 +850,13 @@ export interface SubscriptionDeltaEvent {
   terminalOperations: Array<never>
   settled: boolean
   tier: 'None' | 'Local' | 'Global'
+  /**
+   * The rows the result leaves out because the encryption runtime could
+   * not open them, as a JSON array of `{ table, id, column, code }`.
+   * Set on an opening, a reset, and a delta that changed the list, which
+   * it replaces; absent when the list is unchanged.
+   */
+  unreadable?: string
 }
 
 export type SubscriptionEvent =

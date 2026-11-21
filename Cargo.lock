@@ -2387,6 +2387,7 @@ dependencies = [
  "jazz-core",
  "jazz-e2ee",
  "jazz-e2ee-client",
+ "postcard",
  "rusqlite",
  "serde_json",
  "tempfile",

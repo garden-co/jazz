@@ -1,0 +1,251 @@
+---
+title: Getting Started with Encryption
+description: "Encrypt columns so only your users' devices can read them: declare them, give each device a private store, and read and write as usual."
+languageTabs: backend
+---
+
+With end-to-end encryption, the content of some columns is sealed on your users' devices before it
+leaves them. Your server and your backend store and relay it but cannot read it. Everything else
+about Jazz stays the same: permissions decide who may read and write a row, and encryption keeps the
+content unreadable to anyone outside Jazz's permissions.
+
+## Declare the encrypted columns
+
+Encryption is declared in `jazz.app.json`. A table names the column that holds its **space** (the row
+whose members share one key), the table of those spaces, and the columns to seal:
+
+```json
+{
+  "tables": {
+    "projects": {
+      "columns": {
+        "name": "string",
+        "ownerId": "uuid"
+      }
+    },
+    "tasks": {
+      "columns": {
+        "projectId": "uuid",
+        "title": "bytes",
+        "__e2ee_eq_title": "bytes"
+      },
+      "relations": {
+        "project": {
+          "rel": "projects",
+          "column": "projectId"
+        }
+      },
+      "encryption": {
+        "space": "projectId",
+        "scope": "projects",
+        "columns": {
+          "title": "string"
+        },
+        "equality": ["title"]
+      }
+    }
+  }
+}
+```
+
+Each encrypted column is stored as `bytes`. Your code never sees that: the generated types and the
+values you write and read are the plaintext type (`title` is a string). `equality` lists the columns you
+may filter by equality; each needs a token column (`__e2ee_eq_title`) beside it.
+
+Your permissions decide who is a member of a space: members are the rows of the `__e2ee_members` table,
+and a space's rows are readable to them. See [Sharing and keys](/docs/e2ee/sharing-and-keys).
+
+## Give each device a private store
+
+A device keeps its private keys in a store that **your app supplies**: Jazz has no default, because
+protecting the keys is your decision. An app that declares encryption and opens without one fails,
+naming the option:
+
+```ts
+import { createJazzClient } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
+
+const session = await createJazzClient({
+  serverUrl,
+  app,
+  permissions,
+  store: accountStore,
+  initial: "device",
+  encryption: { store: privateStore },
+});
+```
+
+[Private store](/docs/e2ee/private-store) says what the store holds and gives a starting point.
+
+## Read and write
+
+```ts
+await session.db.insert(app.tasks, { projectId, title: "Call the venue" }).wait({ tier: "global" });
+const tasks = await session.db.all(app.tasks.where({ projectId, title: "Call the venue" }));
+```
+
+An equality filter on an `equality` column works like any other. Other filters, ordering and joins on
+an encrypted column fail with an error that names the pattern (for example "Reading encrypted table
+`tasks` with an aggregate is not supported yet"); they are never answered by scanning everything.
+
+A write to a space whose key this device does not hold yet waits for it (up to ten seconds, for a
+member waiting on another member's delivery) before it fails with the reason `key-pending`.
+
+### Rows this device cannot read
+
+A row this device cannot decrypt (it holds no key for it, or the key is still on its way) is never read
+as empty: the read leaves it out and says so. `unreadableRows(result)` returns the rows a read left out,
+each with its `table`, `id`, the `column` that could not be opened and a `code` (`key-pending`,
+`key-unavailable`, `invalid-ciphertext`, ...); it is empty when the result is complete.
+
+```ts
+import { unreadableRows } from "jazz-tools/backend";
+
+const page = await session.db.all(app.tasks.where({ projectId }).limit(20));
+const missing = unreadableRows(page);
+if (missing.length > 0) {
+  // This page is incomplete: `page.length + missing.length` rows matched.
+}
+```
+
+`limit` and `offset` count the rows left out, because they are applied before rows are decrypted. A page
+can come back shorter than its limit, or empty, and still not be the last one: the rows
+`unreadableRows` names make up the difference, and the next page starts after them. (For a query that
+filters on an encrypted column, they may include rows that would not have matched.) A `key-pending` row
+comes back once its key arrives; read again, or use a subscription, which updates by itself.
+
+A subscription's results say the same. Each result it delivers carries the rows it leaves out, and
+`unreadableRows` works on it as on a read's:
+
+```ts
+const stop = session.db.subscribe(app.tasks.where({ projectId }), (tasks) => {
+  render(tasks);
+  showIncomplete(unreadableRows(tasks));
+});
+```
+
+The list stays current: a new row this device cannot open is named in the next result (even when the
+visible rows did not change), a row whose key arrives joins the result and leaves the list in the same
+update, and a row that leaves the query (deleted, or moved out of a page) is no longer named. A
+subscription with `limit` counts these rows toward its page, as a read does.
+
+The framework hooks carry the list too, as `unreadable` beside `data`, and update it with every result.
+`unreadableRows` is exported from each framework's entry point (and from `jazz-tools/client`), and in
+React it also works on `data` itself.
+
+<Tabs groupId="client-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
+  <Tab value="React">
+    ```tsx title="Tasks.tsx"
+    import { useAll } from "jazz-tools/react";
+    import { app } from "./jazz.generated";
+
+    export function Tasks({ projectId }: { projectId: string }) {
+      const { data: tasks = [], unreadable } = useAll(app.tasks.where({ projectId }));
+      return (
+        <>
+          {tasks.map((task) => (
+            <p key={task.id}>{task.title}</p>
+          ))}
+          {unreadable.length > 0 && <p>{unreadable.length} tasks are still being decrypted</p>}
+        </>
+      );
+    }
+    ```
+
+  </Tab>
+  <Tab value="Vue">
+    ```vue title="Tasks.vue"
+    <script setup lang="ts">
+    import { useAll } from "jazz-tools/vue";
+    import { app } from "./jazz.generated";
+
+    const props = defineProps<{ projectId: string }>();
+    const { data: tasks, unreadable } = useAll(() => app.tasks.where({ projectId: props.projectId }));
+    </script>
+
+    <template>
+      <p v-for="task in tasks ?? []" :key="task.id">{{ task.title }}</p>
+      <p v-if="unreadable.length > 0">{{ unreadable.length }} tasks are still being decrypted</p>
+    </template>
+    ```
+
+  </Tab>
+  <Tab value="Svelte">
+    ```svelte title="Tasks.svelte"
+    <script lang="ts">
+      import { QuerySubscription } from "jazz-tools/svelte";
+      import { app } from "./jazz.generated";
+
+      let { projectId }: { projectId: string } = $props();
+      const tasks = new QuerySubscription(() => app.tasks.where({ projectId }));
+    </script>
+
+    {#each tasks.current ?? [] as task (task.id)}
+      <p>{task.title}</p>
+    {/each}
+    {#if tasks.unreadable.length > 0}
+      <p>{tasks.unreadable.length} tasks are still being decrypted</p>
+    {/if}
+    ```
+
+  </Tab>
+  <Tab value="Solid">
+    ```tsx title="Tasks.tsx"
+    import { For, Show } from "solid-js";
+    import { useAll } from "jazz-tools/solid";
+    import { app } from "./jazz.generated";
+
+    export function Tasks(props: { projectId: string }) {
+      const tasks = useAll(() => ({ query: app.tasks.where({ projectId: props.projectId }) }));
+      return (
+        <>
+          <For each={tasks.data ?? []}>{(task) => <p>{task.title}</p>}</For>
+          <Show when={tasks.unreadable.length > 0}>
+            <p>{tasks.unreadable.length} tasks are still being decrypted</p>
+          </Show>
+        </>
+      );
+    }
+    ```
+
+  </Tab>
+</Tabs>
+
+React Native's and Expo's `useAll` return the same fields as React's.
+
+The runtime also reports each row it could not read, as it happens:
+
+```ts
+session.db.encryption.onUnreadable((report) => {
+  console.warn(report.code, report.table, report.id);
+});
+```
+
+While no listener is registered, the runtime keeps up to 1,024 reports for the next listener. Past that
+the oldest are dropped, and the next listener first receives a `reports-dropped` report with their count.
+
+## The backend holds no keys
+
+Your backend (`createJazz`) starts for an encrypted app and relays its clients as usual. It is not an
+encryption participant: it has no account, no identity and no keys. Its own database reads plain tables
+and the plain columns of an encrypted table as normal, never sees an encrypted column (the rows come
+back without it), refuses a write that names one ("the backend holds no encryption keys; encrypted
+columns are written by clients") and refuses a filter, ordering or selection of one. A server
+that needs to compute on encrypted content cannot; do that on a client.
+
+The generated types are the clients': they give an encrypted column its plaintext type. On the backend,
+query through `keyless(app)` from `jazz-tools/backend`, the same app typed as the backend reads it: an
+encrypted column is absent from its rows (`title?: undefined`), its inserts and its filters.
+
+```ts
+import { keyless } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+
+const backendApp = keyless(app);
+// jazz = await createJazz({ app, ... }).ready()
+const tasks = await jazz.db.all(backendApp.tasks); // each task.title is undefined
+```
+
+`db.encryption` exists on every `Db`; for an app that declares no encryption, using it throws
+`EncryptionNotDeclaredError`.

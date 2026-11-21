@@ -1,5 +1,10 @@
 import type { ClientMigrations } from "../client-migrations.js";
+import type { Encryption, EncryptionNative } from "../../encryption/index.js";
+import { servePrivateStore, type PrivateStore } from "../../encryption/private-store.js";
+import { retryAfterKey } from "../../encryption/key-retry.js";
 import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
+import { SpaceUse, type SubscriptionSpaceUse } from "../../encryption/space-use.js";
+import { withUnreadable, type UnreadableRow } from "../../encryption/unreadable.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
@@ -225,6 +230,42 @@ type NativeDbConstructor = {
     appId: string,
     environment: string,
   ): NativeDb;
+  openMemoryEncrypted?(
+    schema: Uint8Array,
+    config: Uint8Array,
+    runtime: unknown,
+    proof?: { token: string; claimedAuthor: string } | null,
+  ): NativeDb;
+  openPersistentEncrypted?(
+    dataPath: string,
+    schema: Uint8Array,
+    config: Uint8Array,
+    runtime: unknown,
+    proof?: { token: string; claimedAuthor: string } | null,
+  ): NativeDb;
+};
+
+/**
+ * The end-to-end encryption runtime a Node host built for the app (over the
+ * private store the app supplied) and the app's side of it.
+ */
+export type NativeEncryptionOptions = {
+  /** The native `EncryptionRuntime`, built and ready. */
+  runtime: unknown;
+  store: PrivateStore;
+  /** Builds the device's public handle. The keyless broker has no handle. */
+  createHandle: EncryptionHandleFactory;
+};
+
+type EncryptionHandleFactory = (native: EncryptionNative) => Encryption;
+
+/** What a database that has the runtime installed adds to the native calls. */
+type NativeEncryptionDb = EncryptionNative & {
+  takeStoreRequests(): string[];
+  replyStore(id: string, ok: boolean, payload: string): boolean;
+  encryptionUseSpace(table: string, id: string, open: boolean): void;
+  encryptionSpaces(): string;
+  encryptionSetOnline(online: boolean): void;
 };
 
 type NativeWriteOptions = {
@@ -233,7 +274,12 @@ type NativeWriteOptions = {
   updatedAtMs?: number;
 };
 
-type PendingNativeRead = { poll(): Uint8Array | null; cancel(): void };
+type PendingNativeRead = {
+  poll(): Uint8Array | null;
+  cancel(): void;
+  /** A one-shot read's rows left out as undecryptable, as JSON (see {@link UnreadableRow}). */
+  unreadable?(): string | null;
+};
 type NativeReadResult = Uint8Array | PendingNativeRead;
 type PendingNativeSubscriptionBatch = { retryAfterMs?(): number | null };
 type PendingNativePermissionAdvice = {
@@ -770,6 +816,8 @@ type SubscriptionState = {
   tier: string;
   callback?: (result: RuntimeSubscriptionDelta | Error) => void;
   cancelled: boolean;
+  /** The spaces this subscription uses (an app on encrypted tables). */
+  spaces?: SubscriptionSpaceUse;
 };
 
 export type SubscriptionOutputColumns = {
@@ -1113,6 +1161,15 @@ export class NativeRuntimeAdapter implements Runtime {
   // must continue, or the HLC readout waits behind them forever.
   private foregroundLeaseDraining = false;
   private nextSubscriptionId = 1;
+  /** The installed encryption runtime's side, on the runtime that owns the database. */
+  private encryptionState?: {
+    native: NativeEncryptionDb;
+    createHandle: EncryptionHandleFactory;
+    serving: { stop(): void };
+    uses: SpaceUse;
+    handle?: Encryption;
+    online?: boolean;
+  };
 
   static fromDb(
     db: NativeDb,
@@ -1133,6 +1190,40 @@ export class NativeRuntimeAdapter implements Runtime {
       slowQueryLog: opts?.slowQueryLog,
       subscriptionBacklogRows: opts?.subscriptionBacklogRows,
     });
+  }
+
+  private serveEncryption(options: NativeEncryptionOptions): void {
+    const native = this.db as unknown as NativeEncryptionDb;
+    this.encryptionState = {
+      native,
+      createHandle: options.createHandle,
+      serving: servePrivateStore(native, options.store),
+      uses: new SpaceUse(native),
+    };
+    // Verify the account in the background; the app may await `ready()` too.
+    this.encryptionHandle()?.start();
+  }
+
+  /** Runs a write, and again once the space's key is ready if it failed `key-pending`. */
+  retryAfterKey<T>(operation: () => T): T | Promise<T> {
+    const state = this.ownerRuntime.encryptionState;
+    if (!state) return operation();
+    return retryAfterKey(
+      operation,
+      async (space) =>
+        JSON.parse(await state.native.encryptionCall("prepareSpace", space)) as boolean,
+    );
+  }
+
+  /**
+   * The encryption handle of this database, when the app declares encryption
+   * and opened with its runtime (`undefined` otherwise).
+   */
+  encryptionHandle(): Encryption | undefined {
+    const state = this.ownerRuntime.encryptionState;
+    if (!state) return undefined;
+    state.handle ??= state.createHandle(state.native);
+    return state.handle;
   }
 
   /** The migrations this runtime's app ships (see {@link ClientMigrations}). */
@@ -1180,6 +1271,8 @@ export class NativeRuntimeAdapter implements Runtime {
       webSocket?: WebSocketConstructor;
       /** The app's versions and migrations: see {@link ClientMigrations}. */
       migrations?: ClientMigrations;
+      /** An app that declares encryption opens with its runtime installed. */
+      encryption?: NativeEncryptionOptions;
       /**
        * A backend of an app that declares encryption holds no keys: it opens
        * with hooks that relay ciphertext and refuse encrypted columns.
@@ -1279,6 +1372,46 @@ export class NativeRuntimeAdapter implements Runtime {
           environment,
         );
       }
+    } else if (opts?.encryption) {
+      if (!Runtime) throw new Error("Native runtime constructor required for an encrypted app");
+      if (opts.backendMode) {
+        throw new Error(
+          "End-to-end encryption is not supported on a backend client yet: a backend cannot hold a device's keys",
+        );
+      }
+      const proof = opts.selfSignedClientProof
+        ? {
+            token: opts.selfSignedClientProof.token,
+            claimedAuthor: opts.selfSignedClientProof.claimedAuthor,
+          }
+        : null;
+      if (opts.persistentPath) {
+        if (!Runtime.openPersistentEncrypted) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openPersistentEncrypted(
+          opts.persistentPath,
+          this.schemaBytes,
+          this.configBytes,
+          opts.encryption.runtime,
+          proof,
+        );
+      } else {
+        if (!Runtime.openMemoryEncrypted) {
+          throw new Error(
+            "Native runtime does not support encrypted apps; rebuild the Jazz native artifact",
+          );
+        }
+        this.db = Runtime.openMemoryEncrypted(
+          this.schemaBytes,
+          this.configBytes,
+          opts.encryption.runtime,
+          proof,
+        );
+      }
+      this.serveEncryption(opts.encryption);
     } else if (opts?.persistentPath) {
       if (!Runtime) {
         throw new Error("Native runtime constructor required for persistent storage");
@@ -1709,9 +1842,24 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private linkChanged(): void {
     if (this === this.ownerRuntime) this.noteLinkFailure();
+    this.signalEncryptionOnline();
     this.remoteLink.changed();
     this.linkStatusPublisher.changed();
     this.syncStatusPublisher.changed();
+  }
+
+  /** Tells the encryption runtime when the connection to the server goes away or comes back. */
+  private signalEncryptionOnline(): void {
+    const state = this.ownerRuntime.encryptionState;
+    if (!state || this !== this.ownerRuntime || this.closed) return;
+    const online = this.upstreamLinkStatus().state === "connected";
+    if (state.online === online) return;
+    state.online = online;
+    try {
+      state.native.encryptionSetOnline(online);
+    } catch {
+      // The database is closing.
+    }
   }
 
   /** The upstream link as the app sees it; see {@link LinkStatus}. */
@@ -1962,6 +2110,8 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const write of this.writes.values()) {
       write.close?.();
     }
+    this.encryptionState?.handle?.stop();
+    this.encryptionState?.serving.stop();
     this.subscriptions.clear();
     this.pendingTxs.clear();
     this.completedTxs.clear();
@@ -2822,6 +2972,12 @@ export class NativeRuntimeAdapter implements Runtime {
       this.attachLocalReadCoverageInBackground(tier, query, session);
     }
     this.emitQueryCoverageTrace("attach");
+    // Rows the read left out because they could not be decrypted: kept
+    // with the result it returns (see `unreadableRows`).
+    let unreadable: UnreadableRow[] | undefined;
+    const leftOut = (rows: UnreadableRow[]) => {
+      unreadable = rows;
+    };
     if (queryHasArraySubqueries(coreQueryJson)) {
       if (pendingTx) {
         const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
@@ -2832,18 +2988,30 @@ export class NativeRuntimeAdapter implements Runtime {
           subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
         );
       }
-      const payload = await this.readRowsForContextAsync(query, opts, readContext);
+      const payload = await this.readRowsForContextAsync(
+        query,
+        opts,
+        readContext,
+        undefined,
+        leftOut,
+      );
       this.emitQueryCoverageTrace("covered");
-      return rowsFromRelationSnapshot(
-        readRelationSnapshot(payload),
-        this.schema,
-        subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+      return withUnreadable(
+        rowsFromRelationSnapshot(
+          readRelationSnapshot(payload),
+          this.schema,
+          subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+        ),
+        unreadable,
       );
     }
     const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
-    const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
+    const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx, leftOut);
     this.emitQueryCoverageTrace("covered");
-    return rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
+    return withUnreadable(
+      rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns),
+      unreadable,
+    );
   }
 
   createSubscription(
@@ -2867,6 +3035,14 @@ export class NativeRuntimeAdapter implements Runtime {
       cancelled: false,
     });
     const subscription = this.subscriptions.get(handle)!;
+    const columns = subscription.outputColumns;
+    subscription.spaces =
+      (columns &&
+        this.ownerRuntime.encryptionState?.uses.forSubscription(
+          columns.rootTable,
+          columns.rootColumns,
+        )) ||
+      undefined;
     const query = nativeQueryInput(queryJson, this.schema);
     const install = (native: ReadableStream<unknown> | Subscription) => {
       const source = subscriptionSource(native);
@@ -2912,7 +3088,14 @@ export class NativeRuntimeAdapter implements Runtime {
     const subscription = this.subscriptions.get(handle);
     if (!subscription) return;
     if (subscription.callback) throw new Error("Subscription has already been activated");
-    subscription.callback = onUpdate as (result: RuntimeSubscriptionDelta | Error) => void;
+    const deliver = onUpdate as (result: RuntimeSubscriptionDelta | Error) => void;
+    const spaces = subscription.spaces;
+    subscription.callback = spaces
+      ? (result) => {
+          if (!(result instanceof Error)) spaces.observe(result);
+          deliver(result);
+        }
+      : deliver;
     if (subscription.terminalError) {
       this.deliverSubscriptionFailure(subscription);
       return;
@@ -3712,9 +3895,10 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     session: RuntimeSession | undefined,
     pendingTx: PendingTx | undefined,
+    leftOut?: (rows: UnreadableRow[]) => void,
   ): Promise<Uint8Array> {
     const context = this.nativeReadContext(session, pendingTx);
-    return this.readRowsForContextAsync(query, opts, context, pendingTx?.id);
+    return this.readRowsForContextAsync(query, opts, context, pendingTx?.id, leftOut);
   }
 
   /**
@@ -3743,16 +3927,20 @@ export class NativeRuntimeAdapter implements Runtime {
     return result as Uint8Array;
   }
 
+  /** `leftOut` is told the rows the read left out as undecryptable, if any. */
   private async readRowsForContextAsync(
     query: NativeQueryInput,
     opts: unknown,
     context: NativeReadContext,
     openTransactionId?: OpenTransactionId,
+    leftOut?: (rows: UnreadableRow[]) => void,
   ): Promise<Uint8Array> {
-    return this.awaitNativeRead(
-      this.startRowsForContext(query, opts, context, openTransactionId),
-      (opts as { tier?: string }).tier,
-    );
+    const started = this.startRowsForContext(query, opts, context, openTransactionId);
+    const bytes = await this.awaitNativeRead(started, (opts as { tier?: string }).tier);
+    const read = await started;
+    const unreadable = isPendingNativeRead(read) ? read.unreadable?.() : null;
+    if (leftOut && unreadable) leftOut(JSON.parse(unreadable) as UnreadableRow[]);
+    return bytes;
   }
 
   private startRowsForContext(
@@ -4597,6 +4785,9 @@ export class NativeRuntimeAdapter implements Runtime {
       chunk.terminalOperations,
       subscription.outputColumns?.rootColumns,
     );
+    if (chunk.unreadable !== undefined) {
+      delta.unreadable = JSON.parse(chunk.unreadable) as UnreadableRow[];
+    }
     subscription.callback?.(delta);
   }
 
@@ -4985,6 +5176,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private retireSubscriptionResources(subscription: SubscriptionState): void {
     if (subscription.cancelled) return;
     subscription.cancelled = true;
+    subscription.spaces?.release();
+    subscription.spaces = undefined;
     if (subscription.poolId !== undefined) this.pooledSubscriptions.delete(subscription.poolId);
     subscription.openingAbort?.abort();
     const source = subscription.source;
@@ -7564,6 +7757,8 @@ function normalizeSubscriptionChunk(chunk: unknown):
       coalesced?: boolean;
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
+      /** The rows left out as undecryptable, as JSON, when they changed. */
+      unreadable?: string;
     }
   | {
       type: "rejected";
@@ -7582,6 +7777,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     reset?: unknown;
     coalesced?: unknown;
     terminalOperations?: unknown;
+    unreadable?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -7597,6 +7793,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalOperations: Array.isArray(record.terminalOperations)
         ? (record.terminalOperations as NativeTerminalOperation[])
         : undefined,
+      ...(typeof record.unreadable === "string" ? { unreadable: record.unreadable } : {}),
     };
   }
   if (record.type === "rejected" || record.type === "Rejected") {

@@ -137,6 +137,8 @@ import { toError } from "./util.js";
 import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
+import { notDeclaredEncryption, type Encryption } from "../encryption/index.js";
+import { unreadableRows, withUnreadable } from "../encryption/unreadable.js";
 
 /** `getDeviceAccountProof` hands out a session's sync proof only with this long left. */
 const SESSION_PROOF_MIN_REMAINING_SECONDS = 30;
@@ -2020,7 +2022,6 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const { openTransactionId, session, attribution, preparation } = this.requireBinding("insert");
     let id = options?.id;
     const { values, value } = this.prepareCreation(table, data, id, "Insert");
-    if (!id && (preparation.pending || getOwnerPreparation(client)?.pending)) id = reserveRowId();
     let row: ReturnType<typeof client.insertInternal> | undefined;
     const stage = () => {
       row = client.insertInternal(
@@ -2039,6 +2040,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           if (!preparation.cancelled) stage();
         }),
       );
+    // Not staged yet (waiting for preparation, or for its space's key): the
+    // later staging reads `id`, so it commits the row returned here.
+    if (!row && !id) id = reserveRowId();
     try {
       return (
         value ??
@@ -2433,6 +2437,24 @@ export class Db {
   private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
   #authenticatedInspectorPhysicalDbName: string | null = null;
+
+  /**
+   * @internal Opens the runtime client for `schema` now rather than at the
+   * first query: an encrypted app starts verifying its account at open.
+   */
+  openClientFor(schema: WasmSchema): void {
+    this.getClient(schema);
+  }
+
+  /**
+   * End-to-end encryption: device approval, recovery and the reports of rows
+   * that could not be read. Present on every `Db`; for an app that declares
+   * no encryption, using it throws `EncryptionNotDeclaredError`. Reading and
+   * writing encrypted columns needs nothing from it.
+   */
+  get encryption(): Encryption {
+    return this.runtimeSource.encryptionHandle() ?? notDeclaredEncryption();
+  }
 
   /**
    * Protected constructor - use {@link createDb} in regular app code.
@@ -3819,13 +3841,18 @@ export class Db {
       context || usesRelationTraversal
         ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
         : await client.queryInternal(wasmQuery, queryOptions);
-    if (!prepared.computedState) return rows.map(prepared.transform);
-    return finishComputedRead(query, builtQuery, outputTable, prepared, rows, (physical) =>
-      client.queryInternal(
-        translateQuery(builderJson, planningSchema, physical),
-        queryOptions,
-        context?.readSession,
+    // Rows left out as undecryptable stay with the typed result.
+    const unreadable = unreadableRows(rows);
+    if (!prepared.computedState) return withUnreadable(rows.map(prepared.transform), unreadable);
+    return withUnreadable(
+      await finishComputedRead(query, builtQuery, outputTable, prepared, rows, (physical) =>
+        client.queryInternal(
+          translateQuery(builderJson, planningSchema, physical),
+          queryOptions,
+          context?.readSession,
+        ),
       ),
+      unreadable,
     );
   }
 

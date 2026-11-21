@@ -84,10 +84,10 @@ pub use sync::{
     CatalogueVersion, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image,
     MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction, RelationSnapshot,
     RemoteLinkHint, SerializedReadResult, Since, SubscriberId, SyncMessage, Transport,
-    TransportError, TxName, UploadRefusal, UploadStatus, Upstream, WireBase, WireChunk,
-    WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
-    WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
-    validate_frame_batch_for_corpus,
+    TransportError, TxName, UnreadableRow, UploadRefusal, UploadStatus, Upstream, WireBase,
+    WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget,
+    WireTransport, WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex,
+    encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -403,6 +403,12 @@ pub enum SubscriptionEvent {
         /// [`Db::set_subscription_backlog_limit`]): the current result,
         /// which supersedes them. Always `false` on other deltas.
         coalesced: bool,
+        /// The rows the result leaves out because the client's encryption
+        /// hooks could not open them (protocol §4.3), replacing the list
+        /// the reader was told before: always set on an opening or a reset,
+        /// and on a delta when the list changed (a key arrived, or a row
+        /// became unreadable). `None`: unchanged. Empty without hooks.
+        unreadable: Option<Arc<[UnreadableRow]>>,
     },
     /// The subscription ended with an error: `code` says what kind,
     /// `message` is the error's own message, `reason` the error as text
@@ -610,7 +616,8 @@ impl SubscriptionStream {
             self.gate = None;
             self.queue.borrow_mut().clear();
             let group = self.group.upgrade()?;
-            let mut event = fanout::opening(&group.borrow().rows);
+            let group = group.borrow();
+            let mut event = fanout::opening(&group.rows, &group.unreadable);
             if let SubscriptionEvent::Delta {
                 settled: flag,
                 tier,
@@ -634,7 +641,11 @@ impl SubscriptionStream {
         let group = self.group.upgrade();
         let group = group.as_ref().and_then(|group| group.try_borrow().ok());
         debug_assert!(group.is_some(), "a reader reads outside dispatch");
-        queue.pop_front(group.as_ref().map(|group| group.rows.as_slice()))
+        queue.pop_front(
+            group
+                .as_ref()
+                .map(|group| (group.rows.as_slice(), &group.unreadable)),
+        )
     }
 
     /// Changed rows its undelivered deltas hold: at most its backlog limit
@@ -5151,6 +5162,7 @@ fn delta(
         settled: true,
         tier: DurabilityTier::Local,
         coalesced: false,
+        unreadable: None,
     }
 }
 
@@ -5765,13 +5777,28 @@ impl Inner {
         read: &ReadSpec,
         strict: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
+        Ok(self
+            .run_for_reader_reporting(prepared, identity, read, strict)?
+            .0)
+    }
+
+    /// [`Inner::run_for_reader`], with the rows the encryption hooks left
+    /// out because they could not open them (none without hooks, and none
+    /// for a strict read, which fails instead).
+    pub(crate) fn run_for_reader_reporting(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        strict: bool,
+    ) -> Result<(Vec<CurrentRow>, Vec<UnreadableRow>), Error> {
         #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
         let mut rows = self.run(prepared, identity, read)?;
         #[cfg(feature = "e2ee-client")]
-        self.open_read(prepared, read, strict, &mut rows)?;
+        let unreadable = self.open_read(prepared, read, strict, &mut rows)?;
         #[cfg(not(feature = "e2ee-client"))]
-        let _ = strict;
-        Ok(rows)
+        let (unreadable, _) = (Vec::new(), strict);
+        Ok((rows, unreadable))
     }
 
     /// [`Inner::run`] for a caller that uses only each row's identity,

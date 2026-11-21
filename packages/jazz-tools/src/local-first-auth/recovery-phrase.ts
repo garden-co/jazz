@@ -41,6 +41,19 @@ export const RecoveryPhrase = {
   },
 
   toSecret(phrase: string): string {
+    return formatSecret(RecoveryPhrase.toBytes(phrase));
+  },
+
+  /** The 24-word phrase of 32 secret bytes (the same words as {@link fromSecret}). */
+  fromBytes(bytes: Uint8Array): string {
+    if (!(bytes instanceof Uint8Array) || bytes.length !== 32) {
+      throw new RecoveryPhraseError("invalid-secret", "A recovery secret is 32 bytes");
+    }
+    return entropyToMnemonic(bytes, wordlist);
+  },
+
+  /** The 32 secret bytes of a 24-word phrase, checked as {@link toSecret} checks it. */
+  toBytes(phrase: string): Uint8Array {
     if (typeof phrase !== "string") {
       throw new RecoveryPhraseError("invalid-length", "Phrase must be a string");
     }
@@ -57,9 +70,8 @@ export const RecoveryPhrase = {
         );
       }
     }
-    let bytes: Uint8Array;
     try {
-      bytes = mnemonicToEntropy(words.join(" "), wordlist);
+      return mnemonicToEntropy(words.join(" "), wordlist);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (/checksum/i.test(message)) {
@@ -67,6 +79,5 @@ export const RecoveryPhrase = {
       }
       throw new RecoveryPhraseError("invalid-length", message);
     }
-    return formatSecret(bytes);
   },
 };

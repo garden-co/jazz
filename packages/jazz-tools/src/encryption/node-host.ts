@@ -1,26 +1,43 @@
-import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
-import { boundApp } from "../typed-app.js";
+/**
+ * Builds the end-to-end encryption runtime of an app on Node (the native
+ * module), over the private store the app supplied.
+ */
+import * as jazzNapi from "jazz-napi";
+import type { SchemaSourceInput } from "../schema-source.js";
+import { buildEncryption, compiledBindings, declaresEncryption } from "./build.js";
+import type { PrivateStore } from "./private-store.js";
 
-interface Declared {
-  schema: {
-    current: string;
-    encryption?: { versions?: Record<string, object> };
-    schemas?: { hash: string; schema: { tables?: Record<string, unknown> } }[];
-  };
+export { declaresEncryption };
+
+/** What an app passes to turn its encryption on: where the device's private keys live. */
+export interface NodeEncryptionConfig {
+  /** The private store (see {@link PrivateStore}) holding this device's keys. */
+  store: PrivateStore;
 }
 
 /**
- * Whether the app is an encrypted app: its current version declares
- * encryption, or keeps Jazz's system tables without declaring an encrypted
- * column (once added, the tables stay).
+ * The native runtime for `app` and `accountId`, ready, or `undefined` for an
+ * app that declares no encryption. An app that declares it needs the store:
+ * without one this throws `EncryptionStoreRequiredError`.
  */
-export function declaresEncryption(app: SchemaSourceInput): boolean {
-  const bound = boundApp(resolveSchemaSource(app)) as Declared | undefined;
-  if (!bound) return false;
-  const current = bound.schema.encryption?.versions?.[bound.schema.current];
-  if (current !== undefined && Object.keys(current).length > 0) return true;
-  const version = bound.schema.schemas?.find((entry) => entry.hash === bound.schema.current);
-  return Object.keys(version?.schema.tables ?? {}).some((name) => name.startsWith("__e2ee_"));
+export async function buildNodeEncryption(options: {
+  app: SchemaSourceInput;
+  appId: string;
+  environment: string;
+  accountId: string;
+  /** The device account's secret (`jazz-auth-v1:...`); it is the account's recovery secret. */
+  deviceAccountSecret?: string;
+  encryption: NodeEncryptionConfig | undefined;
+}): Promise<{ runtime: unknown; store: PrivateStore } | undefined> {
+  return buildEncryption({
+    host: jazzNapi.EncryptionRuntime,
+    app: options.app,
+    appId: options.appId,
+    environment: options.environment,
+    accountId: options.accountId,
+    deviceAccountSecret: options.deviceAccountSecret,
+    store: options.encryption?.store,
+  });
 }
 
 /**
@@ -34,10 +51,5 @@ export function keylessBackend(
   environment: string,
 ): { bindings: string; appId: string; environment: string } | undefined {
   if (!declaresEncryption(app)) return undefined;
-  const bound = boundApp(resolveSchemaSource(app))!;
-  return {
-    bindings: JSON.stringify({ schema: bound.schema, relations: bound.relations }),
-    appId,
-    environment,
-  };
+  return { bindings: compiledBindings(app), appId, environment };
 }

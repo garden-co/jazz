@@ -159,6 +159,11 @@ export type AuthUpdate =
  */
 export interface Runtime {
   /**
+   * @internal Runs a write, and again after the space's key is ready when it
+   * fails `key-pending` (an encrypted app only).
+   */
+  retryAfterKey?<T>(operation: () => T): T | Promise<T>;
+  /**
    * @internal The Db handed over to a successor: end reads not sent yet with
    * a `RuntimeClosedError` cause, so they ask the successor instead.
    */
@@ -1367,6 +1372,11 @@ export class JazzClient {
     const opened = this.runtime.beginTransaction(kind, id, this.writeContext(session, attribution));
     this.transactionPreparations.set(opened, { committing: false, session, attribution });
     return opened;
+  }
+
+  /** @internal See {@link Runtime.retryAfterKey}. */
+  retryAfterKey<T>(operation: () => T): T | Promise<T> {
+    return this.runtime.retryAfterKey ? this.runtime.retryAfterKey(operation) : operation();
   }
 
   /** @internal Shared across schema clients attached to one runtime owner. */
