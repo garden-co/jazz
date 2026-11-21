@@ -170,11 +170,36 @@ this. Nothing on the wire changes.
 
 ### Removed: `hashes` in the server's schema list
 
-The server's `GET …/schemas` response no longer has `hashes`, the list of schema hashes. Read
-`schemas` instead: one `{ hash, publishedAt }` per schema, so `hashes` is
-`schemas.map((s) => s.hash)`. This is the one HTTP response that changes in beta.0; the sync
-protocol is unchanged. Only scripts and tools that call that endpoint directly hit it: `jazz-tools`
-itself already reads `schemas`.
+**This changes an HTTP response.** `GET /apps/<appId>/schemas` (admin secret required) no longer
+returns `hashes`, deprecated since alpha.54. Read `schemas` instead: one `{ hash, publishedAt }` per
+schema, so the old list is `schemas.map((s) => s.hash)`. The sync protocol is unchanged.
+
+```jsonc
+// Before
+{ "hashes": ["3f…"], "schemas": [{ "hash": "3f…", "publishedAt": 1744011200000 }] }
+// After
+{ "schemas": [{ "hash": "3f…", "publishedAt": 1744011200000 }] }
+```
+
+Only scripts that call this endpoint directly and read `hashes` are affected. `jazz-tools`
+(`fetchSchemaHashes()`, `deploy`, the inspector) reads `schemas`, from beta.0 and alpha.70 servers
+alike.
+
+### Removed: `jazz-tools upgrade`
+
+The command and its codemods are gone: on beta.0, `npx jazz-tools upgrade` fails with a message
+that points here. Its only job was converting an alpha.65 app (`s.defineApp`, `permissions.ts`,
+`migrations/index.ts`, or a JSON-only app without `schema.ts`) to alpha.66's `schema.ts`. Apps on
+alpha.66 or later don't need it.
+
+An app still on alpha.65 or older: run `npx jazz-tools@2.0.0-alpha.70 upgrade`, which is still on
+npm, and review the diff as [Upgrading from alpha.65](#upgrading-from-alpha65) describes. Then
+follow the sections from alpha.66 up to here. Without the codemod, that section's
+[step-by-step list](#run-jazz-tools-upgrade-and-review-the-diff) is also what to do by hand, or
+what to give an AI coding assistant.
+
+`jazz-tools validate`, renamed to `generate` in alpha.65, is now an unknown command: use
+`npx jazz-tools generate`.
 
 ### For an AI coding assistant
 
