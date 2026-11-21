@@ -2439,12 +2439,6 @@ export class Db {
   #authenticatedInspectorPhysicalDbName: string | null = null;
 
   /**
-   * End-to-end encryption: device approval, recovery and the reports of rows
-   * that could not be read. Present on every `Db`; for an app that declares
-   * no encryption, using it throws `EncryptionNotDeclaredError`. Reading and
-   * writing encrypted columns needs nothing from it.
-   */
-  /**
    * @internal Opens the runtime client for `schema` now rather than at the
    * first query: an encrypted app starts verifying its account at open.
    */
@@ -2452,6 +2446,12 @@ export class Db {
     this.getClient(schema);
   }
 
+  /**
+   * End-to-end encryption: device approval, recovery and the reports of rows
+   * that could not be read. Present on every `Db`; for an app that declares
+   * no encryption, using it throws `EncryptionNotDeclaredError`. Reading and
+   * writing encrypted columns needs nothing from it.
+   */
   get encryption(): Encryption {
     return this.runtimeSource.encryptionHandle() ?? notDeclaredEncryption();
   }
