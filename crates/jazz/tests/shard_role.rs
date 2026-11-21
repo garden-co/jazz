@@ -734,6 +734,118 @@ fn uploaded_ops(sent_up: &Log) -> Vec<WireOp> {
         .expect("the writer uploaded its commit")
 }
 
+/// A queued hold released before it was granted stays released across a
+/// reopen: the shard forgets its durable record too, so nothing grants it
+/// later and blocks its rows for good (INV-SHARD-24).
+#[test]
+fn a_released_queued_hold_stays_released_across_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shard.sqlite");
+    let now = Rc::new(Cell::new(NOW));
+    let db = shard_at(&path, &now);
+    let row = RowUuid::from_bytes([7; 16]);
+    let first = CommitRef {
+        node: [9; 16],
+        tx: 1,
+    };
+    let second = CommitRef {
+        node: [9; 16],
+        tx: 2,
+    };
+    held_at(&db, first, &[doc_row(row)]);
+    assert_eq!(
+        db.shard()
+            .hold(second, &[doc_row(row)], b"the second part")
+            .unwrap(),
+        Held::Queued
+    );
+    db.shard().release(first).unwrap();
+    db.shard().release(second).unwrap();
+    drop(db);
+    let db = shard_at(&path, &now);
+    now.set(NOW + HLC_MAX_OFFSET_MS + 1);
+    assert!(
+        db.shard().take_granted().unwrap().is_empty(),
+        "nothing comes back"
+    );
+    assert!(db.shard().holds().is_empty());
+}
+
+/// An abort on the decider stands across a reopen, with no hold left: the
+/// fate and the hold's release are written together, and a reopened shard
+/// drops any hold whose commit is decided (INV-SHARD-20, INV-SHARD-23).
+#[test]
+fn an_abort_leaves_no_hold_across_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shard.sqlite");
+    let now = Rc::new(Cell::new(NOW));
+    let db = shard_at(&path, &now);
+    let row = RowUuid::from_bytes([7; 16]);
+    let part = CommitRef {
+        node: [9; 16],
+        tx: 1,
+    };
+    held_at(&db, part, &[doc_row(row)]);
+    assert_eq!(db.shard().abort(part).unwrap(), Resolution::Aborted);
+    drop(db);
+    let db = shard_at(&path, &now);
+    assert!(db.shard().holds().is_empty(), "no hold stands");
+    assert_eq!(
+        db.shard().hold(part, &[doc_row(row)], b"the part").unwrap(),
+        Held::Decided(Resolution::Aborted),
+        "a hold of it answers the decision"
+    );
+    insert(&db, "a later write");
+}
+
+/// Holds are granted in the order asked: a hold of a free row that a queued
+/// hold waits for queues behind it, rather than jumping ahead.
+#[test]
+fn a_new_hold_queues_behind_a_queued_one() {
+    let (db, _now) = shard(1);
+    let row = RowUuid::from_bytes([7; 16]);
+    let first = CommitRef {
+        node: [9; 16],
+        tx: 1,
+    };
+    let second = CommitRef {
+        node: [9; 16],
+        tx: 2,
+    };
+    let third = CommitRef {
+        node: [9; 16],
+        tx: 3,
+    };
+    held_at(&db, first, &[doc_row(row)]);
+    assert_eq!(
+        db.shard().hold(second, &[doc_row(row)], b"second").unwrap(),
+        Held::Queued
+    );
+    db.shard().release(first).unwrap();
+    assert_eq!(
+        db.shard().hold(third, &[doc_row(row)], b"third").unwrap(),
+        Held::Queued,
+        "the row is free, but the second hold asked first"
+    );
+    let granted: Vec<CommitRef> = db
+        .shard()
+        .take_granted()
+        .unwrap()
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect();
+    assert_eq!(granted, vec![second], "the second hold first");
+    db.shard().release(second).unwrap();
+    let granted: Vec<CommitRef> = db
+        .shard()
+        .take_granted()
+        .unwrap()
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect();
+    assert_eq!(granted, vec![third], "then the third");
+}
+
 /// A shard checks a cross-shard part when it holds it, as its writer's
 /// session would commit it, and writes nothing: a part its session may
 /// write passes, one it may not is refused (and its hold is never taken,

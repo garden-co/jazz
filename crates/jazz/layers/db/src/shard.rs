@@ -383,8 +383,19 @@ impl Inner {
                 .map_err(storage)?
         };
         for (at, commit, fixed) in holds {
-            if self.landed_commit(commit)? {
-                self.forget_hold(commit)?;
+            // Decided here (landed, or aborted on its decider): the hold
+            // went with the decision, or would have but for a crash.
+            if self.landed_commit(commit)? || self.applied_fate(commit.node, commit.tx)?.is_some() {
+                self.exec(
+                    "DELETE FROM _jazz_shard_holds WHERE node = ?1 AND tx = ?2",
+                    rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                )
+                .map_err(storage)?;
+                self.exec(
+                    "DELETE FROM _jazz_shard_held_rows WHERE node = ?1 AND tx = ?2",
+                    rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                )
+                .map_err(storage)?;
                 continue;
             }
             self.shard.holds.insert(at, commit);
@@ -561,9 +572,10 @@ impl Inner {
     /// Drop the durable record of `commit`'s hold. Run inside the savepoint
     /// that lands its part, so the two go together.
     pub(crate) fn forget_hold(&self, commit: CommitRef) -> Result<(), Error> {
-        // Every durable hold is loaded on reopen, so a store holding
-        // nothing in memory has none on disk either.
-        if self.shard.holds.is_empty() && self.shard.fixed.is_empty() {
+        // Every durable hold, standing or queued, is loaded on reopen, so a
+        // store holding nothing in memory has none on disk either.
+        if self.shard.holds.is_empty() && self.shard.fixed.is_empty() && self.shard.queued.is_empty()
+        {
             return Ok(());
         }
         let kept: bool = self
@@ -677,7 +689,14 @@ impl ShardRole<'_> {
         if let Some(resolution) = inner.resolution(commit)? {
             return Ok(Held::Decided(resolution));
         }
-        if inner.shard.blocks(commit, rows) {
+        // A row another part holds, or one a queued hold waits for, queues
+        // this hold behind them: holds are granted in the order asked.
+        let behind_queued = inner
+            .shard
+            .queued
+            .iter()
+            .any(|(queued, ahead, _)| *queued != commit && ahead.iter().any(|row| rows.contains(row)));
+        if inner.shard.blocks(commit, rows) || behind_queued {
             if !inner
                 .shard
                 .queued
@@ -766,8 +785,13 @@ impl ShardRole<'_> {
         if let Some(resolution) = inner.resolution(commit)? {
             return Ok(resolution);
         }
-        inner.record_aborted(commit)?;
-        inner.forget_hold(commit)?;
+        // The fate and the hold's release are one write: a crash between
+        // them must not leave the hold standing (INV-SHARD-20, INV-SHARD-23).
+        let conn = inner.conn.clone();
+        conn.scope("shard_abort", |_| {
+            inner.record_aborted(commit)?;
+            inner.forget_hold(commit)
+        })?;
         inner.shard.landed(commit);
         Ok(Resolution::Aborted)
     }
@@ -831,7 +855,8 @@ impl ShardRole<'_> {
         if inner.shard.held(commit).is_none() && !queued {
             return Ok(());
         }
-        inner.forget_hold(commit)?;
+        let conn = inner.conn.clone();
+        conn.scope("shard_release", |_| inner.forget_hold(commit))?;
         inner.shard.landed(commit);
         Ok(())
     }
