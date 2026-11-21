@@ -5,22 +5,22 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import { Db } from "../runtime/db.js";
 import { earlyDb, earlyDbMethodKind, MAX_EARLY_WRITES } from "./early-db.js";
 import { createJazz, memory, sqlite, type Jazz } from "./index.js";
+import type { AppPermissionsFile } from "./create-jazz.js";
 
 // `createJazz` at a module's top level: it opens nothing until first use,
 // and a later call for the same store (a hot reload) reuses its core.
 
-const app = await defineShippedApp({ todos: s.table({ title: s.string(), owner: s.uuid() }, {}) });
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
+const app = testApp({
+  tables: { todos: { columns: { title: "string", owner: "uuid" } } },
 });
+const permissions = {
+  format: 1,
+  tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+};
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -118,7 +118,7 @@ describe("createJazz, opened on first use", () => {
       "prefetchRuntimeQueries",
       "ensureReady",
       "allInternal",
-      "runShutdown",
+      "runTeardown",
       "waitForOwnSync",
     ]);
     const asyncOnes = names.filter(
@@ -164,13 +164,8 @@ describe("createJazz, opened on first use", () => {
     expect(await reloaded.db.all(app.todos.where({ owner }))).toHaveLength(1);
 
     // New permissions apply to the next use: the user may no longer insert.
-    const noInserts = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user });
-      policy.todos.allowInsert.never();
-      policy.todos.allowUpdate.never();
-      policy.todos.allowDelete.never();
-    });
-    const asBob = (store: ReturnType<typeof sqlite>, rules: typeof permissions) =>
+    const noInserts = { format: 1, tables: { todos: { read: "owner = session.user" } } };
+    const asBob = (store: ReturnType<typeof sqlite>, rules: AppPermissionsFile) =>
       createJazz({ app, permissions: rules, store, authenticate: as("bob") });
     const insertAsBob = async (jazz: Jazz) =>
       (await jazz.forReqUser(request))
@@ -243,11 +238,10 @@ describe("createJazz, opened on first use", () => {
   it("keeps the backend's session across a reload, and lets writes in flight finish", async () => {
     const path = await tempDir();
     const request = new Request("http://app.test/api");
-    const rules = () =>
-      s.definePermissions(app, ({ policy, session }) => {
-        policy.todos.allowRead.where({ owner: session.user });
-        policy.todos.allowInsert.where({ owner: session.user });
-      });
+    const rules = () => ({
+      format: 1,
+      tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+    });
     const jazz = createJazz({
       app,
       permissions: rules(),
@@ -269,11 +263,16 @@ describe("createJazz, opened on first use", () => {
     // Changed permissions publish another bundle: what the old session had
     // in flight, and a db a request still holds, still finish.
     const pending = jazz.db.insert(app.todos, { title: "across bundles", owner });
-    const changed = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user });
-      policy.todos.allowInsert.where({ owner: session.user });
-      policy.todos.allowUpdate.where({ owner: session.user });
-    });
+    const changed = {
+      format: 1,
+      tables: {
+        todos: {
+          read: "owner = session.user",
+          insert: "owner = session.user",
+          update: "owner = session.user",
+        },
+      },
+    };
     createJazz({ app, permissions: changed, store: sqlite({ path }), authenticate: as("a") });
     await jazz.ready();
     await pending.wait({ tier: "global" });

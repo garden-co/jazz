@@ -145,7 +145,7 @@ async function setup() {
   fixture.session = await createJazzSessionOwner({
     accounts,
     async openClient() {
-      return makeFakeClient({ authMode: "local-first", userId: "guest", claims: {} });
+      return makeFakeClient({ authMode: "device-account", userId: "guest", claims: {} });
     },
   });
   return { enroll, link, createLocal };

@@ -274,6 +274,47 @@ fn staging_many_inserts_replays_no_earlier_write() {
     assert_eq!(db.db.evidence_copies_for_test(), 0);
 }
 
+/// What a transaction handle leaves open between its calls, seen through
+/// `Db::held_for_test`. From outside the store the overlay is invisible:
+/// any other use of the store undoes it first. The handle itself stays
+/// open (and its writes staged) until commit or rollback.
+///
+/// ```text
+/// begin ── insert ──────── read ───────── insert ──── commit
+///   batch   batch+overlay   batch          batch+overlay  nothing
+/// ```
+#[test]
+fn held_for_test_sees_what_a_transaction_handle_keeps_between_calls() {
+    let db = authority();
+    assert!(db.db.held_for_test().is_nothing());
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    let held = db.db.held_for_test();
+    assert_eq!(held.open_batches, 1);
+    assert!(!held.overlay && !held.sqlite_transaction);
+
+    db.insert_in_transaction(tx, "notes", &title("staged"), &none())
+        .unwrap();
+    let held = db.db.held_for_test();
+    assert!(held.overlay, "staging leaves the overlay applied");
+    assert!(held.sqlite_transaction, "in its savepoint");
+
+    assert!(titles(&db).is_empty());
+    let held = db.db.held_for_test();
+    assert!(
+        !held.overlay && !held.sqlite_transaction,
+        "a read undoes it"
+    );
+    assert_eq!(held.open_batches, 1);
+
+    db.insert_in_transaction(tx, "notes", &title("more"), &none())
+        .unwrap();
+    assert!(db.db.held_for_test().overlay);
+    assert!(db.commit_transaction(tx, None).unwrap().rejected.is_none());
+    assert!(db.db.held_for_test().is_nothing());
+    assert_eq!(titles(&db).len(), 2);
+}
+
 /// The backend's own writes (no session) are checked by no policy, so
 /// their rows are trusted. Staging many of them in one transaction neither
 /// replays earlier writes nor copies the batch's written-row set for each
@@ -530,6 +571,45 @@ fn comment(note: RowUuid, body: &str) -> Vec<u8> {
     jazz::binding_codec::encode_named_cells(&record).unwrap()
 }
 
+/// An optional relation's filter and order are checked when the read is
+/// prepared, as a required one's are, not only when a parent row is read
+/// (which a read with no parent rows never does). A client reading through
+/// the binding gets the refusal at once, with no rows needed.
+///
+/// ```text
+/// client ──all(notes + comments filtered on `nope`)──► binding ──✗ prepare
+/// ```
+#[test]
+fn an_optional_relations_filter_and_order_are_checked_at_prepare() {
+    let db = open(0xa2);
+    let read = |subquery: ArraySubquery| {
+        let query = Query::from("notes").array_subquery(subquery);
+        db.all(
+            postcard::to_allocvec(&query).unwrap(),
+            &json!({ "tier": "local-only" }),
+            None,
+            None,
+            None,
+        )
+        .and_then(|read| block_on(read).map_err(HostError::from))
+        .map(|_| ())
+    };
+    let comments = || ArraySubquery::new("comments", "comments", "note", "id");
+    for refused in [
+        read(comments().filter(jazz::query::eq(
+            jazz::query::col("nope"),
+            jazz::query::lit(jazz::records::Value::String("x".into())),
+        ))),
+        read(comments().order_by("nope", jazz::query::OrderDirection::Asc)),
+    ] {
+        match refused {
+            Err(HostError::Engine(error)) => assert_eq!(error.code, ErrorCode::Query, "{error}"),
+            other => panic!("expected a query refusal at prepare, got {other:?}"),
+        }
+    }
+    assert!(read(comments().order_by("body", jazz::query::OrderDirection::Asc)).is_ok());
+}
+
 #[test]
 fn a_relation_read_nests_each_relation_in_its_parents_cells() {
     let db = open(0xa1);
@@ -605,17 +685,17 @@ fn a_relation_read_nests_each_relation_in_its_parents_cells() {
     );
 }
 
-/// A local-first account's proof for app `app`, and the canonical author it
+/// A device account's proof for app `app`, and the canonical author it
 /// proves.
 fn local_first_proof(seed: u8, app: &str) -> (String, String) {
-    use jazz::identity::{LOCAL_FIRST_ISSUER, derive_user_id, mint_jazz_self_signed_token};
+    use jazz::identity::{DEVICE_ACCOUNT_ISSUER, derive_user_id, mint_jazz_self_signed_token};
     let seed = [seed; 32];
-    let token = mint_jazz_self_signed_token(&seed, LOCAL_FIRST_ISSUER, app, 600).unwrap();
+    let token = mint_jazz_self_signed_token(&seed, DEVICE_ACCOUNT_ISSUER, app, 600).unwrap();
     let user = derive_user_id(&seed).to_string();
     let app = jazz::app_id::AppId::from_name(app);
-    let author = AuthorSubject::reserved(LOCAL_FIRST_ISSUER, &user)
+    let author = AuthorSubject::reserved(DEVICE_ACCOUNT_ISSUER, &user)
         .unwrap()
-        .with_account(jazz::account_registry::local_first_account_id(
+        .with_account(jazz::account_registry::device_account_id(
             *app.uuid(),
             &user,
         ));
@@ -632,7 +712,7 @@ fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
     argument(backend.insert("notes", &title("before"), &as_account));
 
     backend
-        .admit_local_first_session(&token, "app", &author)
+        .admit_device_account_session(&token, "app", &author)
         .unwrap();
     let write = backend
         .insert("notes", &title("after"), &as_account)
@@ -642,9 +722,99 @@ fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
 
     // Only a backend admits, and only the author its proof derives.
     let (other_token, other_author) = local_first_proof(8, "app");
-    argument(open(1).admit_local_first_session(&other_token, "app", &other_author));
-    argument(backend.admit_local_first_session(&other_token, "app", &author));
-    argument(backend.admit_local_first_session(&token, "other-app", &author));
+    argument(open(1).admit_device_account_session(&other_token, "app", &other_author));
+    argument(backend.admit_device_account_session(&other_token, "app", &author));
+    argument(backend.admit_device_account_session(&token, "other-app", &author));
+}
+
+/// A device account's proof for app `app` that expires `seconds` from
+/// now, and the canonical author it proves.
+fn local_first_proof_expiring(seed: u8, app: &str, seconds: u64) -> (String, String) {
+    use jazz::identity::{DEVICE_ACCOUNT_ISSUER, mint_jazz_self_signed_token_at};
+    let (_, author) = local_first_proof(seed, app);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // Issued in the past, so a short remaining lifetime needs no long ttl.
+    let token = mint_jazz_self_signed_token_at(
+        &[seed; 32],
+        DEVICE_ACCOUNT_ISSUER,
+        app,
+        600,
+        now + seconds - 600,
+    )
+    .unwrap();
+    (token, author)
+}
+
+/// A backend admits each device account a request names (`forReqUser`), so
+/// its admissions must not pile up: an admission drops the ones whose proof
+/// has expired. Reads the admission count through a testing-only accessor,
+/// since an expired admission is otherwise indistinguishable from a dropped
+/// one (both refuse the author).
+///
+/// ```
+/// alice (2 s proof) ──admit──► backend   admitted: {alice}
+///                     … alice's proof expires …
+/// bob (600 s proof) ──admit──► backend   admitted: {bob}
+/// ```
+#[test]
+fn a_backend_drops_local_first_admissions_whose_proof_expired() {
+    let backend = authority();
+    let (alice_token, alice) = local_first_proof_expiring(7, "app", 2);
+    backend
+        .admit_device_account_session(&alice_token, "app", &alice)
+        .unwrap();
+    assert_eq!(backend.admitted_device_accounts(), 1);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    let (bob_token, bob) = local_first_proof(8, "app");
+    backend
+        .admit_device_account_session(&bob_token, "app", &bob)
+        .unwrap();
+    assert_eq!(backend.admitted_device_accounts(), 1);
+    let as_alice = json!({ "author": alice.as_bytes() });
+    argument(backend.insert("notes", &title("alice, expired"), &as_alice));
+    let as_bob = json!({ "author": bob.as_bytes() });
+    assert!(
+        backend
+            .insert("notes", &title("bob"), &as_bob)
+            .unwrap()
+            .rejected
+            .is_none()
+    );
+}
+
+/// Two requests of one device account each admit it; the second's proof may
+/// expire sooner. A db the first request opened still writes as the account
+/// until the first proof expires: an admission keeps the longer-lived proof.
+///
+/// ```
+/// alice req 1 (600 s proof) ──admit──► backend
+/// alice req 2 (2 s proof)   ──admit──► backend   (keeps the 600 s proof)
+///                     … 2 s pass …
+/// alice req 1's db ──insert──► accepted
+/// ```
+#[test]
+fn a_later_admission_never_shortens_a_local_first_account_s_admission() {
+    let backend = authority();
+    let (long_token, alice) = local_first_proof(7, "app");
+    let (short_token, same_alice) = local_first_proof_expiring(7, "app", 2);
+    assert_eq!(alice, same_alice);
+    backend
+        .admit_device_account_session(&long_token, "app", &alice)
+        .unwrap();
+    backend
+        .admit_device_account_session(&short_token, "app", &alice)
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let as_alice = json!({ "author": alice.as_bytes() });
+    let write = backend
+        .insert("notes", &title("still alice"), &as_alice)
+        .unwrap();
+    assert!(write.rejected.is_none());
+    assert_eq!(titles(&backend), ["still alice"]);
 }
 
 #[test]
@@ -931,6 +1101,50 @@ fn a_tab_read_asks_for_the_tick_that_fetches_its_large_values() {
     let rows = jazz::binding_codec::decode_rows(&drive_on_demand(&links, read).unwrap()).unwrap();
     assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 1);
     assert_eq!(titles(&tab), [large]);
+}
+
+#[test]
+fn a_tab_asks_for_the_tick_that_sends_the_next_read_of_its_serializable_transaction() {
+    // The first read of a serializable transaction goes out with the tick its
+    // call asks for. The next is asked once the first one's answer is
+    // applied, inside that tick, after the tick's send: nothing else is in
+    // flight to tick the tab, so it must ask for one itself.
+    let server = authority();
+    server.insert("notes", &title("one"), &none()).unwrap();
+    server
+        .insert(
+            "comments",
+            &comment(RowUuid(uuid::Uuid::from_bytes([7; 16])), "two"),
+            &none(),
+        )
+        .unwrap();
+    let worker = open(0xd4);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xd5));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let tx = &OpenTransactionId::new().to_string();
+    tab.begin_transaction(tx, "serializable", None, None)
+        .unwrap();
+    let read = |table: &str| {
+        let query = postcard::to_allocvec(&Query::from(table)).unwrap();
+        tab.all(query, &none(), Some(tx), None, None).unwrap()
+    };
+    // Both asked now; the transaction runs them one after the other.
+    let (notes, comments) = (read("notes"), read("comments"));
+    let (notes, comments) = drive_on_demand(&links, futures::future::join(notes, comments));
+    let count = |bytes: Vec<u8>| {
+        jazz::binding_codec::decode_rows(&bytes)
+            .unwrap()
+            .iter()
+            .map(|batch| batch.rows.len())
+            .sum::<usize>()
+    };
+    assert_eq!(count(notes.unwrap()), 1);
+    assert_eq!(count(comments.unwrap()), 1);
 }
 
 #[test]
@@ -1878,4 +2092,136 @@ fn binding_configs_have_no_chunk_store() {
     let db_config = binding_host::db_config(schema(), &config, identity);
     assert!(db_config.chunk_store.is_none());
     assert!(!db_config.host_chunk_io);
+}
+
+/// Bindings over a table branched by `branch_id`.
+fn branched(node: u8, authority: bool) -> Binding {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let identity = if authority {
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xee; 16]),
+            author: AuthorSubject::SYSTEM,
+        }
+    } else {
+        identity(node)
+    };
+    let config = DbConfig::new(schema, identity);
+    let db = if authority {
+        block_on(Db::open_history_complete(config))
+    } else {
+        block_on(Db::open(config))
+    }
+    .unwrap();
+    Binding::new(db, identity, authority)
+}
+
+fn branch(byte: u8) -> jazz::protocol::BranchSelector {
+    jazz::protocol::BranchSelector::new([(
+        "branch_id",
+        Value::Uuid(uuid::Uuid::from_bytes([byte; 16])),
+    )])
+}
+
+/// On the host's links (postcard frames, as napi and wasm carry them),
+/// Alice's serializable transaction reads her draft over main and inserts
+/// into the draft; then she commits and waits for the server's verdict.
+fn commit_a_draft_read(features: Option<jazz::wire::WireFeatures>) -> Result<(), jazz::db::Error> {
+    let server = branched(0, true);
+    let client = branched(0xa1, false);
+    let upstream = client.connect_upstream();
+    if let Some(features) = features {
+        upstream.set_features(features);
+    }
+    let subscriber = server
+        .accept_subscriber(client.author(), Default::default())
+        .unwrap();
+    let links = [(&upstream, &subscriber)];
+    let put = |db: &Db, on: jazz::protocol::BranchSelector, title: &str| {
+        block_on(db.insert(
+            "todos",
+            std::collections::BTreeMap::from([(
+                "title".to_owned(),
+                Value::String(title.to_owned()),
+            )]),
+            jazz::db::InsertOptions {
+                target: jazz::db::ExactWriteTarget::Branch(on),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    };
+    put(&server.db, branch(1), "Intro");
+    // Another branch's row: a root read would list it, the draft's view not.
+    put(&server.db, branch(3), "Elsewhere");
+    let tx = OpenTransactionId::new();
+    drive(&links, client.db.begin_serializable(tx)).unwrap();
+    let view = ReadOpts::default().branch_view(
+        branch(2),
+        Some(jazz::protocol::BranchViewBase::current(branch(1))),
+    );
+    let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+    let read = drive(
+        &links,
+        client
+            .db
+            .all_serialized_query(&query, view, Some(tx), None, None),
+    )
+    .unwrap();
+    assert!(matches!(read, jazz::db::SerializedReadResult::Rows(rows) if rows.len() == 1));
+    drive(
+        &links,
+        client.db.tx_ref(tx).insert(
+            "todos",
+            std::collections::BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("Notes".to_owned()),
+            )]),
+            jazz::db::InsertOptions {
+                target: jazz::db::ExactWriteTarget::Branch(branch(2)),
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
+    let receipt = drive(&links, client.db.commit_serializable_handle(tx))?;
+    drive(
+        &links,
+        client
+            .db
+            .wait_for_transaction(receipt.0, jazz::tx::DurabilityTier::Global),
+    )
+    .map(drop)
+}
+
+/// The host hands an upstream link what its `Hello` negotiated
+/// (`connectUpstreamWithSession` does): with the feature, a serializable
+/// commit that read through a branch view crosses real frames and the
+/// server validates it through the view (jazz#5806).
+#[test]
+fn a_link_given_its_features_commits_a_serializable_branch_read() {
+    commit_a_draft_read(Some(jazz::wire::current_wire_features())).unwrap();
+}
+
+/// A link the host never told its features (`connectUpstream` without a
+/// session) reports none: the commit is refused rather than sent to a
+/// server that would check the read as a root read.
+#[test]
+fn a_link_without_features_refuses_a_serializable_branch_read() {
+    let error = commit_a_draft_read(None).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not supported yet by this server"),
+        "{error}"
+    );
 }

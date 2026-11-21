@@ -4,27 +4,32 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
+import {
+  deploy,
+  startLocalJazzServer,
+  startTestJazz,
+  testApp,
+  testPermissions,
+  type TestJazz,
+} from "../testing/index.js";
 
 describe("finite concurrent local write convergence", () => {
   for (const withGSet of [false, true]) {
-    const app = s.defineApp(
-      {
-        records: s.table(
-          {
-            title: s.string(),
-            archived: s.boolean(),
-            revision: s.float(),
-            count: s.int().merge("counter"),
-            tags: withGSet ? s.array(s.string()).merge("g-set") : s.array(s.string()),
+    const app = testApp({
+      tables: {
+        records: {
+          columns: {
+            title: "string",
+            archived: "boolean",
+            revision: "float",
+            count: { type: "int", merge: "counter" },
+            tags: withGSet ? { array: "string", merge: "g-set" } : { array: "string" },
           },
-          {},
-        ),
+        },
       },
-      { migrations: "none" },
-    );
-    const permissions = s.definePermissions(app, ({ policy }) => policy.records.allowRead.always());
+    });
+    const permissionsFile = { format: 1, tables: { records: { read: "true" } } };
+    const permissions = testPermissions(app, permissionsFile);
     for (const offline of [false, true]) {
       it(`settles a fresh editor with ${withGSet ? "GSet and Counter" : "Counter"} after concurrent ${offline ? "offline" : "online"} write chains`, async () => {
         const directory = await mkdtemp(join(tmpdir(), "jazz-concurrent-merge-test-"));
@@ -38,12 +43,12 @@ describe("finite concurrent local write convergence", () => {
         // Each editor is an app's own Jazz (createJazz) in front of the core.
         const sessions: TestJazz[] = [];
         async function open() {
-          const session = await startTestJazz({ app, permissions, core: server });
+          const session = await startTestJazz({ app, permissions: permissionsFile, core: server });
           sessions.push(session);
           return session.jazz.db;
         }
         try {
-          await deploy({ ...settings, schema: app, permissions, serverUrl: server.url });
+          await deploy({ ...settings, app, permissions: permissionsFile, serverUrl: server.url });
           const writer = await open();
           const id = randomUUID();
           await writer

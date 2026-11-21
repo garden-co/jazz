@@ -2,16 +2,10 @@ import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import { clientScope } from "../runtime/client-scope.js";
 import { isWhitespaceOnlySecret, WHITESPACE_BACKEND_SECRET } from "../accounts/registry-client.js";
-import {
-  NapiDb,
-  captureTextAnchor,
-  captureTextRange,
-  resolveTextAnchor,
-  resolveTextRange,
-} from "jazz-napi";
+import { backendNative } from "./backend-native.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import type { CompiledPermissions } from "../permissions/index.js";
+import type { CompiledPermissionsMap as CompiledPermissions } from "../schema-permissions.js";
 import { JazzClient, type MutationErrorEvent, type Runtime, type TxId } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
@@ -128,10 +122,10 @@ interface BackendMutationErrorSink {
 class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   override textAnchors(): TextAnchors {
     return textAnchorsFrom({
-      captureTextAnchor,
-      captureTextRange,
-      resolveTextAnchor,
-      resolveTextRange,
+      captureTextAnchor: backendNative().captureTextAnchor,
+      captureTextRange: backendNative().captureTextRange,
+      resolveTextAnchor: backendNative().resolveTextAnchor,
+      resolveTextRange: backendNative().resolveTextRange,
     });
   }
 
@@ -207,9 +201,9 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     const proof = verifiedLocalFirstRequestProof(session);
     if (!proof) return;
     if (proof.appId !== this.config.appId || !(this.runtime instanceof NativeRuntimeAdapter)) {
-      throw new Error("Local-first request proof does not match the backend runtime");
+      throw new Error("Device account request proof does not match the backend runtime");
     }
-    this.runtime.admitLocalFirstSession(session, proof.token, this.config.appId);
+    this.runtime.admitLocalFirstSession(session, proof.token, proof.audience ?? this.config.appId);
   }
 
   override createClient({
@@ -245,7 +239,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`);
     const persistent = this.config.driver.type === "persistent";
     this.runtime = new NativeRuntimeAdapter(
-      NapiDb,
+      backendNative().Db,
       schema,
       persistent ? systemNode : (this.nodeClock?.node.slice() ?? randomNodeUuidBytes()),
       authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
@@ -263,6 +257,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
           appId: this.config.appId,
           thresholdMs: this.config.slowQueryThresholdMs,
         },
+        subscriptionBacklogRows: this.config.subscriptionBacklogRows,
         migrations,
       },
     );
@@ -607,6 +602,17 @@ class BackendDb extends Db implements BackendMutationErrorSink {
     this.coreSource.assertOpen();
     this.assertOpen();
     return this.client;
+  }
+
+  /**
+   * The backend's connection manager holds no client, so wait on this
+   * `Db`'s: for the writes it makes as its session (or as the backend),
+   * reporting only their rejections. With no server this runtime is the
+   * authority, and writes settle when made.
+   */
+  protected override async waitForUpstreamSync(signal: AbortSignal): Promise<void> {
+    if (!this.getConfig().serverUrl) return;
+    await this.client.waitForSyncAs(this.accessContext?.writeSession ?? undefined, signal);
   }
 
   private readonly backendMutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();

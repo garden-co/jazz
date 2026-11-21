@@ -29,7 +29,7 @@ const partitionCommand = (partition) =>
   `node dev/gates/local-ci-equivalent.mjs --ci-partition ${partition}`;
 const trustedSccacheCondition =
   "inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')";
-const trustedTurboCondition = "inputs.trusted-cache";
+const trustedTurboCondition = "inputs.trusted-cache && inputs.sccache-write";
 const sccacheExportStep = Object.freeze({
   name: "Export trusted sccache configuration",
   if: trustedSccacheCondition,
@@ -73,6 +73,33 @@ const isKnownAdminStep = (step) =>
   isExactStep(step, turboExportStep) ||
   isExactStep(step, sccacheStatsStep);
 
+// A job with a `partition` matrix (test-ts) runs its run steps once per
+// matrix value; expand them so each value counts as its own invocation. The
+// matrix may hold nothing but that list, so no include/exclude entry can add
+// an unchecked command.
+function runStepsOf(jobName, job) {
+  const steps = (job.steps ?? []).filter(({ run }) => typeof run === "string");
+  const matrix = job.strategy?.matrix;
+  if (matrix === undefined) return steps;
+  assert.deepEqual(
+    Object.keys(matrix),
+    ["partition"],
+    `${jobName}'s matrix may only list partitions`,
+  );
+  assert.ok(Array.isArray(matrix.partition), `${jobName}'s partition matrix must be a list`);
+  assert.equal(
+    new Set(matrix.partition).size,
+    matrix.partition.length,
+    `${jobName} lists a partition twice`,
+  );
+  return matrix.partition.flatMap((value) =>
+    steps.map((step) => ({
+      ...step,
+      run: step.run.replaceAll("${{ matrix.partition }}", value),
+    })),
+  );
+}
+
 function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const expectedJobs = new Set(Object.values(ciPartitionJobs));
   // A job may host several partitions (storage-compat also runs the
@@ -84,7 +111,7 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   for (const [partition, jobName] of Object.entries(ciPartitionJobs)) {
     const job = model.jobs?.[jobName];
     assert.ok(job, `CI omits ${jobName} for shared ${partition} partition`);
-    const runSteps = (job.steps ?? []).filter(({ run }) => typeof run === "string");
+    const runSteps = runStepsOf(jobName, job);
     const expected = partitionCommand(partition);
     assert.equal(
       runSteps.filter(({ run }) => run === expected).length,
@@ -103,7 +130,15 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const aggregateRuns = (aggregate.steps ?? []).filter(({ run }) => typeof run === "string");
   assert.deepEqual(
     aggregateRuns.map(({ run }) => run.trim()),
-    ['test "${WORKSPACE_RESULT}" = success\n' + 'test "${STORAGE_COMPAT_RESULT}" = success'],
+    [
+      'test "${WORKSPACE_RESULT}" = success\n' +
+        'test "${STORAGE_COMPAT_RESULT}" = success\n' +
+        'test "${DURABLE_OBJECT_LIMITS_RESULT}" = success\n' +
+        'test "${JAZZ_FFI_BINDINGS_RESULT}" = success\n' +
+        'test "${CRATES_PACKAGE_RESULT}" = success\n' +
+        'test "${KOTLIN_RESULT}" = success\n' +
+        'test "${KOTLIN_ANDROID_RESULT}" = success',
+    ],
     "the Rust aggregate may check partition statuses, but must not add a correctness command",
   );
 
@@ -172,18 +207,62 @@ test("crate publication selector tests are a reachable lint partition contract",
   const selectorTest = lint.find(({ label }) => label === "crate publication selector contract");
   assert.deepEqual(selectorTest, {
     label: "crate publication selector contract",
-    executable: "bash",
-    args: ["dev/scripts/publish-crates-alpha.test.sh"],
+    executable: "node",
+    args: ["--test", "dev/scripts/check-lockstep-versions.test.mjs"],
   });
 
   const withoutSelectorTest = lint.filter(
     ({ label }) => label !== "crate publication selector contract",
   );
   assert.equal(
-    withoutSelectorTest.some(({ args }) => args.includes("publish-crates-alpha.test.sh")),
+    withoutSelectorTest.some(({ args }) =>
+      args.includes("dev/scripts/check-lockstep-versions.test.mjs"),
+    ),
     false,
     "a removed selector test would leave the lint CI partition without its publish admission receipt",
   );
+});
+
+test("CI lint runs the published API crates' rustdoc with warnings denied, jazz-core alone, and jazz-app-support's endpoint", () => {
+  const lint = planFor({ partition: "lint" });
+  const rustdoc = lint.filter(
+    ({ executable, args }) => executable === "cargo" && args[0] === "doc",
+  );
+  assert.deepEqual(rustdoc, [
+    {
+      label: "Rust API rustdoc",
+      executable: "cargo",
+      args: [
+        "doc",
+        "--no-deps",
+        "-p",
+        "jazz-app-support",
+        "-p",
+        "jazz-codegen",
+        "-p",
+        "jazz-ffi",
+        "-p",
+        "jazz-native-transport",
+        "-p",
+        "jazz-core",
+        "-p",
+        "jazz-server",
+      ],
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    },
+    {
+      label: "jazz-core rustdoc",
+      executable: "cargo",
+      args: ["doc", "--no-deps", "-p", "jazz-core"],
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    },
+    {
+      label: "jazz-app-support rustdoc (unstable-endpoint)",
+      executable: "cargo",
+      args: ["doc", "-p", "jazz-app-support", "--no-deps", "--features", "unstable-endpoint"],
+      env: { RUSTDOCFLAGS: "-D warnings" },
+    },
+  ]);
 });
 
 test("focused mode is explicitly smaller and cannot be mistaken for CI-equivalent", () => {
@@ -415,12 +494,13 @@ test("a successful native producer remains visible when a TypeScript consumer fa
 
 test("storage compatibility executes the historical native and browser corpora and propagates failure", async () => {
   // The native corpus stays its own partition; the browser corpus runs in the
-  // TypeScript partition, which already produced the sealed artifacts it opens.
+  // TypeScript examples partition, which already produced the sealed
+  // artifacts it opens.
   assert.deepEqual(
     planFor({ partition: "storage-compat" }).map(({ label }) => label),
     ["native storage compatibility corpus"],
   );
-  const partition = planFor({ partition: "typescript" });
+  const partition = planFor({ partition: "typescript-examples" });
   const assertBrowser = (commands) => {
     const browser = commands.find((item) => item.label === "browser storage compatibility corpus");
     assert.ok(browser, "TypeScript partition must execute browser corpus");

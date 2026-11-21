@@ -4,6 +4,7 @@ import { SharedBrowserForegroundNodeLease } from "../native-runtime/browser-shar
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import {
   BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
+  BROWSER_STORE_HELD_BY_ANOTHER_BUILD,
   BrowserWorkerUnresponsiveError,
 } from "../native-runtime/browser-worker-protocol.js";
 import type { BrowserWorkerConnection, BrowserWorkerConnectionContext } from "../runtime-source.js";
@@ -13,6 +14,7 @@ import type { DbForConnection } from "./types.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
 import type { LinkStatus } from "../sync-status.js";
 import { pageCacheForTest } from "../page-cache.js";
+import { browserBuildId, setNewerBuildHandler } from "../newer-build-reload.js";
 
 function deferred() {
   let resolve!: () => void;
@@ -124,7 +126,8 @@ async function leasedManagerFixture(admissionError?: Error, inspectorAttachment 
           }
         : undefined,
     },
-    isShuttingDown: false,
+    phase: "open" as DbForConnection["phase"],
+    draining: false,
     runtimeSource: {
       acquireBrowserForegroundNodeLease: vi.fn(async () => lease),
       createClient,
@@ -174,7 +177,7 @@ describe("BrowserConnectionManager automatic worker recovery", () => {
       fixture.fail(new BrowserWorkerUnresponsiveError("predecessor stopped responding"));
       await vi.advanceTimersByTimeAsync(250);
       expect(fixture.createConnection).toHaveBeenCalledTimes(2);
-      fixture.host.isShuttingDown = true;
+      fixture.host.phase = "closing";
       const shutdown = fixture.manager.shutdown();
       admission.resolve();
       await shutdown;
@@ -188,7 +191,7 @@ describe("BrowserConnectionManager automatic worker recovery", () => {
     } finally {
       admission.resolve();
       fixture.allowFinish();
-      fixture.host.isShuttingDown = true;
+      fixture.host.phase = "closing";
       await fixture.manager.shutdown().catch(() => undefined);
       vi.useRealTimers();
     }
@@ -224,12 +227,40 @@ describe("BrowserConnectionManager automatic worker recovery", () => {
         await expect(fixture.manager.ensureReady("runtime")).resolves.toBeUndefined();
       } finally {
         fixture.allowFinish();
-        fixture.host.isShuttingDown = true;
+        fixture.host.phase = "closing";
         await fixture.manager.shutdown().catch(() => undefined);
         vi.useRealTimers();
       }
     },
   );
+
+  it("keeps recovering the worker while the Db drains for a graceful shutdown, and stops once teardown starts", async () => {
+    vi.useFakeTimers();
+    const fixture = await leasedManagerFixture();
+    try {
+      // A sign-out waits for its writes to upload: the worker connection
+      // must recover for that, and stay usable if the wait fails.
+      fixture.host.draining = true;
+      fixture.fail(new BrowserWorkerUnresponsiveError("worker gone mid-drain"));
+      await vi.advanceTimersByTimeAsync(250);
+      expect(fixture.createConnection).toHaveBeenCalledTimes(2);
+      // The drain failed (offline): the Db is plainly open again.
+      fixture.host.draining = false;
+      await expect(fixture.manager.ensureReady("runtime")).resolves.toBeUndefined();
+      expect(fixture.manager.getClient({})).toBe(fixture.client);
+
+      // Teardown is final: a failure then is not recovered.
+      fixture.host.phase = "closing";
+      fixture.contexts[1]!.onFailure(new BrowserWorkerUnresponsiveError("worker gone in teardown"));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fixture.createConnection).toHaveBeenCalledTimes(2);
+    } finally {
+      fixture.allowFinish();
+      fixture.host.phase = "closing";
+      await fixture.manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
 
   it("backs off when a replacement worker is also unresponsive", async () => {
     vi.useFakeTimers();
@@ -248,7 +279,7 @@ describe("BrowserConnectionManager automatic worker recovery", () => {
       await expect(fixture.manager.ensureReady("runtime")).resolves.toBeUndefined();
     } finally {
       fixture.allowFinish();
-      fixture.host.isShuttingDown = true;
+      fixture.host.phase = "closing";
       await fixture.manager.shutdown().catch(() => undefined);
       vi.useRealTimers();
     }
@@ -269,7 +300,7 @@ describe("BrowserConnectionManager automatic worker recovery", () => {
         await expect(fixture.manager.ensureReady("runtime")).rejects.toBe(error);
       } finally {
         fixture.allowFinish();
-        fixture.host.isShuttingDown = true;
+        fixture.host.phase = "closing";
         await fixture.manager.shutdown().catch(() => undefined);
         vi.useRealTimers();
       }
@@ -281,7 +312,7 @@ describe("BrowserConnectionManager automatic worker recovery", () => {
     const fixture = await leasedManagerFixture();
     fixture.fail(new BrowserWorkerUnresponsiveError("worker gone"));
     fixture.allowFinish();
-    fixture.host.isShuttingDown = true;
+    fixture.host.phase = "closing";
     try {
       await fixture.manager.shutdown().catch(() => undefined);
       await vi.advanceTimersByTimeAsync(60_000);
@@ -301,7 +332,7 @@ describe("BrowserConnectionManager acknowledged storage reset", () => {
       const fixture = await leasedManagerFixture();
       const flushError = new Error("independent flush failure");
       if (flushFailed) vi.mocked(fixture.connection.flushLocal).mockRejectedValue(flushError);
-      fixture.host.isShuttingDown = true;
+      fixture.host.phase = "closing";
       let outcome: unknown = "pending";
       const shutdown = fixture.manager.shutdown().then(
         () => {
@@ -424,7 +455,7 @@ describe("BrowserConnectionManager acknowledged storage reset", () => {
     await expect(fixture.manager.ensureReady("runtime")).rejects.toBe(resetError);
     expect(fixture.host.runtimeSource.acquireBrowserForegroundNodeLease).toHaveBeenCalledOnce();
     expect(fixture.port.close).toHaveBeenCalledOnce();
-    fixture.host.isShuttingDown = true;
+    fixture.host.phase = "closing";
     await fixture.manager.shutdown();
     expect(fixture.messages).not.toContain("return-foreground-node-lease");
   });
@@ -432,14 +463,19 @@ describe("BrowserConnectionManager acknowledged storage reset", () => {
 
 function admissionManager(
   retryable = true,
-  heldByAnotherSignIn = false,
+  heldByAnotherTab: boolean | "sign-in" | "build" | "older-build" = false,
   config: Record<string, unknown> = {},
 ) {
   let pinned = true;
+  const olderBuild = heldByAnotherTab === "older-build";
+  let heldBy: false | "sign-in" | "build" =
+    heldByAnotherTab === true ? "sign-in" : olderBuild ? "build" : heldByAnotherTab;
   let error = new Error(
-    heldByAnotherSignIn
+    heldBy === "sign-in"
       ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
-      : "incompatible persistent browser configuration",
+      : heldBy === "build"
+        ? BROWSER_STORE_HELD_BY_ANOTHER_BUILD
+        : "incompatible persistent browser configuration",
   );
   const connections: Array<
     BrowserWorkerConnection & {
@@ -449,18 +485,21 @@ function admissionManager(
   > = [];
   const host = {
     config,
-    isShuttingDown: false,
+    phase: "open" as DbForConnection["phase"],
+    draining: false,
     runtimeSource: {
       createBrowserWorkerConnection: vi.fn(() => {
         const rejected = pinned;
         const refusal = error;
-        const held = heldByAnotherSignIn;
+        const held = heldBy;
         const connection = {
           ready: async () => {
             if (rejected) throw refusal;
           },
           canRetryInitialConfigurationAdmission: () => rejected && retryable,
-          waitsForAnotherSignIn: () => rejected && held,
+          waitsForAnotherTab: () => (rejected && held) || false,
+          isOlderThanStore: () => rejected && olderBuild,
+          flushLocal: vi.fn(async () => undefined),
           deleteStorage: vi.fn(async () => {
             if (rejected) throw refusal;
           }),
@@ -492,7 +531,7 @@ function admissionManager(
     /** Later attempts are refused for another reason than a held store. */
     refuseOtherwise: (other: Error) => {
       error = other;
-      heldByAnotherSignIn = false;
+      heldBy = false;
     },
   };
 }
@@ -543,7 +582,42 @@ describe("Browser configuration admission retries", () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(connections).toHaveLength(attempts);
     } finally {
-      host.isShuttingDown = true;
+      host.phase = "closing";
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits quietly while another build's tab holds the store, reports it past its patience, and joins once that tab lets go", async () => {
+    // A deploy changed the schema; a tab of the previous build still has the
+    // store open. This tab once stopped for good, silently: `stopped`, not
+    // retrying, until a later explicit call.
+    vi.useFakeTimers();
+    const { manager, host, connections, unpin } = admissionManager(true, "build");
+    const status = () =>
+      (manager as unknown as { transportLinkStatus(): unknown }).transportLinkStatus();
+    try {
+      let failure: unknown;
+      const waiting = manager.ensureReady("runtime").catch((error: unknown) => {
+        failure = error;
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(failure).toBeUndefined();
+      expect(status()).toEqual({ state: "connecting" });
+      expect(connections.length).toBeGreaterThan(1);
+      await vi.advanceTimersByTimeAsync(BrowserConnectionManager.HELD_BY_ANOTHER_TAB_PATIENCE_MS);
+      await waiting;
+      expect(isStoreHeldByAnotherTabError(failure)).toBe(true);
+      expect((failure as Error).message).toContain("another build of this app");
+      expect((failure as Error).message).toContain("reload the tab that runs the older build");
+      expect(status()).toEqual({ state: "offline", reason: "held-by-another-tab", retrying: true });
+      // The other tab reloads into this build: the next attempt joins.
+      unpin();
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(status()).not.toMatchObject({ state: "offline" });
+      await expect(manager.ensureReady("runtime")).resolves.toBeUndefined();
+    } finally {
+      host.phase = "closing";
       await manager.shutdown().catch(() => undefined);
       vi.useRealTimers();
     }
@@ -574,7 +648,7 @@ describe("Browser configuration admission retries", () => {
       expect(status()).not.toMatchObject({ state: "offline" });
       await expect(manager.ensureReady("runtime")).resolves.toBeUndefined();
     } finally {
-      host.isShuttingDown = true;
+      host.phase = "closing";
       await manager.shutdown().catch(() => undefined);
       vi.useRealTimers();
     }
@@ -603,7 +677,7 @@ describe("Browser configuration admission retries", () => {
       expect(status()).toEqual({ state: "offline", reason: "stopped", retrying: false });
       await expect(manager.ensureReady("runtime")).rejects.toBe(other);
     } finally {
-      host.isShuttingDown = true;
+      host.phase = "closing";
       await manager.shutdown().catch(() => undefined);
       vi.useRealTimers();
     }
@@ -629,7 +703,7 @@ describe("Browser configuration admission retries", () => {
       expect(connections.length).toBeGreaterThan(attempts);
       expect(status()).toEqual({ state: "offline", reason: "held-by-another-tab", retrying: true });
     } finally {
-      host.isShuttingDown = true;
+      host.phase = "closing";
       await manager.shutdown().catch(() => undefined);
       vi.useRealTimers();
     }
@@ -659,7 +733,7 @@ describe("Browser configuration admission retries", () => {
         expect(refused.deleteStorage).not.toHaveBeenCalled();
       expect(connections.at(-1)!.deleteStorage).toHaveBeenCalledOnce();
     } finally {
-      host.isShuttingDown = true;
+      host.phase = "closing";
       await manager.shutdown().catch(() => undefined);
       vi.useRealTimers();
     }
@@ -687,7 +761,7 @@ describe("Browser configuration admission retries", () => {
       await expect(manager.deleteClientStorage()).resolves.toBeUndefined();
       expect(connections.at(-1)!.deleteStorage).toHaveBeenCalledOnce();
     } finally {
-      host.isShuttingDown = true;
+      host.phase = "closing";
       await manager.shutdown().catch(() => undefined);
       vi.useRealTimers();
     }
@@ -706,7 +780,7 @@ describe("Browser configuration admission retries", () => {
       await vi.advanceTimersByTimeAsync(5_000);
       await expect(waiting).resolves.toBeUndefined();
     } finally {
-      host.isShuttingDown = true;
+      host.phase = "closing";
       await manager.shutdown().catch(() => undefined);
       vi.useRealTimers();
     }
@@ -718,7 +792,7 @@ describe("Browser configuration admission retries", () => {
     try {
       const waiting = manager.ensureReady("runtime");
       await vi.advanceTimersByTimeAsync(1_000);
-      host.isShuttingDown = true;
+      host.phase = "closing";
       await manager.shutdown().catch(() => undefined);
       await expect(waiting).resolves.toBeUndefined();
       const attempts = connections.length;
@@ -745,7 +819,7 @@ describe("Browser configuration admission retries", () => {
     const concurrent = manager.ensureReady("runtime");
     await Promise.resolve();
     expect(connections[0]!.shutdown).toHaveBeenCalledOnce();
-    host.isShuttingDown = true;
+    host.phase = "closing";
     retirement.resolve();
     await Promise.all([retry, concurrent]);
     expect(connections).toHaveLength(1);
@@ -758,7 +832,7 @@ describe("BrowserConnectionManager.shutdown", () => {
     vi.mocked(fixture.connection.shutdown).mockRejectedValue(
       new Error("later worker close failure"),
     );
-    fixture.host.isShuttingDown = true;
+    fixture.host.phase = "closing";
     const shutdown = fixture.manager.shutdown();
     const rejected = expect(shutdown).rejects.toThrow("high-water persistence failed");
     await fixture.finishStarted.promise;
@@ -786,7 +860,7 @@ describe("BrowserConnectionManager.shutdown", () => {
       await expect(fixture.manager.ensureReady("runtime")).rejects.toBe(error);
       expect(fixture.client.discard).not.toHaveBeenCalled();
       expect(fixture.messages).not.toContain("retire-foreground-node-lease");
-      fixture.host.isShuttingDown = true;
+      fixture.host.phase = "closing";
       let outcome: unknown = "pending";
       const shutdown = fixture.manager.shutdown().then(
         () => {
@@ -821,7 +895,7 @@ describe("BrowserConnectionManager.shutdown", () => {
   it("interrupts an in-flight lease finish when the shutdown connection fails", async () => {
     const fixture = await leasedManagerFixture();
     const error = new BrowserWorkerUnresponsiveError("worker died during lease cleanup");
-    fixture.host.isShuttingDown = true;
+    fixture.host.phase = "closing";
     let outcome: unknown = "pending";
     const shutdown = fixture.manager.shutdown().then(
       () => {
@@ -867,7 +941,7 @@ describe("BrowserConnectionManager.shutdown", () => {
     expect(fixture.client.discard).not.toHaveBeenCalled();
     expect(fixture.messages).not.toContain("retire-foreground-node-lease");
     fixture.allowFinish();
-    fixture.host.isShuttingDown = true;
+    fixture.host.phase = "closing";
     await fixture.manager.shutdown();
     expect(fixture.messages).toContain("return-foreground-node-lease");
     expect(fixture.messages).not.toContain("retire-foreground-node-lease");
@@ -879,7 +953,7 @@ describe("BrowserConnectionManager.shutdown", () => {
     const fixture = await leasedManagerFixture(error);
     await expect(fixture.manager.ensureReady("runtime")).rejects.toBe(error);
     fixture.allowFinish();
-    fixture.host.isShuttingDown = true;
+    fixture.host.phase = "closing";
     await fixture.manager.shutdown();
     expect(fixture.connection.flushLocal).not.toHaveBeenCalled();
     expect(fixture.messages).toContain("return-foreground-node-lease");
@@ -896,7 +970,7 @@ describe("BrowserConnectionManager.shutdown", () => {
     });
     vi.mocked(fixture.connection.shutdown).mockRejectedValue(new Error("later close failure"));
     const abandon = vi.spyOn(fixture.lease, "abandonAfterWorkerFailure");
-    fixture.host.isShuttingDown = true;
+    fixture.host.phase = "closing";
     let outcome: unknown = "pending";
     const shutdown = fixture.manager.shutdown().then(
       () => {
@@ -1042,7 +1116,8 @@ describe("BrowserConnectionManager.shutdown", () => {
     const disposeRuntimeTelemetry = vi.fn();
     const host = {
       config: { telemetryCollectorUrl: "https://example.test/telemetry" },
-      isShuttingDown: false,
+      phase: "open" as DbForConnection["phase"],
+      draining: false,
       runtimeSource: {
         acquireBrowserForegroundNodeLease: async () => lease,
         createClient: () => client,
@@ -1065,7 +1140,7 @@ describe("BrowserConnectionManager.shutdown", () => {
     expect(leaseMessages).not.toContain("return-foreground-node-lease");
     expect(leaseMessages).not.toContain("retire-foreground-node-lease");
 
-    host.isShuttingDown = true;
+    host.phase = "closing";
     let outcome: { status: "pending" | "fulfilled" } | { status: "rejected"; error: unknown } = {
       status: "pending",
     };
@@ -1115,7 +1190,8 @@ function browserAuthManagerFixture(connections: BrowserWorkerConnection[]) {
       serverUrl: "https://example.test",
       jwtToken: "old.jwt",
     },
-    isShuttingDown: false,
+    phase: "open" as DbForConnection["phase"],
+    draining: false,
     runtimeSource: {
       createBrowserWorkerConnection: vi.fn((context: BrowserWorkerConnectionContext) => {
         contexts.push(context);
@@ -1268,7 +1344,8 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     } as unknown as BrowserWorkerConnection;
     const host = {
       config: { serverUrl: "https://example.test" },
-      isShuttingDown: false,
+      phase: "open" as DbForConnection["phase"],
+      draining: false,
       runtimeSource: { createBrowserWorkerConnection: vi.fn(() => connection) },
       markUnauthenticated: vi.fn(),
       clearAuthError: vi.fn(),
@@ -1316,7 +1393,8 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     const callbacks: Array<{ onFailure(error: unknown): void }> = [];
     const host = {
       config: { serverUrl: "https://example.test" },
-      isShuttingDown: false,
+      phase: "open" as DbForConnection["phase"],
+      draining: false,
       runtimeSource: {
         createBrowserWorkerConnection: vi.fn((input) => {
           callbacks.push(input);
@@ -1372,7 +1450,8 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     let onStorageReset: BrowserWorkerConnectionContext["onStorageReset"];
     const host = {
       config: { serverUrl: "https://example.test" },
-      isShuttingDown: false,
+      phase: "open" as DbForConnection["phase"],
+      draining: false,
       runtimeSource: {
         createBrowserWorkerConnection: vi.fn((input) => {
           onStorageReset = input.onStorageReset;
@@ -1414,7 +1493,8 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     } as unknown as BrowserWorkerConnection;
     const manager = new BrowserConnectionManager({
       config: { serverUrl: "https://example.test" },
-      isShuttingDown: false,
+      phase: "open" as DbForConnection["phase"],
+      draining: false,
     } as DbForConnection);
     Object.assign(
       manager as unknown as {
@@ -1447,7 +1527,8 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     } as unknown as BrowserWorkerConnection;
     const manager = new BrowserConnectionManager({
       config: { serverUrl: "https://example.test" },
-      isShuttingDown: false,
+      phase: "open" as DbForConnection["phase"],
+      draining: false,
     } as DbForConnection);
     Object.assign(
       manager as unknown as {
@@ -1473,7 +1554,7 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       expect(fixture.createConnection).toHaveBeenCalledOnce();
     } finally {
       fixture.allowFinish();
-      fixture.host.isShuttingDown = true;
+      fixture.host.phase = "closing";
       await fixture.manager.shutdown().catch(() => undefined);
     }
   });
@@ -1497,7 +1578,8 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     const callbacks: Array<{ onFailure(error: unknown): void }> = [];
     const host = {
       config: { serverUrl: "https://example.test" },
-      isShuttingDown: false,
+      phase: "open" as DbForConnection["phase"],
+      draining: false,
       runtimeSource: {
         createBrowserWorkerConnection: vi.fn((input) => {
           callbacks.push(input);
@@ -1581,7 +1663,8 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     } as unknown as BrowserWorkerConnection;
     const host = {
       config: { serverUrl: "https://example.test" },
-      isShuttingDown: false,
+      phase: "open" as DbForConnection["phase"],
+      draining: false,
       runtimeSource: {
         createBrowserWorkerConnection: vi.fn(() => connection),
       },
@@ -1625,7 +1708,8 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       | undefined;
     const host = {
       config: { serverUrl: "https://example.test" },
-      isShuttingDown: false,
+      phase: "open" as DbForConnection["phase"],
+      draining: false,
       runtimeSource: {
         createBrowserWorkerConnection: vi.fn((input) => {
           callbacks = input;
@@ -1668,7 +1752,8 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
       | undefined;
     const host = {
       config: { serverUrl: "https://example.test" },
-      isShuttingDown: false,
+      phase: "open" as DbForConnection["phase"],
+      draining: false,
       runtimeSource: {
         createBrowserWorkerConnection: vi.fn((input) => {
           callbacks = input;
@@ -1709,7 +1794,8 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     } as unknown as BrowserWorkerConnection;
     const host = {
       config: { serverUrl: "https://example.test" },
-      isShuttingDown: false,
+      phase: "open" as DbForConnection["phase"],
+      draining: false,
       runtimeSource: {
         createBrowserWorkerConnection: vi.fn(() => connection),
       },
@@ -1751,7 +1837,7 @@ describe("BrowserConnectionManager write readiness", () => {
       await expect(fixture.manager.ensureReady("server")).rejects.toBe(refused);
     } finally {
       fixture.allowFinish();
-      fixture.host.isShuttingDown = true;
+      fixture.host.phase = "closing";
       await fixture.manager.shutdown();
     }
   });
@@ -1769,7 +1855,7 @@ describe("BrowserConnectionManager write readiness", () => {
       expect(fixture.connection.waitForServerConnection).not.toHaveBeenCalled();
     } finally {
       fixture.allowFinish();
-      fixture.host.isShuttingDown = true;
+      fixture.host.phase = "closing";
       await fixture.manager.shutdown();
     }
   });
@@ -1799,7 +1885,7 @@ describe("BrowserConnectionManager in the back/forward cache", () => {
     first.leaveForPageCache = vi.fn(() => leaves);
     const finish = async () => {
       fixture.allowFinish();
-      fixture.host.isShuttingDown = true;
+      fixture.host.phase = "closing";
       await fixture.manager.shutdown().catch(() => undefined);
     };
     return { ...fixture, created, first, finish };
@@ -1925,6 +2011,84 @@ describe("BrowserConnectionManager in the back/forward cache", () => {
       expect(fixture.createConnection).toHaveBeenCalledOnce();
     } finally {
       await fixture.finish();
+    }
+  });
+});
+
+describe("BrowserConnectionManager and a newer build of the app", () => {
+  afterEach(() => setNewerBuildHandler(undefined));
+
+  it("stops taking writes, makes those it took durable and closes, then reloads, when a newer build wants the store", async () => {
+    const fixture = await leasedManagerFixture();
+    const order: string[] = [];
+    const reloads = vi.fn(() => order.push("reload"));
+    setNewerBuildHandler(reloads);
+    vi.mocked(fixture.connection.flushLocal).mockImplementation(async () => {
+      order.push("flush");
+    });
+    vi.mocked(fixture.connection.shutdown).mockImplementation(async () => {
+      order.push("close");
+    });
+    try {
+      fixture.contexts[0]!.onNewerBuild!();
+      expect(() => fixture.manager.getClient({})).toThrow("older build of this app");
+      await expect(fixture.manager.ensureReady("runtime")).rejects.toThrow(
+        "older build of this app",
+      );
+      await vi.waitFor(() => expect(reloads).toHaveBeenCalledOnce());
+      expect(order).toEqual(["flush", "close", "reload"]);
+      // Told twice, it yields once.
+      fixture.contexts[0]!.onNewerBuild!();
+      await Promise.resolve();
+      expect(reloads).toHaveBeenCalledOnce();
+    } finally {
+      fixture.allowFinish();
+      fixture.host.phase = "closing";
+      await fixture.manager.shutdown().catch(() => undefined);
+    }
+  });
+
+  it("never reloads again from a build it already reloaded away from, however often it is refused as older: it waits", async () => {
+    // A stale CDN, or a rollback to the previous build: reloading lands on the
+    // same build, which the store's newer build keeps refusing.
+    vi.useFakeTimers();
+    const reloads = vi.fn();
+    setNewerBuildHandler(reloads);
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => browserBuildId({}),
+      setItem: () => {},
+    });
+    const { manager, host, connections } = admissionManager(true, "older-build");
+    try {
+      let failure: unknown;
+      const waiting = manager.ensureReady("runtime").catch((error: unknown) => {
+        failure = error;
+      });
+      await vi.advanceTimersByTimeAsync(120_000);
+      await waiting;
+      expect(connections.length).toBeGreaterThan(5);
+      expect(reloads).not.toHaveBeenCalled();
+      // It waits as for a build it can't order, and reports it past the patience.
+      expect(isStoreHeldByAnotherTabError(failure)).toBe(true);
+      expect(() => manager.getClient({})).not.toThrow("older build of this app");
+    } finally {
+      vi.unstubAllGlobals();
+      host.phase = "closing";
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("yields and reloads when the worker refuses it as an older build than the store's", async () => {
+    const reloads = vi.fn();
+    setNewerBuildHandler(reloads);
+    const { manager, host } = admissionManager(true, "older-build");
+    try {
+      await expect(manager.ensureReady("runtime")).rejects.toThrow("older build of this app");
+      await vi.waitFor(() => expect(reloads).toHaveBeenCalledOnce());
+    } finally {
+      host.phase = "closing";
+      await manager.shutdown().catch(() => undefined);
     }
   });
 });

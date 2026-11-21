@@ -6,10 +6,10 @@
   "scripts": {
     "dev": "vite",
     "dev:auth": "tsx server/main.ts",
-    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "build": "node ../../packages/jazz-tools/dist/cli.js generate && vite build",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.browser.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "express": "^4.18.2",

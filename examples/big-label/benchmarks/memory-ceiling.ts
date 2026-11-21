@@ -11,8 +11,8 @@
 // checked writes cost at each size with `probe`: user edits made through the
 // deployed permissions.
 import { createHash } from "node:crypto";
-import { app } from "../schema";
-import permissions from "../permissions";
+import { app } from "../jazz.generated";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 type Op = { table: string; id: string; values: Record<string, unknown>; update?: boolean };
 type Tx = { actor: "backend" | string; ops: Op[] };

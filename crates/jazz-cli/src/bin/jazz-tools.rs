@@ -68,13 +68,32 @@ struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
-    /// Import an alpha.59 server data dir into a new one, from the dump that
-    /// `jazz-alpha59-alpha60-export` writes (`import`), and check the result
-    /// (`verify`). Run `jazz-tools alpha59-alpha60` for its usage.
-    #[command(name = "alpha59-alpha60")]
-    Alpha59Alpha60 {
+    /// With --check (for CI): check the committed jazz.app.json (and
+    /// jazz.permissions.json) and fail when the bindings are stale, changing
+    /// nothing. Writing them is `npx jazz-tools generate`'s, from schema.ts.
+    Generate {
+        /// The directory holding jazz.app.json.
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+        /// The bindings' language (repeatable); by default each whose
+        /// marker (package.json, Cargo.toml, Package.swift, build.gradle(.kts), go.mod) sits beside jazz.app.json.
+        #[arg(long)]
+        lang: Vec<String>,
+        /// Fail when the files or bindings are stale; change nothing.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Renamed to `generate`.
+    #[command(hide = true)]
+    Validate {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Migrations are written from schema.ts by `npx jazz-tools migrations
+    /// create`; this binary refuses.
+    Migrations {
+        #[command(subcommand)]
+        action: MigrationsAction,
     },
     /// Create a new resource
     Create {
@@ -113,8 +132,10 @@ enum Commands {
         blobs_dir: Option<String>,
 
         /// Bucket for `--blobs s3` (defaults to S3_BUCKET_NAME). Credentials
-        /// come from AWS_ROLE_ARN with an OIDC token, or AWS_ACCESS_KEY_ID
-        /// and AWS_SECRET_ACCESS_KEY.
+        /// come, as in the AWS SDKs, from AWS_ACCESS_KEY_ID and
+        /// AWS_SECRET_ACCESS_KEY, AWS_ROLE_ARN with an OIDC token, the
+        /// container's role (ECS, Fargate, EKS Pod Identity), or the EC2
+        /// instance profile.
         #[arg(long)]
         s3_bucket: Option<String>,
 
@@ -251,6 +272,43 @@ enum Commands {
         #[arg(long, env = "JAZZ_QUERY_CACHE_BUDGET_BYTES", value_parser = clap::value_parser!(u64))]
         query_cache_budget_bytes: Option<u64>,
 
+        /// Bytes of output one client session may leave unread beyond twice
+        /// its biggest tick before it is closed with a retryable
+        /// `Backpressure` error (the client reconnects and resumes).
+        /// Defaults to 64 MiB.
+        #[arg(long, env = "JAZZ_SESSION_BACKLOG_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        session_backlog_bytes: Option<u64>,
+
+        /// Bytes of output one client session may leave unread at most,
+        /// however big its ticks. Defaults to 256 MiB.
+        #[arg(long, env = "JAZZ_SESSION_BACKLOG_MAX_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        session_backlog_max_bytes: Option<u64>,
+
+        /// Best-effort budget for the unwritten output of all client
+        /// sessions together. Past it, sessions reading slower than the
+        /// minimum read rate for the stall grace are closed, biggest first;
+        /// sessions reading faster are left alone. Defaults to a quarter of
+        /// the memory limit, else 2 GiB.
+        #[arg(long, env = "JAZZ_EGRESS_BUDGET_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        egress_budget_bytes: Option<u64>,
+
+        /// Seconds a client session may read slower than the minimum read
+        /// rate while its output waits before it is closed. Defaults to
+        /// 120.
+        #[arg(long, env = "JAZZ_SLOW_READER_TIMEOUT_SECS", value_parser = clap::value_parser!(u64).range(1..))]
+        slow_reader_timeout_secs: Option<u64>,
+
+        /// Bytes a second a client must read, on average, while its output
+        /// waits, to count as reading (for the slow-reader timeout and the
+        /// egress budget). Defaults to 1024.
+        #[arg(long, env = "JAZZ_SLOW_READER_MIN_BYTES_PER_SEC", value_parser = clap::value_parser!(u64).range(1..))]
+        slow_reader_min_bytes_per_sec: Option<u64>,
+
+        /// Seconds a client session must be behind that rate before the
+        /// egress budget may close it. Defaults to 10.
+        #[arg(long, env = "JAZZ_EGRESS_STALL_GRACE_SECS", value_parser = clap::value_parser!(u64).range(1..))]
+        egress_stall_grace_secs: Option<u64>,
+
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
@@ -269,6 +327,156 @@ enum Commands {
         #[arg(long, env = "JAZZ_DIAGNOSTICS_TOKEN", requires = "diagnostics_listen")]
         diagnostics_token: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum MigrationsAction {
+    /// Refused: run `npx jazz-tools migrations create --name <name>`, which
+    /// writes the migration from schema.ts.
+    Create {
+        /// The migration's name.
+        #[arg(long)]
+        name: String,
+        /// The directory holding jazz.app.json.
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+        /// The bindings' language (repeatable); by default each whose
+        /// marker (package.json, Cargo.toml, Package.swift, build.gradle(.kts), go.mod) sits beside jazz.app.json.
+        #[arg(long)]
+        lang: Vec<String>,
+    },
+}
+
+/// Print a command's outcome and exit 0, or its refusal and exit 1.
+fn finish_app_files(result: Result<jazz_cli::app_files::Outcome, String>) -> ! {
+    let code = match result {
+        Ok(outcome) => {
+            for warning in outcome.warnings {
+                eprintln!("warning: {warning}");
+            }
+            for note in outcome.notes {
+                println!("{note}");
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            1
+        }
+    };
+    std::process::exit(code)
+}
+
+/// Where a TS app keeps its `schema.ts`, relative to the app's directory
+/// (jazz-tools' `SCHEMA_ROOTS`, `packages/jazz-tools/src/upgrade/project.ts`).
+const SCHEMA_ROOTS: &[&str] = &[".", "src", "src/lib"];
+
+/// The app's `schema.ts`, when it is authored in TypeScript.
+fn ts_schema(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    SCHEMA_ROOTS
+        .iter()
+        .map(|root| dir.join(root).join("schema.ts"))
+        .find(|path| path.is_file())
+}
+
+/// The refusal of `jazz.app.json`-only apps (alpha.66 makes TypeScript the
+/// only authoring source): shared with `npx jazz-tools`
+/// (`packages/jazz-tools/src/dev/ts-project.ts`).
+const JSON_ONLY_APP: &str = "TS is the source in alpha.66: this app has jazz.app.json but no \
+     schema.ts. Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema \
+     hashes and bundle id), then edit schema.ts beside your app's manifest (package.json, \
+     Cargo.toml, go.mod, Package.swift, build.gradle, …) and run `npx jazz-tools generate`.";
+
+/// Refuse to write an app's files: TypeScript is the only authoring source,
+/// so `jazz.app.json`, `jazz.permissions.json` and the bindings are written
+/// from `schema.ts` by `npx jazz-tools generate` (and migrations by `npx
+/// jazz-tools migrations create`), which this binary can't run. An app
+/// with `jazz.app.json` but no `schema.ts` is pointed at `npx jazz-tools
+/// upgrade`, which writes its `schema.ts`.
+fn refuse_writing(dir: &std::path::Path, command: &str) -> String {
+    if let Some(schema) = ts_schema(dir) {
+        return format!(
+            "{} exists: this app is authored in TypeScript, and its jazz.app.json and \
+             jazz.permissions.json are generated from it. Run `npx jazz-tools {command}` instead \
+             (the standalone binary can't read TypeScript)",
+            schema.display()
+        );
+    }
+    if dir
+        .join(jazz::tools::deployment::artifact::APP_FILE)
+        .is_file()
+    {
+        return JSON_ONLY_APP.to_owned();
+    }
+    format!(
+        "no schema.ts in {} (looked in {}): write the app's schema in schema.ts and run `npx \
+         jazz-tools {command}` (the standalone binary only checks committed files, with \
+         `generate --check`)",
+        dir.display(),
+        SCHEMA_ROOTS.join(", ")
+    )
+}
+
+/// `generate --check` in `dir`: checks the committed files (their validity
+/// and, when written from TypeScript, their `$generated` digests) and the
+/// bindings against them, but can't check that the files are fresh from
+/// the TypeScript. Without `--check` it refuses: see [`refuse_writing`].
+fn generate(
+    dir: &std::path::Path,
+    names: &[String],
+    check: bool,
+) -> Result<jazz_cli::app_files::Outcome, String> {
+    if !check {
+        return Err(refuse_writing(dir, "generate"));
+    }
+    let ts = ts_schema(dir);
+    if ts.is_some() {
+        check_generated_digests(dir)?;
+    }
+    let mut outcome = jazz_cli::app_files::generate(dir, &langs(dir, names)?, check)?;
+    if let Some(schema) = ts {
+        outcome.notes.push(format!(
+            "note: {} exists: checked the bindings against the committed jazz.app.json and \
+             jazz.permissions.json, not that those are fresh from the TypeScript; run `npx \
+             jazz-tools generate --check` for that",
+            schema.display()
+        ));
+    }
+    Ok(outcome)
+}
+
+/// Refuse a committed file whose `$generated` digest no longer matches: it
+/// was edited by hand since `npx jazz-tools generate` wrote it.
+fn check_generated_digests(dir: &std::path::Path) -> Result<(), String> {
+    use jazz::tools::deployment::artifact::{self, GeneratedCheck};
+    for file in [artifact::APP_FILE, artifact::PERMISSIONS_FILE] {
+        let path = dir.join(file);
+        let Ok(text) = std::fs::read(&path) else {
+            continue;
+        };
+        match artifact::verify_generated(&text).map_err(|error| format!("{file}: {error}"))? {
+            GeneratedCheck::Unmarked | GeneratedCheck::Matches(_) => {}
+            GeneratedCheck::Mismatch { .. } => {
+                return Err(format!(
+                    "{file} was edited since `npx jazz-tools generate` wrote it (its \
+                     `$generated` digest doesn't match): edit the TypeScript and run `npx \
+                     jazz-tools generate`"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn langs(
+    dir: &std::path::Path,
+    names: &[String],
+) -> Result<Vec<jazz_cli::app_files::Selected>, String> {
+    let given = names
+        .iter()
+        .map(|name| jazz_codegen::Lang::parse(name).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    jazz_cli::app_files::languages(dir, &given)
 }
 
 #[derive(Subcommand)]
@@ -295,9 +503,7 @@ fn main() {
 
 async fn run() {
     let cli = Cli::parse();
-    // alpha59-alpha60 prints its JSON summary on stdout, so its logs go to
-    // stderr.
-    init_tracing(matches!(cli.command, Commands::Alpha59Alpha60 { .. }));
+    init_tracing();
     if let Err(error) = validate_server_cli_options(&cli.command) {
         eprintln!("Server error: {error}");
         shutdown_tracing();
@@ -305,11 +511,17 @@ async fn run() {
     }
 
     match cli.command {
-        Commands::Alpha59Alpha60 { args } => {
-            let code = jazz_cli::alpha59_alpha60::main("jazz-tools alpha59-alpha60", args).await;
-            shutdown_tracing();
-            std::process::exit(code);
-        }
+        Commands::Validate { .. } => finish_app_files(Err(
+            "`jazz-tools validate` is renamed to `jazz-tools generate`: run `npx jazz-tools generate` (`jazz-tools generate --check` for CI)".into(),
+        )),
+        Commands::Generate {
+            dir,
+            lang: name,
+            check,
+        } => finish_app_files(generate(&dir, &name, check)),
+        Commands::Migrations {
+            action: MigrationsAction::Create { dir, .. },
+        } => finish_app_files(Err(refuse_writing(&dir, "migrations create"))),
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
                 let app_id = name.map_or_else(AppId::random, |name| AppId::from_name(&name));
@@ -343,6 +555,12 @@ async fn run() {
             memory_limit_bytes,
             stored_arrangements,
             query_cache_budget_bytes,
+            session_backlog_bytes,
+            session_backlog_max_bytes,
+            egress_budget_bytes,
+            slow_reader_timeout_secs,
+            slow_reader_min_bytes_per_sec,
+            egress_stall_grace_secs,
             bound_port_file,
             diagnostics_listen,
             diagnostics_token,
@@ -404,6 +622,12 @@ async fn run() {
                         .or_else(jazz_server::resources::detect_memory_limit_bytes),
                     stored_arrangements,
                     query_cache_budget_bytes,
+                    session_backlog_bytes,
+                    session_backlog_max_bytes,
+                    egress_budget_bytes,
+                    slow_reader_timeout_secs,
+                    egress_stall_grace_secs,
+                    slow_reader_min_bytes_per_sec,
                 },
             )
             .await
@@ -514,17 +738,11 @@ static OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLog
 static OTEL_METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
     std::sync::OnceLock::new();
 
-fn init_tracing(to_stderr: bool) {
-    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+fn init_tracing() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let writer = if to_stderr {
-        BoxMakeWriter::new(std::io::stderr)
-    } else {
-        BoxMakeWriter::new(std::io::stdout)
-    };
-    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(writer);
+    let fmt_layer = tracing_subscriber::fmt::layer();
 
     #[cfg(feature = "otel")]
     {

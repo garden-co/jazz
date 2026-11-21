@@ -28,14 +28,14 @@ appendix as authoritative.
 
 For ordinary Rust/core work, the full gate set is:
 
-1. `cargo test -p jazz -p jazz-types -p jazz-model -p jazz-protocol -p jazz-db`
-2. `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd`
+1. `cargo test -p jazz-core -p jazz-types -p jazz-model -p jazz-protocol -p jazz-db`
+2. `cargo test -p jazz-core --no-default-features --features testing,transport-compression-zstd`
 3. `cargo check -p jazz-sim --benches` in the nightly `benchmark-api` job
 4. `dev/gates/ts-wire-codec.sh`
 5. `dev/t --test maintained_differential --exact maintained_one_shot_differential_oracle -- --ignored`
 6. `dev/t --test integration --exact include_live::renaming_a_sender_updates_exactly_their_messages`
 7. the sensitive-data guard from `jazz-private/dev/gates/`, normally reached
-   through the optional lefthook hook
+   through the Vite+ pre-commit hook
 
 For a benchmark edit, locally run
 `dev/gates/benchmark-smoke.sh <jazz|jazz-sim> <bench>`; it is a targeted debug

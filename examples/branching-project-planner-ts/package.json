@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
-    "typecheck": "tsc --noEmit"
+    "build": "node ../../packages/jazz-tools/dist/cli.js generate && vite build",
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "jazz-tools": "workspace:*"

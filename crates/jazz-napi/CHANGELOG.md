@@ -1,5 +1,105 @@
 # jazz-napi
 
+## 2.0.0-alpha.70
+
+### Patch Changes
+
+- f393bab: Add `db.getPendingUploadRows(table)` and `db.onPendingUploadRowsChange(table, listener)`: the ids of a table's rows with a write the server has neither accepted nor refused yet, so an app can show "not sent yet" beside a row. In Node and React Native this includes writes recovered from local storage after a restart. `null` means the runtime cannot tell (no client yet, or a native build without the report), never "none pending".
+
+## 2.0.0-alpha.69
+
+## 2.0.0-alpha.68
+
+### Patch Changes
+
+- 47af91a: Mergeable transaction reads now fetch as reads outside a transaction do.
+  A cold foreground loads them from its durable local relay, even while its
+  server is offline, and a Remote read waits for the server, on any client.
+  Branch-view reads fetch too, including over a frozen base the foreground has
+  not synced yet. Preserve staged writes, cancellation and mergeable conflict
+  semantics instead of returning an empty foreground cache. Inside a
+  transaction, a Remote read still shows other writers' unsettled rows, as a
+  serializable read does. These reads now go through the same synced query-shape
+  check as reads outside a transaction, so a shape the relay cannot answer is
+  refused there too.
+- a58dd33: `jazz.revokeUser` now ends a user's sessions on every backend instance, not only on the one that runs it. On serverless hosts (Vercel and the like) the sign-out handler usually runs on a different instance from the user's sockets and HTTP streams. The revocation is now recorded at the core, which closes the user's live sessions on any instance, idle ones included. It also refuses sessions that any instance admits later on an `authenticate` answer from before the call, such as a sign-in still in flight or an HTTP stream's reused answer. A sign-in that starts after the call works as before. `revokeUser` still resolves with the number of sessions it ended on the calling instance.
+
+  **Upgrade the core before backends to get cross-instance revocation.** A newer backend in front of an older core warns once and ends only its own instance's sessions, as before. An older backend in front of a newer core is unaffected.
+  - **Rollback:** an older core opens the same store. The revocation marks live in a new table (`_jazz_host_account_session_revocations`) that an older core never reads. After a rollback, recorded revocations stop applying, and sessions on other instances end at their `expiresAt` again.
+  - **Clients:** no client changes. The backend ends a revoked session with the same refused close it already sends for `revokeUser`, so every client that handles that close today handles this one.
+
+- 241df88: A `sqlite({ path })` store and a self-hosted server's data dir now keep their identity inside `jazz.sqlite`: the app id, the store's own id, and where its large values live. `jazz.sqlite` alone is now the whole store, so a copy or restore of it is the same store, for the same app, with the same chunks. The `app-id`, `store-id` and `blob-store` files stay beside it as copies each start rewrites, so an earlier release opened on the directory keeps the same identity; a copy that disagrees with `jazz.sqlite` is refused, not chosen. The Inspector's `inspect-token-secret` stays a file of its own (readable by its owner only) and never enters `jazz.sqlite`. To open a copy next to the original (a staging copy of a backup), run `npx jazz-tools store detach <path>` on the stopped copy: it gets its own store id and agent-token secret instead of claiming the original's chunks. **New refusal:** a store keeps the app it was first opened for, so a self-hosted server started with a different `--app-id` on an existing data dir now refuses to start instead of serving that data as another app; `npx jazz-tools store set-app-id <path> <app id>` changes it, and the error says so.
+
+## 2.0.0-alpha.67
+
+## 2.0.0-alpha.66
+
+### Minor Changes
+
+- 7160afe: ### Upgrading from alpha.65: run `jazz-tools upgrade` and review the diff
+
+  Breaking: alpha.66 gives the schema a cleaner home and permissions a much leaner DSL. Each app defines its tables, permissions and migrations in one `schema.ts`, in every language, and one command, `npx jazz-tools generate`, turns it into readable `jazz.app.json` / `jazz.permissions.json` files and typed bindings for TypeScript, Rust, Go, Swift and Kotlin. The table, column and migration builders are the ones you know from alpha.65; how the schema is mounted (`defineApp`) and how permissions are written change. `jazz-tools upgrade` converts an alpha.65 app for you and checks that its schema hashes and bundle id stay the same.
+
+  **`schema.ts`** (beside the app's manifest: package.json, Cargo.toml, go.mod, Package.swift or build.gradle):
+
+  ```ts
+  import { schema as s } from "jazz-tools";
+
+  export const schema = s.defineSchema({
+    chats: s.table({ isPublic: s.boolean() }, { membersViaChat: s.reverse("chatMembers", "chat") }),
+    chatMembers: s.table(
+      { chatId: s.uuid(), userId: s.uuid() },
+      { chat: s.rel("chats", "chatId") },
+    ),
+  });
+
+  const { definePermissions, exists, session, anyOf } = schema;
+  const isMember = (chatId: s.Uuid) => exists.chatMembers({ chatId, userId: session.user });
+
+  export const permissions = definePermissions({
+    chats: { read: (chat) => anyOf({ isPublic: true }, isMember(chat.id)) },
+    chatMembers: {
+      read: (m) => isMember(m.chatId),
+      insert: { userId: session.user },
+    },
+  });
+  ```
+
+  - **Permissions** use a new, much shorter DSL on the schema: per table `read`, `insert`, `update` (or `updateIf` + `updateTo`, where `updateTo: (row, old) => …` can compare with the old row) and `delete`; conditions are objects (`{ col: v }`, arrays mean `in`), `exists.<table>({…})`, `row.<relation>.where({…})`, `allowedTo.<op>(row.<relation>)`, `anyOf`/`allOf`/`not`, comparison helpers and `session`. Helpers are plain functions. Every table must be listed (`{}` denies everything), an operation left out is denied, and types check tables, columns, values, relations and rule keys. It covers the whole expression grammar of `jazz.permissions.json`. A separate `permissions.ts` exporting `permissions` still works; both at once is refused.
+  - **`generate`** (renamed from `validate`, which now fails naming it) loads `schema.ts` and writes `jazz.app.json` and `jazz.permissions.json`, then the bindings: `jazz.generated.ts`, or Rust, Go, Swift or Kotlin bindings, detected from the manifest beside `schema.ts` (`--lang` overrides). Commit them all. `generate --check` (for CI) writes nothing and fails when anything is stale. Writing needs `npx`, so Node, in every language; the standalone Rust `jazz-tools` binary only runs `generate --check`.
+  - **The JSON files are generated.** They carry a versioned `$schema` (`https://jazz.tools/schemas/jazz.app.v1.json`, `…/jazz.permissions.v1.json`) and a `$generated` digest. `generate` refuses to overwrite a file edited by hand, or one it didn't write, unless given `--force`. Backends and other languages read them: `createJazz({ app, permissions })` with `app` from `./jazz.generated` and `import permissions from "./jazz.permissions.json" with { type: "json" }`.
+  - **Migrations** live in `migrations/*.ts` (`m.defineMigration`, as in alpha.64) with tool-written snapshots in `migrations/snapshots/`, and become `history` and `migrations` in `jazz.app.json`. After a schema change `generate` asks for `npx jazz-tools migrations create --name <name>`; resolve each `TODO` it writes. There is no `migrations/index.ts`.
+  - **Computed fields and transforms** are declared in `schema.ts` (`s.computed(type, ["from", …])` among the columns, `.transform(name, viewType)`) and implemented in `jazz.computed.ts`.
+  - **Runtime code** imports `app` and the row types from `./jazz.generated`; nothing imports `schema.ts` at runtime.
+  - **Better Auth:** the adapter's generator writes `schema-better-auth/schema.ts` exporting `tables` and `permissions`, which `schema.ts` spreads.
+  - **Tests:** `createPolicyTestApp`, `startTestJazz`, `deploy` and backend clients take the generated `app` and permissions file; `jazz-tools/testing` adds `testApp(appJson)` and `testPermissions(app, permissionsJson)` for apps a test defines inline.
+
+  **Upgrade:** run `npx jazz-tools@2.0.0-alpha.66 upgrade` in each app _before_ bumping `jazz-tools`, then review the diff. It first checks with your installed alpha.65 (or .64) that the committed JSON is fresh, then:
+  - rewrites `schema.ts` from `defineApp(schema, { migrations })` to `export const schema = s.defineSchema({ … })`, keeping your comments;
+  - prints the permissions from the committed `jazz.permissions.json` into `schema.ts` in the new DSL (or a separate `permissions.ts` when the old one was large), factoring repeated checks into named helpers and keeping the old file's named constants;
+  - converts Better Auth's module to export `tables` and `permissions`;
+  - rewrites imports of `./schema` to `./jazz.generated`, `app.slice(…)` to `app`, and `validate` to `generate` in package.json scripts;
+  - deletes `migrations/index.ts` (stubs and snapshots stay);
+  - runs `generate`, and checks that the schema hashes and bundle id are unchanged. Otherwise it puts every file back and refuses.
+
+  Upgrade refuses, before writing anything, an app with computed columns or transforms (move those into `schema.ts` by hand), a policy that reads `process.env` and compiled to a bare `true`, and what alpha.65's own `validate --check` refuses. Other environment reads are listed under "Left for you".
+
+  **Removed:** `defineApp` and `{ migrations }` mounting, schema slicing (`defineSliceableApp`, `app.slice(…)`), the callback permissions DSL (`definePermissions(app, ({ policy }) => …)`, root-level `anyOf`/`allOf`/`createSessionContext`), `migrations/index.ts`, `schemaToWasm`, `validate --strict-provenance` and `migrations create --fromHash/--toHash/--migrations-dir`. Removed names throw `JAZZ_API_REMOVED` errors naming their replacement and pointing at `jazz-tools upgrade`. See "Upgrading from alpha.65" in the docs.
+
+  jazz-napi exports Jazz's code generator and loaders (`generate`, `compileApp`, `schemaSourceHash`, `migrationsCreate`, `validateBindings`, `loadBackendApp`) and the generated-file writer `writeAppFiles` with `verifyGenerated`.
+
+### Patch Changes
+
+- d5c4896: `db.waitForSync()` now rejects when a write committed before the call was refused, even if the refusal arrived before the call and later writes were accepted. Before, it resolved in that case, because it only waited for the writes still pending when called (jazz#5728). Each refusal is reported once, and one that the write's own `wait({ tier: "global" })` already reported isn't reported again. A refusal goes only to its writer's wait: on a backend, a `forReqUser` or `forSession` Db's `waitForSync()` reports that user's refusals and the backend's own `db` reports its own (before, a backend Db's `waitForSync()` didn't wait at all). Graceful shutdown doesn't fail on a refusal that settled before it. The same fix applies to Rust's `jazz.wait_for_sync()`.
+
+## 2.0.0-alpha.65
+
+### Patch Changes
+
+- c3ef03b: Server: a Backend or Admin websocket no longer busy-loops if the account registry stops, and an account websocket then closes with a retryable `NotReady` error.
+
+## 2.0.0-alpha.64
+
 ## 2.0.0-alpha.63
 
 ## 2.0.0-alpha.62

@@ -1,0 +1,451 @@
+name: Swift mirror
+
+# Publishes Jazz for Swift to garden-co/jazz-swift, the SwiftPM package
+# (SwiftPM takes a package by URL only with Package.swift at a repository's
+# root, and reads binary targets' checksums from the tagged manifest):
+#   1. builds JazzFFI.xcframework (libjazz_ffi for macOS, iOS and the iOS
+#      simulator, one job per Rust target, joined) from a garden-co/jazz ref;
+#   2. assembles the mirror tree: Package.swift with the XCFramework's URL
+#      and checksum, and packages/jazz-swift's sources;
+#   3. verifies it, in parallel jobs: a consumer package builds and runs
+#      against the mirror, the package's tests pass on macOS and on an iOS
+#      simulator, and the SwiftUI example builds and passes its UI test.
+# A dry run (pull requests touching Swift, or workflow_dispatch without
+# `publish`) stops there and uploads the XCFramework and the mirror as
+# artifacts. With `publish` (after the release `v<version>` exists), the
+# `publish` environment's approval gates attaching the XCFramework to the
+# release and pushing the mirror commit, tagged `<version>`, to jazz-swift.
+# Publishing takes only `ref: v<version>`, resolved once to a commit SHA that
+# every job builds and the mirror commit records.
+#
+# Recovery: the publish job refuses a version whose mirror tag or release
+# asset exists. If it uploaded the asset but failed to push the mirror,
+# check that garden-co/jazz-swift has no tag <version>, delete the asset
+# (`gh release delete-asset v<version> JazzFFI.xcframework.zip`) and run it
+# again. Never delete or move a pushed mirror tag: SwiftPM pins its checksum.
+on:
+  pull_request:
+    paths:
+      - "packages/jazz-swift/**"
+      - "crates/jazz-ffi/**"
+      - "dev/scripts/build-swift-xcframework.sh"
+      - "dev/scripts/assemble-swift-mirror.sh"
+      - "dev/scripts/verify-swift-mirror.sh"
+      - "examples/stage-plan/apps/swiftui/**"
+      - "examples/stage-plan/apps/swift-cli/**"
+      - "crates/jazz-codegen/src/swift.rs"
+      - ".github/workflows/swift-mirror.yml"
+  # release-artifacts.yml builds and verifies the XCFramework and the mirror
+  # once per commit (never publishing).
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      publish:
+        required: false
+        type: boolean
+        default: false
+      # Also rebuild the XCFramework from scratch (no cache) and require the
+      # same checksum. Always on when publishing.
+      reproduce:
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "garden-co/jazz ref to build (the release tag, e.g. v2.0.0-alpha.66, or an rc)"
+        required: true
+      version:
+        description: "Version to publish, without the v (e.g. 2.0.0-alpha.66)"
+        required: true
+      publish:
+        description: "Attach the XCFramework to release v<version> and push + tag the mirror"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # Called from release-artifacts.yml, github.workflow is the caller's: one
+  # group per calling run.
+  group: ${{ github.workflow }}-${{ inputs.version || github.head_ref || github.ref }}${{ github.workflow != 'Swift mirror' && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Fail closed: only main, release and merge-group/** restore caches an
+  # untrusted ref could have written (#supply-chain, 2026-11-19).
+  JAZZ_TRUSTED_CACHE: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) && 'true' || 'false' }}
+  REF: ${{ inputs.ref || github.sha }}
+  VERSION: ${{ inputs.version || format('0.0.0-dry-run.{0}', github.run_number) }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Validate the inputs and resolve the ref to a commit
+        id: resolve
+        env:
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          # Plain semver (SwiftPM reads only those tags).
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::version '$VERSION' isn't semver"; exit 1; }
+          if [[ "$PUBLISH" == true ]]; then
+            # A published version is built from its own release tag, and
+            # nothing else: no other tag, branch or commit.
+            [[ "$REF" == "v$VERSION" ]] || { echo "::error::publishing $VERSION builds v$VERSION, not '$REF'"; exit 1; }
+          fi
+          if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            sha=$REF
+          elif [[ "$REF" =~ ^v[0-9][0-9A-Za-z.-]*$ ]]; then
+            # The tag's commit in this repository (peeled, for annotated tags).
+            refs=$(git ls-remote --tags "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$REF" "refs/tags/$REF^{}")
+            sha=$(awk '/\^\{\}$/ {print $1}' <<<"$refs")
+            [[ -n "$sha" ]] || sha=$(awk '{print $1}' <<<"$refs" | head -1)
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::no tag $REF in ${GITHUB_REPOSITORY}"; exit 1; }
+          else
+            echo "::error::ref '$REF' isn't a v-tag or a commit SHA"; exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "building $REF at $sha"
+
+  # libjazz_ffi for each Rust target in parallel, as
+  # dev/scripts/build-swift-xcframework.sh builds it. sccache keeps the
+  # objects between runs; a cached build was bit-identical to a clean one,
+  # and the zip's checksum is reproducible, so a release can be rebuilt to
+  # check it.
+  slices:
+    name: libjazz_ffi (${{ matrix.target }})
+    needs: resolve
+    runs-on: blacksmith-6vcpu-macos-15
+    timeout-minutes: 60
+    # id-token: the S3 sccache tier (granted by release-artifacts.yml; a
+    # pull request from a trusted author gets the reader role).
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, min: macos13.0 }
+          - { target: x86_64-apple-darwin, min: macos13.0 }
+          - { target: aarch64-apple-ios, min: ios16.0 }
+          - { target: aarch64-apple-ios-sim, min: ios16.0 }
+          - { target: x86_64-apple-ios, min: ios16.0 }
+    env:
+      CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+      TARGET: ${{ matrix.target }}
+      # The script's deployment targets.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build
+        with:
+          restore-caches: ${{ env.JAZZ_TRUSTED_CACHE }}
+          setup-node: "false"
+          rust-cache: "false"
+          rust-targets: ${{ matrix.target }}
+      # sccache (.github/actions/apple-sccache): the trusted S3 tier where
+      # this run may use it, else the Actions cache. sccache doesn't hash
+      # MACOSX_/IPHONEOS_DEPLOYMENT_TARGET, so both hold the minimum OS, and
+      # "Check the minimum OS" below catches any object that slips in.
+      - name: Set up sccache
+        id: sccache
+        uses: ./.github/actions/apple-sccache
+        with:
+          restore-cache: ${{ env.JAZZ_TRUSTED_CACHE }}
+          key: swift-${{ matrix.target }}
+          min-os: ${{ matrix.min }}
+          writer-role: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          reader-role: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          bucket: ${{ vars.SCCACHE_BUCKET }}
+          region: ${{ vars.SCCACHE_REGION }}
+      - name: Build
+        run: |
+          cargo rustc -p jazz-ffi --release --lib --target "$TARGET" --crate-type staticlib -- --print native-static-libs 2>&1 \
+            | grep -E "native-static-libs|error" || true
+          mkdir -p "slice/$TARGET"
+          cp "target/$TARGET/release/libjazz_ffi.a" "slice/$TARGET/"
+          sccache --show-stats
+      # No object needs a newer OS than the slice's minimum (Rust's prebuilt
+      # std may need an older one: 14.0 for the arm64 simulator).
+      - name: Check the minimum OS
+        run: |
+          python3 - "slice/$TARGET/libjazz_ffi.a" "${{ matrix.min }}" <<'PY'
+          import collections, re, struct, sys
+          path, want = sys.argv[1], re.sub(r"^[a-z]+", "", sys.argv[2])
+          data = open(path, "rb").read()
+          assert data[:8] == b"!<arch>\n", "not an ar archive"
+          off, seen = 8, collections.Counter()
+          while off + 60 <= len(data):
+              header = data[off:off + 60]
+              name, size = header[:16].decode().strip(), int(header[48:58])
+              body = data[off + 60:off + 60 + size]
+              if name.startswith("#1/"):
+                  body = body[int(name[3:]):]
+              if body[:4] == b"\xcf\xfa\xed\xfe":
+                  (ncmds,), p = struct.unpack("<I", body[16:20]), 32
+                  for _ in range(ncmds):
+                      cmd, cmdsize = struct.unpack("<II", body[p:p + 8])
+                      if cmd == 0x32:  # LC_BUILD_VERSION
+                          (minos,) = struct.unpack("<I", body[p + 12:p + 16])
+                          seen[f"{minos >> 16}.{(minos >> 8) & 255}"] += 1
+                      p += cmdsize
+              off += 60 + size + (size & 1)
+          print(dict(seen))
+          v = lambda s: tuple(int(n) for n in s.split("."))
+          newer = {k: n for k, n in seen.items() if v(k) > v(want)}
+          sys.exit(f"objects for {newer}, newer than {want}" if newer else 0)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: swift-slice-${{ matrix.target }}
+          path: slice
+          if-no-files-found: error
+      - name: Stop sccache
+        if: always()
+        run: sccache --stop-server || true
+      # Without the S3 tier, the disk cache goes to the Actions cache: from
+      # main, or when nothing was restored. Saved after a failed build too.
+      - name: Save sccache
+        if: >-
+          ${{
+            always() &&
+            steps.sccache.outputs.s3 != 'true' &&
+            steps.sccache.outputs.fallback-hit != 'true' &&
+            (github.ref == 'refs/heads/main' || steps.sccache.outputs.fallback-matched == '')
+          }}
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/sccache
+          key: ${{ steps.sccache.outputs.fallback-key }}
+
+  # lipo, xcodebuild -create-xcframework, zip and checksum: the script's own
+  # steps, over the slices.
+  xcframework:
+    needs: [resolve, slices]
+    runs-on: blacksmith-6vcpu-macos-15
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      checksum: ${{ steps.checksum.outputs.checksum }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: swift-slice-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/slices
+      - name: Assemble JazzFFI.xcframework
+        run: JAZZ_FFI_SLICES="$RUNNER_TEMP/slices" dev/scripts/build-swift-xcframework.sh "$RUNNER_TEMP/xcf"
+      # The same slices must give the same zip (xcodebuild's Info.plist order
+      # and the files' mtimes are normalised): SwiftPM pins its checksum.
+      - name: Check the zip is reproducible
+        id: checksum
+        run: |
+          JAZZ_FFI_SLICES="$RUNNER_TEMP/slices" dev/scripts/build-swift-xcframework.sh "$RUNNER_TEMP/xcf-again"
+          cmp "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip" "$RUNNER_TEMP/xcf-again/JazzFFI.xcframework.zip"
+          echo "checksum=$(cat "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip.checksum")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: JazzFFI.xcframework
+          path: |
+            ${{ runner.temp }}/xcf/JazzFFI.xcframework.zip
+            ${{ runner.temp }}/xcf/JazzFFI.xcframework.zip.checksum
+          if-no-files-found: error
+
+  # The mirror tree, for the release's URL: what publish pushes and tags.
+  mirror:
+    needs: [resolve, xcframework]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: JazzFFI.xcframework
+          path: ${{ runner.temp }}/xcf
+      - name: Assemble the mirror
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          checksum=$(cat "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip.checksum")
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/JazzFFI.xcframework.zip"
+          dev/scripts/assemble-swift-mirror.sh "$VERSION" "$url" "$checksum" "$RUNNER_TEMP/jazz-swift" "$SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-swift-mirror
+          path: ${{ runner.temp }}/jazz-swift
+          if-no-files-found: error
+
+  # The mirror against the local zip (the release asset doesn't exist yet),
+  # in parallel: dev/scripts/verify-swift-mirror.sh's checks.
+  verify:
+    name: Verify (${{ matrix.name }})
+    needs: [resolve, mirror]
+    runs-on: blacksmith-6vcpu-macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS, checks: "smoke test-macos" }
+          - { name: iOS simulator, checks: "test-ios" }
+          - { name: SwiftUI example on macOS, checks: "example-macos" }
+          - { name: SwiftUI UI test on the iOS simulator, checks: "example-ios" }
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: JazzFFI.xcframework
+          path: ${{ runner.temp }}/xcf
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-swift-mirror
+          path: ${{ runner.temp }}/jazz-swift
+      - name: Check the zip against the mirror's checksum
+        run: |
+          checksum=$(cat "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip.checksum")
+          grep -q "checksum: \"$checksum\"" "$RUNNER_TEMP/jazz-swift/Package.swift"
+          echo "$checksum  $RUNNER_TEMP/xcf/JazzFFI.xcframework.zip" | shasum -a 256 -c -
+      - name: Verify
+        run: dev/scripts/verify-swift-mirror.sh "$RUNNER_TEMP/jazz-swift" "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip" "$RUNNER_TEMP/work" ${{ matrix.checks }}
+
+  # A release's XCFramework, rebuilt from scratch: the unchanged script, no
+  # cache, one runner. Its checksum must equal the cached, split build's, so
+  # the cache can't change what ships. In parallel with the verify jobs.
+  reproduce:
+    if: inputs.publish || inputs.reproduce
+    needs: resolve
+    runs-on: blacksmith-6vcpu-macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      checksum: ${{ steps.build.outputs.checksum }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: "1.93.1"
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - name: Build JazzFFI.xcframework from scratch
+        id: build
+        run: |
+          dev/scripts/build-swift-xcframework.sh "$RUNNER_TEMP/xcf"
+          echo "checksum=$(cat "$RUNNER_TEMP/xcf/JazzFFI.xcframework.zip.checksum")" >> "$GITHUB_OUTPUT"
+
+  reproducible:
+    needs: [xcframework, reproduce]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Compare the checksums
+        env:
+          BUILT: ${{ needs.xcframework.outputs.checksum }}
+          REBUILT: ${{ needs.reproduce.outputs.checksum }}
+        run: |
+          echo "split, cached: $BUILT"
+          echo "from scratch:  $REBUILT"
+          [[ -n "$BUILT" && "$BUILT" == "$REBUILT" ]] || { echo "::error::the cached build's XCFramework differs from a clean build's"; exit 1; }
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: [resolve, mirror, verify, reproducible]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: publish
+    permissions:
+      contents: write
+    steps:
+      # A token for garden-co/jazz-swift alone, minted per run by the
+      # jazz-swift-mirror GitHub App (contents: write); revoked when the job
+      # ends.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: mirror-token
+        with:
+          client-id: ${{ secrets.JAZZ_SWIFT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.JAZZ_SWIFT_APP_PRIVATE_KEY }}
+          owner: garden-co
+          repositories: jazz-swift
+          permission-contents: write
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: JazzFFI.xcframework
+          path: xcf
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-swift-mirror
+          path: jazz-swift
+      - name: Refuse a version that's already published, or a moved tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIRROR_TOKEN: ${{ steps.mirror-token.outputs.token }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          # The release tag still points where the build began.
+          now=$(gh api "repos/${GITHUB_REPOSITORY}/commits/v$VERSION" -q .sha)
+          [[ "$now" == "$SHA" ]] || { echo "::error::v$VERSION is at $now now, not $SHA, which was built"; exit 1; }
+          # A published version's asset is pinned by checksum: never replace it.
+          git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$MIRROR_TOKEN"; }; f'
+          if git ls-remote --exit-code --tags https://github.com/garden-co/jazz-swift.git "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::garden-co/jazz-swift already has tag $VERSION"; exit 1
+          fi
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -qx JazzFFI.xcframework.zip; then
+            echo "::error::release v$VERSION already has JazzFFI.xcframework.zip"; exit 1
+          fi
+      - name: Attach the XCFramework to release v${{ env.VERSION }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "v$VERSION" xcf/JazzFFI.xcframework.zip --repo "$GITHUB_REPOSITORY"
+          # What consumers will download must match the checksum the mirror pins.
+          curl -sSfL -o downloaded.zip "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/JazzFFI.xcframework.zip"
+          echo "$(cat xcf/JazzFFI.xcframework.zip.checksum)  downloaded.zip" | sha256sum -c -
+      - name: Push and tag the mirror
+        env:
+          MIRROR_TOKEN: ${{ steps.mirror-token.outputs.token }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$MIRROR_TOKEN"; }; f'
+          git clone https://github.com/garden-co/jazz-swift.git mirror
+          cd mirror
+          git rm -rq --ignore-unmatch . && cp -R ../jazz-swift/. .
+          git add -A
+          git -c user.name="jazz-release-bot" -c user.email="jazz-release-bot@users.noreply.github.com" \
+            commit -qm "Jazz for Swift $VERSION (garden-co/jazz@${SHA}, ${REF})"
+          git tag "$VERSION"
+          git push origin HEAD:main "refs/tags/$VERSION"

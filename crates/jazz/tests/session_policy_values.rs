@@ -30,7 +30,7 @@ fn schema() -> JazzSchema {
                     .column("body", ColumnType::Text)
                     .policies(TablePolicies::new().with_select(PolicyExpr::SessionInList {
                         path: vec!["authMode".to_owned()],
-                        values: vec![PublicValue::Text("local-first".to_owned())],
+                        values: vec![PublicValue::Text("device-account".to_owned())],
                     })),
             )
             .table(
@@ -82,7 +82,8 @@ fn auth_mode_is_derived_from_the_identitys_issuer() {
     ))
     .unwrap()
     .row_uuid();
-    let guest = AuthorSubject::reserved(AuthorSubject::LOCAL_FIRST_ISSUER, "guest-device").unwrap();
+    let guest =
+        AuthorSubject::reserved(AuthorSubject::DEVICE_ACCOUNT_ISSUER, "guest-device").unwrap();
     let staff = AuthorSubject::for_test_bytes([0x51; 16]);
     assert_eq!(read(&db, "guest_notes", guest), [note]);
     assert_eq!(read(&db, "guest_notes", staff), Vec::<RowUuid>::new());
@@ -132,4 +133,53 @@ fn an_array_reference_inherits_from_any_row_it_names() {
     let mut expected = vec![mixed, bobs];
     expected.sort();
     assert_eq!(seen, expected);
+}
+
+/// A policy published before device accounts were renamed may still compare
+/// `session.authMode` with `"local-first"`. No session has that value any
+/// more, so `!= 'local-first'` would admit every device account: such a
+/// policy fails closed, naming the new value, and a deployment refuses it.
+#[test]
+fn a_policy_comparing_auth_mode_with_local_first_fails_closed() {
+    let public = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("staff_notes")
+                .column("body", ColumnType::Text)
+                .policies(TablePolicies::new().with_select(PolicyExpr::SessionCmp {
+                    path: vec!["authMode".to_owned()],
+                    op: CmpOp::Ne,
+                    value: PublicValue::Text("local-first".to_owned()),
+                })),
+        )
+        .build();
+    let refusal =
+        jazz::tools::public_schema_convert::check_deployable_policies(&public).unwrap_err();
+    assert!(
+        refusal.to_string().contains("\"device-account\""),
+        "{refusal}"
+    );
+
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        compile_schema(&public),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xef; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    block_on(db.insert(
+        "staff_notes",
+        BTreeMap::from([("body".to_owned(), Value::String("internal".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let prepared = db.prepare_query(&Query::from("staff_notes")).unwrap();
+    let guest =
+        AuthorSubject::reserved(AuthorSubject::DEVICE_ACCOUNT_ISSUER, "guest-device").unwrap();
+    for who in [guest, AuthorSubject::for_test_bytes([0x51; 16])] {
+        let error = block_on(db.all_for_identity(&prepared, ReadOpts::default(), who))
+            .err()
+            .expect("the policy fails closed");
+        assert!(error.to_string().contains("\"device-account\""), "{error}");
+    }
 }

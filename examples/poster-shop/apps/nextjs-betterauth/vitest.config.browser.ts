@@ -7,9 +7,11 @@ import topLevelAwait from "vite-plugin-top-level-await";
 import wasm from "vite-plugin-wasm";
 import {
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   stopJazzServerByUrl,
   jazzServerTransportControlCommands,
   jazzAppFront,
+  jazzTestDeployment,
   jazzAppRequest,
   jazzAppUser,
   jazzAppBackendInsert,
@@ -102,10 +104,9 @@ export default defineConfig({
   define: {
     __JAZZ_EXAMPLE_TOPOLOGY_SEED__: JSON.stringify(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? "47"),
   },
-  plugins: [wasm(), topLevelAwait(), react()],
+  plugins: [jazzBrowserServerLifecycle, wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
-    globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
       provider: playwright(),
@@ -121,6 +122,8 @@ export default defineConfig({
           insertConnectedPeer(id, table, row),
         posterShopCloseConnectedPeer: async (_context, id) => closeConnectedPeer(id),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzTestDeployment: async (_context, bound, permissions) =>
+          jazzTestDeployment(bound, permissions),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),

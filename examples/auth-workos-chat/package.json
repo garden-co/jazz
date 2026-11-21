@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "build": "node ../../packages/jazz-tools/dist/cli.js generate && vite build",
     "preview": "vite preview",
     "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts",
     "test": "vitest run --config vitest.config.browser.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "dev:server": "tsx --env-file-if-exists=.env.local server/server.ts"
   },
   "dependencies": {

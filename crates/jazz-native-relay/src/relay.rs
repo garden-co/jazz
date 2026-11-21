@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, LargeValueUpdate, Migrations, RemoteLinkHint,
-    SubscriptionStream, block_on,
+    SubscriptionStream, UploadStatus, block_on,
 };
 use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::link::{
@@ -68,6 +68,11 @@ const NATIVE_RELAY_QUEUE_MAX_MESSAGES: usize = 1024;
 /// Commands which cross from a platform call into a relay owner must not
 /// accumulate without bound.
 const NATIVE_RELAY_OWNER_COMMAND_MAX: usize = 1_024;
+/// Events one subscription's relay buffer holds before the relay stops
+/// taking more from its stream: the rest wait in the core, which coalesces
+/// a backlog past the subscription's limit into one reset, so a foreground
+/// that stops draining holds no more than this plus that limit.
+pub(crate) const FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS: usize = 16;
 /// Rounds of one drive before the owner yields to queued commands. A drive
 /// that hits it continues on the next owner turn.
 const NATIVE_RELAY_DRIVE_ROUNDS: usize = 64;
@@ -517,8 +522,11 @@ impl NativeRelay {
         })
     }
 
-    fn begin_socket_upstream(&self) -> Result<(u64, NativeRelayWire), RelayError> {
-        self.run(|worker| Ok(worker.begin_socket_upstream()))
+    fn begin_socket_upstream(
+        &self,
+        features: jazz::wire::WireFeatures,
+    ) -> Result<(u64, NativeRelayWire), RelayError> {
+        self.run(move |worker| Ok(worker.begin_socket_upstream(features)))
     }
 
     fn retire_socket_upstream(&self, generation: u64) -> Result<(), RelayError> {
@@ -814,6 +822,7 @@ impl Foreground {
     fn collect_events(&mut self) -> Result<(), String> {
         for subscription in self.subscriptions.values_mut() {
             while !subscription.closed
+                && subscription.buffer.len() < FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS
                 && let Some(event) = subscription.stream.try_next_event()
             {
                 subscription.opened = true;
@@ -823,6 +832,9 @@ impl Foreground {
                         reset,
                         settled,
                         tier,
+                        // Not in the foreground ABI yet: a coalesced backlog
+                        // reaches React Native as a plain reset.
+                        coalesced: _,
                     } => ForegroundSubscriptionEvent::Delta {
                         reset,
                         settled,
@@ -1139,6 +1151,8 @@ impl RelayWorker {
             .accept_subscriber(identity.author, claims)
             .map_err(RelayError::Host)?;
         let link = binding.connect_upstream();
+        // The foreground store and this relay run the same build.
+        link.set_features(jazz::wire::current_wire_features());
         self.next_client += 1;
         let id = self.next_client;
         self.clients.insert(
@@ -1196,7 +1210,10 @@ impl RelayWorker {
 
     /// Connect the relay's upstream through a fresh host-carried wire,
     /// replacing any earlier connection.
-    fn begin_socket_upstream(&mut self) -> (u64, NativeRelayWire) {
+    fn begin_socket_upstream(
+        &mut self,
+        features: jazz::wire::WireFeatures,
+    ) -> (u64, NativeRelayWire) {
         self.refusal = None;
         if let Some(mut previous) = self.upstream.take() {
             previous.link.close();
@@ -1204,6 +1221,8 @@ impl RelayWorker {
         }
         self.generation += 1;
         let link = self.persistent.connect_upstream();
+        // What the server negotiated it can take (jazz#5806).
+        link.set_features(features);
         let wire = NativeRelayWire::default();
         self.upstream = Some(UpstreamConnection {
             generation: self.generation,
@@ -1234,7 +1253,10 @@ impl RelayWorker {
     fn host_upstream(&mut self) -> NativeRelayWire {
         match &self.upstream {
             Some(upstream) => upstream.wire.clone(),
-            None => self.begin_socket_upstream().1,
+            // The host negotiates this wire's features itself and does not
+            // report them yet: none, so branch-read serializable commits are
+            // refused here rather than validated as root reads.
+            None => self.begin_socket_upstream(jazz::wire::FEATURE_NONE).1,
         }
     }
 
@@ -1262,6 +1284,12 @@ impl RelayWorker {
     #[cfg(test)]
     pub(crate) fn persistent_pending_uploads(&self) -> usize {
         self.persistent.pending_upload_count()
+    }
+
+    /// The relay store's pending revision (see `UploadStatus`).
+    #[cfg(test)]
+    pub(crate) fn persistent_pending_revision(&self) -> u64 {
+        self.persistent.upload_status().pending_revision
     }
 
     /// The current upstream connection's generation (tests carry the
@@ -1332,6 +1360,7 @@ impl RelayWorker {
         // Transaction ids are (seq, node): a rebuilt store goes on above every
         // seq this node minted, so none is reused.
         let high_water = self.persistent.db.seq_high_water();
+        let revision = self.persistent.upload_status().pending_revision;
         if let Some(mut upstream) = self.upstream.take() {
             upstream.link.close();
             // Not a refusal: the socket worker reconnects to the new store.
@@ -1350,6 +1379,8 @@ impl RelayWorker {
         ))
         .map_err(|error| error.to_string())?;
         db.seed_seq_floor(high_water);
+        // Statuses compare by revision: the new store continues the old's.
+        db.seed_pending_revision(revision);
         if let Some(hint) = self.remote_link_hint {
             db.set_remote_link_hint(hint);
         }
@@ -1365,6 +1396,9 @@ impl RelayWorker {
                 .accept_subscriber(author, claims.clone())
                 .map_err(|error| error.to_string())?;
             client.link = client.binding.connect_upstream();
+            client
+                .link
+                .set_features(jazz::wire::current_wire_features());
             client.dirty.set(true);
         }
         self.persistent_dirty.set(true);
@@ -1680,9 +1714,11 @@ fn foreground_command(
             let subscription = client.subscriptions.get_mut(&subscription).ok_or_else(|| {
                 HostError::Argument(format!("unknown subscription {subscription}"))
             })?;
-            Response::SubscriptionEvents {
-                events: subscription.buffer.drain(..).collect(),
-            }
+            let events = subscription.buffer.drain(..).collect();
+            // Refill from the core: what is left wakes the foreground to
+            // drain again.
+            client.collect_events().map_err(HostError::Argument)?;
+            Response::SubscriptionEvents { events }
         }
         Request::Unsubscribe { subscription } => {
             let closed = client.subscriptions.remove(&subscription).is_some();
@@ -1924,12 +1960,29 @@ fn foreground_command(
             Response::SlowQueryThresholdSet
         }
         Request::PendingUploadCount => Response::PendingUploadCount {
-            count: binding.pending_upload_count() as u64,
+            count: foreground_upload_status(&binding, &client.authority).pending as u64,
         },
         Request::UploadStatus => Response::UploadStatus {
-            status_json: serde_json::to_string(&binding.upload_status())
-                .expect("an upload status serializes"),
+            status_json: serde_json::to_string(&foreground_upload_status(
+                &binding,
+                &client.authority,
+            ))
+            .expect("an upload status serializes"),
         },
+        Request::PendingUploadRows { table } => {
+            let mut rows = binding.pending_upload_rows(&table)?;
+            // Each store resolves the app's name itself: a store opened
+            // along other versions keeps the table under another stored
+            // name. Both open with the app's schema, so the store knows the
+            // table too; if it ever did not, failing is right, as an empty
+            // answer would call its recovered writes sent.
+            rows.extend(client.authority.pending_upload_rows(&table)?);
+            rows.sort_unstable();
+            rows.dedup();
+            Response::PendingUploadRows {
+                rows: rows.into_iter().map(|row| *row.as_bytes()).collect(),
+            }
+        }
         Request::BeginStreamingMutation {
             mutation,
             table,
@@ -2068,6 +2121,49 @@ fn foreground_command(
             return Err("host command reached the relay owner".into());
         }
     })
+}
+
+/// A foreground's uploads as its app sees them: its own commits and the
+/// ones the scope's store holds, which after a restart are the only copy of
+/// an earlier process's writes. A relayed commit uploads under its
+/// session's id, so the two count each write once. Refusals are the
+/// foreground's own: the store reports a relayed commit's refusal to its
+/// session, not as one of its own.
+fn foreground_upload_status(binding: &Binding, authority: &Binding) -> UploadStatus {
+    let own = binding.upload_status();
+    let store = authority.upload_status();
+    let pending = sorted_union_len(
+        &binding.db.pending_upload_ids(),
+        &authority.db.pending_upload_ids(),
+    );
+    UploadStatus {
+        pending,
+        oldest_pending_at: own
+            .oldest_pending_at
+            .into_iter()
+            .chain(store.oldest_pending_at)
+            .min(),
+        pending_revision: own.pending_revision + store.pending_revision,
+        ..own
+    }
+}
+
+/// How many distinct items two sorted, deduplicated slices hold together:
+/// a linear merge, no sort.
+fn sorted_union_len<T: Ord>(a: &[T], b: &[T]) -> usize {
+    let (mut i, mut j, mut len) = (0, 0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+        len += 1;
+    }
+    len + (a.len() - i) + (b.len() - j)
 }
 
 /// Wait for a write this foreground committed to reach `tier`. Unless
@@ -2655,6 +2751,11 @@ async fn connect_and_bridge(
                 "native relay socket connect failed: {error}"
             )));
         }
+        // The server answered before its hello: the shared link decides
+        // what its answer means, as it does for every host.
+        Err(NativeTransportError::Wire(error)) => {
+            return LinkEnd::Lost(LinkFailure::from_wire_error(&error, false));
+        }
         // Retrying the same request with the same credential cannot
         // succeed (#4248).
         Err(NativeTransportError::AuthRejected(error)) => {
@@ -2668,7 +2769,7 @@ async fn connect_and_bridge(
         if cancelled.load(Ordering::Acquire) {
             return LinkEnd::Cancelled;
         }
-        match relay.begin_socket_upstream() {
+        match relay.begin_socket_upstream(connected.transport.features()) {
             Ok(installed) => break installed,
             Err(RelayError::OwnerQueueFull) => {
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -2711,7 +2812,8 @@ async fn bridge_connection(
     path: &mut PathWatch,
 ) -> LinkEnd {
     // Losing an admitted link is an outage, whatever the transport calls it,
-    // unless the server refused the credential.
+    // unless the server refused the credential or ended it with a wire error,
+    // which the link classifies.
     let terminal_end = |terminal: NativeTransportTerminal| {
         LinkEnd::Lost(match terminal {
             NativeTransportTerminal::Failed(NativeTransportError::AuthRejected(error)) => {
@@ -2719,6 +2821,12 @@ async fn bridge_connection(
                     reason: AuthFailureReason::from_message(&error),
                     message: format!("native relay socket terminated: {error}"),
                 }
+            }
+            // Not reached: the native transport reports a server's wire error
+            // only before hello, as a failed connect. Were an admitted link to
+            // end with one, the link would classify it as admitted.
+            NativeTransportTerminal::Failed(NativeTransportError::Wire(error)) => {
+                LinkFailure::from_wire_error(&error, true)
             }
             NativeTransportTerminal::Failed(
                 NativeTransportError::Terminal(error) | NativeTransportError::Retryable(error),
@@ -2884,5 +2992,19 @@ mod relay_config_tests {
         let config = relay_db_config(schema, identity, &Migrations::default());
         assert!(config.chunk_store.is_none());
         assert!(!config.host_chunk_io);
+    }
+}
+
+#[cfg(test)]
+mod sorted_union_len_tests {
+    use super::sorted_union_len;
+
+    #[test]
+    fn counts_each_shared_item_once() {
+        assert_eq!(sorted_union_len::<u8>(&[], &[]), 0);
+        assert_eq!(sorted_union_len(&[1, 2], &[]), 2);
+        assert_eq!(sorted_union_len(&[], &[1, 2]), 2);
+        assert_eq!(sorted_union_len(&[1, 3, 5], &[2, 3, 6, 7]), 6);
+        assert_eq!(sorted_union_len(&[1, 2, 3], &[1, 2, 3]), 3);
     }
 }

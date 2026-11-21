@@ -1,5 +1,4 @@
 import { expect, it, vi } from "vitest";
-import { schema } from "../../src/index.js";
 import {
   NativeForegroundDb,
   type NativeForegroundModule,
@@ -10,14 +9,9 @@ import {
 } from "../../src/runtime/native-runtime/native-runtime-adapter.js";
 
 import { withNativeRelayFixture } from "./fixture.js";
-import type { TestJazz } from "../../src/testing/index.js";
+import { testApp, testPermissions, type TestJazz } from "../../src/testing/index.js";
 
-const app = schema.defineApp(
-  {
-    documents: schema.table({ title: schema.string() }, {}),
-  },
-  { migrations: "none" },
-);
+const app = testApp({ tables: { documents: { columns: { title: "string" } } } });
 
 // writeState is the existing low-level NativeDb contract; public WriteHandle
 // exposes waits, so this receipt intentionally uses the real binding adapter.
@@ -57,17 +51,16 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
   });
   let backend: TestJazz | undefined;
   try {
-    const permissions = schema.definePermissions(app, ({ policy }) => [
-      policy.documents.allowRead.always(),
-    ]);
+    const permissionsFile = { format: 1, tables: { documents: { read: "true" } } };
+    const permissions = testPermissions(app, permissionsFile);
     await deploy({
       appId: server.appId,
       serverUrl: server.url,
       adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
+      app,
+      permissions: permissionsFile,
     });
-    backend = await startTestJazz({ core: server, app, permissions });
+    backend = await startTestJazz({ core: server, app, permissions: permissionsFile });
     await withNativeRelayFixture(
       app,
       permissions,
@@ -154,7 +147,7 @@ it.each(["finish", "abort"] as const)(
     });
     let backend: TestJazz | undefined;
     try {
-      backend = await startTestJazz({ core: server, app: app, permissions: {} });
+      backend = await startTestJazz({ core: server, app, permissions: { format: 1, tables: {} } });
       await withNativeRelayFixture(
         app,
         {},

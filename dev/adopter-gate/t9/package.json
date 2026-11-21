@@ -1,0 +1,12 @@
+{
+  "name": "t9-language-clients",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@hono/node-server": "^1",
+    "hono": "^4",
+    "jose": "^5",
+    "tsx": "^4",
+    "ws": "^8"
+  }
+}

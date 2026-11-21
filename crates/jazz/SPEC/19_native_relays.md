@@ -90,7 +90,9 @@ denials and unsupported server capabilities, remain terminal.
 
 A disallowed remote plaintext endpoint returns
 `JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT`. React Native maps that status to
-a fixed diagnostic that contains no endpoint URL, bearer, or claims.
+a fixed diagnostic with the stable `error.code` `remote_plaintext_endpoint`: it
+names the hosts plaintext may reach and the development paths for a physical
+device, and contains no endpoint URL, bearer, or claims.
 An I/O wrapper alone is insufficient: rustls certificate and other TLS protocol failures
 arrive as `InvalidData` I/O errors and remain terminal, as do unknown I/O kinds.
 A structured pre-Hello `NotReady`/`Later` response is likewise retryable,
@@ -562,7 +564,8 @@ it is never length-wrapped as a byte vector at the native read boundary.
 Postcard enum ordinals follow the declared Rust order: relation
 expressions are `TableScan`, `Filter`, `Union`, `Join`, `Project`, `Gather`,
 `Distinct`, `OrderBy`, `Offset`, `Limit`; predicates are `Cmp`, `IsNull`,
-`IsNotNull`, `In`, `Contains`, `EnumMatch`, `And`, `Or`, `Not`, `True`, `False`;
+`IsNotNull`, `In`, `Contains`, a reserved ordinal 5 (payload-enum matches
+until 2.0.0-alpha.65; decoding it is refused), `And`, `Or`, `Not`, `True`, `False`;
 and value references are `Literal`, `Param`, `SessionRef`, `OuterColumn`,
 `FrontierColumn`, `RowId`. Struct fields use declaration order. Literal ordinals
 are `Null`, `Bool`, `I64`, `U64`, `F64(bits)`, `String`, `Array`, and `Object`.

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { beginDbTransactionAfter, Db, type DbConfig, runInTransaction, Transaction } from "./db.js";
 import { RuntimeSource } from "./runtime-source.js";
 import { ownerPreparation } from "./write-preparation.js";
@@ -308,10 +308,7 @@ describe("JazzClient write attribution", () => {
           return "prepared-transaction" as TxId;
         },
       });
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const tx = new Transaction(kind, () => client, null, client);
       client.prepareTransaction(tx.openTransactionId(), async () => {
         await ready;
@@ -371,10 +368,7 @@ describe("JazzClient write attribution", () => {
           await id;
         },
       });
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const tx = new Transaction(kind, () => client, null, client);
       const first = tx.all(app.todos, { tier: "local-first" });
       const second = tx.all(app.todos, { tier: "local-first" });
@@ -405,10 +399,7 @@ describe("JazzClient write attribution", () => {
         complete = resolve;
       });
       const { client } = makeClient({ commitTransaction: () => pending });
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const tx = new Transaction(kind, () => client, null, client);
       const committed = tx.commit();
       try {
@@ -539,7 +530,7 @@ describe("JazzClient write attribution", () => {
     const { client, insertCalls } = makeClient();
     const session = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", role: "owner" },
-      "local-first",
+      "device-account",
     );
     expect(session).toMatchObject({ issuer: LOCAL_FIRST_JWT_ISSUER, user_id: "alice" });
 
@@ -555,7 +546,7 @@ describe("JazzClient write attribution", () => {
       issuer: LOCAL_FIRST_JWT_ISSUER,
       user_id: "alice",
       claims: { role: "owner" },
-      authMode: "local-first",
+      authMode: "device-account",
       [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: expect.any(String),
     });
     expect(serialized).not.toHaveProperty("author");

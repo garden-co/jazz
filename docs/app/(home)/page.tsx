@@ -59,25 +59,45 @@ export const metadata: Metadata = {
 };
 
 const serverCode = `import { createJazz, vercel } from "jazz-tools/backend";
-import { app, permissions } from "./schema";
+// Generated from schema.ts by \`jazz-tools generate\`
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
   permissions,
-  // Also: cloudflare() (coming soon), and plain sqlite()
-  // for your own servers. One core per Vercel environment:
-  store: vercel({ namespace: ({ environment }) => environment }),
-  // Better Auth, WorkOS, many other providers or any custom auth:
-  // pass on the user ID and permission-relevant claims, or null
-  authenticate: (request) => getSignedInUser(request),
+
+  // Where the data lives: one core per Vercel environment,
+  // so production, each preview and development are apart.
+  // On your own servers: sqlite({ path: "./data" }).
+  // On Cloudflare: durableObjects({ url, secret }).
+  store: vercel({
+    namespace: ({ environment }) => environment,
+    // Where the cores run and keep their data: your
+    // functions' region, fixed once a core exists.
+    region: "iad1",
+  }),
+
+  // Who is signed in, from Better Auth, WorkOS, any other
+  // provider or your own auth. Return the user's ID and the
+  // claims your permissions check, or null if signed out.
+  authenticate: async (request) => {
+    const user = await getSignedInUser(request);
+    if (!user) return null;
+    return {
+      userId: user.id,
+      expiresAt: user.sessionExpiresAt,
+      claims: { role: user.role },
+    };
+  },
 });`;
 
 const routeCode = `import { jazz } from "@/jazz.server";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 
 export async function GET(request: Request) {
   // Runs as the signed-in user: only their todos
-  // according to permissions defined in schema.ts
+  // according to the permissions in schema.ts
   const db = await jazz.forReqUser(request);
   const todos = await db.all(app.todos.where({ done: false }));
   return Response.json(todos);
@@ -90,35 +110,29 @@ export const { GET, POST, DELETE } = jazz.next();`;
 
 const schemaCode = `import { schema as s } from "jazz-tools";
 
-const schema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      owner_id: s.uuid(),
-    },
-    {},
-  ),
-};
+export const schema = s.defineSchema({
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
+});
 
-export const app = s.defineApp(schema);
+const { definePermissions, session } = schema;
 
-export const permissions = s.definePermissions(
-  app,
-  ({ policy, session }) => {
-    const mine = { owner_id: session.user };
+// Each user sees and edits only the todos they created
+const createdByMe = { $createdBy: session.user };
 
-    policy.todos.allowRead.where(mine);
-    policy.todos.allowInsert.where(mine);
-    policy.todos.allowUpdate
-      .whereOld(mine)
-      .whereNew(mine);
-    policy.todos.allowDelete.where(mine);
+export const permissions = definePermissions({
+  todos: {
+    read: createdByMe,
+    insert: createdByMe,
+    update: createdByMe,
+    delete: createdByMe,
   },
-);`;
+});`;
 
 const componentCode = `import { useAll } from "jazz-tools/react";
-import { app } from "./schema";
+import { app } from "./jazz.generated";
 
 export function OpenTodos() {
   // As an alternative to traditional querying via api/todos you can query
@@ -165,7 +179,7 @@ const features: {
       <>
         <p>
           Declarative permissions are policies over your data and the user your backend signed in,
-          defined in code and testable like the rest of your app.
+          kept in a file in your repo and testable like the rest of your app.
         </p>
         <p>
           Jazz optimizes each query together with the policies that apply to it, so the same rules
@@ -443,13 +457,13 @@ export default function HomePage() {
         <div className="home-container">
           <SectionHeader id="code" step={1} title="Install in your backend and define a schema" />
           <div className="home-code-pair mt-6">
+            <CodeWindow files={[{ name: "jazz.server.ts", language: "ts", code: serverCode }]} />
             <div className="home-code-stack">
-              <CodeWindow files={[{ name: "jazz.server.ts", language: "ts", code: serverCode }]} />
+              <CodeWindow files={[{ name: "schema.ts", language: "ts", code: schemaCode }]} />
               <CodeWindow
                 files={[{ name: "jazz/[...path]/route.ts", language: "ts", code: mountCode }]}
               />
             </div>
-            <CodeWindow files={[{ name: "schema.ts", language: "ts", code: schemaCode }]} />
           </div>
         </div>
       </section>

@@ -30,13 +30,23 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
 
+// What a backend's `createJazz` needs to run on this build; never in the
+// Durable Object core's build, which is sized for the Workers Free plan.
+#[cfg(all(feature = "backend", feature = "durable-object"))]
+compile_error!("the `backend` and `durable-object` features are separate builds; enable one");
+#[cfg(feature = "backend")]
+mod backend;
 #[cfg(target_arch = "wasm32")]
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
+#[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+mod durable_object;
 #[cfg(target_arch = "wasm32")]
 mod idb_vfs;
 mod identity;
+#[cfg(all(feature = "durable-object", any(target_arch = "wasm32", test)))]
+mod socket_attachment;
 mod text;
 
 #[cfg(feature = "bench-probes")]
@@ -288,7 +298,7 @@ fn decode_seed(seed_b64: &str) -> Result<[u8; 32], JsValue> {
         .map_err(|_| JsValue::from_str("seed must be exactly 32 bytes"))
 }
 
-/// Mint a local-first identity JWT from a base64url-encoded 32-byte seed.
+/// Mint a device-account identity JWT from a base64url-encoded 32-byte seed.
 #[wasm_bindgen(js_name = mintLocalFirstToken)]
 pub fn mint_local_first_token(
     seed_b64: String,
@@ -299,7 +309,7 @@ pub fn mint_local_first_token(
     let seed = decode_seed(&seed_b64)?;
     identity::mint_jazz_self_signed_token_at(
         &seed,
-        identity::LOCAL_FIRST_ISSUER,
+        identity::DEVICE_ACCOUNT_ISSUER,
         &audience,
         ttl_seconds as u64,
         now_seconds,
@@ -307,7 +317,7 @@ pub fn mint_local_first_token(
     .map_err(|e| JsValue::from_str(&e))
 }
 
-/// Derive a stable local-first user id from a base64url-encoded 32-byte seed.
+/// Derive a stable device-account user id from a base64url-encoded 32-byte seed.
 #[wasm_bindgen(js_name = deriveUserId)]
 pub fn derive_user_id(seed_b64: String) -> Result<String, JsValue> {
     let seed = decode_seed(&seed_b64)?;
@@ -410,6 +420,10 @@ fn not_supported(what: &str) -> JsValue {
 #[derive(Default)]
 struct Host {
     tick_scheduler: RefCell<Option<js_sys::Function>>,
+    /// A thin session's transactions, when this database serves them as
+    /// the backend's client (`serveThinTransaction`).
+    #[cfg(feature = "backend")]
+    thin: Rc<RefCell<Option<backend::ThinState>>>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<js_sys::Function>>,
     #[cfg(target_arch = "wasm32")]
@@ -1254,6 +1268,35 @@ impl WasmDb {
         }
     }
 
+    /// Open the backend store a Durable Object owns, on its SQL
+    /// (`ctx.storage`): chunks and host tables live in that store, so it
+    /// survives the object's restarts. A core there accepts finished
+    /// transactions only (see `jazz::storage`).
+    #[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+    #[wasm_bindgen(js_name = openDurableObject)]
+    pub fn open_durable_object(
+        storage: durable_object::ObjectStorage,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+    ) -> Result<WasmDb, JsValue> {
+        initialize_wasm_tracing();
+        let (schema, mut config) =
+            binding_host::decode_open(&schema, &config).map_err(host_error)?;
+        let (identity, trusted) =
+            binding_host::open_identity(&mut config, OpenAs::Backend).map_err(host_error)?;
+        let db_config = jazz::tools::deployment::published::with_client_migrations(
+            binding_host::db_config(schema, &config, identity),
+            config.migrations.as_deref(),
+        )
+        .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        let db = block_on(jazz::db::Db::open_storage(
+            db_config,
+            durable_object::durable_object_storage(storage),
+        ))
+        .map_err(to_js_error)?;
+        Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
+    }
+
     fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
@@ -1631,11 +1674,14 @@ impl WasmDb {
     /// Resolve once every local write so far reached `tier`. Settling
     /// `cancelled` stops a wait that is still pending and rejects it, so a
     /// caller that gives up does not leave the core waiter parked.
+    /// `for_sync`: TS `waitForSync`, which also fails with a rejection of
+    /// this database's own that settled before and no wait reported.
     #[wasm_bindgen(js_name = waitForPendingWrites)]
     pub fn wait_for_pending_writes(
         &self,
         tier: String,
         cancelled: Option<js_sys::Promise>,
+        for_sync: Option<bool>,
     ) -> js_sys::Promise {
         let inner = match self.open_inner() {
             Ok(inner) => inner,
@@ -1646,6 +1692,12 @@ impl WasmDb {
                 match durability_tier_from_str(&tier)? {
                     DurabilityTier::None => {}
                     DurabilityTier::Local => inner.flush().await?,
+                    DurabilityTier::Global if for_sync.unwrap_or(false) => inner
+                        .binding
+                        .wait_for_sync_global(None)
+                        .map_err(host_error)?
+                        .await
+                        .map_err(host_error)?,
                     DurabilityTier::Global => inner
                         .binding
                         .wait_for_pending_writes_global()
@@ -1772,6 +1824,19 @@ impl WasmDb {
             .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
+    /// Ids of `table`'s rows with a write the server has neither accepted
+    /// nor refused yet, sorted.
+    #[wasm_bindgen(js_name = pendingUploadRows)]
+    pub fn pending_upload_rows(&self, table: String) -> Result<Vec<String>, JsValue> {
+        Ok(self
+            .binding()?
+            .pending_upload_rows(&table)
+            .map_err(host_error)?
+            .into_iter()
+            .map(|row| row.0.to_string())
+            .collect())
+    }
+
     /// The optimistic in-memory side of a browser client/worker pair: its
     /// subscriptions open with the worker's answer.
     #[wasm_bindgen(js_name = setNonDurableClient)]
@@ -1811,6 +1876,16 @@ impl WasmDb {
     pub fn set_slow_query_threshold_ms(&self, ms: f64) -> Result<(), JsValue> {
         self.binding()?
             .set_slow_query_threshold_ms(ms)
+            .map_err(host_error)
+    }
+
+    /// Coalesce a subscription's undelivered deltas past `rows` changed
+    /// rows (default 10000, at least 1) into one reset of its current
+    /// result.
+    #[wasm_bindgen(js_name = setSubscriptionBacklogRows)]
+    pub fn set_subscription_backlog_rows(&self, rows: f64) -> Result<(), JsValue> {
+        self.binding()?
+            .set_subscription_backlog_rows(rows)
             .map_err(host_error)
     }
 
@@ -1867,7 +1942,13 @@ impl WasmDb {
                 "server negotiated wire features {features:#x}, but this WASM binding was not compiled with {unsupported:#x}"
             )));
         }
-        self.connect_upstream()
+        // The link sends what the server negotiated it can take (a
+        // serializable commit that read through a branch view, say).
+        let link = self.binding()?.connect_upstream();
+        link.set_features(u64::from(features));
+        Ok(js_sys::Promise::resolve(&JsValue::from(
+            WasmTransport::new(link),
+        )))
     }
 
     /// Serve a subscriber (a tab's in-memory database) as `identity`.
@@ -2122,6 +2203,7 @@ fn event_chunk_to_js(chunk: EventChunk) -> Result<JsValue, JsValue> {
         EventChunk::Delta {
             delta,
             reset,
+            coalesced,
             settled,
             tier,
         } => {
@@ -2133,6 +2215,7 @@ fn event_chunk_to_js(chunk: EventChunk) -> Result<JsValue, JsValue> {
             )?;
             set_prop(&object, "terminalOperations", js_sys::Array::new().into())?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
+            set_prop(&object, "coalesced", JsValue::from_bool(coalesced))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
             set_prop(&object, "tier", JsValue::from_str(&tier))?;
         }

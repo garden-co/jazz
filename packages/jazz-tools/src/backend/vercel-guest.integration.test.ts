@@ -8,11 +8,17 @@ import {
 import { connect, type AddressInfo } from "node:net";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
-import { schema as s } from "../index.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { generateSecret, signToken } from "../local-first-auth/index.js";
-import { acceptDeviceAccounts, createJazz, createJazzClient, vercel, type Jazz } from "./index.js";
+import {
+  acceptDeviceAccounts,
+  createJazz,
+  createJazzClient,
+  remote,
+  vercel,
+  type Jazz,
+} from "./index.js";
 import type { SandboxHandle, SandboxSdk } from "./vercel-store.js";
 
 // Adopter finding E4 (alpha.61): on Vercel without `ws`, local-first guests
@@ -28,13 +34,16 @@ vi.mock("ws", () => {
   });
 });
 
-const app = await defineShippedApp({ todos: s.table({ title: s.string(), owner: s.uuid() }, {}) });
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
+const app = testApp({
+  tables: { todos: { columns: { title: "string", owner: "uuid" } } },
 });
+// Updates and deletes are denied.
+const permissionsFile = {
+  format: 1,
+  tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+};
+/** The engine's permissions, for the clients. */
+const permissions = testPermissions(app, permissionsFile);
 
 /** The app's auth: the user named in a header, else a local-first guest. */
 function authenticate(request: Request) {
@@ -96,20 +105,26 @@ function oidcToken(issuer: string): string {
 }
 
 /**
- * A core an older jazz-tools started with local-first auth off, in front of
- * the core at `target` (since #5248 no core can be started that way, but an
- * older remote one, or a Jazz Cloud app with it off, still answers like
- * this): a guest's session is refused in the core's first message, and a
- * backend founding a guest's account gets 403 `local_first_auth_disabled`.
- * Everything else reaches `target`.
+ * An older core, in front of the core at `target`. `guests-off`: one an
+ * older jazz-tools started with local-first auth off (since #5248 no core
+ * can be started that way, but an older remote one, or a Jazz Cloud app with
+ * it off, still answers like this): a guest's session is refused in the
+ * core's first message, and a backend founding a guest's account gets 403
+ * `local_first_auth_disabled`. `no-signing-key`: one from before jazz#5553,
+ * without the backend signing key route. Everything else reaches `target`.
  */
-async function guestsOffCore(target: string): Promise<string> {
+async function olderCore(target: string, older: OlderCore): Promise<string> {
   const upstream = new URL(target);
   // Upgraded sockets leave the server's books: closed by hand.
   const piped = new Set<{ destroy(): void }>();
   const server = createServer((req, res) => {
     void (async () => {
-      if (req.url?.endsWith("/admin/accounts/found-local-first")) {
+      if (older === "no-signing-key" && req.url?.endsWith("/admin/backend-signing-key")) {
+        req.resume();
+        res.writeHead(404).end();
+        return;
+      }
+      if (older === "guests-off" && req.url?.endsWith("/admin/accounts/found-local-first")) {
         req.resume();
         res.writeHead(403, { "content-type": "text/plain" }).end("local_first_auth_disabled");
         return;
@@ -139,7 +154,7 @@ async function guestsOffCore(target: string): Promise<string> {
   server.on("upgrade", (req: IncomingMessage, socket, head: Buffer) => {
     socket.on("error", () => socket.destroy());
     piped.add(socket);
-    if (req.headers["x-jazz-backend-access"] === undefined) {
+    if (older === "guests-off" && req.headers["x-jazz-backend-access"] === undefined) {
       // A guest's own session (it rides on session access): accepted, then
       // refused in the core's first message.
       const accept = createHash("sha1")
@@ -191,18 +206,21 @@ async function guestsOffCore(target: string): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
+type OlderCore = "guests-off" | "no-signing-key";
+
 /**
  * One Sandbox, shared by every function instance. Its start runs the core
- * with the options the start script passes `serveCore`; with `guestsOff`,
- * behind a stand-in for an older core that refuses guests.
+ * with the options the start script passes `serveCore`; with `older`,
+ * behind a stand-in for an older core (see {@link olderCore}).
  */
-function fakeSandbox(appId: string, issuer: string, guestsOff = false) {
+function fakeSandbox(appId: string, issuer: string, older?: OlderCore) {
   const files = new Map<string, Buffer>([["/data/app-id", Buffer.from(`${appId}\n`)]]);
   const state = { exists: false, drive: false, running: undefined as string | undefined };
   let core: Promise<{ url: string }> | undefined;
   let coreUrl = "http://127.0.0.1:9";
   const handle = (): SandboxHandle => ({
     status: "running",
+    region: "iad1",
     domain: () => coreUrl,
     currentSession: () => ({
       startedAt: new Date(),
@@ -222,7 +240,7 @@ function fakeSandbox(appId: string, issuer: string, guestsOff = false) {
         trustedWorkload: options.trustedWorkload,
       }).then(async (started) => {
         cleanups.push(() => started.stop());
-        return { url: guestsOff ? await guestsOffCore(started.url) : started.url };
+        return { url: older ? await olderCore(started.url, older) : started.url };
       });
       coreUrl = (await core).url;
       state.running = version;
@@ -253,9 +271,13 @@ function fakeSandbox(appId: string, issuer: string, guestsOff = false) {
       },
     },
     Drive: {
+      async get() {
+        if (!state.drive) throw new Error("404 drive not found");
+        return { region: "iad1" };
+      },
       async getOrCreate() {
         state.drive = true;
-        return {};
+        return { region: "iad1" };
       },
     },
   };
@@ -287,20 +309,21 @@ function watchCoreSockets() {
 
 /** Two function instances of one deployment: two createJazz, one Sandbox core. */
 async function deployment(
-  guestsOff = false,
+  older?: OlderCore,
   auth: (request: Request) => ReturnType<typeof authenticate> | null = authenticate,
 ) {
   const coreSockets = watchCoreSockets();
   const appId = randomUUID();
   const issuer = await startIssuer();
-  const { sdk, coreUrl } = fakeSandbox(appId, issuer, guestsOff);
+  const { sdk, coreUrl } = fakeSandbox(appId, issuer, older);
   const instance = async () => {
     const jazz = await createJazz({
       app,
-      permissions,
+      permissions: permissionsFile,
       authenticate: auth,
       store: vercel({
         namespace: ({ environment }) => environment,
+        region: "iad1",
         sdk,
         backendCredential: () => oidcToken(issuer),
       }),
@@ -315,10 +338,13 @@ async function deployment(
 
 /**
  * Vercel's routing, as two instances see it: requests go to either
- * instance in turn, and an HTTP stream's sends reach the instance that
- * holds its open response.
+ * instance in turn (or the one `pin` names for a path), and an HTTP
+ * stream's sends reach the instance that holds its open response.
  */
-async function route(instances: readonly Jazz[]) {
+async function route(
+  instances: readonly Jazz[],
+  pin: (path: string) => number | undefined = () => undefined,
+) {
   const handlers = instances.map(
     (jazz) => jazz.next() as Record<string, (r: Request) => Promise<Response>>,
   );
@@ -332,7 +358,7 @@ async function route(instances: readonly Jazz[]) {
       const instance =
         send !== undefined
           ? (streamOwners.get(decodeURIComponent(send)) ?? 0)
-          : turn++ % instances.length;
+          : (pin(path) ?? turn++ % instances.length);
       const headers = new Headers();
       for (const [name, value] of Object.entries(req.headers)) {
         if (typeof value === "string") headers.set(name, value);
@@ -462,7 +488,7 @@ it("syncs a local-first guest over the HTTP stream through two instances, and ke
 it("says a core that admits no guests refuses them, not that the user has an account", async () => {
   const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
   // A core an older jazz-tools started: local-first auth off.
-  const { appId, instances } = await deployment(true);
+  const { appId, instances } = await deployment("guests-off");
   const { origin } = await route(instances);
 
   const session = await guestOf(appId, origin);
@@ -486,7 +512,7 @@ it("says a core that admits no guests refuses them, not that the user has an acc
 
 it("logs it on the server when the core refuses a guest's sync session", async () => {
   const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
-  const { appId, instances } = await deployment(true);
+  const { appId, instances } = await deployment("guests-off");
   const { origin } = await route(instances);
 
   const session = await guestOf(appId, origin);
@@ -546,9 +572,135 @@ it("never opens a guest's session on the core when the app doesn't accept device
   await vi.waitFor(
     () =>
       expect(
-        warn.mock.calls.filter((call) => /refused a local-first guest/.test(call.join(" "))),
+        warn.mock.calls.filter((call) => /refused a device account/.test(call.join(" "))),
       ).toHaveLength(1),
     { timeout: 20_000 },
   );
   expect(coreSockets.filter(({ access }) => access === "session")).toEqual([]);
 }, 60_000);
+
+/**
+ * Two backend instances that share no state: `remote()` stores (unlike
+ * `vercel()`, which one process opens once per core) each open their own
+ * Jazz, as two function instances do. Both reach one core that trusts the
+ * workload, with its OIDC token and no app secret, as `vercel()` does.
+ */
+async function separateInstances(older?: OlderCore) {
+  const appId = randomUUID();
+  const issuer = await startIssuer();
+  const started = await startLocalJazzServer({
+    appId,
+    inMemory: true,
+    trustedWorkload: { issuer, audience: AUDIENCE, subject: SUBJECT },
+  });
+  cleanups.push(() => started.stop());
+  const url = older ? await olderCore(started.url, older) : started.url;
+  const instance = async () => {
+    const jazz = await createJazz({
+      app,
+      permissions: permissionsFile,
+      authenticate,
+      store: remote({ url, appId, backendCredential: () => oidcToken(issuer) }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    return jazz;
+  };
+  const a = await instance();
+  const b = await instance();
+  expect(a).not.toBe(b);
+  return { appId, instances: [a, b] as const };
+}
+
+/** Where a guest's link goes: its challenge to instance `challenge`, the link to `link`. */
+const splitLink = (challenge: number, link: number) => (path: string) =>
+  path.endsWith("/accounts/backend-link/challenge")
+    ? challenge
+    : path.endsWith("/accounts/backend-link")
+      ? link
+      : undefined;
+
+/** The renewal ticket `origin`'s backend issues `userId` for one session. */
+async function renewalTicket(origin: string, appId: string, userId: string) {
+  const response = await fetch(`${origin}/jazz/apps/${appId}/accounts/backend-user`, {
+    method: "POST",
+    headers: { "x-test-user": userId, "X-Jazz-Renew": "session-1" },
+  });
+  const { renewal } = (await response.json()) as { renewal?: string };
+  expect(renewal).toBeTypeOf("string");
+  return renewal!;
+}
+
+/** A ticket's claims digest: keyed like its MAC, and independent of the clock. */
+const claimsDigest = (ticket: string) =>
+  JSON.parse(Buffer.from(ticket.split(".")[0]!, "base64url").toString()).cl as string;
+
+// jazz#5553: a backend reached with a backend credential alone (vercel(),
+// remote() with backendCredential) holds no app secret, so each instance
+// signed link challenges with a key of its own, and a sign-up whose
+// challenge and link reached two instances failed with
+// invalid_link_challenge. The core now hands its trusted backend one key
+// that every instance derives its signing keys from.
+it("links a guest whose challenge came from one instance and whose link went to another", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const warn = vi.spyOn(console, "warn");
+  const { appId, instances } = await separateInstances();
+  const { origin, log } = await route(instances, splitLink(0, 1));
+
+  const session = await guestOf(appId, origin);
+  const account = session.getSnapshot().client!.session!.user!;
+  signInAs(origin, "alice");
+  await within(session.linkDeviceAccount(), 20_000, "the link");
+  expect(session.getSnapshot().client!.session!.user!).toBe(account);
+  expect(log.filter(({ path }) => /backend-link/.test(path))).toEqual([
+    expect.objectContaining({
+      path: expect.stringMatching(/challenge$/),
+      instance: 0,
+      status: 200,
+    }),
+    expect.objectContaining({
+      path: expect.stringMatching(/backend-link$/),
+      instance: 1,
+      status: 200,
+    }),
+  ]);
+
+  // Renewal tickets are signed with a shared key too: both instances key
+  // the same claims digest.
+  const tickets = [];
+  for (const instance of instances) {
+    const { origin: only } = await route([instance]);
+    tickets.push(await renewalTicket(only, appId, "alice"));
+  }
+  expect(claimsDigest(tickets[0]!)).toBe(claimsDigest(tickets[1]!));
+  expect(warn.mock.calls.filter((call) => /5553/.test(call.join(" ")))).toEqual([]);
+}, 90_000);
+
+it("keeps each instance's own keys behind a core from before the signing key, and says so once", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const { appId, instances } = await separateInstances("no-signing-key");
+  let split = true;
+  const { origin } = await route(instances, (path) => splitLink(0, split ? 1 : 0)(path));
+
+  const session = await guestOf(appId, origin);
+  const account = session.getSnapshot().client!.session!.user!;
+  signInAs(origin, "alice");
+  // Across two instances, the link fails as before the fix...
+  await expect(within(session.linkDeviceAccount(), 20_000, "the link")).rejects.toThrow(
+    /invalid_link_challenge/,
+  );
+  // ...and on one instance it works.
+  split = false;
+  await within(session.linkDeviceAccount(), 20_000, "the link");
+  expect(session.getSnapshot().client!.session!.user!).toBe(account);
+  // Each instance said it once, whatever it signed since.
+  const tickets = [];
+  for (const instance of instances) {
+    const { origin: only } = await route([instance]);
+    tickets.push(await renewalTicket(only, appId, "alice"));
+  }
+  expect(claimsDigest(tickets[0]!)).not.toBe(claimsDigest(tickets[1]!));
+  const said = warn.mock.calls.filter((call) => /jazz#5553/.test(call.join(" ")));
+  expect(said).toHaveLength(2);
+  expect(said[0]!.join(" ")).toMatch(/Upgrade the core/);
+}, 90_000);

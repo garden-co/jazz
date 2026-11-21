@@ -14,17 +14,16 @@ import {
   acquireBrowserTestAccount,
   createBrowserTestDb,
 } from "../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
-import { deployApp } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   getJazzServerInfo,
   jazzAppUserUrl,
   loginAtJazzAppUser,
   startJazzApp,
   type JazzServerInfo,
+  deploy as deployApp,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
-import { app } from "../../schema.js";
-import permissions from "../../permissions.js";
-import { schema as betterAuthSchema } from "../../schema-better-auth/schema.js";
+import { app } from "../../jazz.generated.js";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
 
 /** A test user's client: its Db, and how to close it. */
 type JazzClient = { db: Db; shutdown(): Promise<void> };
@@ -47,7 +46,7 @@ afterEach(async () => {
   while (clients.length > 0) await clients.pop()!.shutdown();
 });
 
-/** A client signed in with `role`, or a local-first guest without one. */
+/** A client signed in with `role`, or a guest on a device account without one. */
 async function makeClient(role?: Role): Promise<JazzClient> {
   let serverUrl = server.serverUrl;
   let account;
@@ -103,24 +102,28 @@ async function remove(client: JazzClient, messageId: string): Promise<void> {
 }
 
 describe("auth-betterauth-chat permissions", () => {
-  it("composes deny-all CRUD policies for every generated Better Auth table", () => {
-    for (const tableName of Object.keys(betterAuthSchema)) {
-      const tablePermissions = permissions[tableName]!;
-
-      expect(tablePermissions.select?.using).toEqual({ type: "False" });
-      expect(tablePermissions.insert?.with_check).toEqual({ type: "False" });
-      expect(tablePermissions.update?.using).toEqual({ type: "False" });
-      expect(tablePermissions.update?.with_check).toEqual({ type: "False" });
-      expect(tablePermissions.delete?.using).toEqual({ type: "False" });
+  it("denies every operation on every generated Better Auth table", () => {
+    const betterAuthTables = Object.keys(app.wasmSchema).filter((name) =>
+      name.startsWith("better_auth_"),
+    );
+    expect(betterAuthTables.length).toBeGreaterThan(0);
+    const tables = permissions.tables as Record<string, unknown>;
+    for (const tableName of betterAuthTables) {
+      expect(tables[tableName], tableName).toEqual({
+        read: "false",
+        insert: "false",
+        update: "false",
+        delete: "false",
+      });
     }
   });
 
   it("uses one update predicate for both the old and new message", () => {
-    // Update `using` evaluates the old row and `with_check` evaluates the new
-    // one. They must use the same room/role predicate; independently OR-ing
-    // per-room rules lets a General-message creator switch its chat_id to
-    // Announcements.
-    expect(permissions.messages!.update?.using).toEqual(permissions.messages!.update?.with_check);
+    // An update policy is checked against the old row and the new one. A
+    // single expression applies to both; separate per-room rules for each
+    // would let a General-message creator switch its chat_id to Announcements.
+    expect(permissions.tables.messages.update).not.toHaveProperty("old");
+    expect(permissions.tables.messages.update).not.toHaveProperty("new");
   });
 
   it("allows only admins to mutate Announcements", async () => {

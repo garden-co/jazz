@@ -120,6 +120,57 @@ describe("SharedWorker bridge with IndexedDB", () => {
     unsub();
   });
 
+  it("posts a local write's frame to the worker before a render its listeners queued", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("frame-before-render") },
+      }),
+    );
+    const log: string[] = [];
+    let rendersQueued = 0;
+    const unsub = trackSubscription(
+      db.subscribe(allTodos, (rows) => {
+        if (!rows.some((row) => row.title === "Sent before render")) return;
+        rendersQueued += 1;
+        // Like React's useSyncExternalStore: the listener queues a long
+        // synchronous render as a microtask.
+        queueMicrotask(() => {
+          log.push("render start");
+          const until = performance.now() + 200;
+          while (performance.now() < until) {
+            // a long synchronous render
+          }
+          log.push("render end");
+        });
+      }),
+    );
+    await db.insert(todos, { title: "warmup", done: false }).wait({ tier: "local" });
+    await sleep(50);
+
+    const postMessage = MessagePort.prototype.postMessage;
+    MessagePort.prototype.postMessage = function (
+      this: MessagePort,
+      ...args: Parameters<MessagePort["postMessage"]>
+    ) {
+      if ((args[0] as { type?: unknown } | null)?.type === "frames") log.push("frames");
+      return postMessage.apply(this, args);
+    } as MessagePort["postMessage"];
+    try {
+      db.insert(todos, { title: "Sent before render", done: false });
+      await waitForCondition(
+        async () => log.includes("render end") && log.includes("frames"),
+        5000,
+        "the write is rendered and posted to the worker",
+      );
+    } finally {
+      MessagePort.prototype.postMessage = postMessage;
+    }
+    expect(rendersQueued).toBeGreaterThan(0);
+    expect(log.indexOf("frames")).toBeLessThan(log.indexOf("render start"));
+    unsub();
+  });
+
   it("subscriptions fire when using queries with filters", async () => {
     const db = track(
       await createDb({

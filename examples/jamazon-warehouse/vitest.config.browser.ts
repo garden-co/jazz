@@ -10,7 +10,9 @@ import type {
 } from "../../packages/jazz-tools/tests/browser/browser-commands.js";
 import {
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   jazzAppFront,
+  jazzTestDeployment,
   jazzAppRequest,
   jazzAppUser,
   stopJazzServerByUrl,
@@ -38,16 +40,17 @@ const jazzBrowserCommands = {
   jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
   jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
   jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+  jazzTestDeployment: async (_context, bound, permissions) =>
+    jazzTestDeployment(bound, permissions),
   jazzAppUser: async (_context, frontUrl, userId, claims) => jazzAppUser(frontUrl, userId, claims),
   jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),
 } satisfies JazzBrowserCommandHandlers;
 
 export default defineConfig({
-  plugins: [wasm(), topLevelAwait(), react()],
+  plugins: [jazzBrowserServerLifecycle, wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
     include: ["tests/browser/**/*.test.ts"],
-    globalSetup: ["../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
       provider: playwright(),

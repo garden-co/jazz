@@ -1,9 +1,9 @@
 //! HTTP and WebSocket routes for the Jazz server.
 //!
 //! Split into submodules so each piece is independently navigable:
-//! - [`websocket`] — engine wire-frame WebSocket boundary
-//! - [`http`] — HTTP endpoint handlers and their request/response types
-//! - [`utils`] — parser/validator helpers used by both
+//! - `websocket` — engine wire-frame WebSocket boundary
+//! - `http` — HTTP endpoint handlers and their request/response types
+//! - `utils` — parser/validator helpers used by both
 //!
 //! The router builder [`create_router`] re-exports unchanged from this module
 //! so existing callers (`server::routes::create_router`) continue to resolve.
@@ -100,9 +100,17 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/accounts/link", post(accounts::link_for_admin))
         .route(
             "/accounts/found-local-first",
-            post(accounts::found_local_first_for_admin),
+            post(accounts::found_device_account_for_admin),
         )
         .route("/accounts/revoke", post(accounts::revoke_for_admin))
+        .route(
+            "/accounts/revoke-sessions",
+            post(accounts::revoke_sessions_for_admin),
+        )
+        .route(
+            "/backend-signing-key",
+            get(accounts::backend_signing_key_for_admin),
+        )
         .route("/migrations/graph", get(migration_graph_handler))
         .route(
             "/introspection/subscriptions",
@@ -1017,7 +1025,7 @@ mod tests {
                 .await
                 .expect("inspect runtime catalogue after lens"),
             (true, true),
-            "migration publication must activate target schema and lens together"
+            "migration publication must admit target schema and lens together"
         );
 
         let lens = state

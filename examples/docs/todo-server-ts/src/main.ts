@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { createJazz, fromJWT, remote, sqlite, type Db } from "jazz-tools/backend";
-import { app as schemaApp } from "../schema.js";
-import permissions from "../permissions.js";
+import { app as schemaApp } from "../jazz.generated.js";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 // ============================================================================
 // Types
@@ -122,7 +122,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
 
   // Sign in: returns the caller's Jazz account, creating it on their first
   // sign-in. Jazz never creates one by itself on the backend; this API has
-  // no browser client (and so no local-first guest to link), so it does.
+  // no browser client (and so no guest's device account to link), so it does.
   app.post("/sign-in", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const user = await authenticate(toRequest(req));

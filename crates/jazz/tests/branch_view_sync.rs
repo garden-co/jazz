@@ -11,15 +11,15 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExactWriteTarget, InsertOptions, ReadOpts, ReadTier,
+    Db, DbConfig, DbIdentity, ExactWriteTarget, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
     SubscriptionEvent, SyncMessage, Transport, TransportError,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::protocol::{BranchSelector, BranchViewBase};
+use jazz::protocol::{BranchSelector, BranchViewBase, ReadViewSourceSpec};
 use jazz::query::{OrderDirection, Query};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 
 use crate::common::{allow_all_policies, compile_schema};
 
@@ -108,6 +108,8 @@ struct Pipe {
     out: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     shipped: Option<Rc<RefCell<usize>>>,
+    /// What this link negotiated in its `Hello`.
+    features: jazz::wire::WireFeatures,
 }
 
 thread_local! {
@@ -129,11 +131,24 @@ impl Transport for Pipe {
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.inbound.borrow_mut().pop_front()
     }
+
+    fn features(&self) -> jazz::wire::WireFeatures {
+        self.features
+    }
 }
 
 /// Connect `client` to `server`; the count of row images the server ships
 /// on this connection.
 fn connect(server: &Db, client: &Db) -> (jazz::db::Upstream, Rc<RefCell<usize>>) {
+    connect_negotiating(server, client, jazz::wire::current_wire_features())
+}
+
+/// [`connect`] over a link that negotiated `features`.
+fn connect_negotiating(
+    server: &Db,
+    client: &Db,
+    features: jazz::wire::WireFeatures,
+) -> (jazz::db::Upstream, Rc<RefCell<usize>>) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let shipped = Rc::new(RefCell::new(0));
@@ -141,11 +156,13 @@ fn connect(server: &Db, client: &Db) -> (jazz::db::Upstream, Rc<RefCell<usize>>)
         out: up.clone(),
         inbound: down.clone(),
         shipped: None,
+        features,
     });
     let server_side = Box::new(Pipe {
         out: down,
         inbound: up,
         shipped: Some(shipped.clone()),
+        features,
     });
     let upstream = block_on(client.connect_upstream(client_side));
     server.accept_subscriber(server_side, alice()).unwrap();
@@ -2000,4 +2017,313 @@ fn a_base_version_another_views_read_holds_by_id_still_ships() {
         titles(&client, &query, main_view.clone()),
         titles(&server, &query, main_view)
     );
+}
+
+/// Run `future`, pumping the link between polls, as a host would.
+fn drive<T>(server: &Db, client: &Db, future: impl Future<Output = T>) -> T {
+    let mut future = pin!(future);
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..64 {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    panic!("did not complete");
+}
+
+/// Alice's replica opens a serializable transaction, reads her draft over
+/// main (the two main rows, under the draft's coordinate) and stages a
+/// draft insert. Returns the transaction.
+fn serializable_draft_read(
+    server: &Db,
+    client: &Db,
+) -> jazz::model::transaction::OpenTransactionId {
+    seed_main(server, client);
+    draft_read(server, client)
+}
+
+/// Main's two rows, at the server and on Alice's replica.
+fn seed_main(server: &Db, client: &Db) {
+    put(server, &branch(0xa1), 1, "Intro", 1);
+    put(server, &branch(0xa1), 2, "Outro", 2);
+    pump(server, client);
+}
+
+/// [`serializable_draft_read`] over rows already seeded.
+fn draft_read(server: &Db, client: &Db) -> jazz::model::transaction::OpenTransactionId {
+    let tx = jazz::model::transaction::OpenTransactionId::new();
+    drive(server, client, client.begin_serializable(tx)).unwrap();
+    let opts =
+        ReadOpts::default().branch_view(branch(0xa2), Some(BranchViewBase::current(branch(0xa1))));
+    let bytes = postcard::to_allocvec(&Query::from("todos")).unwrap();
+    let rows = match drive(
+        server,
+        client,
+        client.all_serialized_query(&bytes, opts, Some(tx), None, None),
+    )
+    .unwrap()
+    {
+        jazz::db::SerializedReadResult::Rows(rows) => rows,
+        other => panic!("{other:?}"),
+    };
+    let mut titles: Vec<_> = rows.iter().map(|row| row.cell("title")).collect();
+    titles.sort_by_key(|title| format!("{title:?}"));
+    assert_eq!(
+        titles,
+        [
+            Some(Value::String("Intro".into())),
+            Some(Value::String("Outro".into()))
+        ]
+    );
+    drive(
+        server,
+        client,
+        client.tx_ref(tx).insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("Summary".into())),
+                ("rank".to_owned(), Value::I32(3)),
+            ]),
+            InsertOptions {
+                target: ExactWriteTarget::Branch(branch(0xa2)),
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
+    tx
+}
+
+/// Commit `tx` and wait for the server's verdict on it.
+fn commit_at_server(
+    server: &Db,
+    client: &Db,
+    tx: jazz::model::transaction::OpenTransactionId,
+) -> Result<(), jazz::db::Error> {
+    let receipt = drive(server, client, client.commit_serializable_handle(tx))?;
+    drive(
+        server,
+        client,
+        client.wait_for_transaction(receipt.0, jazz::tx::DurabilityTier::Global),
+    )
+    .map(drop)
+}
+
+/// Bob, at the server, retitles a row on `on`.
+fn retitle_at_server(server: &Db, on: &BranchSelector, row: u8, title: &str) {
+    block_on(server.update(
+        "todos",
+        RowUuid::from_bytes([row; 16]),
+        BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: on.clone(),
+                base: Some(BranchViewBase::current(branch(0xa1))),
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+}
+
+/// The server validates Alice's draft read through its view (jazz#5806):
+/// a commit after Bob changed a main row the draft inherits is refused,
+/// though her replica (which had not seen it) let it through.
+#[test]
+fn the_server_refuses_a_serializable_branch_read_whose_base_changed() {
+    let (server, client, _) = connected();
+    let tx = serializable_draft_read(&server, &client);
+    retitle_at_server(&server, &branch(0xa1), 1, "Intro, by Bob");
+    let error = commit_at_server(&server, &client, tx).unwrap_err();
+    assert!(error.is_serialization_conflict(), "{error}");
+}
+
+/// Bob writes another branch: the rows Alice's draft read are as they
+/// were, and the server accepts her commit, draft insert and all. Checked
+/// as a root read (every branch's rows) it would have conflicted.
+#[test]
+fn the_server_accepts_a_serializable_branch_read_when_only_another_branch_changed() {
+    let (server, client, _) = connected();
+    let tx = serializable_draft_read(&server, &client);
+    retitle_at_server(&server, &branch(0xa3), 1, "Intro, elsewhere");
+    commit_at_server(&server, &client, tx).unwrap();
+    pump(&server, &client);
+    let draft_only = ReadOpts::default().branch_view(branch(0xa2), None);
+    assert_eq!(
+        titles(&server, &Query::from("todos"), draft_only),
+        ["Summary"]
+    );
+}
+
+/// Over a link that did not negotiate the feature (an older server), the
+/// commit is made, as any serializable commit is, but refused when it would
+/// be sent: such a server would check the draft read as a root read,
+/// against other rows.
+#[test]
+fn a_serializable_branch_read_needs_a_server_that_negotiated_it() {
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let client = open(0x02, alice());
+    let (upstream, _) = connect_negotiating(&server, &client, jazz::wire::FEATURE_NONE);
+    std::mem::forget(upstream);
+    let tx = serializable_draft_read(&server, &client);
+    let error = commit_at_server(&server, &client, tx).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not supported yet by this server"),
+        "{error}"
+    );
+    let draft_only = ReadOpts::default().branch_view(branch(0xa2), None);
+    assert!(titles(&server, &Query::from("todos"), draft_only).is_empty());
+}
+
+/// Offline, Alice's replica makes the commit as it makes any serializable
+/// one; once the link (one that negotiated the feature) is back, the server
+/// validates it through the draft's view and accepts it.
+#[test]
+fn an_offline_serializable_branch_read_commits_when_the_link_returns() {
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let client = open(0x02, alice());
+    let (upstream, _) = connect(&server, &client);
+    // The app keeps its draft live, so the replica holds its rows offline.
+    let view =
+        ReadOpts::default().branch_view(branch(0xa2), Some(BranchViewBase::current(branch(0xa1))));
+    let prepared = client.prepare_query(&Query::from("todos")).unwrap();
+    let _live = block_on(client.subscribe(&prepared, view)).unwrap();
+    seed_main(&server, &client);
+    assert!(client.detach_connection(&upstream));
+    let tx = draft_read(&server, &client);
+    let receipt = drive(&server, &client, client.commit_serializable_handle(tx)).unwrap();
+    let (upstream, _) = connect(&server, &client);
+    std::mem::forget(upstream);
+    drive(
+        &server,
+        &client,
+        client.wait_for_transaction(receipt.0, jazz::tx::DurabilityTier::Global),
+    )
+    .unwrap();
+    let draft_only = ReadOpts::default().branch_view(branch(0xa2), None);
+    assert_eq!(
+        titles(&server, &Query::from("todos"), draft_only),
+        ["Summary"]
+    );
+}
+
+/// Alice's worker synced main (x, y, then z) and the draft (d, and a
+/// tombstone for main's x) from the server, captured main between y and z,
+/// and lost its server. Alice's cold tab, which holds nothing, opens a
+/// mergeable transaction over it. Returns the tab, its worker and the views:
+/// the draft alone, over live main, and over main frozen before z.
+fn cold_tab_over_an_offline_worker(
+    bytes: (u8, u8),
+) -> (Db, Db, [ReadViewSourceSpec; 3], OpenTransactionId) {
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let worker = open(0x02, alice());
+    std::mem::forget(connect(&server, &worker).0);
+    let (main, draft) = (branch(bytes.0), branch(bytes.1));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 1);
+    put(&server, &draft, 0x48, "d", 1);
+    del(&server, 0x45, &draft, Some(&main));
+    let all = worker.prepare_query(&Query::from("todos")).unwrap();
+    let warm = |view: ReadOpts| {
+        let mut opts = view;
+        opts.tier = ReadTier::Remote;
+        let stream = block_on(worker.subscribe(&all, opts)).unwrap();
+        pump(&server, &worker);
+        drop(stream);
+        pump(&server, &worker);
+    };
+    warm(ReadOpts::default().branch_view(main.clone(), None));
+    let frozen = block_on(worker.capture_snapshot()).unwrap();
+    put(&server, &main, 0x47, "z", 1);
+    warm(ReadOpts::default().branch_view(main.clone(), None));
+    warm(
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone()))),
+    );
+    // The server is gone from here on: nothing ticks it again.
+    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    let tab = open(0x03, alice());
+    tab.set_non_durable_client();
+    std::mem::forget(connect(&worker, &tab).0);
+    tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    let id = OpenTransactionId::new();
+    block_on(tab.begin_mergeable(id)).unwrap();
+    let views = [
+        ReadViewSourceSpec::BranchView {
+            head: draft.clone(),
+            base: None,
+        },
+        ReadViewSourceSpec::BranchView {
+            head: draft.clone(),
+            base: Some(BranchViewBase::Current(main.clone())),
+        },
+        ReadViewSourceSpec::BranchView {
+            head: draft,
+            base: Some(BranchViewBase::Snapshot {
+                branch: main,
+                snapshot: frozen,
+            }),
+        },
+    ];
+    (tab, worker, views, id)
+}
+
+/// A LocalFirst read in the tab's mergeable transaction, through `source`,
+/// with the tab and its worker taking turns (never the server).
+fn cold_view_titles(
+    tab: &Db,
+    worker: &Db,
+    id: OpenTransactionId,
+    source: &ReadViewSourceSpec,
+) -> Vec<String> {
+    let query = Query::from("todos").order_by("title", OrderDirection::Asc);
+    let prepared = tab.prepare_query(&query).unwrap();
+    let transaction = tab.tx_ref(id);
+    let mut read =
+        pin!(transaction.all_prepared_in(&prepared, false, None, ReadTier::LocalFirst, source));
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..50 {
+        if let Poll::Ready(rows) = read.as_mut().poll(&mut cx) {
+            return rows
+                .unwrap()
+                .iter()
+                .map(|row| match row.cell("title") {
+                    Some(Value::String(title)) => title,
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+        }
+        block_on(tab.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(tab.tick()).unwrap();
+    }
+    panic!("the cold view read did not finish");
+}
+
+/// The draft alone: its own row, not main's.
+#[test]
+fn a_cold_mergeable_read_of_a_head_only_view_loads_from_the_offline_worker() {
+    let (tab, worker, [head_only, _, _], id) = cold_tab_over_an_offline_worker((0xe1, 0xe2));
+    assert_eq!(cold_view_titles(&tab, &worker, id, &head_only), ["d"]);
+}
+
+/// The draft over live main: main's y and z, x masked by the draft.
+#[test]
+fn a_cold_mergeable_read_of_a_live_base_view_loads_from_the_offline_worker() {
+    let (tab, worker, [_, live, _], id) = cold_tab_over_an_offline_worker((0xe3, 0xe4));
+    assert_eq!(cold_view_titles(&tab, &worker, id, &live), ["d", "y", "z"]);
+}
+
+/// The draft over main frozen before z: the tab learns the captured state
+/// from its worker's answer, so it resolves the snapshot it did not know.
+#[test]
+fn a_cold_mergeable_read_of_a_frozen_base_view_loads_from_the_offline_worker() {
+    let (tab, worker, [_, _, frozen], id) = cold_tab_over_an_offline_worker((0xe5, 0xe6));
+    assert_eq!(cold_view_titles(&tab, &worker, id, &frozen), ["d", "y"]);
 }

@@ -1,3 +1,26 @@
+/// Holds the place of a variant that was removed from a serialized enum, so
+/// the variants after it keep their positional (postcard) tags. It has no
+/// values: nothing can build one, and decoding one is refused.
+///
+/// Predicates held payload-enum matches here until 2.0.0-alpha.66, when
+/// enums with payloads were removed (jazz#5758).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RemovedVariant {}
+
+impl serde::Serialize for RemovedVariant {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        match *self {}
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RemovedVariant {
+    fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+        Err(serde::de::Error::custom(
+            "this variant was removed (payload-enum matches, removed in 2.0.0-alpha.66)",
+        ))
+    }
+}
+
 /// Namespace used for query shape and binding UUIDv5 ids.
 pub const QUERY_NAMESPACE: uuid::Uuid = uuid::uuid!("5d39e9ed-88f3-5b58-b8db-8786b02f5d2f");
 
@@ -93,6 +116,26 @@ pub enum Part {
     },
     /// The subtree at an RFC 6901 pointer of a JSON column.
     JsonPointer(String),
+}
+
+impl Part {
+    /// The UTF-8 byte range `range` of a text column ([`Part::TextUtf8`]):
+    /// offsets are `str` indices, and a range that splits a code point is
+    /// refused.
+    pub fn text(range: std::ops::Range<usize>) -> Self {
+        Self::TextUtf8 {
+            from: range.start as u64,
+            to: range.end as u64,
+        }
+    }
+
+    /// The byte range `range` of a bytes column ([`Part::Bytes`]).
+    pub fn bytes(range: std::ops::Range<usize>) -> Self {
+        Self::Bytes {
+            from: range.start as u64,
+            to: range.end as u64,
+        }
+    }
 }
 
 /// Human-readable query JSON retains the relation tree. Non-human serializers
@@ -282,18 +325,49 @@ pub enum RelationPredicate {
         left: RelationColumnRef,
         right: RelationValueRef,
     },
-    /// Match one tagged payload-enum case. The nested predicate's column refs
-    /// name fields in the selected case payload and are deliberately unscoped.
-    EnumMatch {
-        column: RelationColumnRef,
-        case: String,
-        payload: Box<RelationPredicate>,
-    },
+    /// The slot of a removed variant (see [`RemovedVariant`]).
+    #[doc(hidden)]
+    Removed(RemovedVariant),
     And(Vec<RelationPredicate>),
     Or(Vec<RelationPredicate>),
     Not(Box<RelationPredicate>),
     True,
     False,
+    /// The text `left` begins with the text `right`, compared bytewise
+    /// (UTF-8, case-sensitive). NULL on either side never matches. Appended
+    /// after `False` so every earlier variant keeps its Postcard tag; sent
+    /// upstream only over a link that negotiated
+    /// `FEATURE_TEXT_AFFIX_PREDICATES`.
+    StartsWith {
+        left: RelationColumnRef,
+        right: RelationValueRef,
+    },
+    /// The text `left` ends with the text `right`; as [`Self::StartsWith`].
+    EndsWith {
+        left: RelationColumnRef,
+        right: RelationValueRef,
+    },
+}
+
+impl RelationPredicate {
+    /// Whether this predicate, or any predicate nested in it, is a
+    /// `StartsWith`/`EndsWith`, which only peers that negotiated
+    /// `FEATURE_TEXT_AFFIX_PREDICATES` can decode.
+    pub fn uses_text_affix(&self) -> bool {
+        match self {
+            Self::StartsWith { .. } | Self::EndsWith { .. } => true,
+            Self::And(parts) | Self::Or(parts) => parts.iter().any(Self::uses_text_affix),
+            Self::Not(part) => part.uses_text_affix(),
+            Self::Cmp { .. }
+            | Self::IsNull { .. }
+            | Self::IsNotNull { .. }
+            | Self::In { .. }
+            | Self::Contains { .. }
+            | Self::True
+            | Self::False => false,
+            Self::Removed(removed) => match *removed {},
+        }
+    }
 }
 
 #[allow(missing_docs)]

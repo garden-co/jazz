@@ -20,6 +20,7 @@ import { bearerFetch } from "../runtime/credentialed-transport.js";
 import {
   coreInitial,
   createStartedJazzSession,
+  ownJazzSession,
   type JazzSession,
 } from "../session/jazz-session.js";
 
@@ -28,7 +29,7 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     /**
      * Not for a client: the app id belongs to your backend's store
      * (`remote({ appId })`, or the id a store keeps). A client is scoped by its
-     * `serverUrl`; use `scope` to keep local-first users created under an
+     * `serverUrl`; use `scope` to keep guests' device accounts created under an
      * app id.
      */
     appId?: never;
@@ -81,6 +82,7 @@ const NATIVE_SESSION_OPTIONS = {
   telemetryCollectorUrl: true,
   devMode: true,
   slowQueryThresholdMs: true,
+  subscriptionBacklogRows: true,
   bearer: true,
   nativeRelay: true,
   profile: true,
@@ -96,7 +98,21 @@ export function createJazzClient(config: JazzClientConfig): Promise<JazzSession<
   return createStartedJazzSession(config, openNativeSessionCore);
 }
 
-/** @internal The session core `createJazzClient` and `<JazzProvider>` own. */
+/**
+ * Open a Jazz session on this device and return it at once, while it starts
+ * (`status: "starting"`), for apps that render without a framework provider:
+ * show a loading screen from `getSnapshot()` and `subscribe()`, then the app
+ * once it is `ready` (or `signed-out`). A startup that fails leaves the session
+ * in `error` with the cause in `snapshot.error`; `retry()` starts it again.
+ * Unlike `createJazzClient`, a failed start doesn't close the session: call
+ * `close()` when the app is done with it. Pass it to `<JazzProvider session>`
+ * to render it in a framework.
+ */
+export function startJazzClient(config: JazzClientConfig): JazzSession<JazzClient> {
+  return ownJazzSession(config, openNativeSessionCore);
+}
+
+/** @internal The session core `createJazzClient`, `startJazzClient` and `<JazzProvider>` own. */
 export async function openNativeSessionCore(
   config: JazzClientConfig,
 ): Promise<UserFollowingSession<JazzClient>> {

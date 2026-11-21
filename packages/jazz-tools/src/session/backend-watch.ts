@@ -1,5 +1,6 @@
 import type { AccountHandle, AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
+import type { AuthFailureReason } from "../runtime/auth-state.js";
 import { switchJazzSessionUser, type SessionCore } from "./state.js";
 
 const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
@@ -43,8 +44,12 @@ export type BackendUser = AccountIdentity & {
 };
 
 export interface BackendWatch {
-  /** The sync server refused this client's sign-in: ask the backend whether it still holds. */
-  authRefused(): void;
+  /**
+   * The sync server refused this client's sign-in: ask the backend whether
+   * it still holds. `reason` is why, when the client knows (`"revoked"`:
+   * `jazz.revokeUser` ended the session).
+   */
+  authRefused(reason?: AuthFailureReason): void;
   /** The sync link is connected again (resets the reconnect backoff). */
   connected(): void;
   /**
@@ -114,7 +119,9 @@ export interface BackendWatch {
  * signs the user out (after `onSignedOut`), so a revoked user's open tab
  * doesn't stay signed in and unsynced for long. A background tab's cookie
  * may just be stale, so there a sign-out waits for a check after focus
- * returns (or for the app to call `reauthenticate`). A probe that reports there is no backend (404) is asked
+ * returns (or for the app to call `reauthenticate`), unless the refusal
+ * says the session was revoked (`jazz.revokeUser`): then a background tab's
+ * answer counts too, and it signs out as a visible one does. A probe that reports there is no backend (404) is asked
  * again with backoff, since a deploy or a proxy may answer 404 for a moment;
  * only 404s that keep coming for a while (`notFoundRetryMs`, three answers)
  * stop the watch. A stopped watch rejects every later `reauthenticate`.
@@ -185,15 +192,24 @@ export function watchBackendUser<Client>(
   const firstRetryMs = options.retryMs ?? 2_000;
   let retryMs = firstRetryMs;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  // The retry pending is of refused checks only: it is asked as one, so a
+  // background tab still waits for focus. A plain check failing too makes
+  // it a plain one.
+  let retryRefused = false;
   let retries = 0;
-  const retryLater = (cause: unknown) => {
-    if (stopped || !passes(cause) || retryTimer) return;
+  const retryLater = (cause: unknown, refused = false) => {
+    if (stopped || !passes(cause)) return;
+    if (retryTimer) {
+      if (!refused) retryRefused = false;
+      return;
+    }
     retries++;
+    retryRefused = refused;
     const wait = retryMs;
     retryMs = Math.min(retryMs * 2, 60_000);
     retryTimer = setTimeout(() => {
       retryTimer = undefined;
-      check();
+      check(retryRefused);
     }, wait);
   };
   const clearRetry = () => {
@@ -209,8 +225,11 @@ export function watchBackendUser<Client>(
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   // The sync link was refused and hasn't connected since.
   let refusedPending = false;
+  // That refusal said the session was revoked (`jazz.revokeUser`).
+  let revokedPending = false;
   const resetRefusal = () => {
     refusedPending = false;
+    revokedPending = false;
     backoffMs = firstBackoffMs;
     reconnectAt = 0;
     if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -322,7 +341,7 @@ export function watchBackendUser<Client>(
       if (!asked) {
         // A 404 has its own retry (see `notFoundAnswer`).
         if (!(signedIn.failed instanceof AccountAuthError && signedIn.failed.status === 404))
-          retryLater(signedIn.failed);
+          retryLater(signedIn.failed, refused);
         return;
       }
       throw new Error("Jazz could not ask your backend who is signed in", {
@@ -446,16 +465,23 @@ export function watchBackendUser<Client>(
     }
     // A background tab's cookie may be stale: a refusal there waits for a
     // check after focus. A visible page's cookies are fresh, so its answer
-    // counts as the first, and a second one shortly after confirms it.
+    // counts as the first, and a second one shortly after confirms it. So
+    // does a background tab's when the session was revoked: the backend
+    // ended it on purpose, and the second answer still has to agree.
     // Visibility counts when the refusal is checked: a tab that goes to the
     // background during the confirmation wait is still signed out once the
     // second answer agrees (and `onSignedOut` lets it).
-    if (refused && !(events.isVisible?.() ?? false)) return;
+    if (refused && !revokedPending && !(events.isVisible?.() ?? false)) return;
     if (!asked) {
       await new Promise((resolve) => setTimeout(resolve, confirmMs));
       if (quiet()) return;
       signedIn = await ask();
       if (quiet()) return;
+      if (signedIn !== null && "failed" in signedIn) {
+        // The second answer couldn't be had: ask again later, as this check.
+        retryLater(signedIn.failed, refused);
+        return;
+      }
       if (signedIn !== null) {
         // Someone is signed in after all (the app refreshed its session):
         // a refused link follows that answer as a plain check would, so it
@@ -568,8 +594,11 @@ export function watchBackendUser<Client>(
   // Ask on start, once the host has finished setting up.
   const start = setTimeout(() => check(), 0);
   const watch: BackendWatch = {
-    authRefused() {
+    authRefused(reason) {
       refusedPending = true;
+      // A refusal that says why decides: a later one for another reason
+      // (a stale cookie) doesn't sign a background tab out.
+      if (reason !== undefined) revokedPending = reason === "revoked";
       check(true);
     },
     connected: resetRefusal,
@@ -635,7 +664,7 @@ function linkRefused(cause: unknown): boolean {
   return (
     cause.code === "link_refused" ||
     cause.code === "invalid_local_first_proof" ||
-    cause.code === "local_first_account_required" ||
+    cause.code === "device_account_required" ||
     cause.code === "linked_account_mismatch"
   );
 }

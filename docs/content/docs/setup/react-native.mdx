@@ -9,7 +9,7 @@ React Native and Expo are supported as an alpha through `jazz-tools/react-native
 
 React Native and Expo use the same session API as the web, with platform-specific runtime and
 account storage adapters. `initial: "device"` starts people as guests on a
-[device account](/docs/setup/auth/local-first), which works offline:
+[device account](/docs/setup/auth/device-accounts), which works offline:
 
 ```tsx
 import { JazzProvider } from "jazz-tools/expo";
@@ -80,9 +80,10 @@ and the `jazz-rn` native module must come from the same release, so ship it as a
 To reach a backend on your computer, the Android emulator uses `http://10.0.2.2:<port>` instead of
 `localhost`, and Android blocks plain `http://` unless you allow cleartext traffic for development.
 
-An Expo app's package is CommonJS, while your backend imports `schema.ts` and `permissions.ts` as ES
-modules. Keep those two files in a folder of their own (for example `jazz/`) with a `package.json`
-of `{ "type": "module" }`, and import them from there in both the app and the backend; see
+An Expo app's package is CommonJS, while your backend imports `jazz.generated.ts` as an ES module.
+Keep the app files (`jazz.app.json`, `jazz.permissions.json` and `jazz.generated.ts`) in a folder of
+their own (for example `jazz/`) with a `package.json` of `{ "type": "module" }`, run
+`npx jazz-tools generate` there, and import `app` from there in both the app and the backend; see
 [Your Own Server](/docs/setup/deployment/own-server).
 
 A bare React Native host uses the same direct dependency and New Architecture, with an OS-protected
@@ -122,7 +123,7 @@ with `error` set, so the app keeps working while you show it.
 ## Which entry exports what
 
 Import from `jazz-tools/expo` in an Expo app and `jazz-tools/react-native` in a bare one. Both
-export `JazzProvider`, `useJazzSession`, `createJazzClient`, `useDb`, `useSession`, `useAll`,
+export `JazzProvider`, `useJazzSession`, `createJazzClient`, `useDb`, `useAll`,
 `useOne` and `useSyncStatus`.
 
 <Callout type="info">
@@ -134,7 +135,7 @@ export `JazzProvider`, `useJazzSession`, `createJazzClient`, `useDb`, `useSessio
 <Callout type="warn">
   A device account's key is that identity's signing credential. If it is lost, the account needs
   another linked identity or a recovery backup to regain access. Plan for recovery with [backup and
-  restore](/docs/setup/auth/local-first#backing-up-and-restoring-the-key).
+  restore](/docs/setup/auth/device-accounts#backing-up-and-restoring-the-key).
 </Callout>
 
 <Accordions type="single">
@@ -169,6 +170,27 @@ instead.
 To reach a development backend over plain `http://` on Android, allow cleartext traffic, for
 example with `expo-build-properties` (`android.usesCleartextTraffic: true`) in a development build
 only.
+
+## Developing on a physical device
+
+On a device, Jazz syncs over plaintext (`http://`, `ws://`) only with the machine it runs on:
+`localhost`, a loopback address, or an Android emulator's host (`10.0.2.2`, `10.0.3.2`). Any other
+host, a LAN address like `http://192.168.1.20:4200` or a `.local` name included, needs `https://`:
+otherwise the session's token would travel unencrypted on your network. Jazz refuses such a URL with
+an error whose `code` is `remote_plaintext_endpoint`.
+
+To reach the backend on your development machine from a physical device:
+
+- **Android over USB:** forward the port, then use `localhost` as on an emulator:
+  `adb reverse tcp:4200 tcp:4200` (with your backend's port), and
+  `serverUrl: "http://localhost:4200/jazz"`.
+- **iOS, or Android without USB:** put the backend behind a TLS tunnel with a publicly trusted
+  certificate, such as `cloudflared tunnel --url http://localhost:4200` or `tailscale serve`, and
+  use its `https://` URL.
+
+A certificate from your own development CA (for example mkcert) doesn't work for Jazz's sync
+connection yet, even when the device trusts the CA: on iOS and Android, Jazz's native connection
+trusts only the standard public certificate authorities. Use a tunnel instead.
 
 ## Testing without a device
 

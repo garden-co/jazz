@@ -383,7 +383,7 @@ async fn public_jazz_client_syncs_through_explicit_native_adapter() {
             )
             .await
             .expect("public client connects online");
-            assert!(client.is_connected());
+            jazz::tools::test_support::wait_for_connected(&client).await;
 
             let (id, _, tx) = client
                 .insert(

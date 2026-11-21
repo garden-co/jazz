@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { schema } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { getDbInternalSession } from "../runtime/db-internal-session.js";
 import { mapAuthReason, type AuthFailureReason } from "../runtime/auth-state.js";
@@ -15,10 +15,7 @@ function failAuth(db: object, reason: AuthFailureReason): void {
 describe("account context authority", () => {
   it("opens locally without activating its registry transport and rejects another app or authority", async () => {
     const { serverUrl: _serverUrl, ...config } = await localAccountConfig("local-only-account");
-    const app = schema.defineApp(
-      { notes: schema.table({ text: schema.string() }, {}) },
-      { migrations: "none" },
-    );
+    const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
     const db = await createDb(config);
     try {
       const { value: row } = await db.insert(app.notes, { text: "offline" });
@@ -90,7 +87,7 @@ describe("account context authority", () => {
         });
       }
       expect(db.getAuthState()).toMatchObject({
-        authMode: "local-first",
+        authMode: "device-account",
         session: { identity: config.account.identity },
       });
     } finally {

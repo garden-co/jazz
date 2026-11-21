@@ -10,11 +10,7 @@
   --surface-alt: #f6f8fa;
   color: var(--fg);
   background: var(--bg);
-  font-family:
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 14px;
   line-height: 1.5;
 }

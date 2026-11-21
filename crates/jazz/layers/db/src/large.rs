@@ -22,6 +22,7 @@
 //! ([`crate::chunk_store`]) the bytes of settled leaves move out of the
 //! file on tick; their metadata stays.
 
+use crate::storage::Storage;
 use crate::values::CachedRow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -31,8 +32,8 @@ use jazz_types::large_values::{
     self as lv, AttemptError, ChunkInputs, ChunkNode, LargeValueKind, LargeValueRef,
     chunks::ChunkRequest, epoch,
 };
+use rusqlite::OptionalExtension;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OptionalExtension};
 
 use crate::chunk_store::{ChunkStore, NodeKey};
 use crate::options::{Error, ErrorCode, Reason};
@@ -41,6 +42,15 @@ use crate::values::{Column, Sql, Table, quote, storage};
 #[cfg(feature = "testing")]
 thread_local! {
     static FULL_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static CELL_RANGES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many ranges of chunked or inline cells this thread has read for a
+/// partial selection (a read's `select_part`), so tests can tell whether a
+/// read decoded its cells at all.
+#[cfg(feature = "testing")]
+pub fn cell_ranges_for_test() -> usize {
+    CELL_RANGES.with(std::cell::Cell::get)
 }
 
 /// How many chunked values have been rebuilt whole on this thread, so tests
@@ -144,7 +154,7 @@ CREATE TABLE IF NOT EXISTS _jazz_lv_offload_delete (hash BLOB PRIMARY KEY) WITHO
 /// Prepare a store for its chunk store, or refuse to open a store that
 /// has one without it. The first open with a chunk store queues every leaf
 /// the file already holds.
-pub(crate) fn open_offload(conn: &Connection, chunks: &Chunks) -> Result<(), Error> {
+pub(crate) fn open_offload(conn: &crate::storage::Storage, chunks: &Chunks) -> Result<(), Error> {
     let exists: bool = conn
         .query_row(
             "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' \
@@ -156,7 +166,7 @@ pub(crate) fn open_offload(conn: &Connection, chunks: &Chunks) -> Result<(), Err
     match (exists, chunks.offload_store().is_some()) {
         (true, false) => Err(unconfigured()),
         (false, false) | (true, true) => Ok(()),
-        (false, true) => crate::values::in_savepoint(conn, "jazz_lv_offload", || {
+        (false, true) => conn.scope("jazz_lv_offload", |conn| {
             crate::db::execute_script(conn, OFFLOAD_DDL)?;
             conn.execute(
                 "INSERT INTO _jazz_lv_offload (hash, state) SELECT n.hash, 0 \
@@ -174,10 +184,10 @@ pub(crate) fn open_offload(conn: &Connection, chunks: &Chunks) -> Result<(), Err
 /// receipt or upload lease holds them), marked as being put. Their bytes
 /// must reach the chunk store before [`offloaded`] drops them here.
 pub(crate) fn begin_offload(
-    conn: &Connection,
+    conn: &crate::storage::Storage,
     limit: usize,
 ) -> Result<Vec<(NodeKey, Vec<u8>)>, Error> {
-    crate::values::in_savepoint(conn, "jazz_lv_offload", || {
+    conn.scope("jazz_lv_offload", |conn| {
         let picked: Vec<(Vec<u8>, Vec<u8>)> = conn
             .prepare_cached(
                 "SELECT o.hash, n.bytes FROM _jazz_lv_offload o \
@@ -207,7 +217,7 @@ pub(crate) fn begin_offload(
 
 /// A leaf's bytes reached the chunk store: drop them here, unless it was
 /// reclaimed (and perhaps stored again) while the put ran.
-pub(crate) fn offloaded(conn: &Connection, node: &NodeKey) -> Result<(), Error> {
+pub(crate) fn offloaded(conn: &Storage, node: &NodeKey) -> Result<(), Error> {
     let hash = node.hash.as_slice();
     conn.prepare_cached(
         "UPDATE _jazz_lv_node SET bytes = X'' WHERE hash = ?1 AND EXISTS \
@@ -221,7 +231,7 @@ pub(crate) fn offloaded(conn: &Connection, node: &NodeKey) -> Result<(), Error> 
 }
 
 /// Up to `limit` reclaimed leaves to delete from the chunk store.
-pub(crate) fn pending_deletes(conn: &Connection, limit: usize) -> Result<Vec<NodeKey>, Error> {
+pub(crate) fn pending_deletes(conn: &Storage, limit: usize) -> Result<Vec<NodeKey>, Error> {
     let rows: Vec<Vec<u8>> = conn
         .prepare_cached("SELECT hash FROM _jazz_lv_offload_delete LIMIT ?1")
         .and_then(|mut statement| {
@@ -234,7 +244,7 @@ pub(crate) fn pending_deletes(conn: &Connection, limit: usize) -> Result<Vec<Nod
 }
 
 /// A reclaimed leaf is gone from the chunk store.
-pub(crate) fn deleted(conn: &Connection, node: &NodeKey) -> Result<(), Error> {
+pub(crate) fn deleted(conn: &Storage, node: &NodeKey) -> Result<(), Error> {
     conn.prepare_cached("DELETE FROM _jazz_lv_offload_delete WHERE hash = ?1")
         .and_then(|mut statement| statement.execute([node.hash.as_slice()]))
         .map_err(storage)?;
@@ -303,6 +313,9 @@ pub(crate) fn kind(column: &Column) -> LargeValueKind {
 /// first (`set`), beside the table's earlier ones. An update retains every
 /// new epoch before it releases any old one, so an epoch that moves from
 /// one column to another is never freed in between.
+///
+/// Generated only for new tables or new column sets. A name already in use
+/// must fail: silently skipping a foreign trigger would lose refcount updates.
 pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) -> String {
     let mut sql = String::new();
     if columns.is_empty() {
@@ -341,9 +354,9 @@ pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) ->
                 .join(" ")
         };
         sql.push_str(&format!(
-            "CREATE TRIGGER IF NOT EXISTS {ins} AFTER INSERT ON {on} WHEN {} BEGIN {} END;\n\
-             CREATE TRIGGER IF NOT EXISTS {del} AFTER DELETE ON {on} WHEN {} BEGIN {} END;\n\
-             CREATE TRIGGER IF NOT EXISTS {upd} AFTER UPDATE OF {} ON {on} WHEN {} BEGIN {} {} END;\n",
+            "CREATE TRIGGER {ins} AFTER INSERT ON {on} WHEN {} BEGIN {} END;\n\
+             CREATE TRIGGER {del} AFTER DELETE ON {on} WHEN {} BEGIN {} END;\n\
+             CREATE TRIGGER {upd} AFTER UPDATE OF {} ON {on} WHEN {} BEGIN {} {} END;\n",
             any(&|name| chunked_sql(&format!("NEW.{name}"))),
             each(&|name| count(&format!("NEW.{name}"), "+", None)),
             any(&|name| chunked_sql(&format!("OLD.{name}"))),
@@ -354,16 +367,8 @@ pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) ->
                 epoch_sql(&format!("OLD.{name}")),
                 epoch_sql(&format!("NEW.{name}"))
             )),
-            each(&|name| count(
-                &format!("NEW.{name}"),
-                "+",
-                Some(&format!("OLD.{name}"))
-            )),
-            each(&|name| count(
-                &format!("OLD.{name}"),
-                "-",
-                Some(&format!("NEW.{name}"))
-            )),
+            each(&|name| count(&format!("NEW.{name}"), "+", Some(&format!("OLD.{name}")))),
+            each(&|name| count(&format!("OLD.{name}"), "-", Some(&format!("NEW.{name}")))),
             ins = trigger("ins"),
             del = trigger("del"),
             upd = trigger("upd"),
@@ -376,10 +381,7 @@ pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) ->
 /// [`triggers`] watch: its large-capable columns, under every schema
 /// version the store has held. Read from the `AFTER UPDATE OF` column
 /// list of each `__lv_upd` trigger.
-pub(crate) fn stored_large_columns(
-    conn: &Connection,
-    table: &str,
-) -> Result<BTreeSet<String>, Error> {
+pub(crate) fn stored_large_columns(conn: &Storage, table: &str) -> Result<BTreeSet<String>, Error> {
     let prefix = format!("{table}__lv_upd");
     let sqls: Vec<(String, String)> = conn
         .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1")
@@ -498,6 +500,17 @@ pub(crate) fn missing() -> Error {
     Error::with_reason(ErrorCode::NotObserved, Reason::MissingChunks, MISSING)
 }
 
+const REFUSED: &str = "large-value chunks are not available: the upstream cannot supply them \
+     (it answered that it does not hold them, or no version this replica received holds them); \
+     they are asked for again after a reconnect, or once a version of the row that may hold \
+     them arrives";
+
+/// Chunks the upstream cannot supply ([`Chunks::refuse`]): still missing,
+/// but not on their way.
+fn refused() -> Error {
+    Error::with_reason(ErrorCode::NotObserved, Reason::MissingChunks, REFUSED)
+}
+
 /// An offloaded node its chunk store does not hold: data loss, not demand.
 fn lost() -> Error {
     Error::new(
@@ -547,9 +560,15 @@ struct State {
     budget: Option<usize>,
     clock: u64,
     /// A second, read-only connection to a file store.
-    reader: Option<Connection>,
+    reader: Option<Storage>,
     /// Chunks a statement needed and nothing local holds.
     demand: BTreeSet<ChunkRequest>,
+    /// Chunks the upstream cannot supply (the replica's unavailable nodes,
+    /// which it keeps in step): a read that needs one fails with why
+    /// ([`refused`]) rather than as plain demand, until they are asked for
+    /// again ([`Chunks::clear_refused`]). Consulted only by reads, for
+    /// nodes nothing local holds; answering a pull never consults it.
+    refused: BTreeSet<ChunkRequest>,
     /// The base-tree byte ranges reads of a value (by root) waited on:
     /// the next pull asks for each range whole (SPEC 19.8).
     spans: HashMap<[u8; 32], std::ops::Range<u64>>,
@@ -582,6 +601,12 @@ enum Local {
     Absent,
     /// The chunk store holds it, and answers only asynchronously.
     Fetching,
+    /// This store holds it, but its bytes are gone (the chunk store it
+    /// moved them to answered it does not hold them) or do not match
+    /// their hash: data loss, which asking again does not cure. A failure
+    /// to read the bytes (the chunk store's or the file's) is an error
+    /// instead.
+    Damaged(Error),
 }
 
 /// One epoch row.
@@ -611,19 +636,36 @@ struct Cached {
 impl Chunks {
     /// Chunks of a store in memory (`path` is `None`) or the file at
     /// `path`, on its VFS.
+    #[cfg(test)]
     pub(crate) fn install(
         path: Option<(&std::path::Path, Option<&'static str>)>,
         store: Option<Arc<dyn ChunkStore>>,
         host_io: bool,
     ) -> Result<Arc<Self>, Error> {
-        let reader = match path {
-            None => None,
-            Some((path, vfs)) => {
+        Self::install_reading(path, None, store, host_io)
+    }
+
+    /// [`Self::install`] for a store read through `shared` when it has one:
+    /// a managed store's own backend ([`Storage::shared_reader`]), which is
+    /// durable, so the cache is bounded as a file's is and reads what it
+    /// lacks back through it (after a Durable Object restarts, say).
+    /// Without one, a store with no path is in memory and the cache is its
+    /// only readable copy of its nodes.
+    pub(crate) fn install_reading(
+        path: Option<(&std::path::Path, Option<&'static str>)>,
+        shared: Option<Storage>,
+        store: Option<Arc<dyn ChunkStore>>,
+        host_io: bool,
+    ) -> Result<Arc<Self>, Error> {
+        let reader = match (path, shared) {
+            (_, Some(shared)) => Some(shared),
+            (None, None) => None,
+            (Some((path, vfs)), None) => {
                 let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
                     | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
                 let reader = match vfs {
-                    None => Connection::open_with_flags(path, flags),
-                    Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
+                    None => Storage::open_with_flags(path, flags),
+                    Some(vfs) => Storage::open_with_flags_and_vfs(path, flags, vfs),
                 }
                 .map_err(storage)?;
                 Some(reader)
@@ -634,10 +676,11 @@ impl Chunks {
                 nodes: HashMap::new(),
                 epochs: HashMap::new(),
                 bytes: 0,
-                budget: path.map(|_| CACHE_BYTES),
+                budget: reader.as_ref().map(|_| CACHE_BYTES),
                 clock: 0,
                 reader,
                 demand: BTreeSet::new(),
+                refused: BTreeSet::new(),
                 spans: HashMap::new(),
                 fetch: BTreeSet::new(),
                 in_flight: BTreeSet::new(),
@@ -781,6 +824,25 @@ impl Chunks {
         }
     }
 
+    /// The upstream cannot supply `request`: reads that need it fail with
+    /// that until [`Self::clear_refused`].
+    pub(crate) fn refuse(&self, request: &ChunkRequest) {
+        let mut state = self.state.lock().expect("chunk cache");
+        state.refused.insert(request.clone());
+    }
+
+    fn is_refused(&self, request: &ChunkRequest) -> bool {
+        let state = self.state.lock().expect("chunk cache");
+        state.refused.contains(request)
+    }
+
+    /// Refused chunks may be supplied now (a new session, or a version
+    /// that may hold them): reads of them ask again.
+    pub(crate) fn clear_refused(&self) {
+        let mut state = self.state.lock().expect("chunk cache");
+        state.refused.clear();
+    }
+
     /// Forget the last batch's failed fetches, so reads of them ask again;
     /// whether there were any.
     pub(crate) fn clear_failed(&self) -> bool {
@@ -791,6 +853,15 @@ impl Chunks {
             state.answered += 1;
         }
         any
+    }
+
+    /// Whether no batch ever fetches for this store: it has no chunk
+    /// store, or one that always answers at once
+    /// ([`ChunkStore::always_answers_now`]).
+    pub(crate) fn never_fetches(&self) -> bool {
+        self.store
+            .as_ref()
+            .is_none_or(|store| store.always_answers_now())
     }
 
     /// Refuse reads of `request` with `error` until the next batch starts:
@@ -1061,7 +1132,7 @@ impl Chunks {
             };
             match store.get_now(&NodeKey::from(request)) {
                 None => return Ok(Local::Fetching),
-                Some(Ok(None)) => return Err(lost()),
+                Some(Ok(None)) => return Ok(Local::Damaged(lost())),
                 Some(Err(error)) => return Err(error),
                 Some(Ok(Some(bytes))) => bytes,
             }
@@ -1069,7 +1140,7 @@ impl Chunks {
             Bytes::from(bytes)
         };
         if lv::object_hash(&bytes).0 != request.object_hash {
-            return Err(corrupt(lv::Error::ObjectHashMismatch));
+            return Ok(Local::Damaged(corrupt(lv::Error::ObjectHashMismatch)));
         }
         state.bytes += bytes.len();
         state.nodes.insert(
@@ -1139,17 +1210,20 @@ impl Chunks {
                 Err(AttemptError::Blocked) => {
                     let mut absent = Vec::new();
                     let mut fetching = Vec::new();
+                    let mut any_refused = false;
                     for request in inputs.take_missing_chunks() {
                         match self.get(&request)? {
                             Local::Found(bytes) => {
                                 read(bytes.len());
                                 inputs.install_verified_chunk(request, bytes)
                             }
+                            Local::Absent if self.is_refused(&request) => any_refused = true,
                             Local::Absent => absent.push(request),
                             Local::Fetching => fetching.push(request),
+                            Local::Damaged(error) => return Err(error),
                         }
                     }
-                    if !absent.is_empty() || !fetching.is_empty() {
+                    if any_refused || !absent.is_empty() || !fetching.is_empty() {
                         let span =
                             span.filter(|_| !absent.is_empty())
                                 .and_then(|(value, range)| {
@@ -1162,7 +1236,9 @@ impl Chunks {
                         if let Some((root, span)) = span {
                             state.note_span(root, span);
                         }
-                        return Err(missing());
+                        // The other nodes are asked for all the same; the
+                        // read cannot complete without the refused ones.
+                        return Err(if any_refused { refused() } else { missing() });
                     }
                 }
             }
@@ -1248,7 +1324,7 @@ impl State {
 /// Store a prepared value's new nodes and cache them. A replica (`replica`)
 /// also marks them unpushed, for its next upload.
 pub(crate) fn store(
-    conn: &Connection,
+    conn: &Storage,
     chunks: &Chunks,
     prepared: &lv::PreparedLargeValue,
     replica: bool,
@@ -1263,7 +1339,7 @@ pub(crate) fn store(
 }
 
 /// Record `value`'s base descriptor on its root as built or validated here.
-fn record_base(conn: &Connection, value: &LargeValueRef) -> Result<(), Error> {
+fn record_base(conn: &Storage, value: &LargeValueRef) -> Result<(), Error> {
     let base = lv::tail_base_descriptor(value).map_err(corrupt)?;
     let encoded = lv::encode_large_value_ref(&base).map_err(corrupt)?;
     conn.prepare_cached(
@@ -1284,11 +1360,7 @@ fn record_base(conn: &Connection, value: &LargeValueRef) -> Result<(), Error> {
 /// its tree whose edits start with its tail, else one whose edits its tail
 /// extends (appended to), else a new epoch. An epoch only grows, so every
 /// cell already naming one keeps its value.
-pub(crate) fn intern(
-    conn: &Connection,
-    chunks: &Chunks,
-    value: &LargeValueRef,
-) -> Result<i64, Error> {
+pub(crate) fn intern(conn: &Storage, chunks: &Chunks, value: &LargeValueRef) -> Result<i64, Error> {
     let base = lv::tail_base_descriptor(value).map_err(corrupt)?;
     let encoded_base = lv::encode_large_value_ref(&base).map_err(corrupt)?;
     let n = value.edit_tail.len();
@@ -1342,14 +1414,14 @@ pub(crate) fn intern(
                 statement.execute(rusqlite::params![root, encoded_base, edits, n as i64])
             })
             .map_err(storage)?;
-            conn.last_insert_rowid()
+            conn.last_insert_rowid().map_err(storage)?
         }
     };
     chunks.put_epoch(id, &base, &edits, n);
     Ok(id * SPAN + n as i64)
 }
 
-pub(crate) fn mark_unpushed(conn: &Connection, hash: &lv::ContentHash) -> Result<(), Error> {
+pub(crate) fn mark_unpushed(conn: &Storage, hash: &lv::ContentHash) -> Result<(), Error> {
     conn.prepare_cached("INSERT OR IGNORE INTO _jazz_lv_unpushed (hash) VALUES (?1)")
         .and_then(|mut statement| statement.execute([hash.as_bytes().as_slice()]))
         .map_err(storage)?;
@@ -1361,7 +1433,7 @@ pub(crate) fn mark_unpushed(conn: &Connection, hash: &lv::ContentHash) -> Result
 /// a new leaf is queued for the chunk store, if there is one.
 /// The caller verified `chunk` against its hash (or produced it).
 fn store_chunk(
-    conn: &Connection,
+    conn: &Storage,
     chunks: &Chunks,
     cache: bool,
     chunk: &lv::StagedChunk,
@@ -1414,7 +1486,7 @@ fn store_chunk(
 /// [`expire_uploads`], every node staged under `id` is held from
 /// reclamation, so the row that will reference the finished value never
 /// races the reclaimer.
-pub(crate) fn begin_upload(conn: &Connection, id: &[u8; 32], now: i64) -> Result<(), Error> {
+pub(crate) fn begin_upload(conn: &Storage, id: &[u8; 32], now: i64) -> Result<(), Error> {
     conn.execute(
         "INSERT INTO _jazz_lv_upload (id, touched) VALUES (?1, ?2)",
         rusqlite::params![id.as_slice(), now],
@@ -1424,7 +1496,7 @@ pub(crate) fn begin_upload(conn: &Connection, id: &[u8; 32], now: i64) -> Result
 }
 
 /// Renew `id`'s lease; false once it was ended or expired.
-pub(crate) fn touch_upload(conn: &Connection, id: &[u8; 32], now: i64) -> Result<bool, Error> {
+pub(crate) fn touch_upload(conn: &Storage, id: &[u8; 32], now: i64) -> Result<bool, Error> {
     let renewed = conn
         .prepare_cached("UPDATE _jazz_lv_upload SET touched = ?2 WHERE id = ?1")
         .and_then(|mut statement| statement.execute(rusqlite::params![id.as_slice(), now]))
@@ -1437,14 +1509,14 @@ pub(crate) fn touch_upload(conn: &Connection, id: &[u8; 32], now: i64) -> Result
 /// from the file, so they are not cached; an in-memory store (whose cache
 /// is its only readable copy) or an open transaction caches them pinned.
 pub(crate) fn stage_upload(
-    conn: &Connection,
+    conn: &crate::storage::Storage,
     chunks: &Chunks,
     id: &[u8; 32],
     staged: &[lv::StagedChunk],
     replica: bool,
 ) -> Result<(), Error> {
     let cache = !conn.is_autocommit() || chunks.in_memory();
-    crate::values::in_savepoint(conn, "jazz_lv_upload", || {
+    conn.scope("jazz_lv_upload", |conn| {
         staged.iter().try_for_each(|chunk| {
             store_chunk(conn, chunks, cache, chunk)?;
             if replica {
@@ -1466,13 +1538,13 @@ pub(crate) fn stage_upload(
 }
 
 /// Record the finished value's tail-free base, so binding it trusts it.
-pub(crate) fn finish_upload(conn: &Connection, value: &LargeValueRef) -> Result<(), Error> {
+pub(crate) fn finish_upload(conn: &Storage, value: &LargeValueRef) -> Result<(), Error> {
     record_base(conn, value)
 }
 
 /// Drop `id`'s lease. Its nodes are queued for reclamation, which keeps
 /// whatever a committed row now references.
-pub(crate) fn end_upload(conn: &Connection, id: &[u8; 32]) -> Result<(), Error> {
+pub(crate) fn end_upload(conn: &Storage, id: &[u8; 32]) -> Result<(), Error> {
     conn.execute(
         "INSERT OR IGNORE INTO _jazz_lv_reclaim (root) \
          SELECT hash FROM _jazz_lv_upload_node WHERE id = ?1",
@@ -1490,7 +1562,7 @@ pub(crate) fn end_upload(conn: &Connection, id: &[u8; 32]) -> Result<(), Error> 
 }
 
 /// End every upload not touched since `before` (ms); returns how many.
-pub(crate) fn expire_uploads(conn: &Connection, before: i64) -> Result<usize, Error> {
+pub(crate) fn expire_uploads(conn: &Storage, before: i64) -> Result<usize, Error> {
     let ids: Vec<Vec<u8>> = conn
         .prepare("SELECT id FROM _jazz_lv_upload WHERE touched <= ?1")
         .and_then(|mut statement| {
@@ -1511,7 +1583,7 @@ pub(crate) fn expire_uploads(conn: &Connection, before: i64) -> Result<usize, Er
 
 /// One stored node's encoded bytes (empty once they moved to the chunk
 /// store).
-pub(crate) fn node(conn: &Connection, hash: &[u8; 32]) -> Result<Option<Vec<u8>>, Error> {
+pub(crate) fn node(conn: &Storage, hash: &[u8; 32]) -> Result<Option<Vec<u8>>, Error> {
     conn.prepare_cached("SELECT bytes FROM _jazz_lv_node WHERE hash = ?1")
         .and_then(|mut statement| {
             statement
@@ -1538,23 +1610,42 @@ fn authenticate(request: &ChunkRequest, bytes: &[u8]) -> Result<ChunkNode, Error
 /// store answers only asynchronously is demand for the next fetch, and
 /// fails the caller as missing.
 pub(crate) fn stored_bytes(
-    conn: &Connection,
+    conn: &Storage,
     chunks: &Chunks,
     request: &ChunkRequest,
 ) -> Result<Option<Vec<u8>>, Error> {
+    match held_bytes(conn, chunks, request)? {
+        Held::Bytes(bytes) => Ok(Some(bytes)),
+        Held::Absent => Ok(None),
+        Held::Damaged(error) => Err(error),
+    }
+}
+
+/// What [`held_bytes`] finds of a node.
+enum Held {
+    Bytes(Vec<u8>),
+    Absent,
+    /// See [`Local::Damaged`].
+    Damaged(Error),
+}
+
+/// [`stored_bytes`], with a node whose bytes are lost or do not match
+/// their hash told apart from a failure to read them.
+fn held_bytes(conn: &Storage, chunks: &Chunks, request: &ChunkRequest) -> Result<Held, Error> {
     let Some(bytes) = node(conn, &request.object_hash)? else {
-        return Ok(None);
+        return Ok(Held::Absent);
     };
     if !bytes.is_empty() {
-        return Ok(Some(bytes));
+        return Ok(Held::Bytes(bytes));
     }
     match chunks.get(request)? {
-        Local::Found(bytes) => Ok(Some(bytes.to_vec())),
-        Local::Absent => Ok(None),
+        Local::Found(bytes) => Ok(Held::Bytes(bytes.to_vec())),
+        Local::Absent => Ok(Held::Absent),
         Local::Fetching => {
             chunks.want(request);
             Err(missing())
         }
+        Local::Damaged(error) => Ok(Held::Damaged(error)),
     }
 }
 
@@ -1564,7 +1655,7 @@ pub(crate) fn stored_bytes(
 /// node held by the upstream for others proves nothing, so nothing else
 /// is skipped. `Err` lists the nodes this replica must fetch first.
 pub(crate) fn to_push(
-    conn: &Connection,
+    conn: &Storage,
     chunks: &Chunks,
     value: &LargeValueRef,
     named: &BTreeSet<[u8; 32]>,
@@ -1608,7 +1699,7 @@ pub(crate) fn to_push(
 
 /// The upstream accepted (or finally refused) the commit these nodes were
 /// pushed for.
-pub(crate) fn mark_pushed(conn: &Connection, hashes: &[lv::ContentHash]) -> Result<(), Error> {
+pub(crate) fn mark_pushed(conn: &Storage, hashes: &[lv::ContentHash]) -> Result<(), Error> {
     let mut statement = conn
         .prepare_cached("DELETE FROM _jazz_lv_unpushed WHERE hash = ?1")
         .map_err(storage)?;
@@ -1623,7 +1714,7 @@ pub(crate) fn mark_pushed(conn: &Connection, hashes: &[lv::ContentHash]) -> Resu
 /// Store a node fetched from upstream, after authenticating it against the
 /// hash this replica asked for.
 pub(crate) fn install_fetched(
-    conn: &Connection,
+    conn: &Storage,
     chunks: &Chunks,
     request: &ChunkRequest,
     bytes: Vec<u8>,
@@ -1645,7 +1736,7 @@ pub(crate) fn install_fetched(
 /// Store a node a session (`author`) pushed ahead of its commit, held by
 /// the session's receipt until `expires`.
 pub(crate) fn receive_pushed(
-    conn: &Connection,
+    conn: &Storage,
     chunks: &Chunks,
     request: &ChunkRequest,
     bytes: Vec<u8>,
@@ -1673,7 +1764,7 @@ pub(crate) fn receive_pushed(
 /// nodes that still hold its receipt, so an append settles just the nodes
 /// it pushed.
 pub(crate) fn settle_receipts(
-    conn: &Connection,
+    conn: &Storage,
     root: &lv::ContentHash,
     author: &[u8],
 ) -> Result<(), Error> {
@@ -1694,7 +1785,7 @@ pub(crate) fn settle_receipts(
 /// Drop receipts that expired by `now`; their nodes are reclaimed unless a
 /// commit referenced them meanwhile. Servers run this every tick: a cached
 /// probe, and the writes only once a receipt expired.
-pub(crate) fn expire_receipts(conn: &Connection, now: i64) -> Result<(), Error> {
+pub(crate) fn expire_receipts(conn: &Storage, now: i64) -> Result<(), Error> {
     let expired: bool = conn
         .cached_row(
             "SELECT EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE expires <= ?1)",
@@ -1717,7 +1808,7 @@ pub(crate) fn expire_receipts(conn: &Connection, now: i64) -> Result<(), Error> 
 }
 
 struct Stored<'a> {
-    conn: &'a Connection,
+    conn: &'a Storage,
     chunks: &'a Chunks,
     /// A node is only in the chunk store, which answers asynchronously.
     fetching: std::cell::Cell<bool>,
@@ -1748,11 +1839,7 @@ impl lv::chunks::ChunkProvider for Stored<'_> {
 /// (structure, metrics, logical hash and content), and its edit tail must
 /// replay against it. A root validated once is trusted afterwards, so an
 /// append re-checks only its tail.
-pub(crate) fn admit(
-    conn: &Connection,
-    chunks: &Chunks,
-    value: &LargeValueRef,
-) -> Result<(), Error> {
+pub(crate) fn admit(conn: &Storage, chunks: &Chunks, value: &LargeValueRef) -> Result<(), Error> {
     let rejected = |what: String| Error::new(ErrorCode::WriteRejected, what);
     let base = lv::tail_base_descriptor(value).map_err(|e| rejected(e.to_string()))?;
     let encoded = lv::encode_large_value_ref(&base).map_err(corrupt)?;
@@ -1785,7 +1872,14 @@ pub(crate) fn admit(
             visited.map_err(|e| rejected(format!("large value: {e}")))?;
             let mut validator =
                 lv::LogicalValueValidator::new(&base).map_err(|e| rejected(e.to_string()))?;
-            let mut offset = 0;
+            // A bytes value has no content rule beyond its tree, which the
+            // walk above proved node by node (object hash, logical hash,
+            // metrics); reading it back again would feed nothing.
+            let mut offset = if validator.reads_bytes() {
+                0
+            } else {
+                base.byte_length
+            };
             while offset < base.byte_length {
                 let end = (offset + WINDOW).min(base.byte_length);
                 let window = chunks.run_reading(
@@ -1813,7 +1907,7 @@ pub(crate) fn admit(
 }
 
 /// Whether the root `value` names is stored here.
-pub(crate) fn root_is_local(conn: &Connection, value: &LargeValueRef) -> Result<bool, Error> {
+pub(crate) fn root_is_local(conn: &Storage, value: &LargeValueRef) -> Result<bool, Error> {
     conn.cached_row(
         "SELECT EXISTS (SELECT 1 FROM _jazz_lv_node WHERE hash = ?1)",
         [value.root.object_hash.as_bytes().as_slice()],
@@ -1844,7 +1938,7 @@ pub(crate) struct Possession {
 /// its children covered in turn. A node held here for anyone else proves
 /// nothing, so naming a hash never reads another row's content.
 pub(crate) fn possessed(
-    conn: &Connection,
+    conn: &Storage,
     chunks: &Chunks,
     value: &LargeValueRef,
     possession: &Possession,
@@ -1903,7 +1997,7 @@ pub(crate) struct Via {
 
 /// Record that `root` arrived in `via`, the version later pulls of its
 /// nodes cite.
-pub(crate) fn record_via(conn: &Connection, root: &[u8; 32], via: &Via) -> Result<(), Error> {
+pub(crate) fn record_via(conn: &Storage, root: &[u8; 32], via: &Via) -> Result<(), Error> {
     conn.prepare_cached(
         "INSERT OR REPLACE INTO _jazz_lv_via (root, tbl, id, key, t) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1928,7 +2022,7 @@ const UPWARD_WALK: usize = 4096;
 /// The received root `hash` hangs under, with the version that names it:
 /// walks up the stored edges (a replica learns a node's hash only from a
 /// stored parent or a descriptor).
-pub(crate) fn via_of(conn: &Connection, hash: &[u8; 32]) -> Result<Option<([u8; 32], Via)>, Error> {
+pub(crate) fn via_of(conn: &Storage, hash: &[u8; 32]) -> Result<Option<([u8; 32], Via)>, Error> {
     let mut via = conn
         .prepare_cached("SELECT tbl, id, key, t FROM _jazz_lv_via WHERE root = ?1")
         .map_err(storage)?;
@@ -1982,7 +2076,7 @@ pub(crate) fn via_of(conn: &Connection, hash: &[u8; 32]) -> Result<Option<([u8; 
 /// or down from the root once the walk up spreads too far (a node many
 /// trees share). `down` caches the walk down.
 fn under(
-    conn: &Connection,
+    conn: &Storage,
     root: &[u8; 32],
     hash: &[u8; 32],
     down: &mut Option<std::collections::HashSet<[u8; 32]>>,
@@ -2022,13 +2116,16 @@ fn under(
 }
 
 /// What a pull is answered with: the nodes found, the wanted nodes not
-/// under the cited tree, the wanted nodes under it this store lacks, and
-/// the wanted nodes left for a later answer once `budget` ran out.
+/// under the cited tree, the wanted nodes under it this store lacks, the
+/// wanted nodes left for a later answer once `budget` ran out, and the
+/// nodes it would send whose bytes this store has lost or holds damaged
+/// (see [`Local::Damaged`]), with why.
 pub(crate) type Pulled = (
     Vec<([u8; 32], Vec<u8>)>,
     Vec<[u8; 32]>,
     Vec<[u8; 32]>,
     Vec<[u8; 32]>,
+    Vec<([u8; 32], Error)>,
 );
 
 /// Answer a pull of `root`'s tree (a version the reader may read): the
@@ -2038,9 +2135,10 @@ pub(crate) type Pulled = (
 /// in this answer) are not sent again; at least one wanted node is
 /// answered whatever the budget, so a pull always progresses. A node the
 /// chunk store answers only asynchronously fails the pull as missing; it
-/// is answered again once fetched.
+/// is answered again once fetched. A node whose bytes are lost or damaged
+/// is not sent, and neither is what lies beneath it.
 pub(crate) fn pulled(
-    conn: &Connection,
+    conn: &Storage,
     chunks: &Chunks,
     root: &[u8; 32],
     wanted: &[[u8; 32]],
@@ -2050,6 +2148,7 @@ pub(crate) fn pulled(
 ) -> Result<Pulled, Error> {
     let wanted_set: BTreeSet<[u8; 32]> = wanted.iter().copied().collect();
     let mut out = Vec::new();
+    let mut damaged = Vec::new();
     let mut size = 0;
     if let Some(span) = span.filter(|span| !span.is_empty()) {
         // Walk down through the bytes the read needs, sending what lies
@@ -2063,19 +2162,32 @@ pub(crate) fn pulled(
                 continue;
             };
             let bytes = if send {
-                let Some(bytes) = stored_bytes(conn, chunks, &ChunkRequest { object_hash: hash })?
-                else {
-                    continue;
-                };
-                bytes
+                match held_bytes(conn, chunks, &ChunkRequest { object_hash: hash })? {
+                    Held::Bytes(bytes) => bytes,
+                    Held::Absent => continue,
+                    Held::Damaged(error) => {
+                        damaged.push((hash, error));
+                        continue;
+                    }
+                }
             } else {
                 raw
             };
             // An offloaded leaf's bytes are elsewhere: it has no children.
-            if !bytes.is_empty()
-                && let ChunkNode::Branch { children, .. } =
-                    lv::decode_node_untyped_verified(&bytes).map_err(corrupt)?
-            {
+            let node = if bytes.is_empty() {
+                None
+            } else {
+                match lv::decode_node_untyped_verified(&bytes) {
+                    Ok(node) => Some(node),
+                    Err(error) => {
+                        if send {
+                            damaged.push((hash, corrupt(error)));
+                        }
+                        continue;
+                    }
+                }
+            };
+            if let Some(ChunkNode::Branch { children, .. }) = node {
                 let mut at = offset;
                 let mut next = Vec::new();
                 for child in children {
@@ -2110,21 +2222,25 @@ pub(crate) fn pulled(
             foreign.push(*hash);
             continue;
         }
-        match stored_bytes(conn, chunks, &ChunkRequest { object_hash: *hash })? {
-            Some(bytes) => {
+        if damaged.iter().any(|(node, _)| node == hash) {
+            continue;
+        }
+        match held_bytes(conn, chunks, &ChunkRequest { object_hash: *hash })? {
+            Held::Bytes(bytes) => {
                 sent.insert(*hash);
                 size += bytes.len();
                 out.push((*hash, bytes));
             }
-            None => absent.push(*hash),
+            Held::Absent => absent.push(*hash),
+            Held::Damaged(error) => damaged.push((*hash, error)),
         }
     }
-    Ok((out, foreign, absent, rest))
+    Ok((out, foreign, absent, rest, damaged))
 }
 
 /// Whether a parent this store holds names `hash`: a node a range pull
 /// sent beneath one this replica asked for.
-pub(crate) fn has_parent(conn: &Connection, hash: &[u8; 32]) -> Result<bool, Error> {
+pub(crate) fn has_parent(conn: &Storage, hash: &[u8; 32]) -> Result<bool, Error> {
     conn.cached_row(
         "SELECT EXISTS (SELECT 1 FROM _jazz_lv_edge WHERE child = ?1)",
         [hash.as_slice()],
@@ -2135,7 +2251,7 @@ pub(crate) fn has_parent(conn: &Connection, hash: &[u8; 32]) -> Result<bool, Err
 
 /// Every node under `roots` this store knows of, through its edges.
 fn named_nodes(
-    conn: &Connection,
+    conn: &Storage,
     roots: &BTreeSet<[u8; 32]>,
 ) -> Result<std::collections::HashSet<[u8; 32]>, Error> {
     let mut out = std::collections::HashSet::new();
@@ -2161,7 +2277,7 @@ fn named_nodes(
 }
 
 /// Whether nodes wait in the reclaim queue.
-pub(crate) fn reclaim_queued(conn: &Connection) -> Result<bool, Error> {
+pub(crate) fn reclaim_queued(conn: &Storage) -> Result<bool, Error> {
     conn.cached_row("SELECT EXISTS (SELECT 1 FROM _jazz_lv_reclaim)", [], |r| {
         r.get(0)
     })
@@ -2172,7 +2288,7 @@ pub(crate) fn reclaim_queued(conn: &Connection) -> Result<bool, Error> {
 /// epoch references it and no parent branch holds it; deleting a branch
 /// releases its children, which are reclaimed in turn. Returns the number
 /// of nodes deleted.
-pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Result<usize, Error> {
+pub(crate) fn reclaim(conn: &Storage, chunks: &Chunks, budget: usize) -> Result<usize, Error> {
     // An epoch interned for a write that then stored another cell is named
     // by none: free it, releasing its root.
     conn.prepare_cached("DELETE FROM _jazz_lv_epoch WHERE refs <= 0")
@@ -2284,8 +2400,8 @@ mod tests {
             .collect()
     }
 
-    fn chunks() -> (Connection, Arc<Chunks>) {
-        let conn = Connection::open_in_memory().unwrap();
+    fn chunks() -> (crate::storage::Storage, Arc<Chunks>) {
+        let conn = Storage::open_in_memory().unwrap();
         let chunks = Chunks::install(None, None, false).unwrap();
         conn.execute_batch(DDL).unwrap();
         (conn, chunks)
@@ -2327,7 +2443,7 @@ mod tests {
         );
     }
 
-    fn chunked(conn: &Connection, chunks: &Chunks, kind: LargeValueKind, logical: &[u8]) -> Sql {
+    fn chunked(conn: &Storage, chunks: &Chunks, kind: LargeValueKind, logical: &[u8]) -> Sql {
         let prepared = lv::prepare(kind, logical).unwrap();
         store(conn, chunks, &prepared, false).unwrap();
         Sql::Integer(intern(conn, chunks, &prepared.value_ref).unwrap())
@@ -2335,7 +2451,7 @@ mod tests {
 
     /// Every physical form of a value: inline, chunked, and chunked as a
     /// shorter base plus an appended edit tail.
-    fn forms(conn: &Connection, chunks: &Chunks, kind: LargeValueKind, logical: &[u8]) -> Vec<Sql> {
+    fn forms(conn: &Storage, chunks: &Chunks, kind: LargeValueKind, logical: &[u8]) -> Vec<Sql> {
         let mut forms = vec![inline_cell(kind, logical.to_vec())];
         if !logical.is_empty() {
             forms.push(chunked(conn, chunks, kind, logical));
@@ -2809,7 +2925,7 @@ mod tests {
     struct Offloading {
         dir: std::path::PathBuf,
         path: std::path::PathBuf,
-        conn: Connection,
+        conn: crate::storage::Storage,
         chunks: Arc<Chunks>,
         store: Arc<dyn ChunkStore>,
     }
@@ -2826,7 +2942,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("store.sqlite");
-        let conn = Connection::open(&path).unwrap();
+        let conn = Storage::open(&path).unwrap();
         let store: Arc<dyn ChunkStore> =
             Arc::new(crate::chunk_store::FileChunkStore::new(dir.join("chunks")).unwrap());
         let chunks = Chunks::install(Some((&path, None)), Some(store.clone()), false).unwrap();

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createPolicyTestApp, type PolicyTestApp, type TestDb } from "jazz-tools/testing";
-import { app } from "../schema.js";
-import permissions from "../permissions.js";
+import { app } from "../jazz.generated.js";
+import permissions from "../jazz.permissions.json" with { type: "json" };
 
 let testApp: PolicyTestApp | undefined;
 afterEach(async () => await testApp?.shutdown());
@@ -33,7 +33,7 @@ describe("BigLabel roles on the Jazz server", () => {
         user_id: actor,
         account_id: accounts[actor],
         claims: {},
-        authMode: "local-first",
+        authMode: "device-account",
       });
     const admin = as("admin");
     const editor = as("editor");

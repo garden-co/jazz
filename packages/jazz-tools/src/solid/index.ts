@@ -23,10 +23,15 @@ export { useSyncStatus } from "./use-sync-status.js";
 export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 export * from "../accounts/exports.js";
 
-export { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
+export {
+  createJazzClient,
+  startJazzClient,
+  type JazzClientConfig,
+} from "../session/create-jazz-session.js";
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
 } from "../session/jazz-session.js";

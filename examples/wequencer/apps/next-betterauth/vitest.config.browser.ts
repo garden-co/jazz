@@ -6,8 +6,10 @@ import wasm from "vite-plugin-wasm";
 
 import {
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   jazzServerTransportControlCommands,
   jazzAppFront,
+  jazzTestDeployment,
   jazzAppRequest,
   jazzAppUser,
   stopJazzServerByUrl,
@@ -26,11 +28,10 @@ export default defineConfig({
   define: {
     __JAZZ_EXAMPLE_TOPOLOGY_SEED__: JSON.stringify(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? "61"),
   },
-  plugins: [wasm(), topLevelAwait(), react()],
+  plugins: [jazzBrowserServerLifecycle, wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
     include: ["tests/browser/**/*.test.ts"],
-    globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
       provider: playwright(),
@@ -41,6 +42,8 @@ export default defineConfig({
         ...jazzServerTransportControlCommands(),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzTestDeployment: async (_context, bound, permissions) =>
+          jazzTestDeployment(bound, permissions),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),

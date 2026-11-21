@@ -4,7 +4,8 @@ import {
 } from "../runtime/graceful-shutdown-error.js";
 import { createRoot, createSignal } from "solid-js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbConfig } from "../runtime/db.js";
+import type { AccountDbConfig } from "../accounts/context.js";
+import { accountConfig } from "../../tests/shared/account-config.js";
 
 type Deferred<T> = {
   promise: Promise<T>;
@@ -31,7 +32,7 @@ import {
   createSolidJazzClientInternal,
 } from "./create-solid-jazz-client-internal.js";
 
-function makeRawClient(id: string, shutdown = vi.fn(async () => undefined)) {
+function makeRawClient(id: string, shutdown = vi.fn(async (): Promise<void> => {})) {
   return {
     id,
     db: { clientId: id } as any,
@@ -59,7 +60,7 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
       createRoot((stop) => {
         dispose = stop;
         result = createSolidJazzClientInternal(
-          () => ({ appId: "graceful" }),
+          () => accountConfig("graceful"),
           async () => raw,
         );
       });
@@ -85,7 +86,7 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
       createRoot((stop) => {
         dispose = stop;
         result = createSolidJazzClientInternal(
-          () => ({ appId: "terminal" }),
+          () => accountConfig("terminal"),
           async () => raw,
         );
       });
@@ -98,21 +99,21 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
   });
 
   it("SD-LIFE-01: on rapid reconfig, discards stale client and keeps newest run active", async () => {
-    const pendingByAppId = new Map<string, Deferred<any>>();
+    const pendingByAppId = new Map<AccountDbConfig["appId"], Deferred<any>>();
 
-    defaultClientFactory.mockImplementation((config: DbConfig) => {
+    defaultClientFactory.mockImplementation((config: AccountDbConfig) => {
       const entry = deferred<any>();
       pendingByAppId.set(config.appId, entry);
       return entry.promise;
     });
 
-    let setConfig!: (next: DbConfig) => void;
+    let setConfig!: (next: AccountDbConfig) => void;
     let dispose!: () => void;
     let result!: ReturnType<typeof createSolidJazzClientInternal>;
 
     createRoot((rootDispose) => {
       dispose = rootDispose;
-      const [config, _setConfig] = createSignal<DbConfig>({ appId: "A" });
+      const [config, _setConfig] = createSignal<AccountDbConfig>(accountConfig("A"));
       setConfig = _setConfig;
       result = createSolidJazzClientInternal(config, defaultClientFactory);
       return undefined;
@@ -121,11 +122,9 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
     await flushMicrotasks();
 
     expect(defaultClientFactory).toHaveBeenCalledTimes(1);
-    expect(defaultClientFactory).toHaveBeenNthCalledWith(1, {
-      appId: "A",
-    });
+    expect(defaultClientFactory).toHaveBeenNthCalledWith(1, accountConfig("A"));
 
-    setConfig({ appId: "B" });
+    setConfig(accountConfig("B"));
     await flushMicrotasks();
 
     expect(defaultClientFactory).toHaveBeenCalledTimes(1);
@@ -145,9 +144,7 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
     staleShutdown.resolve();
     await flushMicrotasks();
     expect(defaultClientFactory).toHaveBeenCalledTimes(2);
-    expect(defaultClientFactory).toHaveBeenNthCalledWith(2, {
-      appId: "B",
-    });
+    expect(defaultClientFactory).toHaveBeenNthCalledWith(2, accountConfig("B"));
 
     const rawB = makeRawClient("B");
     pendingByAppId.get("B")!.resolve(rawB);
@@ -172,7 +169,7 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
 
     createRoot((rootDispose) => {
       dispose = rootDispose;
-      createSolidJazzClientInternal(() => ({ appId: "A" }), defaultClientFactory);
+      createSolidJazzClientInternal(() => accountConfig("A"), defaultClientFactory);
       return undefined;
     });
 
@@ -189,21 +186,21 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
   });
 
   it("SD-LIFE-03: during reconfig, hides previous client until next client resolves", async () => {
-    const pendingByAppId = new Map<string, Deferred<any>>();
+    const pendingByAppId = new Map<AccountDbConfig["appId"], Deferred<any>>();
 
-    defaultClientFactory.mockImplementation((config: DbConfig) => {
+    defaultClientFactory.mockImplementation((config: AccountDbConfig) => {
       const entry = deferred<any>();
       pendingByAppId.set(config.appId, entry);
       return entry.promise;
     });
 
-    let setConfig!: (next: DbConfig) => void;
+    let setConfig!: (next: AccountDbConfig) => void;
     let dispose!: () => void;
     let result!: ReturnType<typeof createSolidJazzClientInternal>;
 
     createRoot((rootDispose) => {
       dispose = rootDispose;
-      const [config, _setConfig] = createSignal<DbConfig>({ appId: "A" });
+      const [config, _setConfig] = createSignal<AccountDbConfig>(accountConfig("A"));
       setConfig = _setConfig;
       result = createSolidJazzClientInternal(config, defaultClientFactory);
       return undefined;
@@ -218,7 +215,7 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
     expect(result.client).toBeDefined();
     expect(result.client).toMatchObject({ id: "A" });
 
-    setConfig({ appId: "B" });
+    setConfig(accountConfig("B"));
     await flushMicrotasks();
 
     // During B pending, current client should be unavailable (cutover/loading).
@@ -243,14 +240,14 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
 
     createRoot((rootDispose) => {
       dispose = rootDispose;
-      result = createSolidJazzClientInternal(() => ({ appId: "A" }), clientFactory);
+      result = createSolidJazzClientInternal(() => accountConfig("A"), clientFactory);
       return undefined;
     });
 
     await flushMicrotasks();
 
     expect(clientFactory).toHaveBeenCalledTimes(1);
-    expect(clientFactory).toHaveBeenCalledWith({ appId: "A" });
+    expect(clientFactory).toHaveBeenCalledWith(accountConfig("A"));
     expect(result.client).toBeDefined();
     expect(result.client).toMatchObject({ id: "factory" });
 
@@ -259,21 +256,21 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
   });
 
   it("SD-LIFE-05: preserves client for equivalent config and recreates only on semantic config change", async () => {
-    const pendingByAppId = new Map<string, Deferred<any>>();
+    const pendingByAppId = new Map<AccountDbConfig["appId"], Deferred<any>>();
 
-    defaultClientFactory.mockImplementation((config: DbConfig) => {
+    defaultClientFactory.mockImplementation((config: AccountDbConfig) => {
       const entry = deferred<any>();
       pendingByAppId.set(config.appId, entry);
       return entry.promise;
     });
 
-    let setConfig!: (next: DbConfig) => void;
+    let setConfig!: (next: AccountDbConfig) => void;
     let dispose!: () => void;
     let result!: ReturnType<typeof createSolidJazzClientInternal>;
 
     createRoot((rootDispose) => {
       dispose = rootDispose;
-      const [config, _setConfig] = createSignal<DbConfig>({ appId: "A" });
+      const [config, _setConfig] = createSignal<AccountDbConfig>(accountConfig("A"));
       setConfig = _setConfig;
       result = createSolidJazzClientInternal(config, defaultClientFactory);
       return undefined;
@@ -289,14 +286,14 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
     expect(result.client).toMatchObject({ id: "A" });
 
     // Equivalent config object must not recreate the client.
-    setConfig({ appId: "A" });
+    setConfig(accountConfig("A"));
     await flushMicrotasks();
     expect(defaultClientFactory).toHaveBeenCalledTimes(1);
     expect(rawA.shutdown).toHaveBeenCalledTimes(0);
     expect(result.client).toMatchObject({ id: "A" });
 
     // Semantically different config should recreate the client.
-    setConfig({ appId: "B" });
+    setConfig(accountConfig("B"));
     await flushMicrotasks();
     expect(defaultClientFactory).toHaveBeenCalledTimes(2);
     expect(rawA.shutdown).toHaveBeenCalledTimes(1);
@@ -313,20 +310,20 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
   });
 
   it("SD-LIFE-06: exposes shutdown failure to the current replacement and lets a later config recover", async () => {
-    const pendingByAppId = new Map<string, Deferred<any>>();
-    defaultClientFactory.mockImplementation((config: DbConfig) => {
+    const pendingByAppId = new Map<AccountDbConfig["appId"], Deferred<any>>();
+    defaultClientFactory.mockImplementation((config: AccountDbConfig) => {
       const entry = deferred<any>();
       pendingByAppId.set(config.appId, entry);
       return entry.promise;
     });
 
-    let setConfig!: (next: DbConfig) => void;
+    let setConfig!: (next: AccountDbConfig) => void;
     let dispose!: () => void;
     let result!: ReturnType<typeof createSolidJazzClientInternal>;
 
     createRoot((rootDispose) => {
       dispose = rootDispose;
-      const [config, _setConfig] = createSignal<DbConfig>({ appId: "A" });
+      const [config, _setConfig] = createSignal<AccountDbConfig>(accountConfig("A"));
       setConfig = _setConfig;
       result = createSolidJazzClientInternal(config, defaultClientFactory);
       return undefined;
@@ -341,7 +338,7 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
     pendingByAppId.get("A")!.resolve(rawA);
     await flushMicrotasks();
 
-    setConfig({ appId: "B" });
+    setConfig(accountConfig("B"));
     await flushMicrotasks();
     expect(defaultClientFactory).toHaveBeenCalledTimes(1);
 
@@ -352,10 +349,10 @@ describe("solid/createJazzClientInternal solid-js lifecycle", () => {
     expect(result.error).toBe(shutdownError);
     expect(defaultClientFactory).toHaveBeenCalledTimes(1);
 
-    setConfig({ appId: "C" });
+    setConfig(accountConfig("C"));
     await flushMicrotasks();
     expect(defaultClientFactory).toHaveBeenCalledTimes(2);
-    expect(defaultClientFactory).toHaveBeenLastCalledWith({ appId: "C" });
+    expect(defaultClientFactory).toHaveBeenLastCalledWith(accountConfig("C"));
 
     const rawC = makeRawClient("C");
     pendingByAppId.get("C")!.resolve(rawC);

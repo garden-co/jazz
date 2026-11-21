@@ -109,7 +109,10 @@ export async function resolveAccountRuntimeConfig(config: AccountDbConfig): Prom
   if (account.identity.issuer === "urn:jazz:local-first") {
     setTrustedReservedSession(
       resolved,
-      internalSessionFromVerifiedReservedJwtPayload(parseJwtPayload(jwtToken) ?? {}, "local-first"),
+      internalSessionFromVerifiedReservedJwtPayload(
+        parseJwtPayload(jwtToken) ?? {},
+        "device-account",
+      ),
     );
   }
   admitAccountConfig(resolved, account);

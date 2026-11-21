@@ -4,7 +4,7 @@ import type {
   RemoteBrowserDbWaitForTitleInput,
 } from "./remote-db-harness.js";
 
-declare module "vitest/internal/browser" {
+declare module "vitest/browser" {
   interface BrowserCommands {
     createRemoteBrowserDb: (input: RemoteBrowserDbCreateInput) => Promise<void>;
     waitForRemoteBrowserDbTitle: (

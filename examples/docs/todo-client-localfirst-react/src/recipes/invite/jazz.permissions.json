@@ -1,0 +1,8 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  "$generated": {
+    "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
+    "sha256": "601669899e69c4bd733e9abd8685b73a8b1346185972835fcc1317f13a18b4cb"
+  },
+  "tables": {}
+}

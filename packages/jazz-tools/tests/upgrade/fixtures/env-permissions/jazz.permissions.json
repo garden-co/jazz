@@ -1,0 +1,10 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "messages": {
+      "read": { "anyOf": ["room = 'lobby'", "$createdBy = session.user"] },
+      "insert": "room = 'lobby'"
+    }
+  }
+}

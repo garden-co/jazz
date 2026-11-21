@@ -1,62 +1,49 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { translateQuery } from "./query-adapter.js";
 
-const app = s.defineApp(
-  {
-    users: s.table(
-      {
-        name: s.string(),
+const app = testApp({
+  tables: {
+    users: {
+      columns: { name: "string" },
+      relations: { todosViaOwner: { reverse: "todos", relation: "owner" } },
+    },
+    projects: {
+      columns: { name: "string" },
+      relations: { todosViaProject: { reverse: "todos", relation: "project" } },
+    },
+    todos: {
+      columns: {
+        title: "string",
+        body: "string",
+        rank: "bigint",
+        attachment: "bytes",
+        metadata: { json: true },
+        done: "boolean",
+        projectId: "uuid",
+        ownerId: "uuid?",
       },
-      { todosViaOwner: s.reverse("todos", "owner") },
-    ),
-    projects: s.table(
-      {
-        name: s.string(),
+      relations: {
+        project: { rel: "projects", column: "projectId" },
+        owner: { rel: "users", column: "ownerId" },
       },
-      { todosViaProject: s.reverse("todos", "project") },
-    ),
-    todos: s.table(
-      {
-        title: s.string(),
-        body: s.string(),
-        rank: s.bigint(),
-        attachment: s.bytes(),
-        metadata: s.json(),
-        done: s.boolean(),
-        projectId: s.uuid(),
-        ownerId: s.uuid().optional(),
-      },
-      { project: s.rel("projects", "projectId"), owner: s.rel("users", "ownerId") },
-    ),
-    events: s.table(
-      {
-        event: s.enum({
-          message: { text: s.string(), level: s.int() },
-          closed: { code: s.int() },
-        }),
-      },
-      {},
-    ),
+    },
   },
-  { migrations: "none" },
-);
-const scalarApp = s.defineApp(
-  {
-    filters: s.table(
-      {
-        timestamp: s.timestamp(),
-        bytes: s.bytes(),
-        nullableBytes: s.bytes().optional(),
-        metadata: s.json(),
-        tags: s.array(s.string()),
-        nullableTags: s.array(s.string()).optional(),
+});
+const scalarApp = testApp({
+  tables: {
+    filters: {
+      columns: {
+        timestamp: "timestamp",
+        bytes: "bytes",
+        nullableBytes: "bytes?",
+        metadata: { json: true },
+        tags: { array: "string" },
+        nullableTags: { array: "string", optional: true },
       },
-      {},
-    ),
+    },
   },
-  { migrations: "none" },
-);
+});
 
 function translatedConditions(query: { _build(): string }) {
   return JSON.parse(translateQuery(query._build(), scalarApp.wasmSchema)).conditions;
@@ -134,54 +121,22 @@ describe("translateQuery", () => {
     expect(relationJson).toContain('"-9007199254740993"');
   });
 
-  it("derives bounded, typed-distinct union labels", () => {
-    const first = app.todos.where({
-      metadata: { eq: new Date("2026-01-01T00:00:00.000Z") },
-    } as any);
-    const second = app.todos.where({
-      metadata: { eq: new Date("2026-01-02T00:00:00.000Z") },
-    } as any);
-    const bigint = app.todos.where({ metadata: { eq: 9_007_199_254_740_993n } } as any);
-    const bytes = app.todos.where({ attachment: { eq: new Uint8Array([1, 2, 3]) } } as any);
-    const wide = app.todos.where({ metadata: { eq: "x".repeat(10_000) } } as any);
-    const union = app.union([first, second, bigint, bytes, wide]) as any;
-    const labels = union._unionVal.union.inputs.map((arm: any) => arm.label);
-    expect(labels).toHaveLength(5);
-    expect(new Set(labels).size).toBe(5);
-    expect(
-      labels.every((label: string) => new TextEncoder().encode(label).byteLength <= 4096),
-    ).toBe(true);
-
-    const reordered = app.union([wide, bytes, bigint, second, first]) as any;
-    expect(new Set(reordered._unionVal.union.inputs.map((arm: any) => arm.label))).toEqual(
-      new Set(labels),
-    );
-    const inserted = app.union([first, app.todos.where({ title: "inserted" }), second]) as any;
-    expect(inserted._unionVal.union.inputs.map((arm: any) => arm.label)).toEqual([
-      labels[0],
-      expect.any(String),
-      labels[1],
-    ]);
-
-    const named = app.union({ duplicate: first, second });
-    expect((named as any)._unionVal.union.inputs.map((arm: any) => arm.label)).toEqual([
+  it("leaves unnamed union arms for Rust to label and keeps named ones", () => {
+    const first = app.todos.where({ title: "first" });
+    const second = app.todos.where({ title: "second" });
+    const unnamed = app.union([first, second, first]) as any;
+    expect(unnamed._unionVal.union.inputs.map((arm: any) => arm.label)).toEqual(["", "", ""]);
+    const named = app.union({ duplicate: first, second }) as any;
+    expect(named._unionVal.union.inputs.map((arm: any) => arm.label)).toEqual([
       "duplicate",
       "second",
     ]);
-    expect(() => app.union({ ["é".repeat(2049)]: first })).toThrow(/1..=4096 bytes/);
-
-    const nestedForward = app.union({
-      outer: app.union({ z: first, ä: second }),
-    }) as any;
-    const nestedReverse = app.union({
-      outer: app.union({ ä: second, z: first }),
-    }) as any;
-    expect(nestedForward._unionVal.union.inputs[0].input.union.inputs).not.toEqual(
-      nestedReverse._unionVal.union.inputs[0].input.union.inputs,
-    );
-    expect(nestedForward._unionVal.union.inputs[0].label).toEqual(
-      nestedReverse._unionVal.union.inputs[0].label,
-    );
+    const translated = JSON.parse(translateQuery(unnamed._build(), app.wasmSchema));
+    expect(translated.relation_ir.Union.inputs.map((arm: { label: string }) => arm.label)).toEqual([
+      "",
+      "",
+      "",
+    ]);
   });
 
   it("rejects public union modifiers that retained relation lowering cannot compose", () => {
@@ -221,80 +176,71 @@ describe("translateQuery", () => {
 
   it("rejects a forward relation that would shadow a stored output column", () => {
     expect(() =>
-      s.defineApp(
-        {
-          users: s.table({ name: s.string() }, {
-            todosViaOwner: s.reverse("todos", "owner"),
-          } as never),
-          todos: s.table(
-            {
-              owner: s.string(),
-              ownerId: s.uuid(),
-            },
-            { owner: s.rel("users", "ownerId") } as never,
-          ),
+      testApp({
+        tables: {
+          users: {
+            columns: { name: "string" },
+            relations: { todosViaOwner: { reverse: "todos", relation: "owner" } },
+          },
+          todos: {
+            columns: { owner: "string", ownerId: "uuid" },
+            relations: { owner: { rel: "users", column: "ownerId" } },
+          },
         },
-        { migrations: "none" },
-      ),
-    ).toThrow(/Relationship "owner" collides with a column/);
+      }),
+    ).toThrow("tables.todos.relations.owner: table todos already has a column owner");
   });
 
   it("rejects a generated relation that would shadow the implicit public id", () => {
     expect(() =>
-      s.defineApp(
-        {
-          users: s.table({ name: s.string() }, { todosViaId: s.reverse("todos", "id") }),
-          todos: s.table(
-            {
-              idId: s.uuid(),
-            },
-            { id: s.rel("users", "idId") } as never,
-          ),
+      testApp({
+        tables: {
+          users: {
+            columns: { name: "string" },
+            relations: { todosViaId: { reverse: "todos", relation: "id" } },
+          },
+          todos: {
+            columns: { idId: "uuid" },
+            relations: { id: { rel: "users", column: "idId" } },
+          },
         },
-        { migrations: "none" },
-      ),
-    ).toThrow(/Relationship "id" collides with a column/);
+      }),
+    ).toThrow("tables.todos.relations.id: table todos already has a column id");
   });
 
   it("rejects a nested reverse relation that would shadow a stored output column", () => {
     expect(() =>
-      s.defineApp(
-        {
-          users: s.table(
-            {
-              todosViaOwner: s.string(),
-            },
-            { todosViaOwner: s.reverse("todos", "owner") } as never,
-          ),
-          todos: s.table(
-            {
-              ownerId: s.uuid(),
-            },
-            { owner: s.rel("users", "ownerId") } as never,
-          ),
+      testApp({
+        tables: {
+          users: {
+            columns: { todosViaOwner: "string" },
+            relations: { todosViaOwner: { reverse: "todos", relation: "owner" } },
+          },
+          todos: {
+            columns: { ownerId: "uuid" },
+            relations: { owner: { rel: "users", column: "ownerId" } },
+          },
         },
-        { migrations: "none" },
-      ),
-    ).toThrow(/Relationship "todosViaOwner" collides with a column/);
+      }),
+    ).toThrow(
+      "tables.users.relations.todosViaOwner: table users already has a column todosViaOwner",
+    );
   });
 
   it("uses a distinct declared alias for an unsuffixed UUID column", () => {
     expect(() =>
-      s.defineApp(
-        {
-          users: s.table(
-            { name: s.string() },
-            { todosViaOwner: s.reverse("todos", "ownerRelation") },
-          ),
-          todos: s.table(
-            {
-              owner: s.uuid(),
-            },
-            { ownerRelation: s.rel("users", "owner") },
-          ),
+      testApp({
+        tables: {
+          users: {
+            columns: { name: "string" },
+            relations: { todosViaOwner: { reverse: "todos", relation: "ownerRelation" } },
+          },
+          todos: {
+            columns: { owner: "uuid" },
+            relations: { ownerRelation: { rel: "users", column: "owner" } },
+          },
         },
-        { migrations: "none" },
-      ),
+      }),
     ).not.toThrow();
   });
 
@@ -448,49 +394,6 @@ describe("translateQuery", () => {
     expect(translated.table).toBe("users");
     expect(translated.relation_ir).toBeDefined();
     expect(translated.conditions).toBeUndefined();
-  });
-
-  it("lowers a payload enum match to the first-class relation predicate", () => {
-    const translated = JSON.parse(
-      translateQuery(
-        app.events.where({ event: { match: { type: "message", where: { level: 2 } } } })._build(),
-        app.wasmSchema,
-      ),
-    );
-
-    expect(translated.relation_ir).toEqual({
-      Project: {
-        input: {
-          Filter: {
-            input: { TableScan: { table: "events" } },
-            predicate: {
-              EnumMatch: {
-                column: { column: "event", scope: "events" },
-                case: "message",
-                payload: {
-                  Cmp: {
-                    left: { column: "level" },
-                    op: "Eq",
-                    right: { Literal: { type: "Integer", value: 2 } },
-                  },
-                },
-              },
-            },
-          },
-        },
-        columns: [{ alias: "event", expr: { Column: { column: "event", scope: "events" } } }],
-      },
-    });
-  });
-
-  it("rejects a payload enum match against an absent case field", () => {
-    const built = JSON.parse(app.events._build());
-    built.conditions = [
-      { column: "event", op: "match", value: { type: "closed", where: { level: 2 } } },
-    ];
-    expect(() => translateQuery(JSON.stringify(built), app.wasmSchema)).toThrow(
-      'unknown payload enum field "level" for case "closed"',
-    );
   });
 
   it("treats an omitted include limit as unbounded", () => {
@@ -677,12 +580,10 @@ describe("translateQuery", () => {
     ]);
   });
 
-  it("keeps recognized JSON operator maps on the existing validation path", () => {
-    expect(() =>
-      translateQuery(
-        scalarApp.filters.where({ metadata: { gt: 1 } } as never)._build(),
-        scalarApp.wasmSchema,
-      ),
-    ).toThrow('JSON column "metadata" only supports eq/ne/in/isNull operators.');
+  it("leaves operator checks on JSON operator maps to the engine", () => {
+    // The engine refuses `gt` on JSON at prepare (db.in-memory.test.ts).
+    expect(
+      translatedConditions(scalarApp.filters.where({ metadata: { gt: 1 } } as never)),
+    ).toHaveLength(1);
   });
 });

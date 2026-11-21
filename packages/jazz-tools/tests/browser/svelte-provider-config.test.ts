@@ -46,7 +46,8 @@ describe("JazzSvelteClientProvider client ownership", () => {
 
     await waitForCondition(
       async () =>
-        target.querySelector('[data-client-provider-state="ready"]')?.textContent === "local-first",
+        target.querySelector('[data-client-provider-state="ready"]')?.textContent ===
+        "device-account",
       10_000,
       "the caller-owned client to become available",
     );

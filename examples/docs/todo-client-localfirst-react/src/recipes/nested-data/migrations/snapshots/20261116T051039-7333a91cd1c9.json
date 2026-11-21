@@ -1,0 +1,84 @@
+{
+  "comments": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "body",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "taskId",
+        "nullable": false,
+        "references": "tasks"
+      }
+    ],
+    "relations": {
+      "task": {
+        "kind": "forward",
+        "table": "tasks",
+        "column": "taskId"
+      }
+    }
+  },
+  "projects": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "name",
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "tasks": {
+        "kind": "reverse",
+        "table": "tasks",
+        "relation": "project"
+      }
+    }
+  },
+  "tasks": {
+    "columns": [
+      {
+        "column_type": {
+          "type": "Text"
+        },
+        "name": "title",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Boolean"
+        },
+        "name": "done",
+        "nullable": false
+      },
+      {
+        "column_type": {
+          "type": "Uuid"
+        },
+        "name": "projectId",
+        "nullable": false,
+        "references": "projects"
+      }
+    ],
+    "relations": {
+      "comments": {
+        "kind": "reverse",
+        "table": "comments",
+        "relation": "task"
+      },
+      "project": {
+        "kind": "forward",
+        "table": "projects",
+        "column": "projectId"
+      }
+    }
+  }
+}

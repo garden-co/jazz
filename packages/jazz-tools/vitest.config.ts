@@ -11,6 +11,7 @@ export default defineConfig({
   plugins: [svelte()],
   resolve: {
     alias: [
+      { find: /^jazz-tools$/, replacement: resolve(__dirname, "src/index.ts") },
       { find: /^react-native$/, replacement: resolve(__dirname, "tests/react-native/ui-host.ts") },
       ...(sealedWasmPackage
         ? [{ find: "jazz-wasm", replacement: resolve(sealedWasmPackage, "jazz_wasm.js") }]
@@ -31,7 +32,10 @@ export default defineConfig({
     // groups 192, 197 and 198 each failed one at vitest's 5s default), so the
     // suite gets the same headroom the browser suite has.
     testTimeout: 30_000,
-    include: ["src/**/*.test.ts", "tests/ts-dsl/**/*.test.ts", "tests/topology/**/*.test.ts"],
+    // Backend modules imported on their own (not through jazz-tools/backend)
+    // need Node's engine, as each Node entry installs it.
+    setupFiles: ["tests/setup/lazy-node-engine.ts"],
+    include: ["src/**/*.test.ts", "tests/typed-app/**/*.test.ts", "tests/topology/**/*.test.ts"],
     exclude: ["tests/browser/**", "node_modules/**", "src/**/*.svelte.test.ts", "src/solid/**"],
   },
 });

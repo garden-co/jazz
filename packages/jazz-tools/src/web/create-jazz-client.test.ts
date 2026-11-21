@@ -99,6 +99,8 @@ function createMockDb(
         : null,
     })),
     onAuthChanged: vi.fn(() => () => {}),
+    getSyncStatus: vi.fn(() => ({ link: { state: "local-only" } })),
+    onSyncStatusChange: vi.fn(() => () => {}),
     deleteClientStorage: vi.fn(async () => undefined),
     shutdown: vi.fn(async () => undefined),
     getConfig: vi.fn(() => config),
@@ -129,7 +131,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
       user_id: "local:alice",
       claims: {},
       issuer: "urn:jazz:local-first",
-      authMode: "local-first",
+      authMode: "device-account",
     };
     const db = createMockDb(config.appId, session);
 

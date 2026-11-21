@@ -8,7 +8,7 @@ import { JazzSessionProvider, useJazzSession, type UseJazzSessionResult } from "
 import { ownJazzSession, startJazzSession, type JazzSession } from "../session/jazz-session.js";
 import type { SessionCore } from "../session/state.js";
 import type { CoreJazzClient } from "./provider.js";
-import { useJazzClient } from "./provider.js";
+import { JazzClientProvider, useJazzClient } from "./provider.js";
 import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
 
 afterEach(cleanup);
@@ -24,7 +24,7 @@ async function setup() {
   const accounts = new AccountManager(enrollment, account);
   const clients: ReturnType<typeof makeFakeClient>[] = [];
   const openClient = vi.fn(async () => {
-    const client = makeFakeClient({ authMode: "local-first", userId: "test", claims: {} });
+    const client = makeFakeClient({ authMode: "device-account", userId: "test", claims: {} });
     client.shutdown = vi.fn(async () => {});
     clients.push(client);
     return client;
@@ -325,4 +325,35 @@ it("replaces external sessions and releases both views on unmount", async () => 
   view.unmount();
   await second.session.close();
   expect(second.clients[0]!.shutdown).toHaveBeenCalledOnce();
+});
+
+it("a nested <JazzClientProvider client> reads its own client, not the session", async () => {
+  const { session } = await setup();
+  const inner = makeFakeClient({ authMode: "external", userId: "inner", claims: {} });
+  Object.assign(inner, { session: inner.db.getAuthState().session });
+  let outer: UseJazzSessionResult | undefined;
+  let nested: UseJazzSessionResult | undefined;
+  function Outer({ children }: { children: React.ReactNode }) {
+    outer = useJazzSession();
+    return <>{children}</>;
+  }
+  function Inner() {
+    nested = useJazzSession();
+    return null;
+  }
+  render(
+    <Provider session={session}>
+      <Outer>
+        <JazzClientProvider client={inner as never}>
+          <Inner />
+        </JazzClientProvider>
+      </Outer>
+    </Provider>,
+  );
+  await waitFor(() => expect(nested).toBeDefined());
+  expect(outer!.client).toBe(session.getSnapshot().client);
+  expect(nested!.client).toBe(inner);
+  expect(nested!.user?.identity.subject).toBe("inner");
+  await expect(nested!.signOut()).rejects.toThrow(/outside a Jazz session/);
+  expect(session.getSnapshot().status).toBe("ready");
 });

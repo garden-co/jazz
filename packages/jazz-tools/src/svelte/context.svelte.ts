@@ -1,4 +1,5 @@
 import { getContext, setContext } from "svelte";
+import { warnSessionHookDeprecated } from "../session/deprecated-session-hook.js";
 import type { Db } from "../runtime/db.js";
 import type { PublicSession } from "../runtime/context.js";
 import type { SubscriptionStore } from "../subscription-store-internal.js";
@@ -8,6 +9,8 @@ const JAZZ_CTX_KEY = Symbol("jazz");
 export interface JazzContext {
   db: Db | null;
   session: PublicSession | null;
+  /** @internal The client the provider shows; null until it has one. */
+  client: unknown;
   /** @internal Used by framework bindings; not part of the app-facing client API. */
   subscriptionStore: SubscriptionStore | null;
 }
@@ -17,7 +20,12 @@ export interface JazzContext {
  * Called internally by `JazzProvider` and `JazzSvelteClientProvider`.
  */
 export function initJazzContext(): JazzContext {
-  const ctx: JazzContext = $state({ db: null, session: null, subscriptionStore: null });
+  const ctx: JazzContext = $state({
+    db: null,
+    session: null,
+    client: null,
+    subscriptionStore: null,
+  });
   setContext(JAZZ_CTX_KEY, ctx);
   return ctx;
 }
@@ -35,6 +43,11 @@ export function getJazzContext(): JazzContext {
   return ctx;
 }
 
+/** @internal The enclosing provider's context, or undefined outside one. */
+export function getOptionalJazzContext(): JazzContext | undefined {
+  return getContext<JazzContext | undefined>(JAZZ_CTX_KEY);
+}
+
 /**
  * Get a Jazz {@link Db} instance that can be used to read and write data.
  */
@@ -50,8 +63,12 @@ export function getDb(): Db {
  * Subscribe to the current Jazz {@link Session}.
  * The returned handle's `.current` property always reflects the latest session,
  * updating automatically as the user logs in or out.
+ *
+ * @deprecated Use `getJazzSession()` and read `$session.user`: the same user,
+ * with `user` as `accountId`. Warns once in development; removed in a later alpha.
  */
 export function getSession(): { readonly current: PublicSession | null } {
+  warnSessionHookDeprecated("getSession()", "getJazzSession() ($session.user)");
   const ctx = getJazzContext();
   return {
     get current() {

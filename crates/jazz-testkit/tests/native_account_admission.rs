@@ -25,14 +25,14 @@ async fn a_relayed_guest_authors_as_its_founding_account_and_cannot_choose_anoth
             context.jwt_token = Some(
                 identity::mint_jazz_self_signed_token(
                     &seed,
-                    identity::LOCAL_FIRST_ISSUER,
+                    identity::DEVICE_ACCOUNT_ISSUER,
                     &server.app_id().to_string(),
                     3600,
                 )
                 .expect("mint guest proof"),
             );
             let account =
-                jazz::account_registry::local_first_account_id(*server.app_id().uuid(), &subject);
+                jazz::account_registry::device_account_id(*server.app_id().uuid(), &subject);
             context.account_id = Some(account);
             let client = connect(context.clone())
                 .await
@@ -61,7 +61,7 @@ async fn a_relayed_guest_authors_as_its_founding_account_and_cannot_choose_anoth
                             Value::Row {
                                 id: None,
                                 values: vec![
-                                    Value::Text(identity::LOCAL_FIRST_ISSUER.into()),
+                                    Value::Text(identity::DEVICE_ACCOUNT_ISSUER.into()),
                                     Value::Text(subject.clone()),
                                 ]
                             },
@@ -72,10 +72,20 @@ async fn a_relayed_guest_authors_as_its_founding_account_and_cannot_choose_anoth
             client.shutdown().await.unwrap();
             let mut forged = context.clone();
             forged.account_id = Some(AccountId(uuid::Uuid::new_v4()));
-            assert!(
-                connect(forged).await.is_err(),
+            // Opening does not wait for the server: its refusal is the
+            // link's status, and the link stays down.
+            let forged = connect(forged).await.expect("open with the local store");
+            let refused = jazz::tools::test_support::wait_for_refusal(&forged).await;
+            assert_eq!(
+                refused.phase,
+                jazz::link::LinkPhase::AwaitingCredential(jazz::link::AuthFailureReason::Invalid),
                 "registry must reject a copied account identifier"
             );
+            assert_eq!(
+                refused.reason.as_deref(),
+                Some("account does not match authenticated identity assignment")
+            );
+            forged.shutdown().await.unwrap();
             let reconnected = connect(context)
                 .await
                 .expect("same enrolled context reconnects");

@@ -1,7 +1,6 @@
 import { connect, createServer, type Socket } from "node:net";
 import { expect, it } from "vitest";
-import { schema as s } from "../schema-namespace.js";
-import { definePermissions } from "../permissions/index.js";
+import { testApp } from "../testing/test-app.js";
 import { createDb } from "./default-create-db.js";
 import { WriteWaitTimeoutError } from "./client.js";
 import type { Db } from "./db.js";
@@ -9,7 +8,7 @@ import type { SyncStatus } from "./sync-status.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { startLocalJazzServer, startTestJazz } from "../testing/index.js";
 
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+const app = testApp({ tables: { notes: { columns: { title: "string" } } } });
 
 /** Resolve with the first status `matches` accepts, now or after a change. */
 function statusWhere(
@@ -34,10 +33,7 @@ function statusWhere(
 }
 
 it("reports the link and pending uploads through a disconnect", async () => {
-  const permissions = definePermissions(app, ({ policy }) => {
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
-  });
+  const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
   const server = await startTestJazz({
     app: app,
     permissions: permissions,
@@ -112,11 +108,54 @@ it("reports the link and pending uploads through a disconnect", async () => {
   }
 }, 60_000);
 
-it("says since when a write waits, what the server rejected, and when the link failed", async () => {
-  const permissions = definePermissions(app, ({ policy }) => {
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.where({ title: "allowed" });
+it("names the rows of writes the server has not decided yet", async () => {
+  const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { inMemory: true },
   });
+  let db: Db | undefined;
+  try {
+    db = await createDb(await localAccountConfig(server.appId, server.url));
+    await db.insert(app.notes, { title: "online" }).wait({ tier: "global" });
+    expect(db.getPendingUploadRows(app.notes)).toEqual([]);
+
+    const seen: (readonly string[] | null)[] = [];
+    const unsubscribe = db.onPendingUploadRowsChange(app.notes, (ids) => seen.push(ids));
+
+    await db.disconnect();
+    const one = db.insert(app.notes, { title: "offline one" });
+    const two = db.insert(app.notes, { title: "offline two" });
+    await Promise.all([one.wait({ tier: "local" }), two.wait({ tier: "local" })]);
+    const offline = [one.value.id, two.value.id].sort();
+    expect(db.getPendingUploadRows(app.notes)).toEqual(offline);
+    // An unchanged answer is the same array, as useSyncExternalStore needs.
+    expect(db.getPendingUploadRows(app.notes)).toBe(db.getPendingUploadRows(app.notes));
+
+    await db.reconnect();
+    await db.waitForSync();
+    await statusWhere(db, (status) => status.synced);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(db.getPendingUploadRows(app.notes)).toEqual([]);
+    unsubscribe();
+
+    expect(seen).toContainEqual(offline);
+    expect(seen.at(-1)).toEqual([]);
+    for (let index = 1; index < seen.length; index += 1) {
+      expect(seen[index]).not.toEqual(seen[index - 1]);
+    }
+  } finally {
+    await db?.shutdown();
+    await server.stop();
+  }
+}, 60_000);
+
+it("says since when a write waits, what the server rejected, and when the link failed", async () => {
+  const permissions = {
+    format: 1,
+    tables: { notes: { read: "true", insert: "title = 'allowed'" } },
+  };
   const server = await startTestJazz({
     app: app,
     permissions: permissions,
@@ -199,10 +238,7 @@ it("reads offline when the server accepts connections but never answers", async 
 // reconnect reads offline too. A Global wait stays pending through the outage
 // (#3923) and settles once the server answers again.
 it("reads offline when a reconnect after a live link is accepted but never answered", async () => {
-  const permissions = definePermissions(app, ({ policy }) => {
-    policy.notes.allowRead.always();
-    policy.notes.allowInsert.always();
-  });
+  const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
   const server = await startTestJazz({
     app: app,
     permissions: permissions,

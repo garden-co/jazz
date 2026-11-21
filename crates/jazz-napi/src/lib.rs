@@ -1,7 +1,7 @@
 //! jazz-napi — Native Node.js bindings for the Jazz database (`jazz-db`).
 //!
 //! Provides Node.js bindings for the Jazz database, server helpers, and
-//! local-first identity utilities.
+//! device-account identity utilities.
 //!
 //! # Architecture
 //!
@@ -12,7 +12,7 @@
 //!   Unsupported features fail with an explicit "not supported yet" error.
 //! - `JazzServer` exposes the Rust server process used by integration tests
 //!   and Node deployments.
-//! - Local-first JWT helpers stay here as package-level native utilities.
+//! - device-account JWT helpers stay here as package-level native utilities.
 //!
 //! # Thread affinity
 //!
@@ -110,20 +110,88 @@ pub struct WrittenAppFiles {
     pub permissions: String,
 }
 
+/// The `$generated` marker to write: `{ by }`, what wrote the files.
+#[napi(object)]
+pub struct GeneratedBy {
+    /// E.g. "jazz-tools generate from schema.ts — edit the TypeScript, not
+    /// this file".
+    pub by: String,
+}
+
+/// How [`write_app_artifact`] and [`write_app_files`] write the files.
+#[napi(object)]
+pub struct WriteAppFilesOptions {
+    /// Mark each file `"$generated": { "by", "sha256" }`, first after
+    /// `$schema`.
+    pub generated: Option<GeneratedBy>,
+}
+
 /// Build the `jazz.app.json` and `jazz.permissions.json` texts from what
 /// `jazz-tools validate` compiled (an
 /// [`ArtifactInput`](jazz::tools::deployment::artifact::ArtifactInput) as
-/// JSON): the files' only writer, which refuses what a reader would.
+/// JSON): the files' only writer, which refuses what a reader would. With
+/// `options.generated`, each file carries a `$generated` marker.
 #[napi(js_name = "writeAppArtifact")]
-pub fn write_app_artifact(input: String) -> js::Result<WrittenAppFiles> {
+pub fn write_app_artifact(
+    input: String,
+    options: Option<WriteAppFilesOptions>,
+) -> js::Result<WrittenAppFiles> {
     use jazz::tools::deployment::artifact;
     let input: artifact::ArtifactInput = serde_json::from_str(&input)
         .map_err(|error| napi::Error::from_reason(format!("jazz.app.json input: {error}")))?;
-    let written = artifact::write(input).map_err(artifact_error)?;
+    let written = match options.and_then(|o| o.generated) {
+        Some(generated) => artifact::write_generated(input, &generated.by),
+        None => artifact::write(input),
+    }
+    .map_err(artifact_error)?;
     Ok(WrittenAppFiles {
         app: written.app,
         permissions: written.permissions,
     })
+}
+
+/// Check an app's readable `jazz.app.json` (`app`) and
+/// `jazz.permissions.json` (`permissions`) as a backend does and render
+/// them canonically through the writer, which reads its output back to
+/// exactly the same app. With `options.generated`, each file carries a
+/// `$generated` marker. Idempotent.
+#[napi(js_name = "writeAppFiles")]
+pub fn write_app_files(
+    app: String,
+    permissions: String,
+    options: Option<WriteAppFilesOptions>,
+) -> js::Result<WrittenAppFiles> {
+    let by = options.and_then(|o| o.generated).map(|g| g.by);
+    let written = jazz::tools::deployment::artifact::rewrite(
+        app.as_bytes(),
+        permissions.as_bytes(),
+        by.as_deref(),
+    )
+    .map_err(artifact_error)?;
+    Ok(WrittenAppFiles {
+        app: written.app,
+        permissions: written.permissions,
+    })
+}
+
+/// Whether a `jazz.app.json` or `jazz.permissions.json` text is as the tool
+/// its `$generated` marker names wrote it: `"none"` (no marker), `"match"`
+/// or `"mismatch"` (edited since; formatting alone doesn't count). Throws
+/// when the text isn't a JSON object or the marker is malformed.
+#[napi(
+    js_name = "verifyGenerated",
+    ts_return_type = "\"none\" | \"match\" | \"mismatch\""
+)]
+pub fn verify_generated(text: String) -> napi::Result<String> {
+    use jazz::tools::deployment::artifact::{self, GeneratedCheck};
+    Ok(
+        match artifact::verify_generated(text.as_bytes()).map_err(napi::Error::from_reason)? {
+            GeneratedCheck::Unmarked => "none",
+            GeneratedCheck::Matches(_) => "match",
+            GeneratedCheck::Mismatch { .. } => "mismatch",
+        }
+        .to_owned(),
+    )
 }
 
 /// Read and check an app's `jazz.app.json` (`app`) and
@@ -133,10 +201,277 @@ pub fn write_app_artifact(input: String) -> js::Result<WrittenAppFiles> {
 pub fn load_app_artifact(app: String, permissions: String) -> js::Result<JsonValue> {
     let loaded = jazz::tools::deployment::artifact::load(app.as_bytes(), permissions.as_bytes())
         .map_err(artifact_error)?;
-    Ok(serde_json::json!({
+    Ok(loaded_backend(&loaded))
+}
+
+/// What a backend needs of its loaded files: the current schema hash, the
+/// bundle id, the engine permissions (`{ [table]: TablePolicies }`), the
+/// body it publishes (`deployment`, the server's `DeployRequest` with
+/// `allowDroppingHistory: false`) and what loaded but is ignored.
+fn loaded_backend(loaded: &jazz::tools::deployment::artifact::LoadedApp) -> JsonValue {
+    serde_json::json!({
         "current": loaded.current_hash().to_string(),
         "bundle": loaded.bundle().to_hex(),
-    }))
+        "permissions": loaded.permissions(),
+        "deployment": loaded.deployment_body(false),
+        "warnings": loaded.warnings(),
+    })
+}
+
+/// Read and check a backend's `jazz.permissions.json` (`permissions`)
+/// against the compiled app its generated bindings embed (`schema`: JSON of
+/// `{ schema, relations }`, the options they pass to `bindApp`), for a
+/// deployed backend that has the bindings but not `jazz.app.json`. Same
+/// result and checks as `loadAppArtifact`.
+#[napi(js_name = "loadBackendApp")]
+pub fn load_backend_app(schema: String, permissions: String) -> js::Result<JsonValue> {
+    let loaded =
+        jazz::tools::deployment::artifact::load_backend(schema.as_bytes(), permissions.as_bytes())
+            .map_err(artifact_error)?;
+    Ok(loaded_backend(&loaded))
+}
+
+/// The bindings for `appJson` (a `jazz.app.json` text) in `lang` (`"ts"`):
+/// the whole `jazz.generated.ts`.
+#[napi(js_name = "generate")]
+pub fn generate_bindings(lang: String, app_json: String) -> js::Result<String> {
+    let lang = jazz_codegen::Lang::parse(&lang).map_err(codegen_error)?;
+    jazz_codegen::generate(lang, app_json.as_bytes()).map_err(codegen_error)
+}
+
+/// The options the generated TS bindings pass to `bindApp` (`{ source,
+/// schema, relations }`, without the computed and transform callbacks), as
+/// JSON text, for tests that define an app inline.
+#[napi(js_name = "compileApp")]
+pub fn compile_app(app_json: String) -> js::Result<String> {
+    jazz_codegen::compile_app(app_json.as_bytes()).map_err(codegen_error)
+}
+
+/// `"sha256:<hex>"` of a `jazz.app.json` text, CRLF read as LF: the
+/// `source` generated bindings record.
+#[napi(js_name = "schemaSourceHash")]
+pub fn schema_source_hash(app_json: String) -> String {
+    jazz::tools::deployment::artifact::source_hash(app_json.as_bytes())
+}
+
+/// The engine's hash of a schema in its own JSON form (`{ "tables": … }`),
+/// policies dropped as a deployment drops them, as 64 hex characters. Not
+/// [`schema_source_hash`], which hashes the `jazz.app.json` file.
+#[napi(js_name = "schemaHash")]
+pub fn schema_hash(engine_schema_json: String) -> js::Result<String> {
+    jazz::tools::deployment::artifact::schema_hash(engine_schema_json.as_bytes())
+        .map(|hash| hash.to_string())
+        .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
+}
+
+/// Whether rows pass unchanged between two schemas in the engine's JSON form
+/// (`{ "tables": … }`), so a deployment connects them without a migration:
+/// the rule `migrations create` follows to decide whether to write one.
+/// Indexes, history retention, merge strategies, column order and defaults
+/// of columns outside `branchBy` don't count; everything else does.
+#[napi(js_name = "schemasAreCompatible")]
+pub fn schemas_are_compatible(left_json: String, right_json: String) -> js::Result<bool> {
+    jazz::tools::deployment::artifact::schemas_are_compatible(
+        left_json.as_bytes(),
+        right_json.as_bytes(),
+    )
+    .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
+}
+
+/// What the migration between two schemas in the engine's JSON form
+/// (`{ "tables": … }`) does, as `migrations create` decides it, as JSON:
+/// `{ createTables, dropTables, renameTables: [{ from, to }], migrate:
+/// [{ table, steps, addedVariants, unchangedRows }] }`, each step
+/// `{ step: "add" | "drop" | "maybeRenamed" | "maybeRenamedAway", column, … }`.
+/// Throws, with the reason, for a change no migration step does.
+#[napi(js_name = "migrationDiff")]
+pub fn migration_diff(from_json: String, to_json: String) -> js::Result<String> {
+    jazz_codegen::migrations::diff_steps_json(from_json.as_bytes(), to_json.as_bytes())
+        .map_err(codegen_error)
+}
+
+/// A schema in the engine's JSON form (`{ "tables": … }`) as the readable
+/// `tables` of a `jazz.app.json` `history` version (no relations, computed
+/// fields or transforms), as JSON text.
+#[napi(js_name = "versionTables")]
+pub fn version_tables(engine_schema_json: String) -> js::Result<String> {
+    jazz::tools::deployment::artifact::version_tables_json(engine_schema_json.as_bytes())
+        .map_err(|error| napi::Error::from_reason(error.message().to_owned()).into())
+}
+
+/// What `migrationsCreate` wrote.
+#[napi(object)]
+pub struct CreatedMigration {
+    /// The new `jazz.app.json` text.
+    pub app: String,
+    /// Whether a version and migration were added.
+    pub changed: bool,
+    /// JSON paths of the `"TODO: …"` strings left for the author.
+    pub todos: Vec<String>,
+    /// Why nothing was written, when it isn't simply that nothing changed
+    /// (an index-only edit).
+    pub note: Option<String>,
+}
+
+/// Write the migration from the version the committed bindings
+/// (`bindings`, `jazz.generated.ts`'s text, or null when there are none) were
+/// generated from to `appJson`'s edited `tables`, named `name`.
+#[napi(js_name = "migrationsCreate")]
+pub fn migrations_create(
+    app_json: String,
+    bindings: Option<String>,
+    name: String,
+) -> js::Result<CreatedMigration> {
+    let created = jazz_codegen::migrations::create(
+        jazz_codegen::Lang::TypeScript,
+        app_json.as_bytes(),
+        bindings.as_deref(),
+        &name,
+    )
+    .map_err(codegen_error)?;
+    Ok(CreatedMigration {
+        app: created.app,
+        changed: created.changed,
+        todos: created.todos,
+        note: created.note,
+    })
+}
+
+/// Check committed bindings (`bindings`, or null) against `appJson`. Throws
+/// with `error.code` `JAZZ_SCHEMA_CHANGED` when `tables` changed since the
+/// bindings were generated and no migration leads from that version (run
+/// `migrations create` before regenerating: the bindings hold the only
+/// copy of that version), or `JAZZ_BINDINGS_STALE` when regenerating is
+/// enough (including when there are none).
+#[napi(js_name = "validateBindings")]
+pub fn validate_bindings(app_json: String, bindings: Option<String>) -> js::Result<()> {
+    use jazz_codegen::bindings::Staleness;
+    let app = jazz_codegen::App::load(app_json.as_bytes()).map_err(artifact_error)?;
+    match jazz_codegen::bindings::staleness(
+        &app,
+        jazz_codegen::Lang::TypeScript,
+        bindings.as_deref(),
+    )
+    .map_err(codegen_error)?
+    {
+        None => Ok(()),
+        Some(staleness) => {
+            let code = match staleness {
+                Staleness::SchemaChanged => "JAZZ_SCHEMA_CHANGED",
+                Staleness::Missing | Staleness::OutOfDate | Staleness::Unreadable(_) => {
+                    "JAZZ_BINDINGS_STALE"
+                }
+            };
+            Err(BindingError(napi::Error::new(
+                JsErrorCode(code.to_owned()),
+                staleness.message(jazz_codegen::Lang::TypeScript),
+            )))
+        }
+    }
+}
+
+/// What `generateForDir` / `migrationsCreateForDir` did in an app's directory.
+#[napi(object)]
+pub struct DirOutcome {
+    /// Lines to print.
+    pub notes: Vec<String>,
+    /// Warnings to print.
+    pub warnings: Vec<String>,
+    /// Bindings files written, relative to the directory.
+    pub written: Vec<String>,
+    /// Bindings files already up to date, relative to the directory.
+    pub current: Vec<String>,
+    /// `migrationsCreateForDir`: whether `jazz.app.json` changed.
+    pub changed: bool,
+    /// `migrationsCreateForDir`: JSON paths of the TODOs left to resolve.
+    pub todos: Vec<String>,
+}
+
+/// Options of [`generate_for_dir`] and [`migrations_create_for_dir`].
+#[napi(object)]
+pub struct DirOptions {
+    /// Fail when the files or bindings are stale, and write nothing.
+    pub check: Option<bool>,
+    /// The bindings' languages (`"ts"`, `"rust"`, …); by default each the
+    /// directory's files say the app is written in.
+    pub lang: Option<Vec<String>>,
+    /// The language assumed when nothing in the directory names one and
+    /// no other language's manifest is there (the npm CLI passes `"ts"`).
+    pub fallback: Option<String>,
+}
+
+fn dir_languages(
+    dir: &std::path::Path,
+    options: &Option<DirOptions>,
+) -> js::Result<Vec<jazz_codegen::project::Selected>> {
+    let given = options
+        .as_ref()
+        .and_then(|o| o.lang.clone())
+        .unwrap_or_default()
+        .iter()
+        .map(|name| jazz_codegen::Lang::parse(name))
+        .collect::<std::result::Result<Vec<_>, jazz_codegen::CodegenError>>()
+        .map_err(codegen_error)?;
+    let fallback = options
+        .as_ref()
+        .and_then(|o| o.fallback.as_deref())
+        .map(jazz_codegen::Lang::parse)
+        .transpose()
+        .map_err(codegen_error)?;
+    jazz_codegen::project::languages_or(dir, &given, fallback)
+        .map_err(|error| napi::Error::from_reason(error).into())
+}
+
+fn dir_outcome(outcome: jazz_codegen::project::Outcome) -> DirOutcome {
+    DirOutcome {
+        notes: outcome.notes,
+        warnings: outcome.warnings,
+        written: outcome.written,
+        current: outcome.current,
+        changed: outcome.changed,
+        todos: outcome.todos,
+    }
+}
+
+/// `jazz-tools generate [--check]` in `dir`, the directory of the app's
+/// `jazz.app.json`: the same languages, checks and bytes as the
+/// `jazz-tools` binary, which runs the same code.
+#[napi(js_name = "generateForDir")]
+pub fn generate_for_dir(dir: String, options: Option<DirOptions>) -> js::Result<DirOutcome> {
+    let dir = std::path::Path::new(&dir);
+    let langs = dir_languages(dir, &options)?;
+    let check = options.as_ref().and_then(|o| o.check).unwrap_or(false);
+    jazz_codegen::project::generate(dir, &langs, check)
+        .map(dir_outcome)
+        .map_err(|error| napi::Error::from_reason(error).into())
+}
+
+/// `jazz-tools migrations create --name <name>` in `dir`, as the
+/// `jazz-tools` binary runs it.
+#[napi(js_name = "migrationsCreateForDir")]
+pub fn migrations_create_for_dir(
+    dir: String,
+    name: String,
+    options: Option<DirOptions>,
+) -> js::Result<DirOutcome> {
+    let dir = std::path::Path::new(&dir);
+    let langs = dir_languages(dir, &options)?;
+    jazz_codegen::project::migrations_create(dir, &langs, &name)
+        .map(dir_outcome)
+        .map_err(|error| napi::Error::from_reason(error).into())
+}
+
+/// A codegen refusal, coded as [`artifact_error`] codes the loaders'.
+fn codegen_error(error: jazz_codegen::CodegenError) -> BindingError {
+    use jazz::tools::deployment::artifact;
+    if error.is_unsupported() {
+        BindingError(napi::Error::new(
+            JsErrorCode(artifact::UNSUPPORTED_CODE.to_owned()),
+            error.message().to_owned(),
+        ))
+    } else {
+        napi::Error::from_reason(error.message().to_owned()).into()
+    }
 }
 
 /// An app-file refusal: what the files can't express (yet) throws with
@@ -665,6 +1000,32 @@ impl Host {
 struct Inner {
     binding: Binding,
     host: Rc<Host>,
+    /// The thin session's transactions this database serves, when it is a
+    /// backend's client for one (`serveThinTransaction`): taken while a
+    /// request is served, so requests run one at a time.
+    thin: Rc<RefCell<Option<ThinState>>>,
+}
+
+/// A thin session's transactions, made on the first request.
+enum ThinState {
+    Idle(jazz::thin_transactions::ThinTransactions),
+    Serving,
+}
+
+/// The session's transactions while a request is served: back in their cell
+/// when it ends, or when the caller drops it (a request it stopped waiting
+/// for), so the next request finds them.
+struct Serving {
+    cell: Rc<RefCell<Option<ThinState>>>,
+    transactions: Option<jazz::thin_transactions::ThinTransactions>,
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        if let Some(transactions) = self.transactions.take() {
+            *self.cell.borrow_mut() = Some(ThinState::Idle(transactions));
+        }
+    }
 }
 
 impl Inner {
@@ -685,7 +1046,11 @@ impl Inner {
                 // refusal for the next delivery.
                 callback.call(event, ThreadsafeFunctionCallMode::NonBlocking) == napi::Status::Ok
             }));
-        Self { binding, host }
+        Self {
+            binding,
+            host,
+            thin: Rc::default(),
+        }
     }
 
     /// A write's receipt. A rejected write is reported to the
@@ -997,6 +1362,9 @@ pub struct SubscriptionDeltaEvent {
     #[napi(js_name = "type", ts_type = "'delta'")]
     pub event_type: String,
     pub reset: bool,
+    /// A reset standing for deltas the reader fell too far behind to be
+    /// told one by one (its backlog passed its limit).
+    pub coalesced: bool,
     pub delta: Uint8Array,
     /// Always empty: SQLite subscriptions deliver whole-row deltas.
     #[napi(js_name = "terminalOperations", ts_type = "Array<never>")]
@@ -1057,11 +1425,13 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
             EventChunk::Delta {
                 delta,
                 reset,
+                coalesced,
                 settled,
                 tier,
             } => Either3::A(SubscriptionDeltaEvent {
                 event_type: "delta".to_owned(),
                 reset,
+                coalesced,
                 delta: delta.into(),
                 terminal_operations: Vec::new(),
                 settled,
@@ -1621,9 +1991,10 @@ impl NapiDb {
         self.request_permission_advice(binding_host::advice::delete(table, &row_id), author, claims)
     }
 
-    /// Admit a verified local-first account for this backend runtime only.
-    #[napi]
-    pub fn admit_local_first_session(
+    /// Admit a verified device account for this backend runtime only.
+    // The JS name is ABI with jazz-tools; it stays until the TS side renames it.
+    #[napi(js_name = "admitLocalFirstSession")]
+    pub fn admit_device_account_session(
         &self,
         token: String,
         app_id: String,
@@ -1631,7 +2002,7 @@ impl NapiDb {
     ) -> js::Result<()> {
         Ok(self
             .binding()?
-            .admit_local_first_session(&token, &app_id, &claimed_author)
+            .admit_device_account_session(&token, &app_id, &claimed_author)
             .map_err(host_error)?)
     }
 
@@ -2240,6 +2611,19 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()).into())
     }
 
+    /// Ids of `table`'s rows with a write the server has neither accepted
+    /// nor refused yet (recovered ones included), sorted.
+    #[napi(js_name = "pendingUploadRows")]
+    pub fn pending_upload_rows(&self, table: String) -> js::Result<Vec<String>> {
+        Ok(self
+            .binding()?
+            .pending_upload_rows(&table)
+            .map_err(host_error)?
+            .into_iter()
+            .map(|row| row.0.to_string())
+            .collect())
+    }
+
     /// The optimistic in-memory side of a client/worker pair: its
     /// subscriptions open with the worker's answer.
     #[napi(js_name = "setNonDurableClient")]
@@ -2286,6 +2670,17 @@ impl NapiDb {
         Ok(())
     }
 
+    /// Coalesce a subscription's undelivered deltas past `rows` changed
+    /// rows (default 10000, at least 1) into one reset of its current
+    /// result.
+    #[napi(js_name = "setSubscriptionBacklogRows")]
+    pub fn set_subscription_backlog_rows(&self, rows: f64) -> js::Result<()> {
+        self.binding()?
+            .set_subscription_backlog_rows(rows)
+            .map_err(host_error)?;
+        Ok(())
+    }
+
     /// Connect to the server over byte frames the host carries: each frame
     /// is one postcard `SyncMessage`.
     #[napi(js_name = "connectUpstream")]
@@ -2322,7 +2717,11 @@ impl NapiDb {
             ))
             .into());
         }
-        self.connect_upstream()
+        // The link sends what the server negotiated it can take (a
+        // serializable commit that read through a branch view, say).
+        let link = self.binding()?.connect_upstream();
+        link.set_features(u64::from(features));
+        Ok(self.transport(link))
     }
 
     /// The newest transaction time this database handed out under its node
@@ -2348,6 +2747,92 @@ impl NapiDb {
         Ok(())
     }
 
+    /// Serve one of a thin session's transaction requests (SPEC 8.14), as
+    /// the backend's client linked to the core as that session: `request`
+    /// is the request's wire frame, the answer the response's. A commit
+    /// answers once the core accepted it. One request at a time.
+    #[napi(js_name = "serveThinTransaction")]
+    pub fn serve_thin_transaction(
+        &self,
+        request: Uint8Array,
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let inner = self.open_inner()?;
+        let request = match jazz::wire::decode_postcard_frame(&request) {
+            Ok(jazz::wire::WireFrame::ThinRequest(request)) => request,
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "serveThinTransaction takes a thin request frame",
+                )
+                .into());
+            }
+        };
+        let binding = inner.binding.clone();
+        let thin = Rc::clone(&inner.thin);
+        let state = thin.borrow_mut().replace(ThinState::Serving);
+        let transactions = match state {
+            Some(ThinState::Idle(transactions)) => transactions,
+            None => {
+                let made = if binding.author() == jazz::ids::AuthorSubject::SYSTEM {
+                    // A trusted backend client's session, linked as the
+                    // backend itself: its writes are the backend's, as the
+                    // core ran them as SYSTEM.
+                    Ok(jazz::thin_transactions::ThinTransactions::trusted())
+                } else {
+                    jazz::thin_transactions::ThinTransactions::new(binding.author())
+                };
+                match made {
+                    Ok(transactions) => transactions,
+                    Err(error) => {
+                        *thin.borrow_mut() = None;
+                        return Err(host_error(HostError::Engine(error)).into());
+                    }
+                }
+            }
+            Some(ThinState::Serving) => {
+                *thin.borrow_mut() = Some(ThinState::Serving);
+                return Err(napi::Error::from_reason(
+                    "serveThinTransaction serves one request at a time",
+                )
+                .into());
+            }
+        };
+        let mut serving = Serving {
+            cell: thin,
+            transactions: Some(transactions),
+        };
+        read_or_pending(Box::pin(async move {
+            let body = serving
+                .transactions
+                .as_mut()
+                .expect("held until dropped")
+                .serve(&binding.db, request.id, &request.op)
+                .await;
+            drop(serving);
+            jazz::wire::encode_frame(&jazz::wire::WireFrame::ThinResponse(
+                jazz::thin::ThinResponse {
+                    id: request.id,
+                    body,
+                },
+            ))
+            .map_err(|error| HostError::Argument(format!("encode thin answer: {error}")))
+        }))
+    }
+
+    /// End the thin session's open transactions and uploads: nothing of
+    /// them reached the core.
+    #[napi(js_name = "releaseThinTransactions")]
+    pub fn release_thin_transactions(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let inner = self.open_inner()?;
+        let binding = inner.binding.clone();
+        let state = inner.thin.borrow_mut().take();
+        read_or_pending(Box::pin(async move {
+            if let Some(ThinState::Idle(transactions)) = state {
+                transactions.release(&binding.db).await;
+            }
+            Ok(Vec::new())
+        }))
+    }
+
     /// Capture a snapshot reference, as its persisted string's bytes.
     #[napi(js_name = "captureSnapshot")]
     pub fn capture_snapshot(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
@@ -2367,6 +2852,29 @@ impl NapiDb {
             DurabilityTier::None | DurabilityTier::Local => Ok(Either::A(Vec::new().into())),
             DurabilityTier::Global => {
                 let wait = binding.wait_for_pending_writes_global();
+                read_or_pending(Box::pin(wait.map(|result| result.map(|()| Vec::new()))))
+            }
+        }
+    }
+
+    /// TS `waitForSync`: complete once `writer`'s writes so far (a trusted
+    /// session's author bytes; none for this database's own) reached `tier`,
+    /// failing with a rejection of theirs, including one that settled
+    /// before and no wait reported.
+    #[napi(js_name = "waitForSync")]
+    pub fn wait_for_sync(
+        &self,
+        tier: String,
+        writer: Option<Uint8Array>,
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let binding = self.binding()?;
+        let tier = jazz::binding_args::durability_tier(&tier).map_err(napi::Error::from_reason)?;
+        match tier {
+            DurabilityTier::None | DurabilityTier::Local => Ok(Either::A(Vec::new().into())),
+            DurabilityTier::Global => {
+                let wait = binding
+                    .wait_for_sync_global(writer.as_deref())
+                    .map_err(host_error)?;
                 read_or_pending(Box::pin(wait.map(|result| result.map(|()| Vec::new()))))
             }
         }
@@ -2747,7 +3255,7 @@ pub fn mint_local_first_token(
     let seed = decode_seed_napi(&seed_b64)?;
     identity::mint_jazz_self_signed_token(
         &seed,
-        identity::LOCAL_FIRST_ISSUER,
+        identity::DEVICE_ACCOUNT_ISSUER,
         &audience,
         ttl_seconds as u64,
     )
@@ -2932,5 +3440,168 @@ mod subscription_pool_tests {
         );
         assert!(drained[0].1.closed);
         assert!(streams.is_empty());
+    }
+}
+
+/// One thin connection's frames split between the core and the session's
+/// backend, in the client's order (SPEC 8.14; `jazz::thin_transactions::
+/// ThinRouter`). Messages are WebSocket messages (frame batches).
+#[napi]
+pub struct NapiThinRouter {
+    router: RefCell<jazz::thin_transactions::ThinRouter>,
+}
+
+/// One step a [`NapiThinRouter`] releases: a message for the core, or a
+/// request frame for the backend's client (`serveThinTransaction`).
+#[napi(object)]
+pub struct ThinStep {
+    pub core: Option<Uint8Array>,
+    pub backend: Option<Uint8Array>,
+    /// The backend request's id.
+    pub id: Option<f64>,
+    /// Whether the backend request is a commit.
+    pub commit: Option<bool>,
+}
+
+#[napi]
+impl NapiThinRouter {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            router: RefCell::default(),
+        }
+    }
+
+    /// Take one client message. Throws when it does not decode: the
+    /// connection is broken.
+    #[napi(js_name = "fromClient")]
+    pub fn from_client(&self, message: Uint8Array) -> napi::Result<()> {
+        let frames = jazz::wire::decode_websocket_frame_batch(&message)
+            .map_err(|error| napi::Error::from_reason(format!("undecodable message: {error}")))?;
+        self.router
+            .borrow_mut()
+            .from_client(frames)
+            .map_err(napi::Error::from_reason)
+    }
+
+    /// Note one message the core sent the client: whether it answered a
+    /// request sent to the core.
+    #[napi(js_name = "fromCore")]
+    pub fn from_core(&self, message: Uint8Array) -> bool {
+        jazz::wire::decode_websocket_frame_batch(&message)
+            .is_ok_and(|frames| self.router.borrow_mut().from_core(&frames))
+    }
+
+    /// Note the backend's answer (a response frame, as
+    /// `serveThinTransaction` gives it), and return the messages that carry
+    /// it to the client.
+    #[napi]
+    pub fn answer(&self, answer: Uint8Array) -> napi::Result<Vec<Uint8Array>> {
+        let Ok(jazz::wire::WireFrame::ThinResponse(answer)) =
+            jazz::wire::decode_postcard_frame(&answer)
+        else {
+            return Err(napi::Error::from_reason(
+                "answer takes a thin response frame",
+            ));
+        };
+        self.router.borrow_mut().answered(&answer);
+        jazz::thin_transactions::answer_frames(answer)
+            .into_iter()
+            .map(|frame| {
+                jazz::wire::encode_websocket_frame_batch(&[frame])
+                    .map(Uint8Array::from)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))
+            })
+            .collect()
+    }
+
+    /// Answer backend request `id` with an error the backend gave in its
+    /// place (`code`, `message`): a request it stopped waiting for, or one
+    /// it could not serve. Returns the messages that carry it to the client.
+    #[napi]
+    pub fn refuse(&self, id: f64, code: String, message: String) -> napi::Result<Vec<Uint8Array>> {
+        let frame = jazz::wire::encode_frame(&jazz::wire::WireFrame::ThinResponse(
+            jazz::thin::ThinResponse {
+                id: id as u64,
+                body: jazz::thin::ThinBody::Error { code, message },
+            },
+        ))
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        self.answer(frame.into())
+    }
+
+    /// Whether a client's Hello (its first message after the prelude) asks
+    /// for thin results: a thin client, whose transactions its backend
+    /// serves.
+    #[napi(js_name = "asksThinResults")]
+    pub fn asks_thin_results(message: Uint8Array) -> bool {
+        let Ok(frames) = jazz::wire::decode_websocket_frame_batch(&message) else {
+            return false;
+        };
+        frames.first().is_some_and(|frame| {
+            matches!(
+                jazz::wire::decode_frame(frame),
+                Ok(jazz::wire::WireFrame::Hello(hello))
+                    if hello.features & jazz::wire::FEATURE_THIN_RESULTS != 0
+            )
+        })
+    }
+
+    /// What may go now, in order.
+    #[napi]
+    pub fn ready(&self) -> napi::Result<Vec<ThinStep>> {
+        let mut steps = Vec::new();
+        for step in self.router.borrow_mut().ready() {
+            match step {
+                jazz::thin_transactions::Step::ToCore(frames) => {
+                    for frame in frames {
+                        let message = jazz::wire::encode_websocket_frame_batch(&[frame])
+                            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                        steps.push(ThinStep {
+                            core: Some(message.into()),
+                            backend: None,
+                            id: None,
+                            commit: None,
+                        });
+                    }
+                }
+                jazz::thin_transactions::Step::ToBackend(request) => {
+                    let id = request.id as f64;
+                    let commit = matches!(request.op, jazz::thin::ThinOp::Commit { .. });
+                    let frame =
+                        jazz::wire::encode_frame(&jazz::wire::WireFrame::ThinRequest(request))
+                            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    steps.push(ThinStep {
+                        core: None,
+                        backend: Some(frame.into()),
+                        id: Some(id),
+                        commit: Some(commit),
+                    });
+                }
+            }
+        }
+        Ok(steps)
+    }
+
+    /// The public schema JSON the client bound the connection to, once it
+    /// did.
+    #[napi]
+    pub fn schema(&self) -> Option<Uint8Array> {
+        self.router
+            .borrow()
+            .schema()
+            .map(|schema| schema.to_vec().into())
+    }
+
+    /// Whether something routed waits on an answer that has not come.
+    #[napi(js_name = "isWaiting")]
+    pub fn is_waiting(&self) -> bool {
+        self.router.borrow().is_waiting()
+    }
+}
+
+impl Default for NapiThinRouter {
+    fn default() -> Self {
+        Self::new()
     }
 }

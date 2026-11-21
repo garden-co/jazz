@@ -1,24 +1,13 @@
-import { schema as s } from "../../src/index.js";
+import { app as recoveryApp } from "./apps/pending-recovery/jazz.generated.js";
+import recoveryPermissions from "./apps/pending-recovery/jazz.permissions.json";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { createAccountManagerWithRuntime } from "../../src/accounts/enrollment.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createTestAccountManager } from "../../src/runtime/testing/account-fixtures.js";
 import type { Db } from "../../src/runtime/db.js";
 
-export const recoveryApp = s.defineApp(
-  {
-    headers: s.table({ version: s.int() }, {}),
-    items: s.table({ version: s.int() }, {}),
-  },
-  { migrations: "none" },
-);
-export const recoveryPermissions = s.definePermissions(recoveryApp, ({ policy }) => [
-  policy.headers.allowRead.always(),
-  policy.headers.allowInsert.always(),
-  policy.headers.allowUpdate.always(),
-  policy.items.allowRead.always(),
-  policy.items.allowInsert.always(),
-]);
+// The app is apps/pending-recovery.
+export { recoveryApp, recoveryPermissions };
 
 export type RecoveryConfig = {
   appId: string;

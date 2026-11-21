@@ -17,7 +17,7 @@ import {
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { fireAndReport } from "@/lib/db-write";
 import { logOut } from "@/lib/utils";
-import { app } from "../../../schema.js";
+import { app } from "../../../jazz.generated.js";
 
 interface ProfileProps {
   onClose: () => void;
@@ -143,7 +143,7 @@ function ProfileContent({ setOpen }: { setOpen: (v: boolean) => void }) {
         <div className="space-y-2">
           <Label htmlFor="logout">Log Out</Label>
           <p className="text-xs text-muted-foreground">
-            If you log out, you will be automatically provisioned with a new local-first identity.
+            If you log out, you will be automatically provisioned with a new device account.
           </p>
           <Button
             id="logout"

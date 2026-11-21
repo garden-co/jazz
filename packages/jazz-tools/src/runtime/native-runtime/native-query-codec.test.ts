@@ -14,32 +14,6 @@ type NativeQueryCodecFixture = {
 };
 
 describe("native query codec", () => {
-  it("encodes a payload enum match as the core predicate with a nested payload tree", () => {
-    expect(
-      bytesToHex(
-        queryWithPredicates("events", [
-          {
-            column: "event",
-            op: "EnumMatch",
-            case: "message",
-            payload: {
-              op: "All",
-              predicates: [
-                {
-                  column: "level",
-                  op: "Eq",
-                  value: { type: "Integer", value: 2 },
-                },
-              ],
-            },
-          },
-        ]),
-      ),
-    ).toBe(
-      "066576656e7473010b00056576656e74076d65737361676500010300056c6576656c030f040000000000000000000000000000",
-    );
-  });
-
   it("pins forward, reverse, nested, projected, required and partial query layouts", () => {
     const fixture = nativeQueryCodecFixture();
     for (const [name, table, arraySubqueries, select, orderBy, relation, partial] of queryCases()) {
@@ -56,6 +30,42 @@ describe("native query codec", () => {
           }),
         ),
       ).toBe(expected!.query_hex);
+    }
+  });
+
+  it("pins the text prefix/suffix predicate tags (flat 13/14, relation 11/12)", () => {
+    const fixture = nativeQueryCodecFixture();
+    const text = (value: string) => ({ type: "Text" as const, value });
+    const column = { column: "name" };
+    const cases: Array<[string, Uint8Array]> = [
+      [
+        "text_affix_flat_predicates",
+        queryWithPredicates("people", [
+          { column: "name", op: "StartsWith", value: text("Ann") },
+          { column: "name", op: "EndsWith", value: text("é") },
+        ]),
+      ],
+      [
+        "text_affix_relation_predicates",
+        queryWithPredicates("people", [], {
+          relation: {
+            Filter: {
+              input: { TableScan: { table: "people" } },
+              predicate: {
+                Or: [
+                  { StartsWith: { left: column, right: { Literal: "Ann" } } },
+                  { EndsWith: { left: column, right: { Literal: "é" } } },
+                ],
+              },
+            },
+          },
+        }),
+      ],
+    ];
+    for (const [name, bytes] of cases) {
+      const expected = fixture.cases.find((candidate) => candidate.name === name);
+      expect(expected, `${name} fixture is present`).toBeDefined();
+      expect(bytesToHex(bytes), name).toBe(expected!.query_hex);
     }
   });
 

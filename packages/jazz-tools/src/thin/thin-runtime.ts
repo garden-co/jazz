@@ -81,6 +81,7 @@ import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import {
   WebSocketCarrier,
   peerIdentityForWebSocketAuth,
+  classifyWireLinkFailure,
   isReauthenticateWireError,
   wireAuthFailureReason,
   type WebSocketConstructor,
@@ -121,6 +122,29 @@ export class ThinRemoteError extends Error {
     super(message);
     this.name = "ThinRemoteError";
   }
+}
+
+/**
+ * The backend serving this session's transactions could not learn whether a
+ * commit applied: the core didn't confirm it in time. It may have applied,
+ * or may still: don't retry it as if it failed. Read the rows it wrote to
+ * find out.
+ */
+export class ThinCommitOutcomeUnknownError extends ThinRemoteError {
+  constructor(message: string) {
+    super(COMMIT_OUTCOME_UNKNOWN, message);
+    this.name = "ThinCommitOutcomeUnknownError";
+  }
+}
+
+/** The code of a commit whose outcome is unknown (SPEC 8.14). */
+export const COMMIT_OUTCOME_UNKNOWN = "commit_outcome_unknown";
+
+/** The error a thin request's error answer is thrown as. */
+export function thinRemoteError(code: string, message: string): ThinRemoteError {
+  return code === COMMIT_OUTCOME_UNKNOWN
+    ? new ThinCommitOutcomeUnknownError(message)
+    : new ThinRemoteError(code, message);
 }
 
 /** The connection ended before the server answered. A write may or may not have committed. */
@@ -267,7 +291,9 @@ export class ThinRuntime implements Runtime {
   private parts = new ThinAssembler();
   private url?: string;
   private authJson?: string;
-  /** Requests and live queries go out only once the schema is bound. */
+  /** Whether the server took this connection's schema. Live queries and
+   * the schema go out right behind the `Hello` (see `open`); other requests
+   * only once it is bound. */
   private bound = false;
   /** A planned re-authentication is reconnecting a bound connection (see `lost`). */
   private reauthenticating = false;
@@ -316,6 +342,7 @@ export class ThinRuntime implements Runtime {
   private readonly streamsInFlight = new Set<Promise<void>>();
   private mutationErrorCallback?: (event: MutationErrorEvent) => void;
   private authFailureCallback?: (reason: string) => void;
+  private authRestoredCallback?: () => void;
 
   constructor(schema: WasmSchema, options: ThinRuntimeOptions = {}) {
     this.schema = schema;
@@ -383,6 +410,10 @@ export class ThinRuntime implements Runtime {
     this.authFailureCallback = callback;
   }
 
+  onAuthRestored(callback: () => void): void {
+    this.authRestoredCallback = callback;
+  }
+
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
     this.mutationErrorCallback = callback;
   }
@@ -432,22 +463,33 @@ export class ThinRuntime implements Runtime {
       authJson: this.authJson,
       WebSocket: this.WebSocketImpl,
       onFrame: (frame) => this.receive(carrier, frame),
-      // The server's planned re-authentication arrives as an error on an open
-      // connection, ahead of its close: handle it as the connection's end.
+      // The server's planned re-authentication, and a refusal of an admitted
+      // session (`jazz.revokeUser`), arrive as an error on an open connection,
+      // ahead of its close: handle it as the connection's end, so a refusal
+      // says why (`revoked`) rather than reading as a dropped connection.
       onError: (error) => {
-        if (isReauthenticateWireError(error)) this.lost(carrier, error);
+        if (isReauthenticateWireError(error) || wireAuthFailureReason(error))
+          this.lost(carrier, error);
       },
       onTerminal: (error) => this.lost(carrier, error),
     });
     this.carrier = carrier;
+    // Pipelined: the schema and the app's live queries go out right behind
+    // the `Hello`, without waiting for the server's or for the schema's
+    // answer. The server reads them only once it admitted this connection,
+    // in order, so each live query resolves against the schema just before
+    // it; a connection it refuses never reads them (SPEC §8.1.2, §8.14).
+    // The first results then arrive one round trip after the socket opens,
+    // not three. Refused or lost, nothing sent ahead took effect: the next
+    // connection sends it all again.
+    this.bindSchema(carrier);
+    for (const live of this.liveQueries.values()) if (live.callback) this.openLive(live);
     void carrier.ready().then(
       (negotiation) => {
         if (this.carrier !== carrier) return;
         if ((negotiation.features & FEATURE_THIN_RESULTS) === 0) {
           this.fatal(new Error("this Jazz server does not serve thin clients"));
-          return;
         }
-        this.bindSchema(carrier);
       },
       () => {
         // `onTerminal` reports why.
@@ -471,10 +513,15 @@ export class ThinRuntime implements Runtime {
         this.reauthenticating = false;
         this.refused = false;
         this.refusal = undefined;
+        // Admitted: whatever refused the credential before holds no more.
+        this.authRestoredCallback?.();
         this.stopped = false;
         this.clearOutage();
         this.notifySyncStatus();
-        for (const live of this.liveQueries.values()) if (live.callback) this.openLive(live);
+        // Live queries opened since went out ahead already (`executeSubscription`).
+        for (const live of this.liveQueries.values()) {
+          if (live.callback && live.requestId === undefined) this.openLive(live);
+        }
         for (const [requestId, oneShot] of this.oneShots) {
           if (!oneShot.sent) this.transmit(requestId, oneShot);
         }
@@ -504,8 +551,9 @@ export class ThinRuntime implements Runtime {
       refused(frame.byteLength);
       return false;
     }
-    // Parts of one frame go back to back.
-    void carrier?.sendBatch(frames);
+    // Parts of one frame go back to back, and every frame in the order sent,
+    // also before the server's `Hello` (see `open`).
+    carrier?.sendAhead(frames);
     return true;
   }
 
@@ -516,7 +564,8 @@ export class ThinRuntime implements Runtime {
     this.lastLostMessage = error.message;
     // A planned swap that ends any other way is reported as that ending.
     this.reauthenticating = false;
-    if (isReauthenticateWireError(error) && wasBound) {
+    const kind = classifyWireLinkFailure(error, wasBound);
+    if (kind === "reauthenticate" && wasBound) {
       // The session reached the expiry the app's auth gave it: connect again
       // at once so `authenticate` decides with the current credential. The
       // app keeps seeing a connected link meanwhile; unanswered writes go
@@ -526,7 +575,11 @@ export class ThinRuntime implements Runtime {
       this.open();
       return;
     }
-    const authFailure = wireAuthFailureReason(error);
+    // The auth path follows the classification: an `auth_failed` with a retry
+    // this client does not know is a refusal it retries, not a refused
+    // credential (a reauthenticate before binding is still one).
+    const authFailure =
+      kind === "authRejected" || kind === "reauthenticate" ? wireAuthFailureReason(error) : null;
     if (authFailure) {
       // Refused before the drop publishes, so the link never reads
       // "connecting" in between.
@@ -540,9 +593,10 @@ export class ThinRuntime implements Runtime {
       this.authFailureCallback?.(authFailure);
       return;
     }
-    if (error.retry === "never") {
-      // Stopped for good, as `fatal`: only an explicit connect starts over,
-      // and requests waiting for a connection end now.
+    if (kind === "fatal") {
+      // Stopped for good: only an explicit connect starts over, and requests
+      // waiting for a connection end now. Decided by the code, so a
+      // malformed frame that says `later` does not loop.
       this.fatal(lostError);
       return;
     }
@@ -554,15 +608,19 @@ export class ThinRuntime implements Runtime {
     if (
       !this.stopped &&
       !this.outagePublished &&
-      ((!wasBound && error.code === "backpressure") ||
+      (kind === "refused" ||
         (this.failingSince !== undefined && Date.now() - this.failingSince >= this.outageReportMs))
     ) {
       this.outagePublished = true;
     }
     this.notifySyncStatus();
-    if (!this.wanted || this.closed || error.retry === "never") return;
+    if (!this.wanted || this.closed) return;
+    // The thin client keeps its own delays rather than the link's policy, but
+    // spreads them as the link does (equal jitter, within [d/2, d]), so
+    // clients dropped together do not reconnect together.
     const delays = this.reconnectDelaysMs;
-    const delay = delays[Math.min(this.attempt, delays.length - 1)] ?? 1_000;
+    const ceiling = delays[Math.min(this.attempt, delays.length - 1)] ?? 1_000;
+    const delay = ceiling / 2 + Math.random() * (ceiling / 2);
     this.attempt += 1;
     this.reconnectTimer = setTimeout(() => this.open(), delay);
   }
@@ -710,7 +768,7 @@ export class ThinRuntime implements Runtime {
     })
       .finally(() => clearTimeout(oneShot?.windowTimer))
       .then((body) => {
-        if (body.type === "error") throw new ThinRemoteError(body.code, body.message);
+        if (body.type === "error") throw thinRemoteError(body.code, body.message);
         return body;
       });
     return { answer, oneShot };
@@ -888,7 +946,8 @@ export class ThinRuntime implements Runtime {
     if (!live) return;
     if (live.callback) throw new Error("Subscription has already been activated");
     live.callback = onUpdate;
-    if (this.bound) this.openLive(live);
+    // Behind the schema, also while its answer is on its way (see `open`).
+    if (this.carrier) this.openLive(live);
   }
 
   /** @internal The runtime queries the app is subscribed to now, for an upgrade to warm. */
@@ -912,6 +971,16 @@ export class ThinRuntime implements Runtime {
       }).catch(() => {
         // The connection ended: the server closed the live query with it.
       });
+    } else if (this.carrier) {
+      // Opened ahead of the schema's answer: closed the same way, right
+      // behind it. Nobody waits for the answer (its id is unknown here),
+      // and a connection that ends first took the live query with it.
+      const id = this.nextRequestId++;
+      this.sendFrame(
+        this.carrier,
+        encodeThinRequest(id, { type: "unsubscribe", subscription: live.requestId }),
+        () => undefined,
+      );
     }
   }
 
@@ -1265,6 +1334,11 @@ export class ThinRuntime implements Runtime {
     return id;
   }
 
+  hasStagedTransactionWrites(id: OpenTransactionId): boolean | undefined {
+    const transaction = this.transactions.get(id);
+    return transaction ? transaction.staged : undefined;
+  }
+
   commitTransaction(id: OpenTransactionId): Promise<TxId> {
     const transaction = this.transactions.get(id);
     if (!transaction) {
@@ -1281,14 +1355,28 @@ export class ThinRuntime implements Runtime {
     if (transaction.lost) return Promise.reject(new ThinTransactionLostError(id));
     // A staged write the server refused outright fails the commit; one its
     // row's state refused is the commit's own rejection, from the server.
-    return Promise.all(transaction.requests).then(
+    const committed = Promise.all(transaction.requests).then(
       () => this.write({ type: "commit", transaction: id }, transaction.rows),
       (error: unknown) => {
         void this.request({ type: "rollback", transaction: id }).catch(() => undefined);
         throw error;
       },
     );
+    // Until its staged requests are answered the commit is not a write yet:
+    // `waitForPendingWrites` (the local-first upgrade's drain, a shutdown
+    // that waits for sync) waits for it here, or it would close this runtime
+    // under a commit the app already made.
+    const committing = committed.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.committing.add(committing);
+    void committing.finally(() => this.committing.delete(committing));
+    return committed;
   }
+
+  /** Commits whose staged requests are still being answered (see {@link commitTransaction}). */
+  private readonly committing = new Set<Promise<void>>();
 
   async rollbackTransaction(id: OpenTransactionId): Promise<boolean> {
     const transaction = this.transactions.get(id);
@@ -1435,6 +1523,7 @@ export class ThinRuntime implements Runtime {
       oldestPendingAt,
       rejected: this.rejected,
       lastRejection: this.lastRejection,
+      pendingRevision: 0,
     };
   }
 
@@ -1489,6 +1578,9 @@ export class ThinRuntime implements Runtime {
         while (!streams.aborted && this.streamsInFlight.size > 0)
           await Promise.race([Promise.all(this.streamsInFlight), ended]);
       }
+      // A commit made before this wait becomes a write once its staged
+      // requests are answered: it counts as made so far.
+      if (this.committing.size > 0) await Promise.all([...this.committing]);
       // Only writes still waiting for their answer, like a local-first client:
       // a rejection the app already had doesn't fail every later wait.
       const dones = [...this.writes.values()]

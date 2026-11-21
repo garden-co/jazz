@@ -6,8 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
-import { schema as s } from "../index.js";
+import { testApp, testPermissions } from "../testing/index.js";
 import {
   acceptDeviceAccounts,
   createJazz,
@@ -30,13 +29,16 @@ import type { SandboxHandle, SandboxSdk } from "./vercel-store.js";
 // (`serveCore`) with only its secrets, and a `vercel()` core's from the
 // Sandbox start script.
 
-const app = await defineShippedApp({ todos: s.table({ title: s.string(), owner: s.uuid() }, {}) });
-const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user });
-  policy.todos.allowInsert.where({ owner: session.user });
-  policy.todos.allowUpdate.never();
-  policy.todos.allowDelete.never();
+const app = testApp({
+  tables: { todos: { columns: { title: "string", owner: "uuid" } } },
 });
+// Updates and deletes are denied.
+const permissionsFile = {
+  format: 1,
+  tables: { todos: { read: "owner = session.user", insert: "owner = session.user" } },
+};
+/** The engine's permissions, for the clients. */
+const permissions = testPermissions(app, permissionsFile);
 
 // The Sandbox loads the addon with require(); its ES entry doesn't export serveCore.
 const { serveCore } = createRequire(import.meta.url)("jazz-napi") as typeof import("jazz-napi");
@@ -135,6 +137,7 @@ async function deployedVercel(): Promise<JazzStore> {
   let coreUrl = "http://127.0.0.1:9";
   const handle = (): SandboxHandle => ({
     status: "running",
+    region: "iad1",
     domain: () => coreUrl,
     currentSession: () => ({
       startedAt: new Date(),
@@ -178,9 +181,13 @@ async function deployedVercel(): Promise<JazzStore> {
       },
     },
     Drive: {
+      async get() {
+        if (!state.drive) throw new Error("404 drive not found");
+        return { region: "iad1" };
+      },
       async getOrCreate() {
         state.drive = true;
-        return {};
+        return { region: "iad1" };
       },
     },
   };
@@ -188,6 +195,7 @@ async function deployedVercel(): Promise<JazzStore> {
     sdk,
     backendCredential: () => oidcToken(issuer),
     namespace: ({ environment }) => environment,
+    region: "iad1",
   });
 }
 
@@ -215,7 +223,7 @@ const stores: Array<[string, () => Promise<JazzStore>]> = [
 async function appOn(store: JazzStore, guests: boolean) {
   const jazz = await createJazz({
     app,
-    permissions,
+    permissions: permissionsFile,
     store,
     authenticate: (request) => (guests ? acceptDeviceAccounts(request) : null),
   }).ready();
@@ -264,7 +272,7 @@ describe.each(stores)("on a %s store", (_kind, store) => {
     await vi.waitFor(
       () =>
         expect(
-          warn.mock.calls.some((call) => /refused a local-first guest/.test(call.join(" "))),
+          warn.mock.calls.some((call) => /refused a device account/.test(call.join(" "))),
         ).toBe(true),
       { timeout: 20_000 },
     );

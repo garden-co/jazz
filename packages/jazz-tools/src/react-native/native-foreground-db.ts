@@ -2,6 +2,7 @@ import type * as Relay from "jazz-rn/relay";
 import type { MutationErrorEvent } from "../runtime/client.js";
 import { UnsupportedSnapshotError } from "../runtime/snapshot-ref.js";
 import { NO_UPLOADS, uploadStatusFromCount, type UploadStatus } from "../runtime/sync-status.js";
+import { formatUuid } from "../runtime/hex.js";
 import { REACT_NATIVE_UNSUPPORTED_ERROR } from "./errors.js";
 
 // The foreground command vocabulary is owned by jazz-rn. This module is
@@ -54,7 +55,15 @@ export type NativeForegroundModule = Pick<
  * commit/rollback.
  */
 export class NativeForegroundDb {
-  private closed = false;
+  /**
+   * Only moves forward: `open`, then `storeDeleted` (the relay closed this
+   * foreground with its store; the JSI handle is still held), then `closed`
+   * (the handle is released).
+   */
+  private phase: "open" | "storeDeleted" | "closed" = "open";
+  private get closed(): boolean {
+    return this.phase !== "open";
+  }
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
   private authRejectedCallback: ((reason: string) => void) | undefined;
   /** The sequence of the refusal last reported, so each is reported once. */
@@ -67,6 +76,7 @@ export class NativeForegroundDb {
   private slowQueryLogUnsupported = false;
   private pendingUploadCountUnsupported = false;
   private uploadStatusUnsupported = false;
+  private pendingUploadRowsUnsupported = false;
 
   constructor(
     private readonly runtime: NativeForegroundRuntime,
@@ -219,9 +229,16 @@ export class NativeForegroundDb {
   }
 
   close(): boolean {
-    if (this.closed) return false;
-    this.closed = true;
+    if (this.phase === "closed") return false;
+    const storeDeleted = this.phase === "storeDeleted";
+    this.phase = "closed";
     this.transactions.clear();
+    if (storeDeleted) {
+      // The relay already closed this foreground with its store: only the
+      // JSI handle is left to release.
+      this.runtime.close();
+      return false;
+    }
     try {
       const response = this.executeAllowClosed("close");
       if (response.type !== "closed") return unexpected("close", response.type);
@@ -280,15 +297,44 @@ export class NativeForegroundDb {
   }
 
   /**
+   * Ids of `table`'s rows with a write the server has neither accepted nor
+   * refused yet: this foreground's and the ones its scope's store recovered
+   * after a restart. `null` from an older native build without the command:
+   * it cannot tell, which is not "none pending".
+   */
+  pendingUploadRows(table: string): string[] | null {
+    if (this.closed || this.pendingUploadRowsUnsupported) return null;
+    let response: ForegroundResponse;
+    try {
+      response = this.execute({ type: "pendingUploadRows", table });
+    } catch (error) {
+      if (rejectsCommand(error)) {
+        this.pendingUploadRowsUnsupported = true;
+        return null;
+      }
+      throw error;
+    }
+    // A core error (an unknown table) is this call's, not a missing command:
+    // it must not turn the report off for the rest of the session.
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "pendingUploadRows") {
+      this.pendingUploadRowsUnsupported = true;
+      return null;
+    }
+    return response.rows.map(formatUuid);
+  }
+
+  /**
    * Delete this foreground's scope store: the native relay closes every
    * foreground of the scope (this one too) and its relay, then deletes the
    * store's files, keeping the account. Returns how many writes the server
    * had not confirmed it dropped.
    */
   deleteNativeStore(): { pendingUploads: number } {
+    if (this.closed) throw new Error("React Native native foreground runtime is closed");
     const response = this.execute({ type: "deleteStore" });
     if (response.type !== "storeDeleted") return unexpected("deleteStore", response.type);
-    this.closed = true;
+    this.phase = "storeDeleted";
     return { pendingUploads: response.pendingUploads };
   }
 
@@ -1045,8 +1091,17 @@ function formatTransactionId(bytes: Uint8Array<ArrayBufferLike>): string {
   return hex;
 }
 
-/** Whether the native host refused a command it does not know. */
+/**
+ * Whether the native host refused a command it does not know. A native build
+ * sets the relay status as `error.code` (`invalid_command` for an unknown
+ * command); a lifecycle or encode failure is not a missing command. A build
+ * older than the code threw the same text for every failure, so without a
+ * code only that text says so.
+ */
 function rejectsCommand(error: unknown): boolean {
+  const code =
+    typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+  if (typeof code === "string") return code === "invalid_command";
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("runtime failed during execute");
 }

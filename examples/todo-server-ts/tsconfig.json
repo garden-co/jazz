@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "resolveJsonModule": true,
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
@@ -10,6 +11,6 @@
     "outDir": "dist",
     "declaration": true
   },
-  "include": ["src/**/*", "schema.ts", "permissions.ts"],
+  "include": ["src/**/*", "jazz.generated.ts"],
   "exclude": ["node_modules", "dist"]
 }

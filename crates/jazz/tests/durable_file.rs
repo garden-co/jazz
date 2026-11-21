@@ -194,7 +194,8 @@ fn crash_child(path: &Path, committed: u64) -> ! {
         ))
         .unwrap();
     }
-    let _ = block_on(db.transaction(async |tx| {
+    let _ = block_on(async {
+        let tx = db.mergeable_tx().await?;
         for n in committed..committed + 50 {
             tx.insert(
                 "items",
@@ -208,8 +209,8 @@ fn crash_child(path: &Path, committed: u64) -> ! {
         }
         std::process::abort();
         #[allow(unreachable_code)]
-        Ok(())
-    }));
+        tx.commit().await
+    });
     unreachable!()
 }
 
@@ -493,7 +494,8 @@ fn memory_stays_bounded_by_the_page_cache() {
     let start = rss_kib();
     let rows = 200_000u64;
     for chunk in 0..(rows / 1000) {
-        block_on(db.transaction(async |tx| {
+        block_on(async {
+            let tx = db.mergeable_tx().await?;
             for n in chunk * 1000..(chunk + 1) * 1000 {
                 tx.insert(
                     "items",
@@ -505,8 +507,8 @@ fn memory_stays_bounded_by_the_page_cache() {
                 )
                 .await?;
             }
-            Ok(())
-        }))
+            tx.commit().await
+        })
         .unwrap();
     }
     let after_writes = rss_kib();

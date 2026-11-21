@@ -13,7 +13,7 @@ import {
   SideNavSection,
   type DropdownMenuOption,
 } from "@astryxdesign/core";
-import { app, type Member, type Page, type Workspace } from "@/schema";
+import { app, type Member, type Page, type Workspace } from "@/jazz.generated";
 import { PAGE_TREE_MAX_DEPTH } from "@/src/lib/limits";
 import { createPage } from "@/src/lib/page-actions";
 import { MovePageDialog } from "./MovePageDialog";

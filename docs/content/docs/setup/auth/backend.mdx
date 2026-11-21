@@ -1,6 +1,7 @@
 ---
 title: How Auth Works in Jazz
 description: "Learn how your backend decides who a user is, how the browser follows your auth, and what a session is."
+languageTabs: main-backend
 ---
 
 To authenticate users with Jazz, sign in your users with your auth library as usual. Provide an
@@ -19,8 +20,8 @@ backend already knows who is signed in, so it tells Jazz:
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite } from "jazz-tools/backend";
 import { auth } from "./auth"; // your Better Auth instance, which can keep its tables in Jazz too
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
@@ -49,7 +50,7 @@ export const jazz = createJazz({
   organization, under `session.claims`.
 - Return `null` for a signed-out request.
 - Return `acceptDeviceAccounts(request)` (from `jazz-tools/backend`) to let a signed-out
-  [device account](/docs/setup/auth/local-first) sync: that's how guests work. Device accounts are
+  [device account](/docs/setup/auth/device-accounts) sync: that's how guests work. Device accounts are
   refused otherwise. An app with no sign-in at all passes `authenticate: acceptDeviceAccounts`.
   This gates device-account sync only; [linking](#guests-and-linking) doesn't depend on it.
 
@@ -91,14 +92,23 @@ expiry, with a fresh token. On that reconnect:
 So a sign-out on another device, a ban or a changed role reaches an open connection within
 `sessionTtlSeconds` at the latest. To end a user's open connections at once, call
 `jazz.revokeUser(userId)` from your sign-out handler or your auth provider's session-revoked
-webhook. It ends their connections on this backend instance, including one still signing in as
-them when you call it (say a tab reconnecting); connections on other instances end
-within `sessionTtlSeconds`. On Vercel and other serverless hosts, the request that signs a user out
-usually runs on a different instance than their sync connections, so `revokeUser` there rarely
-reaches them. To sign out the browser the user is in, every tab of it, call `refresh()` on the
-client after your sign-out (see [Signing out in every tab](#signing-out-in-every-tab)). A connection
-`revokeUser` does end asks your backend who is signed in; in a background tab, a "no one" answer
-then waits until the tab is in front again, since its cookies may be stale.
+webhook. It ends their connections on every backend instance, including one still signing in as
+them when you call it (say a tab reconnecting). On Vercel and other serverless hosts, the request
+that signs a user out usually runs on a different instance than their sync connections, so
+`revokeUser` records the revocation at the core. The core ends the user's connections wherever
+they are served, and refuses any that an instance admits afterwards on an `authenticate` answer
+from before the call. A sign-in after the call works as usual. This needs a core at least as new as
+your backend; in front of an older core, `revokeUser` ends this instance's connections only, and
+warns. To sign out the browser the user is in, every tab of it, call `refresh()` on the client
+after your sign-out (see [Signing out in every tab](#signing-out-in-every-tab)). A connection
+`revokeUser` does end asks your backend who is signed in, in a background tab too: the refusal
+says the session was revoked, so a "no one" answer there signs the user out as in a tab in view
+(confirmed by a second answer two seconds later, after `onSignedOut`). Until then the link reads
+`{ state: "offline", reason: "auth", authReason: "revoked" }` in `db.getSyncStatus()`, and writes
+made meanwhile stay pending: stop taking edits from there if your app shouldn't accept them. A
+connection the server refuses because the user's account identity was retired reads as `revoked`
+too, and signs out the same way. Once the tab is admitted again (your backend still names the
+user), the reason is forgotten.
 
 ### Keep auth middleware off Jazz's routes
 
@@ -164,7 +174,9 @@ Jazz asks your backend who is signed in at these moments; the identity always co
 A "no one is signed in" answer signs the user out only once a second answer, two seconds later,
 agrees, so one failed session refresh in `authenticate` signs no one out. After `refresh()` Jazz
 follows the first answer. After a refused connection, a tab in the background doesn't sign out on
-its own: its cookies may be stale, so it asks again when it is in front. A failed check (a network
+its own: its cookies may be stale, so it asks again when it is in front. A connection
+`jazz.revokeUser` ended is the exception: the backend ended it on purpose, so a background tab
+follows the two answers as a tab in view does. A failed check (a network
 error, a timeout, a 5xx) is tried again with backoff. A device remembers the
 user your backend signed in (their account, identity and claims, never a credential), so a reload
 reopens their account straight away, offline too, and the first answer confirms it: another user
@@ -287,14 +299,15 @@ session?.identity; // { issuer: "jazz:backend", subject: "alice" }, subject = th
 
 On the client, the Jazz session names the same user: `getSnapshot().user` (or `user` from
 `useJazzSession()`) is `{ accountId, kind, identity, claims }`, or `null` while no one is signed in.
-`kind` is `"device"` for a [device account](/docs/setup/auth/local-first) and `"backend"` for a
+`kind` is `"device"` for a [device account](/docs/setup/auth/device-accounts) and `"backend"` for a
 user your backend signed in; `identity.subject` is your own user ID.
 
 - **Ownership** compares `session.user`. Linked identities share one account, so this is
   what "rows this user owns" should use: `{ $createdBy: session.user }` or
-  `{ owner_id: session.user }`, also inside `exists` and `hopTo` rules.
+  `{ owner_id: session.user }`, also inside `exists` rules.
 - **Exact authorship** compares `session.identity`, issuer and subject included:
-  `{ "$createdBy.identity": session.identity }`. Jazz stamps `$createdBy` and `$updatedBy` with the
+  `{ "$createdBy.identity": session.identity }`.
+  Jazz stamps `$createdBy` and `$updatedBy` with the
   full author record, `{ account, identity }`, along with edit timestamps. This tells apart writes
   by the same account made through your auth (`jazz:backend`), through a device account's key
   (`urn:jazz:local-first`), or by your backend on the user's behalf without attribution
@@ -309,17 +322,20 @@ author into a string.
 
 ### Observe the current session
 
-| Binding              | Read the current session                                            |
-| -------------------- | ------------------------------------------------------------------- |
-| React / React Native | `const session = useSession()`                                      |
-| Vue                  | `const session = useSession()`; read `session.value`                |
-| Solid                | `const session = useSession()`; read `session()`                    |
-| Svelte               | `const session = getSession()`; read `session.current`              |
-| TypeScript           | `db.getAuthState().session`; subscribe with `db.onAuthChanged(...)` |
+The Jazz session's `user` is who is signed in, and it is what your policies see:
+`user.accountId` is `session.user`, and `user.identity` and `user.claims` are `session.identity` and
+`session.claims`. It is `null` while no one is signed in.
 
-Who is signed in on the device (rather than what a policy sees) comes from the Jazz session:
-`useJazzSession().user` in React, `getJazzSession()` in Svelte, `session.getSnapshot().user`
-without a framework.
+| Binding              | Read the signed-in user                                               |
+| -------------------- | --------------------------------------------------------------------- |
+| React / React Native | `const { user } = useJazzSession()`                                   |
+| Vue                  | `const { snapshot } = useJazzSession()`; read `snapshot.value.user`   |
+| Solid                | `const { snapshot } = useJazzSession()`; read `snapshot().user`       |
+| Svelte               | `const session = getJazzSession()`; read `$session.user`              |
+| TypeScript           | `session.getSnapshot().user`; subscribe with `session.subscribe(...)` |
+
+`user.kind` tells a device account (`"device"`, a guest) from a user your backend signed in
+(`"backend"`).
 
 Framework hooks must run inside the Jazz provider. Signed-out readers have no session account, so
 ownership checks against them fail closed; write an explicit anonymous-access policy when you want
@@ -334,21 +350,21 @@ column and base your policies on it:
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
 
-export const app = s.defineApp(
-  { todos: s.table({ title: s.string(), owner_id: s.uuid() }, {}) },
-  { migrations },
-);
-```
+export const schema = s.defineSchema({
+  todos: s.table({
+    title: s.string(),
+    owner_id: s.uuid(),
+  }),
+});
 
-```ts title="permissions.ts"
-import { schema as s } from "jazz-tools";
-import { app } from "./schema";
+const { definePermissions, session } = schema;
 
-export default s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user });
-  policy.todos.allowInsert.where({ owner_id: session.user });
+export const permissions = definePermissions({
+  todos: {
+    read: { owner_id: session.user },
+    insert: { owner_id: session.user },
+  },
 });
 ```
 
@@ -404,7 +420,7 @@ A copied account ID or claim is not authorization: Jazz checks the request or ha
 
 ## Guests and linking
 
-Guests are [device accounts](/docs/setup/auth/local-first): accounts whose key lives on the device.
+Guests are [device accounts](/docs/setup/auth/device-accounts): accounts whose key lives on the device.
 A guest who signs up keeps its account and data: after your sign-up sets its session, the client
 calls `linkDeviceAccount()`. It proves it owns the device account by signing a one-time challenge
 with its key; your backend runs `authenticate` and links the new user to that account. Call it in
@@ -521,7 +537,7 @@ Signing out stays signed out until a user signs in again, across reloads too: wi
 local data or revoke anything at your auth provider; you are still responsible for any clean-up
 your auth library requires. A device account's key stays on the device, and
 `session.reopenDeviceAccount()` signs back in as it, with its data (see
-[Signing out of a device account](/docs/setup/auth/local-first#signing-out-of-a-device-account)).
+[Signing out of a device account](/docs/setup/auth/device-accounts#signing-out-of-a-device-account)).
 With `clearOnSignOut`, the key is forgotten and the data wiped.
 
 `session.signOut()` signs out of Jazz only. While your own auth still has the user signed in (its
@@ -538,7 +554,8 @@ completes. Changing accounts does.
 reached your backend and the same account can still read it. It keeps device account keys and doesn't
 sign anyone out. The [browser console helper](/docs/how-jazz-works#reset-browser-storage) does the
 same. If another tab holds the account's storage under another sign-in (a guest who just signed up
-in this tab), it waits for that tab to follow or close; after 30 seconds it fails with a
+in this tab), or with another build's schema (a tab of the app's previous deploy), it waits for
+that tab to follow, reload or close; after 30 seconds it fails with a
 `StoreHeldByAnotherTabError`, and you can call it again once that tab is gone.
 
 ### Owning the session yourself

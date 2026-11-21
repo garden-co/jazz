@@ -2,8 +2,13 @@ import { createTestAccountManager } from "../../src/runtime/testing/account-fixt
 import type { AccountStore } from "../../src/accounts/persistence.js";
 import type { AccountHandle } from "../../src/accounts/state.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../../src/schema-source.js";
-import { shippedMigrations } from "../../src/runtime/client-migrations.js";
-import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
+import { boundApp, type BoundApp } from "../../src/typed-app.js";
+import type { TestPermissionsFile } from "../../src/testing/test-app.js";
+import {
+  publishLoadedDeployment,
+  type DeployOptions,
+  type DeployResult,
+} from "../../src/dev/catalogue.js";
 import {
   jazzServerBrowserCommands,
   jazzServerTransportControlBrowserCommands,
@@ -39,19 +44,37 @@ export function getJazzServerInfo(appId?: string): Promise<JazzServerInfo> {
  */
 export async function startJazzApp(
   core: JazzServerInfo,
-  app: { schema: SchemaSourceInput; permissions: CompiledPermissionsMap },
+  app: { schema: SchemaSourceInput; permissions: TestPermissionsFile },
 ): Promise<JazzServerInfo> {
   const coreUrl = jazzCore(core).serverUrl;
-  const schema = resolveSchemaSource(app.schema);
   const serverUrl = await jazzServerBrowserCommands().jazzAppFront(coreUrl, {
-    schema,
-    // The command serializes the schema without the migrations the app
-    // ships; the backend must publish them, as the app's createJazz does.
-    migrations: shippedMigrations(schema),
+    bound: boundOf(app.schema),
     permissions: app.permissions,
     pageOrigin: location.origin,
   });
   return { ...core, serverUrl, coreUrl };
+}
+
+/**
+ * Publish `app` with `permissions` (its `jazz.permissions.json`, as an
+ * object) to the core in `options`, as `deploy` from `src/dev/catalogue.ts`
+ * does in Node. Jazz's Rust loader builds the deployment in Node (the
+ * `jazzTestDeployment` command); the browser publishes it.
+ */
+export async function deploy(options: DeployOptions): Promise<DeployResult> {
+  const { app, permissions, ...server } = options;
+  const build = jazzServerBrowserCommands().jazzTestDeployment;
+  if (!build) throw new Error("Browser test project is missing the jazzTestDeployment command.");
+  return publishLoadedDeployment(
+    server,
+    await build(boundOf(app), permissions as TestPermissionsFile),
+  );
+}
+
+function boundOf(app: SchemaSourceInput): BoundApp {
+  const bound = boundApp(resolveSchemaSource(app));
+  if (!bound) throw new Error("expected an app from a committed jazz.generated.ts");
+  return bound;
 }
 
 /**

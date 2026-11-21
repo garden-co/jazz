@@ -13,9 +13,9 @@ import {
   Spinner,
   VStack,
 } from "@astryxdesign/core";
-import { useAll, useJazzSession, useSession } from "jazz-tools/react";
+import { useAll, useJazzSession } from "jazz-tools/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 import { AssetShelf } from "@/src/components/AssetShelf";
 import { CanvasSurface } from "@/src/components/CanvasSurface";
 import { CheckpointShelf } from "@/src/components/CheckpointShelf";
@@ -74,11 +74,11 @@ export function PosterStudio({
   preparing?: boolean;
   notice?: ReactNode;
 }) {
-  const session = useSession();
+  const session = useJazzSession();
   const { data: authSession } = authClient.useSession();
-  const { refresh } = useJazzSession();
+  const { refresh } = session;
   const { data: canvases, error: canvasesError } = useAll(app.canvases);
-  const author = session?.user ?? null;
+  const author = session.user?.accountId ?? null;
   // The poster the user picked in this visit; until then the invited poster,
   // else the one open before a reload (not whichever syncs first). The
   // remembered poster is read once the account is known, which can be after

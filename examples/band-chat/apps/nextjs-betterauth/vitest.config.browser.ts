@@ -7,9 +7,11 @@ import topLevelAwait from "vite-plugin-top-level-await";
 import wasm from "vite-plugin-wasm";
 import {
   jazzAppFront,
+  jazzTestDeployment,
   jazzAppRequest,
   jazzAppUser,
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   stopJazzServerByUrl,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
@@ -38,10 +40,9 @@ export default defineConfig({
     "process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED":
       JSON.stringify(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED) ?? "undefined",
   },
-  plugins: [wasm(), topLevelAwait(), react()],
+  plugins: [jazzBrowserServerLifecycle, wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
-    globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
       trace: "retain-on-failure",
@@ -52,6 +53,8 @@ export default defineConfig({
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzTestDeployment: async (_context, bound, permissions) =>
+          jazzTestDeployment(bound, permissions),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),

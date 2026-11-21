@@ -5,13 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "jazz-tools validate && next build",
+    "build": "jazz-tools generate && next build",
     "start": "next start",
     "test": "pnpm test:server && pnpm test:browser",
     "test:server": "vitest run --config vitest.config.server.ts",
     "test:browser": "vitest run --config vitest.config.browser.ts",
     "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "better-auth": "1.7.22",

@@ -326,7 +326,8 @@ fn restore_options_as<O: HostObject>(
     })
 }
 
-/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms?, splices? }`.
+/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms?, splices?,
+/// backlog_rows? }`.
 pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
     let mut opts = ReadOpts::default();
     for name in ["read_view", "readView"] {
@@ -362,7 +363,23 @@ pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
         opts.splices = O::decode::<Vec<String>>(splices)
             .map_err(|_| HostError::Argument("splices must be an array of column names".into()))?;
     }
+    if let Some(rows) = options.get("backlog_rows")? {
+        opts.backlog_rows = Some(backlog_rows(O::number(&rows))?);
+    }
     Ok(opts)
+}
+
+/// A backlog limit as a host passes it: a whole number of rows, at least 1.
+fn backlog_rows(rows: Option<f64>) -> HostResult<std::num::NonZeroUsize> {
+    rows.filter(|rows| rows.is_finite() && rows.fract() == 0.0 && *rows >= 1.0)
+        .and_then(|rows| std::num::NonZeroUsize::new(rows.min(usize::MAX as f64) as usize))
+        .ok_or_else(|| {
+            HostError::Argument(
+                "backlog_rows must be a whole number of rows, at least 1: a subscription's \
+                 backlog cannot be unbounded"
+                    .into(),
+            )
+        })
 }
 
 /// A transaction kind: `"mergeable"`, or `"serializable"` (also spelled
@@ -453,12 +470,16 @@ pub fn decode_schema(schema: &[u8]) -> HostResult<JazzSchema> {
 }
 
 /// [`decode_schema`], refusing too what a deployment may not introduce
-/// (`check_deployable_policies`): what `jazz-tools validate` checks.
-/// Opening a store decodes its schema with [`decode_schema`] alone.
+/// (`check_deployable_policies`, `check_deployable_json_schemas`): what
+/// `jazz-tools validate` checks. Opening a store decodes its schema with
+/// [`decode_schema`] alone.
 pub fn validate_deployable_schema(schema: &[u8]) -> HostResult<JazzSchema> {
-    use jazz_model::model::public_schema_convert::check_deployable_policies;
+    use jazz_model::model::public_schema_convert::{
+        check_deployable_json_schemas, check_deployable_policies,
+    };
     let decoded = decode_schema(schema)?;
     check_deployable_policies(decoded.public_schema())
+        .and_then(|()| check_deployable_json_schemas(decoded.public_schema()))
         .map_err(|error| format!("compile public schema: {error}"))?;
     Ok(decoded)
 }
@@ -569,27 +590,44 @@ pub fn verify_self_signed(
     app_id: &str,
     claimed_author: &str,
 ) -> HostResult<AuthorSubject> {
-    let now_seconds = web_time::SystemTime::now()
+    verify_self_signed_until(token, app_id, claimed_author).map(|(author, _)| author)
+}
+
+fn now_seconds() -> HostResult<u64> {
+    Ok(web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .map_err(|error| HostError::Argument(error.to_string()))?
-        .as_secs();
-    Ok(jazz_types::identity::verify_client_runtime_author_at(
+        .as_secs())
+}
+
+/// [`verify_self_signed`], with the proof's `exp` in Unix seconds.
+fn verify_self_signed_until(
+    token: &str,
+    app_id: &str,
+    claimed_author: &str,
+) -> HostResult<(AuthorSubject, u64)> {
+    Ok(jazz_types::identity::verify_client_runtime_author_until_at(
         token,
         app_id,
         claimed_author,
-        now_seconds,
+        now_seconds()?,
     )?)
 }
 
-/// The account-bound local-first author `proof` proves `claimed_author` is.
-fn verify_local_first(proof: &SelfSignedProof, claimed_author: &str) -> HostResult<AuthorSubject> {
-    let author = verify_self_signed(&proof.token, &proof.app_id, claimed_author)?;
-    if author.principal_parts().0 != AuthorSubject::LOCAL_FIRST_ISSUER
+/// The account-bound device-account author `proof` proves `claimed_author` is,
+/// and until when (Unix seconds).
+fn verify_device_account(
+    proof: &SelfSignedProof,
+    claimed_author: &str,
+) -> HostResult<(AuthorSubject, u64)> {
+    let (author, expires_at) =
+        verify_self_signed_until(&proof.token, &proof.app_id, claimed_author)?;
+    if author.principal_parts().0 != AuthorSubject::DEVICE_ACCOUNT_ISSUER
         || author.account_id().is_none()
     {
-        return Err("session admission requires an account-bound local-first proof".into());
+        return Err("session admission requires an account-bound device-account proof".into());
     }
-    Ok(author)
+    Ok((author, expires_at))
 }
 
 /// The identity `config` opens with under `how`, checked; and whether the
@@ -891,18 +929,20 @@ pub struct Binding {
     /// Open transactions bound to an identity: their writes are its, and
     /// their reads run as it.
     bound: Rc<RefCell<BTreeMap<OpenTransactionId, WriteIdentity>>>,
-    /// Local-first accounts a backend admitted (see
-    /// [`Binding::admit_local_first_session`]), by canonical author.
+    /// Device accounts a backend admitted (see
+    /// [`Binding::admit_device_account_session`]), by canonical author.
     admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
     /// Whether the next tick reports the retry store's refusals again.
     requeue: Rc<Cell<bool>>,
 }
 
-/// A Jazz self-signed proof of a local-first account.
+/// A Jazz self-signed proof of a device account.
 #[derive(Clone)]
 struct SelfSignedProof {
     token: String,
     app_id: String,
+    /// The proof's `exp` (Unix seconds), once verified: admission lapses then.
+    expires_at: u64,
 }
 
 impl Binding {
@@ -936,31 +976,67 @@ impl Binding {
         }
     }
 
-    /// Let this backend runtime write and read as the local-first account
+    /// Let this backend runtime write and read as the device account
     /// `claimed_author`, proven by `token`. Raw author bytes never name a
     /// Jazz-reserved identity otherwise. The admission covers this runtime
     /// and its schema views; the proof is checked again at every use, so an
     /// expired one stops admitting.
-    pub fn admit_local_first_session(
+    pub fn admit_device_account_session(
         &self,
         token: &str,
         app_id: &str,
         claimed_author: &str,
     ) -> HostResult<()> {
         self.require_trusted_backend()?;
-        let proof = SelfSignedProof {
+        let mut proof = SelfSignedProof {
             token: token.to_owned(),
             app_id: app_id.to_owned(),
+            expires_at: 0,
         };
-        verify_local_first(&proof, claimed_author)?;
-        self.admitted
-            .borrow_mut()
-            .insert(claimed_author.to_owned(), proof);
+        (_, proof.expires_at) = verify_device_account(&proof, claimed_author)?;
+        let now = now_seconds()?;
+        let mut admitted = self.admitted.borrow_mut();
+        // An expired proof admits no one any more: drop those, so the map
+        // holds only the accounts admitted within a proof's lifetime.
+        admitted.retain(|_, admitted| admitted.expires_at > now);
+        // A Db an earlier request opened may still write as this account:
+        // keep whichever proof admits it longer.
+        match admitted.get(claimed_author) {
+            Some(held) if held.expires_at >= proof.expires_at => {}
+            _ => {
+                admitted.insert(claimed_author.to_owned(), proof);
+            }
+        }
         Ok(())
     }
 
+    /// Deprecated alias of [`Self::admit_device_account_session`].
+    #[deprecated(note = "renamed to admit_device_account_session")]
+    pub fn admit_local_first_session(
+        &self,
+        token: &str,
+        app_id: &str,
+        claimed_author: &str,
+    ) -> HostResult<()> {
+        self.admit_device_account_session(token, app_id, claimed_author)
+    }
+
+    /// How many device accounts this backend holds an unexpired-at-
+    /// admission proof for: only tests read it, to see the map stay bounded.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn admitted_device_accounts(&self) -> usize {
+        self.admitted.borrow().len()
+    }
+
+    /// Deprecated alias of `admitted_device_accounts`.
+    #[deprecated(note = "renamed to admitted_device_accounts")]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn admitted_local_first_accounts(&self) -> usize {
+        self.admitted_device_accounts()
+    }
+
     /// The subject `bytes` (canonical author JSON) names: an ordinary
-    /// author, or a local-first account this backend admitted.
+    /// author, or a device account this backend admitted.
     fn author_of(&self, bytes: &[u8]) -> HostResult<AuthorSubject> {
         match author(bytes) {
             Ok(author) => Ok(author),
@@ -969,7 +1045,9 @@ impl Binding {
                     Some((canonical, self.admitted.borrow().get(canonical)?.clone()))
                 });
                 match admitted {
-                    Some((canonical, proof)) => verify_local_first(&proof, canonical),
+                    Some((canonical, proof)) => {
+                        verify_device_account(&proof, canonical).map(|(author, _)| author)
+                    }
                     None => Err(error),
                 }
             }
@@ -1466,11 +1544,12 @@ impl Binding {
             let mut read =
                 std::pin::pin!(db.all_serialized_query(&query, opts, open_tx, admission, coverage));
             // A row whose large values are missing records their chunks for
-            // the next send; ask for the tick that sends it, or the read
-            // waits on unrelated sync traffic.
+            // the next send, and a serializable read asks its next remote
+            // read from here once the last one is answered; ask for the tick
+            // that sends them, or the read waits on unrelated sync traffic.
             let result = std::future::poll_fn(|context| {
                 let poll = read.as_mut().poll(context);
-                if poll.is_pending() && db.owes_chunk_requests() {
+                if poll.is_pending() && (db.owes_chunk_requests() || db.owes_requests_sent()) {
                     hooks.schedule_tick();
                 }
                 poll
@@ -1497,7 +1576,7 @@ impl Binding {
         let opts = read_opts(opts)?;
         let explicit = author.is_some();
         let author = self.read_author(author)?;
-        let query: Query = postcard::from_bytes(query)
+        let query: Query = jazz_model::query::decode_client_query_postcard(query)
             .map_err(|error| HostError::Argument(format!("undecodable query: {error}")))?;
         let mut prepared = self.db.prepare_query(&query)?;
         let stream = match author {
@@ -1627,10 +1706,21 @@ impl Binding {
     /// `local`, on the server's acceptance for `global` (rejecting if it
     /// refused).
     pub fn wait_for(&self, seq: u64, tier: &str) -> HostResult<HostFuture<()>> {
+        self.wait_for_seq(seq, tier, true)
+    }
+
+    /// `reports`: whether a rejection this wait sees counts as reported, so
+    /// a later [`Self::wait_for_sync_global`] doesn't report it
+    /// again (an observing wait leaves it to that).
+    fn wait_for_seq(&self, seq: u64, tier: &str, reports: bool) -> HostResult<HostFuture<()>> {
         let tier = binding_args::durability_tier(tier)?;
         let db = self.db.clone();
         Ok(Box::pin(self.hooks.progress.parked(async move {
-            db.wait_for_transaction(seq, tier).await?;
+            if reports {
+                db.wait_for_transaction(seq, tier).await?;
+            } else {
+                db.observe_transaction(seq, tier).await?;
+            }
             Ok(())
         })))
     }
@@ -1654,7 +1744,7 @@ impl Binding {
             let error = error.clone();
             Box::pin(async move { Err(HostError::Engine(error)) })
         } else {
-            self.wait_for(write.seq, tier)?
+            self.wait_for_seq(write.seq, tier, claim.is_some())?
         };
         let Some(claim) = claim else {
             return Ok(fate);
@@ -1675,6 +1765,19 @@ impl Binding {
         }))
     }
 
+    /// TS `waitForSync`: like [`Self::wait_for_pending_writes_global`] for
+    /// the writes of `writer` (a trusted session's author bytes; `None` for
+    /// this database's own), also failing with a rejection of theirs that
+    /// settled before and no wait reported (see [`Db::wait_for_sync`]).
+    pub fn wait_for_sync_global(&self, writer: Option<&[u8]>) -> HostResult<HostFuture<()>> {
+        let writer = writer.map(|bytes| self.author_of(bytes)).transpose()?;
+        let db = self.db.clone();
+        Ok(Box::pin(self.hooks.progress.parked(async move {
+            db.wait_for_sync(DurabilityTier::Global, writer).await?;
+            Ok(())
+        })))
+    }
+
     /// How many local commits still wait for the server's verdict.
     pub fn pending_upload_count(&self) -> usize {
         self.db.pending_upload_count()
@@ -1683,6 +1786,11 @@ impl Binding {
     /// See [`crate::db::Db::upload_status`].
     pub fn upload_status(&self) -> crate::db::UploadStatus {
         self.db.upload_status()
+    }
+
+    /// See [`crate::db::Db::pending_upload_rows`].
+    pub fn pending_upload_rows(&self, table: &str) -> HostResult<Vec<RowUuid>> {
+        Ok(self.db.pending_upload_rows(table)?)
     }
 
     /// Apply received frames and send what is due; waits wake.
@@ -1733,6 +1841,14 @@ impl Binding {
         self.db.set_slow_query_threshold(
             (ms > 0.0).then(|| std::time::Duration::from_secs_f64(ms / 1000.0)),
         );
+        Ok(())
+    }
+
+    /// Coalesce a subscription's undelivered deltas past `rows` changed
+    /// rows ([`crate::db::Db::set_subscription_backlog_limit`]); `rows` is at least 1.
+    pub fn set_subscription_backlog_rows(&self, rows: f64) -> HostResult<()> {
+        self.db
+            .set_subscription_backlog_limit(backlog_rows(Some(rows))?);
         Ok(())
     }
 
@@ -1963,12 +2079,15 @@ impl Future for NextEvent<'_> {
 /// A subscription event as the host hands it to JavaScript.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EventChunk {
-    /// `{ type: "delta", delta, reset, settled, tier }`.
+    /// `{ type: "delta", delta, reset, coalesced, settled, tier }`.
     Delta {
         /// Binding-codec delta bytes.
         delta: Vec<u8>,
         /// Replaces everything delivered so far.
         reset: bool,
+        /// A reset that stands for deltas the reader fell too far behind
+        /// to be told one by one (a backlog past its limit).
+        coalesced: bool,
         /// The result is settled at `tier`.
         settled: bool,
         /// The durability tier, as `Debug`-spelled.
@@ -1998,10 +2117,12 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             removed,
             settled,
             tier,
+            coalesced,
             ..
         } => EventChunk::Delta {
             delta: crate::binding_codec::encode_subscription_delta(&added, &updated, &removed)?,
             reset,
+            coalesced,
             settled,
             tier: format!("{tier:?}"),
         },
@@ -2147,6 +2268,9 @@ pub struct WireQueues {
     inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound_ready: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    /// The optional features the host negotiated with the peer
+    /// ([`Link::set_features`]).
+    features: Rc<std::cell::Cell<crate::wire::WireFeatures>>,
 }
 
 struct QueueTransport {
@@ -2164,6 +2288,10 @@ impl WireTransport for QueueTransport {
 
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
         self.queues.inbound.borrow_mut().pop_front()
+    }
+
+    fn features(&self) -> crate::wire::WireFeatures {
+        self.queues.features.get()
     }
 }
 
@@ -2187,6 +2315,15 @@ impl Link {
     /// The binding this link belongs to.
     pub fn binding(&self) -> &Binding {
         &self.binding
+    }
+
+    /// The optional wire features the host negotiated with the peer in
+    /// its `Hello`. An upstream link uses them to decide what it may send:
+    /// a serializable commit that read through a branch view goes only to
+    /// a peer with [`crate::wire::FEATURE_SERIALIZABLE_BRANCH_READS`].
+    pub fn set_features(&self, features: crate::wire::WireFeatures) {
+        self.queues.features.set(features);
+        self.binding.hooks.schedule_tick();
     }
 
     /// Frames received from the peer; applied on the next tick.

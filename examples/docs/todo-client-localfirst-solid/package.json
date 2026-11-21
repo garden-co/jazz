@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "check": "tsc --noEmit",
-    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && pnpm run check && vite build",
+    "check": "tsrs --noEmit",
+    "build": "node ../../../packages/jazz-tools/dist/cli.js generate && pnpm run check && vite build",
     "preview": "vite preview",
     "typecheck": "pnpm run check"
   },

@@ -9,7 +9,7 @@
 //!   with every row, history version, branch, large value, renamed column
 //!   and pending upload intact, accept current writes, and reopen again.
 //! - A damaged copy is refused with a storage error, never read as data; a
-//!   file in another storage format, or one Jazz did not write, is refused
+//!   file in another storage format is refused
 //!   with `UnsupportedStorageCodecs` and left byte-for-byte as it was.
 //! - `fixtures/pre-sqlite/` holds Groove stores (RocksDB directories from the
 //!   published alpha.54 and alpha.56 packages and the last Groove format, and
@@ -628,8 +628,10 @@ fn produce_sqlite_storage_corpus_v1() {
         block_on(client.commit_serializable_handle(tx)).unwrap();
         drop(streams);
 
-        // Then the server renames a column.
-        block_on(server.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+        // Then the server renames a column. The pinned corpus was written
+        // when this made v2 current at runtime (recording a permissions
+        // revision); a deploy now only admits it.
+        block_on(server.admit_schema_with_lenses(v2(), &[rename_title()])).unwrap();
         insert_as(
             &server,
             "documents",
@@ -863,6 +865,32 @@ fn assert_server_corpus(server: &Db, with_client_writes: bool) {
             expect(draft(2), &[("title", string("Shared"))]),
         ]
     );
+}
+
+/// The schema objects a store's file holds, by type and name.
+fn schema_objects(path: &Path) -> Vec<(String, String)> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut statement = conn
+        .prepare("SELECT type, name FROM sqlite_master ORDER BY type, name")
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Opening a pinned store creates no schema objects: a store this build
+/// only reads keeps its file as it was (the browser's pinned corpus checks
+/// its bytes). Objects a newer feature needs (pending reads' views,
+/// jazz#5806) are created when a write first needs them.
+#[test]
+fn opening_the_pinned_client_store_creates_no_schema_objects() {
+    let dir = scratch("schema-objects");
+    let client_path = install(CLIENT_FILE, CLIENT_SHA256, &dir);
+    let before = schema_objects(&client_path);
+    drop(open_client(&client_path));
+    assert_eq!(schema_objects(&client_path), before);
 }
 
 #[test]

@@ -6,9 +6,9 @@
   "scripts": {
     "dev": "next dev",
     "prebuild": "node src/lib/build-config.mjs",
-    "build": "jazz-tools validate && next build",
+    "build": "jazz-tools generate && next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "test": "vitest run",
     "screenshots": "node tests/e2e/flows.mjs",
     "test:e2e": "playwright test",

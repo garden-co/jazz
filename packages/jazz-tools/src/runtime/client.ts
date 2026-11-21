@@ -172,7 +172,13 @@ export interface Runtime {
    */
   waitForPendingWrites?(
     tier?: string,
-    options?: { throughOutage?: boolean; inFlightStreams?: AbortSignal; signal?: AbortSignal },
+    options?: {
+      throughOutage?: boolean;
+      inFlightStreams?: AbortSignal;
+      signal?: AbortSignal;
+      /** Wait as `waitForSync` for this session's writes (none: the runtime's own). */
+      sync?: { writeContext?: string | null };
+    },
   ): Promise<void>;
   /** @internal Close mutation admission and report the foreground TxTime high-water. */
   quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
@@ -184,10 +190,18 @@ export interface Runtime {
   /** Completion may include asynchronous preparation before physical submission. */
   commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
   rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
+  /**
+   * @internal Whether open transaction `id` staged any write; `undefined`
+   * when this runtime can't tell (the transaction then commits as asked).
+   */
+  hasStagedTransactionWrites?(id: OpenTransactionId): boolean | undefined;
   /** Capture behind earlier owner operations without waiting for server acceptance. */
   captureSnapshot?(): Promise<SnapshotRef>;
+  /** @internal A thin session's transaction request, served by its backend's client (NAPI). */
+  serveThinTransaction?(request: Uint8Array): Promise<Uint8Array>;
+  /** @internal End the thin session's open transactions (NAPI). */
+  releaseThinTransactions?(): Promise<void>;
   readonly preparationOwner?: object;
-  readCanEstablishAbsence?(sessionJson?: string, transaction?: OpenTransactionId): boolean;
   /** @internal Live reachability of the upstream server, for read scheduling only. */
   remoteLinkState?(): RemoteLinkState;
   /** @internal Observe {@link Runtime.remoteLinkState} changes. */
@@ -198,6 +212,11 @@ export interface Runtime {
   upstreamLinkStatus?(): LinkStatus;
   /** @internal This client's uploads: pending, since when, and refusals. */
   uploadStatus?(): UploadStatus;
+  /**
+   * @internal Ids of `table`'s rows with a write the server has not decided
+   * yet, sorted; `null` when this runtime cannot tell.
+   */
+  pendingUploadRows?(table: string): readonly string[] | null;
   /** @internal The latest link failure this client saw, if any. */
   lastLinkFailure?(): LinkFailure | null;
   /** @internal Observe changes of the link status or the upload status. */
@@ -332,6 +351,8 @@ export interface Runtime {
   endCredentialWait?(): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure(callback: (reason: string) => void): void;
+  /** Register a callback invoked when the server admits this client's link again. */
+  onAuthRestored?(callback: () => void): void;
 }
 
 /**
@@ -579,6 +600,8 @@ export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> 
   openTransactionId?: OpenTransactionId;
   /** Columns whose updates a subscription also delivers as splices. */
   splices?: readonly string[];
+  /** A subscription's backlog limit, in changed rows (see `QueryOptions.backlogRows`). */
+  backlogRows?: number;
 };
 
 export interface ResolvedQueryExecutionOptions {
@@ -588,6 +611,7 @@ export interface ResolvedQueryExecutionOptions {
   visibility: QueryVisibility;
   branch?: BranchView;
   splices?: readonly string[];
+  backlogRows?: number;
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
@@ -707,6 +731,8 @@ export interface SubscriptionCallbacks {
 
 export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
+  /** The server admitted this client's link (again), so an earlier refusal no longer holds. */
+  onAuthRestored?: () => void;
 }
 
 type QueryExecutionDefaultsContext = {
@@ -739,6 +765,7 @@ export function resolveEffectiveQueryExecutionOptions(
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
     ...(options?.splices?.length ? { splices: options.splices } : {}),
+    ...(options?.backlogRows !== undefined ? { backlogRows: options.backlogRows } : {}),
   };
 }
 
@@ -771,6 +798,7 @@ function encodeQueryExecutionOptions(
     first_load_remote_wait_ms?: number;
     transaction_id?: string;
     splices?: readonly string[];
+    backlog_rows?: number;
     read_view?: {
       source: {
         BranchView: {
@@ -801,12 +829,14 @@ function encodeQueryExecutionOptions(
   }
 
   if (options.splices?.length) payload.splices = options.splices;
+  if (options.backlogRows !== undefined) payload.backlog_rows = options.backlogRows;
 
   if (
     !payload.transaction_id &&
     !payload.first_load_remote_wait_ms &&
     !payload.read_view &&
-    !payload.splices
+    !payload.splices &&
+    payload.backlog_rows === undefined
   ) {
     return undefined;
   }
@@ -1039,6 +1069,41 @@ export class WriteResult<T> extends WriteHandle<T, T> {
 }
 
 /**
+ * The `txId` of a transaction that wrote nothing: it committed nothing, so
+ * it has no transaction id.
+ */
+export class EmptyTransactionError extends Error {
+  readonly name = "EmptyTransactionError";
+  readonly code = "empty_transaction";
+
+  constructor() {
+    super("This transaction wrote nothing, so it has no transaction id");
+  }
+}
+
+/**
+ * Returned by a `db.transaction(callback)` whose callback wrote nothing: the
+ * transaction was rolled back, as there was nothing to commit, so `wait()`
+ * resolves at once with the callback's value. It has no transaction id:
+ * `txId` rejects.
+ */
+export class EmptyTransactionWriteResult<T> extends WriteResult<T> {
+  constructor(value: T, client: JazzClient) {
+    super(value, Promise.reject(new EmptyTransactionError()), client);
+  }
+
+  override async wait(options: WriteWaitOptions): Promise<T> {
+    resolveWriteWaitTier(options.tier);
+    validateWriteWaitTimeout(options.timeoutMs);
+    return this.value;
+  }
+
+  override mapValue<U>(transformValue: (value: T) => U): WriteResult<U> {
+    return new EmptyTransactionWriteResult(transformValue(this.value), this.client());
+  }
+}
+
+/**
  * Returned by explicitly-committed serializable transactions.
  *
  * Serializable transactions are accepted or rejected by the global authority, so
@@ -1142,6 +1207,7 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private shutdownPromise: Promise<void> | null = null;
   private discarded = false;
+  private writesRefused: Error | null = null;
   /** Facade-owned subscription releases, fenced against terminal reentrancy. */
   private activeSubscriptionReleases = new Map<number, () => void>();
 
@@ -1212,6 +1278,8 @@ export class JazzClient {
       this.handleCredentialRefusal(reason);
       onAuthFailure?.(reason);
     });
+    const onAuthRestored = runtimeOptions?.onAuthRestored;
+    if (onAuthRestored) this.runtime.onAuthRestored?.(onAuthRestored);
 
     this.runtime.onMutationError((event) => {
       console.error("Unhandled Jazz mutation error", event);
@@ -1233,6 +1301,18 @@ export class JazzClient {
     runtimeOptions?: ConnectRuntimeOptions,
   ): JazzClient {
     return new JazzClient(runtime, context, runtimeOptions);
+  }
+
+  /** @internal See {@link Runtime.serveThinTransaction}. */
+  serveThinTransaction(request: Uint8Array): Promise<Uint8Array> {
+    if (!this.runtime.serveThinTransaction)
+      return Promise.reject(new Error("this runtime serves no thin transactions"));
+    return this.runtime.serveThinTransaction(request);
+  }
+
+  /** @internal See {@link Runtime.releaseThinTransactions}. */
+  async releaseThinTransactions(): Promise<void> {
+    await this.runtime.releaseThinTransactions?.();
   }
 
   captureSnapshot(): Promise<SnapshotRef> {
@@ -1298,17 +1378,6 @@ export class JazzClient {
   /** @internal Shared across schema clients attached to one runtime owner. */
   preparationOwner(): object {
     return this.runtime.preparationOwner ?? this.runtime;
-  }
-
-  /** @internal An empty policy-filtered result does not establish that a row is absent. */
-  readCanEstablishAbsence(session?: Session, transaction?: OpenTransactionId): boolean {
-    const effective = session ?? this.resolvedSession;
-    return (
-      this.runtime.readCanEstablishAbsence?.(
-        effective ? JSON.stringify(serializeRuntimeSession(effective)) : undefined,
-        transaction,
-      ) ?? false
-    );
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {
@@ -1452,6 +1521,7 @@ export class JazzClient {
   }
 
   commitTransaction(id: OpenTransactionId): WriteHandle {
+    if (this.writesRefused) throw this.writesRefused;
     const state = this.transactionPreparations.get(id);
     if (state?.committing) throw new Error("Transaction is already committing");
     const runtime = this.runtime;
@@ -1474,6 +1544,12 @@ export class JazzClient {
       },
     );
     return new WriteHandle(this.reportCommittedWrite(txId, state), this);
+  }
+
+  /** @internal See {@link Runtime.hasStagedTransactionWrites}. */
+  hasStagedTransactionWrites(id: OpenTransactionId): boolean | undefined {
+    if (this.transactionPreparations.get(id)?.unopened) return false;
+    return this.runtime.hasStagedTransactionWrites?.(id);
   }
 
   rollbackTransaction(id: OpenTransactionId): Promise<boolean> {
@@ -1575,6 +1651,20 @@ export class JazzClient {
       ...resolved,
       openTransactionId: options.openTransactionId,
     };
+  }
+
+  /**
+   * @internal `db.waitForSync` for the writes `session` makes through this
+   * client (none: its own), on the runtime's native path.
+   */
+  async waitForSyncAs(session: Session | undefined, signal?: AbortSignal): Promise<void> {
+    if (!this.runtime.waitForPendingWrites)
+      throw new Error("Runtime does not support waiting for sync");
+    await this.runtime.waitForPendingWrites("global", {
+      throughOutage: true,
+      signal,
+      sync: { writeContext: this.writeContext(session) ?? null },
+    });
   }
 
   /**
@@ -2466,6 +2556,15 @@ export class JazzClient {
   discard(): void {
     this.discarded = true;
     this.runtime.discard?.();
+  }
+
+  /**
+   * @internal Refuse every later commit with `error`: this tab yielded its
+   * store to a newer build of the app and reloads, which would lose them.
+   * A transaction opened before commits through here, not through the Db.
+   */
+  refuseWrites(error: Error): void {
+    this.writesRefused = error;
   }
 
   /** Whether this client's runtime can delete its local store. */

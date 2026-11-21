@@ -27,8 +27,23 @@ import {
   type LocalFirstLoader,
   type LocalFirstModule,
 } from "../runtime/local-first-upgrade.js";
-import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
-import { coreInitial, createStartedJazzSession, type JazzSession } from "./jazz-session.js";
+import {
+  createJazzSessionOwner,
+  notifyJazzSessionClientChanged,
+  replaceJazzSessionClient,
+} from "./state.js";
+import {
+  clearLocalFirstUnavailable,
+  describeLocalFirstFailure,
+  localFirstUnavailableWarning,
+  markLocalFirstUnavailable,
+} from "../runtime/local-first-unavailable.js";
+import {
+  coreInitial,
+  createStartedJazzSession,
+  ownJazzSession,
+  type JazzSession,
+} from "./jazz-session.js";
 import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
 import {
@@ -49,6 +64,7 @@ import { warnWindowJazzConflict } from "../runtime/page-handle.js";
 import { accountForgotten, storedKeepsDeviceAccount } from "../accounts/persistence.js";
 import { rememberBackendUser } from "../accounts/enrollment.js";
 import { deviceAccountStoreMissing } from "../accounts/process-store.js";
+import { setNewerBuildHandler, type NewerBuildHandler } from "../runtime/newer-build-reload.js";
 
 export type { LocalFirstLoader };
 
@@ -57,7 +73,7 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
     /**
      * Not for a client: the app id belongs to your backend's store
      * (`remote({ appId })`, or the id a store keeps). A client is scoped by its
-     * `serverUrl`; use `scope` to keep local-first users created under an
+     * `serverUrl`; use `scope` to keep guests' device accounts created under an
      * app id.
      */
     appId?: never;
@@ -100,6 +116,15 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      * out.
      */
     onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
+    /**
+     * Called when a tab of a newer build of your app (a deploy changed the
+     * schema) wants this browser's local store, which serves one build at a
+     * time. This tab has already made its writes durable and stopped taking
+     * new ones (they fail until it reloads); call `reload()` to load the
+     * newer build, for example after telling the user "a new version is
+     * available". Without it, the tab reloads at once.
+     */
+    onNewerBuild?: NewerBuildHandler;
     /**
      * On sign-out (or a switch to another user), wipe the account's local
      * storage instead of keeping it for that user's next sign-in. For shared
@@ -146,6 +171,7 @@ const BROWSER_SESSION_OPTIONS = {
   initial: true,
   linkDeviceAccountOnSignUp: true,
   onSignedOut: true,
+  onNewerBuild: true,
   clearOnSignOut: true,
   client: true,
   localFirst: true,
@@ -159,6 +185,7 @@ const BROWSER_SESSION_OPTIONS = {
   telemetryCollectorUrl: true,
   devMode: true,
   slowQueryThresholdMs: true,
+  subscriptionBacklogRows: true,
   store: true,
   fetch: true,
   bearer: true,
@@ -207,7 +234,21 @@ export function createJazzClient(config: JazzClientConfig): Promise<JazzSession<
   return createStartedJazzSession(config, openBrowserSessionCore);
 }
 
-/** @internal The session core `createJazzClient` and `<JazzProvider>` own. */
+/**
+ * Open a Jazz session in this browser and return it at once, while it starts
+ * (`status: "starting"`), for apps that render without a framework provider:
+ * show a loading screen from `getSnapshot()` and `subscribe()`, then the app
+ * once it is `ready` (or `signed-out`). A startup that fails leaves the session
+ * in `error` with the cause in `snapshot.error`; `retry()` starts it again.
+ * Unlike `createJazzClient`, a failed start doesn't close the session: call
+ * `close()` when the app is done with it. Pass it to `<JazzProvider session>`
+ * to render it in a framework.
+ */
+export function startJazzClient(config: JazzClientConfig): JazzSession<JazzClient> {
+  return ownJazzSession(config, openBrowserSessionCore);
+}
+
+/** @internal The session core `createJazzClient`, `startJazzClient` and `<JazzProvider>` own. */
 export async function openBrowserSessionCore(
   config: JazzClientConfig,
 ): Promise<BrowserJazzSession> {
@@ -225,6 +266,7 @@ export async function openBrowserSessionCore(
     clearOnSignOut,
     linkDeviceAccountOnSignUp,
     onSignedOut,
+    onNewerBuild,
     client: loadLocalFirst,
     localFirst,
     // The account manager's own: neither is client configuration, and a Db
@@ -236,6 +278,7 @@ export async function openBrowserSessionCore(
   } = { ...config, serverUrl };
   refuseUnkeptOptions(clientConfig);
   refuseLocalFirstTiming(localFirst, loadLocalFirst);
+  setNewerBuildHandler(onNewerBuild);
   const accounts = await createAccountManagerWithMinter(
     { ...config, serverUrl },
     mintLocalFirstTokenInJs,
@@ -347,8 +390,19 @@ export async function openBrowserSessionCore(
     await replaceJazzSessionClient<JazzClient>(
       session!,
       async (current, account) => {
-        const { createClient } = await loader();
-        const next = await openReplica(createClient, account);
+        let next: JazzClient;
+        try {
+          const { createClient } = await loader();
+          next = await openReplica(createClient, account);
+        } catch (error) {
+          // The session stays on this thin client: say why on its snapshot
+          // (`localFirstUnavailable`), not only in the console.
+          if (session?.getSnapshot().client === current) {
+            markLocalFirstUnavailable(current, describeLocalFirstFailure(error));
+            notifyJazzSessionClientChanged(session);
+          }
+          throw error;
+        }
         try {
           await prefetchThinQueries(current.db, next.db);
           await handOffThinWrites(current.db, next.db);
@@ -359,7 +413,10 @@ export async function openBrowserSessionCore(
         upgraded = account;
         return next;
       },
-      (current, next) => upgradesInPlace.get(current)!(next),
+      (current, next) => {
+        clearLocalFirstUnavailable(current);
+        upgradesInPlace.get(current)!(next);
+      },
     );
     // Only once the session took the new client: a superseded upgrade
     // (a logout or account switch meanwhile) is not remembered.
@@ -382,6 +439,14 @@ export async function openBrowserSessionCore(
     return upgradableClient(thin);
   };
 
+  const openThinBecause = async (account: AccountHandle, error: unknown, generic: string) => {
+    const info = describeLocalFirstFailure(error);
+    console.warn(localFirstUnavailableWarning(info, generic, "starting thin"), error);
+    const client = await openThin(account);
+    markLocalFirstUnavailable(client, info);
+    return client;
+  };
+
   const openClient = async (account: AccountHandle) => {
     if (loadLocalFirst && (localFirst === "now" || upgrades.has(account))) {
       let module: LocalFirstModule;
@@ -394,8 +459,11 @@ export async function openBrowserSessionCore(
         // A chunk that no longer loads (renamed by a deploy, or the network)
         // costs the app its offline start, not the session: it runs thin,
         // and the background upgrade tries the loader again.
-        console.warn("Jazz could not load the local-first client; starting thin.", error);
-        return openThin(account);
+        return openThinBecause(
+          account,
+          error,
+          "Jazz could not load the local-first client; starting thin.",
+        );
       }
       return openReplica(module.createClient, account);
     }
@@ -554,11 +622,13 @@ async function createDeviceOnlySession(config: JazzClientConfig): Promise<Browse
     linkDeviceAccountOnSignUp: _linkDeviceAccountOnSignUp,
     localFirst: _localFirst,
     onSignedOut: _onSignedOut,
+    onNewerBuild,
     client: loadLocalFirst,
     store: _store,
     fetch: _fetch,
     ...rest
   } = config;
+  setNewerBuildHandler(onNewerBuild);
   if (!loadLocalFirst) {
     throw new Error(
       'serverUrl: null keeps Jazz on this device, which needs the local-first client: pass client: () => import("jazz-tools/local-first")',
@@ -601,7 +671,14 @@ function upgradeInBackground(session: BrowserJazzSession, loader: LocalFirstLoad
       if (session.getSnapshot().client !== client) return;
       return client.db.upgradeToLocalFirst(loader).catch((error: unknown) => {
         if (session.getSnapshot().client !== client) return;
-        console.warn("Jazz could not upgrade to the local-first client; staying thin.", error);
+        console.warn(
+          localFirstUnavailableWarning(
+            describeLocalFirstFailure(error),
+            "Jazz could not upgrade to the local-first client; staying thin.",
+            "staying thin",
+          ),
+          error,
+        );
       });
     });
   };

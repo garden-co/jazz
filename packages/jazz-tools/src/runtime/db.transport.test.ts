@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/test-app.js";
 import { JazzClient, WriteResult, type TxId, type InsertResult, type Runtime } from "./client.js";
 import { createDbWithRuntimeSource, Db, type DbConfig } from "./db.js";
 import { formatAuthSecret } from "./auth-secret-codec.js";
@@ -60,17 +60,7 @@ function makeSchema(): WasmSchema {
 }
 
 function makeTodosApp() {
-  return s.defineApp(
-    {
-      todos: s.table(
-        {
-          title: s.string(),
-        },
-        {},
-      ),
-    },
-    { migrations: "none" },
-  );
+  return testApp({ tables: { todos: { columns: { title: "string" } } } });
 }
 
 function toBase64Url(value: unknown): string {
@@ -375,7 +365,7 @@ describe("runtime/Db native runtime path upstream wiring", () => {
 
     const inserted = db.insert(app.todos, { title: "Buy milk" });
     db.updateAuthToken("fresh-jwt");
-    const proof = db.getLocalFirstIdentityProof({
+    const proof = db.getDeviceAccountProof({
       audience: "proof-audience",
       ttlSeconds: 7,
     });

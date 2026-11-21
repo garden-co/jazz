@@ -1,4 +1,5 @@
 import {
+  computed,
   defineComponent,
   h,
   inject,
@@ -10,32 +11,35 @@ import {
   provide,
   shallowReadonly,
   shallowRef,
-  type InjectionKey,
   type PropType,
   type ShallowRef,
 } from "vue";
 import type { JazzClient } from "../web/create-jazz-client.js";
 import {
   attachJazzSessionConsumer,
+  clientOnlySessionActions,
+  clientOnlySnapshot,
   jazzSessionActions,
+  jazzSessionErrorViewProps,
   ownJazzSession,
   startJazzSession,
   type JazzSession,
   type JazzSessionSnapshot,
 } from "../session/jazz-session.js";
 import { openBrowserSessionCore, type JazzClientConfig } from "../session/create-jazz-session.js";
-import { JazzClientProvider } from "./provider.js";
+import { JazzClientProvider, injectOptionalJazzClient } from "./provider.js";
+import { SessionKey } from "./session-key.js";
+
+const STARTING_SNAPSHOT = Object.freeze({
+  status: "starting",
+  user: null,
+  localFirst: false,
+} as const);
 import { assertNoClassicProviderProps } from "../classic-api.js";
 import {
   refuseAutoAttachDevTools,
   type NoAutoAttachDevTools,
 } from "../runtime/removed-provider-props.js";
-
-type ProvidedSession = {
-  session: JazzSession<JazzClient>;
-  snapshot: Readonly<ShallowRef<JazzSessionSnapshot<JazzClient>>>;
-};
-const SessionKey: InjectionKey<ProvidedSession> = Symbol("JazzSession");
 
 /** `useJazzSession()`: the session's state as a ref, and its operations. */
 export type UseJazzSession = Omit<JazzSession<JazzClient>, "getSnapshot" | "subscribe" | "db"> & {
@@ -53,7 +57,19 @@ export function useJazzSession(session?: JazzSession<JazzClient>): UseJazzSessio
   // provider is mounted, even in a view that has since unmounted.
   const provided = session ? undefined : inject(SessionKey, undefined);
   if (provided) return withActions(provided.session, provided.snapshot);
-  if (!session) throw new Error("useJazzSession requires <JazzProvider> or a session argument");
+  if (!session) {
+    // A client opened outside a session (`<JazzClientProvider client>`): its
+    // user, always ready, with operations that reject naming why.
+    const client = injectOptionalJazzClient();
+    if (!client)
+      throw new Error(
+        "useJazzSession requires <JazzProvider>, <JazzClientProvider> or a session argument",
+      );
+    const snapshot = computed(() =>
+      client.value ? clientOnlySnapshot(client.value) : STARTING_SNAPSHOT,
+    );
+    return { ...clientOnlySessionActions(), snapshot };
+  }
   const own = session;
   const snapshot = shallowRef(own.getSnapshot());
   onScopeDispose(
@@ -127,27 +143,28 @@ export const JazzProvider = defineComponent({
       lease.release();
       if (owned) void session.close().catch(() => {});
     });
-    const retry = () => session.retry().catch(() => {});
     const loading = () => slots.loading?.() ?? h("p", { role: "status" }, "Loading Jazz…");
     return () => {
       const state = snapshot.value;
       if (state.status === "ready" && state.client)
         return h(
           JazzClientProvider,
-          { client: state.client },
+          { client: state.client, inSession: true },
           { default: slots.default, fallback: loading },
         );
       if (state.status === "signed-out") return slots.signedOut?.() ?? null;
       // A closed session has no client and never starts again.
       if (state.status === "closed") return slots.closed?.() ?? null;
-      if (state.status === "error")
+      if (state.status === "error") {
+        const view = jazzSessionErrorViewProps(session, state);
         return (
-          slots.error?.({ error: state.error, retry }) ??
+          slots.error?.(view) ??
           h("div", { role: "alert" }, [
-            h("p", state.error?.message ?? "Jazz could not start"),
-            h("button", { type: "button", onClick: () => void retry() }, "Retry"),
+            h("p", view.error.message),
+            h("button", { type: "button", onClick: () => void view.retry() }, "Retry"),
           ])
         );
+      }
       return loading();
     };
   },

@@ -28,6 +28,7 @@ import type {
   BrowserWebSocket,
   WebSocketConstructor,
 } from "../runtime/native-runtime/websocket.js";
+import { backendNative } from "./backend-native.js";
 import { optionalPeerImportError } from "./optional-peer.js";
 import { logStoreOpened } from "./store-log.js";
 
@@ -78,8 +79,16 @@ export interface VercelStoreOptions {
    * start and keeps it there.
    */
   appId?: never;
-  /** Sandbox region. Defaults to `iad1`. Fixed when the Sandbox is created. */
-  region?: string;
+  /**
+   * The Vercel region the core runs and keeps its data in: its Sandbox's
+   * region and its Drive's. Required. Fixed when the core is created;
+   * moving an existing core to another region isn't supported yet, so a
+   * different `region` for an existing core throws. `"iad1"` is where
+   * earlier versions created every core. Pick the region your functions run
+   * in: a request from a function elsewhere crosses regions to the core.
+   * See https://vercel.com/docs/sandbox/concepts/regions.
+   */
+  region: string;
   /**
    * Where large values' bytes go:
    * - `vercelBlob()`: the project's Blob store, written by the core
@@ -130,11 +139,16 @@ export interface SandboxSdk {
     get(params: Record<string, unknown>): Promise<SandboxHandle>;
     create(params: Record<string, unknown>): Promise<SandboxHandle>;
   };
-  Drive: { getOrCreate(params: Record<string, unknown>): Promise<unknown> };
+  Drive: {
+    get(params: Record<string, unknown>): Promise<{ readonly region: string }>;
+    getOrCreate(params: Record<string, unknown>): Promise<{ readonly region: string }>;
+  };
 }
 
 export interface SandboxHandle {
   readonly status: string;
+  /** The region the Sandbox is configured to run in. */
+  readonly region: string;
   domain(port: number): string;
   currentSession(): {
     startedAt: Date;
@@ -224,6 +238,23 @@ class CoreStartError extends Error {}
 const isWakeConflict = (error: unknown) => /\b409\b|already attached|conflict/i.test(String(error));
 
 /**
+ * Whether a lookup (`Sandbox.get`, `Drive.get`) failed because nothing has
+ * that name: `@vercel/sandbox`'s `APIError` with a 404 response. Any other
+ * failure (a 5xx, the network) says nothing about whether it exists.
+ */
+export const isNotFound = (error: unknown): boolean => {
+  const status = (error as { response?: { status?: unknown } })?.response?.status;
+  if (typeof status === "number") return status === 404;
+  return /\b404\b/.test(String((error as { message?: unknown })?.message ?? error));
+};
+
+/**
+ * A lookup that failed for another reason than "not found": retried until
+ * the wake's deadline, never read as a missing core (which would create one).
+ */
+class LookupError extends Error {}
+
+/**
  * Whether `Sandbox.create` failed because a Sandbox of that name exists:
  * another instance won the race to create it. `@vercel/sandbox` throws an
  * `APIError` whose `response` is the API's answer and whose message carries
@@ -262,30 +293,51 @@ async function healthy(base: string, timeoutMs: number, diag: Record<string, num
   return false;
 }
 
-/** Whether semver `a` is newer than `b` (prereleases sort before their release). */
+/**
+ * Whether version `a` is newer than `b`. A `-` starts a prerelease of what
+ * precedes it, at any depth, so `2.0.0-alpha.64-rc.1` is a candidate for
+ * `2.0.0-alpha.64` and sorts before it, as `2.0.0-alpha.64` does before
+ * `2.0.0`. Dot-separated parts compare numerically when both are numbers;
+ * a number sorts before a word. The start script's `newer` orders the same
+ * way (GNU `sort -V` with every `-` as `~`).
+ */
 export function newerVersion(a: string, b: string): boolean {
-  const split = (v: string) => {
-    const [main = "", pre] = v.split(/-(.*)/s, 2);
-    return { main: main.split(".").map(Number), pre: pre?.split(".") };
-  };
-  const x = split(a);
-  const y = split(b);
-  for (let i = 0; i < 3; i++) {
-    if ((x.main[i] ?? 0) !== (y.main[i] ?? 0)) return (x.main[i] ?? 0) > (y.main[i] ?? 0);
-  }
-  if (!x.pre || !y.pre) return !x.pre && !!y.pre;
-  for (let i = 0; i < Math.max(x.pre.length, y.pre.length); i++) {
-    const p = x.pre[i];
-    const q = y.pre[i];
+  return compareVersions(a, b) > 0;
+}
+
+const PRERELEASE = Symbol("prerelease");
+type VersionPart = number | string | typeof PRERELEASE;
+
+function versionParts(version: string): VersionPart[] {
+  const parts: VersionPart[] = [];
+  version.split("-").forEach((segment, i) => {
+    if (i > 0) parts.push(PRERELEASE);
+    for (const part of segment.split(".")) {
+      parts.push(/^\d+$/.test(part) ? Number(part) : part);
+    }
+  });
+  return parts;
+}
+
+function compareVersions(a: string, b: string): number {
+  const x = versionParts(a);
+  const y = versionParts(b);
+  for (let i = 0; ; i++) {
+    const p = x[i];
+    const q = y[i];
+    if (p === undefined && q === undefined) return 0;
+    // One ended: a prerelease marker on the other sorts before the end
+    // (`alpha.64-rc.1` < `alpha.64`); any other part sorts after it.
+    if (p === undefined) return q === PRERELEASE ? 1 : -1;
+    if (q === undefined) return p === PRERELEASE ? -1 : 1;
     if (p === q) continue;
-    if (p === undefined) return false;
-    if (q === undefined) return true;
-    const numeric = /^\d+$/;
-    if (numeric.test(p) && numeric.test(q)) return Number(p) > Number(q);
-    if (numeric.test(p) !== numeric.test(q)) return !numeric.test(p);
-    return p > q;
+    if (p === PRERELEASE) return -1;
+    if (q === PRERELEASE) return 1;
+    if (typeof p === "number" && typeof q === "number") return p > q ? 1 : -1;
+    if (typeof p === "number") return -1;
+    if (typeof q === "number") return 1;
+    return p > q ? 1 : -1;
   }
-  return false;
 }
 
 /**
@@ -350,9 +402,11 @@ run=${q(`${root}/tmp`)}
 # Starts are serialized; the server itself runs without the lock.
 exec 9>"$run/jazz.lock"
 flock 9
-# Semver order: GNU sort -V with "~" sorts a prerelease before its release.
+# Version order: GNU sort -V with every "-" as "~" sorts a prerelease
+# before what it is a prerelease of, at any depth (alpha.64-rc.1 before
+# alpha.64 before the release), as newerVersion does in TypeScript.
 newer() {
-  [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1/-/\\~}" "\${2/-/\\~}" | sort -V | tail -1)" = "\${1/-/\\~}" ]
+  [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1//-/\\~}" "\${2//-/\\~}" | sort -V | tail -1)" = "\${1//-/\\~}" ]
 }
 version=${q(version)}
 trust=${q(trustLine)}
@@ -514,7 +568,7 @@ export function resolveCoreBlobs(
   }
   if (blobs === undefined || blobs === "sqlite") return undefined;
   if (blobs.kind === "vercel-blob") return resolveVercelBlob(blobs, env);
-  return resolveVercelS3(blobs, options.region ?? "iad1", env);
+  return resolveVercelS3(blobs, options.region, env, warn);
 }
 
 /**
@@ -591,7 +645,7 @@ async function functionOidcToken(): Promise<string> {
   let failure: unknown;
   try {
     // A literal inside `try`, like `importSandboxSdk`'s.
-    const { getVercelOidcToken } = (await import(/* @vite-ignore */ "@vercel/functions/oidc")) as {
+    const { getVercelOidcToken } = (await backendNative().importPeer("@vercel/functions/oidc")) as {
       getVercelOidcToken(): Promise<string>;
     };
     fetched = await getVercelOidcToken();
@@ -661,8 +715,68 @@ const PER_BRANCH_RECIPE =
 export function missingNamespaceError(): Error {
   return new Error(
     "vercel(): pass `namespace`, which names this deployment's core (its Sandbox is jazz-<project>-<namespace>). The usual choices:\n" +
-      "  vercel({ namespace: ({ environment }) => environment }) // one core per Vercel environment\n" +
-      `  vercel({ ${PER_BRANCH_RECIPE} }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
+      '  vercel({ namespace: ({ environment }) => environment, region: "iad1" }) // one core per Vercel environment\n' +
+      `  vercel({ ${PER_BRANCH_RECIPE}, region: "iad1" }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
+  );
+}
+
+/** Vercel's list of the regions a Sandbox can run in. */
+const SANDBOX_REGIONS_DOCS = "https://vercel.com/docs/sandbox/concepts/regions";
+
+/** Why `vercel()` needs a region, with the one that keeps existing cores where they are. */
+export function missingRegionError(): Error {
+  return new Error(
+    "vercel(): pass `region`, the Vercel region this deployment's core runs and keeps its data in (its Sandbox and its Drive, fixed when the core is created). " +
+      "Earlier versions created every core in iad1; to keep existing cores where they are, pass:\n" +
+      '  vercel({ namespace, region: "iad1" })\n' +
+      `For a new app, pick the region your functions run in (see ${SANDBOX_REGIONS_DOCS}).`,
+  );
+}
+
+/** Check `region` when `vercel()` is called, so `next dev` reports it too. */
+export function checkRegionOption(options: { region?: unknown }): string {
+  if (options.region === undefined) throw missingRegionError();
+  if (typeof options.region !== "string" || !options.region) {
+    throw new Error(
+      `vercel(): region must be a Vercel region such as "iad1" (see ${SANDBOX_REGIONS_DOCS}); got ${JSON.stringify(options.region)}`,
+    );
+  }
+  return options.region;
+}
+
+/**
+ * An existing core (its Sandbox, or its Drive) is in `actual`, not the
+ * configured region: refused, since nothing would move it.
+ */
+export function refuseRegionMove(what: string, actual: string, configured: string): void {
+  if (actual === configured) return;
+  throw new Error(
+    `vercel(): ${what} is in ${actual}, but \`region\` is ${JSON.stringify(configured)}. ` +
+      "Moving a core to another region isn't supported yet: its data would have to be copied (https://github.com/garden-co/jazz/issues/5441). " +
+      `To keep using this core, pass \`region: ${JSON.stringify(actual)}\`.`,
+  );
+}
+
+/** Said once per process, like the Blob store warning. */
+const WARNED_FUNCTION_REGION = Symbol.for("jazz-tools.vercel.warnedFunctionRegion");
+const warnedRegion = globalThis as { [WARNED_FUNCTION_REGION]?: true };
+
+/**
+ * Warn once per process when this function runs in another region than
+ * its core: every request then crosses regions.
+ */
+export function warnFunctionRegion(
+  core: string,
+  region: string,
+  env: Record<string, string | undefined>,
+  warn: (message: string) => void = console.warn,
+): void {
+  const functionRegion = env.VERCEL_REGION;
+  if (!functionRegion || functionRegion === region || warnedRegion[WARNED_FUNCTION_REGION]) return;
+  warnedRegion[WARNED_FUNCTION_REGION] = true;
+  warn(
+    `vercel(): this function runs in ${functionRegion}, but its core ${core} is in ${region}, so every request to the core makes a round trip between the two regions. ` +
+      `Run your functions in ${region} (the project's Function Region setting).`,
   );
 }
 
@@ -678,7 +792,7 @@ export function refuseVercelName(options: {
   if (!("name" in options)) return;
   const defaults =
     "To keep the cores earlier versions created by default (production's and one per preview branch), pass " +
-    `vercel({ ${PER_BRANCH_RECIPE} }) with perBranch from jazz-tools/backend.`;
+    `vercel({ ${PER_BRANCH_RECIPE}, region: "iad1" }) with perBranch from jazz-tools/backend.`;
   const project = options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
   const name = options.name;
   // The Sandbox a namespace names: "jazz-", the project id lowercased with
@@ -873,7 +987,7 @@ export interface OpenVercelCoreOptions {
  */
 async function importSandboxSdk(): Promise<SandboxSdk> {
   try {
-    return (await import(/* @vite-ignore */ "@vercel/sandbox")) as unknown as SandboxSdk;
+    return (await backendNative().importPeer("@vercel/sandbox")) as unknown as SandboxSdk;
   } catch (error) {
     throw optionalPeerImportError("vercel()", "@vercel/sandbox", error);
   }
@@ -889,6 +1003,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
   refuseVercelName(options);
   if (options.namespace === undefined) throw missingNamespaceError();
+  const region = checkRegionOption(options);
   if (!project) {
     throw new Error(
       "vercel(): VERCEL_PROJECT_ID is not set; enable system environment variables, or pass credentials with its projectId",
@@ -896,6 +1011,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   }
   const { name, namespace } = coreName(project, options.namespace, env);
   const drive = driveName(name);
+  warnFunctionRegion(name, region, env);
   const creds = options.credentials ?? {};
   const idleMs = options.idleMs ?? DEFAULT_IDLE_MS;
   const backendCredential = options.backendCredential ?? functionOidcToken;
@@ -1001,20 +1117,46 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   };
 
   /**
+   * The core's Sandbox, or `null` only when Vercel says there is none (a
+   * 404). Any other failure is a `LookupError`: read as "no Sandbox", it
+   * would provision a core, in the configured region, next to one that
+   * exists.
+   */
+  const findSandbox = async (): Promise<SandboxHandle | null> => {
+    try {
+      return await sdk.Sandbox.get({ name, resume: false, ...creds });
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw new LookupError(`vercel(): could not look up core ${name}: ${String(error)}`);
+    }
+  };
+
+  /**
    * Create the Sandbox and start its core, or `null` when another instance
    * created it first (concurrent first requests on a cold deploy): the
    * caller then waits for that one, like any other wake.
    */
   const provision = async (): Promise<SandboxHandle | null> => {
-    await sdk.Drive.getOrCreate({
+    // An existing Drive (say, of a deleted Sandbox) keeps its region, which
+    // can't change: a core there is refused like an existing Sandbox, before
+    // `getOrCreate` is asked for one in the configured region.
+    const existing = await sdk.Drive.get({ name: drive, ...creds }).catch((error: unknown) => {
+      if (isNotFound(error)) return null;
+      throw new LookupError(
+        `vercel(): could not look up core ${name}'s Drive ${drive}: ${String(error)}`,
+      );
+    });
+    if (existing) refuseRegionMove(`core ${name}'s Drive ${drive}`, existing.region, region);
+    const created = await sdk.Drive.getOrCreate({
       name: drive,
-      region: options.region ?? "iad1",
+      region,
       maxSize: options.maxDriveBytes ?? 10 * 1024 ** 3,
       ...creds,
     });
+    refuseRegionMove(`core ${name}'s Drive ${drive}`, created.region, region);
     const sbx = await sdk.Sandbox.create({
       name,
-      region: options.region ?? "iad1",
+      region,
       image: "vercel/sandbox/node:24",
       ports: [VERCEL_CORE_PORT],
       resources: { vcpus: options.vcpus ?? 1 },
@@ -1069,11 +1211,10 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     for (;;) {
       while (!sbx) {
         try {
-          const existing = await sdk.Sandbox.get({
-            name,
-            resume: false,
-            ...creds,
-          }).catch(() => null);
+          const existing = await findSandbox();
+          // Before resuming, which starts its server: a core elsewhere is
+          // never woken.
+          if (existing) refuseRegionMove(`core ${name}`, existing.region, region);
           sbx = existing
             ? await sdk.Sandbox.get({
                 name,
@@ -1094,11 +1235,15 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
             sbx = await getRunning();
           }
         } catch (error) {
-          if (!isWakeConflict(error) || performance.now() > deadline) throw error;
+          const retry = isWakeConflict(error) || error instanceof LookupError;
+          if (!retry || performance.now() > deadline) throw error;
           await sleep(500);
           sbx = await getRunning();
         }
       }
+      // A Sandbox is found by name only, and `region` applies only when it
+      // is created: a core elsewhere is refused, not silently used.
+      refuseRegionMove(`core ${name}`, sbx.region, region);
       // A core pinned to another workload never becomes ours: say so now,
       // not after the health checks time out.
       await refuseForeignPin(sbx);
@@ -1195,6 +1340,10 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
    * still be out of reach for connections (Vercel's router stopped passing
    * them to its session): waking it then finds it healthy at the same
    * address, so only a fresh session gets connections through again.
+   *
+   * Only connections made to a session count, and only against that
+   * session: one that was still waiting for a wake never tried any, and a
+   * wake that brings up a new session starts its count afresh (#6028).
    */
   let unreached: { since: number; count: number } | undefined;
   const connectionUnreached = () => {
@@ -1229,8 +1378,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           unreached = undefined;
           await stopSession(live.sbx);
         }
+        const before = live?.sbx.currentSession().startedAt.getTime();
         const { sbx, base } = await wake();
         suspect = false;
+        // Connections that failed to reach an earlier session say nothing
+        // about this one: stopping it for them would throw away the wake.
+        if (sbx.currentSession().startedAt.getTime() !== before) unreached = undefined;
         const coreAppId =
           live?.base === base
             ? live.appId
@@ -1442,7 +1595,8 @@ function resendable(request: Request, given?: unknown): boolean {
  * `hooks` hears how each connection went: `dropped` for a connection to the
  * core that closed abnormally (the core may be down), `unreached` once a
  * connection ends without ever having opened (retries spent, or the client
- * gave up waiting), and `reached` once one opens.
+ * gave up waiting) after a connection to the core was made (not while it
+ * only waited for the wake), and `reached` once one opens.
  */
 function wakingWebSocket(
   resolveOrigin: () => Promise<string>,
@@ -1456,6 +1610,8 @@ function wakingWebSocket(
     private readonly path: string;
     private readonly deadline = performance.now() + WAKE_DEADLINE_MS;
     private pause = 100;
+    /** Whether a connection to the core was made, not just waited for. */
+    private tried = false;
 
     constructor(url: string) {
       this.path = new URL(url).pathname + new URL(url).search;
@@ -1470,6 +1626,7 @@ function wakingWebSocket(
           const socket = new Socket(`${origin.replace(/^http/, "ws")}${this.path}`) as WebSocket;
           socket.binaryType = "arraybuffer";
           this.socket = socket;
+          this.tried = true;
           socket.addEventListener("open", () => {
             if (this.socket !== socket || this.readyState !== 0) return;
             this.readyState = 1;
@@ -1523,8 +1680,9 @@ function wakingWebSocket(
       if (this.readyState >= 2) return;
       this.socket?.close();
       // A client gives up on a connection that doesn't open in time (its
-      // handshake timeout): that one never reached the core either.
-      this.finish(1000, "client closed", this.readyState === 0);
+      // handshake timeout): that one never reached the core either, if it
+      // tried. One given up while the core was still waking never did.
+      this.finish(1000, "client closed", this.readyState === 0 && this.tried);
     }
 
     private emit(type: string, event?: unknown): void {

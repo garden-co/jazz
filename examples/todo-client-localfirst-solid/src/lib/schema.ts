@@ -1,7 +1,6 @@
 import { schema as s } from "jazz-tools";
-import { migrations } from "./migrations";
 
-const schema = {
+export const schema = s.defineSchema({
   projects: s.table(
     {
       name: s.string(),
@@ -23,9 +22,21 @@ const schema = {
       project: s.rel("projects", "projectId"),
     },
   ),
-};
+});
 
-type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+const { definePermissions, session } = schema;
 
-export type Todo = s.RowOf<typeof app.todos>;
+const ownedByMe = { owner_id: session.user };
+
+export const permissions = definePermissions({
+  projects: {
+    read: true,
+    insert: true,
+  },
+  todos: {
+    read: true,
+    insert: ownedByMe,
+    update: ownedByMe,
+    delete: ownedByMe,
+  },
+});

@@ -10,8 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defineShippedApp } from "../testing/client-migrations.js";
-import { schema as s } from "../index.js";
+import { testApp } from "../testing/index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
 import { createJazz, vercel, vercelBlob } from "./index.js";
@@ -28,13 +27,9 @@ import {
   type SandboxSdk,
 } from "./vercel-store.js";
 
-const app = await defineShippedApp({ notes: s.table({ text: s.string() }, {}) });
-const permissions = s.definePermissions(app, ({ policy }) => {
-  policy.notes.allowRead.always();
-  policy.notes.allowInsert.always();
-  policy.notes.allowUpdate.never();
-  policy.notes.allowDelete.never();
-});
+const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
+// Updates and deletes are denied.
+const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
 
 // The cores earlier versions created by default, production's and one per
 // preview branch (see vercel-namespace.test.ts).
@@ -100,6 +95,9 @@ function fakeVercel(core: { appId: string; url: string }) {
     exists: false,
     status: "stopped",
     drive: false,
+    /** The Sandbox's region, and its Drive's: set when each is created. */
+    region: "iad1",
+    driveRegion: "iad1",
     startedAt: new Date(),
     timeout: 300_000,
     /** What the core runs; a start script switches it to its own version. */
@@ -112,6 +110,11 @@ function fakeVercel(core: { appId: string; url: string }) {
     failing: false,
     /** The next `slowStarts` starts haven't run yet when the function looks. */
     slowStarts: 0,
+    /**
+     * The next `failLookups` lookups of the Sandbox (not resumes) fail as
+     * Vercel's API does when it is briefly unavailable.
+     */
+    failLookups: 0,
     /** Called when a start brings the core up. */
     onStart: undefined as (() => void) | undefined,
   };
@@ -119,6 +122,9 @@ function fakeVercel(core: { appId: string; url: string }) {
   const handle = (): SandboxHandle => ({
     get status() {
       return state.status;
+    },
+    get region() {
+      return state.region;
     },
     domain: () => (state.failing ? "http://127.0.0.1:9" : core.url),
     currentSession: () => ({
@@ -176,6 +182,13 @@ function fakeVercel(core: { appId: string; url: string }) {
   const sdk: SandboxSdk = {
     Sandbox: {
       async get(params) {
+        if (!params.resume && state.failLookups > 0) {
+          state.failLookups--;
+          calls.push("lookup failed");
+          throw Object.assign(new Error("Status code 503 is not ok"), {
+            response: { status: 503 },
+          });
+        }
         if (!state.exists) throw new Error("404 sandbox not found");
         if (params.resume) {
           calls.push(`resume ${String(params.name)}`);
@@ -188,17 +201,24 @@ function fakeVercel(core: { appId: string; url: string }) {
       },
       async create(params) {
         if (!state.drive) throw new Error("drive missing");
-        calls.push(`create ${String(params.name)}`);
+        calls.push(`create ${String(params.name)} in ${String(params.region)}`);
+        state.region = String(params.region);
         state.exists = true;
         state.status = "running";
         return handle();
       },
     },
     Drive: {
+      async get() {
+        if (!state.drive) throw new Error("404 drive not found");
+        return { region: state.driveRegion };
+      },
       async getOrCreate(params) {
-        calls.push(`drive ${String(params.name)}`);
+        calls.push(`drive ${String(params.name)} in ${String(params.region)}`);
+        // An existing Drive keeps its region, as Vercel's do.
+        if (!state.drive) state.driveRegion = String(params.region);
         state.drive = true;
-        return {};
+        return { region: state.driveRegion };
       },
     },
   };
@@ -238,13 +258,17 @@ describe("vercel() store", () => {
       permissions,
       store: vercel({
         namespace: legacyNamespace,
+        region: "iad1",
         sdk: fake.sdk,
         backendCredential: core.credential,
       }),
     }).ready();
     cleanups.push(() => jazz.close());
     const name = `jazz-prj-test-${perBranch("main")}`;
-    expect(fake.calls.slice(0, 2)).toEqual([`drive ${name}-data`, `create ${name}`]);
+    expect(fake.calls.slice(0, 2)).toEqual([
+      `drive ${name}-data in iad1`,
+      `create ${name} in iad1`,
+    ]);
     expect(fake.calls[2]).toMatch(/^start /);
     const scripts = [...fake.files.keys()].filter((path) => path.startsWith("/tmp/jazz-start-"));
     const script = fake.files.get(scripts[0]!)?.toString();
@@ -266,6 +290,7 @@ describe("vercel() store", () => {
       permissions,
       store: vercel({
         namespace: legacyNamespace,
+        region: "iad1",
         sdk: fake.sdk,
         backendCredential: core.credential,
       }),
@@ -288,7 +313,12 @@ describe("vercel() store", () => {
       createJazz({
         app,
         permissions,
-        store: vercel({ namespace: legacyNamespace, sdk: fresh.sdk, backendCredential: preview }),
+        store: vercel({
+          namespace: legacyNamespace,
+          region: "iad1",
+          sdk: fresh.sdk,
+          backendCredential: preview,
+        }),
       }).ready(),
     ).rejects.toThrow(/401/);
 
@@ -309,6 +339,7 @@ describe("vercel() store", () => {
       permissions,
       store: vercel({
         namespace: legacyNamespace,
+        region: "iad1",
         sdk: fake.sdk,
         backendCredential: core.credential,
       }),
@@ -326,7 +357,12 @@ describe("vercel() store", () => {
       createJazz({
         app,
         permissions,
-        store: vercel({ namespace: legacyNamespace, sdk: fake.sdk, backendCredential: preview }),
+        store: vercel({
+          namespace: legacyNamespace,
+          region: "iad1",
+          sdk: fake.sdk,
+          backendCredential: preview,
+        }),
       }).ready(),
     ).rejects.toThrow(/trusts .*environment:production, not this deployment/);
     expect(fake.files.get("/data/trust")?.toString()).toBe(pinned);
@@ -350,7 +386,12 @@ describe("vercel() store", () => {
       createJazz({
         app,
         permissions,
-        store: vercel({ namespace: legacyNamespace, sdk: fake.sdk, backendCredential: preview }),
+        store: vercel({
+          namespace: legacyNamespace,
+          region: "iad1",
+          sdk: fake.sdk,
+          backendCredential: preview,
+        }),
       }).ready(),
     ).rejects.toThrow(/delete \/data\/trust/);
     expect(Date.now() - started).toBeLessThan(5_000);
@@ -372,7 +413,7 @@ describe("vercel() store", () => {
       createJazz({
         app,
         permissions,
-        store: vercel({ namespace: legacyNamespace, sdk: fake.sdk }),
+        store: vercel({ namespace: legacyNamespace, region: "iad1", sdk: fake.sdk }),
       }).ready(),
     ).rejects.toThrow(/preview deployment's OIDC token is for .*environment:production/);
     expect(fake.calls).toEqual([]);
@@ -401,7 +442,12 @@ describe("vercel() store", () => {
     };
     const credential = oidcToken(await startIssuer());
     const opened = await openVercelCore({
-      options: { sdk: fake.sdk, backendCredential: () => credential, namespace: "test" },
+      options: {
+        sdk: fake.sdk,
+        backendCredential: () => credential,
+        namespace: "test",
+        region: "iad1",
+      },
       openRemote: ({ url: base }) =>
         ({
           serverUrl: base,
@@ -467,7 +513,12 @@ describe("vercel() store", () => {
     };
     const credential = oidcToken(await startIssuer());
     const opened = await openVercelCore({
-      options: { sdk: fake.sdk, backendCredential: () => credential, namespace: "test" },
+      options: {
+        sdk: fake.sdk,
+        backendCredential: () => credential,
+        namespace: "test",
+        region: "iad1",
+      },
       openRemote: ({ url: base }) =>
         ({ serverUrl: base, handle: async () => ({}), close: async () => {} }) as never,
       version: "1.2.3",
@@ -502,7 +553,12 @@ describe("vercel() store", () => {
     const core = await startTrustedCore(appId);
     const fake = fakeVercel({ ...core, appId });
     const opened = await openVercelCore({
-      options: { sdk: fake.sdk, backendCredential: core.credential, namespace: "test" },
+      options: {
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+        namespace: "test",
+        region: "iad1",
+      },
       openRemote: ({ url }) =>
         ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
       version: "1.2.3",
@@ -553,6 +609,7 @@ describe("vercel() store", () => {
           sdk: fake.sdk,
           backendCredential: core.credential,
           namespace: "test",
+          region: "iad1",
           blobs: vercelBlob({ storeId: "store_Shared1" }),
         },
         openRemote: ({ url }) =>
@@ -591,7 +648,12 @@ describe("vercel() store", () => {
     // there while the core isn't listening yet.
     fake.state.slowStarts = 2;
     const opened = await openVercelCore({
-      options: { sdk: fake.sdk, backendCredential: core.credential, namespace: "test" },
+      options: {
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+        namespace: "test",
+        region: "iad1",
+      },
       openRemote: ({ url }) =>
         ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
       version: "1.2.3",
@@ -599,6 +661,136 @@ describe("vercel() store", () => {
     });
     cleanups.push(() => opened.close());
     expect(fake.calls).not.toContain("stop");
+  }, 60_000);
+
+  it("creates a new core's Sandbox and Drive in the configured region", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel({ ...core, appId });
+    const opened = await openVercelCore({
+      options: {
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+        namespace: "test",
+        region: "fra1",
+      },
+      openRemote: ({ url }) =>
+        ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
+      version: "1.2.3",
+      env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
+    });
+    cleanups.push(() => opened.close());
+    expect(fake.calls.slice(0, 2)).toEqual([
+      "drive jazz-prj-test-test-data in fra1",
+      "create jazz-prj-test-test in fra1",
+    ]);
+  }, 60_000);
+
+  it('keeps an existing iad1 core, which earlier versions created by default, with region: "iad1"', async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel({ ...core, appId });
+    Object.assign(fake.state, { exists: true, drive: true, region: "iad1", driveRegion: "iad1" });
+    const opened = await openVercelCore({
+      options: {
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+        namespace: "test",
+        region: "iad1",
+      },
+      openRemote: ({ url }) =>
+        ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
+      version: "1.2.3",
+      env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
+    });
+    cleanups.push(() => opened.close());
+    expect(fake.calls).toContain("resume jazz-prj-test-test");
+    expect(fake.calls.filter((call) => /^(create|drive) /.test(call))).toEqual([]);
+  }, 60_000);
+
+  it("refuses an existing core in another region instead of silently using it", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    for (const status of ["stopped", "running"]) {
+      const fake = fakeVercel({ ...core, appId });
+      Object.assign(fake.state, { exists: true, drive: true, status, region: "iad1" });
+      await expect(
+        openVercelCore({
+          options: {
+            sdk: fake.sdk,
+            backendCredential: core.credential,
+            namespace: "test",
+            region: "fra1",
+          },
+          openRemote: ({ url }) =>
+            ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
+          version: "1.2.3",
+          env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
+        }),
+      ).rejects.toThrow(
+        /core jazz-prj-test-test is in iad1, but `region` is "fra1"\. Moving a core to another region isn't supported yet.*issues\/5441.*pass `region: "iad1"`/,
+      );
+      // Nothing was created or started in either region.
+      expect(fake.calls.filter((call) => /^(create|drive|start) /.test(call))).toEqual([]);
+    }
+  }, 60_000);
+
+  it("never reads a failed lookup of an existing core as a missing one", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const open = (sdk: SandboxSdk, region: string) =>
+      openVercelCore({
+        options: { sdk, backendCredential: core.credential, namespace: "test", region },
+        openRemote: ({ url }) =>
+          ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
+        version: "1.2.3",
+        env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
+      });
+
+    // An iad1 core, opened with the wrong region while Vercel's API answers
+    // 503 to the running check and the wake's lookup: the lookup is retried
+    // and the core refused, never provisioned again in fra1.
+    const wrong = fakeVercel({ ...core, appId });
+    Object.assign(wrong.state, { exists: true, drive: true, region: "iad1", failLookups: 2 });
+    await expect(open(wrong.sdk, "fra1")).rejects.toThrow(
+      /core jazz-prj-test-test is in iad1, but `region` is "fra1"/,
+    );
+    expect(wrong.calls.filter((call) => call === "lookup failed")).toHaveLength(2);
+    expect(wrong.calls.filter((call) => /^(create|drive|start) /.test(call))).toEqual([]);
+
+    // With the right region, the same failures delay the wake, nothing more.
+    const right = fakeVercel({ ...core, appId });
+    Object.assign(right.state, { exists: true, drive: true, region: "iad1", failLookups: 2 });
+    const opened = await open(right.sdk, "iad1");
+    cleanups.push(() => opened.close());
+    expect(right.calls).toContain("resume jazz-prj-test-test");
+    expect(right.calls.filter((call) => /^(create|drive) /.test(call))).toEqual([]);
+  }, 60_000);
+
+  it("refuses a Drive left in another region instead of creating a Sandbox that can't mount it", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel({ ...core, appId });
+    // The Sandbox was deleted; its Drive, in iad1, kept the data.
+    Object.assign(fake.state, { exists: false, drive: true, driveRegion: "iad1" });
+    await expect(
+      openVercelCore({
+        options: {
+          sdk: fake.sdk,
+          backendCredential: core.credential,
+          namespace: "test",
+          region: "fra1",
+        },
+        openRemote: ({ url }) =>
+          ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
+        version: "1.2.3",
+        env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" },
+      }),
+    ).rejects.toThrow(
+      /Drive jazz-prj-test-test-data is in iad1, but `region` is "fra1"\. Moving a core to another region isn't supported yet/,
+    );
+    // Refused before asking for a Drive in fra1, which could create one there.
+    expect(fake.calls.filter((call) => /^(create|drive) /.test(call))).toEqual([]);
   }, 60_000);
 
   it("retries a start that failed for a transient reason, and keeps the Sandbox", async () => {
@@ -611,7 +803,12 @@ describe("vercel() store", () => {
       times: 2,
     };
     const opened = await openVercelCore({
-      options: { sdk: fake.sdk, backendCredential: core.credential, namespace: "test" },
+      options: {
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+        namespace: "test",
+        region: "iad1",
+      },
       openRemote: ({ url }) =>
         ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
       version: "1.2.3",
@@ -647,6 +844,7 @@ describe("vercel() store", () => {
       permissions,
       store: vercel({
         namespace: legacyNamespace,
+        region: "iad1",
         sdk: fake.sdk,
         backendCredential: () => oidcToken(issuer),
       }),
@@ -689,6 +887,90 @@ describe("vercel() store", () => {
       await restarting;
     }
   }, 60_000);
+  it("never stops the session it just woke for connections that were only waiting for the wake (#6028)", async () => {
+    // Vercel's router in front of the core. While the Sandbox is stopped it
+    // answers nothing. For a while after each start, the core answers
+    // `/health` but holds WebSocket upgrades (a busy core, slow to say hello).
+    const core = await startTrustedCore(randomUUID());
+    const target = new URL(core.url);
+    let fake!: ReturnType<typeof fakeVercel>;
+    let busyUntil = 0;
+    const passing = new Set<Socket>();
+    const router = createNetServer((client) => {
+      client.on("error", () => {});
+      client.once("data", (head) => {
+        const upgrade = /^upgrade:\s*websocket/im.test(head.toString("latin1"));
+        if (fake.state.status !== "running" || (upgrade && Date.now() < busyUntil)) {
+          // Held: never answered, never closed.
+          cleanups.push(async () => client.destroy());
+          return;
+        }
+        const upstream = connectTcp(Number(target.port), target.hostname, () => {
+          upstream.write(head);
+          client.pipe(upstream).pipe(client);
+        });
+        passing.add(client);
+        const end = () => {
+          passing.delete(client);
+          client.destroy();
+          upstream.destroy();
+        };
+        client.on("close", end);
+        upstream.on("error", end).on("close", end);
+      });
+    });
+    await new Promise<void>((resolve) => router.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => router.close(resolve)));
+    const url = `http://127.0.0.1:${(router.address() as AddressInfo).port}`;
+    fake = fakeVercel({ appId: core.appId, url });
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: vercel({
+        namespace: legacyNamespace,
+        region: "iad1",
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const row = await jazz.db.insert(app.notes, { text: "kept" }).wait({ tier: "global" });
+
+    // The Sandbox stops under the backend's live session, and resuming it
+    // takes longer than two handshake timeouts: the backend's reconnects
+    // give up while they wait for the wake. Then the woken core is busy for
+    // a moment, so the first connection to it times out too.
+    const get = fake.sdk.Sandbox.get;
+    fake.sdk.Sandbox.get = async (params) => {
+      if (params.resume) await sleep(25_000);
+      return get(params);
+    };
+    fake.state.onStart = () => {
+      busyUntil = Date.now() + 12_000;
+    };
+    fake.state.status = "stopped";
+    for (const socket of passing) socket.destroy();
+    fake.calls.length = 0;
+
+    // Reads fail through the outage, then succeed once the busy core
+    // answers, without this instance stopping the session it woke.
+    const deadline = Date.now() + 90_000;
+    let seen: string[] | undefined;
+    while (!seen && Date.now() < deadline) {
+      try {
+        const notes = await jazz.db.all(app.notes.where({ id: row.id }));
+        seen = notes.map((note) => note.text);
+      } catch {
+        await sleep(1_000);
+      }
+    }
+    expect(seen).toEqual(["kept"]);
+    expect(fake.calls.filter((call) => !call.startsWith("extend"))).toEqual([
+      "resume jazz-prj-test-production",
+      expect.stringMatching(/^start /),
+    ]);
+  }, 120_000);
   it("starts a fresh session when connections stop reaching a core that still answers /health", async () => {
     // Vercel's router in front of the core. While `cut`, it passes plain
     // HTTP (so `/health` answers) but holds every WebSocket upgrade without
@@ -729,6 +1011,7 @@ describe("vercel() store", () => {
       permissions,
       store: vercel({
         namespace: legacyNamespace,
+        region: "iad1",
         sdk: fake.sdk,
         backendCredential: core.credential,
       }),
@@ -793,7 +1076,12 @@ describe("vercel() store", () => {
       const opened = await Promise.allSettled(
         Array.from({ length: 5 }, () =>
           openVercelCore({
-            options: { sdk: fake.sdk, backendCredential: () => credential, namespace: "test" },
+            options: {
+              sdk: fake.sdk,
+              backendCredential: () => credential,
+              namespace: "test",
+              region: "iad1",
+            },
             openRemote: ({ url: base }) =>
               ({ serverUrl: base, handle: async () => ({}), close: async () => {} }) as never,
             version: "1.2.3",
@@ -806,7 +1094,7 @@ describe("vercel() store", () => {
       }
       expect(opened.filter((result) => result.status === "rejected")).toEqual([]);
       expect(fake.calls.filter((call) => call.startsWith("create"))).toEqual([
-        "create jazz-prj-test-test",
+        "create jazz-prj-test-test in iad1",
       ]);
     },
     60_000,
@@ -825,6 +1113,7 @@ describe("vercel() store", () => {
       permissions,
       store: vercel({
         namespace: legacyNamespace,
+        region: "iad1",
         sdk: fake.sdk,
         backendCredential: core.credential,
       }),
@@ -846,7 +1135,7 @@ describe("vercel() store", () => {
     const jazz = await createJazz({
       app,
       permissions,
-      store: vercel({ namespace: legacyNamespace, sdk: fake.sdk, local: memory() }),
+      store: vercel({ namespace: legacyNamespace, region: "iad1", sdk: fake.sdk, local: memory() }),
     }).ready();
     cleanups.push(() => jazz.close());
     await jazz.db.insert(app.notes, { text: "local" }).wait({ tier: "global" });
@@ -865,6 +1154,7 @@ describe("vercel() store", () => {
       permissions,
       store: vercel({
         namespace: legacyNamespace,
+        region: "iad1",
         sdk: older.sdk,
         backendCredential: core.credential,
       }),
@@ -882,6 +1172,7 @@ describe("vercel() store", () => {
       permissions,
       store: vercel({
         namespace: legacyNamespace,
+        region: "iad1",
         sdk: newer.sdk,
         backendCredential: core.credential,
       }),
@@ -907,6 +1198,7 @@ describe("vercel() store", () => {
       permissions,
       store: vercel({
         namespace: legacyNamespace,
+        region: "iad1",
         sdk: fake.sdk,
         backendCredential: core.credential,
       }),

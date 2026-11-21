@@ -5,8 +5,8 @@
 //   pnpm backend    (data in ./.jazz; JAZZ_IN_MEMORY=1 keeps it in memory)
 import { createServer } from "node:http";
 import { acceptDeviceAccounts, createJazz, memory, sqlite } from "jazz-tools/backend";
-import { app } from "./schema";
-import permissions from "./permissions";
+import { app } from "./jazz.generated";
+import permissions from "./jazz.permissions.json" with { type: "json" };
 
 const port = Number(process.env.PORT ?? 1625);
 const jazz = createJazz({

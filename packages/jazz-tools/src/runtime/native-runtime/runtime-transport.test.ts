@@ -13,6 +13,11 @@ import {
   WIRE_PROTOCOL_VERSION,
 } from "./websocket.js";
 import { BrowserWorkerTransportPump } from "./browser-worker-transport.js";
+import {
+  deserializeBrowserRelayError,
+  serializeBrowserRelayError,
+} from "./browser-worker-protocol.js";
+import { AuthorityChangedError, isAuthorityChangedError } from "../authority-changed-error.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
 import { createUpstreamLink } from "../testing/napi-runtime-test-utils.js";
 import {
@@ -3062,6 +3067,50 @@ describe("NativeRuntimeAdapter server transport", () => {
     // Unlike the authoritative rejection above, a transport failure has no
     // fate and must not use the mutation-rejection callback path.
     expect(mutationErrors).not.toHaveBeenCalled();
+  });
+
+  it("fails a tab's Global wait with the typed error its worker relays as link fate (#4808)", async () => {
+    const write = {
+      ...fakeWrite(),
+      wait: (tier: string) => (tier === "local" ? Promise.resolve() : new Promise<void>(() => {})),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ insert: () => write, tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      const inserted = runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "kept for a later upload" } },
+        null,
+        "00000000-0000-0000-0000-000000000009",
+      );
+      const txId = await committedTxId(inserted);
+      // What a tab's follower applies from the worker's latched link fate.
+      const relayed = deserializeBrowserRelayError(
+        serializeBrowserRelayError(new AuthorityChangedError("the server's store was recreated")),
+      );
+      runtime.reportRemoteServerTransportError(relayed, false);
+
+      const global = runtime.waitForTransaction(txId, "global");
+      await expect(global).rejects.toSatisfy(isAuthorityChangedError);
+      await expect(runtime.waitForTransaction(txId, "local")).resolves.toBeUndefined();
+      expect(runtime.upstreamFailure()).toEqual({ error: relayed, retrying: false });
+
+      runtime.clearRemoteServerTransportError();
+      expect(runtime.upstreamFailure()).toBeNull();
+    } finally {
+      await runtime.close();
+    }
   });
 
   it("delivers a terminal error to armed concurrent Global waits before reconnect clears transport state", async () => {

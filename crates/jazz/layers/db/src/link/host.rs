@@ -8,7 +8,10 @@
 //! `{"type": "setOffline", "offline": bool}`, `{"type": "admitted", "attempt": n}`,
 //! `{"type": "ended", "attempt": n, "failure": {"kind": k, "message": s}}` with
 //! `k` one of `network`, `refused`, `serverNotReady`, `authRejected`, `fatal`,
-//! `reauthenticate`,
+//! `reauthenticate`; or `{"kind": "wire", "code", "retry", "message",
+//! "admitted", "reason"?}`, a server's `WireError` in its snake_case spelling, which the
+//! link classifies itself ([`LinkFailure::from_wire_error`]; a code or retry
+//! this build does not know is a refusal, retried),
 //! `{"type": "credentialUpdated"}`, `{"type": "timerFired", "token": n}`.
 //!
 //! Output: `{"actions": [...], "events": [...], "status": {...}}`, where an
@@ -28,6 +31,7 @@ use super::{
     LinkPolicy, LinkStatus, TimerToken, UpstreamLink,
 };
 use crate::options::RemoteLinkHint;
+use crate::wire::{WireError, WireErrorCode, WireErrorReason, WireRetry};
 
 /// An [`UpstreamLink`] with the default policy, stepped by JSON documents.
 #[derive(Debug)]
@@ -77,12 +81,33 @@ enum HostInput {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum HostFailure {
-    Network { message: String },
-    Refused { message: String },
-    ServerNotReady { message: String },
-    AuthRejected { message: String },
-    Fatal { message: String },
-    Reauthenticate { message: String },
+    Network {
+        message: String,
+    },
+    Refused {
+        message: String,
+    },
+    ServerNotReady {
+        message: String,
+    },
+    AuthRejected {
+        message: String,
+    },
+    Fatal {
+        message: String,
+    },
+    Reauthenticate {
+        message: String,
+    },
+    Wire {
+        code: String,
+        retry: String,
+        message: String,
+        admitted: bool,
+        /// The server's [`WireErrorReason`], when it named one.
+        #[serde(default)]
+        reason: Option<String>,
+    },
 }
 
 impl HostInput {
@@ -103,11 +128,45 @@ impl HostInput {
                     },
                     HostFailure::Fatal { message } => LinkFailure::Fatal(message),
                     HostFailure::Reauthenticate { message } => LinkFailure::Reauthenticate(message),
+                    HostFailure::Wire {
+                        code,
+                        retry,
+                        message,
+                        admitted,
+                        reason,
+                    } => wire_failure(&code, &retry, message, admitted, reason.as_deref()),
                 },
             ),
             Self::CredentialUpdated => LinkInput::CredentialUpdated,
             Self::TimerFired { token } => LinkInput::TimerFired(TimerToken(token)),
         }
+    }
+}
+
+/// Classify a server's error from its wire spelling. A code or retry this
+/// build cannot name came from a newer server. Nothing negotiates versions
+/// before hello, so it is a refusal the link retries (and reports at once),
+/// never a reason to stop for good.
+fn wire_failure(
+    code: &str,
+    retry: &str,
+    message: String,
+    admitted: bool,
+    reason: Option<&str>,
+) -> LinkFailure {
+    // A reason this build cannot name is left out: the message still says it.
+    let reason = reason
+        .and_then(|reason| serde_json::from_value::<WireErrorReason>(Value::from(reason)).ok());
+    let parsed = serde_json::from_value::<WireErrorCode>(Value::from(code)).and_then(|code| {
+        serde_json::from_value::<WireRetry>(Value::from(retry)).map(|retry| (code, retry))
+    });
+    match parsed {
+        Ok((code, retry)) => {
+            let mut error = WireError::new(code, retry, message);
+            error.reason = reason;
+            LinkFailure::from_wire_error(&error, admitted)
+        }
+        Err(_) => LinkFailure::Refused(format!("{code} ({retry}): {message}")),
     }
 }
 
@@ -232,6 +291,62 @@ mod tests {
         assert!(out["events"].as_array().unwrap().contains(
             &json!({"type": "authFailed", "reason": "expired", "message": "token expired"})
         ));
+    }
+
+    /// A browser runtime hands the link the server's error as it arrived; the
+    /// link classifies it as it does for native hosts. A code this build does
+    /// not know is retried, never a stop.
+    #[test]
+    fn a_host_reports_a_server_wire_error_for_the_link_to_classify() {
+        let ended = |code: &str, retry: &str, admitted: bool| {
+            let mut link = HostLink::new(7);
+            step(
+                &mut link,
+                0.0,
+                json!({"type": "serverConfigured", "configured": true}),
+            );
+            step(
+                &mut link,
+                1.0,
+                json!({"type": "ended", "attempt": 1, "failure": {
+                    "kind": "wire", "code": code, "retry": retry,
+                    "message": "token expired", "admitted": admitted,
+                }}),
+            )["status"]["phase"]
+                .clone()
+        };
+        // Still starting: the first attempt keeps waiting and retries.
+        assert_eq!(ended("not_ready", "later", false), "connecting");
+        assert_eq!(ended("not_ready", "later", true), "backoff");
+        assert_eq!(ended("auth_failed", "never", false), "awaitingCredential");
+        assert_eq!(ended("malformed_frame", "later", false), "stopped");
+        assert_eq!(ended("unknown:9", "later", false), "backoff");
+        assert_eq!(ended("not_ready", "unknown:7", false), "backoff");
+    }
+
+    /// A browser runtime passes the reason a server named along with its
+    /// error; one this build cannot name is left out and the message decides.
+    #[test]
+    fn a_host_passes_the_servers_reason() {
+        let reason = |reason: &str, message: &str| {
+            let mut link = HostLink::new(7);
+            step(
+                &mut link,
+                0.0,
+                json!({"type": "serverConfigured", "configured": true}),
+            );
+            step(
+                &mut link,
+                1.0,
+                json!({"type": "ended", "attempt": 1, "failure": {
+                    "kind": "wire", "code": "auth_failed", "retry": "never",
+                    "message": message, "admitted": false, "reason": reason,
+                }}),
+            )["status"]["authReason"]
+                .clone()
+        };
+        assert_eq!(reason("revoked", "token expired"), "revoked");
+        assert_eq!(reason("unknown:9", "token expired"), "expired");
     }
 
     /// A malformed document is refused instead of guessed at.

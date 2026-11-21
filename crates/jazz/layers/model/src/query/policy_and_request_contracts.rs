@@ -611,23 +611,23 @@ pub enum Predicate {
     Lte(Operand, Operand),
     /// String substring or array membership.
     Contains(Operand, Operand),
-    /// Match one discriminated enum case, then evaluate the predicate against
-    /// that case's payload record fields.
-    EnumMatch {
-        /// Name of the enum column in the containing table.
-        column: String,
-        /// Name of the enum case that must be selected.
-        case: String,
-        /// Predicate evaluated against the selected case's payload record.
-        payload: Box<Predicate>,
-    },
+    /// The slot of a removed variant (see [`RemovedVariant`]).
+    #[doc(hidden)]
+    Removed(RemovedVariant),
     /// Nullable value is null.
     IsNull(Operand),
+    /// Text begins with text, bytewise (UTF-8, case-sensitive); NULL on
+    /// either side never matches. Tag 13, appended so earlier tags keep
+    /// their numbers; sent upstream only over a link that negotiated
+    /// `FEATURE_TEXT_AFFIX_PREDICATES`.
+    StartsWith(Operand, Operand),
+    /// Text ends with text; as [`Self::StartsWith`]. Tag 14.
+    EndsWith(Operand, Operand),
 }
 
 impl Predicate {
     /// Calls `f` on every operand of this predicate, descending through
-    /// `All`, `Any`, `Not` and `EnumMatch` payloads.
+    /// `All`, `Any` and `Not`.
     pub fn for_each_operand_mut(&mut self, f: &mut impl FnMut(&mut Operand)) {
         match self {
             Self::All(predicates) | Self::Any(predicates) => {
@@ -635,16 +635,17 @@ impl Predicate {
                     predicate.for_each_operand_mut(f);
                 }
             }
-            Self::Not(predicate) | Self::EnumMatch { payload: predicate, .. } => {
-                predicate.for_each_operand_mut(f);
-            }
+            Self::Not(predicate) => predicate.for_each_operand_mut(f),
+            Self::Removed(removed) => match *removed {},
             Self::Eq(left, right)
             | Self::Ne(left, right)
             | Self::Gt(left, right)
             | Self::Gte(left, right)
             | Self::Lt(left, right)
             | Self::Lte(left, right)
-            | Self::Contains(left, right) => {
+            | Self::Contains(left, right)
+            | Self::StartsWith(left, right)
+            | Self::EndsWith(left, right) => {
                 f(left);
                 f(right);
             }
@@ -663,16 +664,17 @@ impl Predicate {
             Self::All(predicates) | Self::Any(predicates) => {
                 predicates.iter().any(|predicate| predicate.any_operand(f))
             }
-            Self::Not(predicate) | Self::EnumMatch { payload: predicate, .. } => {
-                predicate.any_operand(f)
-            }
+            Self::Not(predicate) => predicate.any_operand(f),
+            Self::Removed(removed) => match *removed {},
             Self::Eq(left, right)
             | Self::Ne(left, right)
             | Self::Gt(left, right)
             | Self::Gte(left, right)
             | Self::Lt(left, right)
             | Self::Lte(left, right)
-            | Self::Contains(left, right) => f(left) || f(right),
+            | Self::Contains(left, right)
+            | Self::StartsWith(left, right)
+            | Self::EndsWith(left, right) => f(left) || f(right),
             Self::In(left, values) => f(left) || values.iter().any(f),
             Self::IsNull(operand) => f(operand),
         }
@@ -680,6 +682,25 @@ impl Predicate {
 }
 
 impl Query {
+    /// Whether any predicate anywhere in this query (filters, joins,
+    /// policy branches, includes, subqueries, relation) is a
+    /// `StartsWith`/`EndsWith`, which only a peer that negotiated
+    /// `FEATURE_TEXT_AFFIX_PREDICATES` decodes. Walks the query's
+    /// human-readable form so no nesting is missed; literal values are
+    /// skipped, so data never matches.
+    pub fn uses_text_affix(&self) -> bool {
+        fn walk(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+                    key == "StartsWith" || key == "EndsWith" || (key != "Literal" && walk(value))
+                }),
+                serde_json::Value::Array(items) => items.iter().any(walk),
+                _ => false,
+            }
+        }
+        serde_json::to_value(self).is_ok_and(|value| walk(&value))
+    }
+
     /// Calls `f` on each top-level predicate of the query's row conditions:
     /// its filters, join filters (including nested joins), reachable
     /// access/edge/seed filters, and the same lists in every policy branch.

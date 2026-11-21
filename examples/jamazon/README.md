@@ -47,7 +47,7 @@ the Jazz design system.
   payments and runs a fulfilment worker that subscribes to paid orders and ships them after a
   short packing delay. Shoppers watch the order timeline (placed, paid, shipped) advance through
   the same live query.
-- **Permissions in `permissions.ts`.** The catalogue and stock are public and read-only. Carts
+- **Permissions in `jazz.permissions.json`.** The catalogue and stock are public and read-only. Carts
   and their lines belong to one account, quantities stay in range and a line cannot be moved into
   another cart. Orders, order lines, events and payments are readable by their shopper and
   written only by the backend.
@@ -70,7 +70,7 @@ start.
 That includes `next dev` on a non-loopback host (for example a LAN address or a tunnel): it
 needs the full deployment configuration too.
 
-By default the backend stores data in SQLite next to the app. To sync through Jazz Cloud or your
+By default the backend stores data in SQLite next to the app. To sync through Jazz Cloud (deprecated) or your
 own sync server instead, set `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET`; the backend then uses `remote()`, and browsers still talk only to `/jazz`.
 
 To try Stripe test mode, set `PAYMENT_PROVIDER=stripe`, `STRIPE_SECRET_KEY=sk_test_…` and
@@ -92,7 +92,7 @@ pnpm --filter jamazon-nextjs-betterauth test
 
 Runs against a local Jazz server started by `createPolicyTestApp`:
 
-- `tests/permissions.test.ts`: signed-in shoppers and real local-first guests. The catalogue is
+- `tests/permissions.test.ts`: signed-in shoppers and real guests on device accounts. The catalogue is
   public and read-only; guest carts work before sign-in and stay private; carts are private and
   lines cannot move between them; orders and payments are readable only by their shopper and
   never writable by clients.
@@ -105,13 +105,13 @@ Runs against a local Jazz server started by `createPolicyTestApp`:
 
 ## Layout
 
-| Path                          | What lives there                                               |
-| ----------------------------- | -------------------------------------------------------------- |
-| `schema.ts`, `permissions.ts` | Tables and row-level policies                                  |
-| `src/catalogue/catalogue.ts`  | The deterministic synthetic catalogue                          |
-| `src/lib/ids.ts`              | Deterministic (version 5) row ids                              |
-| `src/store/cart.ts`           | Cart hook, merge rules and guest cart claim                    |
-| `src/server/orders.ts`        | Checkout, payment and shipping workflow (backend authority)    |
-| `src/server/payments/`        | `PaymentProvider`, the sandbox and Stripe test mode            |
-| `src/server/fulfilment.ts`    | The worker that ships paid orders                              |
-| `src/components/`             | Storefront UI built from Astryx components with the Jazz theme |
+| Path                                     | What lives there                                               |
+| ---------------------------------------- | -------------------------------------------------------------- |
+| `jazz.app.json`, `jazz.permissions.json` | Tables and row-level policies                                  |
+| `src/catalogue/catalogue.ts`             | The deterministic synthetic catalogue                          |
+| `src/lib/ids.ts`                         | Deterministic (version 5) row ids                              |
+| `src/store/cart.ts`                      | Cart hook, merge rules and guest cart claim                    |
+| `src/server/orders.ts`                   | Checkout, payment and shipping workflow (backend authority)    |
+| `src/server/payments/`                   | `PaymentProvider`, the sandbox and Stripe test mode            |
+| `src/server/fulfilment.ts`               | The worker that ships paid orders                              |
+| `src/components/`                        | Storefront UI built from Astryx components with the Jazz theme |

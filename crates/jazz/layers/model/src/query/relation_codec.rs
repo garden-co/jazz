@@ -280,18 +280,25 @@ enum WireRelationPredicate {
         #[serde(deserialize_with = "deserialize_node")]
         right: WireRelationValueRef,
     },
-    EnumMatch {
-        column: WireRelationColumnRef,
-        #[serde(deserialize_with = "deserialize_bounded_string")]
-        case: String,
-        #[serde(deserialize_with = "deserialize_nested_box")]
-        payload: Box<WireRelationPredicate>,
-    },
+    /// The slot of a removed variant (see [`RemovedVariant`]).
+    Removed(RemovedVariant),
     And(#[serde(deserialize_with = "deserialize_bounded_vec")] Vec<WireRelationPredicate>),
     Or(#[serde(deserialize_with = "deserialize_bounded_vec")] Vec<WireRelationPredicate>),
     Not(#[serde(deserialize_with = "deserialize_nested_box")] Box<WireRelationPredicate>),
     True,
     False,
+    /// Tag 11. Appended: tags 0-10 are unchanged.
+    StartsWith {
+        left: WireRelationColumnRef,
+        #[serde(deserialize_with = "deserialize_node")]
+        right: WireRelationValueRef,
+    },
+    /// Tag 12.
+    EndsWith {
+        left: WireRelationColumnRef,
+        #[serde(deserialize_with = "deserialize_node")]
+        right: WireRelationValueRef,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum WireRelationCmpOp {
@@ -660,15 +667,7 @@ fn wire_predicate(value: &RelationPredicate) -> WireResult<WireRelationPredicate
             left: wire_column(left),
             right: wire_value(right)?,
         },
-        RelationPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => WireRelationPredicate::EnumMatch {
-            column: wire_column(column),
-            case: case.clone(),
-            payload: Box::new(wire_predicate(payload)?),
-        },
+        RelationPredicate::Removed(removed) => match *removed {},
         RelationPredicate::And(values) => WireRelationPredicate::And(
             values
                 .iter()
@@ -686,6 +685,14 @@ fn wire_predicate(value: &RelationPredicate) -> WireResult<WireRelationPredicate
         }
         RelationPredicate::True => WireRelationPredicate::True,
         RelationPredicate::False => WireRelationPredicate::False,
+        RelationPredicate::StartsWith { left, right } => WireRelationPredicate::StartsWith {
+            left: wire_column(left),
+            right: wire_value(right)?,
+        },
+        RelationPredicate::EndsWith { left, right } => WireRelationPredicate::EndsWith {
+            left: wire_column(left),
+            right: wire_value(right)?,
+        },
     })
 }
 fn relation_predicate(value: WireRelationPredicate) -> WireResult<RelationPredicate> {
@@ -719,15 +726,7 @@ fn relation_predicate(value: WireRelationPredicate) -> WireResult<RelationPredic
             left: relation_column(left),
             right: relation_value(right)?,
         },
-        WireRelationPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => RelationPredicate::EnumMatch {
-            column: relation_column(column),
-            case,
-            payload: Box::new(relation_predicate(*payload)?),
-        },
+        WireRelationPredicate::Removed(removed) => match removed {},
         WireRelationPredicate::And(values) => RelationPredicate::And(
             values
                 .into_iter()
@@ -745,6 +744,14 @@ fn relation_predicate(value: WireRelationPredicate) -> WireResult<RelationPredic
         }
         WireRelationPredicate::True => RelationPredicate::True,
         WireRelationPredicate::False => RelationPredicate::False,
+        WireRelationPredicate::StartsWith { left, right } => RelationPredicate::StartsWith {
+            left: relation_column(left),
+            right: relation_value(right)?,
+        },
+        WireRelationPredicate::EndsWith { left, right } => RelationPredicate::EndsWith {
+            left: relation_column(left),
+            right: relation_value(right)?,
+        },
     })
 }
 
@@ -1109,19 +1116,13 @@ fn validate_wire(value: &WireRelationQuery) -> WireResult<()> {
                     }
                     Ok(())
                 }
-                WireRelationPredicate::Contains { left, right } => {
+                WireRelationPredicate::Contains { left, right }
+                | WireRelationPredicate::StartsWith { left, right }
+                | WireRelationPredicate::EndsWith { left, right } => {
                     self.column(left)?;
                     self.value(right, depth + 1)
                 }
-                WireRelationPredicate::EnumMatch {
-                    column,
-                    case,
-                    payload,
-                } => {
-                    self.column(column)?;
-                    self.text(case)?;
-                    self.predicate(payload, depth + 1)
-                }
+                WireRelationPredicate::Removed(removed) => match *removed {},
                 WireRelationPredicate::And(values) | WireRelationPredicate::Or(values) => {
                     self.collection(values.len())?;
                     for value in values {
@@ -1155,6 +1156,14 @@ fn validate_wire(value: &WireRelationQuery) -> WireResult<()> {
                     let mut labels = BTreeSet::new();
                     for arm in inputs {
                         self.text(&arm.label)?;
+                        // An unnamed arm (empty label) is a client's request
+                        // for its derived label; only the client-query entry
+                        // points accept it, and fill it before anything else
+                        // sees the query (`decode_client_query_postcard`).
+                        if arm.label.is_empty() && accepts_unnamed_union_arms() {
+                            self.expr(&arm.input, depth + 1)?;
+                            continue;
+                        }
                         if arm.label.is_empty()
                             || arm.label.len() > 4096
                             || arm.label.contains('\0')
@@ -1488,6 +1497,72 @@ mod relation_postcard_tests {
         query.relation = Some(relation.clone());
         let query_bytes = postcard::to_allocvec(&query).unwrap();
         assert_eq!(postcard::from_bytes::<Query>(&query_bytes).unwrap(), query);
+    }
+
+    /// White-box: pins the Postcard tags of the text prefix/suffix
+    /// predicates (flat `Predicate` 13/14, `RelationPredicate` 11/12),
+    /// appended so every earlier tag keeps its number. The bytes are the
+    /// TypeScript encoder's (`native_query_codec.json`); here they must
+    /// decode to these queries, and re-encode to themselves.
+    #[test]
+    fn text_affix_predicate_bytes_decode_to_the_pinned_queries() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/native_query_codec.json");
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let bytes = |name: &str| {
+            let case = fixture["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["name"] == name)
+                .unwrap_or_else(|| panic!("{name} is pinned"));
+            hex::decode(case["query_hex"].as_str().unwrap()).unwrap()
+        };
+        let text = |value: &str| Operand::Literal(jazz_types::records::Value::String(value.into()));
+        let column = || Operand::Column("name".into());
+
+        let flat = bytes("text_affix_flat_predicates");
+        assert_eq!((flat[8], flat[21]), (13, 14), "flat predicate tags");
+        let query = postcard::from_bytes::<Query>(&flat).unwrap();
+        assert_eq!(
+            query.filters,
+            vec![
+                Predicate::StartsWith(column(), text("Ann")),
+                Predicate::EndsWith(column(), text("é")),
+            ]
+        );
+        assert_eq!(postcard::to_allocvec(&query).unwrap(), flat);
+
+        let relation = bytes("text_affix_relation_predicates");
+        let query = postcard::from_bytes::<Query>(&relation).unwrap();
+        let name = || RelationColumnRef {
+            scope: None,
+            column: "name".into(),
+        };
+        assert_eq!(
+            query.relation,
+            Some(RelationQuery {
+                rel: RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
+                        table: "people".into(),
+                        alias: None,
+                    }),
+                    predicate: RelationPredicate::Or(vec![
+                        RelationPredicate::StartsWith {
+                            left: name(),
+                            right: RelationValueRef::Literal(serde_json::json!("Ann")),
+                        },
+                        RelationPredicate::EndsWith {
+                            left: name(),
+                            right: RelationValueRef::Literal(serde_json::json!("é")),
+                        },
+                    ]),
+                },
+            })
+        );
+        assert!(query.uses_text_affix());
+        assert_eq!(postcard::to_allocvec(&query).unwrap(), relation);
     }
 
     /// The TypeScript native codec's pinned query bytes

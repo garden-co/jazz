@@ -7,7 +7,9 @@ import { resolve } from "node:path";
 import { topologyReceipt } from "./vitest-receipts.mjs";
 import {
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   jazzAppFront,
+  jazzTestDeployment,
   jazzAppRequest,
   jazzAppUser,
   stopJazzServerByUrl,
@@ -40,14 +42,13 @@ export default defineConfig({
   define: {
     "process.env.NEXT_PUBLIC_JAZZ_SERVER_URL": "undefined",
   },
-  plugins: [wasm(), topLevelAwait(), react()],
+  plugins: [jazzBrowserServerLifecycle, wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
     // This project owns the Jazz server lifecycle. Keep the mocked provider
     // receipt in vitest.config.provider.ts so `test:browser` remains a true
     // topology-only gate.
     include: [topologyReceipt],
-    globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
       // Other parallel Vitest projects can reach any port in the default
@@ -61,6 +62,8 @@ export default defineConfig({
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzTestDeployment: async (_context, bound, permissions) =>
+          jazzTestDeployment(bound, permissions),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),

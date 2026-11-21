@@ -3,16 +3,16 @@ import { page, userEvent } from "vitest/browser";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { JazzClientConfig } from "jazz-tools";
-import { deployApp } from "../../../../../../packages/jazz-tools/src/dev/catalogue";
 import {
   getJazzServerInfo,
   jazzAppFetch,
   jazzAppUserUrl,
   startJazzApp,
+  deploy as deployApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server";
 import { memoryAccountStore } from "../../../../../testing/accounts";
-import permissions from "../../permissions";
-import { app } from "../../schema";
+import permissions from "../../jazz.permissions.json" with { type: "json" };
+import { app } from "../../jazz.generated";
 import { BandChatPreview } from "../../src/BandChat";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -103,14 +103,14 @@ async function setUpProfile(element: HTMLDivElement, name: string) {
     "profile setup should render",
     15_000,
   );
-  await preview(element).getByLabelText("Display name").fill(name);
+  await preview(element).getByLabelText("Display name", { exact: false }).fill(name);
   await preview(element).getByRole("button", { name: "Continue", exact: true }).click();
   await waitFor(() => hasText(element, name), "profile should be saved", 15_000);
 }
 
 async function createRoom(element: HTMLDivElement, name: string) {
   await preview(element).getByRole("button", { name: "New room", exact: true }).first().click();
-  await openDialog().getByLabelText("Room name").fill(name);
+  await openDialog().getByLabelText("Room name", { exact: false }).fill(name);
   await openDialog().getByRole("button", { name: "Create room", exact: true }).click();
   await waitFor(
     () => element.querySelector("h2")?.textContent === name,

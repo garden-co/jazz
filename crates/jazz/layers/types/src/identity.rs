@@ -12,10 +12,15 @@ const KEY_NAMESPACE: Uuid = Uuid::from_bytes([
 
 const SIGN_DOMAIN: &str = "jazz-auth-sign-v1";
 
-pub const LOCAL_FIRST_ISSUER: &str = "urn:jazz:local-first";
+/// Issuer of self-signed device-account JWTs. The value predates the rename
+/// and is signed into every token, so it stays `urn:jazz:local-first`.
+pub const DEVICE_ACCOUNT_ISSUER: &str = "urn:jazz:local-first";
+/// Deprecated alias of [`DEVICE_ACCOUNT_ISSUER`].
+#[deprecated(note = "renamed to DEVICE_ACCOUNT_ISSUER")]
+pub const LOCAL_FIRST_ISSUER: &str = DEVICE_ACCOUNT_ISSUER;
 pub const ANONYMOUS_ISSUER: &str = "urn:jazz:anonymous";
 
-const KNOWN_SELF_SIGNED_ISSUERS: &[&str] = &[LOCAL_FIRST_ISSUER, ANONYMOUS_ISSUER];
+const KNOWN_SELF_SIGNED_ISSUERS: &[&str] = &[DEVICE_ACCOUNT_ISSUER, ANONYMOUS_ISSUER];
 
 const DEFAULT_MAX_TTL_SECONDS: u64 = 3600;
 
@@ -56,6 +61,8 @@ pub struct VerifiedSelfSigned {
     pub user_id: String,
     pub public_key_bytes: [u8; 32],
     pub issuer: &'static str,
+    /// The proof's `exp`, in Unix seconds: it proves nothing from then on.
+    pub expires_at: u64,
 }
 
 /// Mint a self-signed JWT using the current system time.
@@ -172,18 +179,31 @@ pub fn verify_client_runtime_author_at(
     claimed_author: &str,
     now_seconds: u64,
 ) -> Result<AuthorSubject, String> {
+    verify_client_runtime_author_until_at(token, expected_audience, claimed_author, now_seconds)
+        .map(|(author, _)| author)
+}
+
+/// [`verify_client_runtime_author_at`], with the proof's `exp` (Unix
+/// seconds): when what it proves stops being proven.
+pub fn verify_client_runtime_author_until_at(
+    token: &str,
+    expected_audience: &str,
+    claimed_author: &str,
+    now_seconds: u64,
+) -> Result<(AuthorSubject, u64), String> {
     let verified = verify_jazz_self_signed_proof_at(token, expected_audience, now_seconds)?;
+    let expires_at = verified.expires_at;
     let author = AuthorSubject::reserved(verified.issuer, &verified.user_id)
         .map_err(|error| error.to_string())?;
     let claimed =
         AuthorSubject::from_canonical(claimed_author).map_err(|error| error.to_string())?;
     let author = if claimed.account_id().is_some() {
-        if verified.issuer != LOCAL_FIRST_ISSUER {
-            return Err("only local-first proofs can found accounts".into());
+        if verified.issuer != DEVICE_ACCOUNT_ISSUER {
+            return Err("only device-account proofs can found accounts".into());
         }
         let app = crate::app_id::AppId::from_string(expected_audience)
             .unwrap_or_else(|_| crate::app_id::AppId::from_name(expected_audience));
-        author.with_account(crate::account_registry::local_first_account_id(
+        author.with_account(crate::account_registry::device_account_id(
             *app.uuid(),
             &verified.user_id,
         ))
@@ -196,7 +216,7 @@ pub fn verify_client_runtime_author_at(
             author.canonical()
         ));
     }
-    Ok(author)
+    Ok((author, expires_at))
 }
 
 /// Verify a self-signed client proof using the current system time.
@@ -326,6 +346,7 @@ pub fn verify_jazz_self_signed_proof_with_max_ttl_at(
         user_id: derived_user_id.to_string(),
         public_key_bytes: pub_key_bytes,
         issuer: matched_issuer,
+        expires_at: exp,
     })
 }
 
@@ -379,9 +400,100 @@ fn user_id_from_public_key(pub_key_bytes: &[u8; 32]) -> Uuid {
     Uuid::new_v5(&KEY_NAMESPACE, pub_key_bytes)
 }
 
+/// The domain a device-account challenge proof signs under (a signed value,
+/// so it keeps its original name), as the TypeScript
+/// `signChallenge` (`local-first-auth/identity.ts`).
+const CHALLENGE_DOMAIN: &str = "local-first-auth-challenge-v1\0";
+
+/// Sign a challenge a server issued, proving control of the seed's identity
+/// for that one challenge (linking a device account to a provider account).
+/// Returns `<public key>.<signature>`, both base64url, as TypeScript's
+/// `signChallenge`.
+pub fn sign_device_account_challenge(seed: &[u8; 32], challenge: &str) -> Result<String, String> {
+    if challenge.is_empty() {
+        return Err("challenge must be a non-empty string".to_owned());
+    }
+    let key = derive_signing_key(seed, SIGN_DOMAIN);
+    let message = format!("{CHALLENGE_DOMAIN}{challenge}");
+    let signature = key.sign(message.as_bytes());
+    Ok(format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes()),
+        URL_SAFE_NO_PAD.encode(signature.to_bytes())
+    ))
+}
+
+/// Verify a [`sign_device_account_challenge`] proof for `challenge`: the
+/// device-account user id it proves.
+pub fn verify_device_account_challenge(proof: &str, challenge: &str) -> Result<Uuid, String> {
+    let invalid = || "invalid device account challenge proof".to_owned();
+    let (public_key, signature) = proof.split_once('.').ok_or_else(invalid)?;
+    let public_key: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(public_key)
+        .map_err(|_| invalid())?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let signature: [u8; 64] = URL_SAFE_NO_PAD
+        .decode(signature)
+        .map_err(|_| invalid())?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let key = VerifyingKey::from_bytes(&public_key).map_err(|_| invalid())?;
+    let message = format!("{CHALLENGE_DOMAIN}{challenge}");
+    key.verify_strict(
+        message.as_bytes(),
+        &ed25519_dalek::Signature::from_bytes(&signature),
+    )
+    .map_err(|_| invalid())?;
+    Ok(user_id_from_public_key(&public_key))
+}
+
+/// Deprecated alias of [`sign_device_account_challenge`].
+#[deprecated(note = "renamed to sign_device_account_challenge")]
+pub fn sign_local_first_challenge(seed: &[u8; 32], challenge: &str) -> Result<String, String> {
+    sign_device_account_challenge(seed, challenge)
+}
+
+/// Deprecated alias of [`verify_device_account_challenge`].
+#[deprecated(note = "renamed to verify_device_account_challenge")]
+pub fn verify_local_first_challenge(proof: &str, challenge: &str) -> Result<Uuid, String> {
+    verify_device_account_challenge(proof, challenge)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_challenge_proof_proves_its_seed_for_that_challenge_only() {
+        let seed = [9u8; 32];
+        let proof = sign_device_account_challenge(&seed, "nonce-1").unwrap();
+        assert_eq!(
+            verify_device_account_challenge(&proof, "nonce-1").unwrap(),
+            derive_user_id(&seed)
+        );
+        assert!(verify_device_account_challenge(&proof, "nonce-2").is_err());
+        assert!(verify_device_account_challenge("junk", "nonce-1").is_err());
+        // Another key's signature under this key's name proves nothing.
+        let (public_key, _) = proof.split_once('.').unwrap();
+        let other = sign_device_account_challenge(&[8u8; 32], "nonce-1").unwrap();
+        let (_, other_signature) = other.split_once('.').unwrap();
+        let forged = format!("{public_key}.{other_signature}");
+        assert!(verify_device_account_challenge(&forged, "nonce-1").is_err());
+        assert!(sign_device_account_challenge(&seed, "").is_err());
+    }
+
+    /// The proof TypeScript's `signChallenge` makes for the same seed and
+    /// challenge (checked against Node's Ed25519 over the same key
+    /// derivation): Ed25519 signatures are deterministic.
+    #[test]
+    fn a_challenge_proof_matches_typescripts() {
+        assert_eq!(
+            sign_device_account_challenge(&[9u8; 32], "nonce-1").unwrap(),
+            "A1uPXwSr13S50jYgA8SsmizcMj7X8nzPP2ZF5kRHTEY.\
+             4Jhi3T41b6IRZoE5RJ3RsIcQM8sSW3dzReMniTu4TR5TvN3rtKxe9zkfQLmK6vhGJrKDE-cMnBdTf343VIRyCw"
+        );
+    }
 
     fn alice_seed() -> [u8; 32] {
         let mut seed = [0u8; 32];
@@ -450,16 +562,18 @@ mod tests {
     fn mint_and_verify_local_first_identity_proof() {
         let seed = alice_seed();
         let user_id = derive_user_id(&seed);
-        let token = mint_jazz_self_signed_token(&seed, LOCAL_FIRST_ISSUER, "my-app", 3600).unwrap();
+        let token =
+            mint_jazz_self_signed_token(&seed, DEVICE_ACCOUNT_ISSUER, "my-app", 3600).unwrap();
         let verified = verify_jazz_self_signed_proof(&token, "my-app").unwrap();
         assert_eq!(verified.user_id, user_id.to_string());
-        assert_eq!(verified.issuer, LOCAL_FIRST_ISSUER);
+        assert_eq!(verified.issuer, DEVICE_ACCOUNT_ISSUER);
     }
 
     #[test]
     fn reject_wrong_audience() {
         let token =
-            mint_jazz_self_signed_token(&alice_seed(), LOCAL_FIRST_ISSUER, "app-a", 3600).unwrap();
+            mint_jazz_self_signed_token(&alice_seed(), DEVICE_ACCOUNT_ISSUER, "app-a", 3600)
+                .unwrap();
         let result = verify_jazz_self_signed_proof(&token, "app-b");
         assert!(result.is_err());
     }
@@ -467,7 +581,8 @@ mod tests {
     #[test]
     fn reject_excessive_ttl() {
         let token =
-            mint_jazz_self_signed_token(&alice_seed(), LOCAL_FIRST_ISSUER, "my-app", 3600).unwrap();
+            mint_jazz_self_signed_token(&alice_seed(), DEVICE_ACCOUNT_ISSUER, "my-app", 3600)
+                .unwrap();
         let result = verify_jazz_self_signed_proof_with_max_ttl(&token, "my-app", 1800);
         assert!(result.is_err());
     }
@@ -489,7 +604,7 @@ mod tests {
             .unwrap()
             .as_secs();
         let claims = serde_json::json!({
-            "iss": LOCAL_FIRST_ISSUER,
+            "iss": DEVICE_ACCOUNT_ISSUER,
             "sub": user_id.to_string(),
             "aud": "my-app",
             "jazz_pub_key": pub_key_b64,
@@ -518,8 +633,9 @@ mod tests {
     #[test]
     fn different_seeds_produce_different_tokens() {
         let t1 =
-            mint_jazz_self_signed_token(&alice_seed(), LOCAL_FIRST_ISSUER, "app", 3600).unwrap();
-        let t2 = mint_jazz_self_signed_token(&bob_seed(), LOCAL_FIRST_ISSUER, "app", 3600).unwrap();
+            mint_jazz_self_signed_token(&alice_seed(), DEVICE_ACCOUNT_ISSUER, "app", 3600).unwrap();
+        let t2 =
+            mint_jazz_self_signed_token(&bob_seed(), DEVICE_ACCOUNT_ISSUER, "app", 3600).unwrap();
         let v1 = verify_jazz_self_signed_proof(&t1, "app").unwrap();
         let v2 = verify_jazz_self_signed_proof(&t2, "app").unwrap();
         assert_ne!(v1.user_id, v2.user_id);
@@ -528,9 +644,14 @@ mod tests {
     #[test]
     fn mint_and_verify_roundtrip_has_no_auth_mode_claim() {
         let seed = [1u8; 32];
-        let token =
-            mint_jazz_self_signed_token_at(&seed, LOCAL_FIRST_ISSUER, "test-app", 3600, 1_000_000)
-                .unwrap();
+        let token = mint_jazz_self_signed_token_at(
+            &seed,
+            DEVICE_ACCOUNT_ISSUER,
+            "test-app",
+            3600,
+            1_000_000,
+        )
+        .unwrap();
         let parts: Vec<&str> = token.split('.').collect();
         let claims_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
         let claims_json: serde_json::Value = serde_json::from_slice(&claims_bytes).unwrap();
@@ -579,7 +700,7 @@ mod tests {
         const NOW: u64 = 1_000_100;
 
         for (issuer, seed) in [
-            (LOCAL_FIRST_ISSUER, alice_seed()),
+            (DEVICE_ACCOUNT_ISSUER, alice_seed()),
             (ANONYMOUS_ISSUER, bob_seed()),
         ] {
             let token =
@@ -610,14 +731,14 @@ mod tests {
 
         let token = mint_jazz_self_signed_token_at(
             &alice_seed(),
-            LOCAL_FIRST_ISSUER,
+            DEVICE_ACCOUNT_ISSUER,
             APP_ID,
             60,
             1_000_050,
         )
         .unwrap();
         let verified = verify_jazz_self_signed_proof_at(&token, APP_ID, NOW).unwrap();
-        let claimed = AuthorSubject::reserved(LOCAL_FIRST_ISSUER, &verified.user_id)
+        let claimed = AuthorSubject::reserved(DEVICE_ACCOUNT_ISSUER, &verified.user_id)
             .unwrap()
             .canonical()
             .to_owned();
@@ -631,9 +752,14 @@ mod tests {
             "wrong audience must fail"
         );
 
-        let expired =
-            mint_jazz_self_signed_token_at(&alice_seed(), LOCAL_FIRST_ISSUER, APP_ID, 1, 1_000_000)
-                .unwrap();
+        let expired = mint_jazz_self_signed_token_at(
+            &alice_seed(),
+            DEVICE_ACCOUNT_ISSUER,
+            APP_ID,
+            1,
+            1_000_000,
+        )
+        .unwrap();
         assert!(
             verify_client_runtime_author_at(&expired, APP_ID, &claimed, NOW).is_err(),
             "expired proof must fail"

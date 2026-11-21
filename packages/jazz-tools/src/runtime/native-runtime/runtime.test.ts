@@ -1,4 +1,4 @@
-import { schema as s } from "../../schema-namespace.js";
+import { testApp } from "../../testing/test-app.js";
 import { authorColumnType } from "../../magic-columns.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { performance } from "node:perf_hooks";
@@ -214,6 +214,34 @@ describe("NativeRuntimeAdapter server transport", () => {
     await expect(runtime.close()).resolves.toBeUndefined();
     await expect(runtime.close()).resolves.toBeUndefined();
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("still tears down on close() after clearing client storage, and refuses work after", async () => {
+    const close = vi.fn(() => true);
+    const deleteNativeStore = vi.fn(() => ({ pendingUploads: 2 }));
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: () => fakeDb({ close, deleteNativeStore }) },
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    await expect(runtime.clearClientStorage()).resolves.toEqual({ pendingUploads: 2 });
+    expect(runtime.isClosed()).toBe(true);
+    // Deleting the store stops admission but leaves the teardown to close().
+    expect(close).not.toHaveBeenCalled();
+    await expect(runtime.clearClientStorage()).rejects.toThrow(
+      "Cannot clear client storage: native runtime is storageCleared",
+    );
+
+    await runtime.close();
+    expect(close).toHaveBeenCalledOnce();
+    expect((runtime as unknown as { phase: string }).phase).toBe("closed");
+    await runtime.close();
+    expect(close).toHaveBeenCalledOnce();
+    expect(deleteNativeStore).toHaveBeenCalledOnce();
+    expect(() => runtime.insert("todos", {})).toThrow(/closed/);
   });
 
   it("resolves connect only after the owned native transport has pumped", async () => {
@@ -1193,6 +1221,96 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
+  // #6049: a native host reports a refused credential (`onAuthRejected`) but
+  // not the admission after it. Once its link is connected again with no
+  // refusal, the runtime calls `onAuthRestored`, as the link machine does on
+  // `live`, so the Db's auth error clears.
+  it("calls onAuthRestored once a native host's link is admitted again after a refusal", async () => {
+    let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+    let reportAuthRejected: ((reason: string) => void) | undefined;
+    let reportUpstreamFailure:
+      | ((failure: { reason: string; retrying: boolean } | null) => void)
+      | undefined;
+    let connected = false;
+    let authRejected: string | null = null;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+              schedule = callback;
+            },
+            tick: () => undefined,
+            onAuthRejected: (callback: (reason: string) => void) => {
+              reportAuthRejected = callback;
+            },
+            onUpstreamFailure: (
+              callback: (failure: { reason: string; retrying: boolean } | null) => void,
+            ) => {
+              reportUpstreamFailure = callback;
+            },
+            nativeConnectionStatus: () => ({
+              configured: true,
+              explicitlyOffline: false,
+              connected,
+              authRejected,
+            }),
+            isNativeForegroundClosed: () => false,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    let restored = 0;
+    runtime.onAuthFailure(() => undefined);
+    runtime.onAuthRestored(() => {
+      restored += 1;
+    });
+    const settle = async () => {
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+    };
+
+    // Connected before any refusal: nothing to restore.
+    connected = true;
+    schedule!("immediate");
+    await settle();
+    expect(restored).toBe(0);
+
+    const reason = "authentication expired";
+    connected = false;
+    authRejected = reason;
+    reportAuthRejected!(reason);
+    reportUpstreamFailure!({ reason, retrying: false });
+    schedule!("immediate");
+    await settle();
+    expect(restored).toBe(0);
+
+    // Reconnecting, not yet admitted.
+    authRejected = null;
+    reportUpstreamFailure!(null);
+    schedule!("immediate");
+    await settle();
+    expect(restored).toBe(0);
+
+    // Admitted: the host's link is connected with no refusal.
+    connected = true;
+    schedule!("immediate");
+    await settle();
+    expect(restored).toBe(1);
+
+    // Only once per refusal.
+    schedule!("immediate");
+    await settle();
+    expect(restored).toBe(1);
+    await runtime.close();
+  });
+
   it("reports pre-hello auth failures and reconnects with refreshed auth", async () => {
     const sockets: FakeWebSocket[] = [];
     let allowServerHello = false;
@@ -1385,7 +1503,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.executeSubscription(handle, updates);
     await Promise.resolve();
 
-    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(5, 3, "server died")]));
+    // `malformed_frame` (2) is fatal even with `later` (3): retrying cannot
+    // help. (`internal` with `later` is a server shutting down, retried.)
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(2, 3, "server died")]));
     await Promise.resolve();
 
     expect(subscription.closed).toBe(true);
@@ -1960,10 +2080,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   it.each(["query", "subscription"] as const)(
     "installs client correlation claims before opening a %s without preparing a native plan",
     async (kind) => {
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       let releaseClaims!: () => void;
       const installed = new Promise<void>((resolve) => {
         releaseClaims = resolve;
@@ -2409,7 +2526,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         claims: {},
         authMode:
           issuer === LOCAL_FIRST_JWT_ISSUER
-            ? "local-first"
+            ? "device-account"
             : issuer === ANONYMOUS_JWT_ISSUER
               ? "anonymous"
               : "external",
@@ -2427,7 +2544,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const authors: string[] = [];
     const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-user" },
-      "local-first",
+      "device-account",
     )!;
     const runtimeSessionJson = JSON.stringify({
       ...trustedSession,
@@ -2509,7 +2626,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     for (const [issuer, authMode] of [
-      [LOCAL_FIRST_JWT_ISSUER, "local-first"],
+      [LOCAL_FIRST_JWT_ISSUER, "device-account"],
       [ANONYMOUS_JWT_ISSUER, "anonymous"],
     ] as const) {
       const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
@@ -2537,7 +2654,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           issuer: LOCAL_FIRST_JWT_ISSUER,
           user_id: "forged-browser-user",
           claims: {},
-          authMode: "local-first",
+          authMode: "device-account",
         }),
         "local-first",
       ),
@@ -2698,106 +2815,6 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(preparedBytes).toEqual(queryWithPredicates("todos", [], { relation }));
   });
 
-  it("carries a payload enum match relation filter in the Query envelope", () => {
-    let preparedBytes: Uint8Array | undefined;
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            subscribe: (query: Uint8Array) => {
-              preparedBytes = query;
-              return new ReadableStream();
-            },
-            tick: () => undefined,
-          }),
-        openBrowser: async () => {
-          throw new Error("not used");
-        },
-      } as never,
-      {
-        events: {
-          columns: [
-            {
-              name: "event",
-              column_type: {
-                type: "EnumPayload",
-                cases: [
-                  {
-                    name: "message",
-                    fields: [{ name: "level", column_type: { type: "Integer" }, nullable: false }],
-                  },
-                ],
-              },
-              nullable: false,
-            },
-          ],
-        },
-      },
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-
-    const handle = runtime.createSubscription(
-      JSON.stringify({
-        table: "events",
-        relation_ir: {
-          Project: {
-            input: {
-              Filter: {
-                input: { TableScan: { table: "events" } },
-                predicate: {
-                  EnumMatch: {
-                    column: { column: "event", scope: "events" },
-                    case: "message",
-                    payload: {
-                      Cmp: {
-                        left: { column: "level" },
-                        op: "Eq",
-                        right: { Literal: { type: "Integer", value: 2 } },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-            columns: [{ alias: "event", expr: { Column: { column: "event", scope: "events" } } }],
-          },
-        },
-      }),
-    );
-
-    expect(handle).toBe(1);
-    expect(preparedBytes).toEqual(
-      queryWithPredicates("events", [], {
-        relation: {
-          Project: {
-            input: {
-              Filter: {
-                input: { TableScan: { table: "events" } },
-                predicate: {
-                  EnumMatch: {
-                    column: { column: "event", scope: "events" },
-                    case: "message",
-                    payload: {
-                      Cmp: {
-                        left: { column: "level" },
-                        op: "Eq",
-                        right: { Literal: { type: "Integer", value: 2 } },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-            columns: [{ alias: "event", expr: { Column: { column: "event", scope: "events" } } }],
-          },
-        },
-      }),
-    );
-  });
-
   it.each(["stream", "native", "native-close-throws"] as const)(
     "forwards %s subscription source failures exactly once without an unhandled rejection",
     async (kind) => {
@@ -2824,10 +2841,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               close,
             };
       const runtime = runtimeWithSubscriptionSource(source);
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const handle = runtime.createSubscription(app.todos._build());
       const callback = vi.fn();
       runtime.executeSubscription(handle, callback);
@@ -2875,10 +2889,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               },
             });
       const runtime = runtimeWithSubscriptionSource(source);
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const handle = runtime.createSubscription(app.todos._build());
       const replacement = vi.fn();
       const callback = vi.fn(() => {
@@ -2973,7 +2984,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       return { runtime, native, queues, failures, drain, readAll, pump };
     }
 
-    const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+    const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
     const row = (n: number) => ({
       table: "todos",
       rowId: uuidBytes(`00000000-0000-0000-0000-00000000000${n}`),
@@ -3001,6 +3012,24 @@ describe("NativeRuntimeAdapter server transport", () => {
         expect(callbacks[0]).not.toHaveBeenCalled();
         expect(callbacks[1]).toHaveBeenCalledWith(expect.objectContaining({ reset: true }));
         expect(callbacks[2]).not.toHaveBeenCalled();
+      } finally {
+        await runtime.close();
+      }
+    });
+
+    it("marks a reset the core coalesced from a backlog with reason backlog", async () => {
+      const { runtime, native, pump } = pooledRuntime();
+      try {
+        const callback = vi.fn();
+        runtime.executeSubscription(runtime.createSubscription(app.todos._build()), callback);
+        native[0]!.queue.push(subscriptionReset([row(1)]));
+        native[0]!.queue.push({ ...subscriptionReset([row(2)]), coalesced: true });
+        pump();
+        expect(callback).toHaveBeenCalledTimes(2);
+        expect(callback.mock.calls[0]![0]).not.toHaveProperty("reason");
+        expect(callback.mock.calls[1]![0]).toEqual(
+          expect.objectContaining({ reset: true, reason: "backlog" }),
+        );
       } finally {
         await runtime.close();
       }
@@ -3093,10 +3122,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       const runtime = runtimeWithSubscriptionSource({
         getReader: () => ({ read: () => pending, cancel }),
       });
-      const app = s.defineApp(
-        { todos: s.table({ title: s.string() }, {}) },
-        { migrations: "none" },
-      );
+      const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
       const handle = runtime.createSubscription(app.todos._build());
       const callback = vi.fn();
       runtime.executeSubscription(handle, callback);
@@ -6107,7 +6133,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 });
 describe("NativeRuntimeAdapter read and subscription lifecycle", () => {
-  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+  const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
   const query = app.todos.where({ title: "lifecycle" })._build();
   const openRuntime = (overrides: Partial<NativeDbForTest>) =>
     new NativeRuntimeAdapter(
@@ -6637,7 +6663,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         iss: LOCAL_FIRST_JWT_ISSUER,
         sub: "verified-attribution",
       },
-      "local-first",
+      "device-account",
     )!;
     session.account_id = "00000000-0000-4000-8000-000000000001";
     const token = trustedReservedSessionToken(session);
@@ -6774,7 +6800,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
     const trustedSession = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-writer" },
-      "local-first",
+      "device-account",
     )!;
     const runtime = new NativeRuntimeAdapter(
       {
@@ -6928,18 +6954,11 @@ const testSchema = {
   },
 } satisfies WasmSchema;
 
-const bigintQuerySchema = s.defineApp(
-  {
-    metrics: s.table(
-      {
-        largeCount: s.bigint(),
-        largeCounts: s.array(s.bigint()),
-      },
-      {},
-    ),
+const bigintQuerySchema = testApp({
+  tables: {
+    metrics: { columns: { largeCount: "bigint", largeCounts: { array: "bigint" } } },
   },
-  { migrations: "none" },
-).wasmSchema;
+}).wasmSchema;
 
 // Capture native bytes for valid queries through the serialized adapter interface.
 async function captureNativeQuery(schema: WasmSchema, query: object): Promise<Uint8Array> {
@@ -8454,7 +8473,7 @@ it.each([null, undefined])(
     } finally {
       releaseOwner();
       runtime.unsubscribe(handle);
-      inner.closed = true;
+      inner.phase = "closed";
     }
   },
 );
@@ -8547,7 +8566,7 @@ it("isolates throwing callbacks when replaying a deferred subscription failure",
 });
 
 it("passes different claims independently on same-query reads", async () => {
-  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+  const app = testApp({ tables: { todos: { columns: { title: "string" } } } });
   const rows = [
     { table: "todos", rowId: new Uint8Array(16), title: "Draft proposal", team: "team-a" },
     { table: "todos", rowId: new Uint8Array(16), title: "Review budget", team: "team-b" },

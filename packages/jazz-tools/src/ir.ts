@@ -27,7 +27,8 @@ export type RelPredicateExpr =
   | { IsNotNull: { column: RelColumnRef } }
   | { In: { left: RelColumnRef; values: RelValueRef[] } }
   | { Contains: { left: RelColumnRef; right: RelValueRef } }
-  | { EnumMatch: { column: RelColumnRef; case: string; payload: RelPredicateExpr } }
+  | { StartsWith: { left: RelColumnRef; right: RelValueRef } }
+  | { EndsWith: { left: RelColumnRef; right: RelValueRef } }
   | { And: RelPredicateExpr[] }
   | { Or: RelPredicateExpr[] }
   | { Not: RelPredicateExpr }
@@ -422,7 +423,18 @@ export function encodeRelationQueryPostcard(relation: RelExpr): Uint8Array {
     }
     tagged(
       value,
-      ["Cmp", "IsNull", "IsNotNull", "In", "Contains", "EnumMatch", "And", "Or", "Not"],
+      [
+        "Cmp",
+        "IsNull",
+        "IsNotNull",
+        "In",
+        "Contains",
+        "And",
+        "Or",
+        "Not",
+        "StartsWith",
+        "EndsWith",
+      ],
       "predicate",
     );
     if ("Cmp" in value) {
@@ -447,12 +459,14 @@ export function encodeRelationQueryPostcard(relation: RelExpr): Uint8Array {
       u64(4);
       column(value.Contains.left);
       nested(() => valueRef(value.Contains.right));
-    } else if ("EnumMatch" in value) {
-      u64(5);
-      column(value.EnumMatch.column);
-      string(value.EnumMatch.case);
-      nested(() => predicate(value.EnumMatch.payload));
+    } else if ("StartsWith" in value || "EndsWith" in value) {
+      // Appended after False (10), so every earlier tag keeps its number.
+      const affix = "StartsWith" in value ? value.StartsWith : value.EndsWith;
+      u64("StartsWith" in value ? 11 : 12);
+      column(affix.left);
+      nested(() => valueRef(affix.right));
     } else if ("And" in value) {
+      // Tag 5 was the removed payload-enum match; the tags after it keep their numbers.
       u64(6);
       collection(value.And.length);
       value.And.forEach((child) => nested(() => predicate(child)));

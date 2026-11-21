@@ -186,14 +186,8 @@ export type QueryPredicate =
     }
   | {
       column: string;
-      op: "Contains";
+      op: "Contains" | "StartsWith" | "EndsWith";
       value: QueryLiteral;
-    }
-  | {
-      column: string;
-      op: "EnumMatch";
-      case: string;
-      payload: QueryPredicate;
     }
   | {
       column: string;
@@ -424,13 +418,15 @@ function writePredicate(writer: PostcardWriter, predicate: QueryPredicate): void
     writeLiteralOperand(writer, predicate.value);
     return;
   }
-  if (predicate.op === "EnumMatch") {
-    writer.u64(11); // Predicate::EnumMatch
+  if (predicate.op === "StartsWith" || predicate.op === "EndsWith") {
+    // Appended after IsNull (12); only for a link that negotiated
+    // FEATURE_TEXT_AFFIX_PREDICATES.
+    writer.u64(predicate.op === "StartsWith" ? 13 : 14);
     writeColumnOperand(writer, predicate.column);
-    writer.string(predicate.case);
-    writePredicate(writer, predicate.payload);
+    writeLiteralOperand(writer, predicate.value);
     return;
   }
+  // Predicate tag 11 was the removed payload-enum match; the core's numbering is unchanged.
   if (predicate.op === "IsNull" || predicate.op === "IsNotNull") {
     if (predicate.op === "IsNotNull") {
       writer.u64(2); // Predicate::Not

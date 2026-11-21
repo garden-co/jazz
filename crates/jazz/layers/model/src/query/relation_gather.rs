@@ -315,11 +315,13 @@ fn relation_gather_predicates_in_scope(predicates: &[&RelationPredicate], scope:
             RelationPredicate::Not(child) => in_scope(child, scope),
             RelationPredicate::Cmp { left, .. }
             | RelationPredicate::Contains { left, .. }
+            | RelationPredicate::StartsWith { left, .. }
+            | RelationPredicate::EndsWith { left, .. }
             | RelationPredicate::In { left, .. } => relation_gather_in_scope(left, scope),
-            // Enum payload fields are relative to the matched record.
-            RelationPredicate::IsNull { column }
-            | RelationPredicate::IsNotNull { column }
-            | RelationPredicate::EnumMatch { column, .. } => relation_gather_in_scope(column, scope),
+            RelationPredicate::IsNull { column } | RelationPredicate::IsNotNull { column } => {
+                relation_gather_in_scope(column, scope)
+            }
+            RelationPredicate::Removed(removed) => match *removed {},
             RelationPredicate::True | RelationPredicate::False => true,
         }
     }
@@ -338,10 +340,11 @@ fn relation_predicate_reads_frontier(predicate: &RelationPredicate) -> bool {
             children.iter().any(relation_predicate_reads_frontier)
         }
         RelationPredicate::Not(child) => relation_predicate_reads_frontier(child),
-        RelationPredicate::EnumMatch { payload, .. } => relation_predicate_reads_frontier(payload),
-        RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
-            reads(right)
-        }
+        RelationPredicate::Removed(removed) => match *removed {},
+        RelationPredicate::Cmp { right, .. }
+        | RelationPredicate::Contains { right, .. }
+        | RelationPredicate::StartsWith { right, .. }
+        | RelationPredicate::EndsWith { right, .. } => reads(right),
         RelationPredicate::In { values, .. } => values.iter().any(reads),
         RelationPredicate::IsNull { .. }
         | RelationPredicate::IsNotNull { .. }

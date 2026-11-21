@@ -1,3 +1,4 @@
+import type { VitestPluginContext } from "vitest/node";
 import { transportControlBrowserCommands } from "./transport-control-commands.js";
 import {
   startLocalJazzServer,
@@ -6,8 +7,11 @@ import {
   type TestJazz,
 } from "../../src/testing/index.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
-import { shipMigrations, type ClientMigrations } from "../../src/runtime/client-migrations.js";
+import { bindApp, type BoundApp } from "../../src/typed-app.js";
+import { resolveSchemaSource } from "../../src/schema-source.js";
+import type { TestPermissionsFile } from "../../src/testing/test-app.js";
+import { loadBackendApp } from "../../src/dev/codegen-napi.js";
+import type { LoadedDeployment } from "../../src/dev/catalogue.js";
 import {
   createTransportControl,
   type TransportControl,
@@ -93,38 +97,59 @@ export async function stopJazzServerByUrl(serverUrl: string): Promise<void> {
   await stopStarted(found[1]);
 }
 
+/** The app whose bindings passed `bound` to `bindApp`, bound again here in Node. */
+function rebind(bound: BoundApp): WasmSchema {
+  return resolveSchemaSource(bindApp(bound as never));
+}
+
+/**
+ * What `deploy` publishes for the app whose bindings passed `bound` to
+ * `bindApp` and `permissions` (its `jazz.permissions.json`), as Jazz's Rust
+ * loader builds it. The browser can't load jazz-napi, so it publishes this
+ * with `publishLoadedDeployment`.
+ */
+export async function jazzTestDeployment(
+  bound: BoundApp,
+  permissions: TestPermissionsFile,
+): Promise<LoadedDeployment> {
+  const { deployment, warnings } = await loadBackendApp(
+    bound,
+    JSON.stringify({ format: 1, ...permissions }),
+  );
+  return { deployment, warnings };
+}
+
 /**
  * Run the app's backend for what a test just deployed to the core at
- * `coreUrl`: createJazz with that schema and permissions, as the app's
- * deployment does. A later call (a redeploy) restarts it on the same origin.
- * Returns the backend's `/jazz` URL, which browser clients sync through.
+ * `coreUrl`: createJazz with that app and its `jazz.permissions.json`, as
+ * the app's deployment does. A later call (a redeploy) restarts it on the
+ * same origin. Returns the backend's `/jazz` URL, which browser clients sync
+ * through.
  */
 export async function jazzAppFront(
   coreUrl: string,
   app: {
-    schema: WasmSchema;
-    migrations?: ClientMigrations;
-    permissions: CompiledPermissionsMap;
+    /** What the app's bindings passed to `bindApp`: schema, history and migrations. */
+    bound: BoundApp;
+    permissions: TestPermissionsFile;
     pageOrigin: string;
   },
 ): Promise<string> {
-  // Restore what the command's serialization dropped: the migrations the
-  // app ships, which its createJazz publishes with the schema.
-  if (app.migrations) shipMigrations(app.schema, app.migrations);
+  const schema = rebind(app.bound);
   const found = await startedFor(coreUrl);
   if (!found) throw new Error(`No Jazz test server is running at ${coreUrl}`);
   const started = found[1];
   const port = started.front ? Number(new URL(started.front.url).port) : undefined;
   await started.front?.stop();
   started.front = await startTestJazz({
-    app: app.schema,
-    permissions: app.permissions,
+    app: schema,
+    permissions: { format: 1, ...app.permissions },
     core: started.server,
     port,
     // The test page is served from the browser runner's own origin.
     jazz: { allowedOrigins: [app.pageOrigin] },
   });
-  started.frontSchema = app.schema;
+  started.frontSchema = schema;
   return started.front.url;
 }
 
@@ -210,6 +235,16 @@ export async function jazzAppRequest(
   });
   return { status: response.status, headers: [...response.headers], body: await response.text() };
 }
+
+// Register teardown from the config module that owns the browser commands.
+// A separately loaded globalSetup module gets its own, empty server registry.
+export const jazzBrowserServerLifecycle = {
+  name: "jazz-browser-server-lifecycle",
+  configureVitest({ vitest, project }: VitestPluginContext) {
+    project.onTestsRerun(stopJazzServer);
+    vitest.onClose(stopJazzServer);
+  },
+};
 
 export async function stopJazzServer(): Promise<void> {
   for (const url of transportControls.keys()) await stopJazzServerTransportControl(url);
