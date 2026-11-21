@@ -16157,11 +16157,11 @@ impl Db {
                 inner.changed.borrow_mut().truncate(mark);
                 return Scoped::Undo(Err((error, true)));
             }
+            // A trial keeps nothing of it: every check ran, then it is undone.
             if trial {
                 inner.as_sent.borrow_mut().clear();
                 inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                return Ok((Vec::new(), Vec::new()));
+                return Scoped::Undo(Ok(Vec::new()));
             }
             let recorded = inner
                 .record_fate(id.0, id.1, &Ok(()))
@@ -16223,6 +16223,9 @@ impl Db {
             Err((error, true)) => return Err((error, mentioned(&self.inner()))),
             Err((error, false)) => return Err((error, Vec::new())),
         };
+        if trial {
+            return Ok((Vec::new(), Vec::new()));
+        }
         let mut inner = self.inner();
         inner.shard.landed(crate::db::shard::CommitRef {
             node: id.0,
