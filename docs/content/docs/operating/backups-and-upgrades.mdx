@@ -209,6 +209,26 @@ one fails at build time. The `jazz-tools/permissions` subpath is removed, and so
 An app in this shape is an alpha.64 or alpha.65 app: convert it with
 `npx jazz-tools@2.0.0-alpha.70 upgrade` before moving to beta.0 (see [Removed: `jazz-tools upgrade`](#removed-jazz-tools-upgrade)).
 
+### Removed: the alpha.68 Rust aliases
+
+Only Rust code that calls the `jazz` or `jazz-server` crate APIs directly hits this; TypeScript apps
+don't. The device-account renames kept the old `local_first` names as deprecated aliases, and beta.0
+removes them, so code that still uses one fails to compile:
+
+| Before                                                              | After                                                              |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `identity::LOCAL_FIRST_ISSUER`, `AuthorSubject::LOCAL_FIRST_ISSUER` | `DEVICE_ACCOUNT_ISSUER`                                            |
+| `sign_local_first_challenge`, `verify_local_first_challenge`        | `sign_device_account_challenge`, `verify_device_account_challenge` |
+| `local_first_account_id`                                            | `device_account_id`                                                |
+| `Binding::admit_local_first_session`                                | `admit_device_account_session`                                     |
+| `admitted_local_first_accounts` (testing only)                      | `admitted_device_accounts`                                         |
+| `jazz-server`: `LOCAL_FIRST_JWT_ISSUER`, `admit_local_first_jwt`    | `DEVICE_ACCOUNT_JWT_ISSUER`, `admit_device_account_jwt`            |
+| `jazz-server`: `LOCAL_FIRST_AUDIENCE_HEADER`                        | `DEVICE_ACCOUNT_AUDIENCE_HEADER`                                   |
+| `jazz-server`: `local_first_audience`, `local_first_founding_app`   | `device_account_audience`, `device_account_founding_app`           |
+
+Nothing on the wire changes: the issuer stays `urn:jazz:local-first` and the header
+`X-Jazz-Local-First-Audience`, so existing tokens and sessions keep working.
+
 ### Removed: `hashes` in the server's schema list
 
 **This changes an HTTP response.** `GET /apps/<appId>/schemas` (admin secret required) no longer
