@@ -1,0 +1,48 @@
+{
+  "hero": "stage-plan",
+  "stack": "jazz",
+  "variant": "default",
+  "date": "2026-11-14T17:33:46.601Z",
+  "where": "local (Jazz backend in the Vite preview server)",
+  "runs": 7,
+  "samples": 20,
+  "sp_join_board": {
+    "median": 597,
+    "p95": 807,
+    "min": 566,
+    "n": 7
+  },
+  "sp_reload_board": {
+    "median": 525,
+    "p95": 769,
+    "min": 508,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 436,
+  "sp_add_task": {
+    "median": 15.6,
+    "p95": 21.1,
+    "min": 12.5,
+    "n": 20
+  },
+  "sp_move_done": {
+    "median": 20.6,
+    "p95": 53.5,
+    "min": 17,
+    "n": 20
+  },
+  "sp_cross_client": {
+    "median": 61.4,
+    "p95": 81.9,
+    "min": 45,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 2880,
+    "gzip_kb": 752
+  },
+  "rtt_ms": 1.1,
+  "retried_samples": 0,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

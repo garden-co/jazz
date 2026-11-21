@@ -1,0 +1,19 @@
+{
+  "tag": "components-unminified",
+  "variant": "default",
+  "flags": {
+    "BENCH_NO_MINIFY": "1"
+  },
+  "samples": 1,
+  "medians": {
+    "committed": 9.8,
+    "render": 37.7,
+    "port out": 252.6,
+    "a dom": 254.9,
+    "b dom": 707.3,
+    "a longtask ms": 1060
+  },
+  "patchStats": {
+    "errors": []
+  }
+}

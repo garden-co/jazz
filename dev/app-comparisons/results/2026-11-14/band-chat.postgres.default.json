@@ -1,0 +1,51 @@
+{
+  "hero": "band-chat",
+  "stack": "postgres",
+  "variant": "default",
+  "date": "2026-11-14T19:47:46.067Z",
+  "where": "local (Postgres 18 + Hono/Better Auth/pg/ws app server, same machine)",
+  "runs": 7,
+  "samples": 20,
+  "bc_open_room": {
+    "median": 953,
+    "p95": 1031,
+    "min": 875,
+    "n": 7
+  },
+  "bc_resume": {
+    "median": 919,
+    "p95": 1040,
+    "min": 786,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 235,
+  "bc_send": {
+    "median": 287.3,
+    "p95": 415.4,
+    "min": 238.4,
+    "n": 20
+  },
+  "bc_switch_room": {
+    "median": 167,
+    "p95": 515.5,
+    "min": 2.5,
+    "n": 20
+  },
+  "bc_cross_client": {
+    "median": 356.1,
+    "p95": 699.3,
+    "min": 272.2,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 786,
+    "gzip_kb": 236,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 0.9,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

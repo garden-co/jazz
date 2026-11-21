@@ -1,0 +1,54 @@
+{
+  "hero": "band-chat",
+  "stack": "neon",
+  "variant": "default",
+  "date": "2026-11-14T19:51:47.642Z",
+  "where": "hosted (Neon Postgres + Realtime + Managed Better Auth, aws-us-east-1); Hono app server local",
+  "runs": 7,
+  "samples": 20,
+  "bc_open_room": {
+    "median": 1406,
+    "p95": 1756,
+    "min": 1297,
+    "n": 7
+  },
+  "bc_resume": {
+    "median": 1466,
+    "p95": 1630,
+    "min": 1239,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 305,
+  "bc_send": {
+    "median": 538.6,
+    "p95": 746.6,
+    "min": 443.1,
+    "n": 20
+  },
+  "bc_switch_room": {
+    "median": 203.4,
+    "p95": 511,
+    "min": 2.7,
+    "n": 20
+  },
+  "bc_cross_client": {
+    "median": 1306.4,
+    "p95": 2198.7,
+    "min": 780.8,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 1088,
+    "gzip_kb": 306,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 3,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 10,
+  "self_reload_phases": {
+    "bc_open_room": 9,
+    "bc_cross_client": 1
+  }
+}

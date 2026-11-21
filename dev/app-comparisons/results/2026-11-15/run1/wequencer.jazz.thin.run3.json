@@ -1,0 +1,51 @@
+{
+  "hero": "wequencer",
+  "stack": "jazz",
+  "variant": "thin",
+  "date": "2026-11-15T07:36:32.278Z",
+  "where": "local (Jazz inside the Next server)",
+  "runs": 7,
+  "samples": 20,
+  "wq_open_pattern": {
+    "median": 652,
+    "p95": 750,
+    "min": 572,
+    "n": 7
+  },
+  "wq_reload": {
+    "median": 359,
+    "p95": 470,
+    "min": 344,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 496,
+  "wq_toggle_pad": {
+    "median": 11.5,
+    "p95": 22.5,
+    "min": 6.9,
+    "n": 20
+  },
+  "wq_cross_client": {
+    "median": 8.7,
+    "p95": 12.4,
+    "min": 6.5,
+    "n": 20
+  },
+  "wq_concurrent": {
+    "median": 270.7,
+    "p95": 366.5,
+    "min": 173,
+    "n": 5
+  },
+  "bundle": {
+    "raw_kb": 3101,
+    "gzip_kb": 912,
+    "wasm_gzip_kb": 2986,
+    "worker_js_gzip_kb": 115
+  },
+  "rtt_ms": 5.8,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

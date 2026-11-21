@@ -1,0 +1,63 @@
+{
+  "hero": "big-label",
+  "stack": "neon",
+  "variant": "default",
+  "date": "2026-11-14T19:28:34.452Z",
+  "where": "hosted (Neon Postgres + Realtime + Managed Better Auth, aws-us-east-1); Next server local",
+  "runs": 7,
+  "samples": 20,
+  "bl_open_releases": {
+    "median": 799,
+    "p95": 1230,
+    "min": 679,
+    "n": 7
+  },
+  "bl_reload": {
+    "median": 538,
+    "p95": 595,
+    "min": 457,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 483,
+  "bl_search": {
+    "median": 88.9,
+    "p95": 151.5,
+    "min": 45.7,
+    "n": 20
+  },
+  "bl_next_page": {
+    "median": 83.2,
+    "p95": 234,
+    "min": 38.8,
+    "n": 20
+  },
+  "bl_switch_label": {
+    "median": 75.4,
+    "p95": 165.2,
+    "min": 50.4,
+    "n": 20
+  },
+  "bl_update_status": {
+    "median": 12.9,
+    "p95": 22.7,
+    "min": 10.4,
+    "n": 20
+  },
+  "bl_cross_client": {
+    "median": 76.8,
+    "p95": 129.3,
+    "min": 55.8,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 1912,
+    "gzip_kb": 523,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 5.8,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

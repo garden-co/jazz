@@ -1,0 +1,16 @@
+next-env.d.ts
+*.tsbuildinfo
+# The repo root ignores data/ directories; this app keeps its data layer in src/data (lib/data).
+!data/
+node_modules
+dist
+.next
+.jazz
+.env
+.env*.local
+test-results
+playwright-report
+.convex
+.zero
+*.sqlite
+.bench-*

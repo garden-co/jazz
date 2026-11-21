@@ -1,0 +1,51 @@
+{
+  "hero": "stage-plan",
+  "stack": "zero",
+  "variant": "default",
+  "date": "2026-11-14T18:39:00.262Z",
+  "where": "local (Postgres 18 + zero-cache + Hono app server, same machine)",
+  "runs": 7,
+  "samples": 20,
+  "sp_join_board": {
+    "median": 509,
+    "p95": 566,
+    "min": 495,
+    "n": 7
+  },
+  "sp_reload_board": {
+    "median": 266,
+    "p95": 335,
+    "min": 250,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 354,
+  "sp_add_task": {
+    "median": 13,
+    "p95": 19.4,
+    "min": 10.2,
+    "n": 20
+  },
+  "sp_move_done": {
+    "median": 17,
+    "p95": 21.7,
+    "min": 15.3,
+    "n": 20
+  },
+  "sp_cross_client": {
+    "median": 54.2,
+    "p95": 87.6,
+    "min": 40.5,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 1201,
+    "gzip_kb": 362,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 0.9,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

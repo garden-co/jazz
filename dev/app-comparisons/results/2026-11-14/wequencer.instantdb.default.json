@@ -1,0 +1,53 @@
+{
+  "hero": "wequencer",
+  "stack": "instantdb",
+  "variant": "default",
+  "date": "2026-11-14T18:58:02.805Z",
+  "where": "hosted (Instant Cloud temporary app, api.instantdb.com via CloudFront IAD / us-east); Next server local",
+  "runs": 7,
+  "samples": 20,
+  "wq_open_pattern": {
+    "median": 510,
+    "p95": 586,
+    "min": 471,
+    "n": 7
+  },
+  "wq_reload": {
+    "median": 264,
+    "p95": 412,
+    "min": 238,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 382,
+  "wq_toggle_pad": {
+    "median": 25.3,
+    "p95": 35.5,
+    "min": 10.6,
+    "n": 20
+  },
+  "wq_cross_client": {
+    "median": 64.8,
+    "p95": 209.1,
+    "min": 59.6,
+    "n": 20
+  },
+  "wq_concurrent": {
+    "median": 1490.7,
+    "p95": 1704.2,
+    "min": 1384.8,
+    "n": 5
+  },
+  "bundle": {
+    "raw_kb": 1553,
+    "gzip_kb": 479,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 6,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 10,
+  "self_reload_phases": {
+    "wq_open_pattern": 10
+  }
+}

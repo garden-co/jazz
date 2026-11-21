@@ -1,0 +1,63 @@
+{
+  "hero": "big-label",
+  "stack": "postgres",
+  "variant": "default",
+  "date": "2026-11-14T19:25:06.633Z",
+  "where": "local (Postgres 18 + Next/Better Auth/Hono API routes + a ws server fed by LISTEN/NOTIFY, same machine)",
+  "runs": 7,
+  "samples": 20,
+  "bl_open_releases": {
+    "median": 391,
+    "p95": 462,
+    "min": 387,
+    "n": 7
+  },
+  "bl_reload": {
+    "median": 199,
+    "p95": 245,
+    "min": 179,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 347,
+  "bl_search": {
+    "median": 8.3,
+    "p95": 45.7,
+    "min": 6.7,
+    "n": 20
+  },
+  "bl_next_page": {
+    "median": 29,
+    "p95": 57.5,
+    "min": 22.5,
+    "n": 20
+  },
+  "bl_switch_label": {
+    "median": 10.9,
+    "p95": 18.3,
+    "min": 8.4,
+    "n": 20
+  },
+  "bl_update_status": {
+    "median": 72.1,
+    "p95": 117.3,
+    "min": 55.1,
+    "n": 20
+  },
+  "bl_cross_client": {
+    "median": 62,
+    "p95": 97.9,
+    "min": 45.4,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 1314,
+    "gzip_kb": 386,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 1.9,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

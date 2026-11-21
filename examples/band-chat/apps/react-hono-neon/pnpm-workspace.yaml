@@ -1,0 +1,8 @@
+packages:
+  - '.'
+allowBuilds:
+  esbuild: true
+  '@astryxdesign/core': false
+minimumReleaseAgeExclude:
+  - '@neon/*'
+  - neon

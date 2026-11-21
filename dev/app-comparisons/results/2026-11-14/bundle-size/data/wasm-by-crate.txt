@@ -1,0 +1,47 @@
+code bytes 8053592
+   2040.5 KB  25.9%  jazz_db
+   1247.0 KB  15.9%  core
+   1030.4 KB  13.1%  jazz_model
+    882.8 KB  11.2%  other/C
+    559.9 KB   7.1%  sqlite(C)
+    472.6 KB   6.0%  alloc
+    345.3 KB   4.4%  serde
+    241.6 KB   3.1%  jazz_types
+    121.1 KB   1.5%  serde_core
+    121.0 KB   1.5%  serde_json
+    111.9 KB   1.4%  <&mut serde_json
+     82.9 KB   1.1%  jazz_wasm
+     72.0 KB   0.9%  hashbrown
+     58.3 KB   0.7%  jazz_text
+     47.0 KB   0.6%  <&mut postcard
+     41.5 KB   0.5%  jazz_protocol
+     37.7 KB   0.5%  rusqlite
+     36.5 KB   0.5%  <&T as core
+     25.5 KB   0.3%  curve25519_dalek
+     20.9 KB   0.3%  js_sys
+     20.7 KB   0.3%  futures_util
+     19.5 KB   0.2%  jazz
+     19.3 KB   0.2%  <&mut A as serde_core
+     19.2 KB   0.2%  serde_wasm_bindgen
+     18.7 KB   0.2%  sha2
+--- largest functions
+   148.7 KB  jazz_db::db::sync::<impl jazz_db::db::Db>::server_tick
+   110.4 KB  jazz_db::db::sync::<impl jazz_db::db::Db>::serve_as
+    79.2 KB  jazz_db::db::sync::<impl jazz_db::db::Db>::sync_tick
+    57.7 KB  sqlite3VdbeExec
+    47.3 KB  jazz_db::db::sync::<impl jazz_db::db::Db>::authorize_commit
+    39.6 KB  jazz_db::db::Db::open_named
+    38.5 KB  sqlite3RunParser
+    36.1 KB  jazz_db::db::sync::<impl jazz_db::db::Db>::record_stored_upload
+    34.6 KB  jazz_db::db::sync::FrameJoiner::push
+    34.3 KB  jazz_model::query::validate_query_canonical_parts_as
+    33.5 KB  <jazz_model::query::_::<impl serde_core::de::Deserialize for jazz_model::query::RelationExpr>::deserialize::__Visitor as serde_core::de::Vis
+    33.5 KB  <jazz_model::query::_::<impl serde_core::de::Deserialize for jazz_model::query::RelationExpr>::deserialize::__Visitor as serde_core::de::Vis
+    32.4 KB  <jazz_model::query::_::<impl serde_core::de::Deserialize for jazz_model::query::RelationExpr>::deserialize::__Visitor as serde_core::de::Vis
+    32.2 KB  jazz_db::db::sync::<impl jazz_db::db::Db>::client_send
+    32.1 KB  sqlite3Select
+pattern 'server_tick|serve_as|authoriz|Server': 316.4 KB in 12 fns
+pattern 'fts5|Fts5': 210.8 KB in 242 fns
+pattern 'rtree|Rtree|geopoly': 29.5 KB in 37 fns
+pattern 'serde_json|json': 327.1 KB in 366 fns
+pattern 'sqlite3|sqlite': 624.6 KB in 626 fns

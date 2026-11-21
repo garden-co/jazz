@@ -17,7 +17,12 @@ export function sessionConfig({ appId, ...rest }: SessionOverrides = {}): JazzCl
     env: "dev",
     // Start on the thin client; load the local-first one in its own chunk
     // once the page has loaded, then keep working offline.
-    client: () => import("jazz-tools/local-first"),
+    // Bench only (dev/app-comparisons): VITE_JAZZ_THIN=1 builds the thin client alone;
+    // VITE_JAZZ_LOCAL_FIRST=now opens the local-first client at once. Unset: as shipped.
+    ...(import.meta.env.VITE_JAZZ_THIN === "1"
+      ? {}
+      : { client: () => import("jazz-tools/local-first") }),
+    ...(import.meta.env.VITE_JAZZ_LOCAL_FIRST === "now" ? { localFirst: "now" as const } : {}),
     ...overrides,
     initial: "device",
   };

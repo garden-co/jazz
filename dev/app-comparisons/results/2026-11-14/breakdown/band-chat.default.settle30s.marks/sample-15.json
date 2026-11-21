@@ -1,0 +1,679 @@
+{
+ "case": "band-chat.default.settle30s.marks",
+ "text": "bench cross 1794645761795-15",
+ "sent": 1794645761903.4,
+ "sinceOpenMs": 59771,
+ "sender": {
+  "page": {
+   "realm": "page",
+   "url": "http://127.0.0.1:4402/?room=01a1d932-a75d-7780-b3ba-7dd8574fcc1d",
+   "timeOrigin": 1794645695613.5,
+   "navigation": [
+    {
+     "name": "http://127.0.0.1:4402/?room=01a1d932-a75d-7780-b3ba-7dd8574fcc1d",
+     "entryType": "navigation",
+     "startTime": 0,
+     "duration": 197.80000000004657,
+     "initiatorType": "navigation",
+     "deliveryType": "",
+     "nextHopProtocol": "http/1.1",
+     "renderBlockingStatus": "non-blocking",
+     "contentEncoding": "",
+     "workerStart": 0,
+     "workerRouterEvaluationStart": 0,
+     "workerCacheLookupStart": 0,
+     "workerMatchedSourceType": "",
+     "workerFinalSourceType": "",
+     "redirectStart": 0,
+     "redirectEnd": 0,
+     "fetchStart": 0.30000000004656613,
+     "domainLookupStart": 2.699999999953434,
+     "domainLookupEnd": 2.699999999953434,
+     "connectStart": 2.699999999953434,
+     "secureConnectionStart": 0,
+     "connectEnd": 3.199999999953434,
+     "requestStart": 3.3999999999068677,
+     "responseStart": 5.399999999906868,
+     "firstInterimResponseStart": 0,
+     "finalResponseHeadersStart": 5.399999999906868,
+     "responseEnd": 6.599999999860302,
+     "transferSize": 1279,
+     "encodedBodySize": 979,
+     "decodedBodySize": 979,
+     "responseStatus": 200,
+     "serverTiming": [],
+     "unloadEventStart": 0,
+     "unloadEventEnd": 0,
+     "domInteractive": 19.899999999906868,
+     "domContentLoadedEventStart": 197.39999999990687,
+     "domContentLoadedEventEnd": 197.39999999990687,
+     "domComplete": 197.80000000004657,
+     "loadEventStart": 197.80000000004657,
+     "loadEventEnd": 197.80000000004657,
+     "type": "navigate",
+     "redirectCount": 0,
+     "activationStart": 0,
+     "criticalCHRestart": 0,
+     "notRestoredReasons": null,
+     "confidence": {
+      "randomizedTriggerRate": 0.4994798,
+      "value": "low"
+     }
+    }
+   ],
+   "marks": [
+    {
+     "name": "send:start",
+     "t": 66294.30000000005,
+     "detail": {
+      "text": "bench cross 1794645761795-15"
+     }
+    },
+    {
+     "name": "send:committed",
+     "t": 66302,
+     "detail": {
+      "text": "bench cross 1794645761795-15"
+     }
+    },
+    {
+     "name": "data:newest",
+     "t": 66326.19999999995,
+     "detail": {
+      "text": "bench cross 1794645761795-15",
+      "n": 200
+     }
+    },
+    {
+     "name": "dom:needle",
+     "t": 66645.3999999999,
+     "detail": {
+      "key": "bench cross 1794645761795-15"
+     }
+    }
+   ],
+   "resources": [
+    {
+     "name": "http://127.0.0.1:4402/assets/index-VG17y32C.js",
+     "start": 12.199999999953434,
+     "responseEnd": 56.5,
+     "bytes": 1134344
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/useIsomorphicLayoutEffect-DsK3Iq2B.js",
+     "start": 12.800000000046566,
+     "responseEnd": 30,
+     "bytes": 44623
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/preload-helper-DSXbuxSR.js",
+     "start": 13.099999999860302,
+     "responseEnd": 30.399999999906868,
+     "bytes": 1493
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/Tooltip-CNarHuA9.js",
+     "start": 13.199999999953434,
+     "responseEnd": 36.89999999990687,
+     "bytes": 2164
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/metro-setup-error-B3lx0Qdw.js",
+     "start": 13.399999999906868,
+     "responseEnd": 46.39999999990687,
+     "bytes": 255716
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/index-BVoIA84T.css",
+     "start": 13.699999999953434,
+     "responseEnd": 39.5999999998603,
+     "bytes": 186614
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/body-font-latin-700-normal-BtTpXyKh.woff2",
+     "start": 210.0999999998603,
+     "responseEnd": 223.69999999995343,
+     "bytes": 124216
+    },
+    {
+     "name": "http://127.0.0.1:4402/api/auth/get-session",
+     "start": 220.19999999995343,
+     "responseEnd": 248.0999999998603,
+     "bytes": 916
+    },
+    {
+     "name": "http://127.0.0.1:4402/jazz/apps/0fee913c-ba7d-52ee-ab1b-141037495fd6/accounts/backend-user",
+     "start": 265.0999999998603,
+     "responseEnd": 280.69999999995343,
+     "bytes": 448
+    },
+    {
+     "name": "http://127.0.0.1:4402/jazz/apps/0fee913c-ba7d-52ee-ab1b-141037495fd6/accounts/backend-sign-in",
+     "start": 282.69999999995343,
+     "responseEnd": 296.89999999990687,
+     "bytes": 471
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/local-first-BZnj5VYv.js",
+     "start": 334.19999999995343,
+     "responseEnd": 341.5,
+     "bytes": 7481
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/delete-local-first-store-CBthIchE.js",
+     "start": 334.5,
+     "responseEnd": 347.80000000004657,
+     "bytes": 43950
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/jazz_wasm-D9-cS1v1.js",
+     "start": 356.5,
+     "responseEnd": 369.5,
+     "bytes": 39185
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/body-font-latin-400-normal-CIRT-lN4.woff2",
+     "start": 423.39999999990687,
+     "responseEnd": 450.69999999995343,
+     "bytes": 121316
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/main-font-latin-700-normal-CHRzKYIS.woff2",
+     "start": 643.0999999998603,
+     "responseEnd": 948.5,
+     "bytes": 55860
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/jazz_wasm_bg-HpkRDlj-.wasm",
+     "start": 3713.3000000000466,
+     "responseEnd": 4709,
+     "bytes": 8965523
+    }
+   ],
+   "ws": [],
+   "ports": [
+    {
+     "t": 1794645761889.8,
+     "dir": "out"
+    },
+    {
+     "t": 1794645761903.1,
+     "dir": "in"
+    },
+    {
+     "t": 1794645761909.7,
+     "dir": "out"
+    },
+    {
+     "t": 1794645762255.5,
+     "dir": "out",
+     "type": "frames",
+     "needle": true
+    },
+    {
+     "t": 1794645762634.2,
+     "dir": "out",
+     "type": "frames"
+    },
+    {
+     "t": 1794645762664.6,
+     "dir": "in"
+    },
+    {
+     "t": 1794645762665.3,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645762984.7,
+     "dir": "out"
+    },
+    {
+     "t": 1794645763051.8,
+     "dir": "in"
+    },
+    {
+     "t": 1794645763051.8,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645763052.6,
+     "dir": "in",
+     "type": "frames",
+     "needle": true
+    },
+    {
+     "t": 1794645763377.4,
+     "dir": "out"
+    },
+    {
+     "t": 1794645763436.6,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645763438.3,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645763438.9,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645763442.4,
+     "dir": "in"
+    }
+   ],
+   "console": [],
+   "counts": {
+    "ws": 1,
+    "wasm:instantiateStreaming": 1
+   },
+   "longtasks": [
+    {
+     "t": 1794645761903.3,
+     "ms": 734
+    },
+    {
+     "t": 1794645762665.2,
+     "ms": 377
+    },
+    {
+     "t": 1794645763052.6,
+     "ms": 376
+    }
+   ]
+  },
+  "workers": [
+   {
+    "sessionId": "E8CD76E2A91DBA71FA1C2A55998A9ADB",
+    "url": "http://127.0.0.1:4402/assets/jazz-broker-worker-Bw_IAgCr.js",
+    "attachedAt": 1794645695971,
+    "detached": false,
+    "realm": "worker",
+    "timeOrigin": 1794645695973.4,
+    "navigation": [],
+    "marks": [],
+    "resources": [
+     {
+      "name": "http://127.0.0.1:4402/assets/jazz_wasm_bg-HpkRDlj-.wasm",
+      "start": 634,
+      "responseEnd": 804.1999999999534,
+      "bytes": 8965523
+     }
+    ],
+    "ws": [
+     {
+      "t": 1794645762283.0999,
+      "dir": "out",
+      "bytes": 351,
+      "needle": true
+     },
+     {
+      "t": 1794645762402.2,
+      "dir": "in",
+      "bytes": 3951
+     },
+     {
+      "t": 1794645762689.5,
+      "dir": "out",
+      "bytes": 100
+     },
+     {
+      "t": 1794645762718,
+      "dir": "in",
+      "bytes": 91
+     }
+    ],
+    "ports": [
+     {
+      "t": 1794645762256.2,
+      "dir": "in",
+      "type": "frames",
+      "needle": true
+     },
+     {
+      "t": 1794645762275.5999,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645762296.2998,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645762444.5999,
+      "dir": "out",
+      "type": "frames",
+      "needle": true
+     },
+     {
+      "t": 1794645762638.0999,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645762678.2998,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645762705.2,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645762748.2998,
+      "dir": "out",
+      "type": "frames"
+     }
+    ],
+    "console": [],
+    "counts": {
+     "wasm:instantiateStreaming": 1,
+     "ws": 1
+    },
+    "longtasks": []
+   }
+  ]
+ },
+ "receiver": {
+  "page": {
+   "realm": "page",
+   "url": "http://127.0.0.1:4402/?room=01a1d932-a75d-7780-b3ba-7dd8574fcc1d",
+   "timeOrigin": 1794645698942.5,
+   "navigation": [
+    {
+     "name": "http://127.0.0.1:4402/?room=01a1d932-a75d-7780-b3ba-7dd8574fcc1d",
+     "entryType": "navigation",
+     "startTime": 0,
+     "duration": 230.19999999995343,
+     "initiatorType": "navigation",
+     "deliveryType": "",
+     "nextHopProtocol": "http/1.1",
+     "renderBlockingStatus": "non-blocking",
+     "contentEncoding": "",
+     "workerStart": 0,
+     "workerRouterEvaluationStart": 0,
+     "workerCacheLookupStart": 0,
+     "workerMatchedSourceType": "",
+     "workerFinalSourceType": "",
+     "redirectStart": 0,
+     "redirectEnd": 0,
+     "fetchStart": 0.19999999995343387,
+     "domainLookupStart": 1.1000000000931323,
+     "domainLookupEnd": 1.1999999999534339,
+     "connectStart": 1.1999999999534339,
+     "secureConnectionStart": 0,
+     "connectEnd": 1.3000000000465661,
+     "requestStart": 1.4000000001396984,
+     "responseStart": 2.699999999953434,
+     "firstInterimResponseStart": 0,
+     "finalResponseHeadersStart": 2.699999999953434,
+     "responseEnd": 15.800000000046566,
+     "transferSize": 1279,
+     "encodedBodySize": 979,
+     "decodedBodySize": 979,
+     "responseStatus": 200,
+     "serverTiming": [],
+     "unloadEventStart": 0,
+     "unloadEventEnd": 0,
+     "domInteractive": 21.100000000093132,
+     "domContentLoadedEventStart": 229.19999999995343,
+     "domContentLoadedEventEnd": 229.80000000004657,
+     "domComplete": 230.10000000009313,
+     "loadEventStart": 230.19999999995343,
+     "loadEventEnd": 230.19999999995343,
+     "type": "navigate",
+     "redirectCount": 0,
+     "activationStart": 0,
+     "criticalCHRestart": 0,
+     "notRestoredReasons": null,
+     "confidence": {
+      "randomizedTriggerRate": 0.4994798,
+      "value": "high"
+     }
+    }
+   ],
+   "marks": [
+    {
+     "name": "data:newest",
+     "t": 63577.5,
+     "detail": {
+      "text": "bench cross 1794645761795-15",
+      "n": 200
+     }
+    },
+    {
+     "name": "dom:needle",
+     "t": 64017.19999999995,
+     "detail": {
+      "key": "bench cross 1794645761795-15"
+     }
+    }
+   ],
+   "resources": [
+    {
+     "name": "http://127.0.0.1:4402/assets/index-VG17y32C.js",
+     "start": 16.699999999953434,
+     "responseEnd": 92,
+     "bytes": 1134344
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/useIsomorphicLayoutEffect-DsK3Iq2B.js",
+     "start": 16.9000000001397,
+     "responseEnd": 37.9000000001397,
+     "bytes": 44623
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/preload-helper-DSXbuxSR.js",
+     "start": 17.800000000046566,
+     "responseEnd": 43.9000000001397,
+     "bytes": 1493
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/Tooltip-CNarHuA9.js",
+     "start": 17.800000000046566,
+     "responseEnd": 44.5,
+     "bytes": 2164
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/index-BVoIA84T.css",
+     "start": 18,
+     "responseEnd": 45.699999999953434,
+     "bytes": 186614
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/metro-setup-error-B3lx0Qdw.js",
+     "start": 18,
+     "responseEnd": 83.69999999995343,
+     "bytes": 255716
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/body-font-latin-700-normal-BtTpXyKh.woff2",
+     "start": 251.5,
+     "responseEnd": 280.9000000001397,
+     "bytes": 124216
+    },
+    {
+     "name": "http://127.0.0.1:4402/api/auth/get-session",
+     "start": 260.19999999995343,
+     "responseEnd": 302.4000000001397,
+     "bytes": 916
+    },
+    {
+     "name": "http://127.0.0.1:4402/jazz/apps/0fee913c-ba7d-52ee-ab1b-141037495fd6/accounts/backend-user",
+     "start": 335.30000000004657,
+     "responseEnd": 364.4000000001397,
+     "bytes": 448
+    },
+    {
+     "name": "http://127.0.0.1:4402/jazz/apps/0fee913c-ba7d-52ee-ab1b-141037495fd6/accounts/backend-sign-in",
+     "start": 367.4000000001397,
+     "responseEnd": 381,
+     "bytes": 471
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/local-first-BZnj5VYv.js",
+     "start": 429.30000000004657,
+     "responseEnd": 453.10000000009313,
+     "bytes": 7481
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/delete-local-first-store-CBthIchE.js",
+     "start": 430.4000000001397,
+     "responseEnd": 453.4000000001397,
+     "bytes": 43950
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/jazz_wasm-D9-cS1v1.js",
+     "start": 469.60000000009313,
+     "responseEnd": 495.19999999995343,
+     "bytes": 39185
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/jazz_wasm_bg-HpkRDlj-.wasm",
+     "start": 502,
+     "responseEnd": 3435.5,
+     "bytes": 8965523
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/body-font-latin-400-normal-CIRT-lN4.woff2",
+     "start": 591.8000000000466,
+     "responseEnd": 698.1000000000931,
+     "bytes": 121316
+    },
+    {
+     "name": "http://127.0.0.1:4402/assets/main-font-latin-700-normal-CHRzKYIS.woff2",
+     "start": 1494.6000000000931,
+     "responseEnd": 2455.8000000000466,
+     "bytes": 55860
+    }
+   ],
+   "ws": [],
+   "ports": [
+    {
+     "t": 1794645762457.4,
+     "dir": "in",
+     "type": "frames",
+     "needle": true
+    },
+    {
+     "t": 1794645762905.7,
+     "dir": "out"
+    },
+    {
+     "t": 1794645763424.8,
+     "dir": "out",
+     "type": "frames"
+    },
+    {
+     "t": 1794645763470.8,
+     "dir": "in"
+    },
+    {
+     "t": 1794645763484.7,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645763514.6,
+     "dir": "in",
+     "type": "frames"
+    },
+    {
+     "t": 1794645763577.5,
+     "dir": "in",
+     "type": "frames"
+    }
+   ],
+   "console": [],
+   "counts": {
+    "ws": 1,
+    "wasm:instantiateStreaming": 1
+   },
+   "longtasks": [
+    {
+     "t": 1794645762457.3,
+     "ms": 972
+    }
+   ]
+  },
+  "workers": [
+   {
+    "sessionId": "4607601980B054800AD47E8FDAE98102",
+    "url": "http://127.0.0.1:4402/assets/jazz-broker-worker-Bw_IAgCr.js",
+    "attachedAt": 1794645699420,
+    "detached": false,
+    "realm": "worker",
+    "timeOrigin": 1794645699426.4,
+    "navigation": [],
+    "marks": [],
+    "resources": [
+     {
+      "name": "http://127.0.0.1:4402/assets/jazz_wasm_bg-HpkRDlj-.wasm",
+      "start": 251.5,
+      "responseEnd": 895.3000000000466,
+      "bytes": 8965523
+     }
+    ],
+    "ws": [
+     {
+      "t": 1794645762404.7998,
+      "dir": "in",
+      "bytes": 4862,
+      "needle": true
+     },
+     {
+      "t": 1794645763484.2998,
+      "dir": "out",
+      "bytes": 100
+     },
+     {
+      "t": 1794645763513.2998,
+      "dir": "in",
+      "bytes": 91
+     }
+    ],
+    "ports": [
+     {
+      "t": 1794645762456.5,
+      "dir": "out",
+      "type": "frames",
+      "needle": true
+     },
+     {
+      "t": 1794645763425.2998,
+      "dir": "in",
+      "type": "frames"
+     },
+     {
+      "t": 1794645763483,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645763514.2998,
+      "dir": "out",
+      "type": "frames"
+     },
+     {
+      "t": 1794645763552.2998,
+      "dir": "out",
+      "type": "frames"
+     }
+    ],
+    "console": [],
+    "counts": {
+     "wasm:instantiateStreaming": 1,
+     "ws": 1
+    },
+    "longtasks": []
+   }
+  ]
+ }
+}

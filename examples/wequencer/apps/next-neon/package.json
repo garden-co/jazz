@@ -1,0 +1,37 @@
+{
+  "name": "wequencer-neon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -H localhost",
+    "db:migrate": "tsx --env-file=.env.local scripts/migrate.ts",
+    "seed": "tsx --conditions react-server --env-file=.env.local scripts/seed.ts",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
+    "@neon/auth": "0.8.2",
+    "@neon/realtime": "0.2.1",
+    "@noble/hashes": "2.0.1",
+    "next": "16.2.11",
+    "pg": "8.16.3",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "server-only": "0.0.1",
+    "zod": "4.1.13"
+  },
+  "devDependencies": {
+    "@neon/config": "1.14.0",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.15.6",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "neon": "9.5.0",
+    "tsx": "4.21.0",
+    "typescript": "6.0.2"
+  }
+}

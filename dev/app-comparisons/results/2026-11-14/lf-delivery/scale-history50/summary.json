@@ -1,0 +1,19 @@
+{
+  "tag": "scale-history50",
+  "variant": "default",
+  "flags": {
+    "VITE_BENCH_HISTORY": "50"
+  },
+  "samples": 9,
+  "medians": {
+    "committed": 5.3,
+    "render": 23.5,
+    "port out": 79.9,
+    "a dom": 81,
+    "b dom": 296.6,
+    "a longtask ms": 401
+  },
+  "patchStats": {
+    "errors": []
+  }
+}

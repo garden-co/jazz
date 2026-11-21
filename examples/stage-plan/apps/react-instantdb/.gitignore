@@ -1,0 +1,13 @@
+node_modules
+dist
+.env
+.next
+.jazz
+.env*.local
+test-results
+playwright-report
+.convex
+.zero
+*.sqlite
+.bench-*
+*.tsbuildinfo

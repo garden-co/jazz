@@ -1,0 +1,9 @@
+{
+  "_note": "Hand-written sync: the server's REST reads, RPC writes, permission checks and WebSocket broadcast are `server` (permission helpers in server/permissions.ts count as `permissions`); the client's fetch, subscribe and cache code is `data`. SQL migrations and the row types count as schema. scripts/ (db reset, seed) and harness.mjs are bench plumbing.",
+  "schema": ["db/*.sql", "shared/types.ts"],
+  "permissions": ["server/permissions.ts"],
+  "server": ["server/index.ts", "server/db.ts", "server/live.ts", "server/session.ts", "server/reads.ts", "server/writes.ts"],
+  "data": ["src/data/**/*.ts", "src/account.ts", "src/App.tsx", "src/main.tsx", "src/model/**/*.ts"],
+  "ui": ["src/components/**/*.tsx", "src/components/**/*.ts", "src/router.ts", "src/styles.css"],
+  "exclude": ["scripts/**", "harness.mjs"]
+}

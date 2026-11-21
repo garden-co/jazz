@@ -1,0 +1,26 @@
+diff -ru a/dist/runtime/native-runtime/browser-worker-transport.js b/dist/runtime/native-runtime/browser-worker-transport.js
+--- a/dist/runtime/native-runtime/browser-worker-transport.js	2026-11-14 16:59:15.569765467 +0000
++++ b/dist/runtime/native-runtime/browser-worker-transport.js	2026-11-14 17:51:00.555345721 +0000
+@@ -135,6 +135,22 @@
+     scheduleOutboundDrain() {
+         if (this.closed || this.outboundDrainScheduled)
+             return;
++        if (!this.syncDrainedThisTask) {
++            this.syncDrainedThisTask = true;
++            setTimeout(() => {
++                this.syncDrainedThisTask = false;
++            }, 0);
++            try {
++                const frames = normalizeTransportFrames(this.transport.recvWireFrames());
++                if (frames.length > 0)
++                    this.sendFrames(frames);
++                globalThis.__jazzSyncOutbound = (globalThis.__jazzSyncOutbound ?? 0) + 1;
++                return;
++            }
++            catch (error) {
++                globalThis.__jazzSyncOutboundErrors = [...(globalThis.__jazzSyncOutboundErrors ?? []), String(error)].slice(-5);
++            }
++        }
+         this.outboundDrainScheduled = true;
+         queueMicrotask(() => {
+             this.outboundDrainScheduled = false;

@@ -1,0 +1,63 @@
+{
+  "hero": "big-label",
+  "stack": "instantdb",
+  "variant": "default",
+  "date": "2026-11-14T19:22:47.096Z",
+  "where": "hosted (Instant Cloud temporary app, api.instantdb.com via CloudFront IAD / us-east); Next server local",
+  "runs": 7,
+  "samples": 20,
+  "bl_open_releases": {
+    "median": 308,
+    "p95": 321,
+    "min": 261,
+    "n": 7
+  },
+  "bl_reload": {
+    "median": 175,
+    "p95": 184,
+    "min": 161,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 373,
+  "bl_search": {
+    "median": 50.8,
+    "p95": 194.9,
+    "min": 45.4,
+    "n": 20
+  },
+  "bl_next_page": {
+    "median": 50.1,
+    "p95": 60.9,
+    "min": 43.7,
+    "n": 20
+  },
+  "bl_switch_label": {
+    "median": 217.9,
+    "p95": 401.8,
+    "min": 206.6,
+    "n": 20
+  },
+  "bl_update_status": {
+    "median": 29,
+    "p95": 154.5,
+    "min": 24.4,
+    "n": 20
+  },
+  "bl_cross_client": {
+    "median": 109.2,
+    "p95": 211.8,
+    "min": 99.6,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 1402,
+    "gzip_kb": 413,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 6.1,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

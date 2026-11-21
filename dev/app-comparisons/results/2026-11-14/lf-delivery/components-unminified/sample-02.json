@@ -1,0 +1,408 @@
+{
+ "tag": "components-unminified",
+ "flags": {
+  "BENCH_NO_MINIFY": "1"
+ },
+ "text": "bench lf 1794677311890-2",
+ "sent": 1794677312725.5,
+ "traced": true,
+ "row": {
+  "committed": 9.5,
+  "render": 26.199951171875,
+  "port out": 233.199951171875,
+  "a dom": 235.599853515625,
+  "b dom": 1242.39990234375,
+  "a longtask ms": 662
+ },
+ "a": {
+  "timeOrigin": 1794677272030.2,
+  "marks": [
+   {
+    "name": "bench:click",
+    "t": 40695.19999999995
+   },
+   {
+    "name": "send:start",
+    "t": 40698.09999999986,
+    "detail": {
+     "text": "bench lf 1794677311890-2"
+    }
+   },
+   {
+    "name": "jazz:commit:native-start",
+    "t": 40701.19999999995
+   },
+   {
+    "name": "jazz:commit:native-end",
+    "t": 40701.89999999991
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 40701.89999999991
+   },
+   {
+    "name": "jazz:pump",
+    "t": 40703.89999999991
+   },
+   {
+    "name": "jazz:outbound-drain-scheduled",
+    "t": 40704.69999999995
+   },
+   {
+    "name": "send:committed",
+    "t": 40704.80000000005,
+    "detail": {
+     "text": "bench lf 1794677311890-2"
+    }
+   },
+   {
+    "name": "data:newest",
+    "t": 40721.5,
+    "detail": {
+     "text": "bench lf 1794677311890-2",
+     "n": 200
+    }
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 40925.89999999991
+   },
+   {
+    "name": "jazz:drain",
+    "t": 40928.39999999991,
+    "detail": 1
+   },
+   {
+    "name": "probe:port-out-needle",
+    "t": 40928.5
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 40928.89999999991
+   },
+   {
+    "name": "dom:needle",
+    "t": 40930.89999999991,
+    "detail": {
+     "key": "bench lf 1794677311890-2"
+    }
+   },
+   {
+    "name": "jazz:outbound-drain-scheduled",
+    "t": 40931.5
+   },
+   {
+    "name": "jazz:drain",
+    "t": 41167.39999999991,
+    "detail": 1
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41167.80000000005
+   },
+   {
+    "name": "jazz:pump",
+    "t": 41194.5
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41197.80000000005
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41546.59999999986
+   },
+   {
+    "name": "jazz:pump",
+    "t": 41559.09999999986
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41559.39999999991
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41559.69999999995
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41559.69999999995
+   },
+   {
+    "name": "jazz:pump",
+    "t": 41561.30000000005
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41568.5
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41863.89999999991
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41866
+   },
+   {
+    "name": "jazz:pump",
+    "t": 41872.39999999991
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41873.39999999991
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41873.69999999995
+   },
+   {
+    "name": "jazz:pump",
+    "t": 41873.89999999991
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41874.09999999986
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41874.30000000005
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41874.39999999991
+   },
+   {
+    "name": "jazz:pump",
+    "t": 41875.59999999986
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41877.59999999986
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 41877.69999999995
+   }
+  ],
+  "ports": [
+   {
+    "t": 1794677312731.2,
+    "dir": "out"
+   },
+   {
+    "t": 1794677312958.7,
+    "dir": "out",
+    "type": "frames",
+    "needle": true
+   },
+   {
+    "t": 1794677313197.7,
+    "dir": "out",
+    "type": "frames"
+   },
+   {
+    "t": 1794677313222.8,
+    "dir": "in"
+   },
+   {
+    "t": 1794677313224.3,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794677313529.2,
+    "dir": "out"
+   },
+   {
+    "t": 1794677313589.0999,
+    "dir": "in"
+   },
+   {
+    "t": 1794677313589.0999,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794677313590,
+    "dir": "in",
+    "type": "frames",
+    "needle": true
+   },
+   {
+    "t": 1794677313859.2,
+    "dir": "out"
+   },
+   {
+    "t": 1794677313902.4,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794677313904,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794677313904.8,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794677313908.8,
+    "dir": "in"
+   },
+   {
+    "t": 1794677313908.9,
+    "dir": "out"
+   },
+   {
+    "t": 1794677313909.5,
+    "dir": "in"
+   }
+  ],
+  "ws": [],
+  "longtasks": [
+   {
+    "t": 1794677313224.3,
+    "ms": 356
+   },
+   {
+    "t": 1794677313590,
+    "ms": 306
+   }
+  ]
+ },
+ "b": {
+  "timeOrigin": 1794677274213.4,
+  "marks": [
+   {
+    "name": "jazz:pump",
+    "t": 39444.700000000186
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 39448.5
+   },
+   {
+    "name": "data:newest",
+    "t": 39474.30000000005,
+    "detail": {
+     "text": "bench lf 1794677311890-2",
+     "n": 200
+    }
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 39750.10000000009
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 39751.90000000014
+   },
+   {
+    "name": "dom:needle",
+    "t": 39754.5,
+    "detail": {
+     "key": "bench lf 1794677311890-2"
+    }
+   },
+   {
+    "name": "jazz:outbound-drain-scheduled",
+    "t": 39755.10000000009
+   },
+   {
+    "name": "jazz:drain",
+    "t": 39965.60000000009,
+    "detail": 1
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 39965.90000000014
+   },
+   {
+    "name": "jazz:pump",
+    "t": 39987.10000000009
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 39987.80000000005
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 39988.10000000009
+   },
+   {
+    "name": "jazz:pump",
+    "t": 39988.700000000186
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 39988.90000000014
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 39989.10000000009
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 39989.10000000009
+   },
+   {
+    "name": "jazz:pump",
+    "t": 40030.10000000009
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 40032.10000000009
+   },
+   {
+    "name": "jazz:pumpSubscriptions",
+    "t": 40032.30000000005
+   }
+  ],
+  "ports": [
+   {
+    "t": 1794677313656.7998,
+    "dir": "in",
+    "type": "frames",
+    "needle": true
+   },
+   {
+    "t": 1794677313927.5,
+    "dir": "out"
+   },
+   {
+    "t": 1794677314179.0999,
+    "dir": "out",
+    "type": "frames"
+   },
+   {
+    "t": 1794677314200.2,
+    "dir": "in"
+   },
+   {
+    "t": 1794677314200.4,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794677314202,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794677314242.9,
+    "dir": "in",
+    "type": "frames"
+   }
+  ],
+  "ws": [],
+  "longtasks": [
+   {
+    "t": 1794677313082.5,
+    "ms": 1098
+   }
+  ]
+ }
+}

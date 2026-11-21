@@ -1,0 +1,20 @@
+{
+  "tag": "patch-sync-outbound-render20",
+  "variant": "default",
+  "flags": {
+    "VITE_BENCH_RENDER_LIMIT": "20"
+  },
+  "samples": 9,
+  "medians": {
+    "committed": 4.7,
+    "render": 26.5,
+    "port out": 4.4,
+    "a dom": 61.6,
+    "b dom": 163.9,
+    "a longtask ms": 282
+  },
+  "patchStats": {
+    "syncOutbound": 551,
+    "errors": []
+  }
+}

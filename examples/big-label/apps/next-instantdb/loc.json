@@ -1,0 +1,23 @@
+{
+  "_note": "seed.ts and harness.mjs are bench plumbing; src/fixtures.ts (createFixture) feeds the demo-data route, counted as server like the Jazz copy. Instant is hosted; the server is the Next routes for sign-in (minting Instant tokens), bootstrap, members and demo data.",
+  "schema": ["instant.schema.ts"],
+  "permissions": ["instant.perms.ts", "src/roles.ts"],
+  "server": [
+    "src/lib/instant.server.ts",
+    "src/lib/bootstrap.ts",
+    "src/lib/members.ts",
+    "src/lib/demo-data.ts",
+    "src/lib/emails.ts",
+    "src/fixtures.ts",
+    "app/api/**/*.ts"
+  ],
+  "data": [
+    "src/lib/db.ts",
+    "src/lib/auth-client.ts",
+    "src/lib/mutations.ts",
+    "src/lib/membership.ts",
+    "src/lib/use-write.ts"
+  ],
+  "ui": ["app/**/*.tsx", "src/**/*.tsx", "src/app.css", "src/styles.d.ts", "src/lib/route.ts"],
+  "exclude": ["seed.ts", "harness.mjs"]
+}

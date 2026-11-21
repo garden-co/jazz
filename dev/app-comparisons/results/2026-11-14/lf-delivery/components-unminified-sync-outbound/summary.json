@@ -1,0 +1,20 @@
+{
+  "tag": "components-unminified-sync-outbound",
+  "variant": "default",
+  "flags": {
+    "BENCH_NO_MINIFY": "1"
+  },
+  "samples": 1,
+  "medians": {
+    "committed": 10.3,
+    "render": 35.9,
+    "port out": 10.1,
+    "a dom": 314.5,
+    "b dom": 398.4,
+    "a longtask ms": 1200
+  },
+  "patchStats": {
+    "syncOutbound": 539,
+    "errors": []
+  }
+}

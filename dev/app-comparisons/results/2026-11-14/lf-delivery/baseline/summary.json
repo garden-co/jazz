@@ -1,0 +1,17 @@
+{
+  "tag": "baseline",
+  "variant": "default",
+  "flags": {},
+  "samples": 9,
+  "medians": {
+    "committed": 7.3,
+    "render": 22.9,
+    "port out": 219.3,
+    "a dom": 221.4,
+    "b dom": 591.9,
+    "a longtask ms": 1038
+  },
+  "patchStats": {
+    "errors": []
+  }
+}

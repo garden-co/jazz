@@ -1,0 +1,201 @@
+{
+ "tag": "patch-sync-outbound-render20",
+ "flags": {
+  "VITE_BENCH_RENDER_LIMIT": "20"
+ },
+ "text": "bench lf 1794676909897-3",
+ "sent": 1794676910470.4001,
+ "traced": true,
+ "row": {
+  "committed": 7.699951171875,
+  "render": 38.5,
+  "port out": 7.599853515625,
+  "a dom": 80.699951171875,
+  "b dom": 463.199951171875,
+  "a longtask ms": 144
+ },
+ "a": {
+  "timeOrigin": 1794676872471.6,
+  "marks": [
+   {
+    "name": "bench:click",
+    "t": 37998.69999999995
+   },
+   {
+    "name": "send:start",
+    "t": 37999.59999999986,
+    "detail": {
+     "text": "bench lf 1794676909897-3"
+    }
+   },
+   {
+    "name": "probe:port-out-needle",
+    "t": 38006.5
+   },
+   {
+    "name": "send:committed",
+    "t": 38006.5,
+    "detail": {
+     "text": "bench lf 1794676909897-3"
+    }
+   },
+   {
+    "name": "data:newest",
+    "t": 38037.299999999814,
+    "detail": {
+     "text": "bench lf 1794676909897-3",
+     "n": 200
+    }
+   },
+   {
+    "name": "dom:needle",
+    "t": 38079.5,
+    "detail": {
+     "key": "bench lf 1794676909897-3"
+    }
+   }
+  ],
+  "ports": [
+   {
+    "t": 1794676910473.7002,
+    "dir": "out"
+   },
+   {
+    "t": 1794676910478,
+    "dir": "out",
+    "type": "frames",
+    "needle": true
+   },
+   {
+    "t": 1794676910551.8,
+    "dir": "out",
+    "type": "frames"
+   },
+   {
+    "t": 1794676910609.8,
+    "dir": "in"
+   },
+   {
+    "t": 1794676910610.1,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794676910657.8,
+    "dir": "out"
+   },
+   {
+    "t": 1794676910666.4001,
+    "dir": "in"
+   },
+   {
+    "t": 1794676910666.5,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794676910667,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794676910668,
+    "dir": "in",
+    "type": "frames",
+    "needle": true
+   },
+   {
+    "t": 1794676910745.4001,
+    "dir": "out"
+   },
+   {
+    "t": 1794676910766.5,
+    "dir": "in"
+   },
+   {
+    "t": 1794676910766.5,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794676910798.3,
+    "dir": "in",
+    "type": "frames"
+   }
+  ],
+  "ws": [],
+  "longtasks": [
+   {
+    "t": 1794676910610.1,
+    "ms": 54
+   },
+   {
+    "t": 1794676910667.8,
+    "ms": 90
+   }
+  ]
+ },
+ "b": {
+  "timeOrigin": 1794676874137.1,
+  "marks": [
+   {
+    "name": "data:newest",
+    "t": 36764.69999999995,
+    "detail": {
+     "text": "bench lf 1794676909897-3",
+     "n": 200
+    }
+   },
+   {
+    "name": "dom:needle",
+    "t": 36796.5,
+    "detail": {
+     "key": "bench lf 1794676909897-3"
+    }
+   }
+  ],
+  "ports": [
+   {
+    "t": 1794676910866.7002,
+    "dir": "in",
+    "type": "frames",
+    "needle": true
+   },
+   {
+    "t": 1794676910921.6,
+    "dir": "out"
+   },
+   {
+    "t": 1794676910935.4001,
+    "dir": "out",
+    "type": "frames"
+   },
+   {
+    "t": 1794676910993.3,
+    "dir": "in"
+   },
+   {
+    "t": 1794676910993.3,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794676910994.5,
+    "dir": "in",
+    "type": "frames"
+   },
+   {
+    "t": 1794676910994.9001,
+    "dir": "in",
+    "type": "frames"
+   }
+  ],
+  "ws": [],
+  "longtasks": [
+   {
+    "t": 1794676910556.4001,
+    "ms": 430
+   }
+  ]
+ }
+}

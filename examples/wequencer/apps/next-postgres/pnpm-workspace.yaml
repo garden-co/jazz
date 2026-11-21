@@ -1,0 +1,6 @@
+packages:
+  - '.'
+allowBuilds:
+  esbuild: true
+  '@astryxdesign/core': false
+  sharp: false

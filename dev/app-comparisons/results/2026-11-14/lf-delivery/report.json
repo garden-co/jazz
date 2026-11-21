@@ -1,0 +1,340 @@
+{
+ "app-memo": {
+  "flags": {
+   "VITE_BENCH_MEMO": "1"
+  },
+  "n": 9,
+  "committed": 7,
+  "render starts": 9,
+  "frame leaves a": 27,
+  "a dom": 29,
+  "b dom": 149,
+  "split": {
+   "window": "→ frame 26",
+   "native": 10,
+   "ui": 7,
+   "react": 4,
+   "wasm": 2,
+   "jazz-js": 2,
+   "app": 1,
+   "other-js": 1
+  }
+ },
+ "app-memo-sync-outbound": {
+  "flags": {
+   "VITE_BENCH_MEMO": "1"
+  },
+  "n": 9,
+  "committed": 8,
+  "render starts": 10,
+  "frame leaves a": 7,
+  "a dom": 34,
+  "b dom": 150,
+  "split": {
+   "window": "→ a dom 47",
+   "native": 18,
+   "react": 12,
+   "ui": 10,
+   "wasm": 4,
+   "jazz-js": 3,
+   "app": 0,
+   "other-js": 0
+  }
+ },
+ "baseline": {
+  "flags": {},
+  "n": 9,
+  "committed": 7,
+  "render starts": 23,
+  "frame leaves a": 219,
+  "a dom": 221,
+  "b dom": 592,
+  "split": {
+   "window": "→ frame 238",
+   "ui": 110,
+   "react": 71,
+   "native": 37,
+   "other-js": 7,
+   "jazz-js": 5,
+   "wasm": 4,
+   "app": 4
+  }
+ },
+ "components-unminified": {
+  "flags": {
+   "BENCH_NO_MINIFY": "1"
+  },
+  "n": 1,
+  "committed": 10,
+  "render starts": 38,
+  "frame leaves a": 253,
+  "a dom": 255,
+  "b dom": 707,
+  "split": {
+   "window": "→ frame 233",
+   "ui": 109,
+   "react": 70,
+   "native": 38,
+   "other-js": 6,
+   "jazz-js": 5,
+   "app": 4,
+   "wasm": 1
+  }
+ },
+ "components-unminified-sync-outbound": {
+  "flags": {
+   "BENCH_NO_MINIFY": "1"
+  },
+  "n": 1,
+  "committed": 10,
+  "render starts": 36,
+  "frame leaves a": 10,
+  "a dom": 315,
+  "b dom": 398,
+  "split": {
+   "window": "→ a dom 277",
+   "ui": 131,
+   "react": 81,
+   "native": 49,
+   "other-js": 8,
+   "jazz-js": 4,
+   "wasm": 3,
+   "app": 1
+  }
+ },
+ "patch-defer-delivery": {
+  "flags": {},
+  "n": 9,
+  "committed": 8,
+  "render starts": 25,
+  "frame leaves a": 229,
+  "a dom": 231,
+  "b dom": 621
+ },
+ "patch-sync-outbound": {
+  "flags": {},
+  "n": 9,
+  "committed": 7,
+  "render starts": 28,
+  "frame leaves a": 7,
+  "a dom": 257,
+  "b dom": 360,
+  "split": {
+   "window": "→ a dom 322",
+   "ui": 157,
+   "react": 85,
+   "native": 51,
+   "other-js": 13,
+   "jazz-js": 7,
+   "app": 6,
+   "wasm": 3
+  }
+ },
+ "patch-sync-outbound-first": {
+  "flags": {},
+  "n": 9,
+  "committed": 7,
+  "render starts": 27,
+  "frame leaves a": 7,
+  "a dom": 266,
+  "b dom": 333,
+  "split": {
+   "window": "→ a dom 256",
+   "ui": 124,
+   "react": 60,
+   "native": 52,
+   "other-js": 9,
+   "jazz-js": 5,
+   "app": 3,
+   "wasm": 3
+  }
+ },
+ "patch-sync-outbound-render20": {
+  "flags": {
+   "VITE_BENCH_RENDER_LIMIT": "20"
+  },
+  "n": 9,
+  "committed": 5,
+  "render starts": 27,
+  "frame leaves a": 4,
+  "a dom": 62,
+  "b dom": 164,
+  "split": {
+   "window": "→ a dom 81",
+   "ui": 32,
+   "native": 25,
+   "react": 14,
+   "jazz-js": 4,
+   "other-js": 3,
+   "wasm": 2,
+   "app": 1
+  }
+ },
+ "scale-busy200": {
+  "flags": {
+   "BENCH_BUSY_MESSAGES": "200"
+  },
+  "n": 9,
+  "committed": 7,
+  "render starts": 24,
+  "frame leaves a": 220,
+  "a dom": 222,
+  "b dom": 632,
+  "split": {
+   "window": "→ frame 236",
+   "ui": 116,
+   "react": 66,
+   "native": 39,
+   "other-js": 7,
+   "jazz-js": 4,
+   "wasm": 3,
+   "app": 2
+  }
+ },
+ "scale-busy6000": {
+  "flags": {
+   "BENCH_BUSY_MESSAGES": "6000"
+  },
+  "n": 9,
+  "committed": 7,
+  "render starts": 24,
+  "frame leaves a": 240,
+  "a dom": 242,
+  "b dom": 609,
+  "split": {
+   "window": "→ frame 279",
+   "ui": 104,
+   "react": 85,
+   "native": 69,
+   "other-js": 8,
+   "jazz-js": 5,
+   "wasm": 4,
+   "app": 4
+  }
+ },
+ "scale-history50": {
+  "flags": {
+   "VITE_BENCH_HISTORY": "50"
+  },
+  "n": 9,
+  "committed": 5,
+  "render starts": 24,
+  "frame leaves a": 80,
+  "a dom": 81,
+  "b dom": 297,
+  "split": {
+   "window": "→ frame 100",
+   "ui": 36,
+   "react": 30,
+   "native": 24,
+   "jazz-js": 4,
+   "other-js": 3,
+   "wasm": 1,
+   "app": 1
+  }
+ },
+ "scale-history500-render200": {
+  "flags": {
+   "VITE_BENCH_HISTORY": "500",
+   "VITE_BENCH_RENDER_LIMIT": "200"
+  },
+  "n": 9,
+  "committed": 8,
+  "render starts": 25,
+  "frame leaves a": 229,
+  "a dom": 232,
+  "b dom": 657,
+  "split": {
+   "window": "→ frame 250",
+   "ui": 119,
+   "react": 74,
+   "native": 44,
+   "other-js": 7,
+   "jazz-js": 4,
+   "app": 2,
+   "wasm": 1
+  }
+ },
+ "scale-no-unread": {
+  "flags": {
+   "VITE_BENCH_NO_UNREAD": "1"
+  },
+  "n": 9,
+  "committed": 7,
+  "render starts": 75,
+  "frame leaves a": 288,
+  "a dom": 291,
+  "b dom": 677,
+  "split": {
+   "window": "→ frame 345",
+   "ui": 171,
+   "react": 90,
+   "native": 69,
+   "other-js": 8,
+   "app": 4,
+   "jazz-js": 2,
+   "wasm": 2
+  }
+ },
+ "scale-render20": {
+  "flags": {
+   "VITE_BENCH_RENDER_LIMIT": "20"
+  },
+  "n": 9,
+  "committed": 5,
+  "render starts": 23,
+  "frame leaves a": 54,
+  "a dom": 54,
+  "b dom": 283,
+  "split": {
+   "window": "→ frame 57",
+   "react": 21,
+   "ui": 17,
+   "native": 7,
+   "jazz-js": 5,
+   "wasm": 4,
+   "other-js": 1,
+   "app": 0
+  }
+ },
+ "thin": {
+  "flags": {},
+  "n": 9,
+  "committed": 5,
+  "render starts": 47,
+  "frame leaves a": 4,
+  "a dom": 318,
+  "b dom": 280,
+  "split": {
+   "window": "→ a dom 592",
+   "native": 307,
+   "ui": 184,
+   "react": 82,
+   "other-js": 9,
+   "jazz-js": 6,
+   "app": 4,
+   "idle": 1
+  }
+ },
+ "thin-memo": {
+  "flags": {
+   "VITE_BENCH_MEMO": "1"
+  },
+  "n": 9,
+  "committed": 5,
+  "render starts": 34,
+  "frame leaves a": 4,
+  "a dom": 61,
+  "b dom": 43,
+  "split": {
+   "window": "→ a dom 66",
+   "native": 35,
+   "idle": 19,
+   "react": 6,
+   "ui": 3,
+   "jazz-js": 2,
+   "app": 0,
+   "other-js": 0
+  }
+ }
+}

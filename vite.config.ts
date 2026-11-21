@@ -14,6 +14,12 @@ const sharedIgnores = [
   "dev/adopter-gate/refusals/**",
   "dev/adopter-gate/t10/**",
   "dev/adopter-gate/t4/app*/**",
+  // dev/app-comparisons: the hero apps ported to other stacks, their bench hooks
+  // in the Jazz heroes, and the harness and results. Kept out of every gate for
+  // now (see dev/app-comparisons/README.md).
+  "examples/*/apps/*-{zero,convex,instantdb,postgres,neon}/**",
+  "examples/**/comparison/**",
+  "dev/app-comparisons/**",
 ];
 
 export default defineConfig({

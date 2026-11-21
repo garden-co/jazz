@@ -1,0 +1,9 @@
+{
+  "_note": "seed.ts and harness.mjs are bench plumbing. Instant is hosted; server/ is the email + password sign-in that mints Instant tokens.",
+  "schema": ["instant.schema.ts"],
+  "permissions": ["instant.perms.ts"],
+  "server": ["server/**/*.ts"],
+  "data": ["src/lib/db.ts", "src/lib/auth-client.ts", "src/lib/unsent-messages.ts", "src/lib/profiles.tsx", "src/lib/attachments.ts", "src/main.tsx", "src/App.tsx"],
+  "ui": ["src/BandChat.tsx", "src/components/**/*.tsx", "components/sign-in-form.tsx", "components/theme-provider.tsx", "src/lib/url-state.tsx", "src/lib/use-object-url.ts", "src/globals.css"],
+  "exclude": ["seed.ts", "harness.mjs"]
+}

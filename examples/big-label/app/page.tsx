@@ -136,7 +136,17 @@ function Failure({ error, onRetry }: { error: Error; onRetry: () => void }) {
 export default function Page() {
   return (
     <JazzProvider
-      config={{ serverUrl: "/jazz" }}
+      config={{
+        serverUrl: "/jazz",
+        // Bench only (dev/app-comparisons): NEXT_PUBLIC_JAZZ_LOCAL_FIRST=background adds the
+        // local-first client after a thin start, "now" opens it at once. Unset: as shipped.
+        ...(process.env.NEXT_PUBLIC_JAZZ_LOCAL_FIRST
+          ? { client: () => import("jazz-tools/local-first") }
+          : {}),
+        ...(process.env.NEXT_PUBLIC_JAZZ_LOCAL_FIRST === "now"
+          ? { localFirst: "now" as const }
+          : {}),
+      }}
       signedOut={<SignIn />}
       loading={<Waiting message="Preparing your personal label…" />}
       error={(state) => (

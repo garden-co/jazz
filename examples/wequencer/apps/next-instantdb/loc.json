@@ -1,0 +1,9 @@
+{
+  "_note": "seed.ts and harness.mjs are bench plumbing. Instant is hosted; the server is the Next routes for email + password sign-in (minting Instant tokens) and profile bootstrap.",
+  "schema": ["instant.schema.ts"],
+  "permissions": ["instant.perms.ts"],
+  "server": ["lib/instant.server.ts", "lib/bootstrap.ts", "app/api/**/*.ts"],
+  "data": ["components/instant-provider.tsx", "lib/db.ts", "lib/auth-client.ts", "lib/session-setup.ts", "lib/step-id.ts", "lib/report-write.ts", "components/presence-heartbeat.ts"],
+  "ui": ["app/**/*.tsx", "app/globals.css", "components/*.tsx", "components/use-sequencer-audio.ts", "lib/audio.ts", "lib/instruments.ts", "lib/roles.ts", "lib/transport.ts"],
+  "exclude": ["seed.ts", "harness.mjs", "components/instant-provider.tsx:ui"]
+}

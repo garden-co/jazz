@@ -1,0 +1,17 @@
+{
+  "tag": "patch-defer-delivery",
+  "variant": "default",
+  "flags": {},
+  "samples": 9,
+  "medians": {
+    "committed": 8,
+    "render": 24.6,
+    "port out": 229.2,
+    "a dom": 231.4,
+    "b dom": 621.2,
+    "a longtask ms": 1071
+  },
+  "patchStats": {
+    "errors": []
+  }
+}

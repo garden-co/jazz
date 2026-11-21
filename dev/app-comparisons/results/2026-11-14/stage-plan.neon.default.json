@@ -1,0 +1,51 @@
+{
+  "hero": "stage-plan",
+  "stack": "neon",
+  "variant": "default",
+  "date": "2026-11-14T18:43:46.513Z",
+  "where": "hosted (Neon Postgres + Realtime, aws-us-east-1); Hono app server local",
+  "runs": 7,
+  "samples": 20,
+  "sp_join_board": {
+    "median": 595,
+    "p95": 854,
+    "min": 530,
+    "n": 7
+  },
+  "sp_reload_board": {
+    "median": 510,
+    "p95": 574,
+    "min": 464,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 252,
+  "sp_add_task": {
+    "median": 11.7,
+    "p95": 14.5,
+    "min": 10.1,
+    "n": 20
+  },
+  "sp_move_done": {
+    "median": 12.5,
+    "p95": 21.5,
+    "min": 11.1,
+    "n": 20
+  },
+  "sp_cross_client": {
+    "median": 66.6,
+    "p95": 112.9,
+    "min": 41.1,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 901,
+    "gzip_kb": 255,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 3.1,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

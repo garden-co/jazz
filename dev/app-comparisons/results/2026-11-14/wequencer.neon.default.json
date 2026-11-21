@@ -1,0 +1,51 @@
+{
+  "hero": "wequencer",
+  "stack": "neon",
+  "variant": "default",
+  "date": "2026-11-14T19:01:40.306Z",
+  "where": "hosted (Neon Postgres + Realtime + Managed Better Auth, aws-us-east-1); Next server local",
+  "runs": 7,
+  "samples": 20,
+  "wq_open_pattern": {
+    "median": 1095,
+    "p95": 1150,
+    "min": 976,
+    "n": 7
+  },
+  "wq_reload": {
+    "median": 762,
+    "p95": 802,
+    "min": 690,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 463,
+  "wq_toggle_pad": {
+    "median": 8.4,
+    "p95": 14.8,
+    "min": 6.9,
+    "n": 20
+  },
+  "wq_cross_client": {
+    "median": 72.3,
+    "p95": 139.8,
+    "min": 46.2,
+    "n": 20
+  },
+  "wq_concurrent": {
+    "median": 1071.4,
+    "p95": 1143.8,
+    "min": 992,
+    "n": 5
+  },
+  "bundle": {
+    "raw_kb": 2066,
+    "gzip_kb": 588,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 4.5,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

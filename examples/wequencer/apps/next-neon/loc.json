@@ -1,0 +1,38 @@
+{
+  "_note": "Neon Realtime has no permissions file: read rules are the filters of the server's sealed SQL queries (lib/live-queries.server.ts), write rules are checks in the server's write handlers (lib/mutators.server.ts), so both count as server, as Convex's function checks do. SQL migrations count as schema; Managed Better Auth's tables are Neon's. scripts/, neon.ts (config) and harness.mjs are bench plumbing.",
+  "schema": ["schema.ts", "db/*.sql"],
+  "permissions": [],
+  "server": [
+    "lib/auth.ts",
+    "lib/db.server.ts",
+    "lib/bootstrap.ts",
+    "lib/live-queries.server.ts",
+    "lib/mutators.server.ts",
+    "app/actions.ts",
+    "app/api/**/*.ts"
+  ],
+  "data": [
+    "queries.ts",
+    "mutators.ts",
+    "components/neon-provider.tsx",
+    "lib/auth-client.ts",
+    "lib/live.ts",
+    "lib/db.ts",
+    "lib/session-setup.ts",
+    "lib/step-id.ts",
+    "lib/report-write.ts",
+    "components/presence-heartbeat.ts"
+  ],
+  "ui": [
+    "app/**/*.tsx",
+    "app/globals.css",
+    "components/*.tsx",
+    "components/use-sequencer-audio.ts",
+    "lib/audio.ts",
+    "lib/instruments.ts",
+    "lib/roles.ts",
+    "lib/transport.ts",
+    "!components/neon-provider.tsx"
+  ],
+  "exclude": ["scripts/**", "harness.mjs", "neon.ts"]
+}

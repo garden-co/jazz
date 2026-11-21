@@ -1,0 +1,22 @@
+{
+  "_note": "Neon Realtime has no permissions file: read rules are the filters of the server's sealed SQL queries (src/lib/live-queries.server.ts), write rules are checks in the server's write handlers (src/lib/mutators.server.ts) and the member route, plus the composite foreign keys and unique indexes in the SQL, so they count as server and schema, as in the other Neon ports. src/roles.ts (the role table the UI reads, and the handlers too) stays under permissions, as in the Jazz copy. src/fixtures.ts (createFixture) feeds the demo-data route, counted as server. scripts/, neon.ts (config) and harness.mjs are bench plumbing.",
+  "schema": ["schema.ts", "db/*.sql"],
+  "permissions": ["src/roles.ts"],
+  "server": [
+    "src/lib/auth.ts",
+    "src/lib/db.server.ts",
+    "src/lib/bootstrap.ts",
+    "src/lib/request-account.ts",
+    "src/lib/members.ts",
+    "src/lib/demo-data.ts",
+    "src/lib/emails.ts",
+    "src/lib/live-queries.server.ts",
+    "src/lib/mutators.server.ts",
+    "src/fixtures.ts",
+    "app/actions.ts",
+    "app/api/**/*.ts"
+  ],
+  "data": ["src/queries.ts", "src/lib/auth-client.ts", "src/lib/live.ts", "src/lib/mutations.ts", "src/lib/use-write.ts"],
+  "ui": ["app/**/*.tsx", "src/**/*.tsx", "src/app.css", "src/styles.d.ts", "src/lib/route.ts"],
+  "exclude": ["scripts/**", "harness.mjs", "neon.ts", "next-env.d.ts"]
+}

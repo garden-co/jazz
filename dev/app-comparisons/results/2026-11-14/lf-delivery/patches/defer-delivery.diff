@@ -1,0 +1,47 @@
+diff -ru a/dist/runtime/native-runtime/native-runtime-adapter.js b/dist/runtime/native-runtime/native-runtime-adapter.js
+--- a/dist/runtime/native-runtime/native-runtime-adapter.js	2026-11-14 16:59:15.575083998 +0000
++++ b/dist/runtime/native-runtime/native-runtime-adapter.js	2026-11-14 17:34:45.030874861 +0000
+@@ -1513,7 +1513,7 @@
+             kind: pending.kind,
+             state: "committed",
+         });
+-        this.pumpSubscriptions();
++        this.scheduleDeferredSubscriptionPump();
+         this.scheduleServerPump();
+         this.notifyPeerTransportWork();
+         const txId = recordWrite(write, this.writes);
+@@ -2441,7 +2441,7 @@
+         const txId = recordWrite(write, this.writes);
+         if (this.nonDurableClient)
+             this.trackLocalSettlement(txId);
+-        this.pumpSubscriptions();
++        this.scheduleDeferredSubscriptionPump();
+         this.scheduleServerPump();
+         this.notifyPeerTransportWork();
+         const row = this.rowStateFromValues(table, rowId, values);
+@@ -2451,7 +2451,7 @@
+         const txId = recordWrite(write, this.writes);
+         if (this.nonDurableClient)
+             this.trackLocalSettlement(txId);
+-        this.pumpSubscriptions();
++        this.scheduleDeferredSubscriptionPump();
+         this.scheduleServerPump();
+         this.notifyPeerTransportWork();
+         return { kind: "committed", txId };
+@@ -2845,6 +2845,16 @@
+             throw new Error("Native runtime backend-attributed transaction requires its original provenance subject");
+         }
+     }
++    scheduleDeferredSubscriptionPump() {
++        if (this.deferredSubscriptionPump)
++            return;
++        this.deferredSubscriptionPump = true;
++        setTimeout(() => {
++            this.deferredSubscriptionPump = false;
++            if (!this.closed)
++                this.pumpSubscriptions();
++        }, 0);
++    }
+     pumpSubscriptions() {
+         this.drainSubscriptionPool();
+         for (const [handle, subscription] of this.subscriptions) {

@@ -1,0 +1,63 @@
+{
+  "hero": "big-label",
+  "stack": "convex",
+  "variant": "default",
+  "date": "2026-11-14T19:18:18.380Z",
+  "where": "local (anonymous Convex local backend via `npx convex dev`, `next start` for the app)",
+  "runs": 7,
+  "samples": 20,
+  "bl_open_releases": {
+    "median": 463,
+    "p95": 497,
+    "min": 400,
+    "n": 7
+  },
+  "bl_reload": {
+    "median": 206,
+    "p95": 217,
+    "min": 165,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 352,
+  "bl_search": {
+    "median": 16.8,
+    "p95": 45.6,
+    "min": 10.2,
+    "n": 20
+  },
+  "bl_next_page": {
+    "median": 52.7,
+    "p95": 77.9,
+    "min": 35.5,
+    "n": 20
+  },
+  "bl_switch_label": {
+    "median": 11.2,
+    "p95": 31.4,
+    "min": 5.7,
+    "n": 20
+  },
+  "bl_update_status": {
+    "median": 52.2,
+    "p95": 109.7,
+    "min": 25.1,
+    "n": 20
+  },
+  "bl_cross_client": {
+    "median": 63,
+    "p95": 132,
+    "min": 51.6,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 1336,
+    "gzip_kb": 391,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 0.6,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}

@@ -1,0 +1,17 @@
+{
+  "tag": "thin",
+  "variant": "thin",
+  "flags": {},
+  "samples": 9,
+  "medians": {
+    "committed": 5,
+    "render": 46.7,
+    "ws out": 3.6,
+    "a dom": 317.5,
+    "b dom": 280.2,
+    "a longtask ms": 558
+  },
+  "patchStats": {
+    "errors": []
+  }
+}

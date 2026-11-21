@@ -1,0 +1,11 @@
+{
+ "update": {
+  "median": 76,
+  "n": 12
+ },
+ "cross": {
+  "median": 105.4,
+  "a_median": 60.4,
+  "n": 12
+ }
+}

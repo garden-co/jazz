@@ -1,0 +1,2 @@
+# The repo root ignores data/ directories; the bundle-size write-up keeps its measurements in one.
+!data/

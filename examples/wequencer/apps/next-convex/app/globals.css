@@ -1,0 +1,153 @@
+/*
+ * Everything else comes from Astryx and the Jazz theme. This file only lays
+ * out the step grid, which has no Astryx equivalent, using theme tokens.
+ */
+
+body {
+  margin: 0;
+  background: var(--color-background-body);
+}
+
+.pattern-bar {
+  border-block-end: 1px solid var(--color-border);
+}
+
+.sequencer-grid {
+  --track-header-width: calc(var(--spacing-12) * 6);
+  --pad-size: var(--size-element-sm);
+  overflow-x: auto;
+  padding-block: var(--spacing-3);
+}
+
+.sequencer-rows {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--track-header-width) repeat(var(--steps), var(--pad-size));
+  column-gap: var(--spacing-1);
+  row-gap: var(--spacing-1-5);
+  align-items: center;
+  width: max-content;
+  padding-inline-end: var(--spacing-3);
+}
+
+.track-lane,
+.step-ruler {
+  display: contents;
+}
+
+.track-header {
+  position: sticky;
+  inset-inline-start: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--spacing-2);
+  align-self: stretch;
+  padding-inline: var(--spacing-3);
+  background: var(--color-background-card);
+}
+
+.step-ruler > span:not(.track-header) {
+  color: var(--color-text-secondary);
+  font-size: var(--text-supporting-size);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  border-radius: var(--radius-inner);
+}
+
+.step-ruler > span[data-current] {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  min-height: var(--spacing-1);
+}
+
+.track-swatch {
+  width: var(--spacing-2);
+  height: var(--spacing-6);
+  border-radius: var(--radius-full);
+  background: var(--track-color);
+}
+
+.track-name {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.pad {
+  width: var(--pad-size);
+  height: var(--pad-size);
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-inner);
+  background: var(--color-background-muted);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.pad[data-beat-start] {
+  border-color: var(--color-border-emphasized);
+}
+
+.pad[aria-pressed="true"] {
+  background: var(--track-color);
+  border-color: var(--track-color);
+}
+
+.pad:hover:enabled {
+  border-color: var(--color-text-secondary);
+}
+
+.pad:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.pad:disabled {
+  cursor: default;
+}
+
+.pad:disabled:not([aria-pressed="true"]) {
+  background: transparent;
+}
+
+/*
+ * Absolutely positioned, so it spans its grid area as an overlay without
+ * taking part in auto-placement: as an in-flow item it occupied one cell in
+ * every lane row, and each lane's cells skipped it, skewing the rows.
+ */
+.playhead {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  margin-block: calc(var(--spacing-1) * -1);
+  border-radius: var(--radius-inner);
+  background: var(--color-overlay-hover);
+  outline: 1px solid var(--color-border-emphasized);
+  pointer-events: none;
+}
+
+.track-volume {
+  min-width: 0;
+}
+
+@media (max-width: 720px) {
+  .sequencer-grid {
+    --track-header-width: calc(var(--spacing-12) * 3);
+  }
+
+  .track-header {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    row-gap: var(--spacing-1);
+    padding-block: var(--spacing-1);
+  }
+
+  .track-header > .track-swatch {
+    grid-row: span 2;
+  }
+
+  .track-volume {
+    display: none;
+  }
+}

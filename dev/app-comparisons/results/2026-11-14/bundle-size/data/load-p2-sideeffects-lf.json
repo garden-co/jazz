@@ -1,0 +1,82 @@
+{
+ "rows": [
+  {
+   "file": "/assets/useIsomorphicLayoutEffect-DS4XUBXS.js",
+   "phase": "initial",
+   "raw": 34703,
+   "gzip": 9109,
+   "br": 7798
+  },
+  {
+   "file": "/assets/preload-helper-rov5CBGT.js",
+   "phase": "initial",
+   "raw": 1193,
+   "gzip": 681,
+   "br": 563
+  },
+  {
+   "file": "/assets/useTooltip-CxM86C4k.js",
+   "phase": "initial",
+   "raw": 19372,
+   "gzip": 7050,
+   "br": 6289
+  },
+  {
+   "file": "/assets/Tooltip-DmpUXXqp.js",
+   "phase": "initial",
+   "raw": 1912,
+   "gzip": 867,
+   "br": 748
+  },
+  {
+   "file": "/assets/useMediaQuery-D3i3weFR.js",
+   "phase": "initial",
+   "raw": 3137,
+   "gzip": 1407,
+   "br": 1277
+  },
+  {
+   "file": "/assets/auxiliary-receive-deadline-Cx5dY_Ft.js",
+   "phase": "initial",
+   "raw": 254832,
+   "gzip": 77917,
+   "br": 66672
+  },
+  {
+   "file": "/assets/index-BCFpCetd.js",
+   "phase": "initial",
+   "raw": 1005697,
+   "gzip": 295192,
+   "br": 243999
+  },
+  {
+   "file": "/assets/delete-local-first-store-C0VavKT3.js",
+   "phase": "initial",
+   "raw": 44336,
+   "gzip": 12804,
+   "br": 11541
+  },
+  {
+   "file": "/assets/local-first-BQw_KnLc.js",
+   "phase": "initial",
+   "raw": 75307,
+   "gzip": 20530,
+   "br": 18231
+  },
+  {
+   "file": "/assets/jazz_wasm-DD0GWEeJ.js",
+   "phase": "initial",
+   "raw": 38932,
+   "gzip": 9371,
+   "br": 8156
+  },
+  {
+   "file": "/assets/jazz_wasm_bg-HpkRDlj-.wasm",
+   "phase": "deferred",
+   "raw": 8965223,
+   "gzip": 3181647,
+   "br": 2203544
+  }
+ ],
+ "errors": []
+}

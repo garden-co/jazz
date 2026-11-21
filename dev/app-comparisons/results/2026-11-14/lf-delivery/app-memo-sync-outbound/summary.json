@@ -1,0 +1,20 @@
+{
+  "tag": "app-memo-sync-outbound",
+  "variant": "default",
+  "flags": {
+    "VITE_BENCH_MEMO": "1"
+  },
+  "samples": 9,
+  "medians": {
+    "committed": 7.8,
+    "render": 9.6,
+    "port out": 7.1,
+    "a dom": 34.2,
+    "b dom": 149.9,
+    "a longtask ms": 0
+  },
+  "patchStats": {
+    "syncOutbound": 551,
+    "errors": []
+  }
+}

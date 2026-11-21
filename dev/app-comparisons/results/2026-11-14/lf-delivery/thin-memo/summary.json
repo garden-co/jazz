@@ -1,0 +1,19 @@
+{
+  "tag": "thin-memo",
+  "variant": "thin",
+  "flags": {
+    "VITE_BENCH_MEMO": "1"
+  },
+  "samples": 9,
+  "medians": {
+    "committed": 5.1,
+    "render": 34.2,
+    "ws out": 3.6,
+    "a dom": 60.9,
+    "b dom": 42.5,
+    "a longtask ms": 0
+  },
+  "patchStats": {
+    "errors": []
+  }
+}

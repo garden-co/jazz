@@ -1,0 +1,483 @@
+{
+  "case": "stage-plan.default.marks",
+  "variant": "default",
+  "log": "default",
+  "wait0": false,
+  "runs": 5,
+  "join": {
+    "nav:responseEnd": {
+      "median": 3.7,
+      "n": 5
+    },
+    "page app:main": {
+      "median": 208.4,
+      "n": 5
+    },
+    "nav:domContentLoaded": {
+      "median": 210.3,
+      "n": 5
+    },
+    "nav:load": {
+      "median": 210.8,
+      "n": 5
+    },
+    "page jazz:client-ready": {
+      "median": 339.8,
+      "n": 5
+    },
+    "page ws:create": {
+      "median": 384.2,
+      "n": 5
+    },
+    "page ws:open": {
+      "median": 408,
+      "n": 5
+    },
+    "page ws:first-send": {
+      "median": 408.7,
+      "n": 5
+    },
+    "page ws:first-out": {
+      "median": 408.7,
+      "n": 5
+    },
+    "page res:local-first-js": {
+      "median": 423.5,
+      "n": 5
+    },
+    "page ws:first-in": {
+      "median": 423.7,
+      "n": 5
+    },
+    "page ws:first-recv": {
+      "median": 423.8,
+      "n": 5
+    },
+    "page page:shared-worker-created": {
+      "median": 438.3,
+      "n": 5
+    },
+    "page port:out:probe-foreground-node-lease-worker": {
+      "median": 439.8,
+      "n": 5
+    },
+    "worker timeOrigin": {
+      "median": 458,
+      "n": 5
+    },
+    "page wasm:instantiateStreaming:start": {
+      "median": 491,
+      "n": 5
+    },
+    "worker worker:connect": {
+      "median": 537.1,
+      "n": 5
+    },
+    "worker port:in:probe-foreground-node-lease-worker": {
+      "median": 537.3,
+      "n": 5
+    },
+    "worker port:out:foreground-node-lease-worker-alive": {
+      "median": 537.6,
+      "n": 5
+    },
+    "page port:in:foreground-node-lease-worker-alive": {
+      "median": 542.4,
+      "n": 5
+    },
+    "page port:out:acquire-foreground-node-lease": {
+      "median": 542.6,
+      "n": 5
+    },
+    "worker port:in:acquire-foreground-node-lease": {
+      "median": 548,
+      "n": 5
+    },
+    "page join:accepted": {
+      "median": 563.1,
+      "n": 5
+    },
+    "worker port:out:foreground-node-lease-ready": {
+      "median": 574.6,
+      "n": 5
+    },
+    "page port:in:foreground-node-lease-ready": {
+      "median": 606.9,
+      "n": 5
+    },
+    "worker wasm:instantiateStreaming:start": {
+      "median": 644.1,
+      "n": 5
+    },
+    "page res:wasm": {
+      "median": 650.5,
+      "n": 5
+    },
+    "page data:show": {
+      "median": 695.1,
+      "n": 5
+    },
+    "worker res:wasm": {
+      "median": 716.4,
+      "n": 5
+    },
+    "page wasm:instantiateStreaming:end": {
+      "median": 743.9,
+      "n": 5
+    },
+    "page wasm:ready": {
+      "median": 744,
+      "n": 5
+    },
+    "worker wasm:instantiateStreaming:end": {
+      "median": 750.9,
+      "n": 5
+    },
+    "worker wasm:ready": {
+      "median": 750.9,
+      "n": 5
+    },
+    "page data:tasks": {
+      "median": 811.3,
+      "n": 5
+    },
+    "page data:tasks-100": {
+      "median": 811.3,
+      "n": 5
+    },
+    "page render:board": {
+      "median": 850.8,
+      "n": 5
+    },
+    "page render:board-100": {
+      "median": 850.9,
+      "n": 5
+    },
+    "page dom:cards-100": {
+      "median": 851.4,
+      "n": 5
+    },
+    "page port:out:connect-runtime": {
+      "median": 873.6,
+      "n": 5
+    },
+    "worker port:in:connect-runtime": {
+      "median": 939.2,
+      "n": 5
+    },
+    "worker port:out:worker-alive": {
+      "median": 939.5,
+      "n": 5
+    },
+    "page port:in:worker-alive": {
+      "median": 981.8,
+      "n": 5
+    },
+    "worker port:out:runtime-ready": {
+      "median": 1170.3,
+      "n": 5
+    },
+    "page port:in:runtime-ready": {
+      "median": 1170.5,
+      "n": 5
+    },
+    "page port:out:init": {
+      "median": 1171.2,
+      "n": 5
+    },
+    "worker port:in:init": {
+      "median": 1172.1,
+      "n": 5
+    },
+    "worker port:out:remote-link": {
+      "median": 1183.7,
+      "n": 5
+    },
+    "page port:in:remote-link": {
+      "median": 1183.8,
+      "n": 5
+    },
+    "page port:in:result": {
+      "median": 1184,
+      "n": 5
+    },
+    "worker port:out:result": {
+      "median": 1184,
+      "n": 5
+    },
+    "page port:out:frames": {
+      "median": 1188.8,
+      "n": 5
+    },
+    "page port:out:liveness-lock": {
+      "median": 1189.1,
+      "n": 5
+    },
+    "page port:out:wait-server": {
+      "median": 1189.3,
+      "n": 5
+    },
+    "worker port:in:frames": {
+      "median": 1190.6,
+      "n": 5
+    },
+    "worker ws:create": {
+      "median": 1205.4,
+      "n": 5
+    },
+    "worker port:out:frames": {
+      "median": 1209,
+      "n": 5
+    },
+    "page port:in:frames": {
+      "median": 1210.5,
+      "n": 5
+    },
+    "worker port:in:liveness-lock": {
+      "median": 1212.1,
+      "n": 5
+    },
+    "worker port:in:wait-server": {
+      "median": 1212.3,
+      "n": 5
+    },
+    "worker ws:open": {
+      "median": 1212.7,
+      "n": 5
+    },
+    "worker ws:first-send": {
+      "median": 1213,
+      "n": 5
+    },
+    "worker ws:first-out": {
+      "median": 1213,
+      "n": 5
+    },
+    "worker ws:first-recv": {
+      "median": 1219.9,
+      "n": 5
+    },
+    "worker ws:first-in": {
+      "median": 1219.9,
+      "n": 5
+    },
+    "page ws:close": {
+      "median": 1522.5,
+      "n": 5
+    }
+  },
+  "reload": {
+    "nav:responseEnd": {
+      "median": 4.1,
+      "n": 5
+    },
+    "page app:main": {
+      "median": 104.7,
+      "n": 5
+    },
+    "nav:domContentLoaded": {
+      "median": 105.4,
+      "n": 5
+    },
+    "nav:load": {
+      "median": 105.8,
+      "n": 5
+    },
+    "page res:local-first-js": {
+      "median": 198.2,
+      "n": 5
+    },
+    "page page:shared-worker-created": {
+      "median": 204.7,
+      "n": 5
+    },
+    "page port:out:probe-foreground-node-lease-worker": {
+      "median": 205.1,
+      "n": 5
+    },
+    "worker timeOrigin": {
+      "median": 211.4,
+      "n": 5
+    },
+    "page wasm:instantiateStreaming:start": {
+      "median": 227.4,
+      "n": 5
+    },
+    "worker worker:connect": {
+      "median": 275.1,
+      "n": 5
+    },
+    "worker port:in:probe-foreground-node-lease-worker": {
+      "median": 275.5,
+      "n": 5
+    },
+    "page port:in:foreground-node-lease-worker-alive": {
+      "median": 275.8,
+      "n": 5
+    },
+    "worker port:out:foreground-node-lease-worker-alive": {
+      "median": 275.8,
+      "n": 5
+    },
+    "page port:out:acquire-foreground-node-lease": {
+      "median": 275.9,
+      "n": 5
+    },
+    "worker port:in:acquire-foreground-node-lease": {
+      "median": 284.4,
+      "n": 5
+    },
+    "page res:wasm": {
+      "median": 290.6,
+      "n": 5
+    },
+    "worker port:out:foreground-node-lease-ready": {
+      "median": 298.1,
+      "n": 5
+    },
+    "page port:in:foreground-node-lease-ready": {
+      "median": 298.3,
+      "n": 5
+    },
+    "worker wasm:instantiateStreaming:start": {
+      "median": 305.6,
+      "n": 5
+    },
+    "page wasm:instantiateStreaming:end": {
+      "median": 324.7,
+      "n": 5
+    },
+    "page wasm:ready": {
+      "median": 324.7,
+      "n": 5
+    },
+    "page jazz:client-ready": {
+      "median": 360.9,
+      "n": 5
+    },
+    "worker res:wasm": {
+      "median": 362.9,
+      "n": 5
+    },
+    "worker wasm:instantiateStreaming:end": {
+      "median": 387.3,
+      "n": 5
+    },
+    "worker wasm:ready": {
+      "median": 387.3,
+      "n": 5
+    },
+    "page port:out:connect-runtime": {
+      "median": 412.2,
+      "n": 5
+    },
+    "worker port:in:connect-runtime": {
+      "median": 424.7,
+      "n": 5
+    },
+    "page port:in:worker-alive": {
+      "median": 424.9,
+      "n": 5
+    },
+    "worker port:out:worker-alive": {
+      "median": 424.9,
+      "n": 5
+    },
+    "worker port:out:runtime-ready": {
+      "median": 469.6,
+      "n": 5
+    },
+    "page port:in:runtime-ready": {
+      "median": 470.9,
+      "n": 5
+    },
+    "page port:out:init": {
+      "median": 471,
+      "n": 5
+    },
+    "worker port:in:init": {
+      "median": 471.6,
+      "n": 5
+    },
+    "worker port:out:remote-link": {
+      "median": 483,
+      "n": 5
+    },
+    "page port:in:remote-link": {
+      "median": 483.2,
+      "n": 5
+    },
+    "worker port:out:result": {
+      "median": 483.4,
+      "n": 5
+    },
+    "page port:in:result": {
+      "median": 484.6,
+      "n": 5
+    },
+    "page port:out:frames": {
+      "median": 485.4,
+      "n": 5
+    },
+    "page port:out:liveness-lock": {
+      "median": 485.6,
+      "n": 5
+    },
+    "worker port:in:frames": {
+      "median": 489.1,
+      "n": 5
+    },
+    "worker port:out:frames": {
+      "median": 492.7,
+      "n": 5
+    },
+    "page port:in:frames": {
+      "median": 493,
+      "n": 5
+    },
+    "worker port:in:liveness-lock": {
+      "median": 503.3,
+      "n": 5
+    },
+    "worker ws:create": {
+      "median": 506.5,
+      "n": 5
+    },
+    "worker ws:open": {
+      "median": 558.1,
+      "n": 5
+    },
+    "worker ws:first-send": {
+      "median": 558.6,
+      "n": 5
+    },
+    "page data:show": {
+      "median": 576.9,
+      "n": 5
+    },
+    "page data:tasks": {
+      "median": 576.9,
+      "n": 5
+    },
+    "page data:tasks-100": {
+      "median": 576.9,
+      "n": 5
+    },
+    "worker ws:first-recv": {
+      "median": 599,
+      "n": 5
+    },
+    "page render:board": {
+      "median": 656.4,
+      "n": 5
+    },
+    "page render:board-100": {
+      "median": 656.4,
+      "n": 5
+    },
+    "page dom:cards-100": {
+      "median": 679.1,
+      "n": 5
+    }
+  }
+}

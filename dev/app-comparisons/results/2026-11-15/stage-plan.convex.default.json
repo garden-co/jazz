@@ -1,0 +1,51 @@
+{
+  "hero": "stage-plan",
+  "stack": "convex",
+  "variant": "default",
+  "date": "2026-11-15T07:34:20.938Z",
+  "where": "local (anonymous Convex local backend via `npx convex dev`, Vite preview for the app)",
+  "runs": 7,
+  "samples": 20,
+  "sp_join_board": {
+    "median": 372,
+    "p95": 496,
+    "min": 355,
+    "n": 7
+  },
+  "sp_reload_board": {
+    "median": 129,
+    "p95": 170,
+    "min": 121,
+    "n": 7
+  },
+  "loaded_js_gzip_kb": 247,
+  "sp_add_task": {
+    "median": 39.4,
+    "p95": 45.6,
+    "min": 34.1,
+    "n": 20
+  },
+  "sp_move_done": {
+    "median": 43.3,
+    "p95": 58.5,
+    "min": 35.8,
+    "n": 20
+  },
+  "sp_cross_client": {
+    "median": 56.1,
+    "p95": 70.1,
+    "min": 49.4,
+    "n": 20
+  },
+  "bundle": {
+    "raw_kb": 846,
+    "gzip_kb": 251,
+    "wasm_gzip_kb": 0,
+    "worker_js_gzip_kb": 0
+  },
+  "rtt_ms": 0.8,
+  "lost_samples": 0,
+  "settle_ms": 5000,
+  "self_reloads": 0,
+  "self_reload_phases": {}
+}
