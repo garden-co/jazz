@@ -248,7 +248,7 @@ export const FEATURE_SERIALIZABLE_BRANCH_READS = 1 << 12;
  * core keeps searches local, refuses them at `Remote` tier, and sends no
  * schema version that uses them.
  */
-export const FEATURE_SPECIALISED_INDEXES = 1 << 15;
+export const FEATURE_SPECIALISED_INDEXES = 1 << 16;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_PAYLOAD_ZSTD |
   FEATURE_AUTHORIZATION_SCOPE_VIEWS |

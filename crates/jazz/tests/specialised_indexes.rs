@@ -768,6 +768,164 @@ fn an_index_only_version_is_not_sent_to_a_peer_without_the_bit() {
     assert_eq!(carol_rows, 1);
 }
 
+/// The optional features v2.0.0-beta.0 knows, as that release numbers them
+/// (literal on purpose: this build's constants must never redefine them).
+/// A native beta.0 link offers [`BETA_0_NATIVE`]; the hosts add the rest.
+const BETA_0_ALL: jazz::wire::WireFeatures = (1 << 3)
+    | (1 << 4)
+    | (1 << 7)
+    | (1 << 8)
+    | (1 << 9)
+    | (1 << 10)
+    | (1 << 11)
+    | (1 << 12)
+    | (1 << 13)
+    | (1 << 14)
+    | (1 << 15);
+
+/// What beta.0's `current_wire_features()` returns, with zstd compiled in.
+const BETA_0_NATIVE: jazz::wire::WireFeatures =
+    (1 << 4) | (1 << 7) | (1 << 9) | (1 << 12) | (1 << 13) | (1 << 15);
+
+/// A link to a peer that offered exactly `features`, recording what this
+/// side sent it: catalogue versions, and whether any read held a search.
+struct Offering {
+    inner: Box<dyn Transport>,
+    features: jazz::wire::WireFeatures,
+    versions: Rc<RefCell<Vec<jazz::ids::SchemaVersionId>>>,
+    searches: Rc<RefCell<usize>>,
+}
+
+impl Transport for Offering {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        match &message {
+            SyncMessage::Welcome { catalogue, .. } | SyncMessage::Catalogue(catalogue) => self
+                .versions
+                .borrow_mut()
+                .extend(catalogue.versions.iter().map(|v| v.schema.id())),
+            SyncMessage::Read { query, .. } => {
+                let searches = query
+                    .filters
+                    .iter()
+                    .filter(|predicate| matches!(predicate, jazz::query::Predicate::Search(_)))
+                    .count();
+                *self.searches.borrow_mut() += searches;
+            }
+            _ => {}
+        }
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn features(&self) -> jazz::wire::WireFeatures {
+        self.features
+    }
+}
+
+/// A peer offering exactly what beta.0 offers, up to every bit that release
+/// defines, gets no SPEC 20 schema version (index-only, vector or point)
+/// and is sent no search: no bit of beta.0's means SPEC 20.
+///
+/// ```
+/// server (plain, + index, + vector, + point) ──Welcome[plain]──► beta.0 client
+/// client ──Read(notes)──► beta.0 server      ──Read(search)──✗
+/// ```
+#[test]
+fn a_beta_0_peer_gets_no_spec_20_schema_version_and_no_search() {
+    for features in [BETA_0_NATIVE, BETA_0_ALL] {
+        assert_eq!(features & jazz::wire::FEATURE_SPECIALISED_INDEXES, 0);
+
+        let table = || {
+            TableSchemaBuilder::new("notes")
+                .column("title", ColumnType::Text)
+                .policies(allow_all_policies())
+        };
+        let other = |name: &str, ty: ColumnType| {
+            TableSchemaBuilder::new(name)
+                .column("value", ty)
+                .policies(allow_all_policies())
+        };
+        let plain = compile_schema(&SchemaBuilder::new().table(table()).build());
+        let indexed = || table().text_index("search", [("title", 1)], "jazz-text/1:en", false);
+        let newer = [
+            compile_schema(&SchemaBuilder::new().table(indexed()).build()),
+            compile_schema(
+                &SchemaBuilder::new()
+                    .table(table())
+                    .table(other("vectors", ColumnType::Vector { dimensions: 2 }))
+                    .build(),
+            ),
+            compile_schema(
+                &SchemaBuilder::new()
+                    .table(table())
+                    .table(other("points", ColumnType::Point))
+                    .build(),
+            ),
+        ];
+
+        let server = authority(plain.clone());
+        for version in &newer {
+            block_on(server.admit_schema_with_lenses(version.clone(), &[])).unwrap();
+        }
+        let old_client = client(1, plain);
+        let (up, down) = jazz::db::duplex();
+        let versions = Rc::new(RefCell::new(Vec::new()));
+        let _link = block_on(old_client.connect_upstream(up));
+        server
+            .accept_subscriber(
+                Box::new(Offering {
+                    inner: down,
+                    features,
+                    versions: versions.clone(),
+                    searches: Rc::default(),
+                }),
+                alice(),
+            )
+            .unwrap();
+        pump(&server, &[&old_client]);
+        for version in &newer {
+            assert!(
+                !versions.borrow().contains(&version.version_id()),
+                "{features:#x}: sent {:?}",
+                version.version_id()
+            );
+        }
+
+        // The other way: this build's client of a beta.0 server.
+        let searching = compile_schema(&SchemaBuilder::new().table(indexed()).build());
+        let old_server = authority(searching.clone());
+        let new_client = client(2, searching);
+        let (up, down) = jazz::db::duplex();
+        let searches = Rc::new(RefCell::new(0));
+        let _link = block_on(new_client.connect_upstream(Box::new(Offering {
+            inner: up,
+            features,
+            versions: Rc::default(),
+            searches: searches.clone(),
+        })));
+        old_server.accept_subscriber(down, alice()).unwrap();
+        let prepared = new_client.prepare_query(&search("garden")).unwrap();
+        let _local = block_on(new_client.subscribe(&prepared, ReadOpts::default())).unwrap();
+        pump(&old_server, &[&new_client]);
+        let remote = ReadOpts {
+            tier: jazz::db::ReadTier::Remote,
+            ..ReadOpts::default()
+        };
+        let Err(error) = block_on(new_client.subscribe(&prepared, remote)) else {
+            panic!("{features:#x}: a Remote search of a beta.0 server is refused");
+        };
+        assert_eq!(error.reason, Some(Reason::IndexSearchUnsupportedUpstream));
+        assert_eq!(
+            *searches.borrow(),
+            0,
+            "{features:#x}: a search crossed the link"
+        );
+    }
+}
+
 /// A row whose large value reaches a replica before its chunks is indexed
 /// without that value at first and again once the chunks arrive, so the
 /// replica's search ends up equal to the authority's (`INV-IX-1`).

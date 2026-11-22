@@ -64,7 +64,7 @@ pub const FEATURE_SERIALIZABLE_BRANCH_READS: WireFeatures = 1 << 12;
 /// (`Predicate::Search`, SPEC 20.4). A node sends a search upstream, and a
 /// schema version using any of these to a peer, only over a link that
 /// offered this; other queries and versions are byte-identical either way.
-pub const FEATURE_SPECIALISED_INDEXES: WireFeatures = 1 << 15;
+pub const FEATURE_SPECIALISED_INDEXES: WireFeatures = 1 << 16;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -1038,11 +1038,16 @@ mod tests {
         })
     }
 
-    /// Index search is wire feature bit 15 (SPEC 20.4); bits 13 and 14 belong
-    /// to other features in flight. No two features share a bit.
+    /// SPEC 20 is wire feature bit 16, above every bit a released peer may
+    /// offer. Bit 15 is beta.0's `FEATURE_REPLACE_HOLDS`: the released
+    /// numbers are literal here, so a merge cannot quietly share one.
     #[test]
-    fn specialised_indexes_is_feature_bit_15_and_shares_it_with_nothing() {
-        assert_eq!(FEATURE_SPECIALISED_INDEXES, 1 << 15);
+    fn specialised_indexes_is_feature_bit_16_and_shares_it_with_no_release() {
+        assert_eq!(FEATURE_SPECIALISED_INDEXES, 1 << 16);
+        let beta_0: WireFeatures = [3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+            .into_iter()
+            .fold(0, |bits, bit| bits | (1 << bit));
+        assert_eq!(beta_0 & FEATURE_SPECIALISED_INDEXES, 0);
         let features = [
             FEATURE_PAYLOAD_LZ4,
             FEATURE_PAYLOAD_ZSTD,
