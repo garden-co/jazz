@@ -221,6 +221,7 @@ describe("encryption on the browser-style client, end to end", () => {
       privateStore: firstStore,
       accounts: firstAccounts,
     });
+    expect(await reopened.db.encryption.ready({ timeoutMs: 30_000 })).toBe("active");
     const committed = await reopened.db.transaction((tx) => {
       tx.insert(app.tasks, { projectId: project, title: "after" });
     });
