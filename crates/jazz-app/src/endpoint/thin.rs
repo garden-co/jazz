@@ -94,7 +94,7 @@ impl SessionTarget {
                 authenticated_at_ms,
                 ..
             } => Arc::new(AuthenticatedAt {
-                native,
+                inner: native,
                 authenticated_at_ms: *authenticated_at_ms,
             }),
             SessionAuth::DeviceAccount(_) => Arc::new(native),
@@ -103,12 +103,12 @@ impl SessionTarget {
 }
 
 /// Connects with `authenticatedAt` in the session the client states.
-struct AuthenticatedAt {
-    native: jazz_native_transport::NativeWebSocketConnector,
+struct AuthenticatedAt<C> {
+    inner: C,
     authenticated_at_ms: u64,
 }
 
-impl NativeTransportConnector for AuthenticatedAt {
+impl<C: NativeTransportConnector> NativeTransportConnector for AuthenticatedAt<C> {
     fn connect(&self, mut request: NativeTransportRequest) -> NativeTransportFuture {
         if let Some(serde_json::Value::Object(session)) = &mut request.auth.backend_session {
             session.insert(
@@ -116,7 +116,7 @@ impl NativeTransportConnector for AuthenticatedAt {
                 self.authenticated_at_ms.into(),
             );
         }
-        self.native.connect(request)
+        self.inner.connect(request)
     }
 }
 
@@ -340,5 +340,51 @@ mod tests {
         );
         let answered = within(REQUEST_TIMEOUT, &commit, async { Ok(ThinBody::Ok) }).await;
         assert_eq!(answered, ThinBody::Ok);
+    }
+}
+
+// Lower-level than a socket test: the session's client opens after the
+// socket's admission, and a revoke in between also closes that socket, so
+// only the request it connects with shows the stamp.
+#[cfg(test)]
+mod connector_tests {
+    use super::*;
+    use jazz::tools::native_transport_connector::NativeTransportLink;
+
+    struct Records(std::sync::Mutex<Option<serde_json::Value>>);
+
+    impl NativeTransportConnector for &'static Records {
+        fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
+            *self.0.lock().unwrap() = request.auth.backend_session;
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// Alice's thin session's client states the `authenticatedAt` her socket
+    /// was admitted with, so a revoke that raced her sign-in refuses it too.
+    #[test]
+    fn a_thin_sessions_client_keeps_authenticated_at() {
+        let records: &'static Records = Box::leak(Box::new(Records(Default::default())));
+        let connector = AuthenticatedAt {
+            inner: records,
+            authenticated_at_ms: 42,
+        };
+        drop(connector.connect(NativeTransportRequest {
+            requested_link: NativeTransportLink::OrdinarySession,
+            server_url: String::new(),
+            app_id: jazz::tools::AppId::random(),
+            peer_identity: jazz::ids::AuthorSubject::SYSTEM,
+            auth: jazz::tools::websocket_prelude_auth::AuthConfig {
+                backend_session: Some(serde_json::json!({ "user_id": "alice" })),
+                ..Default::default()
+            },
+            authorization: None,
+            bundle: None,
+            wake: Arc::new(|| {}),
+        }));
+        assert_eq!(
+            records.0.lock().unwrap().take(),
+            Some(serde_json::json!({ "user_id": "alice", "authenticatedAt": 42 }))
+        );
     }
 }
