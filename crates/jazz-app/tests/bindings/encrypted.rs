@@ -11,6 +11,147 @@ pub use ::jazz_app_support::*;
 /// The `jazz.app.json` these bindings were generated from.
 pub const SOURCE: &str = "sha256:7e059d31fa744f653ab0ac9d9ec3b521cdb5818e0363e9ec5c577ddfeaa33aed";
 
+/// A row of `__e2ee_members`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct E2eeMember {
+    pub id: ::jazz_app_support::ObjectId,
+    /// `scopeId`.
+    pub scope_id: ::jazz_app_support::ObjectId,
+    pub identifier: ::jazz_app_support::ObjectId,
+    /// `accountId`.
+    pub account_id: ::jazz_app_support::ObjectId,
+}
+
+/// A new row of `__e2ee_members`: [`NewE2eeMember::new`] takes the columns it requires.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewE2eeMember {
+    /// `scopeId`.
+    pub scope_id: ::jazz_app_support::ObjectId,
+    pub identifier: ::jazz_app_support::ObjectId,
+    /// `accountId`.
+    pub account_id: ::jazz_app_support::ObjectId,
+}
+
+impl NewE2eeMember {
+    /// A new row with the columns it requires, in this order: `scopeId`, `identifier`, `accountId`. The others
+    /// are left out; set them with `NewE2eeMember { column: …, ..NewE2eeMember::new(…) }`.
+    pub fn new(scope_id: impl ::std::convert::Into<::jazz_app_support::ObjectId>, identifier: impl ::std::convert::Into<::jazz_app_support::ObjectId>, account_id: impl ::std::convert::Into<::jazz_app_support::ObjectId>) -> Self {
+        Self {
+            scope_id: scope_id.into(),
+            identifier: identifier.into(),
+            account_id: account_id.into(),
+        }
+    }
+}
+
+/// Changes to a row of `__e2ee_members`: a `None` field leaves its column as it is.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct E2eeMemberUpdate {
+    /// `scopeId`.
+    pub scope_id: ::std::option::Option<::jazz_app_support::ObjectId>,
+    pub identifier: ::std::option::Option<::jazz_app_support::ObjectId>,
+    /// `accountId`.
+    pub account_id: ::std::option::Option<::jazz_app_support::ObjectId>,
+}
+
+impl ::jazz_app_support::Table for E2eeMember {
+    const NAME: &'static str = "__e2ee_members";
+    const COLUMNS: &'static [&'static str] = &["scopeId", "identifier", "accountId"];
+    type New = NewE2eeMember;
+    type Update = E2eeMemberUpdate;
+
+    fn decode(row: &mut ::jazz_app_support::Fields<'_>) -> ::jazz_app_support::Result<Self> {
+        let scope_id = row.take::<::jazz_app_support::ObjectId>("scopeId")?;
+        let identifier = row.take::<::jazz_app_support::ObjectId>("identifier")?;
+        let account_id = row.take::<::jazz_app_support::ObjectId>("accountId")?;
+        ::std::result::Result::Ok(Self {
+            id: row.id(),
+            scope_id,
+            identifier,
+            account_id,
+        })
+    }
+
+    fn id(&self) -> ::jazz_app_support::ObjectId {
+        self.id
+    }
+}
+
+impl ::jazz_app_support::Insert for NewE2eeMember {
+    type Row = E2eeMember;
+
+    fn into_cells(
+        self,
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::collections::HashMap<::std::string::String, ::jazz_app_support::jazz::tools::Value>> {
+        let mut cells = ::std::collections::HashMap::new();
+        let value = self.scope_id;
+        cells.insert("scopeId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
+        let value = self.identifier;
+        cells.insert("identifier".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
+        let value = self.account_id;
+        cells.insert("accountId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
+        ::std::result::Result::Ok(cells)
+    }
+}
+
+impl ::jazz_app_support::Update for E2eeMemberUpdate {
+    type Row = E2eeMember;
+
+    fn into_cells(
+        self,
+        _implementations: &::jazz_app_support::Implementations,
+    ) -> ::jazz_app_support::Result<::std::vec::Vec<(::std::string::String, ::jazz_app_support::jazz::tools::Value)>> {
+        let mut cells = ::std::vec::Vec::new();
+        if let ::std::option::Option::Some(value) = self.scope_id {
+            cells.push(("scopeId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
+        }
+        if let ::std::option::Option::Some(value) = self.identifier {
+            cells.push(("identifier".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
+        }
+        if let ::std::option::Option::Some(value) = self.account_id {
+            cells.push(("accountId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
+        }
+        ::std::result::Result::Ok(cells)
+    }
+}
+
+/// Queries, columns and relations of `__e2ee_members`.
+pub mod e2ee_members {
+    #[allow(unused_imports)]
+    use super::*;
+
+    /// Every row of `__e2ee_members`; narrow it with `filter`.
+    pub fn query() -> ::jazz_app_support::Query<E2eeMember> {
+        ::jazz_app_support::Query::all()
+    }
+
+    /// Every accepted version of `__e2ee_members`'s rows; bound it to rows with `id` or `id().is_in`.
+    pub fn history() -> ::jazz_app_support::Query<::jazz_app_support::Version<E2eeMember>> {
+        ::jazz_app_support::Query::history()
+    }
+
+    /// The row's id. (`::jazz_app_support::created_at()` and `updated_at()` are columns of every table too.)
+    pub fn id() -> ::jazz_app_support::Column<E2eeMember, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::id()
+    }
+
+    /// Column `scopeId`.
+    pub fn scope_id() -> ::jazz_app_support::Column<E2eeMember, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("scopeId")
+    }
+
+    /// Column `identifier`.
+    pub fn identifier() -> ::jazz_app_support::Column<E2eeMember, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("identifier")
+    }
+
+    /// Column `accountId`.
+    pub fn account_id() -> ::jazz_app_support::Column<E2eeMember, ::jazz_app_support::ObjectId> {
+        ::jazz_app_support::Column::new("accountId")
+    }
+}
+
 /// A row of `notes`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Note {
