@@ -317,12 +317,63 @@ it("a returning browser subscribes to stored encrypted rows as soon as its sessi
   }
 }, 120_000);
 
-it("an encryption readiness failure reaches the subscriber that was waiting for it", async () => {
+it("a returning browser reads its stored encrypted rows offline, and its live query goes on once the server is back", async () => {
+  const server = await serverAt("encrypted-offline-reload");
+  const transport = await createJazzServerTransportControl(server.url);
+  cleanups.push(() => transport.stop());
+  const through = { url: transport.url, appId: server.appId };
+  const dbName = uniqueDbName("encrypted-offline-reload");
+  const first = await load(through, dbName);
+  const db = first.getSnapshot().client!.db;
+  expect(await db.encryption.ready({ timeoutMs: 40_000 })).toBe("active");
+  const projectId = crypto.randomUUID();
+  const account = first.getSnapshot().user!.accountId;
+  const self = await db.encryption.members.row({ table: "projects", id: projectId }, account);
+  await (
+    await db.transaction((tx) => {
+      tx.insert(app.projects, { name: "project", ownerId: account }, { id: projectId });
+      tx.insert(app.__e2ee_members, self);
+    })
+  ).wait({ tier: "global" });
+  await db.insert(app.tasks, { projectId, title: "stored" }).wait({ tier: "global" });
+  await first.close();
+
+  // The server is out of reach when the page loads again. The browser has
+  // synced before: it reads its stored rows with the keys it holds, at once.
+  await transport.down();
+  const returning = await load(through, dbName);
+  const again = returning.getSnapshot().client!.db;
+  const seen: string[][] = [];
+  const errors: unknown[] = [];
+  const stop = again.subscribe(
+    app.tasks.where({ projectId }),
+    {
+      onUpdate: (rows) => seen.push(rows.map((row) => row.title).sort()),
+      onError: (error) => errors.push(error),
+    },
+    { tier: "local-first" },
+  );
+  cleanups.push(async () => stop());
+  await expect.poll(() => seen.at(-1), { timeout: 5_000 }).toEqual(["stored"]);
+  expect(errors).toEqual([]);
+
+  // The server comes back. Another page of this device writes a task: the
+  // same live query, never ended, picks it up.
+  await transport.up();
+  const other = await load(through, uniqueDbName("encrypted-offline-other"));
+  const otherDb = other.getSnapshot().client!.db;
+  expect(await otherDb.encryption.ready({ timeoutMs: 40_000 })).toBe("active");
+  await otherDb.insert(app.tasks, { projectId, title: "later" }).wait({ tier: "global" });
+  await expect.poll(() => seen.at(-1), { timeout: 30_000 }).toEqual(["later", "stored"]);
+  expect(errors).toEqual([]);
+}, 120_000);
+
+it("a runtime that cannot say whether encrypted rows are readable fails the subscriber waiting for it", async () => {
   const server = await serverAt("encrypted-subscription-failure");
   const session = await load(server, uniqueDbName("encrypted-subscription-failure"));
   const db = session.getSnapshot().client!.db;
-  const failure = new Error("device verification failed");
-  const ready = vi.spyOn(db.encryption, "ready").mockRejectedValueOnce(failure);
+  const failure = new Error("the encryption runtime closed");
+  const ready = vi.spyOn(db.encryption, "readable").mockRejectedValueOnce(failure);
   const update = vi.fn();
   const onError = vi.fn();
   const stop = db.subscribe(app.tasks, { onUpdate: update, onError });

@@ -617,6 +617,50 @@ async fn typed_bindings_read_and_write_an_encrypted_column() {
     app.stop().await;
 }
 
+/// Alice's first note in a project streams its label from a one-shot reader.
+/// The encrypted title needs a space key before the label can be read.
+///
+/// ```text
+/// begin → prepare the project key → begin again → read the label → one row
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rust_reader_waits_for_the_encrypted_metadata_key() {
+    let app = App::start().await;
+    let alice = app.device().await;
+    alice
+        .encryption()
+        .ready(Duration::from_secs(30))
+        .await
+        .unwrap();
+    let project = make_project(&alice, "plans").await;
+    alice
+        .with_client(move |client| async move {
+            let cells = HashMap::from([
+                ("projectId".to_owned(), uuid(&project)),
+                ("title".to_owned(), text("private title")),
+            ]);
+            let (_, written) = client
+                .insert_streaming_value(
+                    "tasks",
+                    cells,
+                    "label",
+                    std::io::Cursor::new(b"streamed label"),
+                )
+                .await?;
+            client
+                .wait_for_transaction(written, jazz_app_support::DurabilityTier::GlobalServer)
+                .await?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(titles(&alice, 1).await, ["private title"]);
+    let tasks = alice.all(bindings::tasks::query()).await.unwrap();
+    assert_eq!(tasks[0].label.as_deref(), Some("streamed label"));
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// Alice omits two encrypted fields. The native insert returns the logical
 /// default and null that she reads back from the stored row. The read keeps
 /// a plain column whose name looks like a token for the unindexed field.

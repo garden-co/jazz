@@ -85,6 +85,7 @@ describe("encryption on the Node binding", () => {
     expect(typeof id).toBe("string");
     expect(JSON.parse(first.db.encryptionState())).toEqual({
       status: null,
+      readable: expect.any(Boolean),
       error: null,
       stage: expect.any(String),
     });

@@ -323,6 +323,79 @@ it("drains an already admitted streaming mutation before returning its foregroun
   await runtime.close();
 });
 
+it.each(["standalone", "transaction"])(
+  "gives %s stream publication a fresh deadline after a slow source",
+  async (mode) => {
+    vi.useFakeTimers();
+    try {
+      let release!: () => void;
+      const stuck = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const finish = vi
+        .fn()
+        .mockImplementationOnce(() => new Promise<void>((resolve) => setTimeout(resolve, 9_999)))
+        .mockImplementationOnce(() => stuck);
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              beginStreamingMutation: () => ({
+                push: () => undefined,
+                finish: async () => {
+                  await finish();
+                  return fakeWrite();
+                },
+                finishInTransaction: finish,
+                abort: () => true,
+              }),
+              tick: () => undefined,
+            }),
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const tx = mode === "transaction" ? beginTestBatch(runtime) : undefined;
+      const context = tx && JSON.stringify({ transaction_id: tx });
+      const write = () =>
+        runtime.streamingMutation(
+          "insert",
+          "todos",
+          {},
+          "title",
+          (async function* () {
+            await new Promise((resolve) => setTimeout(resolve, 15_000));
+            yield "slow source";
+          })(),
+          context,
+        );
+      const first = write();
+      await vi.advanceTimersByTimeAsync(24_999);
+      await expect(first).resolves.toBeDefined();
+
+      const refused = vi.fn();
+      const second = write().catch(refused);
+      await vi.advanceTimersByTimeAsync(24_999);
+      expect(finish).toHaveBeenCalledTimes(2);
+      expect(refused).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(refused).toHaveBeenCalledWith(expect.objectContaining({ name: "TimeoutError" }));
+      const queued = write().catch(refused);
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(refused).toHaveBeenCalledTimes(2);
+      release();
+      await Promise.all([second, queued]);
+      await runtime.close();
+      expect(finish).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
 it("waits for a failed stream's native abort before foreground handoff", async () => {
   let releaseSource!: () => void;
   const sourceGate = new Promise<void>((resolve) => {

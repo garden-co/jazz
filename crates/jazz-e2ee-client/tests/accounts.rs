@@ -68,6 +68,7 @@ fn an_app_account_bootstraps_on_its_first_device() {
         assert_eq!(count(&server, "__e2ee_account_roots"), 1);
 
         let space = project(&db, "plans");
+        client.record_fixture_rotation_check(&address(&db, space));
         block_on(client.keep(space_key_of_account(&client, &db, space))).unwrap();
         block_on(db.insert("notes", note(space, SECRET), Default::default())).unwrap();
         pump(&server, &db);
