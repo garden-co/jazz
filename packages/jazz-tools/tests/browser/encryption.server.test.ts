@@ -8,6 +8,7 @@ import { EncryptionNeedsLocalFirstError } from "../../src/runtime/encryption-nee
 import { isThinDb, type LocalFirstLoader } from "../../src/runtime/local-first-upgrade.js";
 import { uniqueDbName, waitForCondition } from "./support.js";
 import {
+  createJazzServerTransportControl,
   deploy,
   getJazzServerInfo,
   jazzAppFetch,
@@ -216,6 +217,63 @@ it("encrypts in a real browser: a device's keys in the browser's own store, a ta
     "The reloaded device should read its encrypted row",
   );
 }, 240_000);
+
+// A tab's encryption runtime acts online only while it is: it rotates a
+// space, and evaluates the rotation a removed device makes necessary, before
+// it seals. Offline it seals under the current version. So a tab behind the
+// shared worker must be online again once the worker reconnects, or every
+// write after any lost connection (a network drop, or a server that ends the
+// user's connections before a device removal) is sealed under the version a
+// removed device still holds.
+it("a tab's encryption is online again once its worker reconnects after losing the server", async () => {
+  const server = await serverAt("encryption-reconnect");
+  const transport = await createJazzServerTransportControl(server.url);
+  cleanups.push(() => transport.stop());
+  const session = await step(
+    "load",
+    load({ url: transport.url, appId: server.appId }, uniqueDbName("encryption-reconnect-db")),
+    40_000,
+  );
+  const db = session.getSnapshot().client!.db;
+  expect(await step("ready", db.encryption.ready({ timeoutMs: 40_000 }), 45_000)).toBe("active");
+  const account = session.getSnapshot().user!.accountId;
+  const id = crypto.randomUUID();
+  const self = await db.encryption.members.row({ table: "projects", id }, account);
+  const written = await db.transaction((tx) => {
+    tx.insert(app.projects, { name: "project", ownerId: account }, { id });
+    tx.insert(app.__e2ee_members, self);
+  });
+  await step("project global", written.wait({ tier: "global" }));
+  await step(
+    "task global",
+    db.insert(app.tasks, { projectId: id, title: "before" }).wait({ tier: "global" }),
+  );
+  const space = { table: "projects", id };
+  // Connected: the tab can rotate the space.
+  // (It delivers to other member accounts only, so it returns 0 here.)
+  await expect(step("rotate before", db.encryption.keys.rotate(space))).resolves.toBe(0);
+
+  // The server goes away until the worker publishes the outage, then comes back.
+  await transport.down();
+  await waitForCondition(
+    async () => db.getSyncStatus().link.state === "offline",
+    30_000,
+    "the worker's published outage",
+  );
+  await transport.up();
+  await waitForCondition(
+    async () => db.getSyncStatus().link.state === "connected",
+    30_000,
+    "the worker's reconnect",
+  );
+  await step(
+    "task after reconnect",
+    db.insert(app.tasks, { projectId: id, title: "after" }).wait({ tier: "global" }),
+  );
+
+  // Connected again: the tab rotates as before, instead of failing offline.
+  await expect(step("rotate after", db.encryption.keys.rotate(space))).resolves.toBe(0);
+}, 120_000);
 
 it("a returning browser subscribes to stored encrypted rows as soon as its session opens", async () => {
   const server = await serverAt("encrypted-message-reload");
