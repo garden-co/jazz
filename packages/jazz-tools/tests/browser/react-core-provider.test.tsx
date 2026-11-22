@@ -98,6 +98,7 @@ function publicSession(
 ): PublicSession {
   return Object.freeze({
     user: canonicalAuthorSubject(issuer, subject),
+    identity: Object.freeze({ issuer, subject }),
     claims: Object.freeze({ ...claims, iss: issuer, sub: subject }),
     authMode: "external",
   });
