@@ -3,6 +3,7 @@ import { mount, unmount, tick, createRawSnippet, getAllContexts } from "svelte";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
+import type { JazzSessionErrorViewProps } from "../session/jazz-session.js";
 import JazzProvider from "./JazzProvider.svelte";
 import type { JazzSessionState } from "./session-state.js";
 import AuthStatus from "../../tests/svelte/AuthStatus.svelte";
@@ -118,9 +119,9 @@ it("renders custom startup loading and error snippets with the provider retry", 
       config: { scope: "test" },
       children: createRawSnippet(() => ({ render: () => "<p>PRIVATE</p>" })),
       loading: createRawSnippet(() => ({ render: () => "<p>CUSTOM LOADING</p>" })),
-      error: createRawSnippet((error, action) => {
-        retry = action();
-        return { render: () => `<p>CUSTOM ${error().message}</p>` };
+      error: createRawSnippet((view: () => JazzSessionErrorViewProps) => {
+        retry = view().retry;
+        return { render: () => `<p>CUSTOM ${view().error.message}</p>` };
       }),
     },
   });
@@ -129,7 +130,7 @@ it("renders custom startup loading and error snippets with the provider retry", 
   reject(new Error("failure"));
   await settle();
   expect(target.textContent).toBe("CUSTOM failure");
-  void retry().catch(() => {});
+  void retry();
   await settle();
   expect(factory).toHaveBeenCalledTimes(2);
   expect(target.textContent).toBe("CUSTOM LOADING");

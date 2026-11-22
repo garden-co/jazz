@@ -24,8 +24,28 @@ enum Request {
         Principal,
         oneshot::Sender<Result<Assignment, RegistryError>>,
     ),
+    RevokeSessions(Principal, u64, oneshot::Sender<Result<u64, RegistryError>>),
+    SessionsRevokedBefore(
+        Principal,
+        oneshot::Sender<Result<Option<u64>, RegistryError>>,
+    ),
+    BackendSigningKey(
+        oneshot::Sender<Result<crate::portable::backend_signing_key::Key, RegistryError>>,
+    ),
     Close(mpsc::Sender<Result<(), String>>),
 }
+
+/// A session revocation the registry recorded: `principal`'s sessions
+/// authenticated before `before_ms` (Unix ms) are revoked.
+#[derive(Clone, Debug)]
+pub(crate) struct SessionsRevoked {
+    pub(crate) principal: Principal,
+    pub(crate) before_ms: u64,
+}
+
+/// Revocations a slow subscriber may fall behind by before it re-checks its
+/// own user in the registry instead.
+const REVOCATIONS_BUFFERED: usize = 256;
 
 pub(crate) struct AccountRegistryOwner {
     sender: mpsc::Sender<Request>,
@@ -34,6 +54,12 @@ pub(crate) struct AccountRegistryOwner {
     /// watch closes (and every subscriber re-checks and fails closed) if that
     /// thread exits for any reason, including a panic.
     changes: tokio::sync::watch::Receiver<u64>,
+    /// Session revocations as they are recorded: the user and the mark in
+    /// force. Template receiver: the only sender lives on the owner thread,
+    /// so subscribers see the channel close if that thread exits. Live user
+    /// sessions filter by their own user, so a revocation costs other users'
+    /// sessions nothing (no registry lookup).
+    revocations: tokio::sync::broadcast::Receiver<SessionsRevoked>,
     #[cfg(test)]
     failpoint: Failpoint,
 }
@@ -43,6 +69,8 @@ impl AccountRegistryOwner {
     pub(crate) fn open(storage: HostSql) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
         let (notify, changes) = tokio::sync::watch::channel(0u64);
+        let (notify_revocation, revocations) =
+            tokio::sync::broadcast::channel(REVOCATIONS_BUFFERED);
         let (ready, opened) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("jazz-account-registry".into())
@@ -96,6 +124,29 @@ impl AccountRegistryOwner {
                             // A lookup never mutates: nothing to announce.
                             let _ = response.send(registry.login(&principal));
                         }
+                        Request::RevokeSessions(principal, before_ms, response) => {
+                            let result = registry.revoke_sessions(&principal, before_ms);
+                            // As for commands: an `Unavailable` failure may
+                            // come after the write committed, so the user's
+                            // live sessions end on it too.
+                            let before_ms = match &result {
+                                Ok(in_force) => *in_force,
+                                Err(_) => before_ms,
+                            };
+                            let _ = notify_revocation.send(SessionsRevoked {
+                                principal,
+                                before_ms,
+                            });
+                            let _ = response.send(result);
+                        }
+                        Request::SessionsRevokedBefore(principal, response) => {
+                            let _ = response.send(registry.sessions_revoked_before(&principal));
+                        }
+                        Request::BackendSigningKey(response) => {
+                            // On this one thread, so concurrent first
+                            // requests keep one key between them.
+                            let _ = response.send(registry.backend_signing_key());
+                        }
                         Request::Close(response) => {
                             drop(registry);
                             let _ = response.send(Ok(()));
@@ -112,6 +163,7 @@ impl AccountRegistryOwner {
         Ok(Self {
             sender,
             changes,
+            revocations,
             closed: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             failpoint: _failpoint,
@@ -142,6 +194,50 @@ impl AccountRegistryOwner {
         let mut changes = self.changes.clone();
         changes.mark_unchanged();
         changes
+    }
+
+    /// Session revocations recorded from now on.
+    pub(crate) fn subscribe_revocations(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<SessionsRevoked> {
+        self.revocations.resubscribe()
+    }
+
+    /// End `principal`'s sessions authenticated before `before_ms`; returns
+    /// the mark in force (never earlier than one recorded before).
+    pub(crate) async fn revoke_sessions(
+        &self,
+        principal: Principal,
+        before_ms: u64,
+    ) -> Result<u64, RegistryError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(Request::RevokeSessions(principal, before_ms, reply))
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
+    }
+
+    /// The latest session revocation mark for `principal`, if any.
+    pub(crate) async fn sessions_revoked_before(
+        &self,
+        principal: Principal,
+    ) -> Result<Option<u64>, RegistryError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(Request::SessionsRevokedBefore(principal, reply))
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
+    }
+
+    /// The app's backend signing key kept in the store, made on first use.
+    pub(crate) async fn backend_signing_key(
+        &self,
+    ) -> Result<crate::portable::backend_signing_key::Key, RegistryError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(Request::BackendSigningKey(reply))
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
     }
 
     pub(crate) fn close(&self) -> Result<(), String> {

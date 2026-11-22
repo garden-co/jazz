@@ -1,6 +1,6 @@
 import { commands } from "vitest/browser";
 
-declare module "vitest/internal/browser" {
+declare module "vitest/browser" {
   interface BrowserCommands {
     sessionTabOpen: (
       id: string,

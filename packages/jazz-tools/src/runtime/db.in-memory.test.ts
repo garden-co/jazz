@@ -4,6 +4,7 @@ import { testApp } from "../testing/test-app.js";
 import type { RowOf } from "../typed-app.js";
 import { type Db, type DbSubscriptionUpdate } from "./db.js";
 import { createDb } from "./default-create-db.js";
+import { nativeCoreErrorCode } from "./native-runtime/native-error-code.js";
 
 const app = testApp({ tables: { notes: { columns: { title: "string", done: "boolean" } } } });
 type Note = RowOf<typeof app.notes>;
@@ -30,6 +31,83 @@ describe("createDb in-memory driver", () => {
   afterEach(async () => {
     await db?.shutdown();
     db = undefined;
+  });
+
+  const refusedCode = async (read: Promise<unknown>) =>
+    read.then(
+      () => "accepted",
+      (error: unknown) => nativeCoreErrorCode(error) ?? String(error),
+    );
+
+  it("leaves operator and orderBy checks to the engine, which refuses them by code", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-operator-checks-test")),
+      driver: { type: "memory" },
+    });
+    const done = largeValues.documents.where({ done: true });
+    for (const query of [
+      largeValues.documents.where({ metadata: { gt: 1 } } as never),
+      largeValues.documents.orderBy("payload" as never),
+      // Union arms and the union's order.
+      largeValues.union([done, largeValues.documents.where({ metadata: { gt: 1 } } as never)]),
+      largeValues.union([done]).orderBy("metadata" as never),
+    ] as never[]) {
+      expect(await refusedCode(db.all(query))).toBe("query");
+    }
+    await expect(db.all(largeValues.documents.orderBy("done"))).resolves.toEqual([]);
+  });
+
+  it("checks gather start and step filters in the engine too", async () => {
+    const tree = testApp({
+      tables: {
+        nodes: {
+          columns: { meta: { json: true }, parent_id: "uuid?" },
+          relations: { parent: { rel: "nodes", column: "parent_id" } },
+        },
+      },
+    });
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-operator-checks-gather-test")),
+      driver: { type: "memory" },
+    });
+    const start = tree.nodes.gather({
+      start: { meta: { gt: 1 } } as never,
+      step: ({ current }) => tree.nodes.where({ id: current }).hopTo("parent"),
+      maxDepth: 3,
+    });
+    const step = tree.nodes.gather({
+      start: {},
+      step: ({ current }) =>
+        tree.nodes.where({ id: current, meta: { gt: 1 } } as never).hopTo("parent"),
+      maxDepth: 3,
+    });
+    for (const query of [start, step]) {
+      expect(await refusedCode(db.all(query as never))).toBe("query");
+    }
+    const fine = tree.nodes.gather({
+      start: { meta: { eq: 1 } } as never,
+      step: ({ current }) => tree.nodes.where({ id: current }).hopTo("parent"),
+      maxDepth: 3,
+    });
+    expect(await refusedCode(db.all(fine as never))).toBe("accepted");
+  });
+
+  it("checks a hop's seed filter in the engine too", async () => {
+    const seeded = testApp({
+      tables: {
+        documents: { columns: { body: "string" } },
+        links: {
+          columns: { documentId: "uuid", meta: { json: true } },
+          relations: { document: { rel: "documents", column: "documentId" } },
+        },
+      },
+    });
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-operator-checks-hop-test")),
+      driver: { type: "memory" },
+    });
+    const hop = seeded.links.where({ meta: { gt: 1 } } as never).hopTo("document");
+    expect(await refusedCode(db.all(hop as never))).toBe("query");
   });
 
   it("opens a native Db with the current ordinary-column schema layout", async () => {

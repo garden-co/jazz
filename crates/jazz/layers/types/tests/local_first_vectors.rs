@@ -8,9 +8,9 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jazz_types::account_registry::local_first_account_id;
+use jazz_types::account_registry::device_account_id;
 use jazz_types::identity::{
-    LOCAL_FIRST_ISSUER, derive_user_id, mint_jazz_self_signed_token_at,
+    DEVICE_ACCOUNT_ISSUER, derive_user_id, mint_jazz_self_signed_token_at,
     verify_jazz_self_signed_proof_at,
 };
 use serde_json::{Value, json};
@@ -50,11 +50,11 @@ fn generate() -> Value {
         .map(|seed| {
             let subject = derive_user_id(seed).to_string();
             let token =
-                mint_jazz_self_signed_token_at(seed, LOCAL_FIRST_ISSUER, APP, 3600, NOW).unwrap();
+                mint_jazz_self_signed_token_at(seed, DEVICE_ACCOUNT_ISSUER, APP, 3600, NOW).unwrap();
             json!({
                 "secret": format!("jazz-auth-v1:{}", URL_SAFE_NO_PAD.encode(seed)),
                 "subject": subject,
-                "founderAccountV1": local_first_account_id(Uuid::parse_str(APP).unwrap(), &subject).0.to_string(),
+                "founderAccountV1": device_account_id(Uuid::parse_str(APP).unwrap(), &subject).0.to_string(),
                 "token": token,
             })
         })
@@ -67,7 +67,7 @@ fn generate() -> Value {
         .iter()
         .map(|audience| {
             let token =
-                mint_jazz_self_signed_token_at(&seed, LOCAL_FIRST_ISSUER, audience, 3600, NOW)
+                mint_jazz_self_signed_token_at(&seed, DEVICE_ACCOUNT_ISSUER, audience, 3600, NOW)
                     .unwrap();
             let claims = URL_SAFE_NO_PAD
                 .decode(token.split('.').nth(1).unwrap())

@@ -100,9 +100,17 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/accounts/link", post(accounts::link_for_admin))
         .route(
             "/accounts/found-local-first",
-            post(accounts::found_local_first_for_admin),
+            post(accounts::found_device_account_for_admin),
         )
         .route("/accounts/revoke", post(accounts::revoke_for_admin))
+        .route(
+            "/accounts/revoke-sessions",
+            post(accounts::revoke_sessions_for_admin),
+        )
+        .route(
+            "/backend-signing-key",
+            get(accounts::backend_signing_key_for_admin),
+        )
         .route("/migrations/graph", get(migration_graph_handler))
         .route(
             "/introspection/subscriptions",
@@ -627,10 +635,11 @@ mod tests {
             .expect("hashes body");
         let hashes_json: Value = serde_json::from_slice(&hashes_body).expect("hashes json");
         let expected_hash = schema_hash.to_string();
-        assert_eq!(
-            hashes_json["hashes"][0].as_str(),
-            Some(expected_hash.as_str())
+        assert!(
+            hashes_json.get("hashes").is_none(),
+            "the deprecated `hashes` field is gone: {hashes_json}"
         );
+        assert_eq!(hashes_json["schemas"].as_array().map(Vec::len), Some(1));
         assert_eq!(
             hashes_json["schemas"][0]["hash"].as_str(),
             Some(expected_hash.as_str())
@@ -1017,7 +1026,7 @@ mod tests {
                 .await
                 .expect("inspect runtime catalogue after lens"),
             (true, true),
-            "migration publication must activate target schema and lens together"
+            "migration publication must admit target schema and lens together"
         );
 
         let lens = state

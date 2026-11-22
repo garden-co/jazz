@@ -692,7 +692,7 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
   const reportProgress = createProgressReporter("W1 progress", operationCount);
 
   const wallStart = performance.now();
-  for (let i = 0; i < operationCount; ) {
+  for (let i = 0; i < operationCount;) {
     const op = w1.mix[rng.pickWeightedIndex(weights)].operation;
     const batch = await measureBatchedLatency(operationCount - i, async (batchIndex) => {
       const currentIndex = i + batchIndex;
@@ -997,7 +997,7 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
     const reportUpdateProgress = createProgressReporter("B1 updates", updateCount);
     const reportDeleteProgress = createProgressReporter("B1 deletes", deleteCount);
 
-    for (let i = 0; i < insertCount; ) {
+    for (let i = 0; i < insertCount;) {
       const batch = await measureBatchedLatency(insertCount - i, async (batchIndex) => {
         const currentIndex = i + batchIndex;
         const taskIdx = rng.nextInt(state.taskIds.length);
@@ -1017,7 +1017,7 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
       reportInsertProgress(i);
     }
 
-    for (let i = 0; i < updateCount; ) {
+    for (let i = 0; i < updateCount;) {
       const batch = await measureBatchedLatency(updateCount - i, async () => {
         const taskId = state.taskIds[rng.nextInt(state.taskIds.length)];
         await db.update(tasksTable, taskId, {
@@ -1032,7 +1032,7 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
       reportUpdateProgress(i);
     }
 
-    for (let i = 0; i < deleteCount; ) {
+    for (let i = 0; i < deleteCount;) {
       const batch = await measureBatchedLatency(deleteCount - i, async (batchIndex) => {
         await db.delete(commentsTable, insertedCommentIds[i + batchIndex]);
       });
@@ -1086,7 +1086,7 @@ async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
 
     const wallStart = performance.now();
     const reportProgress = createProgressReporter("B2 reads", requestCount);
-    for (let i = 0; i < requestCount; ) {
+    for (let i = 0; i < requestCount;) {
       const op = b2.mix[rng.pickWeightedIndex(weights)].operation;
       const batch = await measureBatchedLatency(requestCount - i, async () => {
         switch (op) {
@@ -1941,7 +1941,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     const reportReadProgress = createProgressReporter("B5 reads", reads);
     const reportUpdateProgress = createProgressReporter("B5 updates", updates);
 
-    for (let i = 0; i < reads; ) {
+    for (let i = 0; i < reads;) {
       const batch = await measureBatchedLatency(reads - i, async (batchIndex) => {
         if ((i + batchIndex) % 2 === 0) {
           await allowedDb.all(documentsQuery);
@@ -1955,7 +1955,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
       reportReadProgress(i);
     }
 
-    for (let i = 0; i < updates; ) {
+    for (let i = 0; i < updates;) {
       const shouldAllow =
         hasAllowedUpdateCandidates &&
         (deniedUpdateIds.length === 0 || rng.nextInt(100) < Math.round(b5.allow_fraction * 100));
@@ -2093,7 +2093,7 @@ async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
 
     const wallStart = performance.now();
     const reportProgress = createProgressReporter("B6 hotspot updates", updateCount);
-    for (let i = 0; i < updateCount; ) {
+    for (let i = 0; i < updateCount;) {
       const batch = await measureBatchedLatency(updateCount - i, async (batchIndex) => {
         const currentIndex = i + batchIndex;
         const taskId = hotTasks[rng.nextInt(hotTasks.length)];

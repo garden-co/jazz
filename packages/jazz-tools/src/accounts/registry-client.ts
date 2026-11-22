@@ -20,7 +20,7 @@ export class AccountAuthError extends Error {
  * session is signed out, or its account came from your backend.
  */
 export const LINK_NEEDS_GUEST_MESSAGE =
-  "local_first_account_required: linkDeviceAccount() links this device's device account (a guest) to the user your backend signed in, and there is no device account to link: the session is signed out, or its account came from your backend. Call refresh() to open the backend user's account instead. To keep what a device account wrote, link while it is signed in.";
+  "device_account_required: linkDeviceAccount() links this device's device account (a guest) to the user your backend signed in, and there is no device account to link: the session is signed out, or its account came from your backend. Call refresh() to open the backend user's account instead. To keep what a device account wrote, link while it is signed in.";
 
 /**
  * `linkDeviceAccount()` was called with a device account whose key this
@@ -28,7 +28,7 @@ export const LINK_NEEDS_GUEST_MESSAGE =
  * another client.
  */
 export const LINK_GUEST_KEY_MISSING_MESSAGE =
-  "local_first_account_required: this device account's key isn't held by this client any more (it signed out, or comes from another Jazz client), so it can't prove itself to link. Link from the client where it is signed in, or call refresh() instead.";
+  "device_account_required: this device account's key isn't held by this client any more (it signed out, or comes from another Jazz client), so it can't prove itself to link. Link from the client where it is signed in, or call refresh() instead.";
 
 /**
  * A backend secret of only whitespace (`"  "`, a stray newline): usually an

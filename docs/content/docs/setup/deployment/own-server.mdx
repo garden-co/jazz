@@ -75,18 +75,37 @@ s3({
 });
 ```
 
-The backend reads its credentials from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, or from
-`AWS_ROLE_ARN` with `AWS_WEB_IDENTITY_TOKEN_FILE`. Each chunk is uploaded with its SHA-256, so the
+The backend finds its credentials the way the AWS SDKs do, taking the first of:
+
+1. `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (with `AWS_SESSION_TOKEN` for session keys).
+2. `AWS_ROLE_ARN` with `AWS_WEB_IDENTITY_TOKEN_FILE`, such as an EKS service account's role.
+3. The role the host attaches to the container: on ECS, Fargate, EKS Pod Identity and Lambda, the
+   host sets `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or `AWS_CONTAINER_CREDENTIALS_FULL_URI` (with
+   `AWS_CONTAINER_AUTHORIZATION_TOKEN` or `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`) for you.
+4. On EC2, the instance profile's role, read from the instance metadata service with IMDSv2. Set
+   `AWS_REGION` yourself there. In a container on EC2, the instance's metadata hop limit must be at
+   least 2. `AWS_EC2_METADATA_DISABLED=true` skips this step.
+
+Keys from a role are refreshed before they expire, so a task role or instance profile needs no
+static keys. If none of these is found, the backend refuses to start and names every source it
+tried. Each chunk is uploaded with its SHA-256, so the
 bucket rejects a corrupted upload. One bucket can serve many apps and environments: each data
 directory keeps its objects under its own prefix, claims that prefix the first time it uses it, and
 deletes the chunks it no longer needs. Another data directory is refused on a prefix that is
 already claimed.
 
-The data directory records its choice in `<path>/blob-store`. You can move an existing directory
+The store records its choice in its `jazz.sqlite`. You can move an existing directory
 from `"sqlite"` to `files()` or `s3()` later; any other switch is not supported yet and refuses to
 start, so treat it as a one-way choice. A blob directory belongs to exactly one data directory, so two data directories can't share
-one. To copy a data directory, give the copy its own blob directory or prefix and delete its
-`store-id` and `blob-store` files before it first starts, or it claims the original's.
+one. To copy a data directory, run `npx jazz-tools store detach <path>` on the stopped copy before it
+first starts, or it claims the original's chunks. A `blobs/` directory copied inside it becomes the
+copy's own; a blob directory outside it, or a prefix, is the original's, so give the copy its own (a
+copied chunk directory without its `owner` file, or a new `s3()` prefix).
+
+A data directory keeps the app id it was first started with and refuses to start with another
+`--app-id`. To change it (a wrong first start, or a renamed app), stop the server and run
+`npx jazz-tools store set-app-id <path> <app id>`. Guests' device accounts are derived from the
+app id, so they no longer match after a change.
 
 History keeps every version of a row, so deleting rows doesn't free their large values, and there
 is no way to erase them yet. Expect blob storage to only grow.

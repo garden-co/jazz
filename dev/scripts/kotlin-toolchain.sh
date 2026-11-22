@@ -12,7 +12,8 @@ gradle_sha256=bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
 
 # Download $1 to $2 and check it has sha256 $3.
 fetch() {
-  curl -fsSL -o "$2.part" "$1"
+  # Retried: a transient HTTP/2 reset (curl 92) failed a release build.
+  curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$2.part" "$1"
   echo "$3  $2.part" | sha256sum -c --quiet -
   mv "$2.part" "$2"
 }

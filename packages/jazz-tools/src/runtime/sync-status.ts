@@ -1,3 +1,5 @@
+import type { AuthFailureReason } from "./auth-state.js";
+
 /** Why a {@link LinkStatus} is `offline`. */
 export type OfflineReason =
   | "disconnected"
@@ -20,7 +22,8 @@ export type OfflineReason =
  *     keeps retrying (`retrying: true`).
  *   - `auth`: the server refused the credential. The client waits for a new
  *     one (`db.updateAuthToken(...)`, or a fresh sign-in through the app's
- *     backend).
+ *     backend). `authReason` says why, once known (`"revoked"` after
+ *     `jazz.revokeUser`).
  *   - `stopped`: a failure retrying cannot fix (a protocol error or an
  *     incompatible server); only `db.reconnect()` tries again.
  *   - `authority-changed`: the server serves another history than this
@@ -31,8 +34,9 @@ export type OfflineReason =
  *     automatically, so unsynced writes are never discarded behind the
  *     app's back.
  *   - `held-by-another-tab` (browser): another tab holds this account's
- *     local store under another sign-in (it was still the guest when this
- *     tab signed up) and has not let go for a while. The tab keeps trying
+ *     local store, under another sign-in (it was still the guest when this
+ *     tab signed up) or with another build's schema (it still runs the
+ *     app's previous deploy), and has not let go for a while. The tab keeps trying
  *     (`retrying: true`) and joins once the other tab follows or closes;
  *     waits fail meanwhile with a `StoreHeldByAnotherTabError`.
  */
@@ -44,6 +48,16 @@ export type LinkStatus =
       state: "offline";
       reason: OfflineReason;
       retrying: boolean;
+      /**
+       * With `reason: "auth"`, why the server refused the credential, once
+       * the client knows. `"revoked"`: the backend ended this user's
+       * sessions (`jazz.revokeUser`) or the account identity was retired.
+       * Writes made meanwhile stay pending: they upload if the session signs
+       * in as the same user again, and are dropped (or, with
+       * `clearOnSignOut`, wiped) when it signs out. An app can stop taking
+       * edits from here on.
+       */
+      authReason?: AuthFailureReason;
     };
 
 /** Whether this client's data has reached the server, as `db.getSyncStatus()` reports it. */
@@ -112,6 +126,12 @@ export interface UploadStatus {
   oldestPendingAt: number | null;
   rejected: number;
   lastRejection: { code: string; message: string; at: number } | null;
+  /**
+   * Changes whenever a write joins or leaves the pending set, also when the
+   * count and the oldest time stay as they were; 0 from a host that does
+   * not report it.
+   */
+  pendingRevision: number;
 }
 
 /** @internal The upload status of a client that has uploaded nothing. */
@@ -120,11 +140,22 @@ export const NO_UPLOADS: UploadStatus = Object.freeze({
   oldestPendingAt: null,
   rejected: 0,
   lastRejection: null,
+  pendingRevision: 0,
 });
 
 /** @internal The upload status from a count alone (a host without the full status). */
 export function uploadStatusFromCount(pending: number): UploadStatus {
   return { ...NO_UPLOADS, pending };
+}
+
+/** @internal Whether two pending-row answers name the same rows (both sorted). */
+export function samePendingUploadRows(
+  a: readonly string[] | null,
+  b: readonly string[] | null,
+): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || a.length !== b.length) return false;
+  return a.every((id, index) => id === b[index]);
 }
 
 /** @internal The later of a rejection and a link failure. */
@@ -145,7 +176,8 @@ export function linkFailureOf(link: LinkStatus, message: string | undefined): Li
     auth: "The server refused this client's credential.",
     stopped: "The link stopped for good; only db.reconnect() tries again.",
     "authority-changed": "The server serves another history than this client's local store.",
-    "held-by-another-tab": "Another tab holds this account's local store under another sign-in.",
+    "held-by-another-tab":
+      "Another tab holds this account's local store, under another sign-in or with another build of the app.",
   }[link.reason];
   return { kind: link.reason, message: message || said, at: Date.now() };
 }
@@ -209,7 +241,7 @@ export function linkStatusFromUpstream(status: UpstreamLinkStatus | null): LinkS
 export function sameLinkStatus(a: LinkStatus, b: LinkStatus): boolean {
   if (a.state !== b.state) return false;
   if (a.state !== "offline" || b.state !== "offline") return true;
-  return a.reason === b.reason && a.retrying === b.retrying;
+  return a.reason === b.reason && a.retrying === b.retrying && a.authReason === b.authReason;
 }
 
 /** @internal Assemble a {@link SyncStatus}. */
@@ -244,6 +276,7 @@ export function sameUploadStatus(a: UploadStatus, b: UploadStatus): boolean {
     a.pending === b.pending &&
     a.oldestPendingAt === b.oldestPendingAt &&
     a.rejected === b.rejected &&
+    (a.pendingRevision ?? 0) === (b.pendingRevision ?? 0) &&
     a.lastRejection?.at === b.lastRejection?.at &&
     a.lastRejection?.code === b.lastRejection?.code
   );

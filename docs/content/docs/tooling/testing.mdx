@@ -9,7 +9,7 @@ As you develop your Jazz application, you might find yourself needing to test fu
 
 If your application uses a Jazz `Db` directly, you can open a session that keeps Jazz on this device
 only (`serverUrl: null`) and use its `session.db`. It signs in as a
-[device account](/docs/setup/auth/local-first), so it needs no backend:
+[device account](/docs/setup/auth/device-accounts), so it needs no backend:
 
 ```typescript
 import { createJazzClient } from "jazz-tools/client";
@@ -160,7 +160,7 @@ sign in from a Jazz client or you call `jazz.createAccountFor(userId)` (see
 [Users without an account](/docs/setup/deployment/own-server#users-without-an-account)). Test
 that path through `startTestJazz` below.
 
-To test as a guest (a device account), pass `authMode: "local-first"` and leave out `issuer` and
+To test as a guest (a device account), pass `authMode: "device-account"` and leave out `issuer` and
 `account_id`, with empty `claims`. The test app derives a device account key from `user_id` and acts
 exactly like a real device account with that key, including its own account. The guest's
 session uses the subject derived from that key, not the `user_id` you passed:
@@ -174,7 +174,7 @@ throwing.
 const bob = testApp.as({
   user_id: "bob",
   claims: {},
-  authMode: "local-first",
+  authMode: "device-account",
 });
 
 await expect(bob.all(app.todos.where({ id: privateTodo.id }))).resolves.toEqual([]);
@@ -213,7 +213,7 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
   token: `testJazz.bearer(userId, claims)` returns one your permissions see as that user. Pass it
   as `bearer: () => token` on `createJazzClient`, with `serverUrl: testJazz.url`, and call
   `refresh()`, as below. There, the `serverUrl` from `testJazz.as()` doesn't sign anyone in:
-  `refresh()` throws "loginWithBackend and linkWithBackend need a browser".
+  `refresh()` throws "refresh() and linkDeviceAccount() need a browser".
 - **Signed-in users in a real browser** (Vitest browser mode, Playwright) call
   `await testJazz.as(userId, claims)` instead and point the client at its `serverUrl`: each user
   gets their own origin, which stands in for their session cookie. `bearer` is refused wherever

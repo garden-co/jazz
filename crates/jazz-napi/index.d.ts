@@ -17,7 +17,17 @@ export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzCore {
   /** Open the core's storage and serve it in this process. */
-  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  static open(options: { appId?: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  /**
+   * The app this core serves: the one its store keeps, or the one it was
+   * opened with in memory.
+   */
+  get appId(): string
+  /**
+   * The secret a backend signs agent tokens with, kept in
+   * `<dataDir>/inspect-token-secret` (`null` in memory).
+   */
+  get tokenSecret(): string | null
   /**
    * Route one HTTP request. `url` is the path and query, as the core's
    * router sees them (`/apps/<appId>/...` or `/health`).
@@ -76,7 +86,7 @@ export declare class NapiDb {
   requestReadPermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   requestUpdatePermissionAdvice(table: string, rowId: Uint8Array, patch: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   requestDeletePermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
-  /** Admit a verified local-first account for this backend runtime only. */
+  /** Admit a verified device account for this backend runtime only. */
   admitLocalFirstSession(token: string, appId: string, claimedAuthor: string): void
   insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   insertInTransaction(openTransactionId: string, table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array
@@ -176,6 +186,11 @@ export declare class NapiDb {
    */
   uploadStatus(): JsonValue
   /**
+   * Ids of `table`'s rows with a write the server has neither accepted
+   * nor refused yet (recovered ones included), sorted.
+   */
+  pendingUploadRows(table: string): Array<string>
+  /**
    * The optimistic in-memory side of a client/worker pair: its
    * subscriptions open with the worker's answer.
    */
@@ -203,6 +218,12 @@ export declare class NapiDb {
    * turns the slow-query log off.
    */
   setSlowQueryThresholdMs(ms: number): void
+  /**
+   * Coalesce a subscription's undelivered deltas past `rows` changed
+   * rows (default 10000, at least 1) into one reset of its current
+   * result.
+   */
+  setSubscriptionBacklogRows(rows: number): void
   /**
    * Connect to the server over byte frames the host carries: each frame
    * is one postcard `SyncMessage`.
@@ -484,6 +505,16 @@ export interface DeleteOptions {
   updatedAtMs?: number
 }
 
+/**
+ * Make the stopped store in `dataDir` a store of its own: it forgets its
+ * store id and where its large values live, so its next start claims a
+ * chunk directory or bucket prefix of its own instead of the original's,
+ * and its agent-token secret, so the original's tokens don't open it. For
+ * a copy of a store (a staging copy of a backup) opened next to the
+ * original. It keeps the app id: the copy serves the same app.
+ */
+export declare function detachStore(dataDir: string): void
+
 /** Options of [`generate_for_dir`] and [`migrations_create_for_dir`]. */
 export interface DirOptions {
   /** Fail when the files or bindings are stale, and write nothing. */
@@ -706,6 +737,13 @@ export declare function schemaSourceHash(appJson: string): string
  */
 export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
 
+/**
+ * Make the stopped store in `dataDir` serve `appId` from its next start. A
+ * store refuses any app but the one it was first opened for; this is the
+ * way to change it (a wrong first `--app-id`, or a renamed app).
+ */
+export declare function setStoreAppId(dataDir: string, appId: string): void
+
 /** Owned libsodium device encryption keys. */
 export interface SodiumDeviceKeyPair {
   publicKey: Uint8Array
@@ -738,6 +776,11 @@ export interface SubscriptionClosedEvent {
 export interface SubscriptionDeltaEvent {
   type: 'delta'
   reset: boolean
+  /**
+   * A reset standing for deltas the reader fell too far behind to be
+   * told one by one (its backlog passed its limit).
+   */
+  coalesced: boolean
   delta: Uint8Array
   /** Always empty: SQLite subscriptions deliver whole-row deltas. */
   terminalOperations: Array<never>

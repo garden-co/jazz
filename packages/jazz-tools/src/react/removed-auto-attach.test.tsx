@@ -9,7 +9,6 @@ vi.mock("../react-core/provider.js", () => ({
   JazzClientProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useDb: () => ({}),
   useJazzClient: () => ({ db: {} }),
-  useSession: () => null,
 }));
 vi.mock("../react-core/session.js", () => ({
   JazzSessionProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,

@@ -46,6 +46,26 @@ export interface BrowserRelayError {
 export const BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN =
   "this account's store is open under another sign-in in another tab";
 
+/**
+ * Why a worker refuses a tab whose configuration differs from the open
+ * store's only in its schema: another tab runs another build of the app
+ * (deployed before or after this one) and opened the store with its schema.
+ * The tab tries again on its own until that tab reloads or closes.
+ */
+export const BROWSER_STORE_HELD_BY_ANOTHER_BUILD =
+  "this account's store is open with another build's schema in another tab";
+
+/**
+ * Why a worker refuses a tab of an older build of the app: the store is open
+ * with a newer build's schema (whose history extends this tab's). The tab
+ * reloads to pick up the newer build.
+ */
+export const BROWSER_STORE_OPEN_WITH_NEWER_BUILD =
+  "this account's store is open with a newer build of this app in another tab";
+
+/** How long the worker waits for older builds' tabs to let go of the store before it closes them. */
+export const NEWER_BUILD_HANDOFF_MS = 5_000;
+
 /** The relay error envelope is deliberately small enough for a MessagePort. */
 export const BROWSER_RELAY_ERROR_MAX_CAUSE_DEPTH = 32;
 export const BROWSER_RELAY_ERROR_MAX_TOTAL_CHARS = 64 * 1024;
@@ -376,6 +396,8 @@ export interface BrowserWorkerInitOptions {
   appId: string;
   /** Slow-query log threshold for the worker's store; 0 turns the log off. */
   slowQueryThresholdMs?: number;
+  /** Subscription backlog limit for the worker's store, in changed rows. */
+  subscriptionBacklogRows?: number;
   /** Non-secret logical owner pinned to an explicitly selected physical IDB root. */
   storageOwner: string;
   authSessionKey: string;
@@ -667,6 +689,35 @@ export type BrowserInspectorControlEvent =
       workerTerminated?: true;
     };
 
+/**
+ * What a SharedWorker's upstream link means for the tabs relaying through it.
+ * It is state, not a stream of events: a tab applies it the same way whether
+ * it arrived when the tab attached or later.
+ */
+export type BrowserWorkerLinkFate = {
+  /**
+   * Live reachability of the worker's upstream server. Tabs use it to decide
+   * whether a local-first read's first load may wait for a remote answer.
+   */
+  state: RemoteLinkState;
+  /** The upstream link as the tabs report it in their sync status. */
+  link: LinkStatus;
+  /**
+   * The upstream failure remote waits fail on now (an `authority_changed`
+   * refusal, say), or null while there is none. This is deliberately not a
+   * mutation rejection: writes stay pending, and the tab only fails its
+   * Global and Remote waits and remote subscriptions. While `retrying`, the
+   * worker keeps reconnecting through it, so writes' Global waits and remote
+   * subscriptions wait for it (#3923).
+   */
+  failure: { error: BrowserRelayError; retrying: boolean } | null;
+  /**
+   * Why the server refused the worker's credential, until it accepts one.
+   * Tabs stay attached meanwhile, so any of them can supply a new one.
+   */
+  authFailure: string | null;
+};
+
 export type BrowserFollowerPortEvent =
   | { type: "inspector-query-result"; id: number; value?: unknown; error?: BrowserRelayError }
   | { type: "runtime-pong"; connectionId: string; nonce: number }
@@ -678,11 +729,11 @@ export type BrowserFollowerPortEvent =
    */
   | { type: "transport-state"; explicitlyDisconnected: boolean }
   /**
-   * Live reachability of the worker's upstream server. Tabs use `state` to
-   * decide whether a local-first read's first load may wait for a remote
-   * answer, and report `link` as their sync status; older tabs ignore it.
+   * The worker's upstream link, as one latched value: sent to each tab when
+   * it attaches and again whenever any part changes, so a tab that attaches
+   * late learns the same as one attached all along.
    */
-  | { type: "remote-link"; state: RemoteLinkState; link?: LinkStatus }
+  | { type: "link-fate"; fate: BrowserWorkerLinkFate }
   | {
       type: "result";
       id: number;
@@ -698,8 +749,6 @@ export type BrowserFollowerPortEvent =
        */
       pendingUploads?: number;
     }
-  | { type: "auth-failure"; reason: string }
-  | { type: "auth-restored" }
   | { type: "mutation-error"; event: MutationErrorEvent }
   /**
    * The worker could not write its store to IndexedDB (storage full, most
@@ -708,22 +757,20 @@ export type BrowserFollowerPortEvent =
    * the tab rejects their `local` waits.
    */
   | { type: "storage-failure"; message: string | null }
-  /**
-   * A failure of the worker-owned upstream server transport. This is
-   * deliberately not a mutation rejection: the follower records it only to
-   * reject its active remote waits and subscriptions, or, while the worker
-   * keeps reconnecting, its remote reads.
-   */
-  | {
-      type: "transport-error";
-      error: BrowserRelayError;
-      /**
-       * The worker keeps reconnecting through the error, so writes' Global
-       * waits and remote subscriptions wait for it (#3923).
-       */
-      retrying?: boolean;
-    }
   | { type: "storage-reset"; resetId: number }
   | { type: "storage-invalidated" }
+  /**
+   * A tab of a newer build (its schema history extends this store's) wants
+   * the store: make this tab's writes durable, close, and reload. The worker
+   * closes the tabs that haven't let go after `NEWER_BUILD_HANDOFF_MS`.
+   */
+  | { type: "newer-build-waiting" }
+  /**
+   * This tab didn't let go of the store within `NEWER_BUILD_HANDOFF_MS`: the
+   * worker closes it now, and the newer build takes the store. The tab treats
+   * its connection as gone (and reconnects: as an older build, it reloads,
+   * or waits).
+   */
+  | { type: "closed-for-newer-build" }
   | { type: "relay-trace"; entries: BrowserRelayTrace[] }
   | { type: "error"; error: BrowserRelayError };

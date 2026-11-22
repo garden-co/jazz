@@ -93,23 +93,23 @@ this document or public receipts.
   retry loop. Publish the client and docs immediately before Cloud activation so
   an update is available before existing tenants move. Clearly tell alpha users
   that they must update their clients.
-- Merge the approved release PR only when ready: the publisher can trigger from
-  that merge. Avoid dispatching a duplicate publish run.
-- If manual dispatch is needed, use `publish-jazz-tools-alpha.yml` on the exact
-  `release` branch with `mode=publish`, `expected-sha=<exact merged version PR SHA>`
-  and `version=<expected source version>`. The workflow rejects a moved branch,
-  a different version, any other branch, or a commit that is not the merge of
-  `changeset-release/release` into `release`. Dry-runs may use feature branches.
-  Check workflow inputs before running it. Never publish from a mutable working tree.
+- Merge the approved release PR only when ready. Nothing publishes on the
+  merge: publish by dispatching `release-publish.yml` (below) for the merge
+  commit, once that `release` push's `release-artifacts.yml` run is green (or a
+  Version Packages run of the same tree can be reused). The old publisher
+  (`publish-jazz-tools-alpha.yml`) and its manual legs are retired; the file
+  remains only as the release candidate's preview dry run.
 - Watch individual jobs and inspect failure logs. Warm caches can shorten the run,
   but do not replace validation or guarantee identical artifacts.
 - On partial npm failure, inventory versions already published. Fix credentials or
   packaging, then retry through the publisher's existing-version handling. Never
   republish different bytes under an existing version.
 - Verify every expected npm package/version, native payload, dependency and dist-tag
-  using registry reads and installation. Since alpha.60 the publisher moves both
-  `alpha` and `latest` to the new version for every v2 package, so a plain
-  `npm install jazz-tools` gets v2 and Classic is `jazz-tools@0`. To roll `latest`
+  using registry reads and installation. Since alpha.61 the publishers (trusted
+  publishing) publish every v2 package straight to `latest`, so a plain
+  `npm install jazz-tools` gets v2 and Classic is `jazz-tools@0`. They can't
+  move any other dist-tag: `alpha` has stayed at 2.0.0-alpha.60 and only a
+  maintainer's `npm dist-tag add <pkg>@<version> alpha` (or `rm`) changes it. To roll `latest`
   back, run `npm dist-tag add <pkg>@<previous> latest` for each package. Confirm the source tag matches the exact
   released source. Build artifacts alone are not proof of npm publication.
 - Promote the verified docs deployment. The publisher stages and promotes the
@@ -142,6 +142,43 @@ this document or public receipts.
   measure when an intermediate state could create corrupt, incorrectly configured
   or unrecoverable tenants. A brief, intentional alpha wire mismatch in which old
   clients fail loudly is not by itself a reason for creation maintenance.
+
+## One-approval publish (release-publish.yml, being proven)
+
+`.github/workflows/release-publish.yml` publishes everything (npm, crates,
+Maven Central, Go, Swift, Inspector, GitHub release) with one run and one
+approval of the `publish` environment. It has published every release since
+2.0.0-alpha.68; the old per-registry workflows are retired:
+
+```sh
+gh workflow run release-publish.yml --ref main \
+  -f version=2.0.0-alpha.N -f sha=<release merge commit> -f mode=dry-run
+```
+
+- Before the approval it takes the prebuilt artifacts of a
+  `release-artifacts.yml` run on `release` or `changeset-release/*` that
+  built the published tree: the release commit's own run first, else the
+  Version Packages head's (a dry run may name old workflows' runs with
+  `legacy-run-ids` instead). It checks them, runs `cargo package` on every crate, embeds and
+  tests the Go module, and attaches every asset to the draft release (create
+  the draft with its notes first, with `github-release.yml`).
+- Every publish leg (npm, crates.io, Maven Central, Go tag, Swift mirror)
+  waits on `publish` at the same moment: approve them together. Inspector
+  stages and promotes after npm; the draft is published as Latest last.
+- Each leg skips what is already published: after a partial failure, use
+  "Re-run failed jobs" (the re-run waits for approval again).
+- `maven-publishing-type` is `AUTOMATIC`: the Maven leg returns once Central
+  is PUBLISHING, so the GitHub release goes public without waiting for
+  Central's ~11 min of publishing; the "Maven Central serves it" job then
+  waits (up to 45 min) for repo1.maven.org to serve both artifacts, and if
+  not, fails and adds a warning to the release notes. `USER_MANAGED` leaves it
+  validated for Publish in the Portal, as before. `maven-portal-dry-run` (dry run
+  only) uploads `USER_MANAGED`, waits for VALIDATED and drops it.
+- The run summary opens with the RC gate's verdict (`rc-verdict` of the
+  newest release-candidate.yml run on the Version Packages head): every HOLD
+  with its owner, to decide before approving. A NO-GO refuses the publish; a
+  gate run from before `rc-verdict` is reported as having no verdict.
+- The run summary has a timing table for every job.
 
 ## 5. Publish the GitHub Release and announcement
 
@@ -178,11 +215,10 @@ this document or public receipts.
 ## Current automation boundaries
 
 `changesets-release-pr.yml` creates versions/changelogs and the release PR; it does
-not publish. `publish-jazz-tools-alpha.yml` publishes packages and creates the
-source tag; `publish-jazz-crates-alpha.yml` then publishes the Rust crates (see "Rust crates
-on crates.io"). GitHub Release creation/publication is currently manual. Do not assume
-a green Changesets action or an existing tag means the packages or GitHub Release
-have been published.
+not publish. `release-publish.yml`, dispatched by hand, publishes every registry
+and then the GitHub Release (drafted first with `github-release.yml`). Do not
+assume a green Changesets action or an existing tag means the packages or the
+GitHub Release have been published.
 
 ## Rust crates on crates.io
 
@@ -198,7 +234,7 @@ The published crates are exactly the dependency closure of `jazz-app-support`,
 `node dev/scripts/publish-crates.mjs --list` prints them in publish order:
 
 ```
-jazz-alpha59-alpha60-dump  jazz-ruzstd  jazz-compression  jazz-text  jazz-types
+jazz-ruzstd  jazz-compression  jazz-text  jazz-types
 jazz-model  jazz-protocol  jazz-db  jazz-core  jazz-native-transport  jazz-app-support
 jazz-codegen  jazz-ffi  jazz-otel  jazz-server  jazz-tools  jazz-wasm-tracing
 ```
@@ -213,26 +249,21 @@ fork jazz-wasm uses), which is published last, at its own version. Published cra
 upstream `sqlite-wasm-rs`: the root `[patch.crates-io]` only applies inside
 this workspace (and only to wasm builds).
 
-`publish-jazz-crates-alpha.yml` runs when "Publish jazz-tools alpha" succeeds on
-`release`. It publishes only after npm has jazz-tools at that version and
-`v<version>` points at the release commit. It verifies every package
-(`cargo package`). Then, before publishing anything, it checks that every
+`release-publish.yml` publishes the crates (its `crates` leg, in the `publish`
+environment, with the other legs). Before the approval its `crates-verify` job
+verifies every package (`cargo package`). After it, the leg checks that every
 new crate's bootstrap token is set and that the OIDC exchange works, so a
-missing credential stops the run before it is half published. (The exchange
-succeeds if any existing crate trusts this workflow, so still do step 1
-below for jazz-tools.) It then publishes each crate in order, fetching a
-fresh OIDC token right before the first crate that needs one. A version already on
-crates.io is skipped, so a failed run can be re-run. For each crate it asks
-crates.io whether the crate exists:
+missing credential stops the run before it is half published, then publishes
+each crate in order, fetching a fresh OIDC token right before the first crate
+that needs one. A version already on crates.io is skipped, so a failed run can
+be re-run. For each crate it asks crates.io whether the crate exists:
 
 - **existing crates** are published with trusted publishing (OIDC);
 - **crates that don't exist yet** are published with the `publish`
   environment's `CRATES_IO_BOOTSTRAP_TOKEN` secret.
 
-To check a candidate without publishing, dispatch `publish-jazz-crates-alpha.yml` on the
-rc branch with `mode: dry-run`. It runs `cargo publish --dry-run` for every
-crate in dependency order, needs no credential, and runs outside the `publish`
-environment. A real manual run is `mode: publish` with `tag: v<version>`.
+To check a candidate without publishing, dispatch `release-publish.yml` with
+`mode=dry-run`: its crates leg runs `cargo publish --dry-run` for every crate.
 
 ### One-time bootstrap (first publish of new crates)
 
@@ -241,24 +272,26 @@ crates are published with a short-lived token the first time:
 
 1. **Before the run:** on crates.io, check that `jazz-tools` (it already
    exists) has a GitHub trusted publisher (Settings → Trusted Publishing) for
-   repository `garden-co/jazz`, workflow `publish-jazz-crates-alpha.yml`,
+   repository `garden-co/jazz`, workflow `release-publish.yml`,
    environment `publish`. One may exist since alpha.62; add it if not.
 2. **Create the token:** crates.io → Account Settings → API Tokens → New
    Token. Use the scope `publish-new`, an expiry of 1 day, and crate scopes
    for exactly the new crates. Store it as the `CRATES_IO_BOOTSTRAP_TOKEN`
    secret of the `publish` environment (Settings → Environments → publish).
-   Don't paste it anywhere else. The new crates are: jazz-alpha59-alpha60-dump,
+   Don't paste it anywhere else. The new crates are:
    jazz-ruzstd, jazz-compression, jazz-text, jazz-types, jazz-model,
    jazz-protocol, jazz-db, jazz-core, jazz-native-transport, jazz-app-support,
    jazz-codegen, jazz-ffi, jazz-otel, jazz-server.
-3. **Publish:** let `publish-jazz-crates-alpha.yml` run after the npm publish, or
-   dispatch it with `mode: publish`, `tag: v<version>`. The summary at the
-   end of its log shows which auth each crate used.
+3. **Publish:** `release-publish.yml`'s crates leg; the summary at the end of
+   its log shows which auth each crate used.
+   crates.io limits new crates to a burst of 5, then 1 every 10 minutes. On a
+   429 the script waits until the time crates.io names and retries, up to
+   `CRATES_IO_MAX_WAIT_MINUTES` (default 180), so one run publishes them all.
 4. **Afterwards, for every new crate:** add the same trusted publisher
-   (`garden-co/jazz`, `publish-jazz-crates-alpha.yml`, environment `publish`). Then
+   (`garden-co/jazz`, `release-publish.yml`, environment `publish`). Then
    delete the `CRATES_IO_BOOTSTRAP_TOKEN` secret and revoke the token on
    crates.io. Also add the `garden-co` owners team to each crate (`cargo
-owner --add github:garden-co:<team> <crate>`), so they aren't owned by one
+   owner --add github:garden-co:<team> <crate>`), so they aren't owned by one
    person only.
 5. From then on every crate publishes through OIDC. A crate added to the
    closure later needs steps 2 to 4 for that crate alone. Until then, the
@@ -270,24 +303,14 @@ owner --add github:garden-co:<team> <crate>`), so they aren't owned by one
 `jazz-kotlin-android` (the AAR) publish to Maven Central as
 `tools.jazz:jazz-kotlin` and `tools.jazz:jazz-kotlin-android`, at jazz-tools'
 version (the Gradle builds read it from `packages/jazz-tools/package.json`).
-`.github/workflows/publish-jazz-kotlin.yml` runs `dev/scripts/publish-kotlin.sh`.
+`release-artifacts.yml` builds both (`dev/scripts/publish-kotlin.sh <natives>
+local`, from the same natives as the release's `libjazz_ffi` archives), and
+`release-publish.yml`'s Maven leg re-signs them with the release key and
+uploads them through the Central Portal API (`AUTOMATIC` by default).
+`.github/workflows/publish-jazz-kotlin.yml` remains as the pull-request proof
+and a manual dry run (`mode=dry-run`); it publishes nothing.
 
-1. **After "Attach language artifacts" and the GitHub Release are published,**
-   dispatch "Publish jazz-kotlin" with `mode=dry-run`, `tag=v<version>`. It
-   builds `refs/tags/v<version>`'s commit (never a branch of that name) with
-   the pinned JDK and Gradle 8.14.3: the jar from the release's
-   `libjazz_ffi-<platform>.tar.gz` (checked against `SHA256SUMS-languages`,
-   their build-provenance attestations, and `libjazz_ffi-source.txt` naming
-   that commit) and the AAR. It signs both with a throwaway key and checks
-   every file, POM and signature. Its artifact is what Central would get.
-2. **Publish:** dispatch it with `mode=publish`, `tag=v<version>`. The `publish`
-   environment's reviewer approves; it reads `MAVEN_CENTRAL_USERNAME` and
-   `MAVEN_CENTRAL_PASSWORD` (a Central Portal user token) and
-   `MAVEN_SIGNING_KEY` / `MAVEN_SIGNING_KEY_PASSWORD`. One Gradle run builds,
-   signs and uploads; the same checks then run on those files. The two
-   deployments wait, validated, on central.sonatype.com → Publish →
-   Deployments: once the run is green, check them and press Publish.
-3. A published version can't be replaced or deleted on Central. A failed run
+1. A published version can't be replaced or deleted on Central. A failed run
    publishes nothing; drop any deployment it left in the portal.
 
 The artifacts are signed by the release key, RSA 4096, `Jazz Releases

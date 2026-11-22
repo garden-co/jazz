@@ -1,4 +1,5 @@
 import { optionalPeerImportError } from "./optional-peer.js";
+import { backendNative } from "./backend-native.js";
 
 /** What jazz-tools uses of the `ws` package. */
 export interface WsPackage {
@@ -15,7 +16,7 @@ export interface WsPackage {
  */
 export async function importWs(feature: string): Promise<WsPackage> {
   try {
-    return (await import(/* @vite-ignore */ "ws")) as unknown as WsPackage;
+    return (await backendNative().importPeer("ws")) as unknown as WsPackage;
   } catch (error) {
     throw optionalPeerImportError(feature, "ws", error);
   }

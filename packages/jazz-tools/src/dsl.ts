@@ -119,13 +119,12 @@ type AllowedColumnMergeStrategy<
   Optional extends boolean,
 > = Optional extends true
   ? "lww" | (Sql extends "TEXT" ? TextMergeStrategy : never)
-  :
-      | "lww"
-      | {
-          [Strategy in keyof MergeStrategyColumnType]: Sql extends MergeStrategyColumnType[Strategy]
-            ? Strategy
-            : never;
-        }[keyof MergeStrategyColumnType];
+  : | "lww"
+    | {
+        [Strategy in keyof MergeStrategyColumnType]: Sql extends MergeStrategyColumnType[Strategy]
+          ? Strategy
+          : never;
+      }[keyof MergeStrategyColumnType];
 type ColumnDefaultValue<Sql extends SqlType> = Sql extends "TIMESTAMP"
   ? Date | number
   : TSInitFromSqlType<Sql>;
