@@ -5,8 +5,8 @@ import {
   JazzClientProvider as JazzProvider,
   JazzDbProvider as ConfiguredJazzProvider,
   useDb,
-  useSession,
 } from "../../src/react-core/provider.js";
+import { useJazzSession } from "../../src/react-core/session.js";
 import { useAll, useAllSuspense } from "../../src/react-core/use-all.js";
 import {
   SubscriptionsOrchestrator,
@@ -98,6 +98,7 @@ function publicSession(
 ): PublicSession {
   return Object.freeze({
     user: canonicalAuthorSubject(issuer, subject),
+    identity: Object.freeze({ issuer, subject }),
     claims: Object.freeze({ ...claims, iss: issuer, sub: subject }),
     authMode: "external",
   });
@@ -211,7 +212,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("db-identity", "same");
   });
 
-  it("RCB-B03: useSession returns null when session is absent", async () => {
+  it("RCB-B03: useJazzSession().user is null when session is absent", async () => {
     const client = makeClient({ session: undefined });
 
     render(
@@ -223,7 +224,7 @@ describe("react-core provider/hooks browser coverage", () => {
     await expectText("session", "null");
   });
 
-  it("RCB-B04: useSession returns session when present", async () => {
+  it("RCB-B04: useJazzSession().user is the session user when present", async () => {
     const session = publicSession("https://issuer.example", "user-123", { role: "writer" });
     const client = makeClient({ session });
 
@@ -239,7 +240,7 @@ describe("react-core provider/hooks browser coverage", () => {
     );
   });
 
-  it("RCB-B04A: useSession reacts to db auth-state changes", async () => {
+  it("RCB-B04A: useJazzSession().user reacts to db auth-state changes", async () => {
     const db = createAuthAwareDb(
       publicSession("https://issuer.example", "alice", { role: "reader" }),
     );
@@ -642,7 +643,6 @@ describe("react-core provider/hooks browser coverage", () => {
   it("RCB-B13: hook usage outside provider throws expected invariant error", async () => {
     const cases: Array<{ key: string; element: React.ReactNode }> = [
       { key: "useDb", element: <OutsideProviderDbView /> },
-      { key: "useSession", element: <OutsideProviderSessionView /> },
       { key: "useAll", element: <OutsideProviderUseAllView /> },
       { key: "useAllSuspense", element: <OutsideProviderUseAllSuspenseView /> },
     ];
@@ -693,24 +693,24 @@ function DbIdentityView({ expected }: { expected: unknown }) {
 }
 
 function SessionView() {
-  const session = useSession();
+  const { user } = useJazzSession();
   return (
-    <div data-testid="session" data-user={session?.user}>
-      {session ? session.user : "null"}
+    <div data-testid="session" data-user={user?.accountId}>
+      {user ? user.accountId : "null"}
     </div>
   );
 }
 
 function SessionPairView() {
-  const sessionA = useSession();
-  const sessionB = useSession();
+  const userA = useJazzSession().user;
+  const userB = useJazzSession().user;
   return (
     <>
-      <div data-testid="session-a" data-user={sessionA?.user}>
-        {sessionA ? sessionA.user : "null"}
+      <div data-testid="session-a" data-user={userA?.accountId}>
+        {userA ? userA.accountId : "null"}
       </div>
-      <div data-testid="session-b" data-user={sessionB?.user}>
-        {sessionB ? sessionB.user : "null"}
+      <div data-testid="session-b" data-user={userB?.accountId}>
+        {userB ? userB.accountId : "null"}
       </div>
     </>
   );
@@ -752,11 +752,6 @@ function UseAllSuspenseView({
 function OutsideProviderDbView() {
   useDb();
   return <div data-testid="outside-db">ok</div>;
-}
-
-function OutsideProviderSessionView() {
-  useSession();
-  return <div data-testid="outside-session">ok</div>;
 }
 
 function OutsideProviderUseAllView() {

@@ -4,7 +4,6 @@ export {
   JazzClientProvider,
   useDb,
   useJazzClient,
-  useSession,
   type JazzClientProviderProps,
 } from "./provider.js";
 export { useAll, useAllSuspense, type UseAllResult, type UseAllSuspenseResult } from "./use-all.js";
