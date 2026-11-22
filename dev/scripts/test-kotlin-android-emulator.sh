@@ -65,7 +65,7 @@ package=tools.jazz.smoke
 console_port=5584
 export ANDROID_ADB_SERVER_PORT=5647 ANDROID_SERIAL="emulator-$console_port"
 adb="$sdk/platform-tools/adb"
-emulator_pid='' server_pid='' relay_pid=''
+emulator_pid='' host_build_pid='' server_pid='' relay_pid=''
 passed=false
 cleanup() {
   if [ "$passed" != true ]; then
@@ -78,7 +78,7 @@ cleanup() {
     echo "--- the server's and the relay's logs" >&2
     tail -n 30 "$work/server.log" "$work/relay.log" >&2 2>/dev/null || true
   fi
-  for pid in $relay_pid $server_pid $emulator_pid; do kill "$pid" 2>/dev/null || true; done
+  for pid in $host_build_pid $relay_pid $server_pid $emulator_pid; do kill "$pid" 2>/dev/null || true; done
   if [ -n "$emulator_pid" ]; then
     for _ in $(seq 50); do kill -0 "$emulator_pid" 2>/dev/null || break; sleep 0.2; done
     kill -KILL "$emulator_pid" 2>/dev/null || true
@@ -131,18 +131,21 @@ fi
 echo "testing $(sha256sum "$published/$artifact/$version/$artifact-$version.aar")"
 mark "AAR ready"
 
+# The host's server and relay build beside the app, whose build runs no cargo.
+(
+  if [ -z "${JAZZ_TOOLS:-}" ]; then cargo build -p jazz-tools --bin jazz-tools; fi
+  if [ -z "${JAZZ_APP_TEST_RELAY:-}" ]; then
+    cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay
+  fi
+) &
+host_build_pid=$!
 gradle --no-daemon --console=plain -p "$app" \
   -PjazzRepository="$work/repository" -PjazzVersion="$version" assembleRelease
 mark "app built"
-
-if [ -z "${JAZZ_TOOLS:-}" ]; then
-  cargo build -p jazz-tools --bin jazz-tools
-  JAZZ_TOOLS="${CARGO_TARGET_DIR:-target}/debug/jazz-tools"
-fi
-if [ -z "${JAZZ_APP_TEST_RELAY:-}" ]; then
-  cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay
-  JAZZ_APP_TEST_RELAY="${CARGO_TARGET_DIR:-target}/debug/jazz-app-test-relay"
-fi
+wait "$host_build_pid" || fail "the server or the relay didn't build"
+host_build_pid=''
+JAZZ_TOOLS="${JAZZ_TOOLS:-${CARGO_TARGET_DIR:-target}/debug/jazz-tools}"
+JAZZ_APP_TEST_RELAY="${JAZZ_APP_TEST_RELAY:-${CARGO_TARGET_DIR:-target}/debug/jazz-app-test-relay}"
 
 # The app's backend, a test harness: a Jazz server and the stand-in for a
 # backend's Jazz endpoint, which publishes StagePlan's permissions.
