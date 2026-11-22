@@ -1,6 +1,7 @@
 package smoke
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import jazzapp.NewShow
@@ -12,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -26,7 +28,7 @@ import tools.jazz.Storage
 import tools.jazz.WriteTier
 import java.io.File
 
-private const val TAG = "JazzSmoke"
+internal const val TAG = "JazzSmoke"
 
 /**
  * One phase of the smoke test per launch (dev/scripts/test-kotlin-android-emulator.sh
@@ -36,7 +38,8 @@ private const val TAG = "JazzSmoke"
  * - `write`: opens a persistent app, writes, watches and syncs, is refused as
  *   another user, writes offline and closes.
  * - `restart`: a new process reads it all from the store, syncs the offline
- *   write to a second client, and deletes the store.
+ *   write to a second client, is refused deleting the store while a second
+ *   process holds it ([HolderService]), then deletes it.
  *
  * Everything is called from the main thread, as an app would: the calls say
  * they are main-safe. [Jazz.close] is the exception, so it is moved off it.
@@ -47,14 +50,17 @@ class SmokeActivity : Activity() {
         fun extra(name: String): String = requireNotNull(intent.getStringExtra(name)) { "no $name extra" }
         val run = extra("run")
         val phase = extra("phase")
-        val smoke = Smoke(filesDir, extra("endpoint"), extra("appId"))
+        val endpoint = extra("endpoint")
+        val appId = extra("appId")
+        val smoke = Smoke(filesDir, endpoint, appId)
+        val holder = Intent(this, HolderService::class.java).putExtra("endpoint", endpoint).putExtra("appId", appId)
         // Not the activity's scope: a phase ends only by passing or failing.
         CoroutineScope(Dispatchers.Main).launch {
             try {
                 withTimeout(120_000) {
                     when (phase) {
                         "write" -> smoke.write()
-                        "restart" -> smoke.restart()
+                        "restart" -> smoke.restart(hold = { startService(holder) }, letGo = { stopService(holder) })
                         else -> error("no phase $phase")
                     }
                 }
@@ -66,7 +72,7 @@ class SmokeActivity : Activity() {
     }
 }
 
-private class Smoke(private val files: File, private val endpoint: String, private val appId: String) {
+internal class Smoke(private val files: File, private val endpoint: String, private val appId: String) {
     private val store = File(files, "jazz")
     private val savedShow = File(files, "show")
 
@@ -79,6 +85,9 @@ private class Smoke(private val files: File, private val endpoint: String, priva
             auth = auth,
         ),
     )
+
+    /** The signed-in user's app on the persistent store. */
+    suspend fun openPersistent(): Jazz = open(user("smoke"), store)
 
     private fun user(name: String) = JazzAuth.Bearer { "token-$name" }
 
@@ -139,12 +148,11 @@ private class Smoke(private val files: File, private val endpoint: String, priva
         step("close")
     }
 
-    suspend fun restart() {
+    suspend fun restart(hold: () -> Unit, letGo: () -> Unit) {
         val show = savedShow.readText()
         val tasks = Tasks.where(Tasks.showId eq show)
         val expected = setOf("Synced", "Offline")
-        val jazz = open(user("smoke"), store)
-        using(jazz) {
+        using(openPersistent()) { jazz ->
             val stored = jazz.all(tasks, ReadTier.Local).map { it.title }.toSet()
             check(stored == expected) { "after a restart the store has $stored" }
             step("read from the store after a process restart")
@@ -154,9 +162,29 @@ private class Smoke(private val files: File, private val endpoint: String, priva
             }
             step("the offline write synced to a second client")
 
-            jazz.deleteClientStorage()
-            check(!File(store, "jazz.sqlite").exists()) { "deleteClientStorage left the store" }
-            step("delete the store")
+            val held = File(files, HolderService.HELD)
+            hold()
+            while (!held.exists()) delay(100)
+            try {
+                jazz.deleteClientStorage()
+                error("deleted the store another process holds")
+            } catch (e: JazzException.Refused) {
+                check(File(store, "jazz.sqlite").exists()) { "a refused delete removed the store" }
+                step("delete refused while another process holds the store")
+            }
+            letGo()
+            while (held.exists()) delay(100)
         }
+        // The refusal closed that app. The other process takes a moment to die.
+        while (true) {
+            try {
+                using(openPersistent()) { it.deleteClientStorage() }
+                break
+            } catch (e: JazzException.Refused) {
+                delay(200)
+            }
+        }
+        check(!File(store, "jazz.sqlite").exists()) { "deleteClientStorage left the store" }
+        step("delete the store")
     }
 }
