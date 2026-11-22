@@ -1181,7 +1181,7 @@ impl<'a> Ctx<'a> {
         shadow: &str,
         column: &str,
         cap: usize,
-    ) -> Result<(String, String, Vec<Sql>), Error> {
+    ) -> Result<(String, Vec<Sql>), Error> {
         self.search_cut()?;
         if query.flat_join.is_some()
             || !query.policy_branches.is_empty()
@@ -1196,14 +1196,39 @@ impl<'a> Ctx<'a> {
         let source = self.source(table)?;
         let cap = self.bind(Sql::Integer(cap as i64));
         let wheres = and(&wheres);
-        let plain = format!("SELECT t.rid FROM {source} AS t WHERE {wheres}");
         let sql = format!(
             "SELECT t.rid, t.id, s.{} FROM {source} AS t JOIN {} AS s ON s.rid = t.rid \
              WHERE {wheres} ORDER BY t.rid LIMIT {cap}",
             quote(column),
             quote(shadow)
         );
-        Ok((sql, plain, self.params))
+        Ok((sql, self.params))
+    }
+
+    /// The rows of `query`'s table this read may see, for a search's caps
+    /// to count (SPEC 20.7): the view it reads, the live rows, the read
+    /// policy; not the query's other clauses, which a text search's cost
+    /// does not shrink with. `None` when no policy applies (a replica
+    /// reading for itself, the system).
+    pub(crate) fn compile_readable(
+        mut self,
+        query: &Query,
+    ) -> Result<Option<crate::ix::Readable>, Error> {
+        let Some(session) = self.policy.filter(|session| !session.system) else {
+            return Ok(None);
+        };
+        self.search_cut()?;
+        // As a whole query's policy is (`compile_query`): a relation's body
+        // runs once, not again for every posting it is asked about.
+        self.lift_row_keys = true;
+        let table = self.table(&query.table)?;
+        let source = self.source(table)?;
+        let policy = self.read_policy(table, "t", session)?;
+        Ok(Some(crate::ix::Readable {
+            source,
+            cond: format!("(t._state & {STATE_DELETED}) = 0 AND {policy}"),
+            params: self.params,
+        }))
     }
 
     /// A plain query's root table (read as `t`), its projection, and the

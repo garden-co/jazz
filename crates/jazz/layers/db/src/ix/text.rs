@@ -135,52 +135,61 @@ impl Kind for Text {
         Ok(())
     }
 
-    fn admit(&self, conn: &Storage, prefix: &str, op: &IndexOp) -> Result<(), Error> {
+    fn capped(&self) -> bool {
+        true
+    }
+
+    fn admit(
+        &self,
+        conn: &Storage,
+        prefix: &str,
+        op: &IndexOp,
+        readable: Option<&super::Readable>,
+    ) -> Result<(), Error> {
         let query = self.query(op)?;
         let terms = quote(&shadow(prefix, "terms"));
         let post = quote(&shadow(prefix, "post"));
-        // Each cap reads at most one row past it, so checking costs no more
-        // than the cap (SPEC 20.12).
+        let of_reader: Vec<Sql> = readable.map(|r| r.params.clone()).unwrap_or_default();
+        // Each cap stops one past it. Under a policy that is one past it in
+        // readable rows: what the reader may not read is passed over, at
+        // the cost of a policy check each, and never counted (SPEC 20.7,
+        // 20.12).
         if let Some(last) = &query.prefix {
-            let (range, params) = prefix_range("term", last);
+            let mut params = of_reader.clone();
+            let range = prefix_range("ix_t.term", last, &mut params);
+            let held = readable
+                .map(|r| {
+                    format!(
+                        " AND EXISTS (SELECT 1 FROM {post} AS ix_p WHERE ix_p.tid = ix_t.tid AND {})",
+                        r.exists("ix_p.rid")
+                    )
+                })
+                .unwrap_or_default();
             let sql = format!(
-                "SELECT count(*) FROM (SELECT 1 FROM {terms} WHERE {range} LIMIT {})",
+                "SELECT count(*) FROM (SELECT 1 FROM {terms} AS ix_t WHERE {range}{held} LIMIT {})",
                 PREFIX_TERMS_MAX + 1
             );
-            let expanded: i64 = conn
-                .prepare_cached(&sql)
-                .and_then(|mut s| {
-                    s.query_row(crate::storage::params_from_iter(params.iter()), |r| {
-                        r.get(0)
-                    })
-                })
-                .map_err(storage)?;
-            if expanded as usize > PREFIX_TERMS_MAX {
+            if counted(conn, &sql, &params)? > PREFIX_TERMS_MAX {
                 return Err(super::too_broad(format!(
                     "the prefix `{}` matches more than {PREFIX_TERMS_MAX} indexed terms; type more of it",
                     last.lo
                 )));
             }
         }
-        let mut params = Vec::new();
+        let mut params = of_reader;
         let sources = sources(&terms, &query, &mut |value| {
             params.push(value);
             format!("?{}", params.len())
         });
+        let held = readable
+            .map(|r| format!(" WHERE {}", r.exists("ix_p.rid")))
+            .unwrap_or_default();
         let sql = format!(
-            "SELECT count(*) FROM (SELECT 1 FROM (SELECT DISTINCT tid FROM ({sources})) AS q \
-             JOIN {post} AS p ON p.tid = q.tid LIMIT {})",
+            "SELECT count(*) FROM (SELECT 1 FROM (SELECT DISTINCT tid FROM ({sources})) AS ix_q \
+             JOIN {post} AS ix_p ON ix_p.tid = ix_q.tid{held} LIMIT {})",
             postings_cap() + 1
         );
-        let postings: i64 = conn
-            .prepare(&sql)
-            .and_then(|mut s| {
-                s.query_row(crate::storage::params_from_iter(params.iter()), |r| {
-                    r.get(0)
-                })
-            })
-            .map_err(storage)?;
-        if postings as usize > postings_cap() {
+        if counted(conn, &sql, &params)? > postings_cap() {
             return Err(super::too_broad(format!(
                 "the search would read more than {} postings; use rarer words",
                 postings_cap()
@@ -278,20 +287,32 @@ impl Text {
 }
 
 /// The prefix slot's condition on column `column`: the whole-word term or
-/// any term in the folded word's range, and its parameters in order.
-fn prefix_range(column: &str, last: &PrefixTerm) -> (String, Vec<Sql>) {
-    let mut params = vec![
-        Sql::Text(last.exact.clone().into_bytes()),
-        Sql::Text(last.lo.clone().into_bytes()),
-    ];
-    let range = match &last.hi {
-        Some(hi) => {
-            params.push(Sql::Text(hi.clone().into_bytes()));
-            format!("({column} = ?1 OR ({column} >= ?2 AND {column} < ?3))")
-        }
-        None => format!("({column} = ?1 OR {column} >= ?2)"),
+/// any term in the folded word's range. Its parameters join `params`.
+fn prefix_range(column: &str, last: &PrefixTerm, params: &mut Vec<Sql>) -> String {
+    let mut bind = |text: &str| {
+        params.push(Sql::Text(text.as_bytes().to_vec()));
+        format!("?{}", params.len())
     };
-    (range, params)
+    let (exact, lo) = (bind(&last.exact), bind(&last.lo));
+    match &last.hi {
+        Some(hi) => {
+            let hi = bind(hi);
+            format!("({column} = {exact} OR ({column} >= {lo} AND {column} < {hi}))")
+        }
+        None => format!("({column} = {exact} OR {column} >= {lo})"),
+    }
+}
+
+/// A capped count: `sql`'s one integer.
+fn counted(conn: &Storage, sql: &str, params: &[Sql]) -> Result<usize, Error> {
+    conn.prepare_cached(sql)
+        .and_then(|mut s| {
+            s.query_row(crate::storage::params_from_iter(params.iter()), |r| {
+                r.get::<_, i64>(0)
+            })
+        })
+        .map(|n| n as usize)
+        .map_err(storage)
 }
 
 /// `(tid, slot)` of every indexed term a query slot matches: its whole

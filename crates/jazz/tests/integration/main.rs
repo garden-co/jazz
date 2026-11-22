@@ -209,6 +209,8 @@ mod shared_sqlite;
 mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
+#[path = "../specialised_index_admission.rs"]
+mod specialised_index_admission;
 #[path = "../specialised_index_builds.rs"]
 mod specialised_index_builds;
 #[path = "../specialised_index_kinds.rs"]

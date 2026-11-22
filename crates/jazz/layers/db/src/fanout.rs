@@ -1368,7 +1368,15 @@ impl Inner {
                         stored_canon(governing.column(&column), value, &self.kept_variants)?;
                     Some((governing.stored_name(&column).to_owned(), value))
                 });
+            // A text search's caps count every readable row holding its
+            // words, whatever the query's other filters say: a write outside
+            // the filter's key still has to wake it, or a later write would
+            // decide when it is refused (SPEC 20.7). The key the read policy
+            // pins stays: rows outside it are not readable.
+            let counts_past_filters = crate::ix::search_of(query)
+                .is_some_and(|search| matches!(search.op, crate::query::IndexOp::Match { .. }));
             root_key(query, &prepared.binding)
+                .filter(|_| !counts_past_filters)
                 // Only an application column is in a changed row's image;
                 // a key on anything else (`$createdBy.identity.subject`,
                 // `id`) would never be hit.
@@ -2363,6 +2371,10 @@ impl Inner {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
+        // (After the narrowed plan, which drained the index's queue.)
+        if let Err(error) = self.admit_recheck(&group.prepared, group.identity, &read) {
+            return Some(Err(error));
+        }
         // Relations of the changed roots only; the others' are unchanged.
         let fresh = match self.nest_relations_kept(
             &group.prepared,

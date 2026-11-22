@@ -5297,9 +5297,6 @@ impl Inner {
             .and_then(crate::ix::search_of)
             .unwrap_or(search);
         crate::ix::check_declaration(&index, search)?;
-        // A search that would cost more than its kind allows is refused
-        // before it runs (SPEC 20.12).
-        index.kind.admit(&self.conn, &index.prefix, &search.op)?;
         if crate::ix::has_queued(&self.conn)? {
             self.conn.scope("jazz_ix_drain", crate::ix::drain)?;
         }
@@ -5314,28 +5311,28 @@ impl Inner {
                 return Err(crate::ix::building(&table.name, &index.decl.name));
             }
         }
+        // A search over its kind's caps is refused before it runs (SPEC
+        // 20.12). They are counted once the index is built and its queue
+        // drained, so from the rows as they are now, and only from those
+        // the reader may read (SPEC 20.7).
+        let readable = if index.kind.capped() {
+            self.read_ctx(prepared, policy, claims, read)
+                .compile_readable(&prepared.query)?
+        } else {
+            None
+        };
+        index
+            .kind
+            .admit(&self.conn, &index.prefix, &search.op, readable.as_ref())?;
         if !crate::ix::is_scored(&index.decl.kind) {
             return Ok(crate::ix::Planned::Sql {
                 index,
                 op: search.op.clone(),
             });
         }
-        let scorer = match index.kind.plan(&index.prefix, &search.op, &mut |_| {
-            unreachable!("a Rust-scored kind binds nothing")
-        })? {
-            crate::ix::Candidates::Scored(scorer) => scorer,
-            crate::ix::Candidates::Sql(_) => {
-                return Err(crate::values::query_error(
-                    "a vector kind planned SQL candidates",
-                ));
-            }
-        };
-        let (part, column) = scorer.payload();
-        let shadow = crate::ix::shadow(&index.prefix, part);
         let cap = crate::ix::vector_cap();
-        let (sql, plain, params) = self
-            .read_ctx(prepared, policy, claims, read)
-            .compile_candidates(&prepared.query, &shadow, column, cap + 1)?;
+        let (scorer, sql, params) =
+            self.scored_candidates(prepared, policy, claims, read, &index, search, cap + 1)?;
         // Filter-first (SPEC 20.5): a node answering for others (the
         // authority, a relay or server serving subscribers) scores only rows
         // the query's clauses narrow through a B-tree index, or the search
@@ -5345,7 +5342,6 @@ impl Inner {
         if answers_for_others && !crate::ix::narrows(table, &prepared.query) {
             return Err(crate::ix::vector_unbounded(&table.name, &index.decl.name));
         }
-        let _ = plain;
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let mut rows = statement
             .query(params_from_iter(params.iter()))
@@ -5367,6 +5363,87 @@ impl Inner {
             scored,
             scorer.k(),
         )))
+    }
+
+    /// A Rust-scored search's scorer, and the statement reading at most
+    /// `limit` of its candidates: the rows the reader may read that the
+    /// query's other clauses keep.
+    #[allow(clippy::too_many_arguments)]
+    fn scored_candidates(
+        &self,
+        prepared: &PreparedQuery,
+        policy: Option<&Session>,
+        claims: &Session,
+        read: &ReadSpec,
+        index: &crate::ix::Index,
+        search: &crate::query::IndexSearch,
+        limit: usize,
+    ) -> Result<(Box<dyn crate::ix::Scorer>, String, Vec<Sql>), Error> {
+        let scorer = match index.kind.plan(&index.prefix, &search.op, &mut |_| {
+            unreachable!("a Rust-scored kind binds nothing")
+        })? {
+            crate::ix::Candidates::Scored(scorer) => scorer,
+            crate::ix::Candidates::Sql(_) => {
+                return Err(crate::values::query_error(
+                    "a vector kind planned SQL candidates",
+                ));
+            }
+        };
+        let (part, column) = scorer.payload();
+        let shadow = crate::ix::shadow(&index.prefix, part);
+        let (sql, params) = self
+            .read_ctx(prepared, policy, claims, read)
+            .compile_candidates(&prepared.query, &shadow, column, limit)?;
+        Ok((scorer, sql, params))
+    }
+
+    /// The candidate cap of a live nearest search whose changed rows are
+    /// re-checked alone (SPEC 20.8): that scores only those rows, so the
+    /// cap is counted here, over the whole query, at every change. A live
+    /// search is then refused at the readable change that takes it over,
+    /// never at a later one that happens to re-run it.
+    pub(crate) fn admit_recheck(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<(), Error> {
+        let Some(search) = crate::ix::search_of(&prepared.query) else {
+            return Ok(());
+        };
+        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let table = schema.table(&prepared.query.table)?;
+        let index = crate::ix::index_for(&self.conn, table, search)?;
+        // (A kind that plans in SQL is admitted whenever it is planned.)
+        if !crate::ix::is_scored(&index.decl.kind) {
+            return Ok(());
+        }
+        let (policy, claims) = self.read_sessions(prepared, identity);
+        let cap = crate::ix::vector_cap();
+        let (_, sql, params) = self.scored_candidates(
+            prepared,
+            policy.as_ref(),
+            &claims,
+            read,
+            &index,
+            search,
+            cap + 1,
+        )?;
+        let candidates: i64 = self
+            .conn
+            .query_row(
+                &format!("SELECT count(*) FROM ({sql})"),
+                params_from_iter(params.iter()),
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if candidates as usize > cap {
+            return Err(crate::ix::candidates_over_cap(
+                &table.name,
+                &index.decl.name,
+            ));
+        }
+        Ok(())
     }
 
     /// A read at a past cut (a serializable snapshot, a snapshot reference,

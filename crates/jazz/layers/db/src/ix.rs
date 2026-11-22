@@ -128,9 +128,22 @@ pub(crate) trait Kind {
         rid: i64,
         cells: Option<&[Cell]>,
     ) -> Result<(), Error>;
-    /// Refuse `op` before it runs if it would cost more than the kind's
-    /// caps allow (SPEC 20.12): a typed error, never a long scan.
-    fn admit(&self, _conn: &Storage, _prefix: &str, _op: &IndexOp) -> Result<(), Error> {
+    /// Whether [`Self::admit`] counts anything, and so needs the rows the
+    /// reader may read.
+    fn capped(&self) -> bool {
+        false
+    }
+    /// Refuse `op` before it runs if it is over the kind's caps (SPEC
+    /// 20.12): a typed error. A cap counts only `readable` rows, when a
+    /// read policy applies, so no refusal depends on a row the reader may
+    /// not read (SPEC 20.7).
+    fn admit(
+        &self,
+        _conn: &Storage,
+        _prefix: &str,
+        _op: &IndexOp,
+        _readable: Option<&Readable>,
+    ) -> Result<(), Error> {
         Ok(())
     }
     /// Plan `op` (already checked against the declaration by query
@@ -268,6 +281,27 @@ pub(crate) fn candidates_over_cap(table: &str, index: &str) -> Error {
 // ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
+
+/// The rows of a searched table that a reader may read, as a correlated
+/// condition on a `rid`. Its SQL numbers its parameters from `?1`, so a
+/// statement using it binds [`Self::params`] first.
+pub(crate) struct Readable {
+    /// The table as this read sees it (its branch view included).
+    pub source: String,
+    /// Liveness and the read policy, over the source as `t`.
+    pub cond: String,
+    pub params: Vec<Sql>,
+}
+
+impl Readable {
+    /// The condition that `rid` (an SQL expression) is a readable row.
+    pub(crate) fn exists(&self, rid: &str) -> String {
+        format!(
+            "EXISTS (SELECT 1 FROM {} AS t WHERE t.rid = {rid} AND {})",
+            self.source, self.cond
+        )
+    }
+}
 
 /// One maintained index.
 pub(crate) struct Index {
