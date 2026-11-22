@@ -291,7 +291,7 @@ crates are published with a short-lived token the first time:
    (`garden-co/jazz`, `release-publish.yml`, environment `publish`). Then
    delete the `CRATES_IO_BOOTSTRAP_TOKEN` secret and revoke the token on
    crates.io. Also add the `garden-co` owners team to each crate (`cargo
-owner --add github:garden-co:<team> <crate>`), so they aren't owned by one
+   owner --add github:garden-co:<team> <crate>`), so they aren't owned by one
    person only.
 5. From then on every crate publishes through OIDC. A crate added to the
    closure later needs steps 2 to 4 for that crate alone. Until then, the
