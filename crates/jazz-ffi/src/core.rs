@@ -1190,8 +1190,8 @@ impl Core {
     }
 
     /// Closes the app and deletes its local store (TS's
-    /// `deleteClientStorage`). Refused (the app left open) while another
-    /// open app holds the same store.
+    /// `deleteClientStorage`). It holds the store's lock until the files
+    /// are gone.
     pub fn delete_client_storage(&self) -> Result<()> {
         let jazz = self.open_jazz()?;
         if self.derived {
@@ -1208,8 +1208,8 @@ impl Core {
             Ok(())
         }));
         let deleted = block_on(jazz.delete_client_storage());
-        // Refused as held by another process, the client has stopped all
-        // the same; by another app here, it runs on.
+        // Refused as held, only an app that had stopped already is stopped:
+        // while it runs nothing else can hold its store.
         let stopped = || block_on(jazz.with_client(|_| async { Ok(()) })).is_err();
         if !matches!(deleted, Err(jazz_app_support::Error::StoreHeld(..))) || stopped() {
             self.closed.store(true, Ordering::Release);
@@ -1283,6 +1283,11 @@ impl Core {
     /// `None`, or a zero timeout, closes at once.
     pub fn close_within(&self, timeout: Option<std::time::Duration>) -> Result<()> {
         let drain = timeout.filter(|t| !t.is_zero() && !self.derived);
+        // Before `closed` is set: a second close returns at once, and an open
+        // of the store right after it must wait for this one, not be refused.
+        if !self.derived {
+            self.jazz.begin_stopping();
+        }
         // The host's callbacks stop here, even when signing out already
         // ended the app; but after draining, which may need a fresh token.
         if drain.is_none() {

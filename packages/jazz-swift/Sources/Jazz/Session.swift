@@ -248,9 +248,7 @@ extension Client {
 
     /// Rolls back open transactions, closes the app and deletes its local
     /// store (TS's `deleteClientStorage`): the next open starts empty and
-    /// syncs again. Writes the server hasn't accepted yet are lost. Throws
-    /// `JazzError.refused`, leaving the app open (open transactions are
-    /// still rolled back), while another open app holds the same `dataDir`.
+    /// syncs again. Writes the server hasn't accepted yet are lost.
     public func deleteClientStorage() async throws {
         try await Self.typed { try await Self.run { try self.handle.deleteClientStorage() } }
     }

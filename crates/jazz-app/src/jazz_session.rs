@@ -163,10 +163,11 @@ pub struct SessionConfig {
     /// [`Storage::Dir`] keeps each account's store in a directory of its
     /// own under it (`<dir>/<account id>/`), and the device account's key
     /// in `<dir>/device.key`. [`Storage::Memory`] keeps both for the life
-    /// of the process. [`Jazz::delete_client_storage`] on a session's
-    /// client deletes that account's store only (and is refused with
-    /// [`Error::StoreHeld`] while another open client holds it); the device
-    /// key survives signing out.
+    /// of the process. One client at a time has an account's store open: a
+    /// second session, or client, of the same account and directory fails
+    /// with [`Error::StoreHeld`]. [`Jazz::delete_client_storage`] on a
+    /// session's client deletes that account's store only; the device key
+    /// survives signing out.
     pub storage: Storage,
     /// The app's own auth: who its backend should sign in.
     pub bearer: Option<Bearer>,
