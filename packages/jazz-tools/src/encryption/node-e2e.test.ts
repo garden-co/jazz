@@ -217,6 +217,14 @@ describe("encryption on Node, end to end", () => {
     }
   }, 90_000);
 
+  it("lists a device's published removal request", async () => {
+    const alice = await device(await serve());
+    const mine = async () => (await alice.db.encryption.devices.list()).find((d) => d.isThisDevice);
+    expect((await mine())?.removalRequested).toBe(false);
+    await alice.db.encryption.devices.requestRemoval();
+    expect((await mine())?.removalRequested).toBe(true);
+  }, 60_000);
+
   it.each(["new", "existing"] as const)(
     "streams encrypted bytes when the project key is %s",
     async (key) => {

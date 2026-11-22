@@ -672,6 +672,7 @@ impl Encryption {
                     .into_iter()
                     .map(|device| json!({
                         "id": device.id,
+                        "removalRequested": device.removal_requested,
                         "status": match device.status {
                             DeviceStatus::Active => "active",
                             DeviceStatus::Waiting => "waiting",

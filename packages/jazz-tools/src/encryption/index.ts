@@ -67,6 +67,8 @@ export interface DeviceInfo {
   status: "active" | "waiting";
   /** Whether this is the device that asked. */
   isThisDevice: boolean;
+  /** Whether this device has published a request to be removed. */
+  removalRequested: boolean;
 }
 
 export interface RemovalOutcome {
