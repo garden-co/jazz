@@ -292,7 +292,8 @@ func (s *Session) Watch(ctx context.Context) (<-chan SessionSnapshot, error) {
 
 // Close closes the session without waiting for an operation in flight:
 // it and its DBs' calls end with ErrClosed (close the DBs too), and its
-// watches end. As with DB.Close, it cancels the Token provider's ctx and
+// watches end; an open it interrupts gets up to 2 seconds to let go of its
+// store. As with DB.Close, it cancels the Token provider's ctx and
 // waits for the provider to return, and the provider may call it. An error
 // says what failed as it closed: the session is closed all the same.
 func (s *Session) Close() error {

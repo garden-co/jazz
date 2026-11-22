@@ -226,11 +226,12 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 }
 
 // Close closes the app without waiting for its writes to reach the server
-// (Shutdown does). Calls waiting for the server end with ErrClosed, though
-// what they sent may still apply, and later calls return ErrClosed. Close
-// returns once the app is closed: work already running locally finishes
-// first, and sync gets up to 2 seconds to end. An error says what failed
-// as it closed: the DB is closed and freed all the same.
+// (Shutdown does). Calls waiting for the server end with ErrClosed (or with
+// the answer they already had, a refusal say), though what they sent may
+// still apply, and later calls return ErrClosed. Close returns once the app
+// is closed: work already running locally finishes first, and sync gets up
+// to 2 seconds to end. An error says what failed as it closed: the DB is
+// closed and freed all the same.
 //
 // Close cancels the TokenProvider's ctx and waits for the provider to
 // return. A provider may call Close itself, but mustn't wait for a Close
