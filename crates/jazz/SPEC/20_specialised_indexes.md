@@ -368,9 +368,10 @@ holding a `vector` or `point` column (its catalogue message would fail to
 decode, and the link with it) or would drop its index objects unseen, so the
 authority and relays send a version that uses either, or declares a
 specialised index, only over a link that negotiated the bit. A peer without
-it keeps syncing the versions it knows. (Independently, a peer decodes each
+it is sent the other versions. (Independently, a peer decodes each
 catalogue version on its own and skips one it cannot read with
-`SchemaVersionUnsupported`, 8.10.)
+`SchemaVersionUnsupported`, 8.10.) The gate keeps such a peer's link up. It
+does not make mixed versions safe for a vector or point column (20.13).
 
 `FEATURE_SPECIALISED_INDEXES` is bit 16 (`1 << 16`), above every bit
 v2.0.0-beta.0 defines: 12 `FEATURE_SERIALIZABLE_BRANCH_READS`, 13
@@ -858,13 +859,14 @@ storage. The two items marked so are open.
 
 **Stores of beta.0.** One whose app declares none of this chapter gains no
 schema object on opening, and beta.0 reads it back, this build's writes
-included. One whose app adds an index, a vector or point column or a table
-of them opens and builds over the rows beta.0 wrote.
+included. One whose app adds an index alone opens and builds over the rows
+beta.0 wrote.
 
 **Peers.** Plain apps sync in every mix of beta.0 and newer client, relay
 and server. A beta.0 client, directly or behind a relay of either build,
-reads and writes a newer server's tables whose schema uses this chapter: it
-is sent no such schema version (20.4), and keeps the columns it knows. An
+reads and writes a newer server's tables whose schema adds an index alone:
+it is sent no such schema version (20.4). With a vector or point column,
+mixed-version sync and upgrade are not safe yet (below). An
 app using this chapter on an older server or relay is an app ahead of its
 deployed schema: its writes are refused with `schema_version_not_deployed`
 (8.9), and its searches stay on its replica.
