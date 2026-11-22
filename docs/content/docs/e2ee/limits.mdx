@@ -13,6 +13,8 @@ languageTabs: backend
   `key-pending`.
 - **Removing a member** stops later reads through permissions and a rotation; it cannot take back what
   the member could already read.
+- **A device removal reaches other members one sync round trip later.** In that round trip after the
+  removal commits, other members' writes may still use the old key, as after a member removal.
 - **A device account's secret is the account.** Whoever holds the secret (its 24-word phrase, passkey or
   exported key) controls the account, encryption included. Removing a device does not lock out a holder:
   the device recovers by itself at its next start and receives later keys. Retiring the recovery
