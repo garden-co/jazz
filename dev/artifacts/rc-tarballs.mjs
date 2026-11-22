@@ -42,7 +42,9 @@ export function packageDirs(base = root) {
 
 export function stamp(version, base = root) {
   if (!rcVersion.test(version))
-    throw new Error(`version must look like 2.0.0-alpha.N-rc.M or 2.0.0-beta.N-rc.M, got ${JSON.stringify(version)}`);
+    throw new Error(
+      `version must look like 2.0.0-alpha.N-rc.M or 2.0.0-beta.N-rc.M, got ${JSON.stringify(version)}`,
+    );
   for (const dir of packageDirs(base)) {
     const path = join(dir, "package.json");
     const pkg = readJson(path);

@@ -8,13 +8,13 @@ import { parse as parseYaml } from "yaml";
 const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
 
 describe("release config", () => {
-  it("keeps create-jazz on the lockstep Jazz alpha release train", () => {
+  it("keeps create-jazz on the lockstep Jazz beta release train", () => {
     const config = JSON.parse(
       fs.readFileSync(path.join(repoRoot, ".changeset", "config.json"), "utf8"),
     ) as { fixed?: string[][] };
     const preState = JSON.parse(
       fs.readFileSync(path.join(repoRoot, ".changeset", "pre.json"), "utf8"),
-    ) as { initialVersions?: Record<string, string> };
+    ) as { mode?: string; tag?: string; initialVersions?: Record<string, string> };
     const createJazzPackage = JSON.parse(
       fs.readFileSync(path.join(repoRoot, "packages", "create-jazz", "package.json"), "utf8"),
     ) as { version?: string };
@@ -31,10 +31,14 @@ describe("release config", () => {
     ];
 
     expect(config.fixed).toContainEqual(jazzFixedGroup);
-    expect(createJazzPackage.version).toMatch(/^2\.0\.0-alpha\./);
+    expect(preState.mode).toBe("pre");
+    expect(preState.tag).toBe("beta");
+    // alpha until the first beta's Version Packages PR lands.
+    expect(createJazzPackage.version).toMatch(/^2\.0\.0-(alpha|beta)\.[0-9]+$/);
 
+    // The beta train was entered from 2.0.0-alpha.70.
     for (const packageName of originalJazzPackages) {
-      expect(preState.initialVersions?.[packageName]).toBe("2.0.0-alpha.6");
+      expect(preState.initialVersions?.[packageName]).toBe("2.0.0-alpha.70");
     }
     // The payload packages joined later; they share the release version, not
     // the original packages' historical prerelease baseline.

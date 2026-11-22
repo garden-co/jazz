@@ -23,7 +23,9 @@ export function renumbering(tag, before, after) {
   for (const [name, next] of after) {
     const prev = before.get(name);
     if (prev === undefined || prev === next) continue;
-    const m = new RegExp(`^(\\d+\\.\\d+\\.\\d+)-${tag.replace(/[^0-9A-Za-z-]/g, "")}\\.(\\d+)$`).exec(next);
+    const m = new RegExp(
+      `^(\\d+\\.\\d+\\.\\d+)-${tag.replace(/[^0-9A-Za-z-]/g, "")}\\.(\\d+)$`,
+    ).exec(next);
     if (!m || m[2] === "0") continue;
     if (prereleaseTag(prev) === tag) continue;
     out.set(next, `${m[1]}-${tag}.0`);
@@ -71,7 +73,8 @@ function main() {
     after.set(now.name, now.version);
   }
   const renames = renumbering(pre.tag, before, after);
-  if (renames.size === 0) return console.log(`No version enters ${pre.tag} here; nothing to renumber.`);
+  if (renames.size === 0)
+    return console.log(`No version enters ${pre.tag} here; nothing to renumber.`);
   for (const file of changed.filter((f) => /(package\.json|CHANGELOG\.md)$/.test(f))) {
     const path = join(root, file);
     const text = readFileSync(path, "utf8");

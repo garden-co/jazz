@@ -23,7 +23,10 @@ test("alpha moves to beta, never beta back to alpha", () => {
   assert.equal(wouldMoveLatestBack("2.0.0-beta.0", "2.0.0-alpha.71"), true);
   assert.equal(wouldMoveLatestBack("2.0.0", "2.0.0-beta.3"), true);
   assert.equal(wouldMoveLatestBack("0.20.19", "2.0.0-beta.0"), false);
-  assert.throws(() => wouldMoveLatestBack("2.0.0-alpha.70", "2.0.0-beta.0-rc.0"), /2\.0\.0-beta\.N/);
+  assert.throws(
+    () => wouldMoveLatestBack("2.0.0-alpha.70", "2.0.0-beta.0-rc.0"),
+    /2\.0\.0-beta\.N/,
+  );
 });
 
 test("checkLatest refuses before any upload when a package's latest is newer", () => {
