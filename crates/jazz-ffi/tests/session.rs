@@ -390,6 +390,18 @@ async fn a_c_host_follows_a_session() {
             take(out)
         };
         assert!(account.is_string());
+        // A watch delivers the latest snapshot, so it may skip `ready` if
+        // the session signs out first: wait for it here.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(kind, s)| kind == "session" && s["status"] == "ready")
+        {
+            assert!(Instant::now() < deadline, "the watch never saw ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         call("signOut").unwrap();
         let none = jazz_session_jazz(session, &mut err);
         assert!(none.is_null());
