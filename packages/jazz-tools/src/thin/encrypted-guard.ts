@@ -297,7 +297,7 @@ export class EncryptedGuard {
    * reads one encrypted table at its root through an explicit column list,
    * and the list, its filters and its ordering name plain columns only.
    */
-  private queryTouches(queryJson: string): Touch | undefined {
+  queryTouches(queryJson: string): Touch | undefined {
     if (this.entries.size === 0) return undefined;
     const query = JSON.parse(queryJson) as unknown;
     const named = this.namedEncryptedTable(query);

@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { createJazzClient, openBrowserSessionCore } from "../../src/session/create-jazz-session.js";
 import { unreadableRows } from "../../src/encryption/unreadable.js";
 import { browserPrivateStore } from "../../src/encryption/browser-store.js";
@@ -216,6 +216,66 @@ it("encrypts in a real browser: a device's keys in the browser's own store, a ta
     "The reloaded device should read its encrypted row",
   );
 }, 240_000);
+
+it("a returning browser subscribes to stored encrypted rows as soon as its session opens", async () => {
+  const server = await serverAt("encrypted-message-reload");
+  const dbName = uniqueDbName("encrypted-message-reload");
+  const first = await load(server, dbName);
+  const db = first.getSnapshot().client!.db;
+  expect(await db.encryption.ready({ timeoutMs: 40_000 })).toBe("active");
+  const projectId = crypto.randomUUID();
+  const account = first.getSnapshot().user!.accountId;
+  const self = await db.encryption.members.row({ table: "projects", id: projectId }, account);
+  await (
+    await db.transaction((tx) => {
+      tx.insert(app.projects, { name: "project", ownerId: account }, { id: projectId });
+      tx.insert(app.__e2ee_members, self);
+    })
+  ).wait({ tier: "global" });
+  const title = "stored title";
+  await db.insert(app.tasks, { projectId, title }).wait({ tier: "global" });
+  await first.close();
+
+  const returning = await loadThin(server, dbName, async () => ({
+    createClient: createLocalFirstDb,
+  }));
+  const again = returning.getSnapshot().client!.db;
+  expect(isThinDb(again)).toBe(false);
+  const tasks = app.tasks.where({ projectId }).orderBy("$createdAt", "desc").limit(200);
+  const latest: { selected?: string[]; full?: string[] } = {};
+  const stopSelected = again.subscribe(tasks.select("projectId", "title", "$createdAt"), (rows) => {
+    latest.selected = rows.map((row) => row.title);
+  });
+  const stopFull = again.subscribe(tasks, (rows) => {
+    latest.full = rows.map((row) => row.title);
+  });
+  try {
+    await expect
+      .poll(() => latest, { timeout: 30_000 })
+      .toEqual({ selected: [title], full: [title] });
+  } finally {
+    stopSelected();
+    stopFull();
+  }
+}, 120_000);
+
+it("an encryption readiness failure reaches the subscriber that was waiting for it", async () => {
+  const server = await serverAt("encrypted-subscription-failure");
+  const session = await load(server, uniqueDbName("encrypted-subscription-failure"));
+  const db = session.getSnapshot().client!.db;
+  const failure = new Error("device verification failed");
+  const ready = vi.spyOn(db.encryption, "ready").mockRejectedValueOnce(failure);
+  const update = vi.fn();
+  const onError = vi.fn();
+  const stop = db.subscribe(app.tasks, { onUpdate: update, onError });
+  try {
+    await expect.poll(() => onError.mock.calls).toEqual([[failure]]);
+    expect(update).not.toHaveBeenCalled();
+  } finally {
+    stop();
+    ready.mockRestore();
+  }
+}, 60_000);
 
 it.each(["select", "equality"] as const)(
   "a keyed tab reads an encrypted column through its worker with %s",

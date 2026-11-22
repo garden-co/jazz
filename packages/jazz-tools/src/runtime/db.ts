@@ -147,6 +147,7 @@ import {
   upgradeDbToLocalFirst,
   type LocalFirstLoader,
 } from "./local-first-upgrade.js";
+import { EncryptedGuard } from "../thin/encrypted-guard.js";
 import { EncryptionNeedsLocalFirstError } from "./encryption-needs-local-first.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
@@ -2545,6 +2546,8 @@ export class Db {
   }
 
   private pendingEncryption: Encryption | undefined;
+  private encryptedQueries?: EncryptedGuard;
+  private encryptedReadsReady?: Promise<unknown>;
   private readonly successorWaiters = new Set<(next: Db) => void>();
 
   /**
@@ -4670,74 +4673,48 @@ export class Db {
       if (onError) onError(error);
       else console.error("Unhandled Jazz subscription error", error);
     };
-    // Refused by the thin client and held until the local-first one took over.
-    let wasParked = false;
     const stop = this.registerMovable((db) => {
       // On the successor the query starts over: its opening result replaces
       // what the subscriber has, rows the upgrade already read in included.
       let opening = !first;
       first = false;
       let parked: (() => void) | undefined;
-      const open = () => {
-        const handle = db.subscribeDeltaHere(
-          query,
-          {
-            onDelta: (delta) => {
-              if (opening) {
-                opening = false;
-                onDelta({
-                  delta: delta.delta,
-                  all: delta.all ?? [],
-                  reset: true,
-                });
-                return;
-              }
-              onDelta(delta);
-            },
-            onError: (error) => {
-              // The thin client refused it, as it reads an encrypted column:
-              // it waits, with nothing emitted, for the local-first client,
-              // which opens it when it takes over this Db's live queries.
-              if (error instanceof EncryptionNeedsLocalFirstError) {
-                parked = db.parkUntilLocalFirst(error, (failure) => {
-                  stop();
-                  fail(toError(failure));
-                });
-                if (parked) {
-                  wasParked = true;
-                  return;
-                }
-              }
-              fail(error);
-            },
+      const handle = db.subscribeDeltaHere(
+        query,
+        {
+          onDelta: (delta) => {
+            if (opening) {
+              opening = false;
+              onDelta({
+                delta: delta.delta,
+                all: delta.all ?? [],
+                reset: true,
+              });
+              return;
+            }
+            onDelta(delta);
           },
-          options,
-          session,
-        );
-        ready ??= handle.ready;
-        return handle;
-      };
-      if (!wasParked) {
-        const handle = open();
-        return () => {
-          handle();
-          parked?.();
-        };
-      }
-      // A local-first client that has just opened reads encrypted columns
-      // once it has verified the account, which syncs what names them:
-      // opened sooner, the query would answer without them and stay so.
-      let dropped = false;
-      let handle: SubscriptionHandle | undefined;
-      void Promise.resolve()
-        .then(() => db.encryption.ready({ timeoutMs: LOCAL_FIRST_WAIT_MS }))
-        .catch(() => undefined)
-        .then(() => {
-          if (!dropped) handle = open();
-        });
+          onError: (error) => {
+            // The thin client refused it, as it reads an encrypted column:
+            // it waits, with nothing emitted, for the local-first client,
+            // which opens it when it takes over this Db's live queries.
+            if (error instanceof EncryptionNeedsLocalFirstError) {
+              parked = db.parkUntilLocalFirst(error, (failure) => {
+                stop();
+                fail(toError(failure));
+              });
+              if (parked) return;
+            }
+            fail(error);
+          },
+        },
+        options,
+        session,
+      );
+      ready ??= handle.ready;
       return () => {
-        dropped = true;
-        handle?.();
+        handle();
+        parked?.();
       };
     });
     const handle = (() => stop()) as SubscriptionHandle;
@@ -5034,12 +5011,26 @@ export class Db {
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
     const requirement = queryOptions.tier === "remote" ? "server" : "runtime";
-    if (this.connection.shouldDeferSubscriptionStart(requirement)) {
-      // The worker can only classify the initial authority-tier snapshot as
-      // settled after its own server transport is attached. Delay native
-      // subscription creation until that topology is ready; the native stream
-      // then owns the settled-snapshot gate and remains the sole data source.
-      void this.ensureReady(requirement, readyAbort.signal)
+    const app = this.config?.encryption?.app;
+    let encryptionReady: Promise<unknown> | undefined;
+    if (app && !isThinDb(this)) {
+      this.encryptedQueries ??= new EncryptedGuard(resolveSchemaSource(app));
+      if (this.encryptedQueries.queryTouches(wasmQuery)) {
+        // A returning device opens local-first directly. Its encrypted subscriptions
+        // need the catalogue just as subscriptions moved from the thin client do.
+        encryptionReady = this.encryptedReadsReady ??= this.encryption
+          .ready({ timeoutMs: LOCAL_FIRST_WAIT_MS })
+          .catch((error: unknown) => {
+            this.encryptedReadsReady = undefined;
+            throw error;
+          });
+      }
+    }
+    const connectionReady = this.connection.shouldDeferSubscriptionStart(requirement)
+      ? this.ensureReady(requirement, readyAbort.signal)
+      : undefined;
+    if (connectionReady || encryptionReady) {
+      void Promise.all([connectionReady, encryptionReady])
         .then(() => startNativeSubscription(initialSubscription))
         .catch((error: unknown) => {
           if (unsubscribed || readyAbort.signal.aborted || this.stopping) return;
