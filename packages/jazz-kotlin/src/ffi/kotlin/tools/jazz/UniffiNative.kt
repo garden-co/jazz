@@ -86,6 +86,8 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun updateAt(table: String, id: String, patchJson: String, tier: String): Unit =
         live { handle.updateAt(table, id, patchJson, tier) }
     override fun deleteAt(table: String, id: String, tier: String): Unit = live { handle.deleteAt(table, id, tier) }
+    override fun upsertAt(table: String, id: String, rowJson: String, tier: String): String =
+        live { handle.upsertAt(table, id, rowJson, tier) }
     override fun waitForSync(tier: String): Unit = live { handle.waitForSync(tier) }
     override fun sessionState(): String? = live { handle.sessionState() }
     override fun syncStatus(): String = live { handle.syncStatus() }

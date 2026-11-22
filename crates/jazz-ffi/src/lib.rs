@@ -277,6 +277,24 @@ impl JazzHandle {
         )
     }
 
+    /// [`Self::upsert`], returning once the write reaches `tier`: `"local"`
+    /// or `"global"`. The row is as written here, not as the server has it
+    /// by then.
+    pub fn upsert_at(
+        &self,
+        table: String,
+        id: String,
+        row_json: String,
+        tier: String,
+    ) -> Result<String> {
+        self.core.surface(self.core.upsert(
+            &table,
+            &id,
+            &row_json,
+            &self.core.surface(write_opts(&tier))?,
+        ))
+    }
+
     /// Brings back a deleted row, as it was or with `patch_json` (a whole
     /// row) as its new content. Returns the row.
     pub fn restore(&self, table: String, id: String, patch_json: Option<String>) -> Result<String> {

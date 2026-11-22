@@ -148,9 +148,8 @@ suspend fun clearTodoOwner(jazz: Jazz, todoId: String) {
 
 // #region writing-upsert-kotlin
 suspend fun upsertTodo(jazz: Jazz, importedTodoId: String) {
-    jazz.upsert(Todos, importedTodoId, NewTodo(title = "Imported task", done = false))
-    // Wait until the sync server has it.
-    jazz.waitForSync(WriteTier.Global)
+    // Returns once the sync server has it.
+    jazz.upsert(Todos, importedTodoId, NewTodo(title = "Imported task", done = false), WriteTier.Global)
 }
 // #endregion writing-upsert-kotlin
 
