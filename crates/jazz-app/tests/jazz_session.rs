@@ -786,3 +786,138 @@ async fn closing_reads_stopped_and_replacing_replaced() {
         app.stop().await;
     }
 }
+
+/// Closing interrupts an open on a persistent store wherever it is (from
+/// its token to its store): the same directory reopens at once, and can be
+/// deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_store_reopens_right_after_an_interrupted_open() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let token = bearer(Some("token-alice"));
+    let plain = app.session(&token).storage(Storage::Dir(dir.path().into()));
+    // Alice has her account and her store.
+    let first = JazzSession::open(client_files(), plain.clone())
+        .await
+        .unwrap();
+    assert_eq!(first.snapshot().status, SessionStatus::Ready);
+    first.close().await.unwrap();
+
+    for after in [0, 1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64] {
+        let token_bob = bearer(None);
+        let (entered, mut opening) = tokio::sync::mpsc::unbounded_channel();
+        let provider = {
+            let token = token_bob.clone();
+            move |reason: TokenReason| {
+                let value = token.lock().unwrap().clone();
+                if reason == TokenReason::Connect && value.is_some() {
+                    let _ = entered.send(());
+                }
+                async move { Ok(value) }
+            }
+        };
+        let config = SessionConfig::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .storage(Storage::Dir(dir.path().into()))
+            .bearer(provider);
+        let session = JazzSession::open(client_files(), config).await.unwrap();
+        *token_bob.lock().unwrap() = Some("token-alice".to_owned());
+        let switching = tokio::spawn({
+            let session = session.clone();
+            async move { session.refresh().await }
+        });
+        tokio::time::timeout(Duration::from_secs(10), opening.recv())
+            .await
+            .expect("the open begins");
+        tokio::time::sleep(Duration::from_millis(after)).await;
+        session.close().await.unwrap();
+
+        let again = JazzSession::open(client_files(), plain.clone())
+            .await
+            .unwrap();
+        let snapshot = again.snapshot();
+        assert_eq!(
+            snapshot.status,
+            SessionStatus::Ready,
+            "closed {after} ms into the open: {snapshot:?}"
+        );
+        let deleted = again.jazz().unwrap().delete_client_storage().await;
+        assert!(
+            deleted.is_ok(),
+            "closed {after} ms into the open: {deleted:?}"
+        );
+        again.close().await.unwrap();
+        let _ = switching.await.unwrap();
+    }
+    app.stop().await;
+}
+
+/// The same when the abandoned open is slow to let go: closing waits until
+/// it has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_waits_for_an_abandoned_open_to_let_go_of_its_store() {
+    /// Slow to go, as a client's teardown may be.
+    struct SlowToGo;
+    impl Drop for SlowToGo {
+        fn drop(&mut self) {
+            std::thread::sleep(Duration::from_millis(600));
+        }
+    }
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let token = bearer(Some("token-alice"));
+    let plain = app.session(&token).storage(Storage::Dir(dir.path().into()));
+    let first = JazzSession::open(client_files(), plain.clone())
+        .await
+        .unwrap();
+    let account = first.snapshot().user.unwrap().account;
+    first.close().await.unwrap();
+
+    let token_later = bearer(None);
+    let (entered, mut opening) = tokio::sync::mpsc::unbounded_channel();
+    let provider = {
+        let token = token_later.clone();
+        move |reason: TokenReason| {
+            let value = token.lock().unwrap().clone();
+            let entered = entered.clone();
+            async move {
+                if reason == TokenReason::Connect && value.is_some() {
+                    let _slow = SlowToGo;
+                    let _ = entered.send(());
+                    std::future::pending::<()>().await;
+                }
+                Ok(value)
+            }
+        }
+    };
+    let config = SessionConfig::new(app.app_id)
+        .server(&app.relay.endpoint)
+        .storage(Storage::Dir(dir.path().into()))
+        .bearer(provider);
+    let session = JazzSession::open(client_files(), config).await.unwrap();
+    *token_later.lock().unwrap() = Some("token-alice".to_owned());
+    let switching = tokio::spawn({
+        let session = session.clone();
+        async move { session.refresh().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), opening.recv())
+        .await
+        .expect("the open begins");
+    session.close().await.unwrap();
+
+    let again = Jazz::open(
+        client_files(),
+        Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .storage(Storage::Dir(dir.path().join(account.0.to_string())))
+            .user(jazz_app_support::Auth::bearer(|_| async {
+                Ok(Some("token-alice".to_owned()))
+            })),
+    )
+    .await
+    .expect("reopen");
+    let deleted = again.delete_client_storage().await;
+    assert!(deleted.is_ok(), "right after close: {deleted:?}");
+    let _ = switching.await.unwrap();
+    app.stop().await;
+}

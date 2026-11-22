@@ -49,7 +49,7 @@ const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How long shutdown waits for the backend to answer the requests that end
 /// the client's HTTP stream sessions (see `HttpStreamFallbackConnector::settle`).
-const STREAM_SESSION_END: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const STREAM_SESSION_END: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The issuer `createJazz` names the users a backend acts as by.
 const BACKEND_ISSUER: &str = "jazz:backend";
@@ -141,7 +141,19 @@ impl Jazz {
         config: Config,
         implementations: Implementations,
     ) -> Result<Self> {
-        Self::open_as(files, config, implementations, Link::Own).await
+        Self::open_as(files, config, implementations, Link::Own, None).await
+    }
+
+    /// [`Jazz::open`], with `ended` dropped once the client's thread has
+    /// let go of the store: how a session that abandons the opening knows
+    /// that it has.
+    pub(crate) async fn open_tracked(
+        files: AppFiles,
+        config: Config,
+        ended: oneshot::Sender<()>,
+    ) -> Result<Self> {
+        let implementations = Implementations::default();
+        Self::open_as(files, config, implementations, Link::Own, Some(ended)).await
     }
 
     /// The client a backend's endpoint acts for its users with
@@ -165,6 +177,7 @@ impl Jazz {
             config,
             self.info.implementations.clone(),
             Link::TrustedForUsers,
+            None,
         )
         .await
     }
@@ -174,6 +187,7 @@ impl Jazz {
         config: Config,
         implementations: Implementations,
         link: Link,
+        ended: Option<oneshot::Sender<()>>,
     ) -> Result<Self> {
         let files = match config.backend.as_ref().and_then(|b| b.permissions.clone()) {
             Some(permissions) => files.with_permissions(permissions),
@@ -250,7 +264,11 @@ impl Jazz {
                 // The session stops the client through this, without keeping
                 // it alive: it stops with its last handle all the same.
                 let stopper = commands.downgrade();
-                move || run(files, config, link, store, receiver, ready, stopper)
+                move || {
+                    run(files, config, link, store, receiver, ready, stopper);
+                    // After the store.
+                    drop(ended);
+                }
             })
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
         let Opened {

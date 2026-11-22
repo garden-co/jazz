@@ -306,6 +306,8 @@ JazzSession *jazz_session_open(const char *config_json, JazzTokenCallback token_
  *              sent may still apply), so do the waits of the session's
  *              handles. "replaced" is only for a session that goes on:
  *              closing is always "closed", and wins when both hold.
+ *              An open it interrupted gets up to 2 s to let go of its
+ *              store.
  */
 char *jazz_session_call(JazzSession *session, const char *method, const char *args_json,
                         char **err);

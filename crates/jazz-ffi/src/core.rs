@@ -496,7 +496,6 @@ impl Core {
     /// its close ends the waiting itself, at once (what the call sent may
     /// still apply).
     fn wait<T>(&self, call: impl Future<Output = jazz_app_support::Result<T>>) -> Result<T> {
-        use jazz_app_support::Error;
         #[cfg(test)]
         before_sending();
         let ended = block_on(async {
@@ -509,14 +508,33 @@ impl Core {
         });
         match ended {
             None => Err(FfiError::Closed),
+            Some(ended) => self.answered(ended),
+        }
+    }
+
+    /// [`Self::wait`] for a call whose answer mustn't be dropped (a write's
+    /// confirmation or refusal). Its waits on the server end on the
+    /// client's thread as this handle closes, so it is as prompt as the
+    /// close, which waits for that thread too.
+    ///
+    /// The invariant: whatever `call` awaits is local work, or ends with
+    /// the client's waits (`waits_ended`). Anything else (a wait for a key,
+    /// say) hangs a derived handle's close again.
+    fn wait_answer<T>(&self, call: impl Future<Output = jazz_app_support::Result<T>>) -> Result<T> {
+        #[cfg(test)]
+        before_sending();
+        self.answered(block_on(call))
+    }
+
+    fn answered<T>(&self, ended: jazz_app_support::Result<T>) -> Result<T> {
+        use jazz_app_support::Error;
+        match ended {
             // How closing shows in a call in flight: the client stopped, a
             // closing session replaced it, or the clean-up took what it used.
-            Some(Err(Error::Stopped | Error::Replaced | Error::Config(_)))
-                if self.open.is_closed() =>
-            {
+            Err(Error::Stopped | Error::Replaced | Error::Config(_)) if self.open.is_closed() => {
                 Err(FfiError::Closed)
             }
-            Some(ended) => Ok(ended?),
+            ended => Ok(ended?),
         }
     }
 
@@ -658,7 +676,7 @@ impl Core {
         let name = table_name.to_owned();
         let jazz = self.open_jazz()?;
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
-        let row = self.wait(jazz.with_client(move |client| async move {
+        let row = self.wait_answer(jazz.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let (id, values, committed) =
                 client.insert_with_id(&name, id.map(|id| *id.uuid()), cells)?;
@@ -700,7 +718,7 @@ impl Core {
         }
         let name = table_name.to_owned();
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
-        let row = self.wait(self.open_jazz()?.with_client(move |client| async move {
+        let row = self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let committed = client.upsert(&name, *id.uuid(), cells.into_iter().collect())?;
             mark_wrote(tx);
@@ -735,7 +753,7 @@ impl Core {
         };
         let name = table_name.to_owned();
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
-        let row = self.wait(self.open_jazz()?.with_client(move |client| async move {
+        let row = self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let committed = client.restore(&name, id, cells)?;
             mark_wrote(tx);
@@ -758,7 +776,7 @@ impl Core {
         }
         let name = table_name.to_owned();
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
-        self.wait(self.open_jazz()?.with_client(move |client| async move {
+        self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let committed = client.update(&name, id, cells)?;
             mark_wrote(tx);
@@ -794,7 +812,7 @@ impl Core {
         let edits = convert::edits(table, table_name, &convert::parse(edits_json, "the edits")?)?;
         let name = table_name.to_owned();
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
-        self.wait(self.open_jazz()?.with_client(move |client| async move {
+        self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let edits = whole_pages(&client, &name, id, edits).await?;
             let committed = client
@@ -821,7 +839,7 @@ impl Core {
         self.table(table_name)?;
         let name = table_name.to_owned();
         let (tx, tier) = (self.tx_of(opts)?, opts.write_tier);
-        self.wait(self.open_jazz()?.with_client(move |client| async move {
+        self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             let client = client_for(client, tx)?;
             let committed = client.delete(&name, id)?;
             mark_wrote(tx);
@@ -1125,7 +1143,7 @@ impl Core {
         self.reachable(opts.write_tier)?;
         let tier = opts.write_tier;
         let open = self.open.clone();
-        let row = self.wait(self.open_jazz()?.with_client(move |client| async move {
+        let row = self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             open.owned().remove(&upload);
             let entry = UPLOADS
                 .with(|u| u.borrow_mut().0.remove(&upload))
@@ -1190,7 +1208,7 @@ impl Core {
             return Err(error);
         }
         let open = self.open.clone();
-        self.wait(self.open_jazz()?.with_client(move |client| async move {
+        self.wait_answer(self.open_jazz()?.with_client(move |client| async move {
             // Committed or failed, the transaction has ended.
             open.owned().remove(&tx);
             let (transaction, wrote) = take_tx(tx)?;
@@ -1226,7 +1244,7 @@ impl Core {
             self.open_jazz()?;
             return Ok(());
         }
-        self.wait(self.open_jazz()?.with_client(|client| async move {
+        self.wait_answer(self.open_jazz()?.with_client(|client| async move {
             // Taken first, so a refusal is reported by one call only.
             let writes = UNSYNCED.with(|unsynced| std::mem::take(&mut *unsynced.borrow_mut()));
             let checked = async {
@@ -1242,12 +1260,11 @@ impl Core {
                 Ok(())
             }
             .await;
-            if let Err(jazz_app_support::Error::Jazz(
-                jazz_app_support::jazz::tools::JazzError::ChannelClosed,
-            )) = &checked
-            {
-                // Cut short by closing: the next waitForSync (the parent's,
-                // after a derived handle's close) checks these.
+            if checked.is_err() && client.waits_are_over() {
+                // Failed as it closes, cut short or with a refusal its host
+                // may not look at: the next waitForSync (the parent's, after
+                // a derived handle's close) checks these again. Reporting
+                // twice beats never.
                 unchecked(writes);
             }
             checked
@@ -1719,7 +1736,7 @@ async fn settle(
                 let confirmed = client
                     .wait_for_transaction(committed, DurabilityTier::GlobalServer)
                     .await;
-                if let Err(jazz_app_support::jazz::tools::JazzError::ChannelClosed) = &confirmed {
+                if confirmed.is_err() && client.waits_are_over() {
                     unchecked([committed].into());
                 }
                 confirmed?;
@@ -2166,6 +2183,10 @@ fn config(
     );
     Ok((files, result, app))
 }
+
+#[cfg(test)]
+#[path = "core_close_tests.rs"]
+mod close_tests;
 
 #[cfg(test)]
 mod tests {

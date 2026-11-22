@@ -121,8 +121,8 @@ guest's account; `false` leaves the guest until `link_device_account()`.
 Linking reopens the account on the bearer: `clientEpoch` moves on.
 
 - `snapshot()` / `"snapshot"`: `{"status": "starting"|"ready"|"signed-out"|
-"transitioning"|"error"|"closed", "user"?, "clientEpoch", "error"?:
-{"kind", "message"}, "recovery"?: "action"|"session"}`, as TS's.
+  "transitioning"|"error"|"closed", "user"?, "clientEpoch", "error"?:
+  {"kind", "message"}, "recovery"?: "action"|"session"}`, as TS's.
 - `jazz()` / `jazz_session_jazz`: a `JazzHandle` for the user signed in now
   (`NoUser`, kind `"noUser"` with `"status"`, while there is none). Once the
   user changes (or signs out) every call on it fails with `Replaced` (kind
@@ -157,8 +157,9 @@ that free) gives the calls in flight the same guarantees:
 - A `for_user` or session handle closes only itself, and rolls back what it
   began.
 - A session doesn't wait for the operation in flight, which fails `Closed`
-  and installs no client. `Replaced` is only for a session that goes on:
-  closing is always `Closed`, and wins when both hold.
+  and installs no client; an open it interrupted gets up to 2 s to let go of
+  its store. `Replaced` is only for a session that goes on: closing is
+  always `Closed`, and wins when both hold.
 - Closing waits for a token callback that is running, so hosts make theirs
   cancellable.
 
@@ -224,14 +225,14 @@ write one. Text-merge
 columns (`merge: "text"`) take plain string writes.
 
 - **Query:** `{ "table", "where": [{ "column", "op", "value"? }], "orderBy":
-[{ "column", "direction" }], "limit", "offset" }`. The `where` entries are
+  [{ "column", "direction" }], "limit", "offset" }`. The `where` entries are
   ANDed. Ops: `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `contains` (string or
   array column), `in`, `notIn`, `isNull` (`"value": false` means "is not
   null"), `isNotNull`; `eq`/`ne` with `null` test for null. They mean what
   TS's `where` means (`jazz::query::where_condition`). Columns also include
   `id`, `$createdAt` and `$updatedAt`.
 - **Include:** `"include": [{ "relation": "<name>", "required"?: bool,
-"query"?: { "where", "orderBy", "limit", "select", "include" } }]`, at the
+  "query"?: { "where", "orderBy", "limit", "select", "include" } }]`, at the
   root or nested in an include's `query`, which has no `table` and no
   `offset`. Relations are the ones `jazz.app.json` declares. In a row, an
   included relation sits under its name: a forward relation as a row or
@@ -244,7 +245,7 @@ columns (`merge: "text"`) take plain string writes.
   every column. An entry may read part of a large value instead of all of
   it: `{"column", "from", "to", "units": "utf8"|"utf16"|"bytes"}` (half-open;
   UTF-8 on code point boundaries; bytes come back base64) or `{"column",
-"at": "<JSON pointer>"}` for a json column. Parts are for the root query,
+  "at": "<JSON pointer>"}` for a json column. Parts are for the root query,
   not inside includes.
 - A forward relation through a `uuid[]` column reads as an array of the
   referenced rows; `required` on it keeps only rows whose every reference is
@@ -270,20 +271,20 @@ columns (`merge: "text"`) take plain string writes.
   4096 writes individually; older ones rely on the core wait, which can miss
   a refusal that is no longer pending until jazz#5728 is fixed.
 - **Partial edits:** UniFFI `edit_text(table, id, column, edited_from,
-text)` sets a text-merge column (`merge: "text"`) to `text`, an edit of
+  text)` sets a text-merge column (`merge: "text"`) to `text`, an edit of
   `edited_from`, the value its writer last saw: changes others made since are
   kept, as the server merges them (TS's `editedFrom`). `edit(table, id,
-patch?, edits)` takes a list of `{"kind": "text", "column", "text",
-"editedFrom"}`, `{"kind": "splice", "column", "within": {"units":
-"utf8"|"utf16"|"bytes", "from", "to"}, "splices": [{"at", "delete",
-"insert"}]}` (`insert` a string, or base64 for bytes; `at` relative to
+  patch?, edits)` takes a list of `{"kind": "text", "column", "text",
+  "editedFrom"}`, `{"kind": "splice", "column", "within": {"units":
+  "utf8"|"utf16"|"bytes", "from", "to"}, "splices": [{"at", "delete",
+  "insert"}]}` (`insert` a string, or base64 for bytes; `at` relative to
   `from`) and `{"kind": "jsonSet", "column", "edits": [{"at": "<JSON
-pointer>", "value"}]}`, plus an optional whole-column patch, as one write.
+  pointer>", "value"}]}`, plus an optional whole-column patch, as one write.
   Without `within`, a splice's page is the whole current value, in
   `"units"` (default `"utf8"`). Both on `Transaction` too. C ABI: `jazz_call`
   `textEdit {table, id, column, units?, edits: [{pos, delete, insert}]}`
   (splices over the whole value), `editText {table, id, column,
-editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
+  editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
   `"tier"`.
 - **Permission advice:** UniFFI `can(table, op, args_json) -> Option<bool>`,
   C ABI `can {table, op, id?, row?}` → `true` | `false` | `null`: whether the
@@ -296,17 +297,17 @@ editedFrom, text}` and `edit {table, id, patch?, edits}`, with `"tx"` and
 - **Upsert and restore:** UniFFI `upsert(table, id, row)` and C ABI
   `upsert {table, id, row}` write the row with this id: for a new id an
   insert (`row` then needs every required column, else `missing required
-field`), for an existing row the columns `row` names (a partial row
+  field`), for an existing row the columns `row` names (a partial row
   updates).
   `restore(table, id, patch?)` / `restore {table, id, patch?}` brings back a
   deleted row as it was, or with `patch` (a whole row) as its content; a
   patch naming another row's `id` is refused. Both
   return the row, take `"tx"` and `"tier"`, and are on `Transaction` too.
 - **Streaming uploads:** UniFFI `begin_upload(table, column, kind, id?,
-row?) -> Upload` (`push(bytes)`, `finish() -> row`, `abort()`); C ABI
+  row?) -> Upload` (`push(bytes)`, `finish() -> row`, `abort()`); C ABI
   `uploadBegin {table, column, kind?: "insert"|"update"|"upsert", id?,
-row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
-{upload, tier?}` → the row, `uploadAbort {upload}`. An insert takes the
+  row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
+  {upload, tier?}` → the row, `uploadAbort {upload}`. An insert takes the
   row's other columns as `row` and no `id`; update and upsert take the `id`.
   Not inside a transaction. Read a large value back in pages with `select`
   parts.
@@ -320,7 +321,7 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
 - **hopTo, gather, union, history, includeDeleted** (lowered by jazz-app-support's
   `untyped` builder, as the typed Rust API and TS lower them):
   - `{"table", "where"?, "orderBy"?, "limit"?, "hopTo": "<rel>" | ["<rel>",
-…], "after"?: {"where", "orderBy", "limit", "offset", "select"}}`: rows
+    …], "after"?: {"where", "orderBy", "limit", "offset", "select"}}`: rows
     of the last hop's table; the top-level clauses filter the rows hopped
     from, `after` the rows reached.
   - `{"table", "where"?, "gather": {"relation", "maxDepth"?}}`: the rows
@@ -335,14 +336,14 @@ row?}` → `{upload}`, `uploadPush {upload, bytes: base64}`, `uploadFinish
     name rows by id), as in jazz-app-support.
   - `{"table", "history": true, "where"?, "orderBy"?, "limit"?}`: the
     versions the server accepted, each row with `"$history":
-{"transactionId", "acceptedAt"}` (order by `"$acceptedAt"`); read it at
+    {"transactionId", "acceptedAt"}` (order by `"$acceptedAt"`); read it at
     tier `remote`. Not subscribable yet.
   - `"includeDeleted": true` on any of these or a plain query reads deleted
     rows too.
 - **Row:** `{ "id", "<column>": … }`, with the authored column names. An
   insert may give its own `id`.
 - **Delta:** `{ "added": [row], "updated": [row], "removed": [id], "reset",
-"coalesced" }`. The first delta has `reset: true` and holds the full result.
+  "coalesced" }`. The first delta has `reset: true` and holds the full result.
   `coalesced` stays `false` until the engine coalesces lagging readers
   ([jazz#5635](https://github.com/garden-co/jazz/pull/5635)). Deltas carry no
   positions, so an ordered subscription re-sorts locally. A row that only

@@ -246,6 +246,9 @@ enum Op {
 /// The signed-in user's client.
 #[derive(Default)]
 struct Current {
+    /// Ready once the client being opened has let go of its store, for
+    /// the close that interrupts it.
+    opening: Option<tokio::sync::oneshot::Receiver<()>>,
     jazz: Option<Jazz>,
     /// The device account's key, while signed in as it.
     device: Option<DeviceKey>,
@@ -492,6 +495,9 @@ impl JazzSession {
     /// bearer or the backend: that operation fails with [`Error::Stopped`]
     /// too (what it sent may still apply there), and installs no client.
     /// A client being stopped is waited for, as [`Jazz::shutdown`] bounds it.
+    /// So is one being opened, for up to 2 s, to let go of its store: past
+    /// that (a token provider that doesn't return) deleting the store may
+    /// fail with [`Error::StoreHeld`] until it has.
     pub async fn close(&self) -> Result<()> {
         // Before waiting for a turn, so whoever has it gives it up.
         self.inner.closing.send_replace(true);
@@ -500,6 +506,14 @@ impl JazzSession {
             let _one = this.inner.one_at_a_time.lock().await;
             if this.inner.state.borrow().status == SessionStatus::Closed {
                 return Ok(());
+            }
+            // An opening it interrupted lets go of the store before close
+            // returns, so the store can be reopened or deleted at once. Not
+            // waited for longer: the app's token provider may be what holds
+            // it up, and may be what called close.
+            let opening = this.lock().opening.take();
+            if let Some(opening) = opening {
+                let _ = tokio::time::timeout(crate::handle::STREAM_SESSION_END, opening).await;
             }
             this.replace(None, None, SessionStatus::Closed).await;
             Ok(())
@@ -799,9 +813,12 @@ impl JazzSession {
         self.close_current().await;
         // Not finished when the session closes, the opening stops itself:
         // its thread ends once it has nobody to answer.
+        let (ended, opening) = tokio::sync::oneshot::channel();
+        self.lock().opening = Some(opening);
         let jazz = self
-            .unless_closing(Jazz::open(self.inner.files.clone(), config))
+            .unless_closing(Jazz::open_tracked(self.inner.files.clone(), config, ended))
             .await?;
+        self.lock().opening = None;
         match jazz {
             Ok(jazz) => {
                 let user = jazz.session().map(|session| match session.state() {
