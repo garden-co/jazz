@@ -1306,10 +1306,14 @@ impl Core {
         let bearer = bearer.to_owned();
         // On the client's runtime: linking talks to the app's endpoint
         // (tokio I/O), and the caller's thread may have no runtime at all.
-        let user = self.wait(
-            self.open_jazz()?
-                .with_client(move |_| async move { session.link(&bearer).await }),
-        )?;
+        let user = self.wait(self.open_jazz()?.with_client(move |client| async move {
+            tokio::select! {
+                biased;
+                linked = session.link(&bearer) => linked,
+                // Closing: this handle's or the client's.
+                () = client.waits_ended() => Err(jazz_app_support::Error::Stopped),
+            }
+        }))?;
         Ok(serde_json::to_string(&user).unwrap_or_default())
     }
 

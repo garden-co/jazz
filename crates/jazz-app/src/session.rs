@@ -485,9 +485,12 @@ impl Session {
                 crate::backend::link(&linking.endpoint, linking.app, &bearer, &linking.key).await
             }
         };
+        // Dropped with this call, which aborts the request.
+        let mut requesting = tokio::task::JoinSet::new();
+        requesting.spawn_on(request, &linking.runtime);
         let linked = tokio::select! {
             biased;
-            linked = linking.runtime.spawn(request) => linked.map_err(|_| Error::Stopped)??,
+            Some(linked) = requesting.join_next() => linked.map_err(|_| Error::Stopped)??,
             // The session ended (the client is stopping, or signed out).
             () = self.commands.closed() => return Err(Error::Stopped),
         };

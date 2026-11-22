@@ -697,6 +697,54 @@ fn close_ends_a_session_handles_wait_at_once() {
     session.free();
 }
 
+/// A `link` ends with the session's handle it was called on, not just for
+/// its caller: the request is dropped, though the client lives on.
+#[test]
+fn close_ends_a_session_handles_link_on_the_client() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/jazz", listener.local_addr().unwrap());
+    let (asked, hung_up) = (mpsc::channel(), mpsc::channel());
+    let (asked_tx, hung_up_tx) = (asked.0, hung_up.0);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let (asked, hung_up) = (asked_tx.clone(), hung_up_tx.clone());
+            std::thread::spawn(move || {
+                let mut head = Vec::new();
+                let mut chunk = [0; 1024];
+                let mut linking = false;
+                while let Ok(read @ 1..) = stream.read(&mut chunk) {
+                    head.extend_from_slice(&chunk[..read]);
+                    if !linking && String::from_utf8_lossy(&head).contains("/accounts/backend-link")
+                    {
+                        linking = true;
+                        let _ = asked.send(());
+                    }
+                }
+                if linking {
+                    let _ = hung_up.send(());
+                }
+            });
+        }
+    });
+    let session = guest_session(&endpoint, None);
+    let guest = session.jazz().unwrap();
+    let linking = Running::start(move || guest.call("link", json!({ "bearer": "token-alice" })));
+    asked.1.recv_timeout(PROMPT).expect("the link's request");
+    assert_eq!(
+        guest.spawn("close", json!({})).within(PROMPT, "close"),
+        Ok(Value::Null)
+    );
+    assert_eq!(kind(&linking.within(PROMPT, "link")), "closed");
+    hung_up.1.recv_timeout(PROMPT).expect("the request dropped");
+    guest.free();
+    assert!(
+        session.jazz().map(Handle::free).is_ok(),
+        "the session goes on"
+    );
+    session.free();
+}
+
 /// Closing the session ends what waits on its handles, as `closed` (not
 /// `replaced`).
 #[test]
