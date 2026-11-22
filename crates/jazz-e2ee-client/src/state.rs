@@ -564,6 +564,7 @@ pub(crate) struct AccountStream {
 pub(crate) struct MemberWatch {
     pub space_streams: Vec<(&'static str, WatchedRows<SpaceAddress>)>,
     pub covered: BTreeSet<SpaceAddress>,
+    pub subscribed: BTreeSet<SpaceAddress>,
     #[cfg(any(test, feature = "testing"))]
     pub last_check_rows: usize,
     #[cfg(any(test, feature = "testing"))]
@@ -665,7 +666,13 @@ impl Shared {
         let space = db_address(address);
         let now = self.now();
         let last = self.written.borrow_mut().insert(space.clone(), now);
-        if last.is_none_or(|time| now.duration_since(time) >= std::time::Duration::from_secs(60)) {
+        let watch = self.member_watch.borrow();
+        let subscribed = watch.covered.contains(&space) && watch.subscribed.contains(&space);
+        drop(watch);
+        if !subscribed
+            && last
+                .is_none_or(|time| now.duration_since(time) >= std::time::Duration::from_secs(60))
+        {
             self.member_watch
                 .borrow_mut()
                 .spaces

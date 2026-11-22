@@ -3049,3 +3049,39 @@ fn old_history_at_a_later_cut_gets_no_delivery() {
         assert_eq!(fresh.with_held(|held| held.spaces().len()), 0);
     });
 }
+/// Alice keeps the room open between sends. Both writes finish locally even
+/// when she loses the connection without the host detecting it.
+#[test]
+fn an_open_space_stays_ready_to_write_between_messages() {
+    within(|| {
+        let mut shared = SharedSpace::new();
+        let address = space_address(&shared.alice, shared.space);
+        shared.watch.use_space(&address);
+        shared.turns();
+        shared.alice_writes("warm");
+        shared.turns();
+        let alice = &shared.alice;
+        alice.client.take_reports();
+        for message in ["still online", "disconnected"] {
+            alice
+                .client
+                .advance_settle_clock(std::time::Duration::from_secs(61));
+            // No server pump: preparation that needs a round trip cannot finish.
+            let write = alice.client.write(&alice.db, async || {
+                alice
+                    .db
+                    .insert("notes", note(shared.space, message), Default::default())
+                    .await
+            });
+            assert!(
+                futures::FutureExt::now_or_never(write)
+                    .expect("write waited for the authority")
+                    .is_ok()
+            );
+            if message == "still online" {
+                pump(&shared.server, &alice.db);
+            }
+        }
+        assert!(alice.client.take_reports().is_empty());
+    });
+}
