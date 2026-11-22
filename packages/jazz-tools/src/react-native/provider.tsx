@@ -1,11 +1,7 @@
 import { View, Text, Pressable } from "react-native";
 import type { PublicSession } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
-import {
-  useDb as useCoreDb,
-  useJazzClient as useCoreJazzClient,
-  useSession,
-} from "../react-core/provider.js";
+import { useDb as useCoreDb, useJazzClient as useCoreJazzClient } from "../react-core/provider.js";
 import {
   JazzSessionProvider,
   type JazzSessionSourceProps,
@@ -46,7 +42,6 @@ export function useDb(): Db {
   return useCoreDb<Db>();
 }
 
-export { useSession };
 export type { JazzClientContextValue };
 
 /** @internal The provider shared by React Native and Expo, with native default views. */
