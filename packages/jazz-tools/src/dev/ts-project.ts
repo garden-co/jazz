@@ -34,7 +34,8 @@ export type LoadModule = (file: string) => Promise<Record<string, unknown>>;
  */
 export const JSON_ONLY_APP =
   "TS is the source in alpha.66: this app has jazz.app.json but no schema.ts. " +
-  "Run `npx jazz-tools upgrade` to write schema.ts from it (it keeps the schema hashes and bundle id), " +
+  "Write schema.ts from it with `npx jazz-tools@2.0.0-alpha.70 upgrade` (it keeps the schema hashes and bundle id; " +
+  "see https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0), " +
   "then edit schema.ts beside your app's manifest (package.json, Cargo.toml, go.mod, Package.swift, build.gradle, …) " +
   "and run `npx jazz-tools generate`.";
 
@@ -125,7 +126,7 @@ export async function loadTsApp(
       throw new Error(
         `${shown(permissionsTs)} doesn't export \`permissions\`${"default" in permissionsModule ? " (it has an alpha.64-style default export)" : ""}: ` +
           "write `export const permissions = schema.definePermissions({ … })` with the new permissions DSL, " +
-          "or run `npx jazz-tools upgrade` to convert an alpha.65 app.",
+          "or convert an alpha.65 app with `npx jazz-tools@2.0.0-alpha.70 upgrade` (https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0).",
       );
     {
       if (permissionsFile)

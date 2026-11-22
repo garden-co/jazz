@@ -306,3 +306,29 @@ it("turns the pending-upload count off only for a command the host does not know
     0, 0,
   ]);
 });
+
+it("names pending upload rows, keeps a core error to its call, and goes unknown only on an older native build", () => {
+  const id = new Uint8Array(16).fill(0xab);
+  const answers: unknown[] = [
+    { type: "pendingUploadRows", rows: [id] },
+    { type: "operationError", code: "invalid_argument", reason: "unknown table nope" },
+    { type: "pendingUploadRows", rows: [] },
+  ];
+  const execute = vi.fn((command: Uint8Array) => {
+    if (answers.length === 0) throw new Error("JazzNativeForeground runtime failed during execute");
+    return command;
+  });
+  const db = new NativeForegroundDb({ execute, tick: vi.fn(), close: () => true }, {
+    encodeNativeForegroundCommand: () => Uint8Array.of(41),
+    decodeNativeForegroundResponse: () => answers.shift(),
+  } as never);
+
+  expect(db.pendingUploadRows("todos")).toEqual(["abababab-abab-abab-abab-abababababab"]);
+  // A core error is this call's: it throws, and the next call still asks.
+  expect(() => db.pendingUploadRows("nope")).toThrow(/unknown table nope/);
+  expect(db.pendingUploadRows("todos")).toEqual([]);
+  // A native build without the command can't tell: unknown, never "none".
+  expect(db.pendingUploadRows("todos")).toBeNull();
+  expect(db.pendingUploadRows("todos")).toBeNull();
+  expect(execute).toHaveBeenCalledTimes(4);
+});

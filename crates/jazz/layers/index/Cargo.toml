@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
+# Nothing published depends on it yet; `jazz-core` will when the index framework
+# lands, and then this goes (dev/scripts/check-lockstep-versions.mjs).
+publish = false
 # Only what builds the library: tests, benches and their fixtures stay in the repo.
 include = ["src/**", "README.md"]
 

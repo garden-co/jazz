@@ -1,0 +1,208 @@
+---
+title: Device Accounts
+description: "Let users start as guests, with no sign-in, and keep their data when they sign up: device accounts are Jazz's local-first friendly auth method."
+reviewedAt: "20017a2694"
+---
+
+A device account is a Jazz account whose key lives on the device. It needs no sign-in and works
+offline. Device accounts are how you do **guests** in Jazz: someone can use your app before they sign
+up, and keep everything they made when they do. They are also a **local-first friendly** way to
+sign in at all: an app with no sign-in of its own can run on device accounts alone.
+
+Jazz derives a device account's founding identity from a random key. Creating one works offline.
+When it connects, the server verifies the key's signing proof and admits the account.
+
+## Client setup
+
+Start the session as a device account with `initial: "device"`:
+
+```ts
+import { createJazzClient } from "jazz-tools/client";
+
+const session = await createJazzClient({
+  serverUrl: "/jazz",
+  initial: "device",
+  // Local data, so a guest keeps working offline once its first visit has reached the backend.
+  client: () => import("jazz-tools/local-first"),
+});
+```
+
+In React, React Native, Expo, Vue, Solid and Svelte, pass the same config to the provider:
+`<JazzProvider config={{ serverUrl: "/jazz", initial: "device" }}>`.
+
+Your backend lets device accounts sync by returning `acceptDeviceAccounts(request)` from
+`authenticate` for signed-out requests (an app with no sign-in passes
+`authenticate: acceptDeviceAccounts`). Device accounts are refused otherwise. With
+`serverUrl: null`, Jazz stays on the device: no backend, one device account per browser profile.
+
+Your backend still decides who is signed in. A device account is who the session is signed in as
+while your backend names no one; once your backend's `authenticate` names a user, `refresh()`
+follows it. See [How Auth Works](/docs/setup/auth/backend).
+
+Jazz creates the device account, or reopens the one already on the device. Provided the app has
+fully loaded at least once, new device accounts can be created offline. In a browser, the key is
+kept in browser storage. On Expo, Jazz stores it using SecureStore. In a bare React Native app,
+provide your own atomic `AccountStore` backed by protected device storage. A first visit made while
+your backend is unreachable is not safe yet: the client stays thin, and a guest write made then can
+be lost on reload.
+
+To start signed out and create the device account only when the user asks (a "Continue as guest"
+button), leave out `initial` and call `createDeviceAccount()` on the session, or from
+`useJazzSession()` under `<JazzProvider>` (Svelte: `getJazzSession()`).
+
+`snapshot.user.kind` is `"device"` while the session is signed in as a device account, and
+`"backend"` for a user your backend signed in.
+
+## Backing up and restoring the key
+
+A device account's key is held by the user's device. It is 32 random bytes. If it is lost, the user
+can't get back into their account without a linked sign-in method. You can turn the key into a
+recovery phrase that users can back up and use to regain access if the key is deleted from the
+device's storage.
+
+The recovery phrase is like a password: anyone who has it can sign in to the account. Keep it out of
+logs, and warn the user that it's sensitive. `session.exportDeviceKey()` returns the key as a
+`jazz-auth-v1:…` string:
+
+```ts
+import { RecoveryPhrase } from "jazz-tools/passphrase";
+
+const phrase = RecoveryPhrase.fromSecret(session.exportDeviceKey());
+```
+
+Export the key while the session is signed in as the device account, or while it's signed out:
+it then exports the device account that signed in most recently. It throws a
+`NoKeptDeviceAccountError` when the device keeps none.
+
+### Signing out of a device account
+
+A device account is how an app lets people start as guests, and a local-first friendly way to sign
+in at all: its key lives on the device. Signing out keeps that key and the account's local data:
+
+- The session stays signed out, across reloads too, until someone signs in. With
+  `initial: "device"`, Jazz creates a new device account only on a device that keeps none and where
+  no one signed out.
+- `await session.reopenDeviceAccount()` signs in again as the kept device account, with its account
+  id and its data. If the device keeps several, it reopens the one that signed in most recently. It
+  rejects with a `NoKeptDeviceAccountError` when the device keeps none.
+- `createDeviceAccount()` always starts a new device account.
+- With `clearOnSignOut`, signing out forgets the key and wipes the account's local data, so
+  nothing on the device can reopen it. Keep the key (`exportDeviceKey()`) first if the person
+  should be able to come back.
+
+### Recovery passphrase
+
+To restore a device account from a recovery phrase, turn the phrase back into a key and pass it to
+`restoreDeviceAccount`:
+
+```ts
+await session.restoreDeviceAccount(RecoveryPhrase.toSecret(userInput));
+```
+
+If the phrase is invalid, `RecoveryPhrase.toSecret` throws a `RecoveryPhraseError` whose `code` is
+`invalid-word`, `invalid-checksum` or `invalid-length`, so handle it in your sign-in form.
+
+You don't need to sign out first: restoring switches accounts whoever is signed in, a new device
+account included, the same way any account change does (see
+[Switching accounts](/docs/setup/auth/backend#switching-accounts) for what happens to pending
+writes).
+
+### Passkey backup
+
+Browser apps can wrap the same key with a passkey:
+
+```ts
+import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
+
+const backup = new BrowserPasskeyBackup({
+  appName: "My App",
+  appHostname: "app.example",
+});
+await backup.backup(session.exportDeviceKey(), "My account");
+```
+
+Pass the value returned by `await backup.restore()` to `await session.restoreDeviceAccount(key)` to
+sign in to the account.
+
+Passkey support and sync depend on the user's platform. Passkeys are associated with a domain: if
+`appHostname` isn't set correctly, the user may not be offered the passkey when restoring their
+account, or may not be able to create it. Without `appHostname`, the passkey belongs to the current
+page's hostname, so a passkey made on a preview URL won't work on production. Set it to your
+production hostname.
+
+## Calling your own API routes
+
+A device account calls your API routes like any signed-in user: `jazz.forReqUser(request)` gives
+the route a database scoped to that account, under your permissions, and its writes are attributed
+to it. The browser proves which account it is by sending a short-lived proof from
+`db.getDeviceAccountProof()` as an `Authorization` header:
+
+```ts
+const proof = db.getDeviceAccountProof(); // null unless signed in as a device account
+await fetch("/api/notes", {
+  method: "POST",
+  headers: proof ? { Authorization: `Bearer ${proof}` } : {},
+  body: JSON.stringify(note),
+});
+```
+
+```ts
+// Your backend, with `authenticate` returning `acceptDeviceAccounts(request)` for this request.
+const db = await jazz.forReqUser(request);
+```
+
+The proof is short-lived (at most an hour), so ask for it for each request, and use the database
+`forReqUser` returns for that request only: it stops acting when the proof expires. Your backend
+checks the proof as it checks a sync connection: its signature and expiry, that it was made for this
+app (your `publicUrl`, when browsers reach Jazz through a proxy), that `authenticate` returns
+`acceptDeviceAccounts(request)`, and that the key wasn't revoked when the account was linked to a
+user. A request that fails a check throws a `RequestAuthenticationError` with
+`code: "invalid_device_proof"` or `"device_account_revoked"`; one with no proof is `"signed_out"`,
+as before. When `authenticate` names a user for the request (a session cookie), that user wins over
+the proof.
+
+Anyone can make a device account, so a device account's `forReqUser` database is only as
+restricted as your permissions make it, exactly as its own sync is. `withAttribution` (which skips
+your permissions) and `accountFor` don't take device accounts unless you ask:
+`jazz.withAttribution(request, { deviceAccounts: true })` and
+`jazz.accountFor(request, { deviceAccounts: true })`. Without it, they answer as if no one were
+signed in. With it, `accountFor` creates the device account on the backend if the device never
+synced, as its first sync would; don't read its answer as "a signed-in user".
+
+<Callout type="warn">
+  The proof opens this account's sync until it expires. Don't log it or forward it to other
+  services, and keep it out of error reports. Your own `authenticate` now sees
+  `Authorization: Bearer <proof>` on these requests: if your auth library reads any bearer token as
+  its own, skip tokens it can't parse rather than throw, so the request falls through to
+  `acceptDeviceAccounts(request)`.
+</Callout>
+
+## Signing up later
+
+When a guest signs up with your auth, call `await session.linkDeviceAccount()` after your sign-up
+has set its session. The client proves it owns the device account with its key; your backend's
+`authenticate` names the new user, and Jazz links that user to the existing account. Jazz performs
+graceful shutdown, linking, and client replacement. The account ID stays the same, so account-based
+ownership remains valid, and earlier rows keep the identity that authored them.
+
+The session also links on its own when your backend names a user with no Jazz account yet while a
+device account is signed in. Turn that off on shared devices with
+`linkDeviceAccountOnSignUp: false`.
+
+Linking doesn't need `acceptDeviceAccounts`, which gates only device-account sync and API routes: your backend's
+sign-in plus the device key's proof authorise the link, so it works even when your app doesn't
+accept device accounts for sync.
+
+The user must not have a Jazz account of their own yet. If they do, the app chooses whether to
+sign in to that account (`refresh()`) or migrate data explicitly; Jazz never merges accounts. See
+[Other / Custom](/docs/setup/auth/custom#guests-who-sign-up) and
+[Lifecycle](/docs/setup/auth/backend#lifecycle) for failure and sign-out handling.
+
+## Permissions by auth mode
+
+Use `session.user`, the account, for stable ownership. Use `session.identity`, the exact issuer and
+subject, when a policy deliberately distinguishes linked identities. A device account's identity
+(issuer `urn:jazz:local-first`) is authenticated by its signing key; it is not an unauthenticated
+guest.
+
+You can also use claims returned by your backend's `authenticate` function in your permission policies. For example, you could give users with an admin role access to additional data. See [Declarative Permissions](/docs/schemas/policies).

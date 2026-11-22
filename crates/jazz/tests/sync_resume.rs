@@ -207,13 +207,210 @@ fn ids(db: &Db, identity: Option<AuthorSubject>) -> Vec<RowUuid> {
     ids
 }
 
+/// Alice keeps the same upstream while the server loses its watches. Two rooms
+/// leave her filtered read during sleep. Only the room her other read holds stays.
+#[test]
+fn restored_reads_replace_holds_on_the_same_link() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, alice());
+    for n in 0..2 {
+        jazz::db::block_on(server.insert(
+            "rooms",
+            cells(&[("name", Value::String("open".into()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(id(1, n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let side = |out, inbound| {
+        Box::new(Pipe {
+            out,
+            inbound,
+            shipped: None,
+            resumes: None,
+        })
+    };
+    let _link = block_on(client.connect_upstream(side(up.clone(), down.clone())));
+    let accept = || {
+        server
+            .accept_subscriber(side(down.clone(), up.clone()), alice())
+            .unwrap()
+    };
+    let original = accept();
+    let saved = Rc::new(RefCell::new(Vec::new()));
+    let regs = saved.clone();
+    server.observe_subscriber_registrations(
+        original,
+        Rc::new(move |message| regs.borrow_mut().push(message.clone())),
+        false,
+    );
+    let rooms = client.prepare_query(&Query::from("rooms")).unwrap();
+    let local = || {
+        block_on(client.all(
+            &rooms,
+            ReadOpts {
+                tier: ReadTier::LocalOnly,
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+        .iter()
+        .map(|r| r.row_uuid())
+        .collect::<Vec<_>>()
+    };
+    let subscribe = |column, value| {
+        let q = client
+            .prepare_query(&Query::from("rooms").filter(eq(col(column), lit(value))))
+            .unwrap();
+        block_on(client.subscribe(&q, Default::default())).unwrap()
+    };
+    let _by_name = subscribe("name", Value::String("open".into()));
+    let _by_id = subscribe("id", Value::Uuid(id(1, 0).0));
+    pump(&server, &client);
+    assert_eq!(local().len(), 2);
+    server.disconnect_subscriber(original);
+    for n in 0..2 {
+        block_on(server.update(
+            "rooms",
+            id(1, n),
+            cells(&[("name", Value::String("closed".into()))]),
+            Default::default(),
+        ))
+        .unwrap();
+    }
+    let restored = accept();
+    server.observe_subscriber_registrations(restored, Rc::new(|_| {}), true);
+    server.finish_subscriber_restore(restored);
+    up.borrow_mut().extend(saved.take());
+    pump(&server, &client);
+    assert_eq!(local(), [id(1, 0)]);
+}
+
+/// Alice's saved read stays silent on an unrelated write. Removing her membership
+/// opens it with an empty snapshot; restoring access then reaches her on the same link.
+#[test]
+fn dormant_read_opens_on_a_policy_change() {
+    let server = seeded(2);
+    let client = open(1, alice());
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let side = |out, inbound| {
+        Box::new(Pipe {
+            out,
+            inbound,
+            shipped: None,
+            resumes: None,
+        })
+    };
+    let _link = block_on(client.connect_upstream(side(up.clone(), down.clone())));
+    let accept = || {
+        server
+            .accept_subscriber(side(down.clone(), up.clone()), alice())
+            .unwrap()
+    };
+    let original = accept();
+    let saved = Rc::new(RefCell::new(Vec::new()));
+    let regs = saved.clone();
+    server.observe_subscriber_registrations(
+        original,
+        Rc::new(move |m| regs.borrow_mut().push(m.clone())),
+        false,
+    );
+    let query = client.prepare_query(&Query::from("messages")).unwrap();
+    let _stream = block_on(client.subscribe(&query, Default::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ids(&client, None).len(), 2);
+    server.disconnect_subscriber(original);
+    let restored = accept();
+    server.observe_subscriber_registrations(restored, Rc::new(|_| {}), true);
+    let regs = saved.take();
+    let read_id = regs
+        .iter()
+        .find_map(|m| match m {
+            SyncMessage::Read { id, .. } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    up.borrow_mut().extend(regs);
+    let tick = || {
+        for _ in 0..5 {
+            block_on(server.tick()).unwrap();
+        }
+    };
+    let openings = || {
+        down.borrow()
+            .iter()
+            .filter(|m| matches!(m, SyncMessage::ReplaceHolds { id, .. } if *id == read_id))
+            .count()
+    };
+    block_on(server.tick()).unwrap();
+    server.finish_subscriber_restore(restored);
+    tick();
+    assert_eq!(openings(), 0);
+    assert!(!down.borrow().iter().any(|m| matches!(
+        m,
+        SyncMessage::Rows { .. } | SyncMessage::Settled { .. } | SyncMessage::Holds { .. }
+    )));
+    // A fresh subscriber to the exact same query must still open immediately.
+    let other = open(2, alice());
+    let (client_side, server_side, _) = pipe();
+    let _other_link = block_on(other.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let q = other.prepare_query(&Query::from("messages")).unwrap();
+    let _other_stream = block_on(other.subscribe(&q, Default::default())).unwrap();
+    pump(&server, &other);
+    assert_eq!(ids(&other, None).len(), 2);
+    assert_eq!(openings(), 0);
+    let before = server.fanout_stats().woken;
+    block_on(server.insert(
+        "stickers",
+        cells(&[("body", Value::String("star".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    tick();
+    assert_eq!(server.fanout_stats().woken, before);
+    assert_eq!(openings(), 0);
+    let membership = |member: String| {
+        block_on(server.update(
+            "memberships",
+            id(2, 0),
+            cells(&[("member", Value::String(member))]),
+            Default::default(),
+        ))
+        .unwrap()
+    };
+    membership("bob".into());
+    tick();
+    assert_eq!(openings(), 1);
+    pump(&server, &client);
+    assert!(ids(&client, None).is_empty());
+    membership(subject());
+    tick();
+    assert_eq!(openings(), 0);
+    pump(&server, &client);
+    assert_eq!(ids(&client, None).len(), 2);
+}
+
 #[test]
 fn a_resumed_subscription_ships_only_what_changed_and_converges() {
     let server = open(0, AuthorSubject::SYSTEM);
     let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
-        server
-            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            table,
+            values,
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     };
     for r in 0..2 {
         seed(
@@ -328,9 +525,16 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
 fn caught_up_resume_cost() {
     let server = open(0, AuthorSubject::SYSTEM);
     let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
-        server
-            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            table,
+            values,
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     };
     seed(
         "rooms",
@@ -387,14 +591,16 @@ fn caught_up_resume_cost() {
 fn a_deletion_reaches_a_cold_cached_row_once_a_subscription_covers_it_again() {
     let server = open(0, AuthorSubject::SYSTEM);
     let room = id(1, 1);
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "rooms",
-            room,
-            AuthorSubject::SYSTEM,
-            cells(&[("name", Value::String("lobby".into()))]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "rooms",
+        cells(&[("name", Value::String("lobby".into()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(room),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     let client = open(1, alice());
     let rooms = |db: &Db| {
         let prepared = db.prepare_query(&Query::from("rooms")).unwrap();
@@ -438,9 +644,16 @@ fn a_deletion_reaches_a_cold_cached_row_once_a_subscription_covers_it_again() {
 fn seeded(per_room: u32) -> Db {
     let server = open(0, AuthorSubject::SYSTEM);
     let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
-        server
-            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            table,
+            values,
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     };
     for r in 0..2 {
         seed(
@@ -526,7 +739,26 @@ fn a_resumed_subscription_evicts_rows_whose_access_was_lost_while_away() {
         ids(&client, None).is_empty(),
         "the room's messages are evicted"
     );
-    assert_eq!(*shipped.borrow(), 0, "only evictions ship");
+    // Besides the evictions, the deleted membership the messages rested on
+    // ships as deleted: the replica no longer holds it as it was (#5097).
+    assert_eq!(
+        *shipped.borrow(),
+        1,
+        "only evictions and the membership's deletion ship"
+    );
+    let memberships = client.prepare_query(&Query::from("memberships")).unwrap();
+    let held = block_on(client.all(
+        &memberships,
+        ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert!(
+        held.iter().all(|row| row.row_uuid() != id(2, 0)),
+        "the deleted membership is gone from the replica"
+    );
 }
 
 /// A caught-up subscription resumes without shipping a row: no table its
@@ -590,17 +822,19 @@ fn a_row_evicted_and_readable_again_returns_when_an_older_subscription_resumes()
     pump(&server, &client);
 
     // Access regained, m0 itself unchanged.
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "memberships",
-            id(2, 1),
-            AuthorSubject::SYSTEM,
-            cells(&[
-                ("room", Value::Uuid(id(1, 0).0)),
-                ("member", Value::String(subject())),
-            ]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "memberships",
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("member", Value::String(subject())),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(2, 1)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     let _s1 = block_on(client.subscribe(&q1, ReadOpts::default())).unwrap();
     pump(&server, &client);
     assert_eq!(
@@ -648,17 +882,19 @@ fn a_row_a_listing_dropped_returns_when_an_older_subscription_resumes() {
     drop(s2);
     pump(&server, &client);
 
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "memberships",
-            id(2, 1),
-            AuthorSubject::SYSTEM,
-            cells(&[
-                ("room", Value::Uuid(id(1, 0).0)),
-                ("member", Value::String(subject())),
-            ]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "memberships",
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("member", Value::String(subject())),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(2, 1)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     let _s1 = block_on(client.subscribe(&q1, ReadOpts::default())).unwrap();
     pump(&server, &client);
     assert_eq!(
@@ -889,17 +1125,19 @@ fn one_shot_resume_includes_unchanged_new_members() {
     server.accept_subscriber(down, alice()).unwrap();
     assert_eq!(read_once(&server, &client), [id(3, 0)]);
     assert!(client.detach_connection(&connection));
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "memberships",
-            id(2, 1),
-            AuthorSubject::SYSTEM,
-            cells(&[
-                ("room", Value::Uuid(id(1, 1).0)),
-                ("member", Value::String(subject())),
-            ]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "memberships",
+        cells(&[
+            ("room", Value::Uuid(id(1, 1).0)),
+            ("member", Value::String(subject())),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(2, 1)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     let (up, down, shipped) = pipe();
     let _connection = block_on(client.connect_upstream(up));
     server.accept_subscriber(down, alice()).unwrap();
@@ -1001,17 +1239,19 @@ fn settled_writes_go_cold_but_live_reads_stay_current() {
     let live = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
     pump(&server, &client);
     assert!(ids(&client, None).is_empty());
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "messages",
-            id(3, 2),
-            AuthorSubject::SYSTEM,
-            cells(&[
-                ("room", Value::Uuid(id(1, 0).0)),
-                ("body", Value::String("bob".into())),
-            ]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "messages",
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("body", Value::String("bob".into())),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(3, 2)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     pump(&server, &client);
     assert_eq!(ids(&client, None), [id(3, 2)]);
     // A one-shot read overlapping the live one must not extend its lifetime.
@@ -1352,18 +1592,20 @@ fn local_rooms(db: &Db) -> Vec<RowUuid> {
 /// it: the server holds it for that one and would not ship it again.
 fn an_included_row_one_subscription_lost_stays_for_the_other(lost_first: bool) {
     let server = seeded(1);
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "notes",
-            id(4, 0),
-            AuthorSubject::SYSTEM,
-            cells(&[
-                ("room", Value::Uuid(id(1, 0).0)),
-                ("body", Value::String("n0".into())),
-                ("stickers", Value::Array(Vec::new())),
-            ]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "notes",
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("body", Value::String("n0".into())),
+            ("stickers", Value::Array(Vec::new())),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(4, 0)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
@@ -1479,18 +1721,20 @@ impl Transport for HoldCommits {
 /// rejected, the server would never send that room again).
 fn a_pending_write_does_not_move_what_another_read_holds(member_of_first: bool) {
     let server = seeded(1);
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "notes",
-            id(4, 0),
-            AuthorSubject::SYSTEM,
-            cells(&[
-                ("room", Value::Uuid(id(1, 0).0)),
-                ("body", Value::String("n0".into())),
-                ("stickers", Value::Array(Vec::new())),
-            ]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "notes",
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("body", Value::String("n0".into())),
+            ("stickers", Value::Array(Vec::new())),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(4, 0)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
@@ -1570,9 +1814,16 @@ fn a_pending_write_does_not_move_support_below_the_first_hop(joined_first: bool)
     use jazz::query::{ArraySubquery, col, eq, lit};
     let server = seeded(1);
     let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
-        server
-            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            table,
+            values,
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     };
     seed(
         "notes",
@@ -1693,9 +1944,16 @@ fn a_pending_write_does_not_drop_a_sticker_the_settled_note_names(liked_first: b
     use jazz::query::{ArraySubquery, col, eq, lit};
     let server = seeded(1);
     let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
-        server
-            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            table,
+            values,
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     };
     seed(
         "stickers",
@@ -2199,17 +2457,19 @@ fn a_caught_up_offset_window_resumes_without_shipping_rows() {
 fn a_resumed_window_ships_only_rows_that_entered_it() {
     let server = seeded(10);
     let insert = |n: u32, body: &str| {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "messages",
-                id(3, n),
-                AuthorSubject::SYSTEM,
-                cells(&[
-                    ("room", Value::Uuid(id(1, 0).0)),
-                    ("body", Value::String(body.into())),
-                ]),
-            )
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            "messages",
+            cells(&[
+                ("room", Value::Uuid(id(1, 0).0)),
+                ("body", Value::String(body.into())),
+            ]),
+            jazz::db::InsertOptions {
+                row_id: Some(id(3, n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     };
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
@@ -2314,22 +2574,30 @@ fn resumed_windows_match_fresh_ones_through_random_churn() {
         for round in 0..12 {
             assert!(client.detach_connection(&upstream));
             let changes = next(6);
+            // Memberships deleted while away: the reads that rested on
+            // them no longer hold them, so each one's deletion ships once
+            // on the resume (#5097), which a fresh replica never held.
+            let mut lost_support = 0;
             for _ in 0..changes {
                 match next(5) {
                     0 => {
                         let row = id(3, next_row);
                         next_row += 1;
-                        server
-                            .seed_settled_mergeable_for_bootstrap(
-                                "messages",
-                                row,
-                                AuthorSubject::SYSTEM,
-                                cells(&[
-                                    ("room", Value::Uuid(id(1, next(2) as u32).0)),
-                                    ("body", Value::String(format!("m{}", next(40)))),
-                                ]),
-                            )
-                            .unwrap();
+                        jazz::db::block_on(server.insert(
+                            "messages",
+                            cells(&[
+                                ("room", Value::Uuid(id(1, next(2) as u32).0)),
+                                ("body", Value::String(format!("m{}", next(40)))),
+                            ]),
+                            jazz::db::InsertOptions {
+                                row_id: Some(row),
+                                identity: jazz::db::WriteIdentity::Attribution(
+                                    AuthorSubject::SYSTEM,
+                                ),
+                                ..Default::default()
+                            },
+                        ))
+                        .unwrap();
                         rows.push(row);
                     }
                     1 if rows.len() > 4 => {
@@ -2340,21 +2608,26 @@ fn resumed_windows_match_fresh_ones_through_random_churn() {
                         Some(row) => {
                             block_on(server.delete("memberships", row, Default::default()))
                                 .unwrap();
+                            lost_support += 1;
                         }
                         None => {
                             let row = id(2, next_membership);
                             next_membership += 1;
-                            server
-                                .seed_settled_mergeable_for_bootstrap(
-                                    "memberships",
-                                    row,
-                                    AuthorSubject::SYSTEM,
-                                    cells(&[
-                                        ("room", Value::Uuid(id(1, 1).0)),
-                                        ("member", Value::String(subject())),
-                                    ]),
-                                )
-                                .unwrap();
+                            jazz::db::block_on(server.insert(
+                                "memberships",
+                                cells(&[
+                                    ("room", Value::Uuid(id(1, 1).0)),
+                                    ("member", Value::String(subject())),
+                                ]),
+                                jazz::db::InsertOptions {
+                                    row_id: Some(row),
+                                    identity: jazz::db::WriteIdentity::Attribution(
+                                        AuthorSubject::SYSTEM,
+                                    ),
+                                    ..Default::default()
+                                },
+                            ))
+                            .unwrap();
                             membership = Some(row);
                         }
                     },
@@ -2424,7 +2697,7 @@ fn resumed_windows_match_fresh_ones_through_random_churn() {
                 );
             }
             assert!(
-                resumed <= fresh_count,
+                resumed <= fresh_count + lost_support,
                 "seed {seed_value} round {round}: a resume ships {resumed}, a fresh opening {fresh_count}"
             );
             resumed_total += resumed;
@@ -2443,17 +2716,19 @@ fn resumed_windows_match_fresh_ones_through_random_churn() {
 
 /// A message in the readable room, seeded on the server as settled.
 fn seed_message(server: &Db, n: u32, body: &str) {
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "messages",
-            id(3, n),
-            AuthorSubject::SYSTEM,
-            cells(&[
-                ("room", Value::Uuid(id(1, 0).0)),
-                ("body", Value::String(body.into())),
-            ]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "messages",
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("body", Value::String(body.into())),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(3, n)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
 }
 
 /// A "latest N" window (newest first) that new rows push its oldest out of
@@ -2719,14 +2994,16 @@ fn access_lost_through_one_window_keeps_another_windows_resume_point() {
 #[test]
 fn a_closed_reads_point_is_forgotten_when_a_row_it_counts_is_lost() {
     let server = seeded(3);
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "stickers",
-            id(4, 0),
-            AuthorSubject::SYSTEM,
-            cells(&[("body", Value::String("s0".into()))]),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "stickers",
+        cells(&[("body", Value::String("s0".into()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(4, 0)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     let client = open(1, alice());
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));

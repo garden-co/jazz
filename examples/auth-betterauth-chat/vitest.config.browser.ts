@@ -9,6 +9,7 @@ import {
   jazzAppRequest,
   jazzAppUser,
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   stopJazzServerByUrl,
 } from "../../packages/jazz-tools/tests/browser/testing-server-node.js";
 import {
@@ -25,7 +26,7 @@ export default defineConfig(async () => {
   process.env.NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID = TEST_ANNOUNCEMENTS_CHAT_ID;
 
   return {
-    plugins: [wasm(), topLevelAwait(), react()],
+    plugins: [jazzBrowserServerLifecycle, wasm(), topLevelAwait(), react()],
     worker: {
       plugins: () => [wasm(), topLevelAwait()],
     },
@@ -53,7 +54,6 @@ export default defineConfig(async () => {
         },
       },
       include: ["tests/browser/**/*.test.{ts,tsx}"],
-      globalSetup: ["../../packages/jazz-tools/tests/browser/global-setup.ts"],
       testTimeout: 30000,
     },
   };

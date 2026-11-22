@@ -15,15 +15,7 @@ export {
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
 } from "../session/jazz-session.js";
-
-// Removed in alpha.61: stubs that throw, naming the replacement (one release).
-export {
-  AccountManager,
-  BrowserAuthSecretStore,
-  createAccountManager,
-  createJazzApp,
-  exportLocalFirstSecret,
-} from "../removed-api.js";

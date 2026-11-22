@@ -86,7 +86,7 @@ export declare class NapiDb {
   requestReadPermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   requestUpdatePermissionAdvice(table: string, rowId: Uint8Array, patch: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
   requestDeletePermissionAdvice(table: string, rowId: Uint8Array, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): string | PendingNativePermissionAdvice
-  /** Admit a verified local-first account for this backend runtime only. */
+  /** Admit a verified device account for this backend runtime only. */
   admitLocalFirstSession(token: string, appId: string, claimedAuthor: string): void
   insert(table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Write
   insertInTransaction(openTransactionId: string, table: string, cells: Uint8Array, options?: InsertOptions | undefined | null): Uint8Array
@@ -186,6 +186,11 @@ export declare class NapiDb {
    */
   uploadStatus(): JsonValue
   /**
+   * Ids of `table`'s rows with a write the server has neither accepted
+   * nor refused yet (recovered ones included), sorted.
+   */
+  pendingUploadRows(table: string): Array<string>
+  /**
    * The optimistic in-memory side of a client/worker pair: its
    * subscriptions open with the worker's answer.
    */
@@ -213,6 +218,12 @@ export declare class NapiDb {
    * turns the slow-query log off.
    */
   setSlowQueryThresholdMs(ms: number): void
+  /**
+   * Coalesce a subscription's undelivered deltas past `rows` changed
+   * rows (default 10000, at least 1) into one reset of its current
+   * result.
+   */
+  setSubscriptionBacklogRows(rows: number): void
   /**
    * Connect to the server over byte frames the host carries: each frame
    * is one postcard `SyncMessage`.
@@ -765,6 +776,11 @@ export interface SubscriptionClosedEvent {
 export interface SubscriptionDeltaEvent {
   type: 'delta'
   reset: boolean
+  /**
+   * A reset standing for deltas the reader fell too far behind to be
+   * told one by one (its backlog passed its limit).
+   */
+  coalesced: boolean
   delta: Uint8Array
   /** Always empty: SQLite subscriptions deliver whole-row deltas. */
   terminalOperations: Array<never>

@@ -10,7 +10,7 @@ const producerTasks = ["jazz-napi#build", "jazz-wasm#build", "jazz-wasm#build:fa
 
 // Run the real strict-mode Turbo child boundary, replacing only the fixture's
 // commands with a JSON reporter. This never runs Cargo or writes a target.
-test("Rust producers retain the owner's target, jobs and offline boundary in strict mode", () => {
+test("Rust producers retain the owner's target, jobs, offline boundary and sccache client in strict mode", () => {
   const config = JSON.parse(readFileSync(join(root, "turbo.json"), "utf8"));
   const fixture = mkdtempSync(join(tmpdir(), "jazz-turbo-producer-env-"));
   const writeJson = (path, value) => writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
@@ -53,6 +53,10 @@ test("Rust producers retain the owner's target, jobs and offline boundary in str
         jobs: process.env.CARGO_BUILD_JOBS ?? null,
         offline: process.env.CARGO_NET_OFFLINE ?? null,
         unlisted: process.env.JAZZ_UNLISTED_PRODUCER_ENV_PROBE ?? null,
+        rustc: process.env.RUSTC ?? null,
+        wrapper: process.env.RUSTC_WRAPPER ?? null,
+        sccacheSocket: process.env.SCCACHE_SERVER_UDS ?? null,
+        awsSecret: process.env.AWS_SECRET_ACCESS_KEY ?? null,
       }));\n`,
     );
     const expectedTarget = process.env.CARGO_TARGET_DIR ?? join(fixture, "uncreated-target");
@@ -69,6 +73,16 @@ test("Rust producers retain the owner's target, jobs and offline boundary in str
           CARGO_BUILD_JOBS: "2",
           CARGO_NET_OFFLINE: "true",
           JAZZ_UNLISTED_PRODUCER_ENV_PROBE: "must-not-cross-the-boundary",
+          // CI's setup-blacksmith starts one sccache server (holding the S3
+          // tier's configuration and credentials) and points cargo at it with
+          // these; setup-build's provisioned runners add an absolute RUSTC for
+          // their host-owned daemon. Strict mode dropped them, so every
+          // producer compile in CI bypassed sccache (merge group 743: 0
+          // compile requests).
+          RUSTC: "/opt/probe/bin/rustc",
+          RUSTC_WRAPPER: "sccache",
+          SCCACHE_SERVER_UDS: "/tmp/sccache-probe.sock",
+          AWS_SECRET_ACCESS_KEY: "must-not-cross-the-boundary",
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -88,6 +102,12 @@ test("Rust producers retain the owner's target, jobs and offline boundary in str
           jobs: "2",
           offline: "true",
           unlisted: null,
+          rustc: "/opt/probe/bin/rustc",
+          wrapper: "sccache",
+          sccacheSocket: "/tmp/sccache-probe.sock",
+          // The client only needs the wrapper and the server's socket; cloud
+          // credentials stay with the server and never reach build scripts.
+          awsSecret: null,
         },
       );
     }

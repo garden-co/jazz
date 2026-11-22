@@ -71,6 +71,8 @@ export type NodeData =
       readonly op: "read" | "insert" | "update" | "delete";
       readonly target: HandleData;
       readonly maxDepth?: number;
+      /** Where in the user's code `allowedTo.<op>(…)` was called. */
+      readonly at?: string;
     }
   | {
       readonly k: "compare";
@@ -111,10 +113,57 @@ export function opOf(value: unknown): OpData | undefined {
 }
 
 /** A refusal of the permissions DSL (the caller adds the JSON path). */
-export class PermissionsDslError extends Error {}
+export class PermissionsDslError extends Error {
+  constructor(
+    message: string,
+    /** Where in the user's code the refused construct was written, when known. */
+    readonly location?: string,
+  ) {
+    super(message);
+  }
+}
 
-function fail(message: string): never {
-  throw new PermissionsDslError(message);
+function fail(message: string, location?: string): never {
+  throw new PermissionsDslError(message, location);
+}
+
+/** The first `allowedTo` under a `not`, through `anyOf` / `allOf` / `not`. */
+function negatedAllowed(input: unknown): (NodeData & { k: "allowed" }) | undefined {
+  if (!isNode(input)) return undefined;
+  const data = input[NODE];
+  switch (data.k) {
+    case "allowed":
+      return data;
+    case "and":
+    case "or":
+      for (const item of data.items) {
+        const found = negatedAllowed(item);
+        if (found) return found;
+      }
+      return undefined;
+    case "not":
+      return negatedAllowed(data.item);
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Why `not allowedTo…` is refused: the engine checks inheritance only as a
+ * grant, never negated (and negating the other table's rule would take
+ * `not exists`, which it refuses too). The loader says the same.
+ */
+export function notAllowed(op: string): string {
+  return `\`not allowedTo.${op}(…)\` is not supported yet: write the rule without negating inheritance (\`not\` works on this row's columns and session values)`;
+}
+
+/**
+ * Why `allowedTo` inside an `exists` is refused: the engine checks
+ * inheritance only on the row a rule is for, not on rows an `exists`
+ * reaches. The loader of `jazz.permissions.json` says the same.
+ */
+export function allowedInExists(op: string): string {
+  return `\`allowedTo.${op}(…)\` inside \`exists\` is not supported yet: repeat the other table's ${op} rule there instead (e.g. share it as a helper function)`;
 }
 
 // ============================================================================
@@ -540,8 +589,12 @@ export function text(input: unknown, ctx: Ctx): string {
       const items = data.items.map((item) => text(item, ctx));
       return `${data.k === "and" ? "allOf" : "anyOf"}(${items.join(", ")})`;
     }
-    case "not":
+    case "not": {
+      // Inside an `exists` (or a relation), its own refusal names the problem.
+      const negated = ctx.depth === 0 && !ctx.relation ? negatedAllowed(data.item) : undefined;
+      if (negated) fail(notAllowed(negated.op), negated.at);
       return `not ${text(data.item, ctx)}`;
+    }
     case "exists":
       return existsText(data, ctx);
     case "relWhere":
@@ -669,7 +722,7 @@ function relWhereText(data: NodeData & { k: "relWhere" }, ctx: Ctx): string {
 }
 
 function allowedText(data: NodeData & { k: "allowed" }, ctx: Ctx): string {
-  if (ctx.relation) fail("allowedTo.<op>(…) can't be used inside a relation's predicate");
+  if (ctx.relation || ctx.depth > 0) fail(allowedInExists(data.op), data.at);
   const target = data.target;
   let argument: string;
   if (target.k === "rel") {
@@ -720,7 +773,25 @@ function leftOperand(raw: unknown, ctx: Ctx): string {
   );
 }
 
+/**
+ * Refuse comparing `session.authMode` with `"local-first"`, which device
+ * accounts were called before 2026-11. No session has it any more: a rule
+ * comparing with it would quietly never match, and `ne(session.authMode,
+ * "local-first")` would let device accounts in.
+ */
+function refuseRemovedAuthMode(left: unknown, right: unknown): void {
+  const h = handleOf(left);
+  if (h?.k !== "session" || h.path.length !== 1 || h.path[0] !== "authMode") return;
+  const values = Array.isArray(right) ? right : [right];
+  if (values.includes("local-first"))
+    fail(
+      'session.authMode is never "local-first" any more: local-first auth was renamed to ' +
+        'device accounts, so compare with "device-account"',
+    );
+}
+
 function compareText(data: NodeData & { k: "compare" }, ctx: Ctx): string {
+  refuseRemovedAuthMode(data.left, data.right);
   const left = leftOperand(data.left, ctx);
   const right = data.right;
   switch (data.op) {

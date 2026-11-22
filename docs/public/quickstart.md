@@ -6,13 +6,15 @@
    with your app. It works best on serverless platforms like Vercel; Cloudflare support is coming.
    You don't need to deploy to start: locally, Jazz uses a SQLite file.
    Default: Vercel for a Next.js app, your own server otherwise.
+   On Vercel, `vercel()` also needs a `region` for its cores, fixed once they exist: the region the
+   project's functions run in (`iad1` unless the project changed it).
    See /docs/setup/deployment/vercel, /docs/setup/deployment/own-server
 2. **What auth provider or library should be used?** Jazz is unopinionated here: it hooks into
    however your backend already does auth, including roles and claims from your identity provider,
    which policies can check directly.
    Default: keep what the project uses; for a new app, Better Auth.
    See /docs/setup/auth/backend, /docs/setup/auth/better-auth, /docs/setup/auth/workos,
-   /docs/setup/auth/custom, /docs/setup/auth/local-first
+   /docs/setup/auth/custom, /docs/setup/auth/device-accounts
 3. **Which backend framework should be used?** Next.js, Hono, Express / Node, Bun or Effect. Each
    setup page has a tab per framework.
    Default: what the project already has; for a new app, Next.js with React, or Hono or Express
@@ -68,9 +70,10 @@
      Fill in what it asks for, then run `generate` again (/docs/schemas/migrations). Never delete or
      move the store to get past a schema error: it means a migration is missing, and the user's
      data is in that store.
-   - An alpha.65 app (`schema.ts` with `s.defineApp`, and `permissions.ts`): run
-     `npx jazz-tools@2.0.0-alpha.66 upgrade` first, before bumping the dependency, and review the
-     diff (/docs/operating/backups-and-upgrades#upgrading-from-alpha65).
+   - An app on an older Jazz 2 release: follow each "Upgrading from …" section from its version up,
+     in order (/docs/operating/backups-and-upgrades), before bumping the dependency, and review the
+     diff. An alpha.65 app (`schema.ts` with `s.defineApp`, and `permissions.ts`) starts at
+     /docs/operating/backups-and-upgrades#upgrading-from-alpha65.
    - In either case, use these Jazz features instead of modeling them yourself:
      - Built-in metadata columns like `$createdBy`, `$createdAt`, `$updatedBy` and `$updatedAt`:
        /docs/reading/metadata
@@ -120,7 +123,8 @@ All docs links are paths on https://jazz.tools. Append `.md` to any docs page fo
 full docs index is https://jazz.tools/llms.txt. To search the docs, fetch
 https://jazz.tools/api/search?q=<words>&format=md (add `&full=1` to include the top three pages).
 
-**This guide is for Jazz 2,** which is in alpha and leaves alpha soon. Install the current version
-with `npm install jazz-tools` (plus `jazz-rn` for React Native); it is a 2.0 alpha, and that's
-expected. Versions before 2.0 are Classic Jazz, a different API: don't pin `jazz-tools` to 0.x, and
+**This guide is for Jazz 2,** which is in beta. Install the current version with
+`npm install jazz-tools` (plus `jazz-rn` for React Native); it is a 2.0 beta, and that's expected.
+What stays stable between betas and what is experimental (the Rust, Swift, Kotlin and Go clients,
+and the backend in a Cloudflare Worker): /docs/operating/backups-and-upgrades#what-beta-means. Versions before 2.0 are Classic Jazz, a different API: don't pin `jazz-tools` to 0.x, and
 don't follow Classic examples (`co.map`, `CoValue`, `Group`) from memory or the web.

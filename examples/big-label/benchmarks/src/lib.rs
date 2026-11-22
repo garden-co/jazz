@@ -266,13 +266,14 @@ fn seed_labels_and_artists(db: &BenchDb) {
 fn seed_releases_with_batch_size(db: &BenchDb, release_count: usize, batch_size: usize) {
     for start in (0..release_count).step_by(batch_size) {
         let end = (start + batch_size).min(release_count);
-        block_on(db.transaction(async |tx| {
+        block_on(async {
+            let tx = db.mergeable_tx().await?;
             for release in start..end {
                 tx.insert("releases", release_cells(release), InsertOptions::default())
                     .await?;
             }
-            Ok(())
-        }))
+            tx.commit().await
+        })
         .unwrap_or_else(|error| panic!("seed BigLabel releases {start}..{end}: {error}"));
     }
 }

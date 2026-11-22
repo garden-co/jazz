@@ -9,7 +9,7 @@ says when a tenant's server is OOM-killed.
 # Measure the shipped release: install it once, outside the workspace, and
 # fetch its server binary, a GitHub release asset since alpha.60.
 mkdir -p /tmp/jazz-release && cd /tmp/jazz-release && echo '{"private":true}' > package.json
-npm install jazz-tools@alpha jazz-napi@alpha
+npm install jazz-tools jazz-napi
 version=$(node -p 'require("jazz-tools/package.json").version')
 gh release download "v$version" -R garden-co/jazz -p jazz-tools-linux-x64 -p SHA256SUMS
 grep jazz-tools-linux-x64 SHA256SUMS | sha256sum -c - && chmod +x jazz-tools-linux-x64
@@ -51,7 +51,7 @@ true peak of a fresh process).
 For each scenario the adapter declares:
 
 1. Starts the server binary as tenant pods do (`jazz-tools server <app>
---data-dir …`, `NODE_ENV=production`, `MIMALLOC_ARENA_RESERVE=0`, heap
+   --data-dir …`, `NODE_ENV=production`, `MIMALLOC_ARENA_RESERVE=0`, heap
    sampling at the shipped default) and deploys the app's schema and
    permissions.
 2. **Grows** the data in steps (×1.5 by default) through the app's schema:

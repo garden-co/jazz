@@ -14,7 +14,7 @@ RUN set -eu; \
       arm64) arch=aarch64; sha256=09b7127b09e3d3ed5fa894f4e59f6a01112f267da6acc4249e46dba97b14afcb ;; \
       *) echo "unsupported TARGETARCH $TARGETARCH" >&2; exit 1 ;; \
     esac; \
-    curl --fail --location --silent --show-error --output /tmp/cmake.tar.gz \
+    curl --fail --location --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --output /tmp/cmake.tar.gz \
       "https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-linux-$arch.tar.gz"; \
     echo "$sha256  /tmp/cmake.tar.gz" | sha256sum --check --strict; \
     tar -xzf /tmp/cmake.tar.gz --strip-components=1 -C /usr/local; \

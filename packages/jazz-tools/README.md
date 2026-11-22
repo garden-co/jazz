@@ -58,7 +58,7 @@ JavaScript, declaring a subclass may be inert; calling its inherited constructor
 or accessing Classic static operations raises the diagnostic. A constructor that
 deliberately bypasses the Classic base does not execute that base's diagnostic.
 
-Svelte's `JazzSvelteProvider` and Vue's `JazzProvider` are still supported Jazz 2
+Svelte's and Vue's `JazzProvider` are still supported Jazz 2
 components, and Svelte's `getJazzContext` remains supported. These providers take
 `config`, not Classic `sync` or `AccountSchema` props. Supplying those old props
 (including `accountSchema` / `account-schema` spellings, even with an undefined
@@ -83,7 +83,6 @@ intercept separate legacy packages such as `jazz-vue`, `jazz-svelte` or
 ```bash
 npx jazz-tools generate          # check jazz.app.json / jazz.permissions.json, write jazz.generated.ts
 npx jazz-tools migrations create --name <name>   # record a schema change
-npx jazz-tools upgrade           # convert an alpha.64 app (schema.ts, permissions.ts, migrations/)
 ```
 
 ## Supported binary targets
@@ -95,7 +94,7 @@ npx jazz-tools upgrade           # convert an alpha.64 app (schema.ts, permissio
 
 If your platform is not supported in the npm package, install with Cargo from source.
 
-## React Native alpha boundary
+## React Native boundary
 
 The `jazz-tools/react-native` entry point requires a matching installed
 `jazz-rn` native artifact. Persistent databases use native account admission

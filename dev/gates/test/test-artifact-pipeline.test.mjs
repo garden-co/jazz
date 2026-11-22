@@ -450,7 +450,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
     "utf8",
   );
   assert.match(ensureArtifacts, /spawn\("pnpm", \["build:correctness-artifacts"\]/);
-  assert.match(workflow, /local-ci-equivalent\.mjs --ci-partition typescript/);
+  assert.match(workflow, /local-ci-equivalent\.mjs --ci-partition \$\{\{ matrix\.partition \}\}/);
   assert.match(
     localCi,
     /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/,
@@ -494,7 +494,18 @@ test("CI uses the correctness artifact path while package builds keep release WA
   );
 
   const turbo = JSON.parse(readFileSync(new URL("../../../turbo.json", import.meta.url), "utf8"));
-  const expectedRustSettings = ["CARGO_TARGET_DIR", "CARGO_BUILD_JOBS", "CARGO_NET_OFFLINE"];
+  // RUSTC_WRAPPER and SCCACHE_* point cargo at the sccache server CI starts
+  // (it holds the S3 tier's credentials; none pass through), and RUSTC is the
+  // absolute compiler setup-build gives a host-owned daemon. Strict mode
+  // dropped them, so every Turbo-launched compile bypassed sccache.
+  const expectedRustSettings = [
+    "CARGO_TARGET_DIR",
+    "CARGO_BUILD_JOBS",
+    "CARGO_NET_OFFLINE",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "SCCACHE_*",
+  ];
   const expectedLease = [
     "JAZZ_TEST_ARTIFACT_LOCK_PATH",
     "JAZZ_ARTIFACT_BUILD_LEASE",
@@ -553,6 +564,10 @@ test("CI uses the correctness artifact path while package builds keep release WA
     );
   assert.deepEqual(turbo.tasks.test.passThroughEnv, [
     "TMPDIR",
+    // Package tests that build Rust (rust-backend-clients) reach sccache too.
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "SCCACHE_*",
     ...turbo.tasks["jazz-tools#build"].passThroughEnv,
     "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
     "JAZZ_CORRECTNESS_CONSUMER_TOKEN",

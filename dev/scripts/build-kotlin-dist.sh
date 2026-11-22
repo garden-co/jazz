@@ -14,6 +14,12 @@
 # (`cargo build -p jazz-ffi --profile release`, the library renamed into its
 # JNA directory). Locally, `mkdir -p n/linux-x86-64 && cp target/release/
 # libjazz_ffi.so n/linux-x86-64/` makes a Linux-only one.
+#
+# Prebuilt Rust, so this runs no cargo (attach-language-artifacts.yml):
+# KOTLIN_JVM_BINDINGS=<dir>, the Kotlin bindings uniffi-bindgen generated from
+# the linux-x86_64 release library (the jar's -PuniffiBindings), and
+# KOTLIN_ANDROID_JNI_LIBS and KOTLIN_ANDROID_BINDINGS for the AAR
+# (dev/scripts/test-kotlin-android.sh).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -42,8 +48,9 @@ source dev/scripts/kotlin-toolchain.sh
 gradle --version | grep -q '^Gradle 8\.14\.3$' || { gradle --version >&2; echo "not the pinned Gradle 8.14.3" >&2; exit 1; }
 
 # The bindings are generated from this platform's build of the same sources.
-gradle --no-daemon --console=plain -p packages/jazz-kotlin \
-  -PcargoProfile=release -PnativeLibs="$natives" clean jar
+jvm=(-PcargoProfile=release -PnativeLibs="$natives")
+[ -n "${KOTLIN_JVM_BINDINGS:-}" ] && jvm+=(-PuniffiBindings="$(cd "$KOTLIN_JVM_BINDINGS" && pwd)")
+gradle --no-daemon --console=plain -p packages/jazz-kotlin "${jvm[@]}" clean jar
 cp "packages/jazz-kotlin/build/libs/jazz-kotlin-$version.jar" "$out/"
 
 # The jar must hold every platform's library.

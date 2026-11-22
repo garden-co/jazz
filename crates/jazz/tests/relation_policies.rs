@@ -162,8 +162,16 @@ fn seed(db: &Db, table: &str, row: RowUuid, pairs: &[(&str, CoreValue)]) {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), v.clone()))
         .collect::<BTreeMap<_, _>>();
-    db.seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, cells)
-        .unwrap();
+    jazz::db::block_on(db.insert(
+        table,
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
 }
 
 fn read_as(db: &Db, sub: &str) -> usize {
@@ -505,6 +513,21 @@ fn a_row_id_key_inside_a_gather_seed_is_refused() {
     };
     let refused = refusal(seeded_from_row);
     assert!(refused.contains("Gather seed"), "{refused}");
+}
+
+/// The policy language has no prefix/suffix test. One built through the
+/// Rust API (an `ExistsRel` whose filter uses `StartsWith`) is refused when
+/// the schema compiles, not deployed.
+#[test]
+fn a_prefix_test_in_a_relation_policy_is_refused() {
+    let refused = refusal(edges_where(RelationPredicate::StartsWith {
+        left: access("team"),
+        right: RelationValueRef::literal(Value::Text("ops".into())),
+    }));
+    assert!(
+        refused.contains("starts/ends with is not supported in permission policies"),
+        "{refused}"
+    );
 }
 
 /// A deny policy, a negated relation, is not a form the schema takes yet:

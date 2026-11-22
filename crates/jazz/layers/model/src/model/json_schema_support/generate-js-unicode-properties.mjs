@@ -7,7 +7,7 @@
 //   curl -sfo "$dir/PropertyAliases.txt" https://www.unicode.org/Public/UCD/latest/ucd/PropertyAliases.txt
 //   curl -sfo "$dir/PropertyValueAliases.txt" https://www.unicode.org/Public/UCD/latest/ucd/PropertyValueAliases.txt
 //   node crates/jazz/layers/model/src/model/json_schema_support/generate-js-unicode-properties.mjs "$dir"
-//   pnpm exec oxfmt crates/jazz/layers/model/src/model/json_schema_support/js_unicode_properties.json
+//   pnpm exec vp fmt crates/jazz/layers/model/src/model/json_schema_support/js_unicode_properties.json
 //
 // Run it with the oldest Node the project supports, so the table holds only
 // names every supported engine knows. Note the Node and Unicode versions in

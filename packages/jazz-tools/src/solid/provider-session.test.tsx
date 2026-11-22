@@ -3,7 +3,12 @@ import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
-import { ownJazzSession, startJazzSession, type JazzSession } from "../session/jazz-session.js";
+import {
+  ownJazzSession,
+  startJazzSession,
+  type JazzSession,
+  type JazzSessionErrorViewProps,
+} from "../session/jazz-session.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { JazzProvider, useJazzSession } from "./session.js";
 import { useJazzClient } from "./provider.js";
@@ -110,6 +115,43 @@ it("retries startup through the default UI and exposes unified auth to children"
   await expect(auth!.signOut()).rejects.toThrow("logout failed");
   await flush();
   expect(auth!.snapshot().error?.message).toBe("logout failed");
+});
+it("gives a custom error view { error, recovery, retry }, whose retry never rejects", async () => {
+  const { owner } = await setup();
+  await owner.createLocalFirst();
+  factory
+    .mockRejectedValueOnce(new Error("startup unavailable"))
+    .mockRejectedValueOnce(new Error("still unavailable"));
+  const seen: JazzSessionErrorViewProps[] = [];
+  const node = document.createElement("div");
+  document.body.append(node);
+  dispose = render(
+    () => (
+      <JazzProvider
+        config={{ scope: "test" }}
+        error={(props) => {
+          seen.push(props);
+          return (
+            <button onClick={props.retry}>
+              {props.error.message} ({props.recovery})
+            </button>
+          );
+        }}
+      >
+        <p>PRIVATE</p>
+      </JazzProvider>
+    ),
+    node,
+  );
+  await flush();
+  expect(node.textContent).toBe("startup unavailable (session)");
+  expect(Object.keys(seen.at(-1)!).sort()).toEqual(["error", "recovery", "retry"]);
+  await expect(seen.at(-1)!.retry()).resolves.toBeUndefined();
+  await flush();
+  expect(node.textContent).toBe("still unavailable (session)");
+  node.querySelector("button")!.click();
+  await flush();
+  expect(node.textContent).toBe("PRIVATE");
 });
 it("follows the backend on refresh and releases children before shutdown", async () => {
   const { owner, events } = await setup();

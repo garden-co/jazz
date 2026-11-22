@@ -898,7 +898,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const session = markTrustedReservedSession({
       issuer: claims.iss,
       user_id: claims.sub,
-      authMode: "local-first" as const,
+      authMode: "device-account" as const,
       claims: {},
     });
     const claimedAuthor = JSON.stringify([session.issuer, session.user_id]);

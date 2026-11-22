@@ -11,6 +11,22 @@ use jazz_server::JazzServer;
 use std::path::Path;
 use std::time::Duration;
 
+/// Wait until `jazz`'s link to the server is up.
+async fn connected(jazz: &Jazz) {
+    use futures::StreamExt;
+    let mut changes = jazz.sync_changes();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(status) = changes.next().await {
+            if status.link == jazz_app_support::Link::Connected {
+                return;
+            }
+        }
+        panic!("the client closed before it connected");
+    })
+    .await
+    .expect("the client connects");
+}
+
 async fn open(server: &JazzServer, app_id: AppId) -> Jazz {
     let permissions = include_bytes!("fixtures/guarded/jazz.permissions.json");
     bindings::open(
@@ -167,6 +183,9 @@ async fn permission_advice() {
         .await
         .unwrap();
     let jazz = open(&server, app_id).await;
+    // Opening does not wait for the server, and advice is the server's:
+    // without a link it is `Unknown`.
+    connected(&jazz).await;
     let me = ObjectId::from_uuid(jazz.account().unwrap().0);
     let someone_else = ObjectId::new();
 

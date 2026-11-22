@@ -98,7 +98,9 @@ describe("generate", () => {
   it("points an alpha.65 project (jazz.app.json, no schema.ts) at upgrade", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-legacy-"));
     await writeFile(join(dir, "jazz.app.json"), '{ "format": 1, "tables": {} }\n');
-    await expect(generateApp({ cwd: dir })).rejects.toThrow(/Run `npx jazz-tools upgrade`/);
+    await expect(generateApp({ cwd: dir })).rejects.toThrow(
+      /npx jazz-tools@2\.0\.0-alpha\.70 upgrade/,
+    );
   });
 });
 
