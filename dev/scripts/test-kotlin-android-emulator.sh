@@ -2,12 +2,16 @@
 # The Kotlin Android emulator smoke test: dev/kotlin-android-smoke, a minified
 # app of the built jazz-kotlin-android AAR, installed on an x86-64 emulator,
 # opens, writes, reads and syncs against a Jazz server and
-# jazz-app-test-relay on this machine (adb reverse), and again after a
-# process restart. Needs Linux x86-64 and /dev/kvm.
+# jazz-app-test-relay on this machine (adb reverse), offline after a process
+# kill, and again once the server is back, then checks one app per store
+# directory. It prints one line per rule, `RULE <id> PASS|FAIL|BLOCKED`
+# (BLOCKED: something it needs failed first), and fails if any scored rule
+# didn't pass. Observe-only rules are printed and not scored. Needs Linux
+# x86-64 and /dev/kvm.
 #
 # usage: dev/scripts/test-kotlin-android-emulator.sh [<tools/jazz Maven tree>]
 #   With a tree (release-artifacts' release-maven), tests that AAR and POM:
-#   what ships. Without, builds an x86_64-only AAR from this checkout, with
+#   what ships, at the one version it holds. Without, builds an x86_64-only AAR from this checkout, with
 #   CARGO_PROFILE (default dev) as dev/scripts/test-kotlin-android.sh does.
 #
 # JAZZ_TOOLS and JAZZ_APP_TEST_RELAY take prebuilt host binaries, as the
@@ -109,15 +113,20 @@ printf '%s\n' "avd.ini.encoding=UTF-8" "AvdId=jazz-smoke" "PlayStore.enabled=fal
 emulator_pid=$!
 mark "emulator starting"
 
-version="$(sed -n 's/^  "version": "\(.*\)",$/\1/p' packages/jazz-tools/package.json)"
-[ -n "$version" ] || fail "no version in packages/jazz-tools/package.json"
 published="$work/repository/tools/jazz"
 artifact=jazz-kotlin-android
 mkdir -p "$published"
 if [ -n "$maven_tree" ]; then
+  # The tree's version, not this checkout's: an older release can be tested
+  # from a newer checkout.
+  versions=("$maven_tree/$artifact"/*/)
+  [ "${#versions[@]}" = 1 ] && [ -d "${versions[0]}" ] || fail "$maven_tree/$artifact should hold exactly one version"
+  version="$(basename "${versions[0]}")"
   [ -f "$maven_tree/$artifact/$version/$artifact-$version.aar" ] || fail "$maven_tree has no $artifact $version"
   cp -R "$maven_tree/$artifact" "$published/"
 else
+  version="$(sed -n 's/^  "version": "\(.*\)",$/\1/p' packages/jazz-tools/package.json)"
+  [ -n "$version" ] || fail "no version in packages/jazz-tools/package.json"
   # The POM and module as publishing writes them, without its signing.
   KOTLIN_ANDROID_ABIS=x86_64 \
     KOTLIN_ANDROID_TASKS="generatePomFileForMavenPublication generateMetadataFileForMavenPublication" \
@@ -128,7 +137,7 @@ else
   cp "$built/publications/maven/pom-default.xml" "$published/$artifact/$version/$artifact-$version.pom"
   cp "$built/publications/maven/module.json" "$published/$artifact/$version/$artifact-$version.module"
 fi
-echo "testing $(sha256sum "$published/$artifact/$version/$artifact-$version.aar")"
+echo "testing $artifact $version: $(sha256sum "$published/$artifact/$version/$artifact-$version.aar")"
 mark "AAR ready"
 
 # The host's server and relay build beside the app, whose build runs no cargo.
@@ -193,31 +202,59 @@ timeout 20 "$adb" reverse "tcp:$relay_port" "tcp:$relay_port"
 mark "app installed"
 
 run="run-$app_id"
-failed=()
+# Each phase's rules, in order. Observe-only: printed, not scored.
+declare -A phase_rules=(
+  [memory]="android.memory"
+  [write]="persist.reopen.bearer persist.reopen.device"
+  [offline]="offline.device-open offline.bearer-open"
+  [restart]="persist.killed-process sync.offline-write store.second-open store.reopen store.second-open.process store.killed-holder store.reopen-after-failed-open store.delete-reopen"
+)
+# A bearer user's open waits for the backend's sign-in (2.0.0-beta.0 and
+# later): proposed out of beta.1's contract.
+observe_only=" offline.bearer-open "
+results=()
 # Every phase runs, so one failure doesn't hide the next.
-for phase in memory write restart; do
-  # SIGKILLs the last phase's process, which `write` leaves with its app open.
+for phase in memory write offline restart; do
+  # SIGKILLs the last phase's process, which `write` leaves with its apps open.
   timeout 30 "$adb" shell am force-stop "$package"
   timeout 30 "$adb" logcat -c
+  if [ "$phase" = offline ]; then
+    timeout 20 "$adb" reverse --remove "tcp:$relay_port"
+  else
+    timeout 20 "$adb" reverse "tcp:$relay_port" "tcp:$relay_port"
+  fi
   timeout 90 "$adb" shell am start -n "$package/smoke.SmokeActivity" \
     --es run "$run" --es phase "$phase" --es endpoint "$endpoint" --es appId "$app_id"
   deadline=$((SECONDS + phase_seconds))
+  crashed=''
   while :; do
     log="$(timeout 20 "$adb" logcat -d -v brief -s JazzSmoke:V AndroidRuntime:E libc:F 2>/dev/null || true)"
-    if grep -q "$run $phase PASS" <<<"$log"; then
-      grep 'JazzSmoke' <<<"$log"
-      mark "$phase passed"
-      break
-    fi
-    if grep -q "$run $phase FAIL\|FATAL EXCEPTION\|Fatal signal" <<<"$log" || [ "$SECONDS" -ge "$deadline" ]; then
-      echo "$log" >&2
-      mark "$phase FAILED"
-      failed+=("$phase")
-      break
-    fi
+    if grep -q "$run $phase DONE" <<<"$log"; then break; fi
+    if grep -q "FATAL EXCEPTION\|Fatal signal" <<<"$log"; then crashed="the app crashed"; break; fi
+    if [ "$SECONDS" -ge "$deadline" ]; then crashed="no end within ${phase_seconds}s"; break; fi
     sleep 1
   done
+  grep 'JazzSmoke\|AndroidRuntime\|libc' <<<"$log" || true
+  for rule in ${phase_rules[$phase]}; do
+    line="$(grep -o "$run RULE $rule \(PASS\|FAIL\|BLOCKED\):.*" <<<"$log" | head -1 | sed "s/^$run //")"
+    [ -n "$line" ] || line="RULE $rule BLOCKED: the $phase phase ended before it (${crashed:-see the log})"
+    results+=("$line")
+  done
+  mark "$phase done${crashed:+: $crashed}"
 done
-[ "${#failed[@]}" = 0 ] || fail "failed: ${failed[*]}"
+
+echo "--- rules, $artifact $version"
+scored_failed=()
+for line in "${results[@]}"; do
+  rule="$(cut -d' ' -f2 <<<"$line")"
+  outcome="$(cut -d' ' -f3 <<<"$line" | tr -d :)"
+  if [[ "$observe_only" == *" $rule "* ]]; then
+    echo "$line (observe only)"
+  else
+    echo "$line"
+    [ "$outcome" = PASS ] || scored_failed+=("$rule")
+  fi
+done
+[ "${#scored_failed[@]}" = 0 ] || fail "not passed: ${scored_failed[*]}"
 passed=true
 mark "passed"
