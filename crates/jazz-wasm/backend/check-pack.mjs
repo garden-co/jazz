@@ -29,7 +29,7 @@ if (missing.length > 0) {
 }
 // It is the backend build: what the browser build leaves out is in it.
 const glue = readFileSync(`${root}/backend/pkg/jazz_wasm_backend.js`, "utf8");
-for (const name of ["serveThinTransaction", "WasmThinRouter", "loadBackendApp"]) {
+for (const name of ["serveThinTransaction", "WasmThinRouter", "loadBackendApp", "admitPrelude"]) {
   if (!glue.includes(name)) {
     console.error(`backend/pkg/jazz_wasm_backend.js lacks ${name}: is it a backend build?`);
     process.exit(1);

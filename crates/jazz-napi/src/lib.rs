@@ -3262,6 +3262,21 @@ pub fn mint_local_first_token(
     .map_err(napi::Error::from_reason)
 }
 
+/// `createJazz`'s admission of a client's socket prelude
+/// (`jazz::tools::backend_admission`): `facts` and the answered step are JSON.
+#[napi(js_name = "admitPrelude")]
+pub fn admit_prelude(prelude: Uint8Array, facts: String) -> napi::Result<String> {
+    jazz::tools::backend_admission::admit_json(&prelude, &facts)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
+}
+
+/// `prelude` pinned to the backend's published `bundle`; null when it is
+/// not a JSON object.
+#[napi(js_name = "pinPreludeBundle")]
+pub fn pin_prelude_bundle(prelude: Uint8Array, bundle: Option<String>) -> Option<Uint8Array> {
+    jazz::tools::backend_admission::pin_bundle(&prelude, bundle.as_deref()).map(Uint8Array::from)
+}
+
 #[napi(object)]
 pub struct VerifyTokenResult {
     pub ok: bool,

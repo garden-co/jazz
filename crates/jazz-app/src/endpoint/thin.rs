@@ -14,6 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jazz::thin::{ThinBody, ThinOp, ThinRequest, ThinResponse};
+use jazz::tools::native_transport_connector::{
+    NativeTransportConnector, NativeTransportFuture, NativeTransportRequest,
+};
 use jazz::tools::{AppContext, ClientStorage, JazzClient, Schema, Session};
 use tokio::sync::mpsc;
 
@@ -33,8 +36,12 @@ pub(crate) const ANSWER_DEADLINE: Duration = Duration::from_secs(60);
 /// prelude stated, on the backend's word.
 #[derive(Clone)]
 pub(crate) enum SessionAuth {
-    /// A signed-in user's session, vouched for by the backend.
-    User(Session),
+    /// A signed-in user's session, vouched for by the backend, and when its
+    /// `authenticate` started (`authenticatedAt`).
+    User {
+        session: Session,
+        authenticated_at_ms: u64,
+    },
     /// A device account, on its own proof, relayed by the backend.
     DeviceAccount(String),
 }
@@ -67,13 +74,49 @@ impl SessionTarget {
             migrations: Default::default(),
         };
         match &self.auth {
-            SessionAuth::User(session) => {
+            SessionAuth::User { session, .. } => {
                 context.account_id = session.account_id;
                 context.backend_session = Some(session.clone());
             }
             SessionAuth::DeviceAccount(token) => context.jwt_token = Some(token.clone()),
         }
         context
+    }
+
+    /// How the session's client connects: as the socket was admitted. A
+    /// [`Session`] carries no `authenticatedAt`, so it is stamped here;
+    /// without it a revoke between the sign-in and the client's connection
+    /// would not refuse the client.
+    fn connector(&self) -> Arc<dyn NativeTransportConnector> {
+        let native = jazz_native_transport::NativeWebSocketConnector;
+        match &self.auth {
+            SessionAuth::User {
+                authenticated_at_ms,
+                ..
+            } => Arc::new(AuthenticatedAt {
+                native,
+                authenticated_at_ms: *authenticated_at_ms,
+            }),
+            SessionAuth::DeviceAccount(_) => Arc::new(native),
+        }
+    }
+}
+
+/// Connects with `authenticatedAt` in the session the client states.
+struct AuthenticatedAt {
+    native: jazz_native_transport::NativeWebSocketConnector,
+    authenticated_at_ms: u64,
+}
+
+impl NativeTransportConnector for AuthenticatedAt {
+    fn connect(&self, mut request: NativeTransportRequest) -> NativeTransportFuture {
+        if let Some(serde_json::Value::Object(session)) = &mut request.auth.backend_session {
+            session.insert(
+                "authenticatedAt".to_owned(),
+                self.authenticated_at_ms.into(),
+            );
+        }
+        self.native.connect(request)
     }
 }
 
@@ -163,7 +206,7 @@ fn run(
             Ok(schema) => {
                 JazzClient::connect_with_native_transport(
                     target.context(schema),
-                    Arc::new(jazz_native_transport::NativeWebSocketConnector),
+                    target.connector(),
                 )
                 .await
             }

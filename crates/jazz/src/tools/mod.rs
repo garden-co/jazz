@@ -9,6 +9,8 @@ pub use crate::model::public_schema_convert;
 pub use crate::model::{metadata, policy_claims, public_schema, transaction};
 pub use crate::{app_id, identity};
 #[doc(hidden)]
+pub mod backend_admission;
+#[doc(hidden)]
 pub mod deployment;
 /// Target-shell factory boundary for native peer transports.
 pub mod native_transport_connector;

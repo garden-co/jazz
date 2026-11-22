@@ -30,6 +30,10 @@ function wasmBackendNative(module: typeof wasm): BackendNative {
     host: "workerd",
     Db: module.WasmDb as unknown as BackendNative["Db"],
     ThinRouter: module.WasmThinRouter as BackendNative["ThinRouter"],
+    admitPrelude: module.admitPrelude as BackendNative["admitPrelude"],
+    // jazz-wasm answers undefined where jazz-napi answers null.
+    pinPreludeBundle: (prelude, bundle) =>
+      module.pinPreludeBundle(prelude, bundle ?? undefined) ?? null,
     captureTextAnchor: module.captureTextAnchor as unknown as BackendNative["captureTextAnchor"],
     captureTextRange: module.captureTextRange as unknown as BackendNative["captureTextRange"],
     resolveTextAnchor: module.resolveTextAnchor as unknown as BackendNative["resolveTextAnchor"],

@@ -34,7 +34,6 @@ import {
 } from "../runtime/native-runtime/websocket.js";
 import {
   SESSION_RENEWAL_HEADER,
-  SESSION_RENEWAL_PRELUDE_FIELD,
   WIRE_FRAME_RENEW,
   decodeRenewFrame,
   encodeRenewSoonFrame,
@@ -55,6 +54,7 @@ import { shippedMigrations } from "../runtime/client-migrations.js";
 import { checkRunningBindings } from "../dev/app-files.js";
 import { loadBackendApp, provideCodegenNapi, type LoadedBackendApp } from "../dev/codegen-napi.js";
 import { BUNDLE_HEADER } from "./admission.js";
+import { admitClient } from "./backend-admission.js";
 import { boundApp } from "../typed-app.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { publishLoadedDeployment } from "../dev/catalogue.js";
@@ -74,6 +74,7 @@ import { asksThinResults, ThinRelay, type ThinTransactionClient } from "./thin-r
 import {
   BackendClientsUnavailable,
   backendClientVerifier,
+  type BackendClientAccess,
   type BackendClientTrust,
 } from "./backend-clients.js";
 import { BACKEND_USER_ISSUER } from "./backend-issuer.js";
@@ -1418,7 +1419,7 @@ export function pinnedSocket(socket: CoreSocket, bundle: () => string | undefine
   const pin = (data: Uint8Array): Uint8Array | null => {
     if (!first) return data;
     first = false;
-    const pinned = withBundle(data, bundle());
+    const pinned = backendNative().pinPreludeBundle(data, bundle());
     // A prelude the pin cannot be stamped into would open unpinned.
     if (pinned === null) socket.close();
     return pinned;
@@ -1436,25 +1437,6 @@ export function pinnedSocket(socket: CoreSocket, bundle: () => string | undefine
     close: () => socket.close(),
     ...(socket.opened ? { opened: socket.opened } : {}),
   };
-}
-
-/**
- * `prelude` pinned to `bundle`, or with no pin while none is published yet
- * (the backend's own sockets while it boots): a bundle a browser stated
- * never reaches the core. `null` when the prelude is not a JSON object.
- */
-function withBundle(prelude: Uint8Array, bundle: string | undefined): Uint8Array | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder().decode(prelude));
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const { bundle: _stated, ...rest } = parsed as Record<string, unknown>;
-  return new TextEncoder().encode(
-    JSON.stringify(bundle === undefined ? rest : { ...rest, bundle }),
-  );
 }
 
 /** `bundle` is the published bundle every socket the core opens is pinned to. */
@@ -2977,14 +2959,11 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
   }
 
   /**
-   * Turn a browser prelude into one the core admits on this backend's word:
-   * the user `authenticate` finds on this request, with their account and
-   * claims, vouched for with the backend secret. A device account's
-   * prelude passes through: the core verifies its self-signed token. Any
-   * other credential, or a prelude naming another user, is refused: with
-   * {@link UNVERIFIED_CREDENTIAL} when the client sent a token or backend
-   * client credential that doesn't verify here, with `null` when it sent
-   * none that names anyone.
+   * Admit a client's prelude on this backend's word, or refuse it. The rules
+   * are Rust's (`jazz::tools::backend_admission`); this supplies what only
+   * the app and this host know: the request's backend client, `authenticate`
+   * and the account. `null` for a prelude that names no one,
+   * {@link UNVERIFIED_CREDENTIAL} for a credential that wasn't accepted.
    */
   async function admitPrelude(
     request: Request,
@@ -3006,134 +2985,52 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
       }
     | null
   > {
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(new TextDecoder().decode(prelude)) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    // Between the client and this backend only: the core never sees it.
-    const renewal = parsed[SESSION_RENEWAL_PRELUDE_FIELD] === 1;
-    delete parsed[SESSION_RENEWAL_PRELUDE_FIELD];
-    // Vouch only for an `auth` that carries exactly one client credential.
-    const vouchedAuth = (base: Record<string, unknown>) => {
-      const hasToken = base.jwt_token != null;
-      const hasSession = base.backend_session != null;
-      if (hasToken === hasSession)
-        throw new Error("createJazz: a guest prelude must carry exactly one credential");
-      return { ...base, backend_secret: core.backendSecret };
-    };
-    const separateAuth =
-      parsed.auth != null && typeof parsed.auth === "object" && !Array.isArray(parsed.auth);
-    const auth = (separateAuth ? parsed.auth : parsed) as Record<string, unknown>;
-    // Credentials are read from `auth` alone; top-level copies are dropped.
-    if (separateAuth) {
-      for (const field of PRELUDE_CREDENTIAL_FIELDS) delete parsed[field];
-    }
-    const client = await backendClients.resolve(request);
-    if (client === "refused") return UNVERIFIED_CREDENTIAL;
-    if (client?.kind === "backend") {
-      // A trusted backend client syncs with this backend's authority: it
-      // states a backend secret (any stand-in) and, to act for a user, that
-      // user's session, as the main backend's own client does (the user's
-      // policies then apply to those writes at the core). Never an admin
-      // secret or a token of its own.
-      for (const key of ["admin_secret", "jwt_token"]) {
-        if (parsed[key] != null || auth[key] != null) return null;
-      }
-      if (parsed.backend_secret == null && auth.backend_secret == null) return null;
-      const vouched = { backend_secret: core.backendSecret };
-      const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
-      return {
-        prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
-        userId: undefined,
-        access: "backend",
-        trusted: true,
-        expiresAt: client.expiresAt,
-      };
-    }
-    const others = ["backend_secret", "admin_secret", "backend_session"];
-    // Browser worker transports send `jwt_token: null` alongside a backend
-    // session; only a real token counts as one.
-    const token = auth.jwt_token;
-    if (token !== undefined && token !== null) {
-      const localFirst =
-        typeof token === "string" && parseJwtPayload(token)?.iss === LOCAL_FIRST_JWT_ISSUER;
-      const alone = others.every((key) => parsed[key] == null && auth[key] == null);
-      // A token this backend can't verify (an external JWT, a forged or
-      // malformed one), or one sent with other credentials or for another
-      // endpoint: a credential that was presented and not accepted.
-      if (!localFirst || !alone || parsed.local_first_audience != null)
-        return UNVERIFIED_CREDENTIAL;
-      // A guest has no user here: its session is bound to its own key.
-      if (client) return UNVERIFIED_CREDENTIAL;
-      const audience = guestAudience(request, token);
-      if (!audience) return UNVERIFIED_CREDENTIAL;
-      // Guests are off unless the app's `authenticate` lets this one in.
-      if (!(await acceptsGuest(request))) return UNVERIFIED_CREDENTIAL;
-      if (audience.endpoint === undefined) {
-        // Its own token decides who it is; the backend's secret only vouches
-        // for the bundle this socket is pinned to (see `pinnedSocket`).
-        const pinned = { ...parsed, auth: vouchedAuth(auth) };
+    let client: BackendClientAccess | null = null;
+    let user: (JazzUser & { expiresAt: number }) | null = null;
+    const admitted = await admitClient(prelude, {
+      backendSecret: core.backendSecret,
+      appId,
+      async backendClient() {
+        const resolved = await backendClients.resolve(request);
+        if (resolved === "refused") return "refused";
+        client = resolved;
+        if (!resolved) return "none";
+        return resolved.kind === "backend" ? "trusted" : "scoped";
+      },
+      endpoints: () => endpointAudiences(request),
+      async deviceAccount(endpoint) {
+        if (endpoint !== undefined) warnHeaderAudience(endpoint);
+        return acceptsGuest(request);
+      },
+      async user() {
+        user = await authenticate(request);
+        return user?.userId ?? null;
+      },
+      async account() {
+        // A browser states a user's session only once its sign-in (or link)
+        // gave them an account; this never makes one.
         return {
-          prelude: new TextEncoder().encode(JSON.stringify(pinned)),
-          userId: undefined,
-          access: "session",
-          trusted: false,
-          guest: true,
+          id: await existingAccountOf(user!.userId),
+          issuer,
+          claims: user!.claims ?? {},
         };
-      }
-      // Signed for this endpoint, which the core can't know: vouch for it.
-      const vouched = {
-        ...parsed,
-        local_first_audience: audience.endpoint,
-        auth: vouchedAuth(auth),
-      };
-      // The backend's word on the endpoint needs backend access; the
-      // guest's own token still decides who it is.
-      return {
-        prelude: new TextEncoder().encode(JSON.stringify(vouched)),
-        userId: undefined,
-        access: "backend",
-        trusted: false,
-        guest: true,
-      };
+      },
+      unverifiedDeviceProof: (token) => warnUnknownAudience(token, endpointAudiences(request)),
+    });
+    if ("refused" in admitted) {
+      return admitted.refused === "unverified" ? UNVERIFIED_CREDENTIAL : null;
     }
-    const stated = auth.backend_session as { user_id?: unknown } | undefined;
-    if (!stated || typeof stated !== "object") return null;
-    for (const credential of ["backend_secret", "admin_secret"]) {
-      if (parsed[credential] != null || auth[credential] != null) return null;
-    }
-    // The core compares this with the user's revocation mark: a
-    // `revokeUser` on any instance after this moment ends the session, and
-    // one before it refuses the session (see `revokeUser`).
-    const authenticatedAt = Date.now();
-    const user = await authenticate(request);
-    if (!user || user.userId !== stated.user_id) return null;
-    // A browser states a user's session only once its sign-in (or link)
-    // gave them an account; this never makes one.
-    let session: Session;
-    try {
-      session = await sessionFor(user, "a sync session");
-    } catch (error) {
-      if (error instanceof NoJazzAccountError) return null;
-      throw error;
-    }
-    const vouched = {
-      backend_secret: core.backendSecret,
-      backend_session: { ...session, authenticatedAt },
-    };
-    const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
+    const { who, access } = admitted;
+    const session = { prelude: admitted.prelude, access, trusted: who === "backendClient" };
+    if (who === "deviceAccount") return { ...session, userId: undefined, guest: true };
+    const expiresAt = (client as BackendClientAccess | null)?.expiresAt;
+    if (who === "backendClient") return { ...session, userId: undefined, expiresAt };
     return {
-      prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
-      userId: user.userId,
-      user,
-      access: "backend",
-      trusted: false,
-      expiresAt: client?.expiresAt,
-      // A scoped backend client's session ends with its token instead.
-      ...(renewal && !client ? { renewal: true as const } : {}),
+      ...session,
+      userId: user!.userId,
+      user: user!,
+      expiresAt,
+      ...(admitted.renewal ? { renewal: true as const } : {}),
     };
   }
 
@@ -3654,6 +3551,14 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
 
   const warnedAudiences = new Set<string>();
   let warnedHeaderAudience = false;
+  /** Say once that a vouched endpoint came from the request's own headers. */
+  function warnHeaderAudience(endpoint: string) {
+    if (publicUrls.length || warnedHeaderAudience || isLocalEndpoint(endpoint)) return;
+    warnedHeaderAudience = true;
+    console.warn(
+      `createJazz: vouched for a device account of ${endpoint}, taken from the request's headers. Set publicUrl to the URL browsers use so a caller can't name another host.`,
+    );
+  }
   /** Say once per audience why a guest's proof was refused, so a proxy mismatch is visible. */
   function warnUnknownAudience(token: string, accepted: string[], isAudience = false) {
     const audience = isAudience ? token : parseJwtPayload(token)?.aud;
@@ -3683,12 +3588,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     for (const endpoint of endpoints) {
       try {
         const subject = verifyLocalFirstToken(token, endpoint);
-        if (!publicUrls.length && !warnedHeaderAudience && !isLocalEndpoint(endpoint)) {
-          warnedHeaderAudience = true;
-          console.warn(
-            `createJazz: vouched for a device account of ${endpoint}, taken from the request's headers. Set publicUrl to the URL browsers use so a caller can't name another host.`,
-          );
-        }
+        warnHeaderAudience(endpoint);
         return { endpoint, subject };
       } catch {
         // Not this one.
@@ -5055,21 +4955,6 @@ const HELLO_WAIT_MS = 1_000;
  * verify on this backend: the client reports it as `invalid`, not `missing`.
  */
 const UNVERIFIED_CREDENTIAL = "unverified-credential";
-
-/**
- * Prelude slots that carry a credential. When the client sends a distinct
- * `auth` object, `admitPrelude` reads these from `auth` alone and drops any
- * top-level copy, so a credential it checks is exactly the one forwarded to
- * the core (`local_first_audience` is the backend's own word on a guest's
- * endpoint, never the client's).
- */
-const PRELUDE_CREDENTIAL_FIELDS = [
-  "jwt_token",
-  "backend_secret",
-  "admin_secret",
-  "backend_session",
-  "local_first_audience",
-] as const;
 
 /**
  * What a Jazz route answers (500) when the app's `authenticate` threw. The
