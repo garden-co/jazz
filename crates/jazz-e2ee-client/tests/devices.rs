@@ -802,6 +802,88 @@ fn a_write_after_the_member_watch_expires_checks_the_room_again() {
     });
 }
 
+/// After Alice rotates the room, Bob receives a delivery for each new epoch.
+/// His cold write and his subscription's pass need only the current delivery.
+#[test]
+fn cold_writes_and_watch_passes_read_only_the_deliveries_they_need() {
+    within(|| {
+        let shared = SharedSpace::new();
+        let address = space_address(&shared.alice, shared.space);
+        let bob = &shared.bob_first;
+        let mut watch =
+            drive(&shared.server, &[&bob.db], bob.client.watch_spaces(&bob.db)).unwrap();
+        let protocol_address = jazz_e2ee::protocol::records::space::SpaceAddress::new(
+            &address.scope_id,
+            &address.identifier,
+        )
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        for account in [None, Some(id.as_str())] {
+            let query =
+                jazz_e2ee_client::epoch_deliveries_query(&protocol_address, &id, account).unwrap();
+            let (_, plan) = shared
+                .server
+                .explain_query_plan(&shared.server.prepare_query(&query).unwrap(), None)
+                .unwrap();
+            assert!(
+                plan.contains("SEARCH") && plan.contains("keyEpochId~") && plan.contains("=?)"),
+                "{plan}"
+            );
+        }
+        let mut counts = Vec::new();
+        for rotations in [1, 4] {
+            for _ in 0..rotations {
+                drive(
+                    &shared.server,
+                    &[&shared.alice.db],
+                    shared.alice.client.rotate(&shared.alice.db, &address),
+                )
+                .unwrap();
+            }
+            bob.client
+                .advance_settle_clock(std::time::Duration::from_secs(61));
+            drive(
+                &shared.server,
+                &[&bob.db],
+                bob.client.sync_spaces(&bob.db, &mut watch),
+            )
+            .unwrap();
+            bob.client.take_delivery_reads();
+            drive(
+                &shared.server,
+                &[&bob.db],
+                bob.client.write(&bob.db, async || {
+                    bob.db
+                        .insert("notes", note(shared.space, "resumed"), Default::default())
+                        .await
+                }),
+            )
+            .unwrap();
+            let write = bob.client.take_delivery_reads();
+            watch.use_space(&address);
+            let served = drive(
+                &shared.server,
+                &[&bob.db],
+                bob.client.sync_spaces(&bob.db, &mut watch),
+            )
+            .unwrap();
+            assert!(
+                served
+                    .iter()
+                    .any(|(space, state)| space == &address && state.is_ok())
+            );
+            let pass = bob.client.take_delivery_reads();
+            watch.release_space(&address);
+            counts.push((write, pass));
+        }
+        for (write, pass) in &counts {
+            assert!(write.0 > 0 && pass.0 > 0, "{counts:?}");
+            assert_eq!((write.1, pass.1), (0, 0), "{counts:?}");
+        }
+        assert_eq!(counts[0], counts[1]);
+    });
+}
+
 /// Alice evaluates only the current envelopes after each idle period. Past
 /// rotations add retained deliveries to the server but no rows to the mark check.
 #[test]

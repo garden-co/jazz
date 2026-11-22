@@ -568,6 +568,8 @@ pub(crate) struct MemberWatch {
     #[cfg(any(test, feature = "testing"))]
     pub last_check_rows: usize,
     #[cfg(any(test, feature = "testing"))]
+    pub delivery_reads: (usize, usize),
+    #[cfg(any(test, feature = "testing"))]
     pub chain_reads: usize,
     #[cfg(any(test, feature = "testing"))]
     pub delivery_mark_checks: usize,
