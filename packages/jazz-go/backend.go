@@ -119,29 +119,10 @@ func (db *DB) Shutdown(ctx context.Context) error {
 	if ctx.Err() != nil {
 		timeout = 0
 	}
-	if ffi.closeWithin == nil {
-		// An older libjazz_ffi: drain with waitForSync, then close.
-		c, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		err := db.call(c, "waitForSync", map[string]any{}, nil)
-		db.Close()
-		if c.Err() != nil {
-			// Timed out: some writes may not have reached the server (this
-			// libjazz_ffi can't count them).
-			return &Error{Kind: KindUnsynced, Message: "closed before every write reached the server"}
-		}
-		return err
-	}
 	ms := uint64(timeout.Milliseconds())
 	return db.closeAndFree(timeout,
 		func(h uintptr) error {
 			return callClose(ffi.call, h, fmt.Sprintf(`{"timeoutMs":%d}`, ms))
 		},
-		func(h uintptr) error {
-			// After "close" this only frees. An older libjazz_ffi drains
-			// and closes here.
-			var cerr uintptr
-			ffi.closeWithin(h, ms, &cerr)
-			return takeError(cerr)
-		})
+		ffi.close)
 }

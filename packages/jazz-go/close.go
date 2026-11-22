@@ -1,9 +1,7 @@
 package jazz
 
 import (
-	"errors"
 	"runtime"
-	"strings"
 	"sync"
 	"time"
 )
@@ -29,12 +27,12 @@ func (db *DB) acquire(admitted func()) (h uintptr, release func(), err error) {
 
 // closeAndFree closes the handle with end, giving the token provider
 // drain to keep answering, and frees it with free once no call is in
-// flight.
+// flight. It frees, and returns end's error, also when end fails.
 //
 // Closing again waits for the first close. From inside the DB's own token
 // provider neither waits, as what they would wait for waits on the
 // provider: the handle is then freed once it returns.
-func (db *DB) closeAndFree(drain time.Duration, end, free func(h uintptr) error) error {
+func (db *DB) closeAndFree(drain time.Duration, end func(h uintptr) error, free func(h uintptr)) error {
 	inside := insideProvider(db.provider)
 	db.mu.Lock()
 	if closed := db.closed; closed != nil {
@@ -56,45 +54,30 @@ func (db *DB) closeAndFree(drain time.Duration, end, free func(h uintptr) error)
 	var deadline *time.Timer
 	if drain > 0 {
 		deadline = time.AfterFunc(drain, func() { cancelFetches(db.provider) })
-		defer deadline.Stop()
 	} else {
 		cancelFetches(db.provider)
 	}
 	db.endStreams()
 	err := end(h)
-	if unknownClose(err) {
-		// A libjazz_ffi from before "close": freeing is what closes.
-		err = nil
-	} else {
-		if deadline != nil {
-			deadline.Stop() // not after the provider is released
-		}
-		cancelFetches(db.provider)
+	if deadline != nil {
+		deadline.Stop() // not after the provider is released
 	}
-	finish := func() error {
+	cancelFetches(db.provider)
+	finish := func() {
 		defer close(closed)
 		db.calls.Wait()
-		freeErr := free(h)
+		free(h)
 		db.mu.Lock()
 		db.handle = 0
 		db.mu.Unlock()
 		releaseProvider(db.provider)
-		return freeErr
 	}
 	if inside {
 		go finish()
-		return err
-	}
-	if freeErr := finish(); err == nil {
-		err = freeErr
+	} else {
+		finish()
 	}
 	return err
-}
-
-func unknownClose(err error) bool {
-	var e *Error
-	return errors.As(err, &e) && e.Kind == KindRefused && strings.Contains(e.Message, "unknown") &&
-		strings.Contains(e.Message, `method "close"`)
 }
 
 // callClose is jazz_call's or jazz_session_call's "close".

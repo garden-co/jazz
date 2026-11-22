@@ -270,3 +270,17 @@ func TestCloseFreesAfterTheLastCallInFlight(t *testing.T) {
 	release()
 	_ = returnsWithin(t, "Close after the last call", closeBudget, func() error { return <-done })
 }
+
+// A close that fails still frees, and the caller gets its error.
+func TestAFailedCloseFreesAndReturnsItsError(t *testing.T) {
+	failed := &Error{Kind: KindIO, Message: "flushing failed"}
+	db := &DB{handle: 1} // never reaches jazz-ffi
+	var freedHandle uintptr
+	err := db.closeAndFree(0, func(uintptr) error { return failed }, func(h uintptr) { freedHandle = h })
+	if !errors.Is(err, ErrIO) || freedHandle != 1 || db.handle != 0 {
+		t.Fatalf("a failed close: err %v, freed %d, handle %d", err, freedHandle, db.handle)
+	}
+	if _, _, err := db.acquire(nil); !errors.Is(err, ErrClosed) {
+		t.Fatalf("a call after a failed close: %v, want ErrClosed", err)
+	}
+}

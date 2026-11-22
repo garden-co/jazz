@@ -46,8 +46,7 @@ var ffi struct {
 	threadSelf  func() uintptr
 
 	// Backend-client calls, nil with a libjazz_ffi that predates them.
-	forUser     func(h uintptr, userID, claims *byte, err *uintptr) uintptr
-	closeWithin func(h uintptr, timeoutMs uint64, err *uintptr) int32
+	forUser func(h uintptr, userID, claims *byte, err *uintptr) uintptr
 
 	// Sessions, nil with a libjazz_ffi that predates them.
 	sessionOpen  func(config *byte, cb uintptr, ctx uintptr, err *uintptr) uintptr
@@ -92,7 +91,7 @@ func bind() error {
 		purego.RegisterFunc(fn, sym)
 	}
 	for name, fn := range map[string]any{
-		"jazz_for_user": &ffi.forUser, "jazz_close_within": &ffi.closeWithin,
+		"jazz_for_user":     &ffi.forUser,
 		"jazz_session_open": &ffi.sessionOpen, "jazz_session_call": &ffi.sessionCall,
 		"jazz_session_jazz": &ffi.sessionJazz, "jazz_session_watch": &ffi.sessionWatch,
 		"jazz_session_close": &ffi.sessionClose,

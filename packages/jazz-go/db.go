@@ -229,24 +229,16 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 // (Shutdown does). Calls waiting for the server end with ErrClosed, though
 // what they sent may still apply, and later calls return ErrClosed. Close
 // returns once the app is closed: work already running locally finishes
-// first, and sync gets up to 2 seconds to end.
+// first, and sync gets up to 2 seconds to end. An error says what failed
+// as it closed: the DB is closed and freed all the same.
 //
 // Close cancels the TokenProvider's ctx and waits for the provider to
 // return. A provider may call Close itself, but mustn't wait for a Close
 // made on another goroutine.
 func (db *DB) Close() error {
 	return db.closeAndFree(0,
-		func(h uintptr) error {
-			// Closing can't fail the caller: the app is closed all the same.
-			if err := callClose(ffi.call, h, "{}"); unknownClose(err) {
-				return err
-			}
-			return nil
-		},
-		func(h uintptr) error {
-			ffi.close(h)
-			return nil
-		})
+		func(h uintptr) error { return callClose(ffi.call, h, "{}") },
+		ffi.close)
 }
 
 // call runs jazz_call(method, args) and decodes its result into out.
