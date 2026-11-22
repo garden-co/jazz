@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { unreadableRows, useAll, useDb } from "jazz-tools/react";
-import { Banner, Skeleton, Thumbnail, Token, useLightbox } from "@astryxdesign/core";
+import { unreadableRows, useDb } from "jazz-tools/react";
+import { Banner, Button, Skeleton, Thumbnail, Token, useLightbox } from "@astryxdesign/core";
 import { app } from "../../jazz.generated";
 import { downloadBytes, formatBytes, isAudioType, isImageType } from "../lib/attachments";
 import { useObjectUrl } from "../lib/use-object-url";
@@ -33,20 +33,47 @@ function useNearViewport<T extends Element>() {
   return [ref, isNear] as const;
 }
 
-/** One message's attachment bytes, queried only once `isEnabled` turns true. */
+/** Read one attachment when its preview comes near the viewport. */
 function useAttachmentBytes(messageId: string, isEnabled: boolean) {
-  const { data, error, unreadable } = useAll(
-    isEnabled ? app.messages.where({ id: messageId }).select("roomId", "attachment") : undefined,
-  );
-  const bytes = data?.[0]?.attachment ?? undefined;
-  const reason =
-    error?.message ??
-    unreadable[0]?.code ??
-    (data && !bytes ? "The attachment data is missing." : undefined);
-  return { bytes, reason };
+  const db = useDb();
+  const [result, setResult] = useState<{ bytes?: Uint8Array; reason?: string }>({});
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    if (!isEnabled) return;
+    const onError = (error: unknown) =>
+      setResult({ reason: error instanceof Error ? error.message : String(error) });
+    try {
+      return db.subscribe(app.messages.where({ id: messageId }).select("roomId", "attachment"), {
+        onUpdate(rows) {
+          const bytes = rows[0]?.attachment;
+          setResult(
+            bytes
+              ? { bytes }
+              : { reason: unreadableRows(rows)[0]?.code ?? "The attachment data is missing." },
+          );
+        },
+        onError,
+      });
+    } catch (error) {
+      onError(error);
+    }
+  }, [attempt, db, isEnabled, messageId]);
+
+  return { ...result, retry: () => setAttempt((current) => current + 1) };
 }
 
-function LockedAttachment({ reason }: { reason: string }) {
+function LockedAttachment({
+  reason,
+  retry,
+  retryLabel = "Retry preview",
+  isLoading,
+}: {
+  reason: string;
+  retry: () => void;
+  retryLabel?: string;
+  isLoading?: boolean;
+}) {
   return (
     <Banner
       status="warning"
@@ -54,6 +81,7 @@ function LockedAttachment({ reason }: { reason: string }) {
       description={reason}
       container="section"
       collapsible={false}
+      endContent={<Button label={retryLabel} size="sm" onClick={retry} isLoading={isLoading} />}
     />
   );
 }
@@ -66,11 +94,11 @@ export function Attachment({ message }: { message: MessageSummary }) {
 
 function ImageAttachment({ message }: { message: MessageSummary }) {
   const [ref, isNear] = useNearViewport<HTMLDivElement>();
-  const { bytes, reason } = useAttachmentBytes(message.id, isNear);
+  const { bytes, reason, retry } = useAttachmentBytes(message.id, isNear);
   const src = useObjectUrl(bytes, message.attachmentType);
   const name = message.attachmentName ?? "Image";
   const lightbox = useLightbox({ media: { src: src ?? "", alt: name, caption: name } });
-  if (reason !== undefined) return <LockedAttachment reason={reason} />;
+  if (reason !== undefined) return <LockedAttachment reason={reason} retry={retry} />;
   return (
     <div ref={ref}>
       <Thumbnail
@@ -87,9 +115,9 @@ function ImageAttachment({ message }: { message: MessageSummary }) {
 
 function AudioAttachment({ message }: { message: MessageSummary }) {
   const [ref, isNear] = useNearViewport<HTMLDivElement>();
-  const { bytes, reason } = useAttachmentBytes(message.id, isNear);
+  const { bytes, reason, retry } = useAttachmentBytes(message.id, isNear);
   const src = useObjectUrl(bytes, message.attachmentType);
-  if (reason !== undefined) return <LockedAttachment reason={reason} />;
+  if (reason !== undefined) return <LockedAttachment reason={reason} retry={retry} />;
   return (
     <div ref={ref}>
       {src ? (
@@ -119,15 +147,28 @@ function FileAttachment({ message }: { message: MessageSummary }) {
         app.messages.where({ id: message.id }).select("roomId", "attachment").limit(1),
       );
       const bytes = rows[0]?.attachment;
-      if (bytes) downloadBytes(bytes, name, message.attachmentType);
-      else setReason(unreadableRows(rows)[0]?.code ?? "The attachment data is missing.");
+      if (!bytes) {
+        setReason(unreadableRows(rows)[0]?.code ?? "The attachment data is missing.");
+        return;
+      }
+      downloadBytes(bytes, name, message.attachmentType);
+      setReason(undefined);
     } catch (error) {
       setReason(error instanceof Error ? error.message : String(error));
     } finally {
       setLoading(false);
     }
   }
-  if (reason !== undefined) return <LockedAttachment reason={reason} />;
+  if (reason !== undefined) {
+    return (
+      <LockedAttachment
+        reason={reason}
+        retry={() => void download()}
+        retryLabel="Retry download"
+        isLoading={isLoading}
+      />
+    );
+  }
   return (
     <Token
       label={name}

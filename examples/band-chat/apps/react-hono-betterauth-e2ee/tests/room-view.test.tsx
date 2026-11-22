@@ -7,9 +7,17 @@ import { db, reactMock, resetWorld, world, type Q } from "./support/fake-jazz";
 
 vi.mock("../jazz.generated", async () => ({ app: (await import("./support/fake-jazz")).fakeApp }));
 vi.mock("jazz-tools/react", async () => (await import("./support/fake-jazz")).reactMock);
+vi.mock("../src/lib/attachments", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/lib/attachments")>()),
+  downloadBytes: vi.fn(),
+}));
+vi.mock("../src/lib/use-object-url", () => ({
+  useObjectUrl: (bytes: Uint8Array | undefined) => (bytes ? "blob:preview" : undefined),
+}));
 
 import { RoomView } from "../src/components/RoomView";
 import { UnsentMessagesProvider } from "../src/components/UnsentNotices";
+import { downloadBytes } from "../src/lib/attachments";
 import { ProfileDirectoryProvider } from "../src/lib/profiles";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -134,6 +142,30 @@ describe("an unreadable attachment", () => {
     },
   );
 
+  it.each(["image/png", "audio/ogg"])(
+    "starts a new %s preview after a terminal error",
+    async (attachmentType) => {
+      const answers: Parameters<typeof show>[0] = {
+        messages: {
+          data: [{ ...message("m3", "2026-01-03"), attachmentName: "take", attachmentType }],
+        },
+        attachment: { error: new Error("Connection lost") },
+      };
+      show(answers);
+      expect(await screen.findByText("Connection lost")).toBeTruthy();
+
+      answers.attachment = { data: [{ attachment: new Uint8Array([1, 2, 3]) }] };
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry preview" })));
+      expect(screen.queryByText("Connection lost")).toBeNull();
+      expect(db.subscribe).toHaveBeenCalledTimes(2);
+      if (attachmentType === "image/png") {
+        expect(screen.getByRole("img", { name: "take" }).getAttribute("src")).toBe("blob:preview");
+      } else {
+        expect(screen.getByLabelText("take").getAttribute("src")).toBe("blob:preview");
+      }
+    },
+  );
+
   it("shows why a requested download was omitted and keeps the message readable", async () => {
     const rows: unknown[] = [];
     db.all.mockImplementation(async (query) =>
@@ -150,6 +182,45 @@ describe("an unreadable attachment", () => {
       expect(await screen.findByText("Attachment is unreadable on this browser")).toBeTruthy();
       expect(screen.getByText("unsupported-format")).toBeTruthy();
       expect(screen.getByText("text m3")).toBeTruthy();
+    } finally {
+      unreadableRows.mockRestore();
+    }
+  });
+
+  it("retries a locked download and clears the reason once the file downloads", async () => {
+    const missing: unknown[] = [];
+    const attachment = new Uint8Array([1, 2, 3]);
+    const download = vi.mocked(downloadBytes);
+    download.mockClear();
+    const reads = [missing, [{ attachment }]];
+    db.all.mockImplementation(async (query) =>
+      (query as Q).columns?.includes("attachment") ? (reads.shift() ?? []) : [{ id: "m" }],
+    );
+    const unreadableRows = vi
+      .spyOn(reactMock, "unreadableRows")
+      .mockImplementation((result) => (result === missing ? [{ code: "key-pending" }] : []));
+    try {
+      show({
+        messages: {
+          data: [
+            {
+              ...message("m3", "2026-01-03"),
+              attachmentName: "take.txt",
+              attachmentType: "text/plain",
+            },
+          ],
+        },
+      });
+      fireEvent.click(await screen.findByLabelText("Download take.txt"));
+      expect(await screen.findByText("key-pending")).toBeTruthy();
+      expect(download).not.toHaveBeenCalled();
+
+      await act(async () =>
+        fireEvent.click(screen.getByRole("button", { name: "Retry download" })),
+      );
+      expect(download).toHaveBeenCalledExactlyOnceWith(attachment, "take.txt", "text/plain");
+      expect(screen.queryByText("key-pending")).toBeNull();
+      expect(screen.getByLabelText("Download take.txt")).toBeTruthy();
     } finally {
       unreadableRows.mockRestore();
     }

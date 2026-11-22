@@ -58,6 +58,8 @@ export const fakeApp = new Proxy({} as Record<string, Q>, {
   get: (_target, table: string) => builder({ table }),
 });
 
+const omittedRows = new WeakMap<unknown[], unknown[]>();
+
 type Answer = { data?: unknown[]; unreadable?: unknown[]; error?: Error } | undefined;
 
 export const world = {
@@ -103,6 +105,20 @@ export const db = {
   /** The plain read of a room's first message: the room has one unless a test empties it. */
   all: vi.fn(async (..._args: unknown[]) => [{ id: "m" }] as unknown[]),
   one: vi.fn(async (..._args: unknown[]) => null),
+  subscribe: vi.fn(
+    (
+      query: Q,
+      callbacks: { onUpdate: (rows: unknown[]) => void; onError: (error: Error) => void },
+    ) => {
+      const answer = world.answer(query);
+      if (answer?.error) callbacks.onError(answer.error);
+      if (answer?.data) {
+        omittedRows.set(answer.data, answer.unreadable ?? []);
+        callbacks.onUpdate(answer.data);
+      }
+      return () => undefined;
+    },
+  ),
   beginTransaction: vi.fn(),
   onMutationError: vi.fn(() => () => undefined),
   encryption: {
@@ -129,7 +145,7 @@ export const db = {
 /** The `jazz-tools/react` module as the screens see it. */
 export const reactMock = {
   useDb: () => db,
-  unreadableRows: (_rows: unknown[]) => [] as { code: string }[],
+  unreadableRows: (rows: unknown[]) => (omittedRows.get(rows) ?? []) as { code: string }[],
   useAll: (q?: Q) => {
     if (q) world.asked.push(q);
     const answer = q ? world.answer(q) : undefined;
