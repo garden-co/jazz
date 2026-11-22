@@ -357,7 +357,7 @@ export async function removeMember({
 The real function can also delete a leaver's read markers in the same transaction.
 
 BandChat asks Jazz to rotate the room's key once the server confirms that member rows were
-removed. A removal count of zero means the editor may be unable to see that member's rows.
+removed. A removal count of zero means the creator may be unable to see that member's rows.
 BandChat shows that no member rows were removed. If the room has no key yet, the rotation call
 succeeds and returns `0`. A room gets its key from its first encrypted write.
 
