@@ -146,7 +146,8 @@ fresh token. Jazz calls it for every request and socket, so short-lived tokens j
 
     `job.close(timeout)` first waits for the writes the client holds to reach the backend, for up to
     the timeout, then stops it. With `Storage::Memory`, writes still queued are lost and `close`
-    returns `Error::Unsynced { pending }`; `Duration::ZERO` closes at once:
+    returns `Error::Unsynced { pending }`; `Duration::ZERO` doesn't wait for them. Either way, calls
+    still waiting on the server when it stops fail with `Error::Stopped`:
 
     <include cwd lang="rust" meta='title="src/main.rs"'>
       ../examples/docs/backend-client-rs/src/lib.rs#backend-client-close-rust

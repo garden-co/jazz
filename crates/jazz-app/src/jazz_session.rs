@@ -264,6 +264,10 @@ struct Inner {
     runtime: Option<tokio::runtime::Runtime>,
     handle: tokio::runtime::Handle,
     one_at_a_time: tokio::sync::Mutex<()>,
+    /// Set as [`JazzSession::close`] begins, before it takes its turn: the
+    /// operation under way stops waiting on the app and the network, and
+    /// queued ones don't start.
+    closing: watch::Sender<bool>,
     state: watch::Sender<SessionSnapshot>,
     current: Mutex<Current>,
 }
@@ -340,6 +344,7 @@ impl JazzSession {
                 runtime: Some(runtime),
                 handle,
                 one_at_a_time: tokio::sync::Mutex::new(()),
+                closing: watch::Sender::new(false),
                 state,
                 current: Mutex::new(Current::default()),
             }),
@@ -461,8 +466,7 @@ impl JazzSession {
     pub async fn sign_out(&self) -> Result<()> {
         let this = self.clone();
         self.on_runtime(async move {
-            let _one = this.inner.one_at_a_time.lock().await;
-            this.ensure_open()?;
+            let _one = this.take_turn().await?;
             this.replace(None, None, SessionStatus::SignedOut).await;
             Ok(())
         })
@@ -483,7 +487,14 @@ impl JazzSession {
     /// Closes the session for good: the signed-in user's [`Jazz`] closes,
     /// the snapshot reads `closed` (the last [`JazzSession::changes`]
     /// yields), and every operation fails with [`Error::Stopped`].
+    ///
+    /// It doesn't wait for an operation under way to hear from the app's
+    /// bearer or the backend: that operation fails with [`Error::Stopped`]
+    /// too (what it sent may still apply there), and installs no client.
+    /// A client being stopped is waited for, as [`Jazz::shutdown`] bounds it.
     pub async fn close(&self) -> Result<()> {
+        // Before waiting for a turn, so whoever has it gives it up.
+        self.inner.closing.send_replace(true);
         let this = self.clone();
         self.on_runtime(async move {
             let _one = this.inner.one_at_a_time.lock().await;
@@ -508,10 +519,28 @@ impl JazzSession {
     }
 
     fn ensure_open(&self) -> Result<()> {
-        match self.inner.state.borrow().status {
-            SessionStatus::Closed => Err(Error::Stopped),
-            _ => Ok(()),
+        if *self.inner.closing.borrow() {
+            Err(Error::Stopped)
+        } else {
+            Ok(())
         }
+    }
+
+    /// `wait`'s output, or [`Error::Stopped`] once the session closes.
+    async fn unless_closing<T>(&self, wait: impl std::future::Future<Output = T>) -> Result<T> {
+        let mut closing = self.inner.closing.subscribe();
+        tokio::select! {
+            biased;
+            () = async { let _ = closing.wait_for(|closing| *closing).await; } => Err(Error::Stopped),
+            output = wait => Ok(output),
+        }
+    }
+
+    /// This operation's turn, unless the session closes first.
+    async fn take_turn(&self) -> Result<tokio::sync::MutexGuard<'_, ()>> {
+        let turn = self.unless_closing(self.inner.one_at_a_time.lock()).await?;
+        self.ensure_open()?;
+        Ok(turn)
     }
 
     /// Runs `future` on the session's runtime, whatever the caller's.
@@ -531,9 +560,12 @@ impl JazzSession {
     async fn run(&self, op: Op) -> Result<()> {
         let this = self.clone();
         self.on_runtime(async move {
-            let _one = this.inner.one_at_a_time.lock().await;
-            this.ensure_open()?;
+            let _one = this.take_turn().await?;
             let result = this.perform(op.clone()).await;
+            if result.is_err() && *this.inner.closing.borrow() {
+                // Cut short by close, which has the snapshot's last word.
+                return Err(Error::Stopped);
+            }
             match &result {
                 Ok(()) => {
                     this.lock().last_failed = None;
@@ -621,9 +653,14 @@ impl JazzSession {
         let endpoint = self.endpoint();
         let app = self.inner.config.app_id;
         let guest = self.lock().device.is_some();
-        let token = bearer.token(TokenReason::Refresh).await?;
+        let token = self
+            .unless_closing(bearer.token(TokenReason::Refresh))
+            .await??;
         let who = match &token {
-            Some(token) => crate::backend::backend_user(&endpoint, app, token).await?,
+            Some(token) => {
+                self.unless_closing(crate::backend::backend_user(&endpoint, app, token))
+                    .await??
+            }
             None => None,
         };
         let (Some(token), Some(who)) = (token, who) else {
@@ -683,7 +720,10 @@ impl JazzSession {
             self.set(|snapshot| snapshot.status = SessionStatus::Ready);
             return Ok(());
         }
-        let Some(signed_in) = crate::backend::sign_in(&endpoint, app, &token).await? else {
+        let Some(signed_in) = self
+            .unless_closing(crate::backend::sign_in(&endpoint, app, &token))
+            .await??
+        else {
             self.replace(None, None, SessionStatus::SignedOut).await;
             return Ok(());
         };
@@ -719,9 +759,9 @@ impl JazzSession {
                 "linking needs the app's bearer (SessionConfig::bearer)".into(),
             ));
         };
-        let token = bearer
-            .token(TokenReason::Refresh)
-            .await?
+        let token = self
+            .unless_closing(bearer.token(TokenReason::Refresh))
+            .await??
             .ok_or(Error::SignedOut)?;
         drop(jazz);
         self.link_with(&bearer, &token).await
@@ -740,7 +780,7 @@ impl JazzSession {
         let session = jazz
             .session()
             .ok_or_else(|| Error::Config("the device account's client has no session".into()))?;
-        let user = session.link(token).await?;
+        let user = self.unless_closing(session.link(token)).await??;
         drop(jazz);
         self.transition();
         let config = self
@@ -757,7 +797,11 @@ impl JazzSession {
     /// transition.
     async fn switch_to(&self, config: Config, device: Option<DeviceKey>) -> Result<()> {
         self.close_current().await;
-        let jazz = Jazz::open(self.inner.files.clone(), config).await;
+        // Not finished when the session closes, the opening stops itself:
+        // its thread ends once it has nobody to answer.
+        let jazz = self
+            .unless_closing(Jazz::open(self.inner.files.clone(), config))
+            .await?;
         match jazz {
             Ok(jazz) => {
                 let user = jazz.session().map(|session| match session.state() {
@@ -814,7 +858,7 @@ impl JazzSession {
             current.jazz.take()
         };
         if let Some(old) = old {
-            old.mark_replaced();
+            old.mark_replaced(self.inner.closing.subscribe());
             let _ = old.shutdown().await;
             self.set(|snapshot| snapshot.client_epoch += 1);
         }

@@ -286,7 +286,13 @@ impl Jazz {
         // On the client's runtime, whatever the caller's executor.
         let (link, user) = (link.clone(), user_id.to_owned());
         let session = self
-            .with_client(move |_| async move { user_session(&link, &user, claims).await })
+            .with_client(move |client| async move {
+                tokio::select! {
+                    biased;
+                    session = user_session(&link, &user, claims) => session,
+                    () = client.waits_ended() => Err(Error::Stopped),
+                }
+            })
             .await?;
         Ok(self.scoped(session))
     }
@@ -303,6 +309,10 @@ impl Jazz {
     /// writes that still have not arrived are lost, and this fails with
     /// [`Error::Unsynced`] saying how many; `Duration::ZERO` closes at once
     /// and accepts that. A persistent store keeps them for the next open.
+    ///
+    /// Calls waiting on the server go on while it waits for the writes,
+    /// then fail with [`Error::Stopped`] as [`Jazz::shutdown`] says: `close`
+    /// takes about `timeout`, plus local work already started.
     ///
     /// A handle acting for a user ([`Jazz::for_user`]) closes nothing: the
     /// client is its trusted client's.
@@ -329,7 +339,11 @@ impl Jazz {
                             }
                         }
                     };
-                    let _ = tokio::time::timeout(timeout, drained).await;
+                    tokio::select! {
+                        _ = tokio::time::timeout(timeout, drained) => {}
+                        // A shutdown meanwhile.
+                        () = client.waits_ended() => {}
+                    }
                     Ok(())
                 })
                 .await;
