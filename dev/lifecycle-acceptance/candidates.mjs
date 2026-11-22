@@ -13,4 +13,5 @@ for (const candidate of list) {
   if (!/^[a-z0-9][a-z0-9-]{0,30}$/.test(candidate.name ?? "")) throw new Error(`bad candidate name '${candidate.name}'`);
 }
 if (new Set(list.map((c) => c.name)).size !== list.length) throw new Error("candidate names repeat");
+console.log(`android=${JSON.parse(readFileSync(new URL("android.json", import.meta.url), "utf8")).sha}`);
 console.log(`list=${JSON.stringify(list)}`);

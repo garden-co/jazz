@@ -17,7 +17,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: lifecycle-acceptance-${{ github.ref }}-${{ inputs.sha }}
+  # One run per commit and candidate: run.sh twice never cancels the first.
+  group: lifecycle-acceptance-${{ github.sha }}-${{ inputs.sha }}
   cancel-in-progress: true
 
 env:
@@ -29,6 +30,7 @@ jobs:
     timeout-minutes: 3
     outputs:
       list: ${{ steps.list.outputs.list }}
+      android: ${{ steps.list.outputs.android }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with: { sparse-checkout: dev/lifecycle-acceptance, persist-credentials: false }
@@ -137,9 +139,50 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # The fifth leg: jazz#6246's emulator test at a pinned sha, on the candidate's AAR and core.
+  android:
+    name: ${{ matrix.candidate.name }} / android
+    needs: candidates
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(needs.candidates.outputs.list) }}
+    # The runner image, not a container: the emulator needs /dev/kvm.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - name: Work outside the checkouts
+        run: echo "LA_WORK=$RUNNER_TEMP/jazz-lifecycle" >> "$GITHUB_ENV"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { path: suite, sparse-checkout: dev/lifecycle-acceptance, persist-credentials: false }
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.candidates.outputs.android }}
+          path: android
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with: { node-version: "24.13" }
+      - name: Fetch the candidate's artifacts, fail closed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ matrix.candidate.sha }}
+          RUN: ${{ matrix.candidate.run }}
+        run: node "$LA/fetch.mjs" "$SHA" "$RUN" release-server,release-maven
+      - name: Emulator test on the candidate's AAR
+        env:
+          CANDIDATE: ${{ matrix.candidate.name }}
+        run: node "$LA/android.mjs" "$GITHUB_WORKSPACE/android" "$CANDIDATE" "$GITHUB_WORKSPACE/results"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lifecycle-${{ matrix.candidate.name }}-android
+          path: results/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
   verdict:
     name: verdict
-    needs: [candidates, client]
+    needs: [candidates, client, android]
     if: always() && needs.candidates.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 5

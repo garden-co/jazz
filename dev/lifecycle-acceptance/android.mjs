@@ -1,0 +1,80 @@
+// The Android leg: the pinned emulator test (android.json) on the candidate's release-maven AAR,
+// with the candidate's core binary as its server.
+// usage: node android.mjs <checkout of android.json's sha> <candidate name> <out dir>
+import { spawn } from "node:child_process";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { WORK, assert, die, run } from "./lib/common.mjs";
+import { candidate, cleanEnv } from "./build/consumer.mjs";
+import { within } from "./suite/process.mjs";
+import { redact } from "./suite/redact.mjs";
+import { ANDROID_RULES } from "./suite/android-rules.mjs";
+
+const [source, name, out] = process.argv.slice(2);
+try {
+  const pinned = JSON.parse(readFileSync(new URL("android.json", import.meta.url), "utf8")).sha;
+  const head = run("git", ["-C", source, "rev-parse", "HEAD"], { capture: true }).trim();
+  assert(head === pinned, `the checkout is at ${head}, not the pinned ${pinned}`);
+  const { sha, run: runId, version } = candidate();
+  // The script takes the version to resolve from its own checkout.
+  const own = JSON.parse(readFileSync(join(source, "packages", "jazz-tools", "package.json"), "utf8")).version;
+  assert(own === version, `the pinned test resolves ${own}, the candidate is ${version}: move android.json's pin`);
+
+  const tree = join(WORK, "artifacts", "release-maven");
+  const aar = `jazz-kotlin-android/${version}/jazz-kotlin-android-${version}.aar`;
+  const manifest = JSON.parse(readFileSync(join(WORK, "artifacts", "release-manifest", "manifest.json"), "utf8"));
+  const listed = manifest.files.find((file) => file.artifact === "release-maven" && file.path === aar);
+  assert(listed, `the manifest lists no ${aar}`);
+  const server = join(WORK, "artifacts", "release-server", "jazz-tools-linux-x64");
+  chmodSync(server, 0o755);
+
+  const started = Date.now();
+  const child = spawn("bash", ["dev/scripts/test-kotlin-android-emulator.sh", tree], {
+    cwd: source,
+    env: cleanEnv({ JAZZ_TOOLS: server }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let log = "";
+  for (const stream of [child.stdout, child.stderr])
+    createInterface({ input: stream }).on("line", (line) => {
+      log += `${line}\n`;
+      console.log(redact(line));
+    });
+  const exit = new Promise((resolve) => child.on("close", (code) => resolve(code)));
+  const code = await within(exit, 20 * 60_000, () => {
+    child.kill("SIGTERM"); // its trap stops what it started, by PID
+    return "timeout";
+  });
+
+  // What was tested is the candidate's: the script prints the AAR's sha256 before it uses it.
+  const sameAar = log.includes(`testing ${listed.sha256} `);
+  const results = ANDROID_RULES.map(({ id, phase, title }) => {
+    const passed = sameAar && log.includes(`: ${phase} passed`);
+    const tag = !sameAar
+      ? "the emulator test didn't test the candidate's AAR"
+      : log.includes(`: ${phase} FAILED`)
+        ? `phase ${phase} failed (see the job's log)`
+        : `phase ${phase} didn't run (exit ${code})`;
+    return {
+      id,
+      title,
+      basis: "brief",
+      status: passed ? "PASS" : "FAIL",
+      rounds: 1,
+      passed: passed ? 1 : 0,
+      failures: passed ? {} : { [tag]: { count: 1, example: tag } },
+    };
+  });
+  const allPassed = results.every((result) => result.status === "PASS");
+  assert(!allPassed || code === 0, `every phase passed and the script still exited ${code}`);
+  for (const { status, id } of results) console.log(`${status} android ${id}`);
+  mkdirSync(out, { recursive: true });
+  writeFileSync(
+    join(out, `${name}-android.json`),
+    JSON.stringify({ name, lang: "android", sha, run: runId, version, pinned, ms: Date.now() - started, results }, null, 2),
+  );
+  process.exitCode = allPassed ? 0 : 1;
+} catch (error) {
+  die(`android: ${redact(error.message)}`);
+}

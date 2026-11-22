@@ -5,6 +5,7 @@
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { LANGS } from "./lib/common.mjs";
+import { ANDROID_RULES } from "./suite/android-rules.mjs";
 import { RULES } from "./suite/rules/index.mjs";
 
 const dir = process.argv[2];
@@ -18,7 +19,7 @@ const summary = [];
 let green = true;
 for (const { name, sha, run, mustFail = [] } of candidates) {
   const byLang = {};
-  for (const lang of LANGS) {
+  for (const lang of [...LANGS, "android"]) {
     const file = join(dir, `${name}-${lang}.json`);
     if (!existsSync(file)) continue;
     const result = JSON.parse(readFileSync(file, "utf8"));
@@ -50,8 +51,18 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
     rows.push(`| \`${rule.id}\` (${rule.basis}) | ${cells.join(" | ")} |`);
   }
 
+  const android = ANDROID_RULES.map(({ id }) => {
+    const is = byLang.android?.results.find((result) => result.id === id)?.status ?? "FAIL";
+    totals[is]++;
+    status[`${id} android`] = is;
+    console.log(`${is} ${name} android ${id}${byLang.android ? "" : ": no result (setup broke, see the job)"}`);
+    return `\`${id}\` ${is}${byLang.android ? "" : " (no result)"}`;
+  });
+
   // The negative control: a harness that passes a candidate known to break a rule is itself broken.
-  const controls = mustFail.flatMap((id) => LANGS.map((lang) => [id, lang, status[`${id} ${lang}`], byLang[lang]]));
+  const controls = mustFail.flatMap((id) =>
+    (id.startsWith("android.") ? ["android"] : LANGS).map((lang) => [id, lang, status[`${id} ${lang}`], byLang[lang]]),
+  );
   for (const [id, lang, is, result] of controls) {
     if (is === "FAIL" && result) console.log(`CONTROL_OK ${name} ${lang} ${id} fails, as it must`);
     else {
@@ -72,6 +83,8 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
     `| rule | ${LANGS.join(" | ")} |`,
     `| --- |${" --- |".repeat(LANGS.length)}`,
     ...rows,
+    "",
+    `Android (AAR on an emulator): ${android.join(", ")}`,
     "",
     `Suite times: ${times.join(", ")}`,
     "",
