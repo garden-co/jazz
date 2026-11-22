@@ -118,6 +118,21 @@ describe("finishing leaving this browser", () => {
     await waitFor(() => expect(readLeaveRecord()).toBeNull());
   });
 
+  it("finishes leaving when the replacement device cannot list devices", async () => {
+    writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-this" });
+    const fake = (mocks.fake = fakeEncryption());
+    render(<App />);
+    await settle(fake);
+    expect(mocks.authSignOut).not.toHaveBeenCalled();
+
+    fake.state.deviceId = "device-renewed";
+    fake.state.status = "awaiting-approval";
+    fake.handle.devices.list.mockRejectedValue(encryptionError("device-not-active"));
+
+    await waitFor(() => expect(mocks.authSignOut).toHaveBeenCalledTimes(1), { timeout: 5000 });
+    await waitFor(() => expect(readLeaveRecord()).toBeNull());
+  });
+
   it("stays signed in, keeps the record and offers a retry when erasing the keys failed", async () => {
     writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-this" });
     mocks.fake = fakeEncryption({ deviceId: "device-this" });

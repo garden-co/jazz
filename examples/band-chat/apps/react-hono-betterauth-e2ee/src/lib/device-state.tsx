@@ -106,6 +106,9 @@ export function DeviceStateProvider({
       // Rejects with code `closed` once Jazz has closed its encryption
       // runtime, as it does when erasing the keys after a removal fails.
       const id = await encryption.deviceId();
+      if (!mounted.current) return;
+      // A replacement ID completes a leave even when the new device cannot list devices yet.
+      setThisDeviceId(id);
       let next = statusRef.current;
       // A waiting browser asks again each time, so it sees its approval; an
       // active one reads the list and asks again only if it left the list.
@@ -122,7 +125,6 @@ export function DeviceStateProvider({
       if (!mounted.current) return;
       statusRef.current = next;
       setStatus(next);
-      setThisDeviceId(id);
       setDevices((previous) => (sameDevices(previous, listed) ? previous : listed));
       setFailure(null);
       if (next === "active") setApproval(null);
