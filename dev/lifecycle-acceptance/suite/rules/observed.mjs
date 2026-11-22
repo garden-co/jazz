@@ -68,10 +68,40 @@ async function sessionSecondOpen(r) {
   equal(value(await process.call("account", { h: "b" }), "account afterwards"), account, "the device account changed");
 }
 
+/** A cancelled open gives the store back: the same user's next open in this process succeeds. */
+async function cancelledOpen(r) {
+  const proxy = await r.proxy();
+  const dir = r.dir();
+  const token = await r.stack.token(`cancel-${r.id}`);
+  const process = await r.process();
+  await proxy.hole(); // the open waits on its sign-in
+  const opening = process.send("open", r.openArgs({ h: "a", dir, proxy, token }), 40_000);
+  await r.sleep(300);
+  value(await process.call("cancel", { target: opening.id }), "cancel");
+  const ended = await opening.reply;
+  r.time("cancelled open ends", ended.ms - 300);
+  if (ended.ok) r.note("the cancelled open completed anyway");
+  await proxy.up();
+  const again = await r.open(process, { h: "b", dir, proxy, token });
+  r.time("next open", again.ms);
+  value(again, "the next open after a cancelled one");
+  if (again.ms > 5_000) throw new Broken("the next open waited over 5 s for the cancelled one", `${again.ms} ms`);
+  value(await process.call("close", { h: "b" }), "close");
+}
+
 export default [
+  {
+    id: "cancel.no-leak",
+    title: "a cancelled open gives the store back: the next open in the process succeeds within 5 s",
+    basis: "contract",
+    rounds: 16,
+    jobs: 8,
+    idle: true,
+    run: cancelledOpen,
+  },
   // Decided (Anselm approved the lifecycle card's rules 1-4, 23:09 UTC) but not built here: no PASS
   // over them until they are.
-  ...["close.dns", "close.token-callback", "cancel.no-leak"].map((id) => ({
+  ...["close.dns", "close.token-callback"].map((id) => ({
     id,
     title: `${id}: the contract's rule`,
     basis: "contract",
