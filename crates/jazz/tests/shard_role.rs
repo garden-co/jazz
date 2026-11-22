@@ -896,6 +896,56 @@ fn a_part_is_checked_as_its_session_without_writing() {
     assert!(error.to_string().contains("read"), "{error}");
 }
 
+/// A replica applies its leader's log at the leader's positions: a local
+/// write, a hold and a fixed position land where the leader numbered them,
+/// however far its own clock is off, and an observed position is followed
+/// past the replica's offset bound. Taking over, it waits until its clock
+/// passes the highest position it applied plus the offset bound.
+#[test]
+fn a_replica_numbers_at_its_leaders_positions_and_waits_out_the_bound_to_lead() {
+    let (leader, leader_now) = shard(1);
+    let (replica, replica_now) = shard(2);
+    replica_now.set(NOW - 2_000);
+    leader_now.set(NOW + 50);
+    insert(&leader, "one");
+    let one = newest(&leader);
+    replica.shard().number_at(one).unwrap();
+    insert(&replica, "one");
+    assert_eq!(newest(&replica), one, "at the leader's position");
+    assert!(
+        replica.shard().number_at(one).is_err(),
+        "never at or below what it numbered"
+    );
+    let part = CommitRef {
+        node: [7; 16],
+        tx: 3,
+    };
+    let rows = [doc_row(RowUuid::from_bytes([5; 16]))];
+    let hold = held_at(&leader, part, &rows);
+    replica.shard().number_at(hold).unwrap();
+    assert_eq!(held_at(&replica, part, &rows), hold);
+    let fixed = hold + 10;
+    leader.shard().fix(part, fixed).unwrap();
+    replica.shard().follow(fixed).unwrap();
+    replica.shard().fix(part, fixed).unwrap();
+    assert_eq!(replica.shard().holds(), leader.shard().holds());
+    let far = hlc(NOW + 400);
+    assert_eq!(leader.shard().observe(far).unwrap(), far);
+    replica.shard().follow(far).unwrap();
+    assert_eq!(replica.shard().numbered(), leader.shard().numbered());
+    replica.shard().release(part).unwrap();
+    replica.shard().lead().unwrap();
+    assert_eq!(
+        replica.shard().waits_out(),
+        Some(hlc_ms(far) + HLC_MAX_OFFSET_MS),
+        "the highest position it applied, plus the bound"
+    );
+    replica_now.set(hlc_ms(far) + HLC_MAX_OFFSET_MS + 1);
+    assert_eq!(replica.shard().waits_out(), None);
+    insert(&replica, "two");
+    assert_eq!(newest(&replica), hlc(replica_now.get()), "at its own clock");
+}
+
 /// A queued hold is checked again once granted, when it is already held
 /// but not yet fixed: the check is a trial and lands nothing, so it runs
 /// (INV-SHARD-25) though the part itself waits for its fix (INV-SHARD-27).
@@ -918,5 +968,24 @@ fn a_granted_part_is_checked_before_it_is_fixed() {
         db.shard().resolution(part).unwrap(),
         None,
         "and nothing landed"
+    );
+}
+
+/// A follower that takes over as leader and restarts before its wait ends
+/// still waits out the offset bound on reopen (INV-SHARD-21).
+#[test]
+fn a_new_leader_restarted_mid_wait_waits_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replica.sqlite");
+    let now = Rc::new(Cell::new(NOW));
+    let db = shard_at(&path, &now);
+    insert(&db, "applied from its old leader");
+    db.shard().lead().unwrap();
+    assert!(db.shard().waits_out().is_some(), "the new leader waits");
+    drop(db);
+    let db = shard_at(&path, &now);
+    assert!(
+        db.shard().waits_out().is_some(),
+        "and waits again after a restart mid-wait"
     );
 }
