@@ -47,9 +47,7 @@ export async function admitClient(prelude: Uint8Array, host: AdmissionHost): Pro
     nowMs: Date.now(),
   };
   for (;;) {
-    const step = JSON.parse(
-      backendNative().admitPrelude(prelude, JSON.stringify(facts)),
-    ) as Step;
+    const step = JSON.parse(backendNative().admitPrelude(prelude, JSON.stringify(facts))) as Step;
     if (step.step === "refused") {
       if (step.refusal !== "unverifiedDeviceProof") return { refused: step.refusal };
       host.unverifiedDeviceProof(step.token);
