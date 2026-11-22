@@ -309,7 +309,8 @@ class JazzTest {
 
     @Test
     fun a_sign_out_or_close_that_throws_still_ends_the_watches_and_rethrows(): Unit = runBlocking {
-        val calls = listOf<Pair<String, suspend (Jazz) -> Unit>>("signOut" to { it.signOut() }, "close" to { it.close() })
+        // close() itself returns at once and never throws: its failure reaches closeAndWait().
+        val calls = listOf<Pair<String, suspend (Jazz) -> Unit>>("signOut" to { it.signOut() }, "close" to { it.close(); it.closeAndWait() })
         for ((name, call) in calls) {
             var watching = 0
             val native = object : Native by FakeNative() {

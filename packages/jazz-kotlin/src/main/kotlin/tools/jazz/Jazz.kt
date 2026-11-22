@@ -110,21 +110,23 @@ public class Jazz internal constructor(
          */
         private val teardowns = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<Unit>>()
 
+        /** Waits for a closed app's teardown on [store], if one is running. */
+        private suspend fun awaitTeardown(store: String) {
+            val teardown = teardowns[store] ?: return
+            try {
+                teardown.await()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // Its shutdown failed: the store is let go of all the same.
+            }
+        }
+
         /** Opens the app [app] (the text of its `jazz.app.json`), as generated bindings' `open` does. */
         public suspend fun open(app: String, config: JazzConfig, implementations: Any? = null): Jazz {
             val store = if (config.storage == Storage.Persistent) config.dataDir?.let { java.io.File(it).canonicalPath } else null
             // A previous app on this directory may still be tearing down.
-            store?.let { dir ->
-                teardowns[dir]?.let { teardown ->
-                    try {
-                        teardown.await()
-                    } catch (e: kotlinx.coroutines.CancellationException) {
-                        throw e
-                    } catch (_: Throwable) {
-                        // Its shutdown failed: the store is let go of all the same.
-                    }
-                }
-            }
+            store?.let { awaitTeardown(it) }
             val closed = java.util.concurrent.atomic.AtomicBoolean(false)
             // Given back already off the caller's thread: close it there, not in the background.
             return startHandle(config.dispatcher, giveBack = { it.startClose(inline = true) }) {
@@ -193,7 +195,13 @@ public class Jazz internal constructor(
      *
      * Any other failure closes this app too. Closed, [session] reads `SignedOut`.
      */
-    public suspend fun deleteClientStorage(): Unit = io {
+    public suspend fun deleteClientStorage() {
+        // Another app on this store that was just closed may still be letting go of it.
+        store?.let { awaitTeardown(it) }
+        deleteNow()
+    }
+
+    private suspend fun deleteNow(): Unit = io {
         // Inside io: a cancelled caller gets no result back, and the handle is gone all the same.
         try {
             native.deleteClientStorage()

@@ -69,7 +69,7 @@ class CloseTest {
         }
         Jazz.opener = Native.Opener { native }
         val jazz = Jazz.open("{}", JazzConfig())
-        jazz.close()
+        jazz.close() // doesn't throw
         assertEquals("disk gone", assertFailsWith<JazzException.Io> { jazz.closeAndWait() }.message)
     }
 
@@ -119,5 +119,31 @@ class CloseTest {
         // The native core's ask after close fails (a failed fetch), never null (a sign-out).
         assertFailsWith<JazzException.Closed> { tokens!!("renew") }
         assertEquals(1, asked.get())
+    }
+
+    @Test
+    fun deleting_a_store_waits_for_another_apps_teardown(): Unit = runBlocking {
+        val dir = kotlin.io.path.createTempDirectory("jazz-close-delete").toFile()
+        val first = SlowClose()
+        val deleted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val second = object : Native by FakeNative() {
+            override fun deleteClientStorage() {
+                check(first.closed) { "deleted while the other app still held the store" }
+                deleted.set(true)
+            }
+        }
+        var opened = 0
+        Jazz.opener = Native.Opener { if (opened++ == 0) first else second }
+        val config = JazzConfig(storage = Storage.Persistent, dataDir = dir.path)
+        val closing = Jazz.open("{}", config)
+        val deleting = Jazz.open("{}", config)
+        closing.close()
+        assertTrue(first.closeStarted.await(5, TimeUnit.SECONDS))
+        val deletion = async { deleting.deleteClientStorage() }
+        delay(200)
+        assertFalse(deleted.get())
+        first.release.countDown()
+        withTimeout(5_000) { deletion.await() }
+        assertTrue(deleted.get())
     }
 }
