@@ -105,17 +105,29 @@ describe("removing a lost device", () => {
     expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: "POST" });
   });
 
-  it("removes nothing when the server step fails, and says so with a retry", async () => {
-    const fake = threeDevices();
-    fetchMock.mockResolvedValueOnce(new Response("Forbidden", { status: 403 }));
-    show(fake);
-    await confirmRemoval("device-lost");
-    await screen.findByText(/Your other browsers were not signed out, so nothing was removed/);
-    expect(fake.handle.devices.remove).not.toHaveBeenCalled();
-    await confirmRemoval("device-lost");
-    await waitFor(() => expect(fake.handle.devices.remove).toHaveBeenCalledWith("device-lost"));
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
+  it.each(["partial failure", "lost response"])(
+    "keeps the device and retries when sign-out is unconfirmed after a %s",
+    async (failure) => {
+      const fake = threeDevices();
+      if (failure === "partial failure") {
+        fetchMock.mockResolvedValueOnce(
+          new Response("Could not revoke the connections", { status: 500 }),
+        );
+      } else {
+        fetchMock.mockRejectedValueOnce(new TypeError("Network connection lost"));
+      }
+      show(fake);
+      await confirmRemoval("device-lost");
+      await screen.findByText(
+        /Sign-out could not be confirmed. Your other browsers may have been signed out/,
+      );
+      expect(fake.handle.devices.remove).not.toHaveBeenCalled();
+      expect(row("device-lost")).toBeTruthy();
+      await confirmRemoval("device-lost");
+      await waitFor(() => expect(fake.handle.devices.remove).toHaveBeenCalledWith("device-lost"));
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("runs both steps again after an interrupted removal", async () => {
     const fake = threeDevices();
@@ -258,6 +270,20 @@ describe("a key check that gave up", () => {
 });
 
 describe("recovery set-up", () => {
+  it("prompts for recovery again when device removal retires the last recovery root", async () => {
+    const fake = threeDevices();
+    fake.state.recoveryRoots = [{ id: "old-root", device: "device-lost" }];
+    fake.handle.devices.remove.mockImplementationOnce(async (deviceId) => {
+      fake.state.devices = fake.state.devices.filter((device) => device.id !== deviceId);
+      fake.state.recoveryRoots = [];
+    });
+    show(fake);
+    await screen.findByText("Recovery is set up for your account.");
+    await confirmRemoval("device-lost");
+    expect(await screen.findByRole("button", { name: "Set up recovery" })).toBeTruthy();
+    expect(screen.queryByText("Recovery is set up for your account.")).toBeNull();
+  });
+
   it("with a passkey: says so and shows no phrase", async () => {
     const fake = fakeEncryption();
     show(fake);

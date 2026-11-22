@@ -50,9 +50,9 @@ test("no message text or attachment reaches the server or the wire; a room name 
   await signUp(b.page, bob);
   await deviceIdOf(a.page);
   await deviceIdOf(b.page);
+  await joinThroughLink(a.page, b.page, roomId, bob);
   await watchMarkerWrites(a.page);
   await watchMarkerWrites(b.page);
-  await joinThroughLink(a.page, b.page, roomId, bob);
 
   const fromAlice = unique("Soundcheck at six");
   const fromBob = unique("Bringing the spare amp");
@@ -113,7 +113,8 @@ test("no message text or attachment reaches the server or the wire; a room name 
   ];
   for (const device of [a, b]) {
     const storage = await pageStorage(device.page);
-    for (const secret of storedSecrets) expect(storage).not.toContain(secret);
+    for (const secret of storedSecrets)
+      expect(storage.includes(secret), "plaintext was found in browser storage").toBe(false);
   }
 });
 
@@ -260,6 +261,10 @@ test("an active new member attempts no read marker until the room key arrives", 
   await send(a.page, text);
   await signUp(b.page, bob);
   await deviceIdOf(b.page);
+  await b.page.goto(`/?join=${roomId}`);
+  await b.page.getByRole("button", { name: "Ask to join" }).click();
+  await expect(b.page.getByText("Waiting for the room creator")).toBeVisible({ timeout: T });
+  await deviceIdOf(b.page);
   await watchMarkerWrites(b.page);
 
   // Admission's delivery call happens after its transaction is accepted.
@@ -276,7 +281,7 @@ test("an active new member attempts no read marker until the room key arrives", 
       return deliver();
     };
   });
-  await joinThroughLink(a.page, b.page, roomId, bob);
+  await admit(a.page, bob);
   await a.page.waitForFunction(() => typeof window.releaseBandChatDelivery === "function");
   await expect(lockedBanner(b.page)).toBeVisible({ timeout: T });
   await expect(waitingBanner(b.page)).toHaveCount(0);

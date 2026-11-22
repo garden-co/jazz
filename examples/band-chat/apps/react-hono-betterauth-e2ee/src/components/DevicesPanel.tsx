@@ -273,7 +273,7 @@ function RemoveLostDevice({ device }: { device: DeviceInfo }) {
         await endOtherSignIns();
       } catch (cause) {
         setError(
-          `Your other browsers were not signed out, so nothing was removed: ${failureOf(cause).message} Try again.`,
+          `Sign-out could not be confirmed. Your other browsers may have been signed out. ${failureOf(cause).message} Try again to finish removing the device.`,
         );
         return;
       }
@@ -442,7 +442,7 @@ function ApproveDevice({ device }: { device: DeviceInfo }) {
  * this component's state, and is gone once the user has written it down.
  */
 function RecoverySetup({ accountName }: { accountName: string }) {
-  const { encryption } = useDeviceState();
+  const { devices, encryption } = useDeviceState();
   const [count, setCount] = useState<number | null>(null);
   const [result, setResult] = useState<
     { method: "passkey" } | { method: "phrase"; phrase: string } | null
@@ -454,12 +454,16 @@ function RecoverySetup({ accountName }: { accountName: string }) {
     let stopped = false;
     encryption.recovery
       .list()
-      .then((roots) => !stopped && setCount(roots.length))
+      .then((roots) => {
+        if (stopped) return;
+        setCount(roots.length);
+        if (roots.length === 0) setResult(null);
+      })
       .catch((cause: unknown) => !stopped && setError(failureOf(cause).message));
     return () => {
       stopped = true;
     };
-  }, [encryption]);
+  }, [devices, encryption]);
 
   async function enable() {
     setBusy(true);
