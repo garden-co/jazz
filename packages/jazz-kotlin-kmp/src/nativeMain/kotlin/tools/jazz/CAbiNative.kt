@@ -400,7 +400,8 @@ private class Gate {
         return true
     }
 
-    private companion object {
+    // Not private: the inline `enter` reads it (KTLC-283, an error in Kotlin 2.4).
+    companion object {
         const val CLOSED = 1 shl 30
     }
 }
