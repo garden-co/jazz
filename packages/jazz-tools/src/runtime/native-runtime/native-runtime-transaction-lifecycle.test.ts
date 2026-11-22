@@ -360,7 +360,7 @@ it.each(["standalone", "transaction"])(
       );
       const tx = mode === "transaction" ? beginTestBatch(runtime) : undefined;
       const context = tx && JSON.stringify({ transaction_id: tx });
-      const write = () =>
+      const write = (id?: string) =>
         runtime.streamingMutation(
           "insert",
           "todos",
@@ -371,22 +371,34 @@ it.each(["standalone", "transaction"])(
             yield "slow source";
           })(),
           context,
+          id,
         );
       const first = write();
       await vi.advanceTimersByTimeAsync(24_999);
       await expect(first).resolves.toBeDefined();
 
       const refused = vi.fn();
-      const second = write().catch(refused);
+      const id = "00000000-0000-7000-8000-000000000002";
+      const second = write(id).catch(refused);
       await vi.advanceTimersByTimeAsync(24_999);
       expect(finish).toHaveBeenCalledTimes(2);
       expect(refused).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect(refused).toHaveBeenCalledWith(expect.objectContaining({ name: "TimeoutError" }));
+      expect(refused).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "TimeoutError",
+          message: expect.stringContaining("may still complete"),
+          rowId: id,
+          settled: expect.any(Promise),
+        }),
+      );
+      const { settled } = refused.mock.calls[0]![0];
       const queued = write().catch(refused);
       await vi.advanceTimersByTimeAsync(25_000);
       expect(refused).toHaveBeenCalledTimes(2);
+      expect(refused.mock.calls[1]![0].message).toContain("before publication started");
       release();
+      await expect(settled).resolves.toMatchObject({ id, kind: tx ? "staged" : "committed" });
       await Promise.all([second, queued]);
       await runtime.close();
       expect(finish).toHaveBeenCalledTimes(2);
