@@ -14,6 +14,8 @@ import { Broken, NotCovered, Round } from "./round.mjs";
 import { RULES } from "./rules/index.mjs";
 import { startStack } from "./stack.mjs";
 
+// Rules marked idle wait on a dead server for up to 40 s a round: several run at once.
+const IDLE_AT_ONCE = 4;
 const ROUND_MS = Number(process.env.LA_ROUND_MS ?? 120_000);
 
 const { values: options } = parseArgs({
@@ -110,8 +112,7 @@ try {
   stack = await startStack();
   console.log(`SUITE ${options.name} ${lang}: ${rules.length} rules, up to ${cap} rounds, ${jobs} at a time`);
   const results = [];
-  for (const rule of rules) {
-    const result = await runRule({ lang, driver, stack }, rule);
+  const report = (result) => {
     results.push(result);
     const count = result.status === "NOT_COVERED" ? "" : ` ${result.passed}/${result.rounds}`;
     console.log(`${result.status} ${lang} ${result.id}${count} (${(result.ms / 1000).toFixed(1)}s)${result.why ? ` - ${result.why}` : ""}`);
@@ -120,6 +121,14 @@ try {
     for (const [what, { median, max }] of Object.entries(result.times))
       console.log(`  ${what}: median ${median} ms, max ${max} ms`);
     for (const [note, n] of Object.entries(result.notes).slice(0, 8)) console.log(`  note ${n}x ${note}`);
+  };
+  const context = { lang, driver, stack };
+  // The race-prone rules have the machine to themselves.
+  for (const rule of rules.filter((r) => !r.idle)) report(await runRule(context, rule));
+  const idle = rules.filter((r) => r.idle);
+  for (let i = 0; i < idle.length; i += IDLE_AT_ONCE) {
+    const together = await Promise.all(idle.slice(i, i + IDLE_AT_ONCE).map((rule) => runRule(context, rule)));
+    for (const result of together) report(result);
   }
   const ms = Date.now() - started;
   mkdirSync(options.out, { recursive: true });

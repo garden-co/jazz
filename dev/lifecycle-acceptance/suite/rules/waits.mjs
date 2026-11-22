@@ -42,6 +42,7 @@ async function cancel(r, options) {
   const took = Date.now() - at;
   r.time("cancel", took);
   if (reply.ok) throw new Broken("the cancelled wait succeeded with no server");
+  if (reply.kind === "harness.timeout") throw new Broken("cancel doesn't end the wait", `still waiting ${took} ms after the cancel`);
   if (reply.kind !== CANCELLED[r.lang]) throw new Broken(`a cancelled wait ends as ${reply.kind}`, reply.msg);
   if (took > CANCEL_MS) throw new Broken(`cancel took over ${CANCEL_MS} ms`, `${took} ms`);
   const local = value(await process.call("read", { h: "a", tier: "local" }), "local read after the cancel");
@@ -80,6 +81,7 @@ for (const outage of ["refuse", "hole"]) {
       basis: "pending",
       rounds: ROUNDS,
       jobs: ROUNDS,
+      idle: true,
       run: (r) => cancel(r, { wait, outage }),
     });
   for (const wait of ["none", "sync", "read", "write"])
@@ -89,6 +91,7 @@ for (const outage of ["refuse", "hole"]) {
       basis: "pending",
       rounds: ROUNDS,
       jobs: ROUNDS,
+      idle: true,
       run: (r) => close(r, { wait, outage }),
     });
   rules.push({
@@ -97,6 +100,7 @@ for (const outage of ["refuse", "hole"]) {
     basis: "pending",
     rounds: ROUNDS,
     jobs: ROUNDS,
+    idle: true,
     run: (r) => close(r, { wait: "sync", outage, cancelFirst: true }),
   });
 }
