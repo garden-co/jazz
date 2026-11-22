@@ -2034,16 +2034,19 @@ async fn a_revoke_that_races_a_sign_in_refuses_the_session() {
 
     let mut app = App::start().await;
     let account = app.endpoint.create_account_for("alice").await.unwrap();
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
+    // `authenticate` runs twice for the socket: for its admission, and for
+    // this file's host, which logs who was admitted. Hold both until the
+    // revoke is done, whichever is which.
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
     let held = {
         let (entered, release) = (entered.clone(), release.clone());
         move |request: Request| {
             let (entered, release) = (entered.clone(), release.clone());
             async move {
                 let answer = authenticate(request).await;
-                entered.notify_one();
-                release.notified().await;
+                entered.add_permits(1);
+                let _ = release.acquire().await;
                 answer
             }
         }
@@ -2074,9 +2077,8 @@ async fn a_revoke_that_races_a_sign_in_refuses_the_session() {
     let hello = encode_websocket_frame_batch(&[encode_frame(&hello).unwrap()]).unwrap();
     socket.send(Message::Binary(hello.into())).await.unwrap();
 
-    tokio::time::timeout(Duration::from_secs(10), entered.notified())
-        .await
-        .expect("authenticate ran");
+    let both = tokio::time::timeout(Duration::from_secs(10), entered.acquire_many(2)).await;
+    both.expect("authenticate ran for both").unwrap().forget();
     // The mark refuses only what is strictly older.
     tokio::time::sleep(Duration::from_millis(5)).await;
     let revoked_before = std::time::SystemTime::now()
@@ -2098,7 +2100,7 @@ async fn a_revoke_that_races_a_sign_in_refuses_the_session() {
         .await
         .unwrap();
     assert_eq!(revoked.status().as_u16(), 200);
-    release.notify_one();
+    release.close();
 
     let refusal = tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(Ok(message)) = socket.next().await {
