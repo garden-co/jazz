@@ -1190,6 +1190,38 @@
       }
     },
     {
+      "name": "device: a signed proof whose header is a list",
+      "prelude": "{\"peer_identity\":\"p\",\"jwt_token\":\"WyJFZERTQSJd.eyJpc3MiOiJ1cm46amF6ejpsb2NhbC1maXJzdCIsInN1YiI6ImU4ODQxNmY2LTY3YzgtNWUyNi04ZDUzLTI1MDc0ZDgwMjU0MCIsImF1ZCI6IjZmNmM5YTFlLTZiMWItNGM1ZS05YTU3LTJkM2YwYjhmNWExMCIsImphenpfcHViX2tleSI6InBBQ2R2TTVoVTlrNHlXRlBsSTNDQklKSVNFX1VpeENaalpuVDVaaF9WRkEiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMzYwMH0.p5LxUpfOH5rmqihtQW0ns2reh_bqLESvDMxtZ5LK-BQ9FVzYXOHajoNYyNWDwnpE7LxtduOaZymIUlnhyjcZDQ\",\"auth\":{\"jwt_token\":\"WyJFZERTQSJd.eyJpc3MiOiJ1cm46amF6ejpsb2NhbC1maXJzdCIsInN1YiI6ImU4ODQxNmY2LTY3YzgtNWUyNi04ZDUzLTI1MDc0ZDgwMjU0MCIsImF1ZCI6IjZmNmM5YTFlLTZiMWItNGM1ZS05YTU3LTJkM2YwYjhmNWExMCIsImphenpfcHViX2tleSI6InBBQ2R2TTVoVTlrNHlXRlBsSTNDQklKSVNFX1VpeENaalpuVDVaaF9WRkEiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMzYwMH0.p5LxUpfOH5rmqihtQW0ns2reh_bqLESvDMxtZ5LK-BQ9FVzYXOHajoNYyNWDwnpE7LxtduOaZymIUlnhyjcZDQ\",\"sub\":\"s\"},\"sub\":\"s\"}",
+      "client": "none",
+      "endpoints": ["https://app.example/jazz"],
+      "deviceAccepted": true,
+      "user": "alice",
+      "claims": {
+        "role": "member"
+      },
+      "account": "0b7f3c1e-2a4d-4f7a-8c1b-5e6d7f8a9b0c",
+      "shipped": {
+        "refused": "unverified",
+        "lookups": ["backendClient"]
+      }
+    },
+    {
+      "name": "device: a signed proof whose header is not UTF-8",
+      "prelude": "{\"peer_identity\":\"p\",\"jwt_token\":\"eyJhbGciOiJFZERTQSIsIngiOiL_In0.eyJpc3MiOiJ1cm46amF6ejpsb2NhbC1maXJzdCIsInN1YiI6ImU4ODQxNmY2LTY3YzgtNWUyNi04ZDUzLTI1MDc0ZDgwMjU0MCIsImF1ZCI6IjZmNmM5YTFlLTZiMWItNGM1ZS05YTU3LTJkM2YwYjhmNWExMCIsImphenpfcHViX2tleSI6InBBQ2R2TTVoVTlrNHlXRlBsSTNDQklKSVNFX1VpeENaalpuVDVaaF9WRkEiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMzYwMH0.8rm6f5pXRY9PXZHY5WUIaZWe4XRJkSnnONtXShqBx-iRG1NhLRXqU-AuGvKHpjn-KZuX8GsM8eMaRHxF8ZO1Aw\",\"auth\":{\"jwt_token\":\"eyJhbGciOiJFZERTQSIsIngiOiL_In0.eyJpc3MiOiJ1cm46amF6ejpsb2NhbC1maXJzdCIsInN1YiI6ImU4ODQxNmY2LTY3YzgtNWUyNi04ZDUzLTI1MDc0ZDgwMjU0MCIsImF1ZCI6IjZmNmM5YTFlLTZiMWItNGM1ZS05YTU3LTJkM2YwYjhmNWExMCIsImphenpfcHViX2tleSI6InBBQ2R2TTVoVTlrNHlXRlBsSTNDQklKSVNFX1VpeENaalpuVDVaaF9WRkEiLCJpYXQiOjE4MDAwMDAwMDAsImV4cCI6MTgwMDAwMzYwMH0.8rm6f5pXRY9PXZHY5WUIaZWe4XRJkSnnONtXShqBx-iRG1NhLRXqU-AuGvKHpjn-KZuX8GsM8eMaRHxF8ZO1Aw\",\"sub\":\"s\"},\"sub\":\"s\"}",
+      "client": "none",
+      "endpoints": ["https://app.example/jazz"],
+      "deviceAccepted": true,
+      "user": "alice",
+      "claims": {
+        "role": "member"
+      },
+      "account": "0b7f3c1e-2a4d-4f7a-8c1b-5e6d7f8a9b0c",
+      "shipped": {
+        "refused": "unverified",
+        "lookups": ["backendClient"]
+      }
+    },
+    {
       "name": "device: anonymous issuer",
       "prelude": "{\"peer_identity\":\"p\",\"jwt_token\":\"eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJ1cm46amF6ejphbm9ueW1vdXMiLCJzdWIiOiJlODg0MTZmNi02N2M4LTVlMjYtOGQ1My0yNTA3NGQ4MDI1NDAiLCJhdWQiOiI2ZjZjOWExZS02YjFiLTRjNWUtOWE1Ny0yZDNmMGI4ZjVhMTAiLCJqYXp6X3B1Yl9rZXkiOiJwQUNkdk01aFU5azR5V0ZQbEkzQ0JJSklTRV9VaXhDWmpablQ1WmhfVkZBIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDM2MDB9.ryLfCy5EwN57grFeFJNgFngMIBqeERfk1uIraPK4tkA9M6As8xxo-vfFN4UsFK5WPZk4sNsRo6Hhmc_ZdnxDDA\",\"auth\":{\"jwt_token\":\"eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJ1cm46amF6ejphbm9ueW1vdXMiLCJzdWIiOiJlODg0MTZmNi02N2M4LTVlMjYtOGQ1My0yNTA3NGQ4MDI1NDAiLCJhdWQiOiI2ZjZjOWExZS02YjFiLTRjNWUtOWE1Ny0yZDNmMGI4ZjVhMTAiLCJqYXp6X3B1Yl9rZXkiOiJwQUNkdk01aFU5azR5V0ZQbEkzQ0JJSklTRV9VaXhDWmpablQ1WmhfVkZBIiwiaWF0IjoxODAwMDAwMDAwLCJleHAiOjE4MDAwMDM2MDB9.ryLfCy5EwN57grFeFJNgFngMIBqeERfk1uIraPK4tkA9M6As8xxo-vfFN4UsFK5WPZk4sNsRo6Hhmc_ZdnxDDA\",\"sub\":\"s\"},\"sub\":\"s\"}",
       "client": "none",

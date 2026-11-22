@@ -311,9 +311,11 @@ impl Client<'_> {
         {
             return unverified;
         }
+        let well_formed = has_object_parts(token);
         let holds_for = |audience: &str| {
-            identity::verify_jazz_self_signed_proof_at(token, audience, facts.now_ms / 1000)
-                .is_ok_and(|proof| proof.issuer == DEVICE_ACCOUNT_ISSUER)
+            well_formed
+                && identity::verify_jazz_self_signed_proof_at(token, audience, facts.now_ms / 1000)
+                    .is_ok_and(|proof| proof.issuer == DEVICE_ACCOUNT_ISSUER)
         };
         let endpoint = if holds_for(&facts.app_id) {
             None
@@ -515,6 +517,20 @@ fn names_device_issuer(token: &str) -> bool {
         .and_then(|bytes| serde_json::from_slice::<Issuer>(&bytes).ok())
         .and_then(|claims| claims.iss)
         .is_some_and(|issuer| issuer == DEVICE_ACCOUNT_ISSUER)
+}
+
+/// Whether a proof's header and claims are JSON objects in UTF-8. The
+/// verifier alone also takes a header that is a list, or isn't UTF-8 where
+/// it skips it; a backend never admitted such a proof.
+fn has_object_parts(token: &str) -> bool {
+    token.split('.').take(2).all(|part| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(part)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| serde_json::from_str::<Stated>(&text).ok())
+            .is_some_and(|json| matches!(json, Stated::Object(_)))
+    })
 }
 
 /// A JSON value reduced to what admission reads: scalars, and of an object
