@@ -92,12 +92,14 @@ impl JazzHandle {
 
     /// Links this device account to the user's account with the app's own
     /// sign-in (`bearer`): the session becomes that user's. Returns the user
-    /// as JSON.
+    /// as JSON. Not supported on a session's handle: use
+    /// `Session.linkDeviceAccount`.
     pub fn link(&self, bearer: String) -> Result<String> {
         self.core.surface(self.core.link(&bearer))
     }
 
-    /// Signs the end user out and closes the app.
+    /// Signs the end user out and closes the app. Not supported on a
+    /// session's handle, which stays open: use `Session.signOut`.
     pub fn sign_out(&self) -> Result<()> {
         self.core.surface(self.core.sign_out())
     }

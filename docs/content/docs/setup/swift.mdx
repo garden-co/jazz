@@ -90,7 +90,8 @@ server itself), signed in with a device account or with your own sign-in's beare
 `jazz.syncStatus()` and `jazz.syncChanges` report the link (`.connected`, `.offline(reason:…)`, …),
 pending uploads and rejections, as TypeScript's `SyncStatus`. `refresh()` asks your token provider
 again, `link(bearer:)` links a device account to your sign-in, and `signOut()` signs out and closes
-the app. `.local()` opens a client without a server.
+the app (on a `JazzSession`'s client both are refused: use the session's `linkDeviceAccount()` and
+`signOut()`). `.local()` opens a client without a server.
 
 Before the process exits, call `try await jazz.close()`. It ends every live `watch` and
 `subscribe` loop with `JazzError.closed`.

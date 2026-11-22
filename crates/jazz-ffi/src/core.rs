@@ -1159,7 +1159,8 @@ impl Core {
         Ok(serde_json::to_string(&user).unwrap_or_default())
     }
 
-    /// Signs the end user out and closes the app.
+    /// Signs the end user out and closes the app; a session's handle
+    /// refuses and stays open.
     pub fn sign_out(&self) -> Result<()> {
         let jazz = self.open_jazz()?;
         if jazz.session().is_none() {

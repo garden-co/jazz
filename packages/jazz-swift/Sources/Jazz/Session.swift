@@ -220,7 +220,8 @@ extension Client {
         try await Self.typed { try await Self.run { try self.handle.refresh() } }
     }
 
-    /// Signs out and closes the app.
+    /// Signs out and closes the app. Not supported on a `JazzSession`'s
+    /// client, which stays open: use `JazzSession.signOut()`.
     public func signOut() async throws {
         try await Self.typed { try await Self.run { try self.handle.signOut() } }
     }

@@ -189,6 +189,28 @@ async fn device_accounts_are_created_reopened_restored_and_linked() {
         .insert(NewTodo::new("As a guest", false))
         .await
         .unwrap();
+    // The user and the client are the session's to change: its handle
+    // neither signs out nor links behind its back.
+    let as_guest = session.jazz().unwrap();
+    let epoch = session.snapshot().client_epoch;
+    let refused = as_guest.sign_out().await;
+    assert!(
+        matches!(&refused, Err(Error::Unsupported(what)) if what.contains("JazzSession::sign_out")),
+        "{refused:?}"
+    );
+    let on = as_guest.session().unwrap().clone();
+    let refused = on.link("token-carol").await;
+    assert!(
+        matches!(&refused, Err(Error::Unsupported(what)) if what.contains("link_device_account")),
+        "{refused:?}"
+    );
+    assert!(
+        matches!(on.state(), jazz_app_support::SessionState::SignedIn { user } if user.kind == UserKind::Device)
+    );
+    on.refresh().await.expect("refresh is the user's own");
+    as_guest.all(todos::query()).await.expect("still open");
+    assert_eq!(session.snapshot().client_epoch, epoch);
+
     // Its store sits in a directory of its own, the key beside them.
     let store = dir.path().join(guest.account.0.to_string());
     assert!(store.join("jazz.sqlite").exists(), "{store:?}");

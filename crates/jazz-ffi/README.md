@@ -135,6 +135,9 @@ Linking reopens the account on the bearer: `clientEpoch` moves on.
   `retry()` (as `recovery` says); C `jazz_session_call(s, method, args)`.
 - `watch(listener)` / `jazz_session_watch`: each snapshot, the current one
   first, and a last `{"kind": "closed"}` when the session closes.
+- On a handle it gave, `sign_out` and `link` fail with kind `"notSupported"`
+  and leave the handle open: use the session's `sign_out` and
+  `link_device_account`.
 - `shutdown()` / `jazz_session_close`: closes the session; its handles fail
   `Closed`, its watches end, and no token callback runs after.
 
