@@ -217,8 +217,8 @@ enum Via {
     AuthorityMergeable,
     /// Staged at the authority as the session, through a serializable handle.
     AuthoritySerializable,
-    /// A replica's `Db::transaction`, uploaded.
-    UploadCallback,
+    /// A replica's scoped mergeable transaction, uploaded.
+    UploadScoped,
     /// A replica's mergeable handle, uploaded.
     UploadMergeable,
     /// A replica's serializable handle, uploaded.
@@ -228,7 +228,7 @@ enum Via {
 const EVERY_VIA: [Via; 5] = [
     Via::AuthorityMergeable,
     Via::AuthoritySerializable,
-    Via::UploadCallback,
+    Via::UploadScoped,
     Via::UploadMergeable,
     Via::UploadSerializable,
 ];
@@ -440,12 +440,12 @@ impl World {
                     block_on(self.server.commit_serializable_handle(id)).map(drop)
                 }
             }
-            Via::UploadCallback => {
+            Via::UploadScoped => {
                 let replica = self.replica(who);
                 self.pump(&replica);
-                let writes = writes.to_vec();
-                let ((), receipt) = block_on(replica.transaction(async move |tx| {
-                    for write in &writes {
+                let receipt = block_on(async {
+                    let tx = replica.mergeable_tx().await?;
+                    for write in writes {
                         match write.clone() {
                             Write::Insert(table, row, cells) => {
                                 tx.insert(table, cells, insert_options(row)).await?;
@@ -460,8 +460,8 @@ impl World {
                             Write::Restore(..) => unreachable!("staged at the authority only"),
                         }
                     }
-                    Ok(())
-                }))?;
+                    tx.commit().await
+                })?;
                 self.settle(&replica, receipt.0)
             }
             Via::UploadMergeable | Via::UploadSerializable => {
@@ -1045,7 +1045,8 @@ fn an_unknown_table_identity_grants_nothing_until_the_names_are_confirmed() {
     // The replica holds the project and alice's member row, written in one
     // unit before it ever met its authority.
     let member = world.member_cells(project, alice());
-    block_on(replica.transaction(async move |tx| {
+    block_on(async {
+        let tx = replica.mergeable_tx().await?;
         tx.insert("projects", project_cells("p"), insert_options(project))
             .await?;
         tx.insert(
@@ -1054,8 +1055,8 @@ fn an_unknown_table_identity_grants_nothing_until_the_names_are_confirmed() {
             insert_options(RowUuid(uuid::Uuid::new_v4())),
         )
         .await?;
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
     let projects = replica.prepare_query(&Query::from("projects")).unwrap();
     let read = |db: &Db| {

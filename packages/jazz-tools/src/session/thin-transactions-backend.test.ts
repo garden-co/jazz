@@ -266,3 +266,48 @@ it("refuses a thin transaction's write of an encrypted column in the backend, wh
   // The refusal is the server's: it holds no row of the write.
   expect(await server.jazz.db.all(encryptedApp.tasks)).toEqual([]);
 }, 60_000);
+
+it("runs the transaction of a client built against an app that ships migrations", async () => {
+  // The app's current version renames a column from its first one, so the
+  // core stores it under names its migrations derive. The session's replica
+  // in the backend must be opened with those migrations, or it names the
+  // version itself and the core refuses every transaction it serves.
+  const before = {
+    notes: { columns: { title: "string" } },
+    locked: { columns: { title: "string" } },
+  };
+  const migratedApp = testApp({
+    tables: {
+      notes: { columns: { body: "string" } },
+      locked: { columns: { title: "string" } },
+    },
+    history: { v1: { tables: before } },
+    migrations: [{ from: "v1", migrate: { notes: { body: { renameFrom: "title" } } } }],
+  });
+  server = await startTestJazz({
+    app: migratedApp,
+    permissions,
+    coreOptions: { inMemory: true },
+  });
+  const session = await thinSession({
+    scope: server.appId,
+    serverUrl: server.url,
+    initial: "device",
+  });
+  const db = session.getSnapshot().client!.db;
+  expect(isThinDb(db)).toBe(true);
+
+  const committed = await db.transaction((tx) => {
+    tx.insert(migratedApp.notes, { body: "in a transaction" });
+  });
+  await committed.wait({ tier: "global" });
+  const serializable = await db.serializableTransaction(async (tx) => {
+    const existing = await tx.all(migratedApp.notes);
+    tx.insert(migratedApp.notes, { body: `after ${existing.length}` });
+  });
+  await serializable.wait();
+  expect((await db.all(migratedApp.notes)).map((note) => note.body).sort()).toEqual([
+    "after 1",
+    "in a transaction",
+  ]);
+}, 60_000);

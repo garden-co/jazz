@@ -1,5 +1,15 @@
 # create-jazz
 
+## 2.0.0-alpha.70
+
+### Patch Changes
+
+- 7681047: Raise the minimum supported Node.js version from 22.12 to 22.18.
+
+## 2.0.0-alpha.69
+
+## 2.0.0-alpha.68
+
 ## 2.0.0-alpha.67
 
 ## 2.0.0-alpha.66

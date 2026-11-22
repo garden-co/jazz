@@ -7,10 +7,10 @@
 //! writes to it (not even the journal mode), so a refused file is left
 //! byte-for-byte as it was:
 //!
-//! - an empty file is new: it is stamped with [`STORAGE_FORMAT`];
+//! - a file without Jazz metadata is new, even if it holds unrelated tables;
 //! - a file stamped with [`STORAGE_FORMAT`] opens;
-//! - any other stamp, and a file with tables but no stamp (one Jazz did not
-//!   write, such as a Groove SQLite-adapter root), is refused with
+//! - any other stamp, unstamped Jazz metadata, or a recognized legacy Groove
+//!   store is refused with
 //!   [`ErrorCode::UnsupportedStorageCodecs`].
 //!
 //! The Groove engine's native stores were RocksDB directories; a host that
@@ -22,6 +22,7 @@
 //! not read bumps [`STORAGE_FORMAT`] and adds its corpus.
 
 use crate::storage::Storage;
+use rusqlite::OptionalExtension;
 use std::path::Path;
 
 use crate::options::{Error, ErrorCode};
@@ -43,37 +44,49 @@ pub(crate) fn unsupported(detail: impl std::fmt::Display) -> Error {
     )
 }
 
-/// Admit the file `conn` opened: stamp a new one, accept one in
-/// [`STORAGE_FORMAT`], refuse anything else. Reads only, unless the file is
-/// new.
+/// Stamp a new store inside its caller's initialization/write transaction.
 pub(crate) fn admit(conn: &Storage) -> Result<(), Error> {
-    // A damaged header fails here (`file is not a database`), as a storage
-    // error, before any write.
-    let tables: Vec<String> = conn
-        .prepare(
-            // Durable Object SQLite keeps its own `_cf_*` tables in the file.
-            "SELECT name FROM sqlite_master WHERE type = 'table' \
-             AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
-        )
-        .and_then(|mut statement| {
-            statement
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<_, _>>()
-        })
-        .map_err(storage)?;
-    if tables.is_empty() {
-        return conn
-            .execute_batch(&format!(
-                "CREATE TABLE {STAMP_TABLE} (version INTEGER NOT NULL); \
-                 INSERT INTO {STAMP_TABLE} (version) VALUES ({STORAGE_FORMAT});"
-            ))
-            .map_err(storage);
+    if !check(conn)? {
+        conn.scope("jazz_format", |conn| {
+            conn.execute_batch(&format!(
+                "CREATE TABLE {STAMP_TABLE} (version INTEGER NOT NULL); INSERT INTO {STAMP_TABLE} (version) VALUES ({STORAGE_FORMAT});"
+            )).map_err(storage)
+        })?;
     }
-    if !tables.iter().any(|name| name == STAMP_TABLE) {
-        return Err(unsupported(
-            "this SQLite file has tables but no Jazz storage format stamp \
-             (it was not written by Jazz's SQLite engine)",
-        ));
+    Ok(())
+}
+
+/// Validate without writing. Whether the store already has a valid stamp.
+pub(crate) fn check(conn: &Storage) -> Result<bool, Error> {
+    // Only Jazz owns this namespace; other tables may share the file.
+    let stamp: Option<String> = conn
+        .query_row(
+            "SELECT type FROM sqlite_master WHERE name = ?1 COLLATE NOCASE",
+            [STAMP_TABLE],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    if stamp.is_none() {
+        // Durable Object hosts can create their own tables before the core opens.
+        // Their indexes also belong to the host, not to the core storage format.
+        let unstamped: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE lower(name) GLOB '_jazz_*'
+                 AND NOT (lower(name) GLOB '_jazz_host_*' AND lower(tbl_name) GLOB '_jazz_host_*'))",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if unstamped || is_groove_sqlite(conn)? {
+            return Err(unsupported(
+                "Jazz storage metadata exists without its format stamp, or the file contains a legacy Groove store",
+            ));
+        }
+        return Ok(false);
+    }
+    if stamp.as_deref() != Some("table") {
+        return Err(unsupported("Jazz format stamp is not a table"));
     }
     let versions: Vec<rusqlite::types::Value> = conn
         .prepare(&format!("SELECT version FROM {STAMP_TABLE}"))
@@ -84,7 +97,7 @@ pub(crate) fn admit(conn: &Storage) -> Result<(), Error> {
         })
         .map_err(storage)?;
     match versions.as_slice() {
-        [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => Ok(()),
+        [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => Ok(true),
         [rusqlite::types::Value::Integer(version)] => Err(unsupported(format!(
             "this store was written in Jazz SQLite storage format {version}"
         ))),
@@ -93,6 +106,41 @@ pub(crate) fn admit(conn: &Storage) -> Result<(), Error> {
             format!("corrupt storage format stamp: {STAMP_TABLE} holds {other:?}"),
         )),
     }
+}
+
+/// Recognize the legacy format by indexed metadata, not by the spelling of DDL.
+fn is_groove_sqlite(conn: &Storage) -> Result<bool, Error> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta' COLLATE NOCASE)",
+        [], |row| row.get(0),
+    ).map_err(storage)?;
+    if !exists {
+        return Ok(false);
+    }
+    let columns: Vec<(String, i64)> = conn
+        .prepare("PRAGMA table_info('meta')")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| Ok((row.get(1)?, row.get(5)?)))?
+                .collect()
+        })
+        .map_err(storage)?;
+    let primary: Vec<_> = columns.iter().filter(|(_, pk)| *pk != 0).collect();
+    // Avoid scanning another application's unindexed metadata.
+    if primary.len() != 1
+        || !primary[0].0.eq_ignore_ascii_case("key")
+        || !columns
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("value"))
+    {
+        return Ok(false);
+    }
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM meta WHERE key = 'format' AND value = ?1)",
+        [b"jazz-groove-ordered-kv".as_slice()],
+        |row| row.get(0),
+    )
+    .map_err(storage)
 }
 
 /// Whether `dir` is a RocksDB directory: the Groove engine's native store.

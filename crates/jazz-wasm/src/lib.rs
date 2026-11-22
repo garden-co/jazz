@@ -37,6 +37,12 @@ type BrowserHooks = Rc<dyn jazz::e2ee::E2eeHooks>;
 #[cfg(all(target_arch = "wasm32", not(feature = "e2ee-client")))]
 type BrowserHooks = std::convert::Infallible;
 
+// What a backend's `createJazz` needs to run on this build; never in the
+// Durable Object core's build, which is sized for the Workers Free plan.
+#[cfg(all(feature = "backend", feature = "durable-object"))]
+compile_error!("the `backend` and `durable-object` features are separate builds; enable one");
+#[cfg(feature = "backend")]
+mod backend;
 #[cfg(target_arch = "wasm32")]
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
@@ -48,6 +54,8 @@ mod encryption;
 #[cfg(target_arch = "wasm32")]
 mod idb_vfs;
 mod identity;
+#[cfg(all(feature = "durable-object", any(target_arch = "wasm32", test)))]
+mod socket_attachment;
 mod text;
 
 #[cfg(feature = "bench-probes")]
@@ -424,6 +432,10 @@ struct Host {
     /// The end-to-end encryption runtime, when the app declares encryption.
     #[cfg(feature = "e2ee-client")]
     encryption: RefCell<Option<Rc<jazz_e2ee_client::host::runtime::Encryption>>>,
+    /// A thin session's transactions, when this database serves them as
+    /// the backend's client (`serveThinTransaction`).
+    #[cfg(feature = "backend")]
+    thin: Rc<RefCell<Option<backend::ThinState>>>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<js_sys::Function>>,
     #[cfg(target_arch = "wasm32")]
@@ -1902,6 +1914,19 @@ impl WasmDb {
             .upload_status()
             .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
             .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    /// Ids of `table`'s rows with a write the server has neither accepted
+    /// nor refused yet, sorted.
+    #[wasm_bindgen(js_name = pendingUploadRows)]
+    pub fn pending_upload_rows(&self, table: String) -> Result<Vec<String>, JsValue> {
+        Ok(self
+            .binding()?
+            .pending_upload_rows(&table)
+            .map_err(host_error)?
+            .into_iter()
+            .map(|row| row.0.to_string())
+            .collect())
     }
 
     /// The optimistic in-memory side of a browser client/worker pair: its

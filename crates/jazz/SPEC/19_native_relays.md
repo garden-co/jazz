@@ -90,7 +90,9 @@ denials and unsupported server capabilities, remain terminal.
 
 A disallowed remote plaintext endpoint returns
 `JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT`. React Native maps that status to
-a fixed diagnostic that contains no endpoint URL, bearer, or claims.
+a fixed diagnostic with the stable `error.code` `remote_plaintext_endpoint`: it
+names the hosts plaintext may reach and the development paths for a physical
+device, and contains no endpoint URL, bearer, or claims.
 An I/O wrapper alone is insufficient: rustls certificate and other TLS protocol failures
 arrive as `InvalidData` I/O errors and remain terminal, as do unknown I/O kinds.
 A structured pre-Hello `NotReady`/`Later` response is likewise retryable,
@@ -511,7 +513,16 @@ the rows the result leaves out undecrypted). The relay sends it instead of event
 when the core tells the list (an opening, a reset, a change), and event 0 when
 the list is unchanged or a reset leaves no row out. Its bytes are pinned by `unreadable_delta_event_has_pinned_bytes`
 and decoded by the same bytes in jazz-rn.
-Response 37 is ReportedRows: rows byte vector, unreadable_json string. A
+ABI 6 assigns request 41 and response 32 to PendingUploadRows. ABI 7 appends
+the encryption commands in the order EncryptionOpen, TakeStoreRequests,
+ReplyStore, EncryptionCall and TakeEncryptionReports (requests 42–46).
+Their responses are EncryptionOpen, StoreRequests, StoreReply,
+EncryptionResult and EncryptionReports (33–37). The private pre-release
+encryption tags moved to preserve the published ABI 6 bytes. The ABI 7
+wrapper and native library ship together. Their byte fixtures include
+`encrypted_foreground_postcard_bytes`.
+
+Response 38 is ReportedRows: rows byte vector, unreadable_json string. A
 one-shot `All` reads through the reporting read and answers it (directly or
 from `Poll`) when the read left rows out undecrypted; a read that left none out
 answers response 2, Rows, as before. Its bytes are pinned by

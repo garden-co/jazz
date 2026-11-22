@@ -331,6 +331,41 @@ async fn a_deployment_keeps_its_declarations_with_the_catalogue_change() {
     assert_eq!(kept.get(&app.current_hash().0).unwrap(), Some(stored));
 }
 
+/// Alice prepares the first deployment, then Bob publishes different declarations for
+/// its schema. Alice's failed start leaves the store without a catalogue or runtime.
+#[tokio::test]
+async fn a_conflicting_first_deployment_rolls_back_initialization() {
+    let (_, state) = router_and_state().await;
+    let store = state.store.as_ref().unwrap();
+    let app = loaded("ownerId = session.user");
+    let hash = app.current_hash();
+    let body = serde_json::from_value(app.deployment_body(false)).unwrap();
+    let index = state.catalogue_store.index().unwrap();
+    let deployment =
+        crate::portable::deployment::prepare_encrypted(&index, body, 1_000, |_| Ok(None))
+            .unwrap_or_else(|error| panic!("{}", error.body));
+    let kept = store.kv(super::DECLARATIONS).unwrap();
+    kept.put_if_absent(&hash.0, b"another deployment").unwrap();
+    let catalogue = store.catalogue().unwrap();
+    let before = catalogue.read().unwrap();
+    let change = deployment.catalogue_change(&before).unwrap();
+    let values = deployment
+        .first_declared
+        .iter()
+        .map(|(version, bytes)| (super::DECLARATIONS, version.0.to_vec(), bytes.clone()))
+        .collect();
+    let result = store.start_deployment(deployment.genesis().unwrap(), change, values);
+    assert!(matches!(
+        result,
+        Err(crate::runtime::CatalogueApplyError::Rejected(_))
+    ));
+    assert_eq!(catalogue.read().unwrap(), before);
+    assert_eq!(
+        kept.get(&hash.0).unwrap().as_deref(),
+        Some(b"another deployment".as_slice())
+    );
+}
+
 /// Two instances sharing a store deploy the same new version with
 /// different declarations: the second prepared its deployment before the
 /// first kept its own, so its check saw nothing kept. It is refused when

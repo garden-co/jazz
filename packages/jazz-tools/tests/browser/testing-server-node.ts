@@ -1,5 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { VitestPluginContext } from "vitest/node";
 import { transportControlBrowserCommands } from "./transport-control-commands.js";
 import {
   startLocalJazzServer,
@@ -278,6 +279,16 @@ export async function jazzAppRequest(
   });
   return { status: response.status, headers: [...response.headers], body: await response.text() };
 }
+
+// Register teardown from the config module that owns the browser commands.
+// A separately loaded globalSetup module gets its own, empty server registry.
+export const jazzBrowserServerLifecycle = {
+  name: "jazz-browser-server-lifecycle",
+  configureVitest({ vitest, project }: VitestPluginContext) {
+    project.onTestsRerun(stopJazzServer);
+    vitest.onClose(stopJazzServer);
+  },
+};
 
 export async function stopJazzServer(): Promise<void> {
   for (const url of transportControls.keys()) await stopJazzServerTransportControl(url);

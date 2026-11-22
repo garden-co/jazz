@@ -424,7 +424,8 @@ enum Seed {
 }
 
 fn commit_batch(db: &Db, batch: &[Seed], shape: &Shape) {
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
         for seed in batch {
             match *seed {
                 Seed::Message { room, k, sender } => {
@@ -457,15 +458,16 @@ fn commit_batch(db: &Db, batch: &[Seed], shape: &Shape) {
                 }
             }
         }
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .expect("seed BandChat history");
 }
 
 /// Seed profiles, rooms, memberships, history, reactions and read markers.
 /// Writes run as the database identity and are settled.
 fn seed(db: &Db, shape: &Shape) {
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
         for user in 0..USERS {
             tx.insert(
                 "profiles",
@@ -497,8 +499,8 @@ fn seed(db: &Db, shape: &Shape) {
                 .await?;
             }
         }
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .expect("seed BandChat profiles, rooms and memberships");
 
     let mut batch = Vec::with_capacity(SEED_BATCH);
@@ -524,7 +526,8 @@ fn seed(db: &Db, shape: &Shape) {
         commit_batch(db, &batch, shape);
     }
 
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
         for room in 0..shape.rooms {
             for (slot, &member) in shape.members(room).iter().enumerate() {
                 let up_to = shape.read_up_to(room, slot);
@@ -543,8 +546,8 @@ fn seed(db: &Db, shape: &Shape) {
                 .await?;
             }
         }
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .expect("seed BandChat read markers");
 }
 
@@ -833,7 +836,8 @@ impl DeepRoom {
     /// A member moves their marker to the newest message: one update of their
     /// marker row (the app writes it at most every 5 s while the room is open).
     fn member_reads_to(&self, slot: usize, member: usize, at: u64) {
-        block_on(self.db.transaction_for_identity(user(member), async |tx| {
+        block_on(async {
+            let tx = self.db.mergeable_tx_for_identity(user(member)).await?;
             tx.update(
                 "readMarkers",
                 marker_row(DEEP_ROOM, slot),
@@ -844,8 +848,8 @@ impl DeepRoom {
                 },
             )
             .await?;
-            Ok(())
-        }))
+            tx.commit().await
+        })
         .expect("member moves their marker");
     }
 }

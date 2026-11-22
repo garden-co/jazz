@@ -54,8 +54,8 @@ pub(crate) fn begin_savepoint(conn: &Storage, name: &str) -> Result<(), Error> {
 
 /// The typed refusal for what managed storage (a Durable Object's SQL)
 /// cannot do: keep savepoint `name` open past the call that opened it. A
-/// transaction handle's staged writes and a callback transaction's
-/// savepoint stay open between calls; on managed storage both are refused.
+/// transaction handle's staged writes stay open between calls; on managed
+/// storage they are refused.
 pub(crate) fn not_on_managed_storage(name: &str) -> Error {
     Error::new(
         ErrorCode::Query,
@@ -1763,6 +1763,14 @@ impl Table {
         }
     }
 
+    pub(crate) fn index_name(&self, index: &[String]) -> String {
+        format!(
+            "{}__ix({})",
+            self.stored,
+            self.stored_index(index).join(",")
+        )
+    }
+
     /// One index. Its name is its stored key list, so re-creating it on a
     /// store that already has it (under any schema version) is a no-op.
     pub fn index_ddl(&self, index: &[String]) -> String {
@@ -1772,6 +1780,7 @@ impl Table {
         } else {
             "_branch, "
         };
+        let name = table.index_name(index);
         let index = table.stored_index(index);
         let keys: Vec<String> = index
             .iter()
@@ -1782,7 +1791,7 @@ impl Table {
             .collect();
         format!(
             "CREATE INDEX IF NOT EXISTS {} ON {}({lead}{}, id);\n",
-            quote(&format!("{}__ix({})", table.stored, index.join(","))),
+            quote(&name),
             quote(&table.stored),
             keys.join(", ")
         )

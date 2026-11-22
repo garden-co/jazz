@@ -42,12 +42,15 @@ fn open(s: JazzSchema) -> Db {
     db
 }
 fn seed(db: &Db, t: &str, n: u8, cells: BTreeMap<String, Value>) {
-    db.seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(db.insert(
         t,
-        RowUuid::from_bytes([n; 16]),
-        AuthorSubject::SYSTEM,
         cells,
-    )
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([n; 16])),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
     .unwrap();
 }
 fn claims(v: &str) -> BTreeMap<String, Value> {

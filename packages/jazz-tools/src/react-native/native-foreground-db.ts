@@ -2,6 +2,7 @@ import type * as Relay from "jazz-rn/relay";
 import type { MutationErrorEvent } from "../runtime/client.js";
 import { UnsupportedSnapshotError } from "../runtime/snapshot-ref.js";
 import { NO_UPLOADS, uploadStatusFromCount, type UploadStatus } from "../runtime/sync-status.js";
+import { formatUuid } from "../runtime/hex.js";
 import { REACT_NATIVE_UNSUPPORTED_ERROR } from "./errors.js";
 
 // The foreground command vocabulary is owned by jazz-rn. This module is
@@ -75,6 +76,7 @@ export class NativeForegroundDb {
   private slowQueryLogUnsupported = false;
   private pendingUploadCountUnsupported = false;
   private uploadStatusUnsupported = false;
+  private pendingUploadRowsUnsupported = false;
   /**
    * A tick failure met while an encryption call waited. The call is not its
    * owner, so the next `tick()` (the core's own driver) throws it, or the
@@ -325,6 +327,34 @@ export class NativeForegroundDb {
       return uploadStatusFromCount(this.pendingUploadCount());
     }
     return JSON.parse(response.statusJson) as UploadStatus;
+  }
+
+  /**
+   * Ids of `table`'s rows with a write the server has neither accepted nor
+   * refused yet: this foreground's and the ones its scope's store recovered
+   * after a restart. `null` from an older native build without the command:
+   * it cannot tell, which is not "none pending".
+   */
+  pendingUploadRows(table: string): string[] | null {
+    if (this.closed || this.pendingUploadRowsUnsupported) return null;
+    let response: ForegroundResponse;
+    try {
+      response = this.execute({ type: "pendingUploadRows", table });
+    } catch (error) {
+      if (rejectsCommand(error)) {
+        this.pendingUploadRowsUnsupported = true;
+        return null;
+      }
+      throw error;
+    }
+    // A core error (an unknown table) is this call's, not a missing command:
+    // it must not turn the report off for the rest of the session.
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "pendingUploadRows") {
+      this.pendingUploadRowsUnsupported = true;
+      return null;
+    }
+    return response.rows.map(formatUuid);
   }
 
   /**

@@ -27,8 +27,6 @@ mod branch_view_sync;
 mod branch_views;
 #[path = "../bundle_permissions.rs"]
 mod bundle_permissions;
-#[path = "../callback_transaction_cancellation.rs"]
-mod callback_transaction_cancellation;
 #[path = "../catalogue_keeping.rs"]
 mod catalogue_keeping;
 #[path = "../catalogue_rows.rs"]
@@ -144,6 +142,8 @@ mod parameterized_subscription_routing;
 mod pending_commit_reopen;
 #[path = "../pending_rebase_scope.rs"]
 mod pending_rebase_scope;
+#[path = "../pending_upload_rows.rs"]
+mod pending_upload_rows;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
 #[path = "../policy_check_plans.rs"]
@@ -220,10 +220,14 @@ mod session_policy_values;
 mod session_write_checks;
 #[path = "../shard_role.rs"]
 mod shard_role;
+#[path = "../shared_sqlite.rs"]
+mod shared_sqlite;
 #[path = "../slow_queries.rs"]
 mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
+#[path = "../staged_transaction_cancellation.rs"]
+mod staged_transaction_cancellation;
 #[path = "../storage_corpus.rs"]
 mod storage_corpus;
 #[path = "../storage_errors.rs"]

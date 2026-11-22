@@ -22,6 +22,7 @@ mod thin;
 pub use core::ServerCore;
 #[cfg(feature = "native")]
 pub use host::*;
+pub use thin::{ThinRegistration, ThinRegistrationObserver};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -304,6 +305,22 @@ pub enum CatalogueApplyError {
     Rejected(String),
     /// Storage or the runtime failed.
     Failed(String),
+}
+
+impl From<String> for CatalogueApplyError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<jazz::db::Error> for CatalogueApplyError {
+    fn from(error: jazz::db::Error) -> Self {
+        if error.code == jazz::db::ErrorCode::Storage {
+            Self::Failed(error.to_string())
+        } else {
+            Self::Rejected(error.to_string())
+        }
+    }
 }
 
 impl std::fmt::Display for CatalogueApplyError {
@@ -1015,9 +1032,8 @@ impl Owner {
     fn assert_holds_nothing(&self, after: &str) {
         let held = self.db.held_for_test();
         let thin = self.open_thin_transactions();
-        let allowed = held.open_batches == thin
-            && !held.callback_transaction
-            && (thin > 0 || (!held.overlay && !held.sqlite_transaction));
+        let allowed =
+            held.open_batches == thin && (thin > 0 || (!held.overlay && !held.sqlite_transaction));
         if !allowed {
             // Straight to stderr: the test harness captures `eprintln!`,
             // and an abort loses what it captured.
@@ -1031,6 +1047,11 @@ impl Owner {
         }
     }
 }
+
+type InitialCatalogue = (
+    CatalogueChange,
+    Vec<(jazz::host::HostTable, Vec<u8>, Vec<u8>)>,
+);
 
 impl Owner {
     /// Open the runtime on `file` with the native host's chunk store (see
@@ -1046,8 +1067,22 @@ impl Owner {
         any_stored_catalogue: bool,
         app: Option<String>,
         registry: Option<HostReader>,
-        registry_required: bool,
-    ) -> Result<Self, String> {
+        initial: Option<InitialCatalogue>,
+    ) -> Result<Self, CatalogueApplyError> {
+        const REGISTRY_REQUIRED: &str = "this app encrypts columns, which needs the account registry \
+            of an app's store: open the store for an app (`set_app`) with its host tables";
+        if (registry.is_none() || app.is_none())
+            && let Some((change, _)) = &initial
+            && std::iter::once(&schema)
+                .chain(change.admit.iter().map(|(schema, _)| schema))
+                .any(|schema| {
+                    schema.tables().iter().any(|table| {
+                        table.name == jazz::tools::deployment::artifact::system_tables::MEMBERS
+                    })
+                })
+        {
+            return Err(CatalogueApplyError::Rejected(REGISTRY_REQUIRED.to_owned()));
+        }
         let chunk_io = match &chunk_store {
             Some(choice) if choice.network => {
                 Some(ChunkIoRunner::start(Arc::clone(&choice.store), wake)?)
@@ -1055,19 +1090,15 @@ impl Owner {
             _ => None,
         };
         let mut owner =
-            Self::open_on(
-                schema,
-                file,
-                any_stored_catalogue,
-                app,
-                |config| match &chunk_store {
+            Self::open_on(schema, file, any_stored_catalogue, app, initial, |config| {
+                match &chunk_store {
                     Some(choice) if choice.network => config
                         .with_chunk_store(Arc::clone(&choice.store))
                         .with_host_chunk_io(),
                     Some(choice) => config.with_chunk_store(Arc::clone(&choice.store)),
                     None => config,
-                },
-            )?;
+                }
+            })?;
         owner.chunk_io = chunk_io;
         // The checks beside the E2EE account tables' policies read the
         // account registry the store keeps beside the rows.
@@ -1087,13 +1118,8 @@ impl Owner {
         // through an external login would count as founded by the app, so
         // an encrypted app is not served without one.
         owner.registry_installed = installed;
-        if registry_required && !installed && owner.encrypts()? {
-            return Err(
-                "this app encrypts columns, which needs the account registry \
-                 of an app's store: open the store for an app (`set_app`) with its \
-                 host tables"
-                    .to_owned(),
-            );
+        if !installed && owner.encrypts()? {
+            return Err(CatalogueApplyError::Rejected(REGISTRY_REQUIRED.to_owned()));
         }
         Ok(owner)
     }
@@ -1110,8 +1136,9 @@ impl Owner {
         file: StoreFile,
         any_stored_catalogue: bool,
         app: Option<String>,
+        initial: Option<InitialCatalogue>,
         configure: impl FnOnce(jazz::db::DbConfig) -> jazz::db::DbConfig,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CatalogueApplyError> {
         let rows = file
             .catalogue()
             .map_err(|error| format!("read catalogue: {error}"))?;
@@ -1139,9 +1166,14 @@ impl Owner {
             (None, None) => schema,
         };
         let config = configure(config(current));
-        let db = block_on(Db::open_file(config, file))
-            .map_err(|error| format!("open server store: {error}"))?;
-        db.set_authority().map_err(|error| error.to_string())?;
+        let db = match initial {
+            Some((change, kept)) => {
+                Db::open_file_with_catalogue_keeping(config, file, change, &kept)
+            }
+            None => block_on(Db::open_file(config, file)),
+        }
+        .map_err(CatalogueApplyError::from)?;
+        db.set_authority()?;
         db.require_session_pins();
         db.track_closed_subscribers();
         db.set_slow_query_threshold(slow_query_threshold());

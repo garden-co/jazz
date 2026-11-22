@@ -201,7 +201,8 @@ fn a_transaction_whose_upload_record_cannot_be_stored_is_rolled_back_whole() {
         let client = open_file(&path, 3);
 
         hide(&path, table);
-        let failed = block_on(client.transaction(async |tx| {
+        let failed = block_on(async {
+            let tx = client.mergeable_tx().await?;
             for (n, label) in [(1, "a"), (2, "b")] {
                 tx.insert(
                     "items",
@@ -213,8 +214,8 @@ fn a_transaction_whose_upload_record_cannot_be_stored_is_rolled_back_whole() {
                 )
                 .await?;
             }
-            Ok(())
-        }));
+            tx.commit().await
+        });
         restore(&path, table);
         assert!(
             failed.is_err(),
@@ -225,17 +226,23 @@ fn a_transaction_whose_upload_record_cannot_be_stored_is_rolled_back_whole() {
             "{table}: and none of its rows remain"
         );
 
-        let (_, receipt) = block_on(client.transaction(async |tx| {
-            tx.insert(
-                "items",
-                item("c"),
-                InsertOptions {
-                    row_id: Some(row(1)),
-                    ..Default::default()
-                },
-            )
-            .await
-        }))
+        let (_, receipt) = block_on(async {
+            let tx = client.mergeable_tx().await?;
+            let result: Result<_, jazz::db::Error> = {
+                tx.insert(
+                    "items",
+                    item("c"),
+                    InsertOptions {
+                        row_id: Some(row(1)),
+                        ..Default::default()
+                    },
+                )
+                .await
+            };
+            let value = result?;
+            let receipt = tx.commit().await?;
+            Ok::<_, jazz::db::Error>((value, receipt))
+        })
         .unwrap();
         assert_eq!(labels(&client), ["c"]);
         assert_eq!(synced(&client, &[receipt.0]), ["c"]);
@@ -247,7 +254,8 @@ fn a_transaction_rolled_back_by_sqlite_itself_reports_its_own_error() {
     let path = scratch("rolled-back");
     let client = open_file(&path, 3);
 
-    let failed: Result<((), _), _> = block_on(client.transaction(async |tx| {
+    let failed: Result<(), jazz::db::Error> = block_on(async {
+        let tx = client.mergeable_tx().await?;
         tx.insert(
             "items",
             item("gone"),
@@ -264,7 +272,7 @@ fn a_transaction_rolled_back_by_sqlite_itself_reports_its_own_error() {
             jazz::db::ErrorCode::Storage,
             "disk I/O error".to_owned(),
         ))
-    }));
+    });
     let error = failed.unwrap_err().to_string();
     assert!(
         error.contains("disk I/O error"),

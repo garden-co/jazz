@@ -515,7 +515,7 @@ function encodeBytesResponse(tag: number, bytes: Uint8Array): Uint8Array {
 /** Answer 37: a read's rows with the rows it left out, as JSON. */
 function encodeReportedRows(rows: Uint8Array, unreadable: string): Uint8Array {
   const json = new TextEncoder().encode(unreadable);
-  return Uint8Array.from([37, ...varint(rows.length), ...rows, ...varint(json.length), ...json]);
+  return Uint8Array.from([38, ...varint(rows.length), ...rows, ...varint(json.length), ...json]);
 }
 
 function encodeSubscriptionEvents(

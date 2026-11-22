@@ -268,6 +268,11 @@ export declare class NapiDb {
    */
   uploadStatus(): JsonValue
   /**
+   * Ids of `table`'s rows with a write the server has neither accepted
+   * nor refused yet (recovered ones included), sorted.
+   */
+  pendingUploadRows(table: string): Array<string>
+  /**
    * The optimistic in-memory side of a client/worker pair: its
    * subscriptions open with the worker's answer.
    */

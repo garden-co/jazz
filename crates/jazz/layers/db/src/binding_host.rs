@@ -1860,6 +1860,11 @@ impl Binding {
         self.db.upload_status()
     }
 
+    /// See [`crate::db::Db::pending_upload_rows`].
+    pub fn pending_upload_rows(&self, table: &str) -> HostResult<Vec<RowUuid>> {
+        Ok(self.db.pending_upload_rows(table)?)
+    }
+
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
         let result = self.db.tick().await;

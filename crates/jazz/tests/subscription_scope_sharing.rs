@@ -39,12 +39,15 @@ fn open() -> Db {
     )))
     .unwrap();
     db.set_authority().unwrap();
-    db.seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(db.insert(
         "notes",
-        RowUuid::from_bytes([4; 16]),
-        AuthorSubject::SYSTEM,
         BTreeMap::from([("body".into(), Value::String("secret".into()))]),
-    )
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([4; 16])),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
     .unwrap();
     db
 }
@@ -175,12 +178,15 @@ fn claim_scopes_in_one_store_follow_their_own_source() {
         )))
         .unwrap();
         db.set_authority().unwrap();
-        db.seed_settled_mergeable_for_bootstrap(
+        jazz::db::block_on(db.insert(
             "notes",
-            RowUuid::from_bytes([4; 16]),
-            AuthorSubject::SYSTEM,
             BTreeMap::from([("body".into(), Value::String("secret".into()))]),
-        )
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([4; 16])),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
         .unwrap();
         db.set_identity_claims(alice(), claims("secret"));
         let base = by_claim(&db);

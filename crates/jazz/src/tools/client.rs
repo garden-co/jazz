@@ -383,6 +383,35 @@ impl Shared {
         .await
     }
 
+    /// [`Self::settle`] for a wait on the server: it fails once the link has
+    /// stopped trying on its own ([`crate::link::LinkPhase::is_terminal`]:
+    /// stopped, or refused a credential nothing can renew), instead of
+    /// staying pending. An outage, and a refusal a new token can fix, keep
+    /// it waiting (#3923).
+    async fn settle_upstream<T>(&self, future: impl std::future::Future<Output = T>) -> Result<T> {
+        let mut future = pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        self.until(|| match future.as_mut().poll(&mut context) {
+            Poll::Ready(value) => Some(Ok(value)),
+            Poll::Pending => self.upstream_ended().map(Err),
+        })
+        .await?
+    }
+
+    /// Why waits on the server can no longer succeed, if they cannot.
+    fn upstream_ended(&self) -> Option<JazzError> {
+        let state = self.state.borrow();
+        let status = state.link_status.as_ref()?;
+        if !status.phase.is_terminal() {
+            return None;
+        }
+        Some(JazzError::Connection(format!(
+            "the server link stopped ({:?}): {}",
+            status.phase,
+            status.reason.as_deref().unwrap_or("no reason given")
+        )))
+    }
+
     /// Tick the engine once. A recoverable failure is retried by the next
     /// tick; a fatal one, or one recoverable failure too many, stops the
     /// driver and is reported to every caller from then on.
@@ -799,18 +828,6 @@ impl LinkKeeper {
         self.actions.extend(actions);
     }
 
-    /// The connect the machine asked for, taken to be carried out inline.
-    fn take_connect(&mut self) -> Option<AttemptId> {
-        let at = self
-            .actions
-            .iter()
-            .position(|action| matches!(action, LinkAction::Connect { .. }))?;
-        match self.actions.remove(at) {
-            LinkAction::Connect { attempt, .. } => Some(attempt),
-            _ => unreachable!(),
-        }
-    }
-
     /// Hand the machine's view to the read gate and the status accessor.
     fn publish(&mut self, shared: &Shared) {
         shared.db.set_remote_link_hint(self.link.remote_link_hint());
@@ -1107,25 +1124,11 @@ impl JazzClient {
                 bundle: context.bundle.clone(),
                 wake: Arc::new(move || wake.notify_one()),
             };
-            // The first attempt decides whether the server admits this
-            // client at all; an unreachable server only means offline.
+            // Open returns with the local store, as TS's does: the first
+            // attempt runs in the keeper like every later one, so a refusal
+            // reaches the link's status (and ends waits it makes hopeless)
+            // however fast or slow the server answers it.
             let mut keeper = LinkKeeper::new();
-            keeper.publish(&shared);
-            let attempt = keeper.take_connect().expect("a configured link connects");
-            match connector.connect(request.clone()).await {
-                Ok(link) => {
-                    attach(&shared, link.transport).await;
-                    keeper.live = Some((attempt, link.terminal));
-                    keeper.handle(LinkInput::Admitted(attempt));
-                }
-                Err(error) if !error.is_retryable() => {
-                    return Err(JazzError::Connection(error.to_string()));
-                }
-                Err(error) => {
-                    tracing::debug!(%error, "jazz client starts offline");
-                    keeper.handle(LinkInput::Ended(attempt, link_failure(error)));
-                }
-            }
             keeper.publish(&shared);
             let keeper = tokio::task::spawn_local(keep_upstream(
                 Rc::downgrade(&shared),
@@ -2189,7 +2192,7 @@ impl JazzClient {
             _ => None,
         };
         self.shared
-            .settle(db.wait_for_sync(CoreDurabilityTier::Global, writer))
+            .settle_upstream(db.wait_for_sync(CoreDurabilityTier::Global, writer))
             .await?
             .map_err(|error| {
                 JazzError::write_rejected(&error).unwrap_or_else(|| {
@@ -2229,20 +2232,22 @@ impl JazzClient {
             )));
         }
         let db = self.db()?;
-        self.shared
-            .settle(db.wait_for_transaction(seq, core_tier))
-            .await?
-            .map(drop)
-            .map_err(|error| {
-                // A rejection carries the authority's verdict as TS's code
-                // and reason.
-                JazzError::write_rejected(&error).unwrap_or_else(|| {
-                    JazzError::Write(format!(
-                        "{} {tier:?} durability: {error}",
-                        super::REJECTED_BEFORE
-                    ))
-                })
+        let wait = db.wait_for_transaction(seq, core_tier);
+        let settled = if core_tier > CoreDurabilityTier::Local {
+            self.shared.settle_upstream(wait).await?
+        } else {
+            self.shared.settle(wait).await?
+        };
+        settled.map(drop).map_err(|error| {
+            // A rejection carries the authority's verdict as TS's code
+            // and reason.
+            JazzError::write_rejected(&error).unwrap_or_else(|| {
+                JazzError::Write(format!(
+                    "{} {tier:?} durability: {error}",
+                    super::REJECTED_BEFORE
+                ))
             })
+        })
     }
 
     /// Unsubscribe from a subscription. Dropping the stream unsubscribes.
@@ -3535,7 +3540,7 @@ mod tests {
         }
     }
 
-    type Outcome = std::result::Result<(), String>;
+    type Outcome = std::result::Result<(), NativeTransportError>;
 
     /// Each attempt takes the next scripted outcome; an attempt past the
     /// script attaches a link that never speaks.
@@ -3561,7 +3566,7 @@ mod tests {
                         features: 0,
                         terminal: Box::pin(std::future::pending()),
                     }),
-                    Err(error) => Err(NativeTransportError::Retryable(error)),
+                    Err(error) => Err(error),
                 }
             })
         }
@@ -3577,7 +3582,11 @@ mod tests {
             .run_until(async {
                 let (first_tx, first) = oneshot::channel();
                 let (retry_tx, retry) = oneshot::channel();
-                first_tx.send(Err("server down".to_owned())).unwrap();
+                first_tx
+                    .send(Err(NativeTransportError::Retryable(
+                        "server down".to_owned(),
+                    )))
+                    .unwrap();
                 let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 let connector = Arc::new(ScriptedConnector {
                     attempts: Mutex::new(VecDeque::from([first, retry])),
@@ -3608,7 +3617,11 @@ mod tests {
                     )
                 };
                 tokio::task::yield_now().await;
-                retry_tx.send(Err("stale outage".to_owned())).unwrap();
+                retry_tx
+                    .send(Err(NativeTransportError::Retryable(
+                        "stale outage".to_owned(),
+                    )))
+                    .unwrap();
 
                 let attached = tokio::time::timeout(Duration::from_secs(30), reconnect)
                     .await
@@ -3617,6 +3630,198 @@ mod tests {
                     .expect("the stale failure is not this call's");
                 assert!(attached);
                 assert!(started.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+            })
+            .await;
+    }
+
+    fn notes_context() -> AppContext {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("notes").column("title", ColumnType::Text))
+            .build();
+        let mut context = AppContext::test(schema);
+        context.server_url = "http://upstream.invalid".to_owned();
+        context.admin_secret = Some("admin-secret".to_owned());
+        context
+    }
+
+    fn scripted(
+        attempts: Vec<oneshot::Receiver<Outcome>>,
+    ) -> (Arc<ScriptedConnector>, Arc<std::sync::atomic::AtomicUsize>) {
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connector = Arc::new(ScriptedConnector {
+            attempts: Mutex::new(VecDeque::from(attempts)),
+            started: started.clone(),
+        });
+        (connector, started)
+    }
+
+    fn note(title: &str) -> HashMap<String, Value> {
+        HashMap::from([("title".to_owned(), Value::Text(title.to_owned()))])
+    }
+
+    /// Re-read the link's status on each change until `ready` holds.
+    async fn until_status(client: &JazzClient, ready: impl Fn(&LinkStatus) -> bool) -> LinkStatus {
+        let mut changes = client.status_changes();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(status) = client.upstream_status()
+                    && ready(&status)
+                {
+                    return status;
+                }
+                changes.changed().await.expect("client open");
+            }
+        })
+        .await
+        .expect("the link reaches the status")
+    }
+
+    /// Open returns with the local store while the server has not answered
+    /// (as TS's does), and local-first work goes on meanwhile.
+    #[tokio::test]
+    async fn open_does_not_wait_for_the_server() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_hold, first) = oneshot::channel::<Outcome>();
+                let (connector, started) = scripted(vec![first]);
+                let client = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    JazzClient::connect_with_native_transport(notes_context(), connector),
+                )
+                .await
+                .expect("open returns before the server answers")
+                .expect("open succeeds");
+
+                assert_eq!(
+                    client.upstream_status().map(|status| status.phase),
+                    Some(crate::link::LinkPhase::Connecting)
+                );
+                client
+                    .insert("notes", note("offline first"))
+                    .expect("local write");
+                let rows = client
+                    .query(Query::from("notes"), ReadTier::LocalFirst)
+                    .await
+                    .expect("local-first read");
+                assert_eq!(rows.len(), 1);
+                assert!(!client.is_connected());
+                tokio::task::yield_now().await;
+                assert_eq!(started.load(std::sync::atomic::Ordering::SeqCst), 1);
+            })
+            .await;
+    }
+
+    /// A refusal of the credential nothing can renew reaches the status and
+    /// ends the waits on the server, whenever the server answers: here after
+    /// open returned. Before, a fast refusal failed the open and a slow one
+    /// (past the handshake deadline) did not.
+    #[tokio::test]
+    async fn a_refusal_after_open_surfaces_as_status_and_ends_server_waits() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (refuse, first) = oneshot::channel();
+                let (connector, _) = scripted(vec![first]);
+                let client = JazzClient::connect_with_native_transport(notes_context(), connector)
+                    .await
+                    .expect("open does not wait for the verdict");
+                let (_, _, write) = client.insert("notes", note("kept")).expect("local write");
+                let write = write.expect("a committed write");
+
+                refuse
+                    .send(Err(NativeTransportError::AuthRejected(
+                        "token revoked".to_owned(),
+                    )))
+                    .unwrap();
+                let status = until_status(&client, |status| status.phase.is_terminal()).await;
+                assert_eq!(
+                    status.phase,
+                    crate::link::LinkPhase::AwaitingCredential(AuthFailureReason::Revoked)
+                );
+                assert_eq!(client.auth_refusals(), 1);
+
+                let sync = tokio::time::timeout(Duration::from_secs(5), client.wait_for_sync())
+                    .await
+                    .expect("the wait ends");
+                assert!(
+                    matches!(&sync, Err(JazzError::Connection(message)) if message.contains("token revoked")),
+                    "{sync:?}"
+                );
+                let durable = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    client.wait_for_transaction(write, DurabilityTier::GlobalServer),
+                )
+                .await
+                .expect("the wait ends");
+                assert!(matches!(durable, Err(JazzError::Connection(_))), "{durable:?}");
+                // The store is untouched: local reads still see the write.
+                let rows = client
+                    .query(Query::from("notes"), ReadTier::LocalFirst)
+                    .await
+                    .expect("local-first read");
+                assert_eq!(rows.len(), 1);
+            })
+            .await;
+    }
+
+    /// A refusal a new token can fix leaves waits pending until one comes,
+    /// as an outage does (#3923).
+    #[tokio::test]
+    async fn a_renewable_refusal_keeps_server_waits_pending() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (refuse, first) = oneshot::channel();
+                let (connector, _) = scripted(vec![first]);
+                let client = JazzClient::connect_with_native_transport(notes_context(), connector)
+                    .await
+                    .expect("open");
+                client
+                    .insert("notes", note("pending"))
+                    .expect("local write");
+                refuse
+                    .send(Err(NativeTransportError::AuthRejected(
+                        "token expired".to_owned(),
+                    )))
+                    .unwrap();
+                let status = until_status(&client, |status| {
+                    matches!(status.phase, crate::link::LinkPhase::AwaitingCredential(_))
+                })
+                .await;
+                assert!(!status.phase.is_terminal());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(300), client.wait_for_sync())
+                        .await
+                        .is_err(),
+                    "a renewable refusal holds the wait"
+                );
+            })
+            .await;
+    }
+
+    /// The first attempt is classified like every later one: a connector's
+    /// `Terminal` (a proxy refusing the upgrade) is a refusal the link
+    /// retries, not a failed open.
+    #[tokio::test]
+    async fn a_terminal_connect_error_on_the_first_attempt_is_retried() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (refuse, first) = oneshot::channel();
+                refuse
+                    .send(Err(NativeTransportError::Terminal(
+                        "proxy refused the upgrade".to_owned(),
+                    )))
+                    .unwrap();
+                let (connector, started) = scripted(vec![first]);
+                let client = JazzClient::connect_with_native_transport(notes_context(), connector)
+                    .await
+                    .expect("a refused first attempt does not fail the open");
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    while !client.is_connected() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("the retry attaches");
+                assert!(started.load(std::sync::atomic::Ordering::SeqCst) >= 2);
             })
             .await;
     }

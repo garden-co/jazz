@@ -1,6 +1,6 @@
 {
   "name": "jazz-wasm",
-  "version": "2.0.0-alpha.67",
+  "version": "2.0.0-alpha.70",
   "description": "WebAssembly bindings for the Jazz database engine",
   "keywords": [
     "crdt",
@@ -24,7 +24,12 @@
     "durable-object/host.js",
     "durable-object/pkg/jazz_wasm_do.js",
     "durable-object/pkg/jazz_wasm_do_bg.wasm",
-    "durable-object/pkg/snippets/"
+    "durable-object/pkg/snippets/",
+    "backend/index.js",
+    "backend/index.d.ts",
+    "backend/pkg/jazz_wasm_backend.js",
+    "backend/pkg/jazz_wasm_backend.d.ts",
+    "backend/pkg/jazz_wasm_backend_bg.wasm"
   ],
   "type": "module",
   "main": "pkg/jazz_wasm.js",
@@ -38,6 +43,10 @@
       "types": "./durable-object/index.d.ts",
       "workerd": "./durable-object/index.js"
     },
+    "./backend": {
+      "types": "./backend/index.d.ts",
+      "workerd": "./backend/index.js"
+    },
     "./package.json": "./package.json",
     "./*": "./*"
   },
@@ -50,8 +59,10 @@
     "build:fast": "node ../../dev/artifacts/build.mjs wasm fast",
     "build:profiling": "node ../../dev/artifacts/build.mjs wasm profiling",
     "test:durable-objects": "tests/durable-objects/run.sh",
-    "build:durable-object": "wasm-pack build . --target web --release --out-dir durable-object/pkg --out-name jazz_wasm_do --no-pack -- --no-default-features --features durable-object,console_error_panic_hook,transport-compression-ruzstd && node durable-object/reinstantiable.mjs && node -e \"require('node:fs').rmSync('durable-object/pkg/.gitignore', { force: true })\"",
+    "build:durable-object": "node durable-object/build.mjs",
+    "build:backend": "node backend/build.mjs",
     "check:durable-object-pack": "node durable-object/check-pack.mjs",
+    "check:backend-pack": "node backend/check-pack.mjs",
     "test:durable-object-release": "node --test tests/durable-objects/release.test.mjs"
   },
   "devDependencies": {

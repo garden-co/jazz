@@ -110,29 +110,43 @@ pub(crate) async fn deploy_body(
         return Ok(deployment.staged.response);
     }
     let new_bundle = staged.new_bundle();
+    let kept_values = match &kept {
+        Some(_) => deployment
+            .first_declared
+            .iter()
+            .map(|(version, stored)| (DECLARATIONS, version.0.to_vec(), stored.clone()))
+            .collect(),
+        None => Vec::new(),
+    };
     let genesis = deployment.genesis()?;
     let runtime = match state.runtime() {
         Some(runtime) => runtime,
         None => {
-            // Apply on a scratch store first, so a deployment the catalogue
-            // refuses never creates the app's database. The real store
-            // starts as empty as the scratch one, so the same change
-            // applies there; only a storage failure can still fail it, and
-            // then leaves an empty store that the next deployment reuses.
-            let probe = ServerRuntimeHandle::start_scratch(genesis.clone())
-                .map_err(DeployError::internal)?;
-            let applied = match change(&probe, &deployment).await {
-                Ok(change) => probe
-                    .apply_catalogue(change, None)
-                    .await
-                    .map_err(DeployError::from),
-                Err(error) => Err(error),
-            };
-            probe.shutdown().await.map_err(DeployError::internal)?;
-            applied?;
+            let store = state.store.as_ref().ok_or_else(|| {
+                DeployError::unavailable("server runtime storage is not configured")
+            })?;
             state
-                .start_core_server_shell(genesis)
+                .catalogue_store
+                .check_unchanged(staged)
+                .map_err(DeployError::invalid)?;
+            let stored = store
+                .catalogue()
                 .map_err(DeployError::internal)?
+                .read()
+                .map_err(DeployError::internal)?;
+            let change = deployment.catalogue_change(&stored)?;
+            // Initialization and publication commit on the real store together.
+            // Do not expose a runtime until that transaction has succeeded.
+            let started = store.start_deployment(genesis, change, kept_values);
+            if let Ok(runtime) = &started {
+                *state.core_server_shell.write().unwrap() = Some(runtime.clone());
+            }
+            state
+                .catalogue_store
+                .refresh()
+                .map_err(DeployError::internal)?;
+            started?;
+            return Ok(deployment.staged.response);
         }
     };
     state
@@ -151,14 +165,6 @@ pub(crate) async fn deploy_body(
     // transaction the apply owns: a conflicting kept value refuses the whole
     // deployment before anything is live, however many instances share the
     // store.
-    let kept_values = match &kept {
-        Some(_) => deployment
-            .first_declared
-            .iter()
-            .map(|(version, stored)| (DECLARATIONS, version.0.to_vec(), stored.clone()))
-            .collect(),
-        None => Vec::new(),
-    };
     let applied = runtime
         .apply_catalogue_keeping(change, new_bundle, kept_values)
         .await;

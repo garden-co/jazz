@@ -43,7 +43,7 @@ use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _};
 use jazz::account_registry::AccountId;
 use jazz::tools::Session;
 use jazz::wire::{
-    WireError, WireErrorCode, WireFrame, WireRetry, encode_frame, encode_websocket_frame_batch,
+    WireError, WireErrorCode, WireErrorReason, WireFrame, WireRetry, encode_websocket_frame_batch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -1145,8 +1145,11 @@ impl Endpoint {
             Ok(admission) => admission,
             Err(_) => {
                 let _ = outgoing
-                    .send(auth_failed(
-                        "session unavailable: the backend could not admit it",
+                    .send(error_batch(
+                        WireRetry::Never,
+                        "session unavailable: the backend could not admit it".to_owned(),
+                        None,
+                        0,
                     ))
                     .await;
                 return Closed {
@@ -1163,23 +1166,34 @@ impl Endpoint {
                 ..
             } => (prelude, until, auth),
             Admission::Unverified => {
+                let features = refused_client_features(incoming).await;
                 let _ = outgoing
                     .send(auth_failed(
                         "session invalid: this backend did not accept the credential the client sent",
+                        WireErrorReason::Invalid,
+                        features,
                     ))
                     .await;
                 return Closed::policy("session invalid");
             }
             Admission::Missing => {
+                let features = refused_client_features(incoming).await;
                 let _ = outgoing
-                    .send(auth_failed("session missing: not signed in"))
+                    .send(auth_failed(
+                        "session missing: not signed in",
+                        WireErrorReason::Missing,
+                        features,
+                    ))
                     .await;
                 return Closed::policy("session missing");
             }
             Admission::Expired => {
+                let features = refused_client_features(incoming).await;
                 let _ = outgoing
                     .send(auth_failed(
                         "session expired: authenticate returned an expiresAt in the past",
+                        WireErrorReason::Expired,
+                        features,
                     ))
                     .await;
                 return Closed::policy("session expired");
@@ -1220,6 +1234,9 @@ impl Endpoint {
         // A thin client (its Hello asks for thin results) has its
         // transaction requests served here, not by the core (SPEC 8.14).
         let mut hello_seen = false;
+        // What the client's Hello offered: a refusal names its reason to a
+        // client that reads one (`FEATURE_TYPED_ERROR_REASON`).
+        let mut client_features = 0;
         let mut thin: Option<ThinSocket> = None;
         let (answers, mut answered) = tokio::sync::mpsc::unbounded_channel();
         // Since when the thin socket's requests wait on an answer: one that
@@ -1256,6 +1273,7 @@ impl Endpoint {
                     Some(message) => {
                         if !hello_seen {
                             hello_seen = true;
+                            client_features = hello_features(&message);
                             if asks_thin_results(&message) {
                                 thin = Some(ThinSocket::default());
                             }
@@ -1331,7 +1349,7 @@ impl Endpoint {
                 () = &mut expiry => {
                     // A planned reconnect: the client connects again, and
                     // `authenticate` decides on its new request.
-                    let _ = outgoing.send(reauthenticate()).await;
+                    let _ = outgoing.send(reauthenticate(client_features)).await;
                     break Closed::policy("reauthenticate");
                 }
             }
@@ -1608,28 +1626,72 @@ fn reauthenticate_at(now: Instant, expires_at: u64, ttl: Duration) -> Option<Ins
     Some(now + (remaining - lead).max(MIN_SESSION.min(remaining)))
 }
 
-fn error_batch(retry: WireRetry, message: String) -> Vec<u8> {
-    let frame = encode_frame(&WireFrame::Error(WireError::new(
-        WireErrorCode::AuthFailed,
-        retry,
-        message,
-    )))
-    .unwrap_or_default();
+/// An `auth_failed` error, naming `reason` to a client whose Hello offered
+/// `client_features` with `FEATURE_TYPED_ERROR_REASON`
+/// (`wire-error-reason-v1`); the plain `Error` every client reads otherwise.
+fn error_batch(
+    retry: WireRetry,
+    message: String,
+    reason: Option<WireErrorReason>,
+    client_features: u64,
+) -> Vec<u8> {
+    let mut error = WireError::new(WireErrorCode::AuthFailed, retry, message);
+    error.reason = reason;
+    let frame =
+        jazz::wire::encode_error_frame_for_client(&error, client_features).unwrap_or_default();
     encode_websocket_frame_batch(&[frame]).unwrap_or_default()
 }
 
 /// An auth failure the client does not retry: it asks its backend who is
 /// signed in.
-fn auth_failed(message: &str) -> Vec<u8> {
-    error_batch(WireRetry::Never, message.to_owned())
+fn auth_failed(message: &str, reason: WireErrorReason, client_features: u64) -> Vec<u8> {
+    error_batch(
+        WireRetry::Never,
+        message.to_owned(),
+        Some(reason),
+        client_features,
+    )
 }
 
 /// Asks the client to connect again, at its session's expiry.
-fn reauthenticate() -> Vec<u8> {
+fn reauthenticate(client_features: u64) -> Vec<u8> {
     error_batch(
         WireRetry::AfterResume,
         format!("{REAUTHENTICATE_PREFIX} the session reached the expiry authenticate gave it"),
+        Some(WireErrorReason::Reauthenticate),
+        client_features,
     )
+}
+
+/// What a client's Hello (its first message after the prelude) offered; 0
+/// for anything else.
+fn hello_features(message: &[u8]) -> u64 {
+    jazz::wire::decode_websocket_frame_batch(message)
+        .ok()
+        .and_then(
+            |frames| match frames.first().map(|frame| jazz::wire::decode_frame(frame)) {
+                Some(Ok(WireFrame::Hello(hello))) => Some(hello.features),
+                _ => None,
+            },
+        )
+        .unwrap_or(0)
+}
+
+/// How long a refusal before the client's Hello waits for it: a client sends
+/// it right behind its prelude.
+const HELLO_WAIT: Duration = Duration::from_secs(1);
+
+/// The features of the Hello a refused client sends behind its prelude, read
+/// before refusing it so the refusal names its reason to a client that reads
+/// one. 0 when none comes in time.
+async fn refused_client_features<I>(incoming: &mut I) -> u64
+where
+    I: Stream<Item = Vec<u8>> + Unpin + Send,
+{
+    match tokio::time::timeout(HELLO_WAIT, incoming.next()).await {
+        Ok(Some(message)) => hello_features(&message),
+        _ => 0,
+    }
 }
 
 /// Send `messages` to the core, in order. False once it went away.

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { flushSync } from "svelte";
+import type { QueryOptions } from "../runtime/db.js";
 import type { QueryBuilder } from "../shared/index.js";
 import "./test-helpers.svelte.js";
 import { withUnreadable, type UnreadableRow } from "../encryption/unreadable.js";
@@ -7,7 +8,7 @@ import { withUnreadable, type UnreadableRow } from "../encryption/unreadable.js"
 const mocks = vi.hoisted(() => {
   const unsubscribe = vi.fn();
   const subscribe = vi.fn(() => unsubscribe);
-  const makeQueryKey = vi.fn((q: any) => `key:${q?._marker ?? "?"}`);
+  const makeQueryKey = vi.fn((q: any, _options?: QueryOptions) => `key:${q?._marker ?? "?"}`);
   const getCacheEntry = vi.fn(() => ({
     state: { status: "fulfilled", data: [] },
     subscribe,

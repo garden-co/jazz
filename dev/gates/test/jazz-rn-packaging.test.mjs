@@ -3367,7 +3367,10 @@ test("release, preview, and labeled platform gates seal and link the staged rela
       }
     }
   }
-  assert.match(packageBuild, /cargo-ndk@\$\{\{ env\.JAZZ_RN_CARGO_NDK_VERSION \}\}/);
+  assert.match(
+    packageBuild,
+    /cargo-ndk\/releases\/download\/v\$\{JAZZ_RN_CARGO_NDK_VERSION\}\/[\s\S]*sha256sum --check/,
+  );
   assert.match(packageBuild, /rn-packages\.mjs pack/);
   assert.match(verifier, /relay artifact inventory differs from its manifest/);
 });

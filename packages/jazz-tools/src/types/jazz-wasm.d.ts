@@ -310,6 +310,7 @@ declare module "jazz-wasm" {
     setNonDurableClient(): void;
     /** This store's uploads; see `UploadStatus` in runtime/sync-status.ts. */
     uploadStatus(): import("../runtime/sync-status.js").UploadStatus;
+    pendingUploadRows(table: string): string[];
     /** @internal Foreground node-lease handoff only. */
     foregroundTxTimeHighWater(): Promise<bigint>;
     /** @internal Foreground node-lease bootstrap only. */

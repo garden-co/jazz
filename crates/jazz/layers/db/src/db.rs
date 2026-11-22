@@ -673,9 +673,6 @@ pub struct Held {
     /// A transaction handle's staged writes are applied, in a SQLite
     /// savepoint, for its next stage.
     pub overlay: bool,
-    /// A callback transaction ([`Db::transaction`]) is open: its savepoint
-    /// spans the callback's awaits.
-    pub callback_transaction: bool,
     /// Transaction handles that are open (staged, not committed or rolled
     /// back).
     pub open_batches: usize,
@@ -901,12 +898,6 @@ struct Inner {
     /// in its write checks. Kept after the unit's checks end, so a staged
     /// write's batch can note them, until the next unit starts.
     unit_inserts: RefCell<InsertedRows>,
-    /// The open transaction's seq and the tables it wrote.
-    tx: Option<(u64, BTreeSet<String>)>,
-    /// The identity the open callback transaction writes as. A write as
-    /// any other identity while it is open would join its commit, and
-    /// upload under its author and claims, so it is refused.
-    tx_identity: Option<WriteIdentity>,
     /// Set once connected upstream: this store is a replica.
     client: Option<sync::Client>,
     /// A replica whose store does not outlive it (a foreground over a
@@ -919,10 +910,6 @@ struct Inner {
     /// clock too, so a reopened file never hands out a transaction id it
     /// may already have uploaded (see [`Inner::next_seq`]).
     pub(crate) reopenable: bool,
-    /// Rows the authority named as written for this replica's own commits
-    /// whose version was not this replica's image of them (see
-    /// `Inner::as_written_images`), asked for whole instead.
-    pub(crate) as_written_mismatches: u64,
     /// Pending commits a rebase replayed (see `Db::rebase`).
     pub(crate) replayed_commits: u64,
     /// Echoes a serving pass examined to match its images (see
@@ -942,6 +929,11 @@ struct Inner {
     /// The upstream's refusals of this store's own commits, counted for
     /// [`Db::upload_status`].
     refusals: sync::Refusals,
+    /// What [`Db::upload_status`] adds to the client queue's own revision,
+    /// so the pending revision keeps growing when the queue is replaced (a
+    /// reopen along another version) or the store is a rebuilt one
+    /// ([`Db::seed_pending_revision`]).
+    pub(crate) pending_revision_base: u64,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
     /// Durability acks to sessions held until the host has persisted the
@@ -966,8 +958,6 @@ struct Inner {
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
-    /// Ops of the open local transaction, for upload, by stored names.
-    pub(crate) capture: Vec<StagedOp>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -1002,10 +992,6 @@ struct Inner {
     /// random when it opens: a digest confirms no guessed value elsewhere.
     #[cfg(feature = "e2ee-client")]
     e2ee_salt: [u8; 32],
-    /// The companion rows the open callback transaction's sealed writes
-    /// applied: told to the hooks as dropped if it rolls back.
-    #[cfg(feature = "e2ee-client")]
-    tx_companions: Vec<(String, RowUuid)>,
 }
 
 /// Whether a read decodes its rows' projected cells.
@@ -1515,32 +1501,27 @@ pub fn take_vm_steps_for_test() -> u64 {
 }
 
 /// The application tables a store holds, by their stored columns.
-fn stored_schema(conn: &Storage, jazz: &JazzSchema) -> Result<Schema, Error> {
-    let names: Vec<String> = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-        .and_then(|mut statement| {
-            statement
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<_, _>>()
-        })
-        .map_err(storage)?;
+fn stored_schema(
+    conn: &Storage,
+    jazz: &JazzSchema,
+    names: &BTreeSet<String>,
+) -> Result<Schema, Error> {
     let mut tables = BTreeMap::new();
     for name in names {
-        if name.starts_with("_jazz")
-            || name.starts_with("_cf_")
-            || name.starts_with("sqlite_")
-            || name.ends_with("__h")
-        {
-            continue;
-        }
         let columns: Vec<String> = conn
-            .prepare(&format!("PRAGMA table_info({})", quote(&name)))
+            .prepare(&format!("PRAGMA table_info({})", quote(name)))
             .and_then(|mut statement| {
                 statement
                     .query_map([], |row| row.get(1))?
                     .collect::<Result<_, _>>()
             })
             .map_err(storage)?;
+        if columns.is_empty() {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                format!("Jazz catalogue references missing table {name}"),
+            ));
+        }
         let columns = columns
             .into_iter()
             .filter(|column| {
@@ -1552,13 +1533,13 @@ fn stored_schema(conn: &Storage, jazz: &JazzSchema) -> Result<Schema, Error> {
         // A large-capable column is one the large-value refcount triggers
         // watch (`large::triggers`): its kind comes from the schemas unioned
         // in.
-        let large = crate::large::stored_large_columns(conn, &name)?;
+        let large = crate::large::stored_large_columns(conn, name)?;
         for column in &mut table.columns {
             if large.contains(&column.stored) {
                 column.ty = ValueType::Nullable(Box::new(ValueType::String));
             }
         }
-        tables.insert(name, table);
+        tables.insert(name.clone(), table);
     }
     Ok(Schema {
         tables,
@@ -2081,7 +2062,6 @@ impl Db {
     /// Open on `storage` (a host's SQL: [`Storage::from_backend`]), with
     /// no file: chunks live in the store itself.
     pub async fn open_storage(config: DbConfig, storage: Storage) -> Result<Self, Error> {
-        crate::format::admit(&storage)?;
         Self::open_on(config, storage, None)
     }
 
@@ -2108,6 +2088,38 @@ impl Db {
         )
     }
 
+    /// Initialize the real store and publish its first catalogue atomically.
+    /// Failure leaves existing host and application tables unchanged; the
+    /// returned database is usable only after the outer scope commits.
+    pub fn open_file_with_catalogue(
+        config: DbConfig,
+        file: crate::host::StoreFile,
+        change: crate::catalogue::CatalogueChange,
+    ) -> Result<Self, Error> {
+        Self::open_file_with_catalogue_keeping(config, file, change, &[])
+    }
+
+    /// Initialize and publish the first catalogue together with its host-table values.
+    pub fn open_file_with_catalogue_keeping(
+        config: DbConfig,
+        file: crate::host::StoreFile,
+        change: crate::catalogue::CatalogueChange,
+        kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
+    ) -> Result<Self, Error> {
+        let crate::host::StoreFile { conn, path } = file;
+        let conn = Rc::new(conn);
+        conn.scope("jazz_initialize", |_| {
+            crate::format::admit(&conn)?;
+            let db = Self::open_initialized(
+                config,
+                conn.clone(),
+                path.as_ref().map(|(path, vfs)| (path.as_path(), *vfs)),
+            )?;
+            db.apply_catalogue_now(change, kept)?;
+            Ok(db)
+        })
+    }
+
     /// Run `f` on the store's connection, outside any transaction handle's
     /// overlay (see [`crate::host`]).
     pub(crate) fn with_host_connection<T>(
@@ -2119,8 +2131,20 @@ impl Db {
     }
 
     fn open_on(
-        mut config: DbConfig,
+        config: DbConfig,
         conn: crate::storage::Storage,
+        path: Option<(&std::path::Path, Option<&'static str>)>,
+    ) -> Result<Self, Error> {
+        let conn = Rc::new(conn);
+        conn.scope("jazz_initialize", |_| {
+            crate::format::admit(&conn)?;
+            Self::open_initialized(config, conn.clone(), path)
+        })
+    }
+
+    fn open_initialized(
+        mut config: DbConfig,
+        conn: Rc<crate::storage::Storage>,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         #[cfg(feature = "e2ee-client")]
@@ -2176,6 +2200,11 @@ impl Db {
             inner.reset_everything();
             // Pending writes upload under the version they were written
             // in, and replay by the names of the one now current.
+            let retired = inner
+                .client
+                .as_ref()
+                .map_or(0, |client| client.pending_revision());
+            inner.pending_revision_base += retired + 1;
             inner.client = None;
             inner.load_client()?;
         }
@@ -2211,7 +2240,7 @@ impl Db {
 
     fn open_named(
         config: DbConfig,
-        conn: crate::storage::Storage,
+        conn: Rc<crate::storage::Storage>,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement, so both see all of them.
@@ -2283,13 +2312,11 @@ impl Db {
             crate::values::note_rollback(rollback_key);
         }))
         .map_err(storage)?;
-        let fresh: i64 = conn
-            // Durable Object SQLite keeps its own `_cf_*` tables in the file.
-            .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'", [], |r| r.get(0))
-            .map_err(storage)?;
+        let owned_tables = names.stored_tables();
+        let fresh = owned_tables.is_empty();
         // A reopened store keeps every column earlier schemas added; bring
         // it up to this schema without touching what is already there.
-        let physical = if fresh == 0 {
+        let physical = if fresh {
             execute_script(&conn, &schema.ddl())?;
             let mut physical = Schema {
                 tables: BTreeMap::new(),
@@ -2308,7 +2335,7 @@ impl Db {
             // store's union grew: the opening schema is not always the
             // newest (a server core reopens under its genesis while later
             // versions' tables and columns take writes, #4769).
-            let mut physical = stored_schema(&conn, &config.schema)?;
+            let mut physical = stored_schema(&conn, &config.schema, &owned_tables)?;
             let mut ddl = String::new();
             for (version, earlier) in &admitted {
                 if *version == config.schema.version_id() {
@@ -2370,7 +2397,7 @@ impl Db {
             view: None,
             defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
-                conn: Rc::new(conn),
+                conn,
                 validated_shapes: HashSet::new(),
                 mutation_admission_closed: false,
                 kept_variants: BTreeMap::new(),
@@ -2447,12 +2474,9 @@ impl Db {
                 trusted_rows: RefCell::new(BTreeMap::new()),
                 inherited_heads: RefCell::new(HashMap::new()),
                 unit_inserts: RefCell::new(BTreeMap::new()),
-                tx: None,
-                tx_identity: None,
                 client: None,
                 non_durable: false,
                 reopenable: path.is_some(),
-                as_written_mismatches: 0,
                 replayed_commits: 0,
                 echo_probes: 0,
                 authority: false,
@@ -2460,6 +2484,7 @@ impl Db {
                 account_registry: None,
                 upstream_rejections: None,
                 refusals: sync::Refusals::default(),
+                pending_revision_base: 0,
                 sessions: Vec::new(),
                 held_acks: None,
                 column_codes: RefCell::default(),
@@ -2468,7 +2493,6 @@ impl Db {
                 merge_fallbacks: RefCell::default(),
                 accepted: 0,
                 since_tick: Vec::new(),
-                capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 unsupported_versions: BTreeMap::new(),
@@ -2487,8 +2511,6 @@ impl Db {
                     salt[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
                     salt
                 },
-                #[cfg(feature = "e2ee-client")]
-                tx_companions: Vec::new(),
             })),
         };
         {
@@ -2522,6 +2544,21 @@ impl Db {
     pub fn seed_seq_floor(&self, floor: u64) {
         let mut inner = self.inner.borrow_mut();
         inner.seq = inner.seq.max(floor);
+    }
+
+    /// Report pending revisions above `floor` from now on: a host that
+    /// replaces a store with a fresh one continues the old one's revision,
+    /// so a status read across the swap never looks unchanged.
+    pub fn seed_pending_revision(&self, floor: u64) {
+        let mut inner = self.inner.borrow_mut();
+        let current = inner.pending_revision_base
+            + inner
+                .client
+                .as_ref()
+                .map_or(0, |client| client.pending_revision());
+        if current <= floor {
+            inner.pending_revision_base += floor + 1 - current;
+        }
     }
 
     /// Every SQLite store holds complete history; this one is also the
@@ -2685,11 +2722,6 @@ impl Db {
         let (node, tx) = (sync::origin_node(author, *key.node.as_bytes()), key.time.0);
         {
             let inner = self.inner.borrow();
-            if inner.tx.is_some() {
-                return Err(unsupported(
-                    "a write as another writer's commit inside a transaction",
-                ));
-            }
             match inner.origin_fate(node, tx, author)? {
                 OriginFate::Unseen => {}
                 OriginFate::Pending | OriginFate::Accepted => return Ok(OriginWrite::Repeat),
@@ -3399,7 +3431,8 @@ impl Db {
     #[cfg(feature = "testing")]
     #[doc(hidden)]
     pub fn rollback_sqlite_transaction_for_test(&self) {
-        self.inner()
+        self.inner
+            .staging()
             .conn
             .execute_batch("ROLLBACK")
             .expect("an open SQLite transaction");
@@ -3417,8 +3450,8 @@ impl Db {
 
     /// Permanently stop admitting application row mutations in this runtime
     /// and all its schema views. New transactions, further staging, stream
-    /// pushes and commits return a storage error, including a callback
-    /// transaction that was still running when this fence was set.
+    /// pushes and commits return a storage error, including transactions
+    /// opened before this fence was set.
     ///
     /// Reads, transaction abandonment, stream aborts and ordinary sync/cleanup
     /// ticks remain available so already committed writes can settle. This is
@@ -3758,12 +3791,10 @@ impl Db {
             .nest_relations(prepared, None, &ReadSpec::default(), roots)
     }
 
-    /// A read of the store as it is; inside a callback transaction, a
-    /// strict one (protocol §4.4).
+    /// A read of the store as it is.
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
         let inner = self.inner();
-        let strict = inner.tx.is_some();
-        inner.run_for_reader(prepared, None, &ReadSpec::default(), strict)
+        inner.run_for_reader(prepared, None, &ReadSpec::default(), false)
     }
 
     pub async fn all_for_identity(
@@ -3807,7 +3838,7 @@ impl Db {
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription(prepared, None, opts)
+        self.open_subscription(prepared, None, opts, false)
     }
 
     pub async fn subscribe_for_identity(
@@ -3816,7 +3847,17 @@ impl Db {
         opts: ReadOpts,
         identity: AuthorSubject,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription(prepared, Some(identity), opts)
+        self.open_subscription(prepared, Some(identity), opts, false)
+    }
+
+    /// Restore a reader's watches; its first matching change emits a full opening.
+    pub fn restore_subscription_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        identity: AuthorSubject,
+    ) -> Result<SubscriptionStream, Error> {
+        self.open_subscription(prepared, Some(identity), opts, true)
     }
 
     /// On a client a subscription also attaches remotely (unless
@@ -3829,6 +3870,7 @@ impl Db {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         opts: ReadOpts,
+        dormant: bool,
     ) -> Result<SubscriptionStream, Error> {
         let read = ReadSpec::of(&opts, &self.inner())?;
         let client = self.is_client();
@@ -3877,7 +3919,7 @@ impl Db {
         let mut inner = self.inner();
         let backlog = fanout::Backlog::Reader(opts.backlog_rows);
         let (queue, group) =
-            match inner.subscribe_member(prepared, identity, read, settled, backlog) {
+            match inner.subscribe_member(prepared, identity, read, settled, backlog, dormant) {
                 Ok(member) => member,
                 Err(error) => {
                     drop(inner);
@@ -4092,19 +4134,9 @@ impl Db {
         #[cfg(not(feature = "e2ee-client"))]
         let _ = streamed;
         self.inner().require_mutation_admission()?;
-        // A write while a callback transaction is open joins its commit:
-        // only one made as that transaction's identity may (its own).
-        if let (Some(open), Some(identity)) = (self.inner().tx_identity, op.identity())
-            && identity != open
-        {
-            return Err(unsupported(
-                "a write as another identity while a transaction is open",
-            ));
-        }
         #[cfg(feature = "e2ee-client")]
         let mut companions: Vec<(String, RowUuid)> = Vec::new();
         let written = self.with_upload(|| {
-            let table = op.table().to_owned();
             let (prior, mark) = {
                 let inner = self.inner();
                 let mark = inner.changed.borrow().len();
@@ -4112,9 +4144,8 @@ impl Db {
             };
             // Internal rows the encryption hooks stage with the write: they
             // commit, and upload, before it.
-            #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
             let mut ops = Vec::new();
-            let (notify, handle) = self.write_unnotified(&table, |inner, seq| {
+            let (notify, handle) = self.write_unnotified(|inner, seq| {
                 #[cfg(feature = "e2ee-client")]
                 {
                     ops = inner.seal_op(&mut op, None, streamed)?;
@@ -4138,10 +4169,9 @@ impl Db {
             // handle names the row's current version, which may be the
             // newest commit's own seq, so recording it would upload a
             // second commit under that commit's transaction id.
-            let committed = notify || self.inner().tx.is_some();
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
-            if let Err(error) = committed
+            if let Err(error) = notify
                 .then(|| self.record_upload(ops, handle.tx, sync::Kind::Mergeable, None))
                 .transpose()
             {
@@ -4156,38 +4186,21 @@ impl Db {
             Ok(handle)
         });
         #[cfg(feature = "e2ee-client")]
-        if !companions.is_empty() {
-            self.settle_companions(companions, written.is_ok());
+        if written.is_err()
+            && !companions.is_empty()
+            && let Some(hooks) = &self.inner.borrow().e2ee
+        {
+            hooks.companions_dropped(&companions);
         }
         written
     }
 
-    /// Settles the companion rows a direct write's sealing produced: a
-    /// write that failed dropped them; one inside a callback transaction
-    /// keeps them until the transaction commits or rolls back.
-    #[cfg(feature = "e2ee-client")]
-    fn settle_companions(&self, companions: Vec<(String, RowUuid)>, written: bool) {
-        let hooks = {
-            let mut inner = self.inner.borrow_mut();
-            if written {
-                if inner.tx.is_some() {
-                    inner.tx_companions.extend(companions);
-                }
-                return;
-            }
-            inner.e2ee.clone()
-        };
-        if let Some(hooks) = hooks {
-            hooks.companions_dropped(&companions);
-        }
-    }
-
     /// On a replica, a local commit and its upload record are one SQLite
-    /// transaction (outside an open Jazz transaction, which already is).
+    /// transaction.
     fn with_upload<R>(&self, f: impl FnOnce() -> Result<R, Error>) -> Result<R, Error> {
         let wrap = {
             let inner = self.inner.borrow();
-            inner.client.is_some() && inner.tx.is_none()
+            inner.client.is_some()
         };
         if !wrap {
             return f();
@@ -4196,21 +4209,15 @@ impl Db {
         conn.scope("upload_local", |_| f())
     }
 
-    /// Run one write atomically. Inside a transaction it joins the
-    /// transaction's seq; standalone it commits. Returns whether a
-    /// standalone commit happened, which the caller notifies subscribers of
-    /// once its upload record is in.
+    /// Run one write atomically. Returns whether it committed a change;
+    /// the caller notifies subscribers once its upload record is in.
     fn write_unnotified(
         &self,
-        table: &str,
         apply: impl FnOnce(&mut Inner, u64) -> Result<WriteHandle, Error>,
     ) -> Result<(bool, WriteHandle), Error> {
         let standalone = {
             let mut inner = self.inner();
-            let (seq, standalone) = match &inner.tx {
-                Some((seq, _)) => (*seq, false),
-                None => (inner.fresh_seq(), true),
-            };
+            let seq = inner.fresh_seq();
             let conn = inner.conn.clone();
             let mark = inner.changed.borrow().len();
             // A standalone commit takes the writer id a thin client's write
@@ -4220,16 +4227,15 @@ impl Db {
             // put in `own_order` for it goes back, so no other commit
             // inherits its writer id, nor it another's (and `fresh_seq`
             // drops whatever an exit after this one leaves).
-            let origin = if standalone { inner.next_origin } else { None };
-            let prior = standalone.then(|| inner.own_order.get(&seq).copied());
+            let origin = inner.next_origin;
+            let prior = inner.own_order.get(&seq).copied();
             let restore = |inner: &mut Inner| match prior {
-                Some(Some(order)) => {
+                Some(order) => {
                     inner.own_order.insert(seq, order);
                 }
-                Some(None) => {
+                None => {
                     inner.own_order.remove(&seq);
                 }
-                None => {}
             };
             let applied = conn.scope("w", |_| {
                 inner.commit_origin = origin;
@@ -4240,7 +4246,7 @@ impl Db {
                 applied.and_then(|handle| {
                     let wrote = handle.seq == inner.own_pos(seq);
                     if let (true, true, Some((node, tx))) =
-                        (standalone && wrote, inner.me == sync::ACCEPTED, origin)
+                        (wrote, inner.me == sync::ACCEPTED, origin)
                     {
                         inner.record_fate(node, tx, &Ok(()))?;
                         inner.record_settled(node, tx, Some(Pos::at(seq)))?;
@@ -4268,13 +4274,9 @@ impl Db {
                         inner.next_origin = None;
                     }
                     if wrote {
-                        if standalone {
-                            inner.seq = inner.seq.max(seq);
-                        } else if let Some((_, tables)) = &mut inner.tx {
-                            tables.insert(table.to_owned());
-                        }
+                        inner.seq = inner.seq.max(seq);
                     }
-                    (standalone && wrote, handle)
+                    (wrote, handle)
                 }
                 Err(error) => {
                     inner.changed.borrow_mut().truncate(mark);
@@ -4284,106 +4286,6 @@ impl Db {
             }
         };
         Ok(standalone)
-    }
-
-    // ---- transactions ---------------------------------------------------
-
-    pub async fn transaction<T>(
-        &self,
-        callback: impl AsyncFnOnce(&mut MergeableTx<'_>) -> Result<T, Error>,
-    ) -> Result<(T, TxReceipt), Error> {
-        self.transaction_as(WriteIdentity::Database, callback).await
-    }
-
-    /// A transaction whose writes are attributed to `author`. Like every
-    /// mergeable transaction it stages its writes for the authority, which
-    /// checks the commit when it is uploaded; no local policy check runs
-    /// here.
-    pub async fn transaction_for_identity<T>(
-        &self,
-        author: AuthorSubject,
-        callback: impl AsyncFnOnce(&mut MergeableTx<'_>) -> Result<T, Error>,
-    ) -> Result<(T, TxReceipt), Error> {
-        self.transaction_as(WriteIdentity::Attribution(author), callback)
-            .await
-    }
-
-    /// Run `callback` in one commit, its writes made as `identity`.
-    async fn transaction_as<T>(
-        &self,
-        identity: WriteIdentity,
-        callback: impl AsyncFnOnce(&mut MergeableTx<'_>) -> Result<T, Error>,
-    ) -> Result<(T, TxReceipt), Error> {
-        {
-            let mut inner = self.inner();
-            inner.require_mutation_admission()?;
-            if inner.tx.is_some() {
-                return Err(unsupported("nested transactions"));
-            }
-            begin_savepoint(&inner.conn, "tx")?;
-            inner.changed.borrow_mut().clear();
-            let seq = inner.fresh_seq();
-            inner.tx = Some((seq, BTreeSet::new()));
-            inner.tx_identity = Some(identity);
-            #[cfg(feature = "e2ee-client")]
-            inner.tx_companions.clear();
-        }
-        // Until the unit commits or is rolled back below, dropping this
-        // future (cancellation) or unwinding out of the callback rolls it
-        // back exactly as an error would.
-        let mut guard = CallbackTransactionGuard {
-            db: self,
-            restore_seq: None,
-            armed: true,
-        };
-        let mut tx = MergeableTx { db: self, identity };
-        let result = callback(&mut tx).await.and_then(|value| {
-            self.inner().require_mutation_admission()?;
-            Ok(value)
-        });
-        let captured;
-        let prior;
-        let changed = {
-            let mut inner = self.inner();
-            let (seq, tables) = inner.tx.take().expect("open transaction");
-            inner.tx_identity = None;
-            captured = std::mem::take(&mut inner.capture);
-            prior = inner.seq;
-            match &result {
-                Ok(_) => {
-                    if !tables.is_empty() {
-                        // A hold or observe while the tx was open may have
-                        // moved seq past the one it drew.
-                        inner.seq = inner.seq.max(seq);
-                        guard.restore_seq = Some(prior);
-                    }
-                    Some((seq, tables))
-                }
-                Err(_) => {
-                    guard.armed = false;
-                    inner.roll_back_callback_tx(None)?;
-                    None
-                }
-            }
-        };
-        let value = result?;
-        let (seq, _) = changed.expect("committed");
-        // The upload record joins the transaction's SQLite savepoint.
-        // A callback transaction writes as the database or attributed
-        // (`transaction_as`), never as a session, so no session claims
-        // travel with it.
-        let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None, None);
-        if let Err(error) = recorded {
-            guard.armed = false;
-            self.inner().roll_back_callback_tx(Some(prior))?;
-            return Err(error);
-        }
-        end_savepoint(&self.inner.borrow().conn, "tx", true)?;
-        guard.armed = false;
-        #[cfg(feature = "e2ee-client")]
-        self.inner.borrow_mut().tx_companions.clear();
-        self.notify();
-        Ok((value, TxReceipt(seq)))
     }
 
     // ---- schema evolution -------------------------------------------------
@@ -4416,7 +4318,7 @@ impl Db {
         &self,
         change: crate::catalogue::CatalogueChange,
     ) -> Result<(), Error> {
-        self.apply_catalogue_keeping(change, &[]).await
+        self.apply_catalogue_now(change, &[])
     }
 
     /// [`Self::apply_catalogue`] that also keeps `kept` (host table, key,
@@ -4426,6 +4328,14 @@ impl Db {
     /// they were. The transaction is the one this call owns and ends before
     /// it returns.
     pub async fn apply_catalogue_keeping(
+        &self,
+        change: crate::catalogue::CatalogueChange,
+        kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
+    ) -> Result<(), Error> {
+        self.apply_catalogue_now(change, kept)
+    }
+
+    fn apply_catalogue_now(
         &self,
         change: crate::catalogue::CatalogueChange,
         kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
@@ -5166,39 +5076,6 @@ fn delta(
     }
 }
 
-/// A callback may suspend at any await, and may panic. Dropping
-/// [`Db::transaction_as`]'s future there, or unwinding out of it, rolls the
-/// unit back as its error path does ([`Inner::roll_back_callback_tx`]) before
-/// another unit can start.
-struct CallbackTransactionGuard<'a> {
-    db: &'a Db,
-    /// `inner.seq` before the unit took its own seq, once it has.
-    restore_seq: Option<u64>,
-    armed: bool,
-}
-
-impl Drop for CallbackTransactionGuard<'_> {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        // A RefCell still borrowed here means an unwind out of a borrow;
-        // `try_borrow_mut` keeps that a panic rather than an abort. Drop
-        // cannot return a rollback error: the helper closes mutation
-        // admission instead.
-        if let Some(mut inner) = self.db.inner.try_borrow_mut() {
-            let _ = inner.roll_back_callback_tx(self.restore_seq);
-        }
-    }
-}
-
-/// A mergeable transaction: writes join one commit, reads see them.
-pub struct MergeableTx<'a> {
-    db: &'a Db,
-    /// Who every write is made as, chosen when the transaction opens.
-    identity: WriteIdentity,
-}
-
 /// The identity of a write inside a transaction opened as `tx`: its own
 /// options may not choose another.
 fn in_transaction(own: WriteIdentity, tx: WriteIdentity) -> Result<WriteIdentity, Error> {
@@ -5209,91 +5086,6 @@ fn in_transaction(own: WriteIdentity, tx: WriteIdentity) -> Result<WriteIdentity
         ));
     }
     Ok(tx)
-}
-
-impl MergeableTx<'_> {
-    pub async fn insert(
-        &mut self,
-        table: &str,
-        cells: BTreeMap<String, Value>,
-        opts: InsertOptions,
-    ) -> Result<WriteHandle, Error> {
-        self.db
-            .insert(
-                table,
-                cells,
-                InsertOptions {
-                    identity: in_transaction(opts.identity, self.identity)?,
-                    ..opts
-                },
-            )
-            .await
-    }
-
-    pub async fn update(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: BTreeMap<String, Value>,
-        opts: UpdateOptions,
-    ) -> Result<WriteHandle, Error> {
-        self.db
-            .update(
-                table,
-                row,
-                cells,
-                UpdateOptions {
-                    identity: in_transaction(opts.identity, self.identity)?,
-                    ..opts
-                },
-            )
-            .await
-    }
-
-    pub async fn upsert(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        cells: BTreeMap<String, Value>,
-        opts: UpsertOptions,
-    ) -> Result<WriteHandle, Error> {
-        self.db
-            .upsert(
-                table,
-                row,
-                cells,
-                UpsertOptions {
-                    identity: in_transaction(opts.identity, self.identity)?,
-                    ..opts
-                },
-            )
-            .await
-    }
-
-    pub async fn delete(
-        &mut self,
-        table: &str,
-        row: RowUuid,
-        opts: DeleteOptions,
-    ) -> Result<WriteHandle, Error> {
-        self.db
-            .delete(
-                table,
-                row,
-                DeleteOptions {
-                    identity: in_transaction(opts.identity, self.identity)?,
-                    ..opts
-                },
-            )
-            .await
-    }
-
-    pub async fn all_prepared(
-        &mut self,
-        prepared: &PreparedQuery,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.db.read(prepared)
-    }
 }
 
 impl Drop for Inner {
@@ -5315,46 +5107,6 @@ impl Inner {
             ));
         }
         Ok(())
-    }
-
-    /// Roll back the open callback transaction, from its error path or its
-    /// drop guard alike: its savepoint, the uploads it captured, and whatever
-    /// a write it left mid-way (a cancelled await, a panic) derived or
-    /// stamped. Only the unit's own seq goes back (`restore_seq`, once it took
-    /// it): a floor raised while it ran (a hold, an observed peer position)
-    /// stays, or a later commit could reuse a transaction id. A rollback
-    /// SQLite cannot confirm leaves the savepoint open under any later unit,
-    /// so it closes mutation admission.
-    fn roll_back_callback_tx(&mut self, restore_seq: Option<u64>) -> Result<(), Error> {
-        self.tx = None;
-        self.tx_identity = None;
-        // The hooks never call the database: they may hear it while it is
-        // busy.
-        #[cfg(feature = "e2ee-client")]
-        {
-            let dropped = std::mem::take(&mut self.tx_companions);
-            if let (false, Some(hooks)) = (dropped.is_empty(), &self.e2ee) {
-                hooks.companions_dropped(&dropped);
-            }
-        }
-        self.capture.clear();
-        self.writer = None;
-        self.clear_derived();
-        if let Some(seq) = restore_seq {
-            self.seq = seq;
-        }
-        let rolled_back = self.abandon_savepoint("tx");
-        if rolled_back.is_err() {
-            self.mutation_admission_closed = true;
-        }
-        rolled_back
-    }
-
-    /// Undo everything since `SAVEPOINT name`. Its changes are forgotten
-    /// first, so no subscriber hears of them whatever happens next.
-    fn abandon_savepoint(&self, name: &str) -> Result<(), Error> {
-        self.changed.borrow_mut().clear();
-        end_savepoint(&self.conn, name, false)
     }
 
     /// Published bundle `id`, resolved: the write version it selects and
@@ -9927,6 +9679,7 @@ enum WriteCheck {
     Restore,
 }
 
+#[derive(Clone)]
 struct DeferredCheck {
     /// The schema the write was made through, which names its table.
     schema: Rc<Schema>,
@@ -10150,11 +9903,11 @@ enum Located {
 
 /// A staged mergeable transaction handle (`Db::mergeable_tx`). Writes are
 /// staged in order and applied as one commit; each staged write sees the
-/// earlier ones, as Jazz's transaction overlay does.
+/// earlier ones, as Jazz's transaction overlay does. Dropping the handle
+/// discards its staged writes. Other Db operations never join this transaction.
 pub struct MergeableTxHandle<'a> {
-    db: &'a Db,
+    tx: TxRef<'a>,
     identity: WriteIdentity,
-    ops: RefCell<Vec<StagedOp>>,
 }
 
 #[derive(Clone, Debug)]
@@ -10183,39 +9936,25 @@ pub(crate) enum StagedOp {
 
 impl Db {
     pub async fn mergeable_tx(&self) -> Result<MergeableTxHandle<'_>, Error> {
-        self.inner().require_mutation_admission()?;
+        let id = OpenTransactionId::new();
+        self.begin_mergeable(id).await?;
         Ok(MergeableTxHandle {
-            db: self,
+            tx: self.tx_ref(id),
             identity: WriteIdentity::Database,
-            ops: RefCell::new(Vec::new()),
         })
     }
 
-    /// A staged transaction whose writes are authored by `author` (see
-    /// [`Db::transaction_for_identity`]).
+    /// A staged transaction whose writes are authored by `author`.
     pub async fn mergeable_tx_for_identity(
         &self,
         author: AuthorSubject,
     ) -> Result<MergeableTxHandle<'_>, Error> {
-        self.inner().require_mutation_admission()?;
+        let id = OpenTransactionId::new();
+        self.begin_mergeable(id).await?;
         Ok(MergeableTxHandle {
-            db: self,
+            tx: self.tx_ref(id),
             identity: WriteIdentity::Attribution(author),
-            ops: RefCell::new(Vec::new()),
         })
-    }
-}
-
-impl Db {
-    fn move_row(
-        &self,
-        table: &str,
-        from: BranchSelector,
-        to: BranchSelector,
-        row: RowUuid,
-    ) -> Result<(), Error> {
-        self.write_op(StagedOp::Move(table.to_owned(), from, to, row), Who::Local)
-            .map(drop)
     }
 }
 
@@ -10287,24 +10026,19 @@ impl MergeableTxHandle<'_> {
         &self,
         table: &str,
         cells: BTreeMap<String, Value>,
-        mut opts: InsertOptions,
+        opts: InsertOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db.inner().require_mutation_admission()?;
-        let row = match opts.row_id {
-            Some(row) => row,
-            None => self.db.inner().ids.next_row_id(),
-        };
-        opts.row_id = Some(row);
-        self.ops
-            .borrow_mut()
-            .push(StagedOp::Insert(table.to_owned(), cells, opts));
-        Ok(WriteHandle {
-            row,
-            seq: Pos::default(),
-            tx: 0,
-        })
+        self.tx
+            .insert(
+                table,
+                cells,
+                InsertOptions {
+                    identity: in_transaction(opts.identity, self.identity)?,
+                    ..opts
+                },
+            )
+            .await
     }
-
     pub async fn update(
         &self,
         table: &str,
@@ -10312,13 +10046,19 @@ impl MergeableTxHandle<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpdateOptions,
     ) -> Result<(), Error> {
-        self.db.inner().require_mutation_admission()?;
-        self.ops
-            .borrow_mut()
-            .push(StagedOp::Update(table.to_owned(), row, cells, opts));
-        Ok(())
+        self.tx
+            .update(
+                table,
+                row,
+                cells,
+                UpdateOptions {
+                    identity: in_transaction(opts.identity, self.identity)?,
+                    ..opts
+                },
+            )
+            .await
+            .map(drop)
     }
-
     pub async fn upsert(
         &self,
         table: &str,
@@ -10326,30 +10066,37 @@ impl MergeableTxHandle<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpsertOptions,
     ) -> Result<(), Error> {
-        self.db.inner().require_mutation_admission()?;
-        self.ops.borrow_mut().push(StagedOp::Upsert(
-            table.to_owned(),
-            row,
-            cells,
-            BTreeMap::new(),
-            opts,
-        ));
-        Ok(())
+        self.tx
+            .upsert(
+                table,
+                row,
+                cells,
+                UpsertOptions {
+                    identity: in_transaction(opts.identity, self.identity)?,
+                    ..opts
+                },
+            )
+            .await
+            .map(drop)
     }
-
     pub async fn delete(
         &self,
         table: &str,
         row: RowUuid,
         opts: DeleteOptions,
     ) -> Result<(), Error> {
-        self.db.inner().require_mutation_admission()?;
-        self.ops
-            .borrow_mut()
-            .push(StagedOp::Delete(table.to_owned(), row, opts));
-        Ok(())
+        self.tx
+            .delete(
+                table,
+                row,
+                DeleteOptions {
+                    identity: in_transaction(opts.identity, self.identity)?,
+                    ..opts
+                },
+            )
+            .await
+            .map(drop)
     }
-
     pub async fn restore(
         &self,
         table: &str,
@@ -10357,15 +10104,19 @@ impl MergeableTxHandle<'_> {
         content: Option<BTreeMap<String, Value>>,
         opts: RestoreOptions,
     ) -> Result<(), Error> {
-        self.db.inner().require_mutation_admission()?;
-        self.ops
-            .borrow_mut()
-            .push(StagedOp::Restore(table.to_owned(), row, content, opts));
-        Ok(())
+        self.tx
+            .restore(
+                table,
+                row,
+                content,
+                RestoreOptions {
+                    identity: in_transaction(opts.identity, self.identity)?,
+                    ..opts
+                },
+            )
+            .await
+            .map(drop)
     }
-
-    /// A branch move is an explicit source delete plus a destination
-    /// insert (or restore of an earlier destination tombstone).
     pub async fn move_between_branches(
         &self,
         table: &str,
@@ -10373,86 +10124,22 @@ impl MergeableTxHandle<'_> {
         destination: BranchSelector,
         row: RowUuid,
     ) -> Result<(), Error> {
-        self.db.inner().require_mutation_admission()?;
-        self.ops
-            .borrow_mut()
-            .push(StagedOp::Move(table.to_owned(), source, destination, row));
-        Ok(())
+        self.tx
+            .stage(StagedOp::Move(table.to_owned(), source, destination, row))
+            .await
     }
-
+    pub async fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.tx.all_prepared(prepared).await
+    }
     pub async fn commit(self) -> Result<TxReceipt, Error> {
-        let ops = self.ops.into_inner();
-        let db = self.db;
-        let identity = self.identity;
-        let ((), receipt) = db
-            .transaction_as(identity, async |_tx| {
-                for op in ops {
-                    match op {
-                        StagedOp::Insert(t, c, o) => db
-                            .insert(
-                                &t,
-                                c,
-                                InsertOptions {
-                                    identity: in_transaction(o.identity, identity)?,
-                                    ..o
-                                },
-                            )
-                            .await
-                            .map(drop)?,
-                        StagedOp::Update(t, r, c, o) => db
-                            .update(
-                                &t,
-                                r,
-                                c,
-                                UpdateOptions {
-                                    identity: in_transaction(o.identity, identity)?,
-                                    ..o
-                                },
-                            )
-                            .await
-                            .map(drop)?,
-                        StagedOp::Upsert(t, r, c, _, o) => db
-                            .upsert(
-                                &t,
-                                r,
-                                c,
-                                UpsertOptions {
-                                    identity: in_transaction(o.identity, identity)?,
-                                    ..o
-                                },
-                            )
-                            .await
-                            .map(drop)?,
-                        StagedOp::Delete(t, r, o) => db
-                            .delete(
-                                &t,
-                                r,
-                                DeleteOptions {
-                                    identity: in_transaction(o.identity, identity)?,
-                                    ..o
-                                },
-                            )
-                            .await
-                            .map(drop)?,
-                        StagedOp::Restore(t, r, c, o) => db
-                            .restore(
-                                &t,
-                                r,
-                                c,
-                                RestoreOptions {
-                                    identity: in_transaction(o.identity, identity)?,
-                                    ..o
-                                },
-                            )
-                            .await
-                            .map(drop)?,
-                        StagedOp::Move(t, from, to, r) => db.move_row(&t, from, to, r)?,
-                    }
-                }
-                Ok(())
-            })
-            .await?;
-        Ok(receipt)
+        self.tx.db.commit_mergeable_handle(self.tx.id).await
+    }
+}
+impl Drop for MergeableTxHandle<'_> {
+    fn drop(&mut self) {
+        // Commit normally takes the batch. Also clean up if admission was
+        // closed before it could do so, or if the handle was abandoned.
+        let _ = self.tx.db.abandon_transaction_handle(self.tx.id);
     }
 }
 
@@ -10739,13 +10426,6 @@ impl Store {
         inner
     }
 
-    /// [`Store::borrow_mut`], or `None` while the store is already borrowed.
-    fn try_borrow_mut(&self) -> Option<std::cell::RefMut<'_, Inner>> {
-        let mut inner = self.0.try_borrow_mut().ok()?;
-        inner.settle_overlay();
-        Some(inner)
-    }
-
     fn borrow(&self) -> std::cell::Ref<'_, Inner> {
         // A borrow already held means the overlay was undone when it was
         // taken.
@@ -10774,6 +10454,11 @@ struct Batch {
     /// write's `InsertedByThisTransaction` holds for (see
     /// [`Db::in_overlay`]).
     inserted: Arc<InsertedRows>,
+    /// The check of each row's first write in `ops`, by stored table and
+    /// row: the policy a later staged write to that row continues, so
+    /// staging decides the row by its first write as the commit and the
+    /// authority do (SPEC 7).
+    first_checks: HashMap<(String, [u8; 16]), Vec<DeferredCheck>>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
@@ -11127,7 +10812,7 @@ impl Inner {
         // A commit made under a thin client's id is kept under it: a relay
         // uploads it so, so a resend of it anywhere gets its fate (SPEC 8
         // §8.14).
-        let origin = self.commit_origin.filter(|_| self.tx.is_none());
+        let origin = self.commit_origin;
         if origin.is_some() || !self.own_order.contains_key(&seq) {
             let hlc = self.next_hlc();
             let (node, tx) = origin.unwrap_or((*self.identity.node.as_bytes(), seq));
@@ -11168,7 +10853,6 @@ impl Inner {
             .map(|(seq, _)| *seq)
     }
 
-    /// Apply one write as `who`: policies apply for a session identity.
     /// Apply `op`, a write this store authors as `who`, at `seq`: its
     /// large values chunked and its counter changes resolved first.
     fn apply_authored(
@@ -11186,6 +10870,7 @@ impl Inner {
         applied
     }
 
+    /// Apply one write as `who`: policies apply for a session identity.
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
         let author = match who {
             Who::Session(author) | Who::Attributed(author) => author,
@@ -11407,6 +11092,7 @@ impl Db {
                 ops: Vec::new(),
                 rows: Arc::default(),
                 inserted: Arc::default(),
+                first_checks: HashMap::new(),
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
                 claims: None,
@@ -11447,7 +11133,6 @@ impl Db {
         let inner = self.inner.staging();
         Held {
             overlay: inner.overlay.is_some(),
-            callback_transaction: inner.tx.is_some(),
             open_batches: inner.batches.len(),
             sqlite_transaction: !inner.conn.is_autocommit(),
         }
@@ -11499,7 +11184,6 @@ impl Db {
     }
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
-        self.refuse_commit_in_callback_tx()?;
         let batch = self.take_batch(id)?;
         if !matches!(batch.kind, BatchKind::Mergeable) {
             return Err(rejected(format!("transaction {id:?} is not mergeable")));
@@ -11518,7 +11202,6 @@ impl Db {
         &self,
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
-        self.refuse_commit_in_callback_tx()?;
         let batch = self.take_batch(id)?;
         let BatchKind::Serializable {
             snapshot,
@@ -11681,23 +11364,8 @@ impl Db {
         Ok(receipt)
     }
 
-    /// A transaction handle's commit while a callback transaction is open
-    /// would join that transaction's commit (and be undone with it), so it
-    /// is refused; the handle stays open, to commit once the callback
-    /// transaction has finished.
-    fn refuse_commit_in_callback_tx(&self) -> Result<(), Error> {
-        if self.inner().tx.is_some() {
-            return Err(unsupported(
-                "committing a transaction while a callback transaction is open",
-            ));
-        }
-        Ok(())
-    }
-
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         self.inner().require_mutation_admission()?;
-        // Its handle's commit refused this before taking the batch.
-        self.refuse_commit_in_callback_tx()?;
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
@@ -11772,6 +11440,20 @@ impl Db {
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         let staged = batch.ops.len();
+        // The extra write's row, and the checks its first staged write
+        // left, which decide it instead of the extra write's own.
+        let extra_row = match extra.as_deref().and_then(|op| Some((op, op.row()?))) {
+            Some((op, row)) => Some((
+                inner.schema.table(op.table())?.stored.clone(),
+                *row.0.as_bytes(),
+            )),
+            None => None,
+        };
+        let first_checks = extra_row
+            .as_ref()
+            .and_then(|key| batch.first_checks.get(key))
+            .cloned()
+            .unwrap_or_default();
         // A row is never evidence for its own check.
         let staged_rows = match extra.as_deref() {
             Some(op) => {
@@ -11842,6 +11524,8 @@ impl Db {
         // A step that is undone leaves no head rows behind.
         let heads = inner.inherited_heads.borrow().clone();
         let joins = extra.is_some();
+        let mut first = Vec::new();
+        let mut first_key = None;
         let applied = match extra {
             Some(op) => inner.counter_deltas(op).and_then(|()| {
                 let schema = inner.schema.clone();
@@ -11850,9 +11534,24 @@ impl Db {
                 // evidence for this one's (SPEC 7), as at the authority
                 // that receives the unit. The commit checks the whole unit.
                 inner.defer_checks();
+                // A row the batch already wrote is decided by its first
+                // write's check on its end state, as on commit, where the
+                // whole unit applies under one `defer_checks`: the extra
+                // write's own check is dropped as a later write's.
+                if let Some(pending) = inner.deferred.borrow_mut().as_mut() {
+                    pending.extend(first_checks);
+                }
                 let applied = inner
                     .apply_all_checking(&[(schema, op.clone())], 0, own)
-                    .and_then(|()| inner.finish_checks_after(own, staged_rows, staged_inserts));
+                    .and_then(|()| {
+                        if let Some(key) = &extra_row
+                            && let Some(pending) = inner.deferred.borrow().as_ref()
+                        {
+                            first.extend(pending.iter().cloned());
+                            first_key = Some(key.clone());
+                        }
+                        inner.finish_checks_after(own, staged_rows, staged_inserts)
+                    });
                 if applied.is_err() {
                     inner.abandon_checks();
                 }
@@ -11876,6 +11575,13 @@ impl Db {
         }
         if keep && let Some(overlay) = inner.overlay.as_mut() {
             overlay.applied += 1;
+        }
+        if keep
+            && let Some(key) = first_key
+            && !first.is_empty()
+            && let Some(batch) = inner.batches.get_mut(&id)
+        {
+            batch.first_checks.entry(key).or_insert(first);
         }
         result
     }

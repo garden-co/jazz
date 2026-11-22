@@ -1,12 +1,13 @@
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DbConfig } from "../runtime/db.js";
+import type { AccountDbConfig } from "../accounts/context.js";
+import { accountConfig } from "../../tests/shared/account-config.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 import { JazzClientProvider, LegacyJazzProvider as JazzProvider } from "./provider.js";
 import type { PendingSolidJazzClient } from "./create-solid-jazz-client.js";
 
-const openJazzClient = vi.hoisted(() => vi.fn<(config: DbConfig) => Promise<JazzClient>>());
+const openJazzClient = vi.hoisted(() => vi.fn<(config: AccountDbConfig) => Promise<JazzClient>>());
 
 vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient }));
 vi.mock("../runtime/db.js", () => ({}));
@@ -24,7 +25,7 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
-function makeClient(id: string, shutdown = vi.fn(async () => undefined)): JazzClient {
+function makeClient(id: string, shutdown = vi.fn(async (): Promise<void> => {})): JazzClient {
   return {
     db: { id } as never,
     session: null,
@@ -79,7 +80,7 @@ describe("Solid providers", () => {
     const second = deferred<JazzClient>();
     openJazzClient.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
 
-    const [config, setConfig] = createSignal<DbConfig>({ appId: "first" });
+    const [config, setConfig] = createSignal<AccountDbConfig>(accountConfig("first"));
     const dispose = render(
       () => (
         <JazzProvider config={config()} fallback={<p>Loading</p>}>
@@ -90,7 +91,7 @@ describe("Solid providers", () => {
     );
 
     await flushMicrotasks();
-    expect(openJazzClient).toHaveBeenCalledWith({ appId: "first" });
+    expect(openJazzClient).toHaveBeenCalledWith(accountConfig("first"));
     expect(container.textContent).toBe("Loading");
 
     const firstShutdown = deferred<void>();
@@ -102,7 +103,7 @@ describe("Solid providers", () => {
     await flushMicrotasks();
     expect(container.textContent).toBe("Ready");
 
-    setConfig({ appId: "second" });
+    setConfig(accountConfig("second"));
     await flushMicrotasks();
     expect(firstClient.shutdown).toHaveBeenCalledOnce();
     expect(openJazzClient).toHaveBeenCalledOnce();
@@ -110,7 +111,7 @@ describe("Solid providers", () => {
 
     firstShutdown.resolve();
     await flushMicrotasks();
-    expect(openJazzClient).toHaveBeenCalledWith({ appId: "second" });
+    expect(openJazzClient).toHaveBeenCalledWith(accountConfig("second"));
     expect(container.textContent).toBe("Loading");
 
     const secondClient = makeClient("second");
@@ -124,14 +125,14 @@ describe("Solid providers", () => {
   });
 
   it("JazzProvider skips obsolete factories and never overlaps client lifecycles", async () => {
-    const pendingClients = new Map<string, Deferred<JazzClient>>();
+    const pendingClients = new Map<AccountDbConfig["appId"], Deferred<JazzClient>>();
     openJazzClient.mockImplementation((config) => {
       const pending = deferred<JazzClient>();
       pendingClients.set(config.appId, pending);
       return pending.promise;
     });
 
-    const [config, setConfig] = createSignal<DbConfig>({ appId: "first" });
+    const [config, setConfig] = createSignal<AccountDbConfig>(accountConfig("first"));
     const dispose = render(
       () => (
         <JazzProvider config={config()} fallback={<p>Loading</p>}>
@@ -151,9 +152,9 @@ describe("Solid providers", () => {
     );
     await flushMicrotasks();
 
-    setConfig({ appId: "second" });
+    setConfig(accountConfig("second"));
     await flushMicrotasks();
-    setConfig({ appId: "third" });
+    setConfig(accountConfig("third"));
     await flushMicrotasks();
     expect(openJazzClient.mock.calls.map(([next]) => next.appId)).toEqual(["first"]);
 
@@ -161,7 +162,7 @@ describe("Solid providers", () => {
     await flushMicrotasks();
     expect(openJazzClient.mock.calls.map(([next]) => next.appId)).toEqual(["first", "third"]);
 
-    setConfig({ appId: "fourth" });
+    setConfig(accountConfig("fourth"));
     await flushMicrotasks();
     expect(openJazzClient.mock.calls.map(([next]) => next.appId)).toEqual(["first", "third"]);
 

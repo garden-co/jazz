@@ -65,6 +65,7 @@ import { warnWindowJazzConflict } from "../runtime/page-handle.js";
 import { accountForgotten, storedKeepsDeviceAccount } from "../accounts/persistence.js";
 import { rememberBackendUser } from "../accounts/enrollment.js";
 import { deviceAccountStoreMissing } from "../accounts/process-store.js";
+import { setNewerBuildHandler, type NewerBuildHandler } from "../runtime/newer-build-reload.js";
 
 export type { LocalFirstLoader };
 
@@ -116,6 +117,15 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      * out.
      */
     onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
+    /**
+     * Called when a tab of a newer build of your app (a deploy changed the
+     * schema) wants this browser's local store, which serves one build at a
+     * time. This tab has already made its writes durable and stopped taking
+     * new ones (they fail until it reloads); call `reload()` to load the
+     * newer build, for example after telling the user "a new version is
+     * available". Without it, the tab reloads at once.
+     */
+    onNewerBuild?: NewerBuildHandler;
     /**
      * On sign-out (or a switch to another user), wipe the account's local
      * storage instead of keeping it for that user's next sign-in, and, in an
@@ -170,6 +180,7 @@ const BROWSER_SESSION_OPTIONS = {
   initial: true,
   linkDeviceAccountOnSignUp: true,
   onSignedOut: true,
+  onNewerBuild: true,
   clearOnSignOut: true,
   client: true,
   localFirst: true,
@@ -268,6 +279,7 @@ export async function openBrowserSessionCore(
     clearOnSignOut,
     linkDeviceAccountOnSignUp,
     onSignedOut,
+    onNewerBuild,
     client: loadLocalFirst,
     localFirst,
     // The account manager's own: neither is client configuration, and a Db
@@ -279,6 +291,7 @@ export async function openBrowserSessionCore(
   } = { ...config, serverUrl };
   refuseUnkeptOptions(clientConfig);
   refuseLocalFirstTiming(localFirst, loadLocalFirst);
+  setNewerBuildHandler(onNewerBuild);
   const accounts = await createAccountManagerWithMinter(
     { ...config, serverUrl },
     mintLocalFirstTokenInJs,
@@ -644,11 +657,13 @@ async function createDeviceOnlySession(config: JazzClientConfig): Promise<Browse
     linkDeviceAccountOnSignUp: _linkDeviceAccountOnSignUp,
     localFirst: _localFirst,
     onSignedOut: _onSignedOut,
+    onNewerBuild,
     client: loadLocalFirst,
     store: _store,
     fetch: _fetch,
     ...rest
   } = config;
+  setNewerBuildHandler(onNewerBuild);
   if (!loadLocalFirst) {
     throw new Error(
       'serverUrl: null keeps Jazz on this device, which needs the local-first client: pass client: () => import("jazz-tools/local-first")',

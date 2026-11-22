@@ -6,6 +6,7 @@
 
 pub mod accounts;
 pub mod admission;
+pub mod backend_signing_key;
 pub mod catalogue;
 pub mod deployment;
 pub mod guest;

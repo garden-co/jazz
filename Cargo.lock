@@ -2234,7 +2234,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jazz-app-support"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
@@ -2271,7 +2271,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-codegen"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "jazz-core",
  "serde",
@@ -2280,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-compression"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "jazz-ruzstd",
  "lz4_flex",
@@ -2289,7 +2289,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-core"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2339,7 +2339,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-db"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "bytes",
  "futures",
@@ -2359,7 +2359,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-e2ee"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "aead-stream",
  "blake2",
@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-e2ee-client"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -2540,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-ffi"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -2560,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-model"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -2633,7 +2633,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-native-transport"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "axum 0.8.9",
  "bytes",
@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-otel"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "jazz-core",
  "jazz-server",
@@ -2678,7 +2678,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-protocol"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "hex",
  "jazz-compression",
@@ -2701,7 +2701,7 @@ version = "0.8.3"
 
 [[package]]
 name = "jazz-server"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
@@ -2774,7 +2774,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-text"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "serde",
  "serde_json",
@@ -2782,7 +2782,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-tools"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
@@ -2818,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-types"
-version = "2.0.0-alpha.67"
+version = "2.0.0-alpha.70"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2843,6 +2843,7 @@ name = "jazz-wasm"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "console_error_panic_hook",
  "ed25519-dalek 2.2.0",
  "futures-channel",

@@ -116,7 +116,7 @@ pub(crate) fn stable_plans(conn: &Storage) -> Result<(), Error> {
     Ok(())
 }
 
-/// A store's file opened and admitted, before a [`Db`] is opened on it:
+/// A store's file opened and format-checked, before a [`Db`] is opened on it:
 /// [`StoreFile::open`] then [`Db::open_file`] is [`Db::open_at`].
 pub struct StoreFile {
     pub(crate) conn: Storage,
@@ -126,7 +126,8 @@ pub struct StoreFile {
 impl StoreFile {
     /// Open (creating) the file at `path` with `options`, and admit its
     /// storage format (see [`crate::format`]); a refused file is left as it
-    /// was.
+    /// was. New stores are stamped transactionally with their first write,
+    /// not by opening this handle.
     pub fn open(path: &Path, options: FileOptions) -> Result<Self, Error> {
         // SQLite cannot open a directory; one the Groove engine wrote gets
         // the typed refusal.
@@ -161,7 +162,7 @@ impl StoreFile {
         }
         // Before the journal mode, which rewrites the header: a refused file
         // is left as it was.
-        crate::format::admit(&conn)?;
+        crate::format::check(&conn)?;
         // `journal_mode` answers with a row, so it is queried, not batched.
         let mode: String = conn
             .query_row(&format!("PRAGMA journal_mode = {journal}"), [], |r| {
@@ -189,7 +190,7 @@ impl StoreFile {
     /// [`Storage::from_backend`]), admitted as a file is, with no path:
     /// its chunks live in the store itself.
     pub fn from_storage(storage: Storage) -> Result<Self, Error> {
-        crate::format::admit(&storage)?;
+        crate::format::check(&storage)?;
         Ok(Self {
             conn: storage,
             path: None,
@@ -199,7 +200,7 @@ impl StoreFile {
     /// A store that lives only as long as what is opened on it.
     pub fn memory() -> Result<Self, Error> {
         let conn = Storage::open_in_memory().map_err(storage)?;
-        crate::format::admit(&conn)?;
+        crate::format::check(&conn)?;
         Ok(Self { conn, path: None })
     }
 
@@ -209,7 +210,7 @@ impl StoreFile {
     pub fn shared_memory(name: &str) -> Result<Self, Error> {
         let conn =
             Storage::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
-        crate::format::admit(&conn)?;
+        crate::format::check(&conn)?;
         Ok(Self { conn, path: None })
     }
 }
@@ -334,12 +335,17 @@ impl HostTables for StoreFile {
     }
 
     fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
-        self.conn
-            .scope("host_write", |conn| crate::catalogue::put(conn, put))
+        self.conn.scope("host_write", |conn| {
+            crate::format::admit(conn)?;
+            crate::catalogue::put(conn, put)
+        })
     }
 
     fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error> {
-        self.conn.scope("host_write", |conn| f(conn))
+        self.conn.scope("host_write", |conn| {
+            crate::format::admit(conn)?;
+            f(conn)
+        })
     }
 }
 
@@ -464,6 +470,7 @@ fn put_many(conn: &Storage, table: HostTable, pairs: &[HostPair]) -> Result<(), 
         return Ok(());
     }
     conn.scope("host_write", |conn| {
+        crate::format::admit(conn)?;
         create(conn, table)?;
         let mut statement = conn
             .prepare_cached(&format!(
@@ -485,6 +492,7 @@ pub(crate) fn put_if_absent(
     value: &[u8],
 ) -> Result<Option<Vec<u8>>, Error> {
     conn.scope("host_write", |conn| {
+        crate::format::admit(conn)?;
         create(conn, table)?;
         let existing: Option<Vec<u8>> = conn
             .prepare_cached(&format!("SELECT v FROM {} WHERE k = ?1", table.sql_name()))

@@ -98,6 +98,10 @@ pub struct UploadStatus {
     pub rejected: u64,
     /// The latest of those refusals.
     pub last_rejection: Option<UploadRefusal>,
+    /// Changes whenever a commit joins or leaves the pending set, so a host
+    /// comparing statuses sees every change of [`Db::pending_upload_rows`],
+    /// also one that leaves the count and the oldest time as they were.
+    pub pending_revision: u64,
 }
 
 /// One refused upload, as [`UploadStatus`] names it.
@@ -445,6 +449,11 @@ impl FrameJoiner {
             frames: 0,
             ceiling,
         }
+    }
+
+    /// Whether the next frame must continue a partially received message.
+    pub fn is_partial(&self) -> bool {
+        self.parts.is_some()
     }
 
     /// The message `frame` completes, if any. A frame over the frame
@@ -1739,6 +1748,11 @@ pub enum SyncMessage {
         added: Vec<(String, [u8; 16])>,
         removed: Vec<(String, [u8; 16])>,
     },
+    /// Complete held set when reopening a live read on its surviving socket.
+    ReplaceHolds {
+        id: u64,
+        rows: Vec<(String, [u8; 16])>,
+    },
 }
 
 /// The catalogue entries a [`SyncMessage::Catalogue`] or
@@ -1931,6 +1945,7 @@ impl SyncMessage {
             Self::AccessLost { .. } => "AccessLost",
             Self::Settled { .. } => "Settled",
             Self::Holds { .. } => "Holds",
+            Self::ReplaceHolds { .. } => "ReplaceHolds",
             Self::Refused { .. } => "Refused",
             Self::Fate { .. } => "Fate",
             Self::CheckAllowed { .. } => "CheckAllowed",
@@ -2127,6 +2142,8 @@ struct PendingQueue {
     /// branch view copies the row from its base branch, so a commit
     /// depends on every branch of the rows it writes.
     by_id: HashMap<(String, RowUuid), BTreeSet<u64>>,
+    /// Bumped whenever a commit joins or leaves the queue.
+    revision: u64,
 }
 
 impl PendingQueue {
@@ -2163,6 +2180,7 @@ impl PendingQueue {
                 .insert(pending.tx);
         }
         self.commits.insert(pending.tx, pending);
+        self.revision += 1;
     }
 
     /// Take back commit `tx`, just pushed.
@@ -2178,6 +2196,7 @@ impl PendingQueue {
     fn remove(&mut self, tx: u64) {
         if let Some(pending) = self.commits.remove(&tx) {
             self.unindex(&pending);
+            self.revision += 1;
         }
     }
 
@@ -2197,6 +2216,19 @@ impl PendingQueue {
                 }
             }
         }
+    }
+
+    /// The ids of `stored` table's rows a pending commit writes, through
+    /// any branch, sorted.
+    fn row_ids(&self, stored: &str) -> Vec<RowUuid> {
+        let mut ids = self
+            .by_id
+            .keys()
+            .filter(|(table, _)| table == stored)
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
     }
 
     /// The pending txs writing any branch of `row`'s row.
@@ -3069,7 +3101,12 @@ impl SettledBy {
 /// An upstream subscription's identity: query, binding, include_deleted.
 type RemoteRead = (Query, BTreeMap<String, Value>, bool, ReadViewSourceSpec);
 
+/// A host preserving a live socket can observe its accepted query registrations.
+pub type RegistrationObserver = Rc<dyn Fn(&SyncMessage)>;
+
 pub(crate) struct Session {
+    registrations: Option<RegistrationObserver>,
+    restoring: bool,
     transport: Box<dyn Transport>,
     identity: AuthorSubject,
     /// This connection's own claims. Two sessions of one identity may hold
@@ -3227,6 +3264,8 @@ impl Session {
             transport,
             identity,
             claims: None,
+            registrations: None,
+            restoring: false,
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
@@ -3335,6 +3374,7 @@ impl CompositeTables {
 /// watched that no other one covers.
 #[derive(Default)]
 struct Watches {
+    replace_openings: bool,
     holders: HashMap<u64, u32>,
     by_owner: HashMap<u64, HashSet<u64>>,
     /// The row each row watch names (stored table and id): what a
@@ -3437,10 +3477,17 @@ impl Watches {
                 .filter_map(|key| self.names.get(key).map(wire))
                 .collect();
             added.sort_unstable();
-            out.push(SyncMessage::Holds {
-                id: owner,
-                added,
-                removed: Vec::new(),
+            out.push(if self.replace_openings {
+                SyncMessage::ReplaceHolds {
+                    id: owner,
+                    rows: added,
+                }
+            } else {
+                SyncMessage::Holds {
+                    id: owner,
+                    added,
+                    removed: Vec::new(),
+                }
             });
         }
         let mut changed: Vec<(u64, HashMap<u64, (bool, RowName)>)> = self.changes.drain().collect();
@@ -6591,13 +6638,12 @@ impl Inner {
         seq: u64,
         accepted_at: Option<u64>,
         as_written: &[AsWritten],
-    ) -> Result<(Vec<Image>, Vec<WholeRow>, u64), Error> {
+    ) -> Result<(Vec<Image>, Vec<WholeRow>), Error> {
         let client = self.client.as_ref().expect("client");
         let mut images = Vec::new();
         let mut whole = Vec::new();
-        let mut mismatched = 0;
         let Some(pending) = client.pending.get(tx) else {
-            return Ok((images, whole, mismatched));
+            return Ok((images, whole));
         };
         for written in as_written {
             let row = pending
@@ -6628,7 +6674,6 @@ impl Inner {
                         )));
                     };
                     let same = echo_digest(&entry.image) == written.digest;
-                    mismatched += u64::from(!same);
                     same.then_some(entry)
                 }
                 None => None,
@@ -6648,7 +6693,7 @@ impl Inner {
                 None => whole.push((table.clone(), *row.0.as_bytes(), key.clone())),
             }
         }
-        Ok((images, whole, mismatched))
+        Ok((images, whole))
     }
 
     /// The `$createdAt` of a row's settled version beneath pending writes:
@@ -8863,6 +8908,11 @@ impl Client {
 }
 
 impl Client {
+    /// The pending queue's revision (see [`UploadStatus::pending_revision`]).
+    pub(crate) fn pending_revision(&self) -> u64 {
+        self.pending.revision
+    }
+
     /// Why this store refused its current link (see
     /// [`Inner::refuse_upstream`]), if it did: nothing answers a remote
     /// read until a new link does.
@@ -9278,8 +9328,7 @@ impl Db {
         self.inner.borrow().client.is_some()
     }
 
-    /// Record a local commit's upload (client only); inside an open
-    /// transaction the ops join it. It reads and writes the store, so
+    /// Record a local commit's upload (client only). It reads and writes the store, so
     /// it runs inside the commit's SQLite transaction: an error leaves the
     /// replica's sync state as it was, and the caller rolls the commit back.
     /// `ops` name tables and columns as the schema the write ran under
@@ -9294,23 +9343,14 @@ impl Db {
         relayed: Option<Relayed>,
     ) -> Result<(), Error> {
         let ops = {
-            let mut inner = self.inner.borrow_mut();
+            let inner = self.inner.borrow_mut();
             if inner.client.is_none() {
                 return Ok(());
             }
             let schema = inner.schema.clone();
-            let ops = ops
-                .into_iter()
+            ops.into_iter()
                 .map(|op| inner.stored_op(op, &schema))
-                .collect::<Result<Vec<_>, _>>()?;
-            if inner.tx.is_some() {
-                // As in `record_upload_under_stored_view`: no session write
-                // joins a callback transaction.
-                debug_assert!(!ops.iter().any(StagedOp::is_session));
-                inner.capture.extend(ops);
-                return Ok(());
-            }
-            ops
+                .collect::<Result<Vec<_>, _>>()?
         };
         self.record_stored_upload(ops, seq, kind, relayed, None)
     }
@@ -9349,17 +9389,6 @@ impl Db {
         claims: Option<BTreeMap<String, Value>>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
-        if inner.tx.is_some() {
-            // No local write joins a callback transaction as a session:
-            // `Db::write_op` refuses a write as another identity, and a
-            // transaction handle's commit is refused while it is open. So
-            // no session claims travel with `capture`. (A relay's apply of a
-            // downstream upload during `tick` can still land here:
-            // jazz#6038.)
-            debug_assert!(!ops.iter().any(StagedOp::is_session) && claims.is_none());
-            inner.capture.extend(ops);
-            return Ok(());
-        }
         // A read-only serializable commit still goes up: the authority
         // validates its reads.
         if (ops.is_empty() && !kind.validates_reads()) || seq != inner.seq {
@@ -10233,6 +10262,21 @@ impl Db {
             .map_or(0, |client| client.pending.len())
     }
 
+    /// The rows of `table` written by a local commit that awaits the
+    /// upstream's verdict, through any branch: committed here (recovered
+    /// ones included) and not yet accepted or refused. In row order. Empty
+    /// on a database that has never had an upstream; an error for a table
+    /// the schema does not have.
+    pub fn pending_upload_rows(&self, table: &str) -> Result<Vec<RowUuid>, Error> {
+        // Resolved under this handle's own schema, not whichever view ran last.
+        let inner = self.inner();
+        let stored = inner.schema.stored_table(table)?;
+        Ok(inner
+            .client
+            .as_ref()
+            .map_or_else(Vec::new, |client| client.pending.row_ids(stored)))
+    }
+
     /// The ids the pending commits upload under, sorted: a relayed commit
     /// uploads under its session's id, so a host holding both a session and
     /// the store that relays it counts each write once by this id.
@@ -10267,6 +10311,11 @@ impl Db {
             oldest_pending_at,
             rejected: inner.refusals.count,
             last_rejection: inner.refusals.last.clone(),
+            pending_revision: inner.pending_revision_base
+                + inner
+                    .client
+                    .as_ref()
+                    .map_or(0, |client| client.pending.revision),
         }
     }
 
@@ -10899,7 +10948,7 @@ impl Db {
                                 as_written,
                                 ..
                             } => {
-                                let (images, whole, mismatched) = inner.as_written_images(
+                                let (images, whole) = inner.as_written_images(
                                     tx,
                                     through,
                                     *accepted_at,
@@ -10910,7 +10959,6 @@ impl Db {
                                 // and the commit stays pending until they
                                 // arrive: its writes never drop out here.
                                 if !whole.is_empty() && !arrived {
-                                    inner.as_written_mismatches += mismatched;
                                     for row in &whole {
                                         inner.ask_whole(row.clone(), through)?;
                                     }
@@ -11086,7 +11134,14 @@ impl Db {
                             }
                         }
                     }
-                    SyncMessage::Holds { id, added, removed } => {
+                    message @ (SyncMessage::Holds { .. } | SyncMessage::ReplaceHolds { .. }) => {
+                        let (id, added, removed, replace) = match message {
+                            SyncMessage::Holds { id, added, removed } => {
+                                (id, added, removed, false)
+                            }
+                            SyncMessage::ReplaceHolds { id, rows } => (id, rows, Vec::new(), true),
+                            _ => unreachable!(),
+                        };
                         let client = inner.client.as_mut().expect("client");
                         if let Some(live) =
                             client
@@ -11106,7 +11161,7 @@ impl Db {
                             // all it holds: what it held on the last one
                             // and no longer does is judged again once this
                             // batch applied (see `Db::client_apply`).
-                            let before = if first {
+                            let before = if first || replace {
                                 let before = std::mem::take(&mut live.holds);
                                 for (table, rows) in &before {
                                     live.released
@@ -12619,6 +12674,65 @@ impl Db {
         Ok(SubscriberId { slot, generation })
     }
 
+    /// Observe successful joins, live reads and unsubscribes for this exact connection.
+    pub fn observe_subscriber_registrations(
+        &self,
+        subscriber: SubscriberId,
+        observer: RegistrationObserver,
+        restored: bool,
+    ) {
+        if let Some(session) = self
+            .inner
+            .borrow_mut()
+            .sessions
+            .get_mut(subscriber.slot)
+            .filter(|s| s.open && s.generation == subscriber.generation)
+        {
+            session.registrations = Some(observer);
+            session.watch.replace_openings = restored;
+            session.restoring = restored;
+        }
+    }
+
+    /// Reads processed after the restore tick must open eagerly.
+    pub fn finish_subscriber_restore(&self, subscriber: SubscriberId) {
+        if let Some(session) = self
+            .inner
+            .borrow_mut()
+            .sessions
+            .get_mut(subscriber.slot)
+            .filter(|s| s.open && s.generation == subscriber.generation)
+        {
+            session.restoring = false;
+        }
+    }
+
+    /// When a host without periodic idle ticks should continue answering chunk pulls.
+    pub fn next_chunk_pull_tick_ms(&self) -> Option<u32> {
+        let inner = self.inner.borrow();
+        if inner
+            .sessions
+            .iter()
+            .any(|s| s.open && !s.deferred_pulls.is_empty())
+        {
+            return Some(0);
+        }
+        let at = inner.store_retry.not_before?;
+        if !inner
+            .sessions
+            .iter()
+            .any(|s| s.open && !s.store_failed_pulls.is_empty())
+        {
+            return None;
+        }
+        let delay = at.saturating_sub(inner.now_ms());
+        Some(if delay > STORE_RETRY_MS.1 {
+            0
+        } else {
+            delay.max(0) as u32
+        })
+    }
+
     /// The handle of the session in `slot`.
     fn subscriber_at(&self, slot: usize) -> SubscriberId {
         SubscriberId {
@@ -12649,15 +12763,6 @@ impl Db {
             }
             inner.forget_relayed(subscriber.slot);
         }
-    }
-
-    /// Rows the authority named as written for this replica's own commits
-    /// that were not this replica's image of them, and were asked for
-    /// whole instead (for tests and metrics): each is a case the
-    /// authority's inference that its writer holds the row missed, at the
-    /// cost of one round trip (SPEC 8 §8.3).
-    pub fn as_written_mismatches(&self) -> u64 {
-        self.inner.borrow().as_written_mismatches
     }
 
     /// Pending commits replayed over restored baselines since this store
@@ -12716,26 +12821,6 @@ impl Db {
             .iter()
             .filter(|session| session.open)
             .count()
-    }
-
-    /// Seed a row as settled server state, written by `made_by`.
-    pub fn seed_settled_mergeable_for_bootstrap(
-        &self,
-        table: &str,
-        row: RowUuid,
-        made_by: AuthorSubject,
-        cells: BTreeMap<String, Value>,
-    ) -> Result<u64, Error> {
-        let handle = block_on(self.insert(
-            table,
-            cells,
-            InsertOptions {
-                row_id: Some(row),
-                identity: WriteIdentity::Attribution(made_by),
-                ..Default::default()
-            },
-        ))?;
-        Ok(handle.tx)
     }
 
     /// Sessions the server ended since the last call, with why: for what
@@ -12911,8 +12996,24 @@ impl Db {
             // needs is served again once they arrive.
             let again = (fetch.is_none() && self.inner.borrow().chunks.store().is_some())
                 .then(|| message.clone());
+            let registration = match &message {
+                SyncMessage::Join { .. }
+                | SyncMessage::Read {
+                    span: ReadSpan::Live,
+                    ..
+                }
+                | SyncMessage::Unsubscribe { .. } => self.inner.borrow().sessions[index]
+                    .registrations
+                    .as_ref()
+                    .map(|observer| (observer.clone(), message.clone())),
+                _ => None,
+            };
             match (self.serve(index, message), read) {
-                (Ok(()), _) => {}
+                (Ok(()), _) => {
+                    if let Some((observe, message)) = registration {
+                        observe(&message);
+                    }
+                }
                 (Err(error), _)
                     if crate::large::is_missing(&error)
                         && again.is_some()
@@ -14385,6 +14486,7 @@ impl Db {
                 wait.read,
                 SettledBy::Always(authority),
                 fanout::Backlog::Replica,
+                false,
             )?;
             let session = &mut inner.sessions[index];
             if let Some((_, _, windowed, _)) = session.subs.remove(&id) {
@@ -14563,6 +14665,8 @@ impl Db {
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
                 let authority = inner.authority;
+                let dormant =
+                    inner.sessions[index].restoring && upstream.is_none() && since.is_none();
                 let subscribed = inner.subscribe_member(
                     &prepared,
                     policy,
@@ -14578,6 +14682,7 @@ impl Db {
                         None => SettledBy::Always(authority),
                     },
                     fanout::Backlog::Replica,
+                    dormant,
                 );
                 if attached.is_some() {
                     match &subscribed {

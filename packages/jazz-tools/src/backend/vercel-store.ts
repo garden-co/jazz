@@ -28,6 +28,7 @@ import type {
   BrowserWebSocket,
   WebSocketConstructor,
 } from "../runtime/native-runtime/websocket.js";
+import { backendNative } from "./backend-native.js";
 import { optionalPeerImportError } from "./optional-peer.js";
 import { logStoreOpened } from "./store-log.js";
 
@@ -644,7 +645,7 @@ async function functionOidcToken(): Promise<string> {
   let failure: unknown;
   try {
     // A literal inside `try`, like `importSandboxSdk`'s.
-    const { getVercelOidcToken } = (await import(/* @vite-ignore */ "@vercel/functions/oidc")) as {
+    const { getVercelOidcToken } = (await backendNative().importPeer("@vercel/functions/oidc")) as {
       getVercelOidcToken(): Promise<string>;
     };
     fetched = await getVercelOidcToken();
@@ -986,7 +987,7 @@ export interface OpenVercelCoreOptions {
  */
 async function importSandboxSdk(): Promise<SandboxSdk> {
   try {
-    return (await import(/* @vite-ignore */ "@vercel/sandbox")) as unknown as SandboxSdk;
+    return (await backendNative().importPeer("@vercel/sandbox")) as unknown as SandboxSdk;
   } catch (error) {
     throw optionalPeerImportError("vercel()", "@vercel/sandbox", error);
   }
@@ -1339,6 +1340,10 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
    * still be out of reach for connections (Vercel's router stopped passing
    * them to its session): waking it then finds it healthy at the same
    * address, so only a fresh session gets connections through again.
+   *
+   * Only connections made to a session count, and only against that
+   * session: one that was still waiting for a wake never tried any, and a
+   * wake that brings up a new session starts its count afresh (#6028).
    */
   let unreached: { since: number; count: number } | undefined;
   const connectionUnreached = () => {
@@ -1373,8 +1378,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           unreached = undefined;
           await stopSession(live.sbx);
         }
+        const before = live?.sbx.currentSession().startedAt.getTime();
         const { sbx, base } = await wake();
         suspect = false;
+        // Connections that failed to reach an earlier session say nothing
+        // about this one: stopping it for them would throw away the wake.
+        if (sbx.currentSession().startedAt.getTime() !== before) unreached = undefined;
         const coreAppId =
           live?.base === base
             ? live.appId
@@ -1586,7 +1595,8 @@ function resendable(request: Request, given?: unknown): boolean {
  * `hooks` hears how each connection went: `dropped` for a connection to the
  * core that closed abnormally (the core may be down), `unreached` once a
  * connection ends without ever having opened (retries spent, or the client
- * gave up waiting), and `reached` once one opens.
+ * gave up waiting) after a connection to the core was made (not while it
+ * only waited for the wake), and `reached` once one opens.
  */
 function wakingWebSocket(
   resolveOrigin: () => Promise<string>,
@@ -1600,6 +1610,8 @@ function wakingWebSocket(
     private readonly path: string;
     private readonly deadline = performance.now() + WAKE_DEADLINE_MS;
     private pause = 100;
+    /** Whether a connection to the core was made, not just waited for. */
+    private tried = false;
 
     constructor(url: string) {
       this.path = new URL(url).pathname + new URL(url).search;
@@ -1614,6 +1626,7 @@ function wakingWebSocket(
           const socket = new Socket(`${origin.replace(/^http/, "ws")}${this.path}`) as WebSocket;
           socket.binaryType = "arraybuffer";
           this.socket = socket;
+          this.tried = true;
           socket.addEventListener("open", () => {
             if (this.socket !== socket || this.readyState !== 0) return;
             this.readyState = 1;
@@ -1667,8 +1680,9 @@ function wakingWebSocket(
       if (this.readyState >= 2) return;
       this.socket?.close();
       // A client gives up on a connection that doesn't open in time (its
-      // handshake timeout): that one never reached the core either.
-      this.finish(1000, "client closed", this.readyState === 0);
+      // handshake timeout): that one never reached the core either, if it
+      // tried. One given up while the core was still waking never did.
+      this.finish(1000, "client closed", this.readyState === 0 && this.tried);
     }
 
     private emit(type: string, event?: unknown): void {

@@ -3,6 +3,7 @@
 // answers its backend: run after `build:durable-object`, before publishing,
 // for breaks only a release build has.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -10,6 +11,19 @@ import { Miniflare } from "miniflare";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const SECRET = "s".repeat(40);
+
+test("the release Durable Object entry is the -Oz build", () => {
+  // Merge-group CI tests an -O1 host; what ships (and is smoke-tested here)
+  // must be the default -Oz build.
+  const build = JSON.parse(readFileSync(join(here, "../../durable-object/pkg/build.json"), "utf8"));
+  assert.deepEqual(build, { wasmOptLevel: "Oz" });
+});
+
+test("the release backend entry is the -Oz build", () => {
+  // The same for the backend build a backend's `createJazz` runs on.
+  const build = JSON.parse(readFileSync(join(here, "../../backend/pkg/build.json"), "utf8"));
+  assert.deepEqual(build, { wasmOptLevel: "Oz" });
+});
 
 test("the release Durable Object entry starts and admits its backend", async () => {
   const mf = new Miniflare({

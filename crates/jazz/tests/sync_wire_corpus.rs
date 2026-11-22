@@ -51,6 +51,21 @@ use common::{compile_schema, read_and_allow_all_writes, session_eq};
 const CORPUS: &str = "sqlite_sync_wire_v1.json";
 const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 
+/// Pin the negotiated v1 extension that replaces all of Alice's holds for read 7.
+#[test]
+fn replace_holds_v1_bytes() {
+    let message = SyncMessage::ReplaceHolds {
+        id: 7,
+        rows: vec![("notes".into(), [1; 16])],
+    };
+    let bytes = [b"\x15\x07\x01\x05notes".as_slice(), &[1; 16]].concat();
+    assert_eq!(encode_frames(message).unwrap(), [bytes.clone()]);
+    assert!(matches!(
+        jazz::db::decode_message(&bytes),
+        Ok(SyncMessage::ReplaceHolds { id: 7, .. })
+    ));
+}
+
 /// Every `SyncMessage` variant, in declaration order. A message too
 /// large for one frame travels in parts below the message layer
 /// (binding_host's frame-split test covers it).

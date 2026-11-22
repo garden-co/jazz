@@ -1,5 +1,11 @@
 # jazz-rn-ios
 
+## 2.0.0-alpha.70
+
+## 2.0.0-alpha.69
+
+## 2.0.0-alpha.68
+
 ## 2.0.0-alpha.67
 
 ## 2.0.0-alpha.66

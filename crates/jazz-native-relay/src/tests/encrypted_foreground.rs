@@ -570,11 +570,11 @@ fn ready_expires_while_owner_is_busy(relay: &NativeRelay, execute: impl Fn(Reque
 fn encrypted_foreground_postcard_bytes() {
     assert_eq!(
         postcard::to_allocvec(&Request::EncryptionOpen).unwrap(),
-        [41]
+        [42]
     );
     assert_eq!(
         postcard::to_allocvec(&Request::TakeStoreRequests).unwrap(),
-        [42]
+        [43]
     );
     assert_eq!(
         postcard::to_allocvec(&Request::ReplyStore {
@@ -583,7 +583,7 @@ fn encrypted_foreground_postcard_bytes() {
             payload: "null".to_owned()
         })
         .unwrap(),
-        b"\x2b\x012\x01\x04null"
+        b"\x2c\x012\x01\x04null"
     );
     assert_eq!(
         postcard::to_allocvec(&Request::EncryptionCall {
@@ -591,36 +591,36 @@ fn encrypted_foreground_postcard_bytes() {
             args_json: "{}".to_owned()
         })
         .unwrap(),
-        b"\x2c\x05state\x02{}"
+        b"\x2d\x05state\x02{}"
     );
     assert_eq!(
         postcard::to_allocvec(&Request::TakeEncryptionReports).unwrap(),
-        [45]
+        [46]
     );
     assert_eq!(
         postcard::to_allocvec(&Response::EncryptionOpen { ready: false }).unwrap(),
-        [32, 0]
+        [33, 0]
     );
     assert_eq!(
         postcard::to_allocvec(&Response::StoreRequests {
             requests: vec!["one".to_owned(), "two".to_owned()]
         })
         .unwrap(),
-        b"\x21\x02\x03one\x03two"
+        b"\x22\x02\x03one\x03two"
     );
     assert_eq!(
         postcard::to_allocvec(&Response::StoreReply { accepted: true }).unwrap(),
-        [34, 1]
+        [35, 1]
     );
     assert_eq!(
         postcard::to_allocvec(&Response::EncryptionResult {
             json: "null".to_owned()
         })
         .unwrap(),
-        b"\x23\x04null"
+        b"\x24\x04null"
     );
     assert_eq!(
         postcard::to_allocvec(&Response::EncryptionReports { reports: vec![] }).unwrap(),
-        [36, 0]
+        [37, 0]
     );
 }

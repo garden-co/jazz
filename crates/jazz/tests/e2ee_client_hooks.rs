@@ -225,6 +225,8 @@ struct Fake {
     /// Built from an encrypted app's declarations even when they name no
     /// table (a version that keeps the system tables and declares nothing).
     encrypted_app: Cell<bool>,
+    /// A project to stage as the next write's companion instead of a space root.
+    companion_project: RefCell<Option<(RowUuid, String)>>,
     /// The companion rows core said it dropped, call by call.
     dropped: RefCell<Vec<Vec<(String, RowUuid)>>>,
 }
@@ -333,7 +335,13 @@ impl E2eeHooks for Fake {
                 space: address(space),
             });
         }
-        if self.rooted.borrow_mut().insert(space) {
+        if let Some((id, name)) = self.companion_project.take() {
+            write.companion_rows.push((
+                "projects".to_owned(),
+                id,
+                BTreeMap::from([("name".to_owned(), Value::String(name))]),
+            ));
+        } else if self.rooted.borrow_mut().insert(space) {
             write.companion_rows.push((
                 "space_roots".to_owned(),
                 RowUuid(uuid::Uuid::new_v4()),
@@ -724,7 +732,7 @@ fn stored_bytes(path: &Path) -> Vec<u8> {
 }
 
 /// Contract: every way alice writes an encrypted column (a write, a
-/// callback transaction, a staged mergeable handle, a handle transaction)
+/// scoped mergeable transaction, a staged mergeable handle, a handle transaction)
 /// stores and uploads only sealed cells and tokens, and her equality query
 /// reaches the server as a token filter. She reads plaintext back.
 ///
@@ -755,14 +763,16 @@ fn plaintext_reaches_neither_storage_nor_the_wire() {
         Default::default(),
     ))
     .unwrap();
-    block_on(alice.transaction(async |tx| {
+    block_on(async {
+        let tx = alice.mergeable_tx().await?;
         tx.insert(
             "notes",
             note(space, &format!("{SECRET}-callback")),
             Default::default(),
         )
-        .await
-    }))
+        .await?;
+        tx.commit().await
+    })
     .unwrap();
     let handle = block_on(alice.mergeable_tx()).unwrap();
     block_on(handle.insert(
@@ -908,9 +918,59 @@ fn a_handle_transaction_refuses_on_the_staging_call() {
     assert_eq!(roots[0].cell("space"), Some(Value::Uuid(first)));
 }
 
+/// Alice stages a large project, then retries a note whose first attempt failed
+/// after staging a large companion. Only the earlier project and the retry
+/// contribute to the batch. Counting checks and chunk edits also detects stale
+/// staging state for discarded rows that never appears in a query result.
+#[test]
+fn retry_after_failed_companion_stage_keeps_only_its_own_checks_and_chunks() {
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    let id = OpenTransactionId::new();
+    block_on(alice.begin_mergeable(id)).unwrap();
+    let tx = alice.tx_ref(id);
+    let opts = |row| InsertOptions {
+        row_id: Some(row),
+        identity: jazz::db::WriteIdentity::Session(AuthorSubject::for_test_bytes([1; 16])),
+        ..Default::default()
+    };
+    let original = RowUuid(space);
+    let discarded = RowUuid(uuid::Uuid::new_v4());
+    let note_id = RowUuid(uuid::Uuid::new_v4());
+    let large = "project".repeat(16_384);
+    block_on(tx.insert(
+        "projects",
+        BTreeMap::from([("name".into(), text(&large))]),
+        opts(original),
+    ))
+    .unwrap();
+    let counts = || alice.staged_checks_and_chunks_for_test(id);
+    assert_eq!(counts(), (1, 1));
+
+    hooks
+        .companion_project
+        .replace(Some((discarded, "discarded".repeat(16_384))));
+    let mut invalid = note(space, SECRET);
+    invalid.insert("title".into(), Value::I32(1));
+    block_on(tx.insert("notes", invalid, opts(note_id))).unwrap_err();
+    let after_failure = counts();
+
+    block_on(tx.insert("notes", note(space, SECRET), opts(note_id))).unwrap();
+    let after_retry = counts();
+    block_on(alice.commit_mergeable_handle(id)).unwrap();
+    assert_eq!((after_failure, after_retry), ((1, 1), (3, 1)));
+    let projects = all(&alice, "projects");
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].row_uuid(), original);
+    assert_eq!(projects[0].cell("name"), Some(text(&large)));
+    assert_eq!(bodies(&all(&alice, "notes")), [text(SECRET)]);
+}
+
 /// Contract: the hooks hear of each companion row core will not store, once:
 /// a direct or staged write that fails after sealing, a handle transaction
-/// abandoned or failing to commit, a callback transaction rolled back. A
+/// abandoned or failing to commit, a scoped mergeable transaction dropped. A
 /// write or transaction that commits its rows drops none.
 #[test]
 fn the_hooks_hear_of_companion_rows_that_are_not_stored() {
@@ -969,18 +1029,17 @@ fn the_hooks_hear_of_companion_rows_that_are_not_stored() {
     alice.abandon_transaction_handle(id).unwrap();
     assert_eq!(calls(), 3);
 
-    // A callback transaction: committed, then rolled back.
-    block_on(alice.transaction(async |tx| {
-        tx.insert("notes", note(fresh(), SECRET), Default::default())
-            .await
-    }))
-    .unwrap();
+    // A scoped transaction commits explicitly or abandons its writes on drop.
+    let tx = block_on(alice.mergeable_tx()).unwrap();
+    block_on(tx.insert("notes", note(fresh(), SECRET), Default::default())).unwrap();
+    block_on(tx.commit()).unwrap();
     assert_eq!(calls(), 3);
-    let rolled_back: Result<((), _), _> = block_on(alice.transaction(async |tx| {
+    let rolled_back: Result<(), _> = block_on(async {
+        let tx = alice.mergeable_tx().await?;
         tx.insert("notes", note(fresh(), SECRET), Default::default())
             .await?;
         Err(jazz::db::Error::new(ErrorCode::Query, "changed my mind"))
-    }));
+    });
     assert!(rolled_back.is_err());
     assert_eq!(calls(), 4);
     assert_eq!(all(&alice, "space_roots").len(), 3, "the committed ones");
@@ -1089,8 +1148,9 @@ fn strict_reads_fail_rather_than_leave_rows_out() {
             space: address(lost)
         })
     );
-    let in_callback = block_on(alice.transaction(async |tx| tx.all_prepared(&query).await));
-    assert!(in_callback.is_err());
+    let tx = block_on(alice.mergeable_tx()).unwrap();
+    assert!(block_on(tx.all_prepared(&query)).is_err());
+    drop(tx);
     let id = OpenTransactionId::new();
     block_on(alice.begin_mergeable(id)).unwrap();
     assert!(block_on(alice.tx_ref(id).all_prepared(&query)).is_err());

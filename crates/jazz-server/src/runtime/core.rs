@@ -73,8 +73,63 @@ impl ServerCore {
         any_stored_catalogue: bool,
         app: Option<String>,
     ) -> Result<Self, String> {
+        Self::open_with_chunk_store(schema, file, any_stored_catalogue, app, None)
+    }
+
+    /// [`Self::open`], with settled large-value bytes moving out of the
+    /// store's file to `chunk_store`, whose I/O the host runs
+    /// ([`jazz::db::DbConfig::with_host_chunk_io`]): it takes each batch
+    /// with [`Db::take_chunk_io`] (and the reads waiting beside it with
+    /// [`Db::take_chunk_fetches`]), runs it, hands the outcome back and
+    /// ticks. The engine never calls `chunk_store` itself for a batch; a
+    /// read outside a session that needs an offloaded node asks it inline,
+    /// so a host whose store cannot answer synchronously refuses that read.
+    /// A store that holds large values inline moves them out on its first
+    /// open with a chunk store; one that has moved them is refused without
+    /// one.
+    pub fn open_with_chunk_store(
+        schema: JazzSchema,
+        file: StoreFile,
+        any_stored_catalogue: bool,
+        app: Option<String>,
+        chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
+    ) -> Result<Self, String> {
+        Self::open_on(schema, file, any_stored_catalogue, app, chunk_store, None)
+            .map_err(String::from)
+    }
+
+    /// Initialize and publish a first deployment in the real store's scope.
+    /// No core is returned until initialization and catalogue admission commit.
+    pub fn open_deployment(
+        schema: JazzSchema,
+        file: StoreFile,
+        app: Option<String>,
+        chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
+        change: CatalogueChange,
+    ) -> Result<Self, CatalogueApplyError> {
+        Self::open_on(schema, file, true, app, chunk_store, Some(change))
+    }
+
+    fn open_on(
+        schema: JazzSchema,
+        file: StoreFile,
+        any_stored_catalogue: bool,
+        app: Option<String>,
+        chunk_store: Option<Arc<dyn jazz::chunk_store::ChunkStore>>,
+        initial: Option<CatalogueChange>,
+    ) -> Result<Self, CatalogueApplyError> {
         Ok(Self {
-            owner: Owner::open_on(schema, file, any_stored_catalogue, app, |config| config)?,
+            owner: Owner::open_on(
+                schema,
+                file,
+                any_stored_catalogue,
+                app,
+                initial.map(|change| (change, Vec::new())),
+                |config| match chunk_store {
+                    Some(store) => config.with_chunk_store(store).with_host_chunk_io(),
+                    None => config,
+                },
+            )?,
             next_session: 1,
             edges: HashMap::new(),
             thin_ingress: Arc::new(tokio::sync::Semaphore::new(THIN_INGRESS_SERVER_BUDGET)),
@@ -140,6 +195,63 @@ impl ServerCore {
             .owner
             .open_session(session, served_as, claims, bundle, output, egress);
         self.settle(session, opened)
+    }
+
+    /// Observe accepted query registrations on a sync session whose host can hibernate.
+    pub fn observe_registrations(
+        &self,
+        session: ServerSession,
+        observer: Rc<dyn Fn(&SyncMessage)>,
+        restored: bool,
+    ) {
+        if let Some(state) = self.owner.sessions.get(&session) {
+            self.owner
+                .db
+                .observe_subscriber_registrations(state.subscriber, observer, restored);
+        }
+    }
+
+    /// End the window for registering saved reads without opening them.
+    pub fn finish_session_restore(&self, session: ServerSession) {
+        if let Some(state) = self.owner.sessions.get(&session) {
+            self.owner.db.finish_subscriber_restore(state.subscriber);
+        }
+    }
+
+    pub fn has_partial_frame(&self, session: ServerSession) -> bool {
+        self.owner
+            .sessions
+            .get(&session)
+            .is_some_and(|state| state.joiner.is_partial())
+    }
+
+    /// Notify a hibernating host when the schema or accepted live reads change.
+    pub fn observe_thin_registrations(
+        &mut self,
+        session: ServerSession,
+        observe: super::ThinRegistrationObserver,
+    ) {
+        if let Some(thin) = self.owner.thin.get_mut(&session) {
+            thin.observer = Some(observe);
+        }
+    }
+
+    /// Reinstall saved thin watches under the newly admitted session.
+    pub fn restore_thin(
+        &mut self,
+        session: ServerSession,
+        version: Option<jazz::ids::SchemaVersionId>,
+        reads: Vec<jazz::thin::ThinRequest>,
+    ) -> Result<(), String> {
+        self.owner.restore_thin(session, version, reads)
+    }
+
+    /// Whether sleeping now would discard an operation the peer still expects to finish.
+    pub fn unfinished_thin_work(&self, session: ServerSession) -> bool {
+        self.owner
+            .thin
+            .get(&session)
+            .is_some_and(|thin| thin.has_unfinished_work())
     }
 
     /// Open a thin-client session for an admitted connection.
@@ -381,6 +493,89 @@ mod tests {
     fn core() -> ServerCore {
         let schema = JazzSchema::new(&source()).unwrap();
         ServerCore::open(schema, StoreFile::memory().unwrap(), false, None).unwrap()
+    }
+
+    /// Alice initializes a managed store, then Bob's table blocks a later
+    /// admission. Initialization and catalogue rows roll back together; Alice
+    /// can retry with another genesis and keep Bob's data.
+    /// alice -> initialize notes -> admit tasks -> collision -> rollback
+    #[test]
+    fn first_deployment_on_managed_storage_rolls_back_and_retries() {
+        use jazz::storage::{Storage, managed_emulation::EmulatedObjectSql};
+        let backend = EmulatedObjectSql::open_in_memory().unwrap();
+        let observer = Storage::from_backend(backend.clone());
+        observer
+            .execute_batch("CREATE TABLE tasks (v TEXT); INSERT INTO tasks VALUES ('bob')")
+            .unwrap();
+        let file = || StoreFile::from_storage(Storage::from_backend(backend.clone())).unwrap();
+        let initial_file = file();
+        let before: i64 = observer
+            .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+            .unwrap();
+        let source = source();
+        let later = SchemaBuilder::new()
+            .table(TableSchema::builder("tasks").column("body", ColumnType::Text))
+            .build();
+        let change = CatalogueChange {
+            put: jazz::catalogue::CataloguePut {
+                schemas: vec![(source.clone(), 1)],
+                ..Default::default()
+            },
+            admit: vec![(JazzSchema::new(&later).unwrap(), vec![])],
+        };
+        let result = ServerCore::open_deployment(
+            JazzSchema::new(&source).unwrap(),
+            initial_file,
+            None,
+            None,
+            change,
+        );
+        assert!(matches!(result, Err(CatalogueApplyError::Rejected(_))));
+        assert_eq!(
+            observer
+                .query_row("SELECT count(*) FROM sqlite_master", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            observer
+                .query_row("SELECT v FROM tasks", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "bob"
+        );
+        let retry = SchemaBuilder::new()
+            .table(TableSchema::builder("messages").column("body", ColumnType::Text))
+            .build();
+        let schema = JazzSchema::new(&retry).unwrap();
+        let change = CatalogueChange {
+            put: jazz::catalogue::CataloguePut {
+                schemas: vec![(retry.clone(), 2)],
+                ..Default::default()
+            },
+            admit: vec![(schema.clone(), vec![])],
+        };
+        let core = ServerCore::open_deployment(schema.clone(), file(), None, None, change).unwrap();
+        assert!(
+            core.db()
+                .catalogue()
+                .unwrap()
+                .schemas
+                .iter()
+                .any(|row| row.schema == retry)
+        );
+        core.close();
+        let reopened = ServerCore::open(schema, file(), true, None).unwrap();
+        assert!(
+            reopened
+                .db()
+                .catalogue()
+                .unwrap()
+                .schemas
+                .iter()
+                .any(|row| row.schema == retry)
+        );
+        reopened.close();
     }
 
     fn body(bytes: Vec<u8>) -> BTreeMap<String, Value> {

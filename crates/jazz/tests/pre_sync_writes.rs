@@ -529,24 +529,32 @@ fn a_transaction_uploads_under_the_version_its_writes_name() {
     block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
     let ahead = block_on(client.register_schema_view(v2())).unwrap();
 
-    let mixed = block_on(client.transaction(async |tx| {
-        tx.insert("notes", cells(&[("title", "v1")]), row(4))
-            .await?;
-        ahead
-            .insert("notes", cells(&[("title", "v2"), ("tag", "new")]), row(5))
-            .await?;
-        Ok(())
-    }));
-    mixed.unwrap();
+    let mixed = OpenTransactionId::new();
+    block_on(client.begin_mergeable(mixed)).unwrap();
+    block_on(
+        client
+            .tx_ref(mixed)
+            .insert("notes", cells(&[("title", "v1")]), row(4)),
+    )
+    .unwrap();
+    block_on(ahead.tx_ref(mixed).insert(
+        "notes",
+        cells(&[("title", "v2"), ("tag", "new")]),
+        row(5),
+    ))
+    .unwrap();
+    block_on(client.commit_mergeable_handle(mixed)).unwrap();
     assert_eq!(ids(&client), vec![4, 5]);
 
-    block_on(client.transaction(async |_| {
-        ahead
-            .insert("notes", cells(&[("title", "v2"), ("tag", "new")]), row(6))
-            .await?;
-        Ok(())
-    }))
+    let view_only = OpenTransactionId::new();
+    block_on(client.begin_mergeable(view_only)).unwrap();
+    block_on(ahead.tx_ref(view_only).insert(
+        "notes",
+        cells(&[("title", "v2"), ("tag", "new")]),
+        row(6),
+    ))
     .unwrap();
+    block_on(client.commit_mergeable_handle(view_only)).unwrap();
     // The server is redeployed at v2; a new transport replaces the old one.
     let server = common::reinstall(server, &server_path, config(v2(), 0), vec![lens()]);
     let _link = link(&client, &server);

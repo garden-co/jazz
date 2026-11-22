@@ -1,10 +1,12 @@
 /**
- * Builds the end-to-end encryption runtime of an app on Node (the native
- * module), over the private store the app supplied.
+ * Builds the end-to-end encryption runtime of an app on a backend's engine
+ * (see `backendNative`), over the private store the app supplied. It never
+ * imports jazz-napi itself, so a Cloudflare Worker's bundle stays free of it.
  */
-import * as jazzNapi from "jazz-napi";
+import { backendNative } from "../backend/backend-native.js";
 import type { SchemaSourceInput } from "../schema-source.js";
 import { buildEncryption, compiledBindings, declaresEncryption } from "./build.js";
+import { EncryptionError } from "./index.js";
 import type { PrivateStore } from "./private-store.js";
 
 export { declaresEncryption };
@@ -29,8 +31,16 @@ export async function buildNodeEncryption(options: {
   deviceAccountSecret?: string;
   encryption: NodeEncryptionConfig | undefined;
 }): Promise<{ runtime: unknown; store: PrivateStore } | undefined> {
+  if (!declaresEncryption(options.app)) return undefined;
+  const host = backendNative().EncryptionRuntime;
+  if (!host) {
+    throw new EncryptionError(
+      "unsupported",
+      "A backend client of an app that declares end-to-end encryption is not supported in a Cloudflare Worker yet",
+    );
+  }
   return buildEncryption({
-    host: jazzNapi.EncryptionRuntime,
+    host,
     app: options.app,
     appId: options.appId,
     environment: options.environment,

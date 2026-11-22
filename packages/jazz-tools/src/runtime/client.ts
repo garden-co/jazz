@@ -224,6 +224,11 @@ export interface Runtime {
   upstreamLinkStatus?(): LinkStatus;
   /** @internal This client's uploads: pending, since when, and refusals. */
   uploadStatus?(): UploadStatus;
+  /**
+   * @internal Ids of `table`'s rows with a write the server has not decided
+   * yet, sorted; `null` when this runtime cannot tell.
+   */
+  pendingUploadRows?(table: string): readonly string[] | null;
   /** @internal The latest link failure this client saw, if any. */
   lastLinkFailure?(): LinkFailure | null;
   /** @internal Observe changes of the link status or the upload status. */
@@ -1270,6 +1275,7 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private shutdownPromise: Promise<void> | null = null;
   private discarded = false;
+  private writesRefused: Error | null = null;
   /** Facade-owned subscription releases, fenced against terminal reentrancy. */
   private activeSubscriptionReleases = new Map<number, () => void>();
 
@@ -1588,6 +1594,7 @@ export class JazzClient {
   }
 
   commitTransaction(id: OpenTransactionId): WriteHandle {
+    if (this.writesRefused) throw this.writesRefused;
     const state = this.transactionPreparations.get(id);
     if (state?.committing) throw new Error("Transaction is already committing");
     const runtime = this.runtime;
@@ -2627,6 +2634,15 @@ export class JazzClient {
   discard(): void {
     this.discarded = true;
     this.runtime.discard?.();
+  }
+
+  /**
+   * @internal Refuse every later commit with `error`: this tab yielded its
+   * store to a newer build of the app and reloads, which would lose them.
+   * A transaction opened before commits through here, not through the Db.
+   */
+  refuseWrites(error: Error): void {
+    this.writesRefused = error;
   }
 
   /** Whether this client's runtime can delete its local store. */

@@ -45,12 +45,15 @@ fn config(node: u8, author: AuthorSubject, read: PolicyExpr) -> DbConfig {
 fn server_with_row(db: Db) -> (Db, RowUuid) {
     db.set_authority().unwrap();
     let row = RowUuid::from_bytes([7; 16]);
-    db.seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(db.insert(
         "users",
-        row,
-        AuthorSubject::SYSTEM,
         BTreeMap::from([("name".to_owned(), Value::String("ada".into()))]),
-    )
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
     .unwrap();
     (db, row)
 }
@@ -382,14 +385,16 @@ fn server_with_users(rows: u8) -> (Db, BundleId, BundleId) {
     let server = block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap();
     server.set_authority().unwrap();
     for n in 0..rows {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "users",
-                RowUuid::from_bytes([n + 1; 16]),
-                AuthorSubject::SYSTEM,
-                BTreeMap::from([("name".to_owned(), Value::String(format!("user {n}")))]),
-            )
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String(format!("user {n}")))]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([n + 1; 16])),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     }
     let open = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
     let closed = block_on(server.publish_bundle(&users(PolicyExpr::False))).unwrap();
@@ -494,14 +499,16 @@ fn a_session_with_claims_resumes_only_with_the_same_claims() {
     server.set_authority().unwrap();
     let teams = ["red", "red", "red", "blue", "blue"];
     for (n, team) in teams.iter().enumerate() {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "users",
-                RowUuid::from_bytes([n as u8 + 1; 16]),
-                AuthorSubject::SYSTEM,
-                BTreeMap::from([("name".to_owned(), Value::String((*team).to_owned()))]),
-            )
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String((*team).to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([n as u8 + 1; 16])),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     }
     let by_team = |team: &str| -> Vec<RowUuid> {
         teams

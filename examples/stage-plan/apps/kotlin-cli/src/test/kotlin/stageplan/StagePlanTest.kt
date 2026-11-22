@@ -235,6 +235,11 @@ class StagePlanTest {
             assertEquals(false, asked.first())
             val states = kotlinx.coroutines.channels.Channel<tools.jazz.SessionState?>(kotlinx.coroutines.channels.Channel.UNLIMITED)
             val watching = launch { alice.session.collect { states.send(it) } }
+            // Opening doesn't wait for the server: the snippet reports the
+            // status once the link is up and nothing waits for upload.
+            kotlinx.coroutines.withTimeout(30_000) {
+                alice.syncStatus.first { it.link == tools.jazz.Link.Connected && it.synced }
+            }
             assertEquals(listOf("signed in as alice"), DocsSnippets.sessionState(alice).filter { it != "offline" })
             kotlin.test.assertTrue(asked.contains(true), "refreshSession asks for a fresh token")
             kotlinx.coroutines.withTimeout(30_000) { while (states.receive() != tools.jazz.SessionState.SignedOut) Unit }

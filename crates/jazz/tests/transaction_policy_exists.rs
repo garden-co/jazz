@@ -52,6 +52,25 @@ fn schema() -> JazzSchema {
                             ),
                     ),
             )
+            .table(
+                // An item's `kind` is fixed once written: an update must keep
+                // the kind its committed version has.
+                TableSchemaBuilder::new("items")
+                    .column("kind", ColumnType::Text)
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(
+                                Some(PolicyExpr::True),
+                                exists(
+                                    "items",
+                                    vec![outer_eq("id", "id"), outer_eq("kind", "kind")],
+                                ),
+                            ),
+                    ),
+            )
             .build(),
     )
 }
@@ -310,7 +329,12 @@ fn a_staged_row_is_no_evidence_for_its_own_check() {
         },
     ))
     .expect_err("its own parent, after an earlier write to it");
-    assert!(error.message.contains("WITH CHECK"), "{}", error.message);
+    // The insert decides a row the transaction wrote first, as on commit.
+    assert!(
+        error.message.contains("INSERT policy denied"),
+        "{}",
+        error.message
+    );
 }
 
 /// A chain staged link by link commits: the commit grounds it from the
@@ -372,4 +396,116 @@ fn a_cycle_of_staged_rows_is_refused_at_commit() {
         "{}",
         error.message
     );
+}
+
+fn update_as(author: AuthorSubject) -> jazz::db::UpdateOptions {
+    jazz::db::UpdateOptions {
+        identity: WriteIdentity::Session(author),
+        ..Default::default()
+    }
+}
+
+fn stage_item(db: &Db, open: OpenTransactionId) -> RowUuid {
+    block_on(db.tx_ref(open).insert(
+        "items",
+        BTreeMap::from([
+            ("kind".to_owned(), text("a")),
+            ("title".to_owned(), text("x")),
+        ]),
+        session(alice()),
+    ))
+    .unwrap()
+    .row_uuid()
+}
+
+/// A row the transaction inserted has no committed version, so its insert
+/// decides it (SPEC 7): alice's later staged updates to it are checked as
+/// the commit and the authority check them, the row's end state against
+/// its INSERT policy, not by their own WITH CHECK against a committed
+/// version that doesn't exist yet.
+///
+/// ```text
+/// alice ──insert item──► open tx ──update item──► open tx ──commit──► ✓
+///                                     │
+///                                     └── WITH CHECK would read the
+///                                         committed item: there is none
+/// ```
+#[test]
+fn a_staged_update_to_a_row_staged_earlier_is_decided_by_its_insert() {
+    let db = open();
+    let open = OpenTransactionId::new();
+    block_on(db.begin_mergeable(open)).unwrap();
+    let item = stage_item(&db, open);
+    for title in ["y", "z"] {
+        block_on(db.tx_ref(open).update(
+            "items",
+            item,
+            BTreeMap::from([("title".to_owned(), text(title))]),
+            update_as(alice()),
+        ))
+        .unwrap_or_else(|error| panic!("the insert decides the row: {error}"));
+    }
+    block_on(db.commit_mergeable_handle(open)).expect("the commit decides it the same way");
+}
+
+/// The insert's check still runs, on the row's end state: alice's staged
+/// update that leaves her node under a parent that doesn't exist is
+/// refused at the call, and the transaction still commits without it.
+#[test]
+fn a_staged_update_to_a_row_staged_earlier_is_checked_by_its_insert_policy() {
+    let db = open();
+    let root = root_node(&db);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_mergeable(open)).unwrap();
+    let node = block_on(db.tx_ref(open).insert(
+        "nodes",
+        BTreeMap::from([("parent_id".to_owned(), uuid(root))]),
+        session(alice()),
+    ))
+    .unwrap()
+    .row_uuid();
+    let error = block_on(db.tx_ref(open).update(
+        "nodes",
+        node,
+        BTreeMap::from([("parent_id".to_owned(), uuid(RowUuid::from_bytes([9; 16])))]),
+        update_as(alice()),
+    ))
+    .expect_err("no such parent");
+    assert!(error.is_authorization_denied(), "{}", error.message);
+    assert!(
+        error.message.contains("INSERT policy denied"),
+        "{}",
+        error.message
+    );
+    block_on(db.commit_mergeable_handle(open)).expect("the refused update was not staged");
+}
+
+/// A committed row keeps its own WITH CHECK: alice's updates staged to it
+/// are checked against its committed version, so changing its kind is
+/// refused.
+#[test]
+fn a_staged_update_to_a_committed_row_keeps_its_with_check() {
+    let db = open();
+    let setup = OpenTransactionId::new();
+    block_on(db.begin_mergeable(setup)).unwrap();
+    let item = stage_item(&db, setup);
+    block_on(db.commit_mergeable_handle(setup)).unwrap();
+
+    let open = OpenTransactionId::new();
+    block_on(db.begin_mergeable(open)).unwrap();
+    block_on(db.tx_ref(open).update(
+        "items",
+        item,
+        BTreeMap::from([("title".to_owned(), text("y"))]),
+        update_as(alice()),
+    ))
+    .expect("the kind is kept");
+    let error = block_on(db.tx_ref(open).update(
+        "items",
+        item,
+        BTreeMap::from([("kind".to_owned(), text("b"))]),
+        update_as(alice()),
+    ))
+    .expect_err("the kind changed");
+    assert!(error.message.contains("WITH CHECK"), "{}", error.message);
 }

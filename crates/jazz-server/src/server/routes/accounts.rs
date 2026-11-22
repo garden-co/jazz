@@ -235,6 +235,36 @@ pub(super) async fn revoke_sessions_for_admin(
     }))
 }
 
+/// The app's backend signing key (see
+/// [`crate::portable::backend_signing_key`]), for the app's trusted backend
+/// only: the admin secret, or a backend credential stating admin access.
+/// Derived from a configured admin secret; otherwise the key kept in the
+/// store, so it outlives this process either way.
+pub(super) async fn backend_signing_key_for_admin(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<impl axum::response::IntoResponse, Failure> {
+    use crate::portable::backend_signing_key as signing;
+    crate::middleware::auth::validate_admin_secret(
+        super::http::admin_secret_header(&headers),
+        &state.auth_config,
+    )?;
+    let key = match &state.backend_signing_secret {
+        Some(secret) => signing::derived(secret, &state.app_id.to_string()),
+        None => owner(&state)?
+            .backend_signing_key()
+            .await
+            .map_err(failure)?,
+    };
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        signing::body(&key),
+    ))
+}
+
 /// Authentication denial and temporary registry availability are different wire outcomes.
 #[derive(Debug)]
 pub(in crate::server) enum AdmissionError {
@@ -242,13 +272,20 @@ pub(in crate::server) enum AdmissionError {
     /// The user's sessions were revoked after this one was authenticated:
     /// the backend asks its `authenticate` again.
     Revoked,
+    /// A denial whose reason is known: the client is told it as a
+    /// [`jazz::wire::WireErrorReason`] when it reads one, and by `message`
+    /// otherwise.
+    Refused {
+        message: String,
+        reason: jazz::wire::WireErrorReason,
+    },
     Unavailable,
     AuthenticationUnavailable(String),
 }
 impl std::fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Denied(message) => f.write_str(message),
+            Self::Denied(message) | Self::Refused { message, .. } => f.write_str(message),
             Self::Unavailable => f.write_str("account registry unavailable"),
             Self::Revoked => f.write_str(SESSION_REVOKED),
             Self::AuthenticationUnavailable(message) => f.write_str(message),
@@ -269,10 +306,19 @@ impl From<UnauthenticatedResponse> for AdmissionError {
     fn from(error: UnauthenticatedResponse) -> Self {
         match error.code {
             UnauthenticatedCode::Unavailable => Self::AuthenticationUnavailable(error.message),
-            _ => Self::Denied(
-                serde_json::to_string(&error)
+            code => Self::Refused {
+                // Clients that read no reason classify this text.
+                message: serde_json::to_string(&error)
                     .unwrap_or_else(|_| "authentication failed".to_owned()),
-            ),
+                reason: match code {
+                    UnauthenticatedCode::Expired => jazz::wire::WireErrorReason::Expired,
+                    UnauthenticatedCode::Missing => jazz::wire::WireErrorReason::Missing,
+                    UnauthenticatedCode::Disabled => jazz::wire::WireErrorReason::Disabled,
+                    UnauthenticatedCode::Invalid | UnauthenticatedCode::Unavailable => {
+                        jazz::wire::WireErrorReason::Invalid
+                    }
+                },
+            },
         }
     }
 }
@@ -285,6 +331,14 @@ impl From<RegistryError> for AdmissionError {
     }
 }
 impl AdmissionError {
+    /// A denial naming why.
+    pub(super) fn refused(message: impl Into<String>, reason: jazz::wire::WireErrorReason) -> Self {
+        Self::Refused {
+            message: message.into(),
+            reason,
+        }
+    }
+
     pub(super) fn into_wire(self) -> jazz::wire::WireError {
         use jazz::wire::{WireError, WireErrorCode, WireRetry};
         match self {
@@ -298,7 +352,12 @@ impl AdmissionError {
                 WireErrorCode::AuthFailed,
                 WireRetry::AfterAuth,
                 SESSION_REVOKED,
-            ),
+            )
+            .with_reason(jazz::wire::WireErrorReason::Revoked),
+            Self::Refused { message, reason } => {
+                WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, message)
+                    .with_reason(reason)
+            }
             Self::AuthenticationUnavailable(message) => {
                 WireError::new(WireErrorCode::NotReady, WireRetry::Later, message)
             }

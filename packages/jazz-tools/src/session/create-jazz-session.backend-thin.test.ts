@@ -760,17 +760,27 @@ describe("browser session against the app's backend", () => {
       await client.db.insert(app.todos, { title: "first", owner }).wait({ tier: "global" });
 
       // Revoked, but her cookie still holds: the tab is admitted again as
-      // her, and the admission clears the refusal's reason.
+      // her, and the admission clears the refusal's reason. `revokeUser`
+      // resolves once the server ended her session, which can be before the
+      // tab hears of it, while it still reads connected with no error: wait
+      // for the refusal itself first, or it lands after the restart below.
+      let refusedAsRevoked = false;
+      const stopAuth = client.db.onAuthChanged(({ error }) => {
+        if (error === "revoked") refusedAsRevoked = true;
+      });
+      cleanups.push(async () => stopAuth());
       expect(await jazz.revokeUser("alice")).toBe(1);
       await expect
         .poll(
           () => ({
+            refusedAsRevoked,
             link: client.db.getSyncStatus().link,
             error: client.db.getAuthState().error,
           }),
           { timeout: 15_000, interval: 20 },
         )
-        .toEqual({ link: { state: "connected" }, error: undefined });
+        .toEqual({ refusedAsRevoked: true, link: { state: "connected" }, error: undefined });
+      stopAuth();
 
       // Later her cookie expires and the server restarts: an ordinary refusal.
       const links: unknown[] = [];

@@ -55,6 +55,17 @@ export const BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN =
 export const BROWSER_STORE_HELD_BY_ANOTHER_BUILD =
   "this account's store is open with another build's schema in another tab";
 
+/**
+ * Why a worker refuses a tab of an older build of the app: the store is open
+ * with a newer build's schema (whose history extends this tab's). The tab
+ * reloads to pick up the newer build.
+ */
+export const BROWSER_STORE_OPEN_WITH_NEWER_BUILD =
+  "this account's store is open with a newer build of this app in another tab";
+
+/** How long the worker waits for older builds' tabs to let go of the store before it closes them. */
+export const NEWER_BUILD_HANDOFF_MS = 5_000;
+
 /** The relay error envelope is deliberately small enough for a MessagePort. */
 export const BROWSER_RELAY_ERROR_MAX_CAUSE_DEPTH = 32;
 export const BROWSER_RELAY_ERROR_MAX_TOTAL_CHARS = 64 * 1024;
@@ -754,5 +765,18 @@ export type BrowserFollowerPortEvent =
   | { type: "storage-failure"; message: string | null }
   | { type: "storage-reset"; resetId: number }
   | { type: "storage-invalidated" }
+  /**
+   * A tab of a newer build (its schema history extends this store's) wants
+   * the store: make this tab's writes durable, close, and reload. The worker
+   * closes the tabs that haven't let go after `NEWER_BUILD_HANDOFF_MS`.
+   */
+  | { type: "newer-build-waiting" }
+  /**
+   * This tab didn't let go of the store within `NEWER_BUILD_HANDOFF_MS`: the
+   * worker closes it now, and the newer build takes the store. The tab treats
+   * its connection as gone (and reconnects: as an older build, it reloads,
+   * or waits).
+   */
+  | { type: "closed-for-newer-build" }
   | { type: "relay-trace"; entries: BrowserRelayTrace[] }
   | { type: "error"; error: BrowserRelayError };

@@ -8,7 +8,7 @@
     "start": "tsx src/main.ts",
     "dev": "tsx watch src/main.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "express": "^4.18.2",

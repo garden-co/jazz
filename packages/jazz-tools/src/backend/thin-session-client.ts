@@ -7,7 +7,7 @@
  * bundle). The core reads and checks for it as the session; the session's
  * staged writes run as the session.
  */
-import { NapiDb } from "jazz-napi";
+import { backendNative } from "./backend-native.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { ClientMigrations } from "../runtime/client-migrations.js";
 import { JazzClient } from "../runtime/client.js";
@@ -60,7 +60,7 @@ export function openThinSessionClient(options: ThinSessionClientOptions): ThinTr
     .tables;
   if (!schema) throw new Error("the thin client bound no schema tables");
   const runtime = new NativeRuntimeAdapter(
-    NapiDb,
+    backendNative().Db,
     schema,
     randomNodeUuidBytes(),
     new TextEncoder().encode(author),

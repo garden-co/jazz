@@ -9,7 +9,7 @@
     "backend": "tsx server.ts",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "check": "tsc --noEmit",
+    "check": "tsrs --noEmit",
     "build": "jazz-tools generate && pnpm run check",
     "test": "pnpm run check",
     "prebuild": "expo prebuild --clean",

@@ -4,7 +4,7 @@ import type { AuthState } from "../runtime/auth-state.js";
 import { withCanonicalUser } from "../runtime/author-id.js";
 
 function author(issuer: string, subject: string) {
-  return withCanonicalUser({ issuer, user_id: subject, claims: {}, authMode: "external" }).user;
+  return withCanonicalUser({ issuer, user_id: subject, claims: {}, authMode: "external" });
 }
 import type { JazzClient } from "../web/create-jazz-client.js";
 import { createSolidJazzClientStore } from "./solid-jazz-client-store.js";
@@ -56,7 +56,7 @@ function makeStateA(): AuthState {
   return {
     authMode: "external",
     session: {
-      user: author("https://issuer.example", "u-a"),
+      ...author("https://issuer.example", "u-a"),
       claims: { role: "reader" },
       authMode: "external",
     },
@@ -67,7 +67,7 @@ function makeStateB(): AuthState {
   return {
     authMode: "device-account",
     session: {
-      user: author("urn:jazz:local-first", "u-b"),
+      ...author("urn:jazz:local-first", "u-b"),
       claims: { role: "writer" },
       authMode: "device-account",
     },
@@ -127,12 +127,12 @@ describe("solid/createJazzClientStateStore", () => {
 
         expect(store.authState?.authMode).toBe("external");
         expect(store.session?.claims.sub).toBeUndefined();
-        expect(store.session?.user).toEqual(author("https://issuer.example", "u-a"));
+        expect(store.session?.user).toEqual(author("https://issuer.example", "u-a").user);
 
         a.emit({
           authMode: "external",
           session: {
-            user: author("https://issuer.example", "u-a2"),
+            ...author("https://issuer.example", "u-a2"),
             claims: { role: "reader" },
             authMode: "external",
           },
@@ -142,7 +142,7 @@ describe("solid/createJazzClientStateStore", () => {
 
       await flushMicrotasks();
       expect(store.session?.claims.sub).toBeUndefined();
-      expect(store.session?.user).toEqual(author("https://issuer.example", "u-a2"));
+      expect(store.session?.user).toEqual(author("https://issuer.example", "u-a2").user);
     } finally {
       dispose?.();
     }
@@ -176,14 +176,14 @@ describe("solid/createJazzClientStateStore", () => {
       await flushMicrotasks();
 
       expect(store.session?.claims.sub).toBeUndefined();
-      expect(store.session?.user).toEqual(author("urn:jazz:local-first", "u-b"));
+      expect(store.session?.user).toEqual(author("urn:jazz:local-first", "u-b").user);
       expect(a.listenerCount()).toBe(0);
       expect(b.listenerCount()).toBe(1);
 
       a.emit({
         authMode: "external",
         session: {
-          user: author("https://issuer.example", "u-a-stale"),
+          ...author("https://issuer.example", "u-a-stale"),
           claims: {},
           authMode: "external",
         },
@@ -193,7 +193,7 @@ describe("solid/createJazzClientStateStore", () => {
       b.emit({
         authMode: "device-account",
         session: {
-          user: author("urn:jazz:local-first", "u-b2"),
+          ...author("urn:jazz:local-first", "u-b2"),
           claims: {},
           authMode: "device-account",
         },
@@ -201,7 +201,7 @@ describe("solid/createJazzClientStateStore", () => {
       await flushMicrotasks();
 
       expect(store.session?.claims.sub).toBeUndefined();
-      expect(store.session?.user).toEqual(author("urn:jazz:local-first", "u-b2"));
+      expect(store.session?.user).toEqual(author("urn:jazz:local-first", "u-b2").user);
     } finally {
       dispose?.();
     }

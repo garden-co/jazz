@@ -56,25 +56,23 @@ export const wequencerBenchmarks: BenchmarkMetadata[] = [
     },
     source,
   },
-  ...[1000, 10000].map(
-    (depth): BenchmarkMetadata => ({
-      name: `wequencer_pad_edit_history[${depth}]`,
-      title: "Wequencer · read a pad after a long offline edit chain",
-      description:
-        "Read the current value of one pad that was toggled over and over while offline: a chain of locally settled edits, each built on the last, all still retained.",
-      fixture: `One pad edited ${depth.toLocaleString("en-US")} times; every candidate is retained.`,
-      storage: "SQLite file, WAL with synchronous=NORMAL",
-      includes: ["One current-row read that scans the retained edit history"],
-      excludes: [
-        "Writing and settling the edit history",
-        "The untimed receipt that checks the winner and read counts",
-      ],
-      work: {
-        count: 1,
-        unit: "reads/s",
-        explanation: "One current-row read per iteration; the edit depth is load context.",
-      },
-      source,
-    }),
-  ),
+  ...[1000, 10000].map((depth): BenchmarkMetadata => ({
+    name: `wequencer_pad_edit_history[${depth}]`,
+    title: "Wequencer · read a pad after a long offline edit chain",
+    description:
+      "Read the current value of one pad that was toggled over and over while offline: a chain of locally settled edits, each built on the last, all still retained.",
+    fixture: `One pad edited ${depth.toLocaleString("en-US")} times; every candidate is retained.`,
+    storage: "SQLite file, WAL with synchronous=NORMAL",
+    includes: ["One current-row read that scans the retained edit history"],
+    excludes: [
+      "Writing and settling the edit history",
+      "The untimed receipt that checks the winner and read counts",
+    ],
+    work: {
+      count: 1,
+      unit: "reads/s",
+      explanation: "One current-row read per iteration; the edit depth is load context.",
+    },
+    source,
+  })),
 ];

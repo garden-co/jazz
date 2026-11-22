@@ -23,6 +23,8 @@ import {
   withTimeout,
 } from "./support.js";
 import { Db, resolveDefaultPersistentDbName, type QueryBuilder } from "../../src/runtime/db.js";
+import { browserBuildId, setNewerBuildHandler } from "../../src/runtime/newer-build-reload.js";
+import { shipMigrations, shippedMigrations } from "../../src/runtime/client-migrations.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { createJazzServerTransportControl, jazzAppUser, stopJazzServer } from "./testing-server.js";
@@ -1042,19 +1044,23 @@ describe("SharedWorker bridge with IndexedDB", () => {
     unsubscribe();
   });
 
-  it("makes a tab of another build wait for the store and join once the old build tab closes", async () => {
-    const dbName = uniqueDbName("schema-mismatch-recovery");
+  /**
+   * A store this page opens with the catalogue app's first build (V1), with a
+   * row, for the tests where a tab of another build comes along. The tabs
+   * are Dbs of this page: a page-wide `onNewerBuild` stands in for reloads.
+   */
+  async function oldBuildTab(name: string) {
+    const dbName = uniqueDbName(name);
     // Both versions must already be admitted with their lineage lens. Merely
     // supplying a new schema at reopen is not a catalogue publication.
-    const server = await publishCatalogueSchemaFamily("schema-mismatch-recovery");
-    const nextApp = catalogueAppV2;
-    const oldTab = track(
-      await createDb({
+    const server = await publishCatalogueSchemaFamily(name);
+    const open = () =>
+      createDb({
         appId: server.appId,
         serverUrl: server.serverUrl,
         driver: { type: "persistent", dbName },
-      }),
-    );
+      });
+    const oldTab = track(await open());
     await withTimeout(
       oldTab
         .insert(catalogueAppV1.todos, { title: "Old schema row", completed: false })
@@ -1062,48 +1068,147 @@ describe("SharedWorker bridge with IndexedDB", () => {
       8000,
       "Old tab should receive the published catalogue before pinning its schema",
     );
-    await waitForCondition(
-      async () => {
-        const rows = await oldTab.all(catalogueAppV1.todos, { tier: "local-first" });
-        return rows.some((row) => row.title === "Old schema row");
-      },
-      8000,
-      "Old tab should be durable-ready with the original schema",
-    );
+    return { oldTab, open: async () => track(await open()) };
+  }
 
-    // Another build's tab (a deploy changed the schema) waits for the store
-    // rather than failing for good (#6100): connecting, retrying on its own.
-    const newTab = track(
-      await createDb({
-        appId: server.appId,
-        serverUrl: server.serverUrl,
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    let outcome = "pending";
-    const waiting = newTab.all(nextApp.todos, { tier: "local-first" }).then(
-      (rows) => {
-        outcome = "fulfilled";
-        return rows;
-      },
-      (error: unknown) => {
-        outcome = `rejected: ${String(error)}`;
-        return [];
-      },
-    );
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-    expect(outcome).toBe("pending");
-    expect(newTab.getSyncStatus().link).toMatchObject({ state: "connecting" });
+  it("hands the store to a newer build's tab at once, and the old build's tab yields and reloads", async () => {
+    const reloads = vi.fn();
+    setNewerBuildHandler(reloads);
+    try {
+      const { oldTab, open } = await oldBuildTab("newer-build-takes-store");
+      // A transaction the old tab has open when the newer build arrives.
+      const tx = oldTab.beginTransaction();
+      tx.insert(catalogueAppV1.todos, { title: "Committed too late", completed: false });
+      // V2 ships V1 in its schema history: it is the newer build.
+      const newTab = await open();
+      const rows = await withTimeout(
+        newTab.all(catalogueAppV2.todos, { tier: "local-first" }),
+        15_000,
+        "The newer build's tab should get the store without the old tab closing",
+      );
+      expect(rows.some((row) => row.title === "Old schema row")).toBe(true);
+      await waitForCondition(
+        async () => reloads.mock.calls.length === 1,
+        5_000,
+        "The old build's tab should be asked to reload",
+      );
+      // Until it reloads, it takes no writes: they would be lost.
+      expect(() =>
+        oldTab.insert(catalogueAppV1.todos, { title: "Too late", completed: false }),
+      ).toThrow("older build of this app");
+      // Nor commits a transaction it opened before: it would report success,
+      // then the reload would lose it.
+      expect(() => tx.commit()).toThrow("older build of this app");
+    } finally {
+      setNewerBuildHandler(() => {});
+    }
+  });
 
-    // The old build's tab goes away (it reloads, or closes): the new one joins.
-    await oldTab.shutdown();
-    const rows = await withTimeout(
-      waiting,
-      15_000,
-      "The waiting tab should join once the old build's tab lets go",
-    );
-    expect(outcome).toBe("fulfilled");
-    expect(rows.some((row) => row.title === "Old schema row")).toBe(true);
+  it("closes an old build's tab that doesn't let go after 5 s, and hands the store over then", async () => {
+    // This old tab already reloaded away from its build this session (as a
+    // stale CDN makes it), so it doesn't yield: it stands in for a frozen or
+    // unresponsive tab, which the worker closes after the deadline.
+    const reloads = vi.fn();
+    setNewerBuildHandler(reloads);
+    const marker = "jazz:newer-build-reloaded-from";
+    sessionStorage.setItem(marker, browserBuildId(catalogueAppV1.wasmSchema));
+    try {
+      const { oldTab, open } = await oldBuildTab("newer-build-forces-old-tab");
+      const newTab = await open();
+      const started = Date.now();
+      const rows = await withTimeout(
+        newTab.all(catalogueAppV2.todos, { tier: "local-first" }),
+        20_000,
+        "The newer build's tab should get the store once the old tab is closed",
+      );
+      expect(Date.now() - started).toBeGreaterThanOrEqual(4_000);
+      expect(rows.some((row) => row.title === "Old schema row")).toBe(true);
+      expect(reloads).not.toHaveBeenCalled();
+      // Told it was closed, the old tab reconnects, is refused as an older
+      // build, and (having reloaded away from it already) waits.
+      await waitForCondition(
+        async () => oldTab.getSyncStatus().link.state === "connecting",
+        10_000,
+        "The closed old tab should wait for the store, not stop",
+      );
+    } finally {
+      sessionStorage.removeItem(marker);
+      setNewerBuildHandler(() => {});
+    }
+  });
+
+  it("makes an older build's tab yield and reload when a newer build has the store", async () => {
+    const reloads = vi.fn();
+    setNewerBuildHandler(reloads);
+    try {
+      const { oldTab, open } = await oldBuildTab("older-build-yields");
+      // The newer build takes the store first...
+      const newTab = await open();
+      await withTimeout(
+        newTab.all(catalogueAppV2.todos, { tier: "local-first" }),
+        15_000,
+        "The newer build's tab should get the store",
+      );
+      reloads.mockClear();
+      // ...then a tab of the older build opens (a stale tab, a cached build).
+      const staleTab = await open();
+      await expect(
+        withTimeout(
+          staleTab.all(catalogueAppV1.todos, { tier: "local-first" }),
+          15_000,
+          "The older build's tab should yield rather than wait",
+        ),
+      ).rejects.toThrow("older build of this app");
+      expect(reloads).toHaveBeenCalledOnce();
+      void oldTab;
+    } finally {
+      setNewerBuildHandler(() => {});
+    }
+  });
+
+  it("makes a tab of a build it can't order wait for the store, and join once the other tab closes", async () => {
+    // Builds it can't order (histories neither contains: unrelated builds,
+    // a rollback; or one that ships none, as here the old one) don't take
+    // the store from each other.
+    const shipped = shippedMigrations(catalogueAppV1.wasmSchema);
+    Object.defineProperty(catalogueAppV1.wasmSchema, Symbol.for("jazz-tools.shippedMigrations"), {
+      value: undefined,
+      configurable: true,
+    });
+    const reloads = vi.fn();
+    setNewerBuildHandler(reloads);
+    try {
+      const { oldTab, open } = await oldBuildTab("schema-mismatch-recovery");
+      const newTab = await open();
+      let outcome = "pending";
+      const waiting = newTab.all(catalogueAppV2.todos, { tier: "local-first" }).then(
+        (rows) => {
+          outcome = "fulfilled";
+          return rows;
+        },
+        (error: unknown) => {
+          outcome = `rejected: ${String(error)}`;
+          return [];
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      expect(outcome).toBe("pending");
+      expect(newTab.getSyncStatus().link).toMatchObject({ state: "connecting" });
+      expect(reloads).not.toHaveBeenCalled();
+
+      // The other build's tab goes away (it reloads, or closes): this one joins.
+      await oldTab.shutdown();
+      const rows = await withTimeout(
+        waiting,
+        15_000,
+        "The waiting tab should join once the other build's tab lets go",
+      );
+      expect(outcome).toBe("fulfilled");
+      expect(rows.some((row) => row.title === "Old schema row")).toBe(true);
+    } finally {
+      if (shipped) shipMigrations(catalogueAppV1.wasmSchema, shipped);
+      setNewerBuildHandler(() => {});
+    }
   });
 
   it("still refuses another configuration besides the schema visibly, rather than wait", async () => {

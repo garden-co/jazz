@@ -22,8 +22,8 @@ const schema = {
       }),
     },
     {
-      priority: s.computed(
-        (row): Priority => (row.score >= 8 ? "high" : row.score >= 4 ? "medium" : "low"),
+      priority: s.computed((row): Priority =>
+        row.score >= 8 ? "high" : row.score >= 4 ? "medium" : "low",
       ),
       label: s.computed(({ title, score }) => `${title} (${score})`),
       done: s.computed((row) => row.score >= 10),

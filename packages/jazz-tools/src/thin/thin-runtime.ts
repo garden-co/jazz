@@ -1424,14 +1424,28 @@ export class ThinRuntime implements Runtime {
     if (transaction.lost) return Promise.reject(new ThinTransactionLostError(id));
     // A staged write the server refused outright fails the commit; one its
     // row's state refused is the commit's own rejection, from the server.
-    return Promise.all(transaction.requests).then(
+    const committed = Promise.all(transaction.requests).then(
       () => this.write(this.admit({ type: "commit", transaction: id }), transaction.rows),
       (error: unknown) => {
         void this.request(this.admit({ type: "rollback", transaction: id })).catch(() => undefined);
         throw error;
       },
     );
+    // Until its staged requests are answered the commit is not a write yet:
+    // `waitForPendingWrites` (the local-first upgrade's drain, a shutdown
+    // that waits for sync) waits for it here, or it would close this runtime
+    // under a commit the app already made.
+    const committing = committed.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.committing.add(committing);
+    void committing.finally(() => this.committing.delete(committing));
+    return committed;
   }
+
+  /** Commits whose staged requests are still being answered (see {@link commitTransaction}). */
+  private readonly committing = new Set<Promise<void>>();
 
   async rollbackTransaction(id: OpenTransactionId): Promise<boolean> {
     const transaction = this.transactions.get(id);
@@ -1579,6 +1593,7 @@ export class ThinRuntime implements Runtime {
       oldestPendingAt,
       rejected: this.rejected,
       lastRejection: this.lastRejection,
+      pendingRevision: 0,
     };
   }
 
@@ -1633,6 +1648,9 @@ export class ThinRuntime implements Runtime {
         while (!streams.aborted && this.streamsInFlight.size > 0)
           await Promise.race([Promise.all(this.streamsInFlight), ended]);
       }
+      // A commit made before this wait becomes a write once its staged
+      // requests are answered: it counts as made so far.
+      if (this.committing.size > 0) await Promise.all([...this.committing]);
       // Only writes still waiting for their answer, like a local-first client:
       // a rejection the app already had doesn't fail every later wait.
       const dones = [...this.writes.values()]

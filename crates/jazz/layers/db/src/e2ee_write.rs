@@ -19,6 +19,18 @@ use crate::tools::OpenTransactionId;
 use crate::values::{CachedRow, Sql};
 
 impl Db {
+    /// Counts retained staging state that a row read cannot observe.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn staged_checks_and_chunks_for_test(&self, id: OpenTransactionId) -> (usize, usize) {
+        let inner = self.inner.staging();
+        let batch = &inner.batches[&id];
+        (
+            batch.first_checks.len(),
+            batch.edits.derived.len() + batch.edits.pending_nodes.len(),
+        )
+    }
+
     /// Stage `op` in batch `id` sealed by the encryption hooks, as `kind`
     /// when given. The internal rows the hooks stage with it go first; if any of them or
     /// the write fails, none stays staged.
@@ -42,17 +54,28 @@ impl Db {
                 _ => None,
             })
             .collect();
-        let mark = {
+        let (prefix, rows, inserted, claims, new_check_keys) = {
             let inner = self.inner.staging();
             let batch = inner
                 .batches
                 .get(&id)
                 .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+            // Only absent entries can be added by these inserts. An unknown
+            // table fails staging before it can record a check.
+            let new_check_keys: Vec<_> = names
+                .iter()
+                .filter_map(|(table, row)| {
+                    let stored = inner.schema.stored_table(table).ok()?;
+                    let key = (stored.to_owned(), *row.0.as_bytes());
+                    (!batch.first_checks.contains_key(&key)).then_some(key)
+                })
+                .collect();
             (
-                batch.ops.len(),
+                batch.prefix(),
                 batch.rows.clone(),
                 batch.inserted.clone(),
                 batch.claims.clone(),
+                new_check_keys,
             )
         };
         let staged = companions
@@ -66,8 +89,12 @@ impl Db {
                 // what stays staged.
                 inner.settle_overlay();
                 if let Some(batch) = inner.batches.get_mut(&id) {
-                    let (ops, rows, inserted, claims) = mark;
-                    batch.ops.truncate(ops);
+                    batch.ops.truncate(prefix.ops);
+                    batch.edits.derived.truncate(prefix.derived);
+                    batch.edits.pending_nodes.truncate(prefix.pending_nodes);
+                    for key in new_check_keys {
+                        batch.first_checks.remove(&key);
+                    }
                     batch.rows = rows;
                     batch.inserted = inserted;
                     batch.claims = claims;

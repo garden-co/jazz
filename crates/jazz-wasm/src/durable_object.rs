@@ -792,7 +792,9 @@ mod smoke {
         batch(&[jazz::wire::WireFrame::Hello(
             jazz::wire::WireHello::current(
                 jazz::wire::WirePeerRole::Client,
-                jazz::wire::current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS,
+                jazz::wire::current_wire_features()
+                    | jazz::wire::FEATURE_THIN_RESULTS
+                    | jazz::wire::FEATURE_HEARTBEAT,
             ),
         )])
     }
@@ -859,7 +861,9 @@ mod smoke {
         let mut out = Vec::new();
         for frame in frames {
             out.push(match jazz::wire::decode_frame(&frame).map_err(js)? {
-                jazz::wire::WireFrame::Hello(_) => serde_json::json!({ "hello": true }),
+                jazz::wire::WireFrame::Hello(hello) => serde_json::json!({
+                    "hello": true, "heartbeat": hello.features & jazz::wire::FEATURE_HEARTBEAT != 0
+                }),
                 jazz::wire::WireFrame::Error(error) => {
                     serde_json::json!({ "error": error.message })
                 }
@@ -895,7 +899,7 @@ mod smoke {
     /// Run `step` on this object's storage; a JSON summary of what it saw.
     /// - `write`: insert a short note and a 300 KiB one.
     /// - `read`: every note's title and body length (after a restart too).
-    /// - `transaction`: a callback transaction, which a Durable Object core
+    /// - `transaction`: a mergeable transaction, which a Durable Object core
     ///   refuses; the refusal's message.
     #[wasm_bindgen(js_name = durableObjectSmoke)]
     pub fn durable_object_smoke(storage: ObjectStorage, step: &str) -> Result<String, JsValue> {
@@ -950,12 +954,13 @@ mod smoke {
                 serde_json::to_string(&seen).map_err(js)
             }
             "transaction" => {
-                let refused = block_on(db.transaction(async |tx| {
+                let refused = block_on(async {
+                    let tx = db.mergeable_tx().await?;
                     tx.insert("notes", note("inside", "x"), row(3)).await?;
-                    Ok(())
-                }));
+                    tx.commit().await
+                });
                 match refused {
-                    Ok(_) => Err(js("a callback transaction committed on a Durable Object")),
+                    Ok(_) => Err(js("a mergeable transaction committed on a Durable Object")),
                     Err(error) => serde_json::to_string(&error.to_string()).map_err(js),
                 }
             }
@@ -973,6 +978,7 @@ mod smoke {
 /// send what `output` returns.
 mod core_host {
     use super::{durable_object_storage, ObjectStorage};
+    use crate::socket_attachment::{SavedReads, SocketAttachment};
     use jazz_server::portable::accounts::{
         self, AccountRoute, RouteAuthority, RouteBody, RouteContext,
     };
@@ -980,6 +986,7 @@ mod core_host {
         admit_by_core_secret, same_secret, SessionRevocation, UpgradeCredential,
         WebSocketCredential, WebSocketPrelude,
     };
+    use jazz_server::portable::backend_signing_key;
     use jazz_server::portable::catalogue::{CatalogueIndex, DeploymentResponse};
     use jazz_server::portable::deployment::{self, DeployError, DeployRequest};
     use jazz_server::portable::handshake::{link, negotiate_hello};
@@ -988,6 +995,7 @@ mod core_host {
     };
     use jazz_server::runtime::{ServerCore, ServerSession};
     use std::collections::{HashMap, VecDeque};
+    use std::{cell::RefCell, rc::Rc};
     use wasm_bindgen::prelude::*;
 
     fn js(error: impl std::fmt::Display) -> JsValue {
@@ -1003,6 +1011,7 @@ mod core_host {
 
     /// What a connection's socket is.
     struct Socket {
+        attachment: Option<Rc<RefCell<SocketAttachment>>>,
         session: ServerSession,
         thin: bool,
         /// Split thin requests being joined.
@@ -1014,6 +1023,9 @@ mod core_host {
         held_bytes: usize,
         /// Why the socket ends: its error frame goes out with its output.
         failed: Option<jazz::wire::WireError>,
+        /// What the client's `Hello` offered: its error frames name their
+        /// reason when it reads one.
+        client_features: u64,
         /// For a user session the backend stated: what a revocation of its
         /// user's sessions is checked against.
         revocation: Option<SessionRevocation>,
@@ -1094,6 +1106,121 @@ mod core_host {
         paused: bool,
         /// The account registry's tables exist (made on first use).
         accounts_open: bool,
+        /// Settled large values move to the host's bucket (`JAZZ_BLOBS`),
+        /// whose I/O the host runs: see `takeChunkIo`.
+        blobs: bool,
+        /// The chunk-store batch out with the host, and the fetches out
+        /// beside it: one of each at a time.
+        chunk_io: Option<jazz::chunk_store::ChunkIo>,
+        chunk_fetches: Option<jazz::chunk_store::ChunkIo>,
+    }
+
+    /// The chunk store of a core whose host runs its I/O (`blobs`): the
+    /// engine hands the host every batch, and calls this only for a read
+    /// outside a session that wants an offloaded node at once, which a
+    /// Durable Object (whose bucket answers asynchronously) refuses.
+    struct HostRunChunkStore;
+
+    fn host_run() -> jazz::db::Error {
+        jazz::db::Error::new(
+            jazz::db::ErrorCode::Storage,
+            "chunk store: the Durable Object host reads its bucket asynchronously; this read cannot wait for it",
+        )
+    }
+
+    impl jazz::chunk_store::ChunkStore for HostRunChunkStore {
+        fn put<'a>(
+            &'a self,
+            _: &'a jazz::chunk_store::NodeKey,
+            _: &'a [u8],
+        ) -> jazz::chunk_store::StoreFuture<'a, ()> {
+            Box::pin(std::future::ready(Err(host_run())))
+        }
+
+        fn get<'a>(
+            &'a self,
+            _: &'a jazz::chunk_store::NodeKey,
+        ) -> jazz::chunk_store::StoreFuture<'a, Option<bytes::Bytes>> {
+            Box::pin(std::future::ready(Err(host_run())))
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _: &'a jazz::chunk_store::NodeKey,
+        ) -> jazz::chunk_store::StoreFuture<'a, ()> {
+            Box::pin(std::future::ready(Err(host_run())))
+        }
+    }
+
+    /// A batch as the host runs it: `{ fetches, puts, deletes }`, every
+    /// entry a node's SHA-256 in lowercase hex (its object name, and the
+    /// checksum its put carries). A put's bytes stay here until the host
+    /// starts it (`chunkPutBytes`), so a batch is never held twice whole.
+    fn chunk_io_js(io: &jazz::chunk_store::ChunkIo) -> JsValue {
+        let keys = |keys: &mut dyn Iterator<Item = jazz::chunk_store::NodeKey>| -> JsValue {
+            keys.map(|key| JsValue::from_str(&key.object_name()))
+                .collect::<js_sys::Array>()
+                .into()
+        };
+        let puts = keys(&mut io.puts().iter().map(|(key, _)| *key));
+        object(&[
+            ("fetches", keys(&mut io.fetches())),
+            ("puts", puts),
+            ("deletes", keys(&mut io.deletes().iter().copied())),
+        ])
+    }
+
+    /// One result per op, as the host hands them back: `undefined` or
+    /// `null` for success, a string for a failure (`fetched`: a
+    /// `Uint8Array` found, `null` for no such object).
+    fn chunk_results<T>(
+        results: &js_sys::Array,
+        ok: impl Fn(JsValue) -> Result<T, String>,
+    ) -> Vec<Result<T, jazz::db::Error>> {
+        results
+            .iter()
+            .map(|result| match result.as_string() {
+                Some(failure) => Err(failure),
+                None => ok(result),
+            })
+            .map(|result| {
+                result.map_err(|failure| {
+                    jazz::db::Error::new(
+                        jazz::db::ErrorCode::Storage,
+                        format!("large-value bucket: {failure}"),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn chunk_done(
+        io: jazz::chunk_store::ChunkIo,
+        fetched: &js_sys::Array,
+        put: &js_sys::Array,
+        deleted: &js_sys::Array,
+    ) -> Result<jazz::chunk_store::ChunkIoDone, jazz::db::Error> {
+        let none = |result: JsValue| {
+            if result.is_undefined() || result.is_null() {
+                Ok(())
+            } else {
+                Err("an unexpected result".to_owned())
+            }
+        };
+        let fetched = chunk_results(fetched, |result| {
+            if result.is_undefined() || result.is_null() {
+                return Ok(None);
+            }
+            result
+                .dyn_into::<js_sys::Uint8Array>()
+                .map(|bytes| Some(bytes::Bytes::from(bytes.to_vec())))
+                .map_err(|_| "a fetch answered neither bytes nor null".to_owned())
+        });
+        io.done(
+            fetched,
+            chunk_results(put, none),
+            chunk_results(deleted, none),
+        )
     }
 
     /// What `accept` answers: the frames to send, and the socket's number
@@ -1132,8 +1259,10 @@ mod core_host {
         }
     }
 
-    fn error_frame(error: &jazz::wire::WireError) -> Vec<u8> {
-        jazz::wire::encode_frame(&jazz::wire::WireFrame::Error(error.clone()))
+    /// `error` as a client whose `Hello` offered `client_features` reads it:
+    /// naming its reason to one that offered `FEATURE_TYPED_ERROR_REASON`.
+    fn error_frame(error: &jazz::wire::WireError, client_features: u64) -> Vec<u8> {
+        jazz::wire::encode_error_frame_for_client(error, client_features)
             .and_then(|frame| encode_ws_frame_batches(&[frame]))
             .ok()
             .and_then(|mut batches| batches.pop())
@@ -1151,11 +1280,15 @@ mod core_host {
     impl DurableObjectCore {
         /// Open the core on the object's SQL (`ctx.storage`). `secret`
         /// admits the app's backend; `schema` (the app's public schema as
-        /// JSON) is served until a published catalogue replaces it.
+        /// JSON) is served until a published catalogue replaces it. With
+        /// `blobs`, settled large values move out of the object's SQL to a
+        /// bucket the host reads and writes (`takeChunkIo`); a store that
+        /// moved them is refused without it.
         pub fn open(
             storage: ObjectStorage,
             secret: String,
             schema: Option<String>,
+            blobs: Option<bool>,
         ) -> Result<DurableObjectCore, JsValue> {
             if secret.len() < 32 {
                 return Err(js("the core secret must be at least 32 characters"));
@@ -1182,6 +1315,9 @@ mod core_host {
                 global_held_limit: GLOBAL_HELD_LIMIT,
                 paused: false,
                 accounts_open: false,
+                blobs: blobs.unwrap_or(false),
+                chunk_io: None,
+                chunk_fetches: None,
             };
             this.open_core(schema.as_deref())?;
             Ok(this)
@@ -1196,7 +1332,120 @@ mod core_host {
             credential: Option<String>,
             access: Option<String>,
         ) -> JsValue {
-            self.admit(prelude, first, credential, access).into_js()
+            self.admit(prelude, first, credential, access, false)
+                .into_js()
+        }
+
+        /// Accept a socket whose host preserves its live sync registrations.
+        #[wasm_bindgen(js_name = acceptHibernating)]
+        pub fn accept_hibernating(
+            &mut self,
+            prelude: &str,
+            first: &[u8],
+            credential: Option<String>,
+            access: Option<String>,
+        ) -> JsValue {
+            self.admit(prelude, first, credential, access, true)
+                .into_js()
+        }
+
+        /// Reopen an admitted socket. The only caller reads bytes from
+        /// workerd's server-owned attachment, never from a peer's request.
+        #[wasm_bindgen(js_name = restoreSocket)]
+        pub fn restore_socket(&mut self, bytes: &[u8]) -> Result<u32, JsValue> {
+            let (state, admission, frames) = SocketAttachment::restore(bytes).map_err(js)?;
+            if let Some(check) = &admission.revocation {
+                let mark = self.revocation_mark(&check.principal).map_err(js)?;
+                if accounts::session_revoked(mark, check.authenticated_at_ms) {
+                    return Err(js("session revoked"));
+                }
+            }
+            let guest = admission.guest.then_some(admission.identity);
+            if let Some(identity) = guest {
+                let (issuer, subject) = identity.principal_parts();
+                let principal = jazz::account_registry::Principal { issuer, subject };
+                let storage = self.registry().map_err(js)?;
+                let assignment = accounts::login(&storage, &principal)
+                    .map_err(|_| js("guest admission unavailable"))?;
+                if Some(assignment.account) != identity.account_id() {
+                    return Err(js("guest assignment changed"));
+                }
+            }
+            let core = self.core.as_mut().ok_or_else(|| js("no admitted schema"))?;
+            let thin = matches!(frames, SavedReads::Thin { .. });
+            let open = if thin {
+                ServerCore::open_thin_session
+            } else {
+                ServerCore::open_session
+            };
+            let session = open(
+                core,
+                admission.identity,
+                admission.claims,
+                admission.bundle,
+                admission.trust,
+            )
+            .map_err(js)?;
+            let replay = match frames {
+                SavedReads::Thin { version, requests } => {
+                    core.restore_thin(session, version, requests)
+                }
+                SavedReads::Sync(frames) => {
+                    let size = frames.iter().map(Vec::len).sum();
+                    core.receive_frames(session, frames, size)
+                        .and_then(|queued| {
+                            queued
+                                .then_some(())
+                                .ok_or_else(|| "cannot queue saved registrations".to_owned())
+                        })
+                }
+            };
+            if let Err(error) = replay {
+                core.close_session(session);
+                return Err(js(error));
+            }
+            Ok(self.install_socket(
+                session,
+                thin,
+                Some(Rc::new(RefCell::new(state))),
+                admission.client_features,
+                admission.revocation,
+                guest,
+                true,
+            ))
+        }
+
+        /// Any replay held past the first tick must open eagerly. A write could
+        /// arrive before that read has installed its watches.
+        #[wasm_bindgen(js_name = finishSocketRestore)]
+        pub fn finish_socket_restore(&self) {
+            if let Some(core) = &self.core {
+                for socket in self.sockets.values() {
+                    core.finish_session_restore(socket.session);
+                }
+            }
+        }
+
+        /// Changed bytes only. An unfinished operation temporarily disables restoration.
+        #[wasm_bindgen(js_name = changedAttachment)]
+        pub fn changed_attachment(&mut self, socket: u32) -> Result<Option<Vec<u8>>, JsValue> {
+            let Some(state) = self.sockets.get(&socket) else {
+                return Ok(None);
+            };
+            let Some(attachment) = &state.attachment else {
+                return Ok(None);
+            };
+            let partial = !state.held.is_empty()
+                || self.core.as_ref().is_some_and(|core| {
+                    if state.thin {
+                        state.assembler.is_partial() || core.unfinished_thin_work(state.session)
+                    } else {
+                        core.has_partial_frame(state.session)
+                    }
+                });
+            let mut attachment = attachment.borrow_mut();
+            attachment.set_partial(partial);
+            Ok(attachment.take_changed())
         }
 
         fn admit(
@@ -1205,6 +1454,7 @@ mod core_host {
             first: &[u8],
             credential: Option<String>,
             access: Option<String>,
+            hibernate: bool,
         ) -> Accepted {
             // A client on another wire version is refused in its own layout.
             if let Some(refusal) = ws_foreign_version_refusal(first) {
@@ -1215,12 +1465,15 @@ mod core_host {
                         .unwrap_or_default(),
                 );
             }
+            // What the client offered, from the `Hello` behind its prelude.
+            let client_features = jazz_server::portable::websocket_codec::decode_ws_hello(first)
+                .map(|hello| hello.features)
+                .unwrap_or(0);
             let fail = |code, message: String| {
-                refused(error_frame(&jazz::wire::WireError::new(
-                    code,
-                    jazz::wire::WireRetry::Never,
-                    message,
-                )))
+                refused(error_frame(
+                    &jazz::wire::WireError::new(code, jazz::wire::WireRetry::Never, message),
+                    client_features,
+                ))
             };
             let prelude: WebSocketPrelude = match serde_json::from_str(prelude) {
                 Ok(prelude) => prelude,
@@ -1257,15 +1510,17 @@ mod core_host {
             let admission = match admit_by_core_secret(&prelude, upgrade, &secret, now, &mut guest)
             {
                 Ok(admission) => admission,
-                Err(message) => return fail(jazz::wire::WireErrorCode::AuthFailed, message),
+                Err(refusal) => return refused(error_frame(&refusal.into_wire(), client_features)),
             };
-            let hello = match negotiate_hello(first, prelude.bootstrap_catalogue) {
-                Ok(hello) => hello,
-                Err(error) => return refused(error_frame(&error)),
-            };
+            let hello =
+                match negotiate_hello(first, prelude.bootstrap_catalogue, jazz::wire::FEATURE_NONE)
+                {
+                    Ok(hello) => hello,
+                    Err(error) => return refused(error_frame(&error, client_features)),
+                };
             let link = match link(&admission, &hello) {
                 Ok(link) => link,
-                Err(error) => return refused(error_frame(&error)),
+                Err(error) => return refused(error_frame(&error, client_features)),
             };
             // A stated session of a user whose sessions were revoked after
             // the backend authenticated it is refused, as native refuses it.
@@ -1275,60 +1530,66 @@ mod core_host {
             if let Some(revocation) = &revocation {
                 match self.revocation_mark(&revocation.principal) {
                     Ok(mark) if accounts::session_revoked(mark, revocation.authenticated_at_ms) => {
-                        return refused(error_frame(&revoked()));
+                        return refused(error_frame(&revoked(), client_features));
                     }
                     Ok(_) => {}
                     Err(error) => {
-                        return refused(error_frame(&jazz::wire::WireError::new(
-                            jazz::wire::WireErrorCode::NotReady,
-                            jazz::wire::WireRetry::Later,
-                            error,
-                        )));
+                        return refused(error_frame(
+                            &jazz::wire::WireError::new(
+                                jazz::wire::WireErrorCode::NotReady,
+                                jazz::wire::WireRetry::Later,
+                                error,
+                            ),
+                            client_features,
+                        ));
                     }
                 }
             }
             let Some(core) = self.core.as_mut() else {
-                return refused(error_frame(&jazz::wire::WireError::new(
-                    jazz::wire::WireErrorCode::NotReady,
-                    jazz::wire::WireRetry::Later,
-                    "no schema has been published for this app; start the app's createJazz backend, which publishes its schema, before connecting",
-                )));
+                return refused(error_frame(
+                    &jazz::wire::WireError::new(
+                        jazz::wire::WireErrorCode::NotReady,
+                        jazz::wire::WireRetry::Later,
+                        "no schema has been published for this app; start the app's createJazz backend, which publishes its schema, before connecting",
+                    ),
+                    client_features,
+                ));
             };
-            let opened = if link.thin {
-                core.open_thin_session(
-                    admission.identity,
-                    admission.claims,
-                    admission.bundle,
-                    admission.trust,
-                )
+            let attachment = if hibernate
+                && (link.thin || hello.features & jazz::wire::FEATURE_REPLACE_HOLDS != 0)
+            {
+                match SocketAttachment::new(&admission, client_features, link.thin) {
+                    Ok(state) => Some(Rc::new(RefCell::new(state))),
+                    Err(error) => return fail(jazz::wire::WireErrorCode::Backpressure, error),
+                }
             } else {
-                core.open_session(
-                    admission.identity,
-                    admission.claims,
-                    admission.bundle,
-                    admission.trust,
-                )
+                None
             };
-            let session = match opened {
+            let open = if link.thin {
+                ServerCore::open_thin_session
+            } else {
+                ServerCore::open_session
+            };
+            let session = match open(
+                core,
+                admission.identity,
+                admission.claims,
+                admission.bundle,
+                admission.trust,
+            ) {
                 Ok(session) => session,
                 Err(error) => {
                     return fail(jazz::wire::WireErrorCode::NotReady, error.to_string());
                 }
             };
-            let socket = self.next_socket;
-            self.next_socket += 1;
-            self.sockets.insert(
-                socket,
-                Socket {
-                    session,
-                    thin: link.thin,
-                    assembler: jazz::thin::ThinAssembler::default(),
-                    held: VecDeque::new(),
-                    held_bytes: 0,
-                    failed: None,
-                    revocation,
-                    guest,
-                },
+            let socket = self.install_socket(
+                session,
+                link.thin,
+                attachment,
+                client_features,
+                revocation,
+                guest,
+                false,
             );
             let hello = encode_ws_frame_batches(&[link.server_hello])
                 .ok()
@@ -1382,6 +1643,114 @@ mod core_host {
             !self.paused && self.core.as_ref().is_some_and(ServerCore::wants_tick)
         }
 
+        #[wasm_bindgen(js_name = nextChunkPullTickMs)]
+        pub fn next_chunk_pull_tick_ms(&self) -> Option<u32> {
+            self.core.as_ref()?.db().next_chunk_pull_tick_ms()
+        }
+
+        /// The next batch of bucket work for a core opened with `blobs`
+        /// (see `chunk_io_js`), or `undefined`: no core, nothing to do, or
+        /// the last batch is still out. With `holdFetches`, reads' fetches
+        /// stay for later (the host is backing them off). Hand what running
+        /// it came to back with `finishChunkIo`.
+        #[wasm_bindgen(js_name = takeChunkIo)]
+        pub fn take_chunk_io(&mut self, hold_fetches: bool) -> Result<JsValue, JsValue> {
+            if !self.blobs || self.chunk_io.is_some() {
+                return Ok(JsValue::UNDEFINED);
+            }
+            let Some(core) = self.core.as_ref() else {
+                return Ok(JsValue::UNDEFINED);
+            };
+            let taken = if hold_fetches {
+                core.db().take_chunk_io_holding_fetches()
+            } else {
+                core.db().take_chunk_io()
+            };
+            // An empty batch ends when it is dropped.
+            match taken.map_err(js)? {
+                Some(io) if !io.is_empty() => {
+                    let batch = chunk_io_js(&io);
+                    self.chunk_io = Some(io);
+                    Ok(batch)
+                }
+                _ => Ok(JsValue::UNDEFINED),
+            }
+        }
+
+        /// The bytes of put `index` of the batch out, as the host starts
+        /// it; `undefined` when no batch is out or it has no such put.
+        #[wasm_bindgen(js_name = chunkPutBytes)]
+        pub fn chunk_put_bytes(&self, index: usize) -> Option<js_sys::Uint8Array> {
+            let (_, bytes) = self.chunk_io.as_ref()?.puts().get(index)?;
+            Some(js_sys::Uint8Array::from(bytes.as_slice()))
+        }
+
+        /// Hand back the batch `takeChunkIo` gave out: one result per
+        /// fetch, put and delete, in order (`undefined` or `null` for
+        /// success, a string for why an op failed; a fetch's bytes, or
+        /// `null` for no such object). Failed ops are retried in a later
+        /// batch; the first failure is returned, `undefined` if none.
+        #[wasm_bindgen(js_name = finishChunkIo)]
+        pub fn finish_chunk_io(
+            &mut self,
+            fetched: js_sys::Array,
+            put: js_sys::Array,
+            deleted: js_sys::Array,
+        ) -> Result<Option<String>, JsValue> {
+            let Some(io) = self.chunk_io.take() else {
+                return Err(js("no chunk I/O batch is out"));
+            };
+            let Some(core) = self.core.as_ref() else {
+                return Ok(None);
+            };
+            let done = chunk_done(io, &fetched, &put, &deleted).map_err(js)?;
+            Ok(core.db().finish_chunk_io(done).err().map(|e| e.to_string()))
+        }
+
+        /// The offloaded nodes reads wait on, to fetch beside the batch that
+        /// is out, or `undefined` (none, or fetches already out): `{
+        /// fetches }` as in `takeChunkIo`. Hand them back with
+        /// `finishChunkFetches`.
+        #[wasm_bindgen(js_name = takeChunkFetches)]
+        pub fn take_chunk_fetches(&mut self) -> Result<JsValue, JsValue> {
+            if !self.blobs || self.chunk_fetches.is_some() {
+                return Ok(JsValue::UNDEFINED);
+            }
+            let Some(core) = self.core.as_ref() else {
+                return Ok(JsValue::UNDEFINED);
+            };
+            match core.db().take_chunk_fetches().map_err(js)? {
+                Some(io) => {
+                    let fetches = chunk_io_js(&io);
+                    self.chunk_fetches = Some(io);
+                    Ok(fetches)
+                }
+                None => Ok(JsValue::UNDEFINED),
+            }
+        }
+
+        /// Hand back what `takeChunkFetches` gave out, one result per
+        /// fetch (as `finishChunkIo`'s). Returns the first failure.
+        #[wasm_bindgen(js_name = finishChunkFetches)]
+        pub fn finish_chunk_fetches(
+            &mut self,
+            fetched: js_sys::Array,
+        ) -> Result<Option<String>, JsValue> {
+            let Some(io) = self.chunk_fetches.take() else {
+                return Err(js("no chunk fetches are out"));
+            };
+            let Some(core) = self.core.as_ref() else {
+                return Ok(None);
+            };
+            let none = js_sys::Array::new();
+            let done = chunk_done(io, &fetched, &none, &none).map_err(js)?;
+            Ok(core
+                .db()
+                .finish_chunk_fetches(done)
+                .err()
+                .map(|e| e.to_string()))
+        }
+
         /// How often to tick while sockets are open, in milliseconds.
         #[wasm_bindgen(js_name = idleTickMs)]
         pub fn idle_tick_ms() -> u32 {
@@ -1405,6 +1774,7 @@ mod core_host {
             let mut batches = Vec::new();
             let mut ended = false;
             let failed = state.failed.clone();
+            let client_features = state.client_features;
             let taken = match self.core.as_mut() {
                 Some(core) => core.take_output(state.session),
                 None => Vec::new(),
@@ -1412,18 +1782,26 @@ mod core_host {
             for out in taken {
                 match out {
                     Ok(frames) => {
-                        for batch in encode_ws_frame_batches(&frames).unwrap_or_default() {
+                        let Ok(encoded) = encode_ws_frame_batches(&frames) else {
+                            ended = true;
+                            break;
+                        };
+                        for batch in encoded {
                             batches.push(js_sys::Uint8Array::from(batch.as_slice()));
                         }
                     }
                     Err(error) => {
-                        batches.push(js_sys::Uint8Array::from(error_frame(&error).as_slice()));
+                        batches.push(js_sys::Uint8Array::from(
+                            error_frame(&error, client_features).as_slice(),
+                        ));
                         ended = true;
                     }
                 }
             }
             if let Some(error) = failed {
-                batches.push(js_sys::Uint8Array::from(error_frame(&error).as_slice()));
+                batches.push(js_sys::Uint8Array::from(
+                    error_frame(&error, client_features).as_slice(),
+                ));
                 ended = true;
             }
             if ended {
@@ -1448,6 +1826,51 @@ mod core_host {
     }
 
     impl DurableObjectCore {
+        fn install_socket(
+            &mut self,
+            session: ServerSession,
+            thin: bool,
+            attachment: Option<Rc<RefCell<SocketAttachment>>>,
+            client_features: u64,
+            revocation: Option<SessionRevocation>,
+            guest: Option<jazz::ids::AuthorSubject>,
+            restored: bool,
+        ) -> u32 {
+            if let Some(attachment) = attachment.clone() {
+                let core = self.core.as_mut().expect("opened session");
+                if thin {
+                    core.observe_thin_registrations(
+                        session,
+                        Rc::new(move |event| attachment.borrow_mut().record_thin(event)),
+                    );
+                } else {
+                    core.observe_registrations(
+                        session,
+                        Rc::new(move |message| attachment.borrow_mut().record(message)),
+                        restored,
+                    );
+                }
+            }
+            let socket = self.next_socket;
+            self.next_socket += 1;
+            self.sockets.insert(
+                socket,
+                Socket {
+                    attachment,
+                    client_features,
+                    session,
+                    thin,
+                    assembler: jazz::thin::ThinAssembler::default(),
+                    held: VecDeque::new(),
+                    held_bytes: 0,
+                    failed: None,
+                    revocation,
+                    guest,
+                },
+            );
+            socket
+        }
+
         /// Decode `message` into the socket's held input.
         fn read(state: &mut Socket, message: &[u8], limit: usize) -> Result<(), String> {
             let frames = decode_ws_encoded_frame_batch(message).map_err(|e| e.to_string())?;
@@ -1547,6 +1970,46 @@ mod core_host {
                         .unwrap_or(0);
                     Some(answer(200, serde_json::json!({ "rows": rows })))
                 }
+                // The bytes of large-value leaves the object's SQL still
+                // holds (a leaf moved to the bucket holds none), and how
+                // many nodes it knows.
+                "test/inline-large-values" => {
+                    let count = |sql: &str| {
+                        storage
+                            .prepare_cached(sql)
+                            .and_then(|mut statement| {
+                                statement.query_row([], |row| row.get::<_, i64>(0))
+                            })
+                            .unwrap_or(-1)
+                    };
+                    Some(answer(
+                        200,
+                        serde_json::json!({
+                            "leafBytes": count(
+                                "SELECT coalesce(sum(length(n.bytes)), 0) FROM _jazz_lv_node n \
+                                 WHERE NOT EXISTS (SELECT 1 FROM _jazz_lv_edge e WHERE e.parent = n.hash)",
+                            ),
+                            "nodes": count("SELECT count(*) FROM _jazz_lv_node"),
+                            "queued": count("SELECT count(*) FROM _jazz_lv_offload"),
+                            "receipts": count("SELECT count(*) FROM _jazz_lv_receipt"),
+                            "unpushed": count("SELECT count(*) FROM _jazz_lv_unpushed"),
+                            "uploading": count("SELECT count(*) FROM _jazz_lv_upload_node"),
+                        }),
+                    ))
+                }
+                // Leave every large value unreferenced, as a row's last
+                // version going does (white-box: no public write drops a
+                // committed value that history keeps); the next tick
+                // reclaims them.
+                "test/unreference-large-values" => {
+                    storage
+                        .execute_batch("UPDATE _jazz_lv_root SET refs = 0")
+                        .expect("unreference");
+                    if let Some(core) = self.core.as_mut() {
+                        core.tick();
+                    }
+                    Some(no_content())
+                }
                 // Set the held limits and pause or resume the engine; the
                 // answer is the limits that were in force.
                 "test/limits" => {
@@ -1638,10 +2101,31 @@ mod core_host {
             };
             let any_stored = !rows.schemas.is_empty();
             self.core = Some(
-                ServerCore::open(schema, file, any_stored, Some(self.app_id.clone()))
+                self.open_server_core(schema, file, any_stored)
                     .map_err(js)?,
             );
             Ok(())
+        }
+
+        /// The engine on the object's store, with the host's bucket if it
+        /// has one.
+        fn open_server_core(
+            &self,
+            schema: jazz::schema::JazzSchema,
+            file: jazz::host::StoreFile,
+            any_stored: bool,
+        ) -> Result<ServerCore, String> {
+            let chunk_store = self.blobs.then(|| {
+                std::sync::Arc::new(HostRunChunkStore)
+                    as std::sync::Arc<dyn jazz::chunk_store::ChunkStore>
+            });
+            ServerCore::open_with_chunk_store(
+                schema,
+                file,
+                any_stored,
+                Some(self.app_id.clone()),
+                chunk_store,
+            )
         }
     }
 
@@ -1678,6 +2162,7 @@ mod core_host {
             jazz::wire::WireRetry::AfterAuth,
             "session revoked: jazz.revokeUser ended this user's sessions",
         )
+        .with_reason(jazz::wire::WireErrorReason::Revoked)
     }
 
     fn no_content() -> HttpAnswer {
@@ -1933,10 +2418,16 @@ mod core_host {
                 ("GET", "admin/migrations/graph" | "admin/bundles") | ("POST", "admin/bundles") => {
                     credentials.admin(&self.secret)?
                 }
+                ("GET", backend_signing_key::ROUTE) => credentials.admin(&self.secret)?,
                 #[cfg(feature = "durable-object-tests")]
-                ("POST", "test/panic" | "test/panic-rows" | "test/limits") => {
-                    credentials.admin(&self.secret)?
-                }
+                (
+                    "POST",
+                    "test/panic"
+                    | "test/panic-rows"
+                    | "test/limits"
+                    | "test/inline-large-values"
+                    | "test/unreference-large-values",
+                ) => credentials.admin(&self.secret)?,
                 _ => return Err(not_found()),
             }
             Ok(route)
@@ -1974,6 +2465,16 @@ mod core_host {
                 ("GET", "admin/bundles") => match self.catalogue_index() {
                     Ok(index) => answer(200, published_bundles(&index)),
                     Err(error) => refusal(500, ErrorResponse::internal(error)),
+                },
+                // The core secret is configured and outlives every
+                // deployment, so the key derives from it (jazz#5553).
+                ("GET", backend_signing_key::ROUTE) => HttpAnswer {
+                    status: 200,
+                    body: backend_signing_key::body(&backend_signing_key::derived(
+                        &self.secret,
+                        &self.app_id,
+                    )),
+                    content_type: "application/json",
                 },
                 _ => {
                     if let Err(error) = serde_json::from_slice::<DeployRequest>(body) {
@@ -2144,16 +2645,10 @@ mod core_host {
             Ok(CatalogueIndex::from_rows(&self.catalogue_rows()?, None))
         }
 
-        /// Publish the deploy request in `body` (valid JSON, checked by the
-        /// caller), as native's `POST admin/bundles`: validate it against
-        /// the core's catalogue and apply its rows and admissions in one
-        /// transaction, refused if the catalogue moved since it was staged
-        /// (`apply_catalogue`). Without a core yet, the deployment is
-        /// probed on a scratch store first, so one the catalogue refuses
-        /// never opens the app's store on its schema, and the core is
-        /// opened on its first schema; it is then staged again on that
-        /// core's catalogue (which admitted the schema it opened on). A
-        /// bundle new to the store ends the sessions pinned to others.
+        /// Publish rows and admissions atomically on the object's real store.
+        /// A first deployment includes initialization in that same transaction;
+        /// the core is installed only after commit. Later deployments end sessions
+        /// pinned to other bundles when publishing a new bundle.
         fn deploy(&mut self, body: &[u8]) -> Result<DeploymentResponse, DeployError> {
             let request =
                 || serde_json::from_slice::<DeployRequest>(body).map_err(DeployError::invalid);
@@ -2165,20 +2660,24 @@ mod core_host {
                     return Ok(deployment.staged.response);
                 }
                 let genesis = deployment.genesis()?;
-                let scratch = jazz::host::StoreFile::memory().map_err(DeployError::internal)?;
-                let mut probe = ServerCore::open(genesis.clone(), scratch, false, None)
-                    .map_err(DeployError::internal)?;
-                let probed = apply(&mut probe, request()?, now, false).map(drop);
-                probe.close();
-                probed?;
+                let rows = self.catalogue_rows().map_err(DeployError::internal)?;
+                let change = deployment.catalogue_change(&rows)?;
                 let file = jazz::host::StoreFile::from_storage(durable_object_storage(
                     self.storage.clone(),
                 ))
                 .map_err(DeployError::internal)?;
-                self.core = Some(
-                    ServerCore::open(genesis, file, false, Some(self.app_id.clone()))
-                        .map_err(DeployError::internal)?,
-                );
+                let chunk_store = self.blobs.then(|| {
+                    std::sync::Arc::new(HostRunChunkStore)
+                        as std::sync::Arc<dyn jazz::chunk_store::ChunkStore>
+                });
+                self.core = Some(ServerCore::open_deployment(
+                    genesis,
+                    file,
+                    Some(self.app_id.clone()),
+                    chunk_store,
+                    change,
+                )?);
+                return Ok(deployment.staged.response);
             }
             let core = self.core.as_mut().expect("opened above");
             apply(core, request()?, now, true)
