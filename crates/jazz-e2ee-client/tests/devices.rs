@@ -191,6 +191,42 @@ fn a_second_device_is_approved_and_reads() {
     });
 }
 
+/// Contract: a device awaiting approval, which holds no key of the account's
+/// space, is not told its write can be tried again. Its check of the space
+/// before the write fails (the account is not verified here), which marks
+/// the space; a write under the current version still needs that version.
+///
+/// ```text
+/// second (awaiting approval) ──prepare write to space──► not ready
+/// ```
+#[test]
+fn a_device_awaiting_approval_is_not_told_to_write_again() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let first = device(&server, alice, memory(), 1, &settings);
+        assert_eq!(first.status(&server, &[]), AccountStatus::Active);
+        let space = space_with_a_note(&server, &first, &account_id(alice));
+
+        let second = device(&server, alice, memory(), 2, &settings);
+        assert_eq!(
+            second.status(&server, &[&first]),
+            AccountStatus::AwaitingApproval
+        );
+        let address = space_address(&second, space);
+        let prepared = drive(
+            &server,
+            &[&second.db],
+            second.client.prepare_space(&second.db, &address),
+        );
+        assert!(
+            !matches!(prepared, Ok(true)),
+            "a device without the space's key cannot write under it: {prepared:?}"
+        );
+    });
+}
+
 fn space_address(device: &Device, space: uuid::Uuid) -> jazz::e2ee::SpaceAddress {
     let scope = device.db.table_identity("projects").unwrap().unwrap().0;
     jazz::e2ee::SpaceAddress {
