@@ -11,7 +11,9 @@ name: Release publish
 #     so one review approves them all), in parallel:
 #     npm             the prebuilt tarballs, dependencies first
 #     crates.io       cargo publish in dependency order (already verified)
-#     Maven Central   the prebuilt jar/aar, signed, through the Portal API
+#     Maven           the prebuilt jar/aar, bundled and checked; uploaded to
+#                     Maven Central only when dev/release-publish/kotlin-channel.sh
+#                     says central (paused: the GitHub release's files until then)
 #     Go              push packages/jazz-go/v<version>
 #     Swift           push and tag garden-co/jazz-swift
 #     Inspector       stage and promote the prebuilt deployment (after npm)
@@ -56,7 +58,7 @@ on:
           - publish
           - verify-trust
       maven-publishing-type:
-        description: "Central Portal publishingType: AUTOMATIC publishes once validated (the release waits only for PUBLISHING; a later job waits until repo1 serves it); USER_MANAGED leaves it validated for Publish in the Portal."
+        description: "Only while Kotlin's channel is central. Central Portal publishingType: AUTOMATIC publishes once validated (the release waits only for PUBLISHING; a later job waits until repo1 serves it); USER_MANAGED leaves it validated for Publish in the Portal."
         required: true
         default: AUTOMATIC
         type: choice
@@ -64,7 +66,7 @@ on:
           - AUTOMATIC
           - USER_MANAGED
       maven-portal-dry-run:
-        description: "Dry run only: upload the Maven bundle USER_MANAGED, wait for VALIDATED, then drop it. Needs the publish environment's approval (its Maven secrets)."
+        description: "Dry run only, and only while Kotlin's channel is central: upload the Maven bundle USER_MANAGED, wait for VALIDATED, then drop it. Needs the publish environment's approval (its Maven secrets)."
         required: false
         default: false
         type: boolean
@@ -135,6 +137,7 @@ jobs:
       tree: ${{ steps.artifacts.outputs.tree }}
       inspector_run_id: ${{ steps.artifacts.outputs.inspector_run_id }}
       legacy: ${{ steps.artifacts.outputs.legacy }}
+      kotlin_channel: ${{ steps.kotlin.outputs.channel }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -161,6 +164,27 @@ jobs:
           at_sha=$(gh api "repos/${GH_REPO}/contents/packages/jazz-tools/package.json?ref=${SHA}" --jq .content | base64 -d | jq -r .version)
           [ "${at_sha}" = "${VERSION}" ] || { echo "::error::${SHA} is jazz-tools ${at_sha}, not ${VERSION}"; exit 1; }
           echo "Publishing ${VERSION} from ${SHA} (${MODE})"
+
+      # From the workflow's commit, for every version: while Central is paused
+      # nothing uploads there, a re-dispatched older version included.
+      - name: Where Kotlin publishes
+        id: kotlin
+        env:
+          PORTAL_DRY_RUN: ${{ inputs.maven-portal-dry-run }}
+        run: |
+          set -euo pipefail
+          channel=$(bash dev/release-publish/kotlin-channel.sh)
+          case "${channel}" in
+            central) ;;
+            github-release)
+              if [ "${PORTAL_DRY_RUN}" = true ]; then
+                echo "::error::maven-portal-dry-run uploads to Maven Central, which is paused (dev/release-publish/kotlin-channel.sh)"
+                exit 1
+              fi ;;
+            *) echo "::error::unknown Kotlin channel '${channel}'"; exit 1 ;;
+          esac
+          echo "channel=${channel}" >> "${GITHUB_OUTPUT}"
+          echo "Kotlin publishes to: ${channel}"
 
       # As "Publish jazz-tools alpha": only a merged Version Packages PR's
       # release commit publishes, and only once the release tests passed on
@@ -730,18 +754,21 @@ jobs:
           CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
         run: node dev/scripts/publish-crates.mjs --publish
 
+  # Runs and must succeed whatever the channel (finalize needs it), so the
+  # bundle keeps being checked. Only `central` gets the publish environment
+  # (so its approval and secrets) and uploads.
   maven:
-    name: Maven Central
+    name: Maven
     needs: [resolve, ready]
     if: ${{ !cancelled() && needs.ready.result == 'success' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 75
-    environment: ${{ (inputs.mode == 'publish' || inputs.maven-portal-dry-run) && 'publish' || '' }}
+    environment: ${{ needs.resolve.outputs.kotlin_channel == 'central' && (inputs.mode == 'publish' || inputs.maven-portal-dry-run) && 'publish' || '' }}
     permissions:
       actions: read
       contents: read
     env:
-      PORTAL: ${{ inputs.mode == 'publish' || inputs.maven-portal-dry-run }}
+      PORTAL: ${{ needs.resolve.outputs.kotlin_channel == 'central' && (inputs.mode == 'publish' || inputs.maven-portal-dry-run) }}
     outputs:
       uploaded_at: ${{ steps.upload.outputs.uploaded_at }}
     steps:
@@ -758,7 +785,7 @@ jobs:
           name: release-maven
           path: maven
 
-      - name: Throwaway signing key (dry run)
+      - name: Throwaway signing key (no upload)
         if: env.PORTAL != 'true'
         run: |
           set -euo pipefail
@@ -793,6 +820,15 @@ jobs:
           DROP: ${{ inputs.mode != 'publish' && '--drop' || '' }}
         run: node dev/release-publish/maven-central.mjs upload "${RUNNER_TEMP}/bundle.zip" "${VERSION}" "${TYPE}" ${DROP}
 
+      - name: Maven Central is paused
+        if: needs.resolve.outputs.kotlin_channel != 'central'
+        run: |
+          {
+            echo "### Maven Central is paused: bundle checked, nothing uploaded"
+            echo
+            echo "jazz-kotlin ${VERSION} installs from the GitHub release's jar and AAR (dev/release-publish/kotlin-channel.sh)."
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+
   # With AUTOMATIC the Maven job returns at PUBLISHING (validated, no way
   # back) and the GitHub release need not wait the ~11 min Central takes to
   # publish. This job waits, without credentials (so without a second
@@ -803,7 +839,7 @@ jobs:
     needs: [resolve, maven, finalize]
     if: >-
       ${{ !cancelled() && inputs.mode == 'publish' && inputs.maven-publishing-type == 'AUTOMATIC' &&
-          needs.maven.result == 'success' }}
+          needs.resolve.outputs.kotlin_channel == 'central' && needs.maven.result == 'success' }}
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 50
     permissions:
