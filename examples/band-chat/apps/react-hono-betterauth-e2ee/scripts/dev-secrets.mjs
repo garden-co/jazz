@@ -8,12 +8,13 @@ import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 const FILE = new URL("../.env.development.local", import.meta.url);
 const NAMES = ["BETTER_AUTH_SECRET"];
 
-const current = existsSync(FILE) ? readFileSync(FILE, "utf8") : "";
+const exists = existsSync(FILE);
+if (exists) chmodSync(FILE, 0o600);
+const current = exists ? readFileSync(FILE, "utf8") : "";
 const missing = NAMES.filter((name) => !new RegExp(`^${name}=.+`, "m").test(current));
 if (missing.length) {
   const lines = missing.map((name) => `${name}=${randomBytes(32).toString("base64url")}`);
   const prefix = current && !current.endsWith("\n") ? "\n" : "";
   writeFileSync(FILE, `${current}${prefix}${lines.join("\n")}\n`, { mode: 0o600 });
-  chmodSync(FILE, 0o600);
   console.log(`Generated local ${missing.join(" and ")} in .env.development.local`);
 }
