@@ -148,8 +148,10 @@ impl E2eeClient {
                     Err(_) => true,
                 });
             let mut keys = self.shared.keys.borrow_mut();
-            keys.rotation_evaluated.insert(address.clone());
-            keys.space_removals.insert(address.clone(), removals);
+            if self.shared.member_watch.borrow().spaces.contains_key(space) {
+                keys.rotation_evaluated.insert(address.clone());
+                keys.space_removals.insert(address.clone(), removals);
+            }
             if marked {
                 keys.rotation_pending.insert(address.clone());
             } else {
@@ -392,7 +394,9 @@ impl E2eeClient {
             keys.rotation_pending.remove(&address);
             // The new version is sealed to the members' current account
             // epochs: nothing a removal superseded holds it.
-            keys.rotation_evaluated.insert(address.clone());
+            if self.shared.member_watch.borrow().spaces.contains_key(space) {
+                keys.rotation_evaluated.insert(address.clone());
+            }
         }
         let mut written = first;
         for batch in rest.chunks(DELIVERY_BATCH) {

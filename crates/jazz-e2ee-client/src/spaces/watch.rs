@@ -30,6 +30,8 @@ pub struct SpaceWatch {
     own: Vec<(&'static str, WatchedRows<SpaceAddress>)>,
     /// The spaces the shared subscriptions cover now.
     watched: BTreeSet<SpaceAddress>,
+    /// Spaces whose subscriptions or pending reports already had an acquisition pass.
+    interest: BTreeSet<SpaceAddress>,
     /// The current versions whose deliveries the shared watch covers.
     epochs: BTreeSet<String>,
     /// How many open app subscriptions use each space.
@@ -135,6 +137,22 @@ fn account_query(table: &str, accounts: &[String]) -> Query {
     Query::from(table).filter(Predicate::In(Operand::Column("accountId".to_owned()), ids))
 }
 
+async fn local_members(
+    db: &Db,
+    space: &SpaceAddress,
+) -> Result<Vec<jazz::db::CurrentRow>, ClientError> {
+    let id = |value: &str| uuid_cell(value).ok_or(ProtocolError::InconsistentEvidence);
+    let query = Query::from(rows::SPACE_MEMBERS)
+        .filter(eq(col("scopeId"), lit(id(&space.scope_id)?)))
+        .filter(eq(col("identifier"), lit(id(&space.identifier)?)));
+    Ok(db
+        .all(
+            &db.prepare_query(&query)?,
+            ReadOpts::for_read_tier(ReadTier::LocalOnly),
+        )
+        .await?)
+}
+
 impl E2eeClient {
     /// The current version of each of `spaces` as this device last read its
     /// chain: the deliveries of earlier versions are not watched, the newest
@@ -160,7 +178,7 @@ impl E2eeClient {
         db: &Db,
         watch: &mut SpaceWatch,
         interest: &BTreeSet<SpaceAddress>,
-    ) -> Result<bool, ClientError> {
+    ) -> Result<(), ClientError> {
         let mut covered = self.shared.recent_writes();
         covered.extend(interest.iter().cloned());
         let epochs = self.current_epochs(&covered);
@@ -169,7 +187,7 @@ impl E2eeClient {
             && self.shared.member_watch.borrow().covered == covered
         {
             self.refresh_accounts(db, watch).await?;
-            return Ok(false);
+            return Ok(());
         }
         let spaces: Vec<SpaceAddress> = covered.iter().cloned().collect();
         let versions: Vec<String> = epochs.iter().cloned().collect();
@@ -195,7 +213,7 @@ impl E2eeClient {
         watch.watched = covered;
         watch.epochs = epochs;
         self.refresh_accounts(db, watch).await?;
-        Ok(true)
+        Ok(())
     }
 
     /// Opens the shared subscriptions of the member accounts of the watched
@@ -211,7 +229,15 @@ impl E2eeClient {
         let mut by_account = BTreeMap::<_, BTreeSet<_>>::new();
         {
             let mut members = self.shared.member_watch.borrow_mut();
-            members.spaces.retain(|space, _| active.contains(space));
+            let mut keys = self.shared.keys.borrow_mut();
+            members.spaces.retain(|space, _| {
+                let keep = active.contains(space);
+                if !keep && let Ok(address) = protocol_address(space) {
+                    keys.rotation_evaluated.remove(&address);
+                    keys.space_removals.remove(&address);
+                }
+                keep
+            });
             for space in active {
                 let deps = members.spaces.entry(space.clone()).or_default();
                 for (table, accounts) in [
@@ -291,6 +317,7 @@ impl E2eeClient {
         Ok(SpaceWatch {
             own,
             watched: BTreeSet::new(),
+            interest: BTreeSet::new(),
             epochs: BTreeSet::new(),
             uses: Default::default(),
         })
@@ -319,21 +346,11 @@ impl E2eeClient {
                 done.push(row);
                 continue;
             }
-            let (Some(scope), Some(id)) =
-                (uuid_cell(&space.scope_id), uuid_cell(&space.identifier))
-            else {
+            if protocol_address(&space).is_err() {
                 done.push(row);
                 continue;
-            };
-            let query = Query::from(rows::SPACE_MEMBERS)
-                .filter(eq(col("scopeId"), lit(scope)))
-                .filter(eq(col("identifier"), lit(id)));
-            let read = db
-                .all(
-                    &db.prepare_query(&query)?,
-                    ReadOpts::for_read_tier(ReadTier::LocalOnly),
-                )
-                .await?;
+            }
+            let read = local_members(db, &space).await?;
             if read.iter().any(|found| found.row_uuid() == row) {
                 ready.insert(space);
                 done.push(row);
@@ -428,7 +445,7 @@ impl E2eeClient {
         self.ensure_open()?;
         let mut interest = self.shared.published.borrow().pending_spaces();
         interest.extend(watch.uses.keys().cloned());
-        let joined = self.refresh_shared(db, watch, &interest).await?;
+        self.refresh_shared(db, watch, &interest).await?;
         // Member rows this client wrote that have committed: their spaces
         // are served now, in use or not (protocol §3.4).
         let committed = self.committed_member_changes(db).await?;
@@ -446,15 +463,45 @@ impl E2eeClient {
                 served.extend(changed.intersection(&interest).cloned());
             }
         }
-        if joined {
-            served.extend(interest.iter().cloned());
-        }
+        served.extend(interest.difference(&watch.interest).cloned());
+        watch.interest.clone_from(&interest);
         served.extend(members_changed.intersection(&interest).cloned());
         let mut results = Vec::new();
         for space in served {
             // `acquire` refuses an address that is not a pair of UUIDs: that
             // space is reported with its error, the others go on.
             let mut state = self.acquire(db, &space).await;
+            // A subscriber waiting for its key still watches the members' roots.
+            // The shared membership subscription supplies these rows locally.
+            if state.is_ok()
+                && !matches!(state, Ok(SpaceKeyState::Held))
+                && self
+                    .shared
+                    .member_watch
+                    .borrow()
+                    .spaces
+                    .contains_key(&space)
+            {
+                match local_members(db, &space).await {
+                    Ok(rows) => {
+                        if let Some(deps) =
+                            self.shared.member_watch.borrow_mut().spaces.get_mut(&space)
+                        {
+                            deps.members = rows
+                                .iter()
+                                .filter_map(|row| match row.cell("accountId") {
+                                    Some(jazz::records::Value::Uuid(id)) => Some(id.to_string()),
+                                    _ => None,
+                                })
+                                .collect();
+                            deps.holders.clear();
+                            deps.waiting.retain(|id| deps.members.contains(id));
+                            deps.version = None;
+                        }
+                    }
+                    Err(error) => state = Err(error),
+                }
+            }
             // The pass: members that lack a version this device holds.
             if matches!(state, Ok(SpaceKeyState::Held))
                 && let Err(error) = self.deliver_pass(db, &space).await

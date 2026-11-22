@@ -867,6 +867,8 @@ impl E2eeClient {
             };
         }
         *self.shared.creations.borrow_mut() = Default::default();
+        *self.shared.member_watch.borrow_mut() = Default::default();
+        self.shared.written.borrow_mut().clear();
         // What belongs to the device and account that are gone: versions its
         // reads found missing.
         self.shared.missing.borrow_mut().clear();

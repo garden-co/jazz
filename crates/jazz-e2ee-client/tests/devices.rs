@@ -809,9 +809,18 @@ fn a_write_checks_the_same_number_of_rows_after_many_rotations() {
                         && last.ends_with("=?)")),
                 "{plan}"
             );
-            counts.push(shared.alice.client.write_check_reads().0);
+            let prepared = shared.server.prepare_query(&probe).unwrap();
+            jazz::db::take_vm_steps_for_test();
+            let rows = block_on(shared.server.all(
+                &prepared,
+                jazz::db::ReadOpts::for_read_tier(jazz::db::ReadTier::LocalOnly),
+            ))
+            .unwrap();
+            let probe_steps = jazz::db::take_vm_steps_for_test();
+            assert!(rows.is_empty());
+            counts.push((shared.alice.client.write_check_reads().0, probe_steps));
         }
-        assert!(counts[0] > 0);
+        assert!(counts[0].0 > 0 && counts[0].1 > 0);
         assert_eq!(counts[0], counts[1]);
     });
 }

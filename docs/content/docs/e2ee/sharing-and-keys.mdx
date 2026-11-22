@@ -66,7 +66,7 @@ reading any row after.
 
 Before reusing a space key, Jazz checks whether it needs rotation. If account verification or the
 check fails, `onReport` receives `rotation-check-failed` with the space and the original reason.
-Jazz marks the space for rotation even if a later attempt succeeds.
+Jazz marks the space for rotation. The app receives the original failure even if rotation succeeds.
 
 That automatic rotation happens just before a write. If it fails, for example because the writer may
 not update the space's row, the write still goes ahead under the current key, which the removed member
@@ -75,6 +75,8 @@ may hold. The runtime then sends `onReport` a `rotation-failed` report with the 
 
 ```ts
 db.encryption.onReport((report) => {
+  if (report.type === "rotation-check-failed")
+    console.warn("rotation check failed", report.space, report.reason);
   if (report.type === "rotation-failed")
     console.warn("key not rotated", report.space, report.reason);
 });

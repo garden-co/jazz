@@ -1028,6 +1028,7 @@ fn only_an_eligible_holder_checks_the_mark_and_watches_public_successors() {
         let watched = || bob.client.watched_member_accounts(&address);
         let successors = ("__e2ee_public_account_successors", alice.id());
         sync(&mut watch);
+        assert!(watched().contains(&("__e2ee_account_roots", alice.id())));
         let before = bob.client.delivery_mark_checks();
         deliver(&server, &bob, &[], space);
         sync(&mut watch);
@@ -1039,6 +1040,14 @@ fn only_an_eligible_holder_checks_the_mark_and_watches_public_successors() {
         assert!(bob.client.delivery_mark_checks() > before);
         assert!(watched().contains(&successors));
         assert!(!watched().contains(&("__e2ee_account_keys", alice.id())));
+        let dave = owned_device(&server, account(0xd0), MemoryStore::new(), 3);
+        server_member(&server, &alice, space, &dave.id());
+        sync(&mut watch);
+        let daves_keys = ("__e2ee_account_keys", dave.id());
+        assert!(watched().contains(&daves_keys));
+        dave.activate(&server);
+        sync(&mut watch);
+        assert!(!watched().contains(&daves_keys));
         drive(&server, &[&bob.db], bob.client.rotate(&bob.db, &address)).unwrap_err();
         let refused = bob.client.delivery_mark_checks();
         deliver(&server, &bob, &[], space);
