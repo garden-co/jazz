@@ -38,6 +38,12 @@ With `use {}`, run the whole block in `withContext(Dispatchers.IO)`.
   at the default tier and watch `syncStatus`.
 </Callout>
 
+<Callout type="warn" title="Known issue: open one Jazz per dataDir">
+  Open one `Jazz` per `dataDir`. A second app open on the same persistent store can make writes fail
+  with `database is locked` and stop that client's sync until it reopens. When reopening, wait for
+  the previous `close()` to return.
+</Callout>
+
 ## Install
 
 From `2.0.0-beta.1`, `jazz-kotlin` isn't published to Maven Central. Until it's in a Maven
