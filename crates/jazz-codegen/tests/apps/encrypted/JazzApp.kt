@@ -43,6 +43,54 @@ public val APP: kotlin.String = kotlin.arrayOf(
 public suspend fun open(config: tools.jazz.JazzConfig): tools.jazz.Jazz =
     tools.jazz.Jazz.open(APP, config)
 
+/** A row of `__e2ee_members`. */
+@kotlinx.serialization.Serializable
+public data class E2eeMember(
+    val id: kotlin.String,
+    val scopeId: kotlin.String,
+    val identifier: kotlin.String,
+    val accountId: kotlin.String,
+)
+
+/** A new row of `__e2ee_members`: leave out a column to store its default (or `null`). */
+@kotlinx.serialization.Serializable
+public data class NewE2eeMember(
+    val scopeId: kotlin.String,
+    val identifier: kotlin.String,
+    val accountId: kotlin.String,
+)
+
+/** Changes to a row of `__e2ee_members`: columns not set are left as they are. */
+public class E2eeMemberPatch : tools.jazz.Patch() {
+    /** Sets `scopeId`. */
+    public fun scopeId(value: kotlin.String): E2eeMemberPatch = apply { set("scopeId", value, kotlinx.serialization.serializer<kotlin.String>()) }
+    /** Sets `identifier`. */
+    public fun identifier(value: kotlin.String): E2eeMemberPatch = apply { set("identifier", value, kotlinx.serialization.serializer<kotlin.String>()) }
+    /** Sets `accountId`. */
+    public fun accountId(value: kotlin.String): E2eeMemberPatch = apply { set("accountId", value, kotlinx.serialization.serializer<kotlin.String>()) }
+}
+
+/** Table `__e2ee_members`: its columns, and queries with `query()`. */
+public object E2eeMembers : tools.jazz.Table<E2eeMember, NewE2eeMember, E2eeMemberPatch>(
+    "__e2ee_members",
+    E2eeMember.serializer(),
+    NewE2eeMember.serializer(),
+    ::E2eeMemberPatch,
+) {
+    /** The row's id. */
+    public val id: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("id", kotlinx.serialization.serializer<kotlin.String>())
+    /** Column `scopeId`. */
+    public val scopeId: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("scopeId", kotlinx.serialization.serializer<kotlin.String>())
+    /** Column `identifier`. */
+    public val identifier: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("identifier", kotlinx.serialization.serializer<kotlin.String>())
+    /** Column `accountId`. */
+    public val accountId: tools.jazz.Column<kotlin.String> =
+        tools.jazz.Column("accountId", kotlinx.serialization.serializer<kotlin.String>())
+}
+
 /** A row of `projects`. */
 @kotlinx.serialization.Serializable
 public data class Project(

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use jazz::tools::deployment::artifact;
 use jazz::tools::public_schema::ColumnType;
-use jazz_codegen::App;
+use jazz_codegen::{App, Lang};
 
 fn app_json() -> Vec<u8> {
     std::fs::read(
@@ -26,13 +26,13 @@ const PERMISSIONS: &str = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permi
         "tasks": { "read": "allowedTo.read(project)", "insert": "allowedTo.update(project)" }
     } }"#;
 
-/// Generated code sees an encrypted column's plaintext type and no
-/// equality column or system table.
+/// Generated code sees plaintext column types and the members table.
+/// Equality columns and the other system tables are hidden.
 #[test]
 fn bindings_expose_plaintext_and_hide_ciphertext() {
     let app = App::load(&app_json()).unwrap();
     let names: Vec<&str> = app.tables.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["projects", "tasks"]);
+    assert_eq!(names, ["__e2ee_members", "projects", "tasks"]);
     let tasks = app.table("tasks").unwrap();
     assert!(tasks.column("__e2ee_eq_title").is_none());
     let title = tasks.column("title").unwrap();
@@ -43,6 +43,13 @@ fn bindings_expose_plaintext_and_hide_ciphertext() {
         app.table("tasks").unwrap().column("done").unwrap().ty.ty,
         ColumnType::Boolean
     );
+}
+
+/// Rust callers get typed members bindings alongside their app tables.
+#[test]
+fn encrypted_app_generates_its_committed_rust_byte_for_byte() {
+    let generated = jazz_codegen::generate(Lang::Rust, &app_json()).unwrap();
+    assert_eq!(generated, include_str!("apps/encrypted/src/jazz_app.rs"));
 }
 
 /// The TypeScript type map marks each encrypted column `encrypted: true`

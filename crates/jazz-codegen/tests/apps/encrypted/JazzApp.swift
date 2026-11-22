@@ -64,6 +64,91 @@ public enum JazzApp {
             storage: storage, dataDir: dataDir, implementations: nil)
     }
 
+    /// A row of `__e2ee_members`.
+    public struct E2eeMember: Jazz.Row {
+        public static let table = "__e2ee_members"
+        public let id: Jazz.ID
+        public var scopeId: Jazz.ID
+        public var identifier: Jazz.ID
+        public var accountId: Jazz.ID
+
+        public init(id: Jazz.ID, scopeId: Jazz.ID, identifier: Jazz.ID, accountId: Jazz.ID) {
+            self.id = id
+            self.scopeId = scopeId
+            self.identifier = identifier
+            self.accountId = accountId
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case id
+            case scopeId = "scopeId"
+            case identifier = "identifier"
+            case accountId = "accountId"
+        }
+    }
+
+    /// A new row of `__e2ee_members`: `nil` leaves a column out, which stores its default (or `null`).
+    public struct NewE2eeMember: Jazz.Insert {
+        public typealias Row = E2eeMember
+        public var scopeId: Jazz.ID
+        public var identifier: Jazz.ID
+        public var accountId: Jazz.ID
+
+        public init(scopeId: Jazz.ID, identifier: Jazz.ID, accountId: Jazz.ID) {
+            self.scopeId = scopeId
+            self.identifier = identifier
+            self.accountId = accountId
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case scopeId = "scopeId"
+            case identifier = "identifier"
+            case accountId = "accountId"
+        }
+    }
+
+    /// A change to a row of `__e2ee_members`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
+    public struct E2eeMemberPatch: Jazz.Patch {
+        public typealias Row = E2eeMember
+        public var scopeId: Jazz.Change<Jazz.ID>
+        public var identifier: Jazz.Change<Jazz.ID>
+        public var accountId: Jazz.Change<Jazz.ID>
+
+        public init(scopeId: Jazz.Change<Jazz.ID> = .unchanged, identifier: Jazz.Change<Jazz.ID> = .unchanged, accountId: Jazz.Change<Jazz.ID> = .unchanged) {
+            self.scopeId = scopeId
+            self.identifier = identifier
+            self.accountId = accountId
+        }
+
+        enum CodingKeys: Swift.String, Swift.CodingKey {
+            case scopeId = "scopeId"
+            case identifier = "identifier"
+            case accountId = "accountId"
+        }
+
+        public func encode(to encoder: any Swift.Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeChange(self.scopeId, forKey: .scopeId)
+            try container.encodeChange(self.identifier, forKey: .identifier)
+            try container.encodeChange(self.accountId, forKey: .accountId)
+        }
+    }
+
+    /// Queries of `__e2ee_members` and its columns.
+    public enum e2eeMembers {
+        /// Every row of `__e2ee_members`; narrow it with `where`, `orderBy`, `limit` and `offset`.
+        public static func query() -> Jazz.Query<E2eeMember> { Jazz.Query() }
+
+        /// The row's id.
+        public static let id = Jazz.Column<E2eeMember, Jazz.ID>("id")
+        /// Column `scopeId`.
+        public static let scopeId = Jazz.Column<E2eeMember, Jazz.ID>("scopeId")
+        /// Column `identifier`.
+        public static let identifier = Jazz.Column<E2eeMember, Jazz.ID>("identifier")
+        /// Column `accountId`.
+        public static let accountId = Jazz.Column<E2eeMember, Jazz.ID>("accountId")
+    }
+
     /// A row of `projects`.
     public struct Project: Jazz.Row {
         public static let table = "projects"

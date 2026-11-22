@@ -47,6 +47,108 @@ func Open(ctx context.Context, cfg jazz.Config) (*jazz.DB, error) {
 	return jazz.Open(ctx, cfg)
 }
 
+// E2eeMember is a row of `__e2ee_members`.
+type E2eeMember struct {
+	ID         string `json:"id"`
+	ScopeID    string `json:"scopeId"`
+	Identifier string `json:"identifier"`
+	AccountID  string `json:"accountId"`
+}
+
+// NewE2eeMember is a row to insert into `__e2ee_members`: nil fields are null, or take their default.
+type NewE2eeMember struct {
+	ScopeID    string `json:"scopeId"`
+	Identifier string `json:"identifier"`
+	AccountID  string `json:"accountId"`
+}
+
+// E2eeMemberPatch changes the fields of a row of `__e2ee_members` that are set (jazz.Set).
+type E2eeMemberPatch struct {
+	ScopeID    jazz.Patch[string]
+	Identifier jazz.Patch[string]
+	AccountID  jazz.Patch[string]
+}
+
+// MarshalJSON writes the fields that are set.
+func (p E2eeMemberPatch) MarshalJSON() ([]byte, error) {
+	return jazz.MarshalPatch(
+		p.ScopeID.Entry("scopeId"),
+		p.Identifier.Entry("identifier"),
+		p.AccountID.Entry("accountId"),
+	)
+}
+
+// e2eeMembersTable is the type of E2eeMembers: the columns of `__e2ee_members`, to build conditions and orders from, and its relations, to include.
+type e2eeMembersTable struct {
+	ID         jazz.Column[E2eeMember, string]
+	ScopeID    jazz.Column[E2eeMember, string]
+	Identifier jazz.Column[E2eeMember, string]
+	AccountID  jazz.Column[E2eeMember, string]
+}
+
+// E2eeMembers is the table `__e2ee_members`.
+var E2eeMembers = e2eeMembersTable{
+	ID:         jazz.NewColumn[E2eeMember, string]("id"),
+	ScopeID:    jazz.NewColumn[E2eeMember, string]("scopeId"),
+	Identifier: jazz.NewColumn[E2eeMember, string]("identifier"),
+	AccountID:  jazz.NewColumn[E2eeMember, string]("accountId"),
+}
+
+// Query starts a query of `__e2ee_members`.
+func (e2eeMembersTable) Query() *jazz.Query[E2eeMember] {
+	return jazz.NewQuery[E2eeMember]("__e2ee_members")
+}
+
+// Insert inserts a row into `__e2ee_members` and returns it, with its id.
+func (e2eeMembersTable) Insert(ctx context.Context, db jazz.Querier, row NewE2eeMember, opts ...jazz.WriteOption) (E2eeMember, error) {
+	return jazz.Insert[NewE2eeMember, E2eeMember](ctx, db, "__e2ee_members", row, opts...)
+}
+
+// Update changes the fields patch sets of the row of `__e2ee_members` with id.
+func (e2eeMembersTable) Update(ctx context.Context, db jazz.Querier, id string, patch E2eeMemberPatch, opts ...jazz.WriteOption) error {
+	return jazz.Update(ctx, db, "__e2ee_members", id, patch, opts...)
+}
+
+// Upsert writes row as the row of `__e2ee_members` with id: inserted, or updated if it exists.
+func (e2eeMembersTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewE2eeMember, opts ...jazz.WriteOption) (E2eeMember, error) {
+	return jazz.Upsert[NewE2eeMember, E2eeMember](ctx, db, "__e2ee_members", id, row, opts...)
+}
+
+// Restore brings back the deleted row of `__e2ee_members` with id.
+func (e2eeMembersTable) Restore(ctx context.Context, db jazz.Querier, id string) (E2eeMember, error) {
+	return jazz.Restore[E2eeMember](ctx, db, "__e2ee_members", id, nil)
+}
+
+// History starts a query of `__e2ee_members`'s history: every accepted version of its rows.
+func (e2eeMembersTable) History() *jazz.Query[jazz.HistoryRow[E2eeMember]] {
+	return jazz.History(jazz.NewQuery[E2eeMember]("__e2ee_members"))
+}
+
+// CanRead advises whether the app's permissions allow reading the row with id in `__e2ee_members`.
+func (e2eeMembersTable) CanRead(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanRead(ctx, db, "__e2ee_members", id)
+}
+
+// CanInsert advises whether the app's permissions allow inserting row in `__e2ee_members`.
+func (e2eeMembersTable) CanInsert(ctx context.Context, db jazz.Querier, row NewE2eeMember) (jazz.Advice, error) {
+	return jazz.CanInsert(ctx, db, "__e2ee_members", row)
+}
+
+// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `__e2ee_members`.
+func (e2eeMembersTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch E2eeMemberPatch) (jazz.Advice, error) {
+	return jazz.CanUpdate(ctx, db, "__e2ee_members", id, patch)
+}
+
+// CanDelete advises whether the app's permissions allow deleting the row with id in `__e2ee_members`.
+func (e2eeMembersTable) CanDelete(ctx context.Context, db jazz.Querier, id string) (jazz.Advice, error) {
+	return jazz.CanDelete(ctx, db, "__e2ee_members", id)
+}
+
+// Delete deletes the row of `__e2ee_members` with id.
+func (e2eeMembersTable) Delete(ctx context.Context, db jazz.Querier, id string, opts ...jazz.WriteOption) error {
+	return jazz.Delete(ctx, db, "__e2ee_members", id, opts...)
+}
+
 // Project is a row of `projects`.
 type Project struct {
 	ID      string `json:"id"`

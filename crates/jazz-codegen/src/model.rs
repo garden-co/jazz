@@ -6,8 +6,9 @@
 //! maps them to its own idiom and refuses names it can't express.
 
 use jazz::tools::deployment::artifact::{
-    self, AppDefinition, ArtifactError, CodegenRelation, DeclaredEncryption, json::Json,
-    system_tables::is_system_table,
+    self, AppDefinition, ArtifactError, CodegenRelation, DeclaredEncryption,
+    json::Json,
+    system_tables::{is_members_table, is_system_table},
 };
 use jazz::tools::deployment::published::{PublishMigrationRequest, PublishedSchema};
 use jazz::tools::public_schema::EncryptionEntry;
@@ -195,11 +196,10 @@ impl App {
         let encryption = definition
             .encryption()
             .entries(&definition.current_hash().to_string());
-        // Jazz's system tables are no app table: generated code doesn't
-        // name them.
+        // The members table is the only system table apps use directly.
         let tables = current
             .iter()
-            .filter(|(name, _)| !is_system_table(name.as_str()))
+            .filter(|(name, _)| is_members_table(name.as_str()) || !is_system_table(name.as_str()))
             .map(|(name, schema)| {
                 let name = name.as_str();
                 let info = codegen.tables.get(name);
