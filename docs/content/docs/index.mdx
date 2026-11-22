@@ -238,6 +238,9 @@ You can also query and write to the database right from your frontend. It is pro
       ../examples/stage-plan/apps/kotlin-cli/src/main/kotlin/stageplan/DocsSnippets.kt#context-setup-kotlin-client
     </include>
 
+    **Known issue:** `Storage.Persistent` [fails to open on Android](/docs/setup/kotlin), so this
+    example fails there, in every release up to and including 2.0.0-beta.0.
+
     <include cwd lang="kotlin" meta='title="App.kt"'>
       ../examples/docs/todo-client-kotlin/src/main/kotlin/todoclient/DocsSnippets.kt#reading-subscriptions-kotlin
     </include>

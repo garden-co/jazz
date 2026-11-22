@@ -24,6 +24,9 @@ compared with TypeScript.
     deltas, and `close(timeout)`. See [Rust](/docs/setup/rust) and
     [Backend Client](/docs/setup/backend-client).
 
+    **Known issue in Rust apps built for Android:** `Storage::Dir` fails to open with
+    `try_lock_shared() not supported`, in every release up to and including 2.0.0-beta.0.
+
     It doesn't support yet:
 
     - running your app's main backend (serving its `/jazz` and publishing its permissions): run it
@@ -73,8 +76,9 @@ compared with TypeScript.
 
     **Known issue on Android:** `Storage.Persistent` fails to open with
     `try_lock_shared() not supported`, in every release up to and including 2.0.0-beta.0. The default
-    memory storage doesn't take that lock, but it loses its data, including writes not yet synced,
-    when you close `Jazz` or the app's process ends. The JVM on desktop isn't affected.
+    memory storage doesn't take that lock (untested on Android), and it loses its data, including
+    writes not yet synced, when you close `Jazz` or the app's process ends. The JVM on desktop isn't
+    affected.
 
     It doesn't support yet:
 

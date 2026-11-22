@@ -15,9 +15,9 @@ The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). It
 <Callout type="warn" title="Known issue on Android: persistent storage doesn't open">
   On Android, `Storage.Persistent` fails to open with `try_lock_shared() not supported`, in every
   release up to and including 2.0.0-beta.0. The JVM on desktop isn't affected. The example under
-  [Open the app](#open-the-app) uses `Storage.Persistent`: on Android, use the default
-  `Storage.Memory` instead. It doesn't take that lock, but it loses its data, including writes not
-  yet synced, when you close `Jazz` or the app's process ends.
+  [Open the app](#open-the-app) uses `Storage.Persistent`, so that example fails on Android. The
+  default `Storage.Memory` doesn't take that lock (untested on Android), and it loses its data,
+  including writes not yet synced, when you close `Jazz` or the app's process ends.
 </Callout>
 
 ## Install
