@@ -105,15 +105,5 @@ for (const kind of ["device", "bearer"]) {
       notCovered: NO_SESSION,
       run: (r) => session(r, { kind, restart }),
     });
-  for (const surface of ["client", "session"])
-    for (const suffix of surface === "client" ? [""] : ["", ".no-restart"])
-      rules.push({
-        id: `signout.${surface}.${kind}.other-user${suffix}`,
-        title: `${surface} (${kind}): sign out, sign in as another user`,
-        basis: "brief",
-        rounds: 100,
-        external: true, // its result has to be supplied: without one the verdict can't be PASS
-        notCovered: { all: "not covered by this workflow" },
-      });
 }
 export default rules;

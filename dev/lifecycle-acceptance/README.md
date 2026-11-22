@@ -43,7 +43,9 @@ candidate's own `jazz-tools generate`.
   result is a FAIL too.
 - `NOT_COVERED`: the language has no API for it, the workflow doesn't cover it, or the contract
   doesn't decide it yet (`pending`: the line says what was observed).
-- The verdict is `INCOMPLETE`, never `PASS`, while a rule is pending or covered elsewhere.
+- The verdict is `INCOMPLETE`, never `PASS`, while a rule is pending (awaiting a decision) or covered elsewhere.
+- `basis`: `contract` rules are decided by #native-language-apis and scored; `pending` ones are
+  awaiting Anselm and report what they observed.
 - Android: while `android.json` says `predatesOneStore`, the pinned test's store-sharing part is
   `NOT_COVERED`: it asserts the opposite of one app per store. A phase that wasn't reached is
   `NOT_COVERED` too.

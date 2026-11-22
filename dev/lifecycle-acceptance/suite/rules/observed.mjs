@@ -68,9 +68,18 @@ async function sessionSecondOpen(r) {
   equal(value(await process.call("account", { h: "b" }), "account afterwards"), account, "the device account changed");
 }
 
+const NOT_BUILT = "awaiting Anselm, and not built in this harness yet";
+
 export default [
+  ...["close.dns", "close.token-callback", "cancel.no-leak", "close.main-thread"].map((id) => ({
+    id,
+    title: `${id}: the contract's rule (awaiting Anselm)`,
+    basis: "pending",
+    rounds: 1,
+    notCovered: { all: NOT_BUILT },
+  })),
   {
-    id: "store.second-session.same-process",
+    id: "store.second-session",
     title: "a second JazzSession on a held dir reports storeHeld and keeps the device account",
     basis: "pending",
     rounds: 20,
@@ -92,7 +101,7 @@ export default [
     run: (r) => deleteWhileHeld(r, { otherProcess: true }),
   },
   {
-    id: "open.offline.bearer",
+    id: "offline.bearer-open",
     title: "a signed-in bearer user's app opens its store with no server",
     basis: "pending",
     rounds: 8,

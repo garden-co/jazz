@@ -58,10 +58,15 @@ async fn perform(state: &State, request: &Value) -> Result<Value, Failure> {
                 Some(key) => Auth::Device(key.parse().map_err(failed)?),
                 None => Auth::bearer(provider(&Arc::new(Mutex::new(text(request, "token"))))),
             };
-            let config = Config::new(app()?)
-                .server(text(request, "url"))
-                .storage(Storage::Dir(text(request, "dir").into()))
-                .user(auth);
+            let storage = match text(request, "storage").as_str() {
+                "memory" => Storage::Memory,
+                _ => Storage::Dir(text(request, "dir").into()),
+            };
+            let config = if request["local"].as_bool() == Some(true) {
+                Config::new(app()?).storage(storage)
+            } else {
+                Config::new(app()?).server(text(request, "url")).storage(storage).user(auth)
+            };
             let jazz = jazz_app::open(config).await.map_err(failed)?;
             state.clients.lock().unwrap().insert(h.clone(), jazz);
         }
@@ -86,7 +91,10 @@ async fn perform(state: &State, request: &Value) -> Result<Value, Failure> {
             return Ok(json!(titles));
         }
         "sync" => client()?.wait_for_sync().await.map_err(failed)?,
-        "close" => client()?.shutdown().await.map_err(failed)?,
+        "close" => match request["ms"].as_u64() {
+            Some(ms) => client()?.close(std::time::Duration::from_millis(ms)).await.map_err(failed)?,
+            None => client()?.shutdown().await.map_err(failed)?,
+        },
         "delete" => client()?.delete_client_storage().await.map_err(failed)?,
         "disconnect" => client()?.disconnect().await.map_err(failed)?,
         "reconnect" => client()?.reconnect().await.map_err(failed)?,
@@ -111,6 +119,7 @@ async fn perform(state: &State, request: &Value) -> Result<Value, Failure> {
             let snapshot = session()?.0.snapshot();
             return Ok(json!({
                 "status": snapshot.status.to_string(),
+                "clientEpoch": snapshot.client_epoch,
                 "error": snapshot.error.map(|error| json!({"kind": error.kind, "message": error.message})),
             }));
         }

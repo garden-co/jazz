@@ -12,7 +12,7 @@ import { isJazzName } from "../build/names.mjs";
 import { LANGS } from "../lib/common.mjs";
 import { checkFiles, checkManifest, checkRun } from "../lib/provenance.mjs";
 import { ANDROID_RULES, judgeAndroid } from "../suite/android-rules.mjs";
-import { storeHeld } from "../suite/errors.mjs";
+import { closed, storeHeld } from "../suite/errors.mjs";
 import { Proxy } from "../suite/proxy.mjs";
 import { redact } from "../suite/redact.mjs";
 import { Broken, Round } from "../suite/round.mjs";
@@ -70,28 +70,28 @@ test("the blocking registry's names", () => {
   for (const name of ["hono", "tsx", "@hono/node-server"]) assert.ok(!isJazzName(name));
 });
 
-test("only StoreHeld is StoreHeld", () => {
-  const held = "the local store is held: /s is open in another app of this process";
-  assert.ok(storeHeld.matches({ kind: "StoreHeld", msg: held }, "rust"));
-  assert.ok(storeHeld.matches({ kind: "refused", msg: held }, "go"));
-  assert.ok(storeHeld.matches({ kind: "refused", msg: held }, "swift"));
-  assert.ok(storeHeld.matches({ kind: "Refused", msg: held }, "kotlin"));
+test("errors match by kind alone, and only the expected one", () => {
+  assert.ok(storeHeld.matches({ kind: "StoreHeld", msg: "" }, "rust"));
+  for (const lang of ["go", "swift"]) assert.ok(storeHeld.matches({ kind: "refused", msg: "anything" }, lang));
+  assert.ok(storeHeld.matches({ kind: "Refused", msg: "" }, "kotlin"));
   assert.ok(!storeHeld.matches({ kind: "Jazz", msg: "database is locked" }, "rust"));
-  assert.ok(!storeHeld.matches({ kind: "Config", msg: held }, "rust"));
-  assert.ok(!storeHeld.matches({ kind: "io", msg: held }, "go"));
-  assert.ok(!storeHeld.matches({ kind: "refused", msg: "permission denied" }, "swift"));
+  assert.ok(!storeHeld.matches({ kind: "Refused", msg: "the local store is held" }, "rust"));
+  assert.ok(!storeHeld.matches({ kind: "io", msg: "the local store is held" }, "go"));
   assert.ok(!storeHeld.matches({ kind: "Io", msg: "database is locked" }, "kotlin"));
   assert.ok(!storeHeld.matches({ kind: "harness.timeout", msg: "" }, "kotlin"));
+  assert.ok(closed.matches({ kind: "Stopped" }, "rust") && !closed.matches({ kind: "Replaced" }, "rust"));
+  assert.ok(closed.matches({ kind: "closed" }, "swift") && !closed.matches({ kind: "replaced" }, "swift"));
+  assert.ok(!closed.matches({ kind: "harness.timeout" }, "go"));
 });
 
 for (const [fake, ids] of [
-  ["yes", ["persist.clean-exit", "persist.sigkill", "store.second-open.same-process", "store.open-race.same-process"]],
-  ["throws", ["store.second-open.same-process", "store.open-race.same-process"]],
+  ["yes", ["persist.clean-exit", "persist.sigkill", "store.second-open", "store.second-open.race", "close.ends-waits", "close.drain", "close.session", "signout.derived", "signout.follow"]],
+  ["throws", ["store.second-open", "store.second-open.race"]],
 ])
   for (const id of ids)
     test(`a driver where ${fake === "yes" ? "everything works" : "an open throws something"} fails ${id}`, async () => {
       const driver = { cmd: [process.execPath, join(here, "fake-driver.mjs")], env: { FAKE: fake } };
-      const round = new Round({ lang: "go", driver, stack: { appId: "app", backendPort: 9 } }, 0);
+      const round = new Round({ lang: "go", driver, stack: { appId: "app", backendPort: 9, token: async () => "t" } }, 0);
       try {
         await assert.rejects(RULES.find((rule) => rule.id === id).run(round), Broken);
       } finally {
@@ -209,9 +209,16 @@ test("the verdict fails closed", () => {
   assert.equal(incomplete.status, 1);
   assert.match(incomplete.stdout, /VERDICT c INCOMPLETE/);
 
-  const control = verdict(() => {}, ["store.second-open.same-process"]);
+  const control = verdict(() => {}, ["store.second-open"]);
   assert.equal(control.status, 1);
-  assert.match(control.stdout, /CONTROL_BROKEN c rust store\.second-open\.same-process/);
+  assert.match(control.stdout, /CONTROL_BROKEN c rust store\.second-open /);
+  // A pending rule's control is what it observed.
+  const pendingIndex = RULES.findIndex((rule) => rule.id === "store.second-open");
+  const observedFail = verdict((results) => {
+    for (const lang of LANGS) Object.assign(results.get(lang).results[pendingIndex], { status: "NOT_COVERED", observed: "FAIL" });
+  }, ["store.second-open"]);
+  assert.match(observedFail.stdout, /CONTROL_OK c go store\.second-open/);
+  assert.doesNotMatch(observedFail.stdout, /CONTROL_BROKEN/);
 });
 
 test("secrets don't reach a log", () => {

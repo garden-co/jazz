@@ -14,16 +14,17 @@ At end of input the process exits without closing anything.
 | op | arguments | value |
 | --- | --- | --- |
 | `genkey` | | a new device key |
-| `open` | `h dir url app`, `key` or `token` | null |
+| `open` | `h dir url app`, `key` or `token`, `storage=persistent\|memory`, `local` (no server, no account) | null |
 | `account` | `h` | account id |
 | `write` | `h title owner tier=local\|global` | row id |
 | `read` | `h tier=local\|remote` | titles, sorted |
 | `sync` | `h` | null, once waitForSync returns |
-| `close` `delete` `signout` `disconnect` `reconnect` | `h` | null |
+| `close` | `h`, `ms?` (close with that timeout, where the language has one) | null |
+| `delete` `signout` `disconnect` `reconnect` | `h` | null |
 | `cancel` | `target` (a request id) | null; the target then answers as the language does |
 | `sopen` | `h dir url app start=backend\|device\|signed-out`, `token?` | null |
 | `stoken` | `h token` (`""` is signed out) | null; what the bearer provider gives from now on |
-| `ssnap` | `h` | `{status,error}` |
+| `ssnap` | `h` | `{status,clientEpoch,error}` |
 | `sjazz` | `h as` | null; handle `as` is the signed-in user's client |
 | `screate` `sreopen` `srefresh` `ssignout` `sclose` | `h` | null |
 

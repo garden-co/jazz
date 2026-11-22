@@ -97,12 +97,13 @@ async function runRule(context, rule) {
 
   let status = failed ? "FAIL" : gaps ? "NOT_COVERED" : "PASS";
   let why = done.find((outcome) => outcome.status === "NOT_COVERED")?.why;
+  const observed = status;
   if (rule.basis === "pending") {
     why = `the contract doesn't decide it yet; observed ${status} ${passed}/${done.length}${why ? ` (${why})` : ""}`;
     status = "NOT_COVERED";
   }
   const { id, title, basis } = rule;
-  return { id, title, basis, status, rounds: done.length, passed, failed, why, failures, notes, times, ms: Date.now() - started };
+  return { id, title, basis, status, observed, rounds: done.length, passed, failed, why, failures, notes, times, ms: Date.now() - started };
 }
 
 const started = Date.now();

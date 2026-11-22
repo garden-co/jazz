@@ -1,4 +1,4 @@
-// One open app per store: a second open is refused with StoreHeld, and the holder goes on working.
+// One open app per store (jazz#6269), awaiting Anselm: run, reported NOT_COVERED with what was seen.
 import { inLang, storeHeld } from "../errors.mjs";
 import { Broken, equal, refusal, show, value } from "../round.mjs";
 
@@ -68,40 +68,70 @@ async function twoWriters(r) {
   );
 }
 
+async function reopen(r) {
+  const proxy = await r.proxy();
+  const dir = r.dir();
+  const first = await r.process();
+  const key = value(await first.call("genkey"), "genkey");
+  const variant = ["after close", "while the holder stops", "after the holder was killed"][r.index % 3];
+  if (variant === "after close") {
+    value(await r.open(first, { dir, proxy, key }), "open");
+    value(await first.call("close", { h: "a" }), "close");
+    const again = await r.open(first, { h: "b", dir, proxy, key });
+    r.time("reopen after close", again.ms);
+    value(again, "reopen right after close returned");
+  } else if (variant === "while the holder stops") {
+    value(await r.open(first, { dir, proxy, key }), "open");
+    const owner = value(await first.call("account", { h: "a" }), "account");
+    await proxy.hole();
+    value(await first.call("write", { h: "a", title: `x ${r.id}`, owner, tier: "local" }), "offline write");
+    first.send("sync", { h: "a" }, 60_000);
+    await r.sleep(300);
+    first.send("close", { h: "a" }, 60_000); // stopping: its wait is pending
+    await r.sleep(100);
+    const again = await r.open(first, { h: "b", dir, proxy, key });
+    r.time("open while the holder stops", again.ms);
+    if (again.ms > 5_500) throw new Broken("an open waited over 5 s for a stopping holder", show(again));
+    // Refused after the wait is within the rule; nothing else is.
+    if (!again.ok) refusal(again, inLang(storeHeld, r.lang), "open while the holder stops");
+  } else {
+    value(await r.open(first, { dir, proxy, key }), "open");
+    await r.killed(first);
+    const next = await r.process();
+    const again = await r.open(next, { dir, proxy, key });
+    r.time("open after the holder was killed", again.ms);
+    value(again, "open after the holder was killed");
+  }
+}
+
 export default [
   {
-    id: "store.second-open.same-process",
-    title: "a second open in the same process is refused with StoreHeld",
-    basis: "proposed",
+    id: "store.second-open",
+    title: "a second open, in this process or another, is refused; the first still works; open after it closes",
+    basis: "pending",
     rounds: 100,
-    run: (r) => secondOpen(r, { otherProcess: false }),
+    run: (r) => secondOpen(r, { otherProcess: r.index % 2 === 1 }),
   },
   {
-    id: "store.second-open.other-process",
-    title: "a second open in another process is refused with StoreHeld",
-    basis: "proposed",
+    id: "store.second-open.race",
+    title: "of two simultaneous opens, in one process or two, exactly one wins",
+    basis: "pending",
     rounds: 100,
-    run: (r) => secondOpen(r, { otherProcess: true }),
-  },
-  {
-    id: "store.open-race.same-process",
-    title: "of two simultaneous opens in one process exactly one wins",
-    basis: "proposed",
-    rounds: 100,
-    run: (r) => simultaneousOpens(r, { otherProcess: false }),
-  },
-  {
-    id: "store.open-race.other-process",
-    title: "of two simultaneous opens in two processes exactly one wins",
-    basis: "proposed",
-    rounds: 100,
-    run: (r) => simultaneousOpens(r, { otherProcess: true }),
+    run: (r) => simultaneousOpens(r, { otherProcess: r.index % 2 === 1 }),
   },
   {
     id: "store.no-two-writers",
-    title: "apps on one store never fail each other's writes (database is locked)",
-    basis: "proposed",
+    title: "two apps write: one open is refused, and every acknowledged write reaches the server",
+    basis: "pending",
     rounds: 100,
     run: twoWriters,
+  },
+  {
+    id: "store.reopen",
+    title: "reopen after close at once; while a holder stops within 5 s; after a killed holder",
+    basis: "pending",
+    rounds: 30,
+    jobs: 6,
+    run: reopen,
   },
 ];

@@ -41,7 +41,7 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
       // The only gap a PASS may have is one the rule declares for that language.
       const declared = !rule.external && rule.notCovered?.[lang];
       if (is === "NOT_COVERED" && !declared) open++;
-      status[`${rule.id} ${lang}`] = is;
+      status[`${rule.id} ${lang}`] = got?.observed ?? is;
       if (!got) {
         console.log(`FAIL ${name} ${lang} ${rule.id}: no result (setup broke, see the job)`);
         return "FAIL (no result)";

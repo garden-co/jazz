@@ -72,6 +72,9 @@ struct Request: Decodable, Sendable {
     var owner: String?
     var tier: String?
     var target: Int?
+    var ms: Int?
+    var storage: String?
+    var local: Bool?
 }
 
 func perform(_ shared: Shared, _ r: Request) async throws -> Any {
@@ -87,8 +90,13 @@ func perform(_ shared: Shared, _ r: Request) async throws -> Any {
             let token = Token(r.token ?? "")
             auth = .bearer { _ in token.get() }
         }
+        if r.local == true {
+            shared.put(h, try await JazzApp.open(.local(appId: r.app, storage: .persistent, dataDir: r.dir)))
+            return NSNull()
+        }
         let config = Jazz.Config.client(
-            appId: r.app ?? "", serverUrl: r.url ?? "", auth: auth, storage: .persistent, dataDir: r.dir)
+            appId: r.app ?? "", serverUrl: r.url ?? "", auth: auth,
+            storage: r.storage == "memory" ? .memory : .persistent, dataDir: r.storage == "memory" ? nil : r.dir)
         shared.put(h, try await JazzApp.open(config))
     case "account":
         return String(describing: try await shared.client(h).account())
@@ -102,6 +110,8 @@ func perform(_ shared: Shared, _ r: Request) async throws -> Any {
     case "sync":
         try await shared.client(h).waitForSync()
     case "close":
+        // Jazz for Swift's close() takes no timeout.
+        if r.ms != nil { throw Failure(kind: "driver.unsupported", message: "close with a timeout") }
         try await shared.client(h).close()
     case "delete":
         try await shared.client(h).deleteClientStorage()
@@ -122,7 +132,7 @@ func perform(_ shared: Shared, _ r: Request) async throws -> Any {
         try shared.session(h).1.set(r.token ?? "")
     case "ssnap":
         let snapshot = try await shared.session(h).0.snapshot()
-        var value: [String: Any] = ["status": snapshot.status.rawValue, "error": NSNull()]
+        var value: [String: Any] = ["status": snapshot.status.rawValue, "clientEpoch": snapshot.clientEpoch, "error": NSNull()]
         if let error = snapshot.error { value["error"] = ["kind": error.kind, "message": error.message] }
         return value
     case "sjazz":

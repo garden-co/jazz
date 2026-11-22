@@ -1,14 +1,13 @@
-// Cancel and close while the server is unreachable. The bounds are provisional until the contract
-// names them, so these report NOT_COVERED with what was observed.
+// Cancel while the server is unreachable: not decided (cancel.*), so these report NOT_COVERED with
+// what was observed. waiting() sets up a call pending on that server, for close.* too.
 import { CANCELLED } from "../errors.mjs";
 import { Broken, equal, value } from "../round.mjs";
 
 const CANCEL_MS = 2_000;
-const CLOSE_MS = 5_000;
 const MEASURE_MS = 40_000; // past jazz-app's 30 s drain, to tell slow from never
 const ROUNDS = 8; // all at once: these rounds wait, they don't compute
 
-async function waiting(r, { wait, outage }) {
+export async function waiting(r, { wait, outage }) {
   const proxy = await r.proxy();
   const dir = r.dir();
   const process = await r.process();
@@ -49,28 +48,6 @@ async function cancel(r, options) {
   equal(local, [`online ${r.id}`, title].sort(), "cancelling the wait lost a write");
 }
 
-async function close(r, options) {
-  const { proxy, dir, process, key, title, started } = await waiting(r, options);
-  if (options.cancelFirst) {
-    // The app gave up on its wait, and then closes.
-    value(await process.call("cancel", { target: started.id }), "cancel");
-    await r.sleep(100);
-  }
-  const reply = await process.call("close", { h: "a" }, MEASURE_MS);
-  r.time("close", reply.ms);
-  value(reply, "close");
-  if (reply.ms > CLOSE_MS) throw new Broken(`close took over ${CLOSE_MS} ms`, `${reply.ms} ms`);
-  await r.endCleanly(process);
-  await proxy.refuse();
-  const next = await r.process();
-  value(await r.open(next, { dir, proxy, key }), "open after the close");
-  equal(
-    value(await next.call("read", { h: "a", tier: "local" }), "read after the close"),
-    [`online ${r.id}`, title].sort(),
-    "closing without a server lost a write",
-  );
-}
-
 const rules = [];
 for (const outage of ["refuse", "hole"]) {
   const how = outage === "refuse" ? "refused" : "black-holed";
@@ -84,24 +61,5 @@ for (const outage of ["refuse", "hole"]) {
       idle: true,
       run: (r) => cancel(r, { wait, outage }),
     });
-  for (const wait of ["none", "sync", "read", "write"])
-    rules.push({
-      id: `close.${wait === "none" ? "idle" : `during-${wait}`}.${outage}`,
-      title: `close with a ${how} server${wait === "none" ? "" : ` during a ${wait}`}, within ${CLOSE_MS} ms`,
-      basis: "pending",
-      rounds: ROUNDS,
-      jobs: ROUNDS,
-      idle: true,
-      run: (r) => close(r, { wait, outage }),
-    });
-  rules.push({
-    id: `close.after-cancelled-sync.${outage}`,
-    title: `cancel a sync waiting on a ${how} server, then close within ${CLOSE_MS} ms`,
-    basis: "pending",
-    rounds: ROUNDS,
-    jobs: ROUNDS,
-    idle: true,
-    run: (r) => close(r, { wait: "sync", outage, cancelFirst: true }),
-  });
 }
 export default rules;

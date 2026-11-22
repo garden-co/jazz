@@ -44,13 +44,14 @@ private suspend fun perform(r: JsonObject): JsonElement {
         "open" -> {
             val key = r.text("key")
             val token = r.text("token")
-            val auth = if (key.isNotEmpty()) JazzAuth.DeviceAccount(key) else JazzAuth.Bearer { token.ifEmpty { null } }
+            val local = (r["local"] as? JsonPrimitive)?.content == "true"
+            val auth = if (local) null else if (key.isNotEmpty()) JazzAuth.DeviceAccount(key) else JazzAuth.Bearer { token.ifEmpty { null } }
             clients[h] = jazzapp.open(
                 JazzConfig(
                     appId = r.text("app"),
-                    serverUrl = r.text("url"),
-                    storage = Storage.Persistent,
-                    dataDir = r.text("dir"),
+                    serverUrl = if (local) null else r.text("url"),
+                    storage = if (r.text("storage") == "memory") Storage.Memory else Storage.Persistent,
+                    dataDir = r.text("dir").takeIf { r.text("storage") != "memory" },
                     auth = auth,
                 ),
             )
@@ -70,7 +71,8 @@ private suspend fun perform(r: JsonObject): JsonElement {
         }
         "sync" -> client().waitForSync()
         // close() blocks: an app calls it off its main thread.
-        "close" -> withContext(Dispatchers.IO) { client().close() }
+        // jazz-kotlin's close() takes no timeout.
+        "close" -> if (r.containsKey("ms")) throw Unsupported("close with a timeout") else withContext(Dispatchers.IO) { client().close() }
         "delete" -> client().deleteClientStorage()
         "disconnect" -> client().disconnect()
         "reconnect" -> client().reconnect()

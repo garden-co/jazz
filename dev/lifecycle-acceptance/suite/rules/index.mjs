@@ -1,16 +1,18 @@
 // Every rule. `basis` says who decided it:
 //   brief      given with the task
 //   proposed   the proposed one-store contract
-//   contract   the rules from the native-language API owners
-//   pending    not decided: it runs and is reported NOT_COVERED with what was observed, never PASS
+//   contract   decided by #native-language-apis (relayed 2026-11-22 22:37 UTC): scored
+//   pending    not decided, or awaiting Anselm: it runs and is reported NOT_COVERED with what was observed, never PASS
 import artifacts from "./artifacts.mjs";
+import decided from "./decided.mjs";
 import observed from "./observed.mjs";
+import perAccount from "./per-account.mjs";
 import persist from "./persist.mjs";
 import signout from "./signout.mjs";
 import store from "./store.mjs";
 import waits from "./waits.mjs";
 
-const COMMITTED = [...artifacts, ...persist, ...store, ...signout, ...waits, ...observed];
+const COMMITTED = [...artifacts, ...persist, ...decided, ...store, ...signout, ...perAccount, ...waits, ...observed];
 
 /**
  * LA_LOCAL_RULES: a module of rules run beside these, or in place of the committed rule of the same

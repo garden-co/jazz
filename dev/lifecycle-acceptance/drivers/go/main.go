@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 
 	jazz "github.com/garden-co/jazz/packages/jazz-go/v2"
 
@@ -31,6 +32,9 @@ type request struct {
 	Owner  string `json:"owner"`
 	Tier   string `json:"tier"`
 	Target uint64 `json:"target"`
+	Ms     *int64 `json:"ms"`
+	Store  string `json:"storage"`
+	Local  bool   `json:"local"`
 }
 
 type session struct {
@@ -102,7 +106,12 @@ func perform(ctx context.Context, r request) (any, error) {
 		return jazz.GenerateDeviceKey()
 	case "open":
 		cfg := jazz.Config{AppID: r.App, ServerURL: r.URL, DataDir: r.Dir, Storage: jazz.StoragePersistent}
-		if r.Key != "" {
+		if r.Store == "memory" {
+			cfg.Storage, cfg.DataDir = jazz.StorageMemory, ""
+		}
+		if r.Local {
+			cfg.ServerURL = ""
+		} else if r.Key != "" {
 			cfg.Auth = jazz.DeviceKey(r.Key)
 		} else {
 			token := r.Token
@@ -146,6 +155,12 @@ func perform(ctx context.Context, r request) (any, error) {
 	case "sync":
 		return nil, db.WaitForSync(ctx, jazz.WriteGlobal)
 	case "close":
+		if r.Ms != nil {
+			// Shutdown waits for queued writes until its context's deadline.
+			deadline, cancel := context.WithTimeout(ctx, time.Duration(*r.Ms)*time.Millisecond)
+			defer cancel()
+			return nil, db.Shutdown(deadline)
+		}
 		return nil, db.Close()
 	case "delete":
 		return nil, db.DeleteClientStorage(ctx)
@@ -189,7 +204,7 @@ func perform(ctx context.Context, r request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"status": snap.Status, "error": snap.Error}, nil
+		return map[string]any{"status": snap.Status, "clientEpoch": snap.ClientEpoch, "error": snap.Error}, nil
 	case "sjazz":
 		client, err := ses.s.DB(ctx)
 		if err != nil {
