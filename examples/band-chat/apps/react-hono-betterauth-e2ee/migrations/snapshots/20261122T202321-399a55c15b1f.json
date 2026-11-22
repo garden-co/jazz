@@ -931,7 +931,7 @@
         "nullable": false
       }
     ],
-    "composite_indexes": [["scopeId", "identifier"]]
+    "composite_indexes": [["scopeId", "identifier", "predecessor"]]
   },
   "__e2ee_spaces": {
     "columns": [
