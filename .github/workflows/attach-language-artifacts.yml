@@ -3,11 +3,11 @@ name: Attach language artifacts
 # Builds jazz-ffi (the core the Swift, Kotlin and Go bindings link) for each
 # platform and attaches it to a GitHub release, next to the UniFFI-generated
 # Swift and Kotlin sources, so the language packages can download a
-# prebuilt library instead of building Rust. Dispatched for the release,
-# after the npm publish pushes the tag and while the
-# release is still a draft (assets are never replaced once it is
-# published). `dry-run` builds and uploads workflow artifacts only; a pull
-# request changing this file runs it so.
+# prebuilt library instead of building Rust. It builds and uploads workflow
+# artifacts only: release-artifacts.yml calls it, and release-publish.yml
+# attaches the assets to the draft release (this workflow's former `attach`
+# job is retired, so `dry-run: false` attaches nothing). A pull request
+# changing this file runs it.
 #
 # Assets, per platform (linux-x86_64, linux-aarch64, darwin-aarch64,
 # darwin-x86_64, windows-x86_64):
@@ -150,8 +150,8 @@ jobs:
     steps:
       - name: Validate inputs
         run: |
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N, 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${VERSION}'"
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-(alpha|beta)\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-(alpha|beta).N, 2.0.0-(alpha|beta).N-rc.M or 2.0.0-(alpha|beta).N.K-rc.M, got '${VERSION}'"
             exit 1
           fi
 
@@ -612,50 +612,3 @@ jobs:
           name: language-artifacts
           path: dist/*
           if-no-files-found: error
-
-  # The only job with a write token: a dispatched, non-dry run.
-  attach:
-    name: Attach to v${{ inputs.version }}
-    needs: pack
-    if: github.event_name == 'workflow_dispatch' && !inputs.dry-run
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      # Build-provenance attestations of the assets, only here: a real run.
-      attestations: write
-      id-token: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: language-artifacts
-          path: dist
-
-      # Replacing assets is safe only on a draft: checked before attesting
-      # (so a published release gets no stray attestations) and again right
-      # before uploading.
-      - name: Check the release is a draft
-        run: |
-          if ! is_draft=$(gh release view "v${VERSION}" --json isDraft --jq .isDraft); then
-            echo "::error::No release v${VERSION}; create its draft with the GitHub release workflow first."
-            exit 1
-          fi
-          if [ "${is_draft}" != true ]; then
-            echo "::error::v${VERSION} is published; its language assets are never replaced."
-            exit 1
-          fi
-
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: dist/*
-
-      - name: Upload to the draft release
-        run: |
-          if [ "$(gh release view "v${VERSION}" --json isDraft --jq .isDraft)" != true ]; then
-            echo "::error::v${VERSION} was published meanwhile; its language assets are never replaced."
-            exit 1
-          fi
-          gh release upload "v${VERSION}" dist/* --clobber

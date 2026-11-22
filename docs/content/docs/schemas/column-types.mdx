@@ -61,7 +61,8 @@ yet, and an empty string is ordinary text:
 
 ## Transformed Columns
 
-> **Experimental:** Transformed columns are an early API and may change before the stable release.
+> **Experimental:** Transformed columns are an early API and may change in any beta release (see
+> [What beta means](/docs/operating/backups-and-upgrades#what-beta-means)).
 
 A transformed column is stored as one type while your app reads and writes it as another. Call
 `.transform(name, viewType)` on the column: the column's own type is the stored type, `viewType` is
@@ -123,7 +124,7 @@ indexes see only the stored type. Permissions can't refer to a transformed colum
 value.
 
 A transform converts one value on its own: it can't read other columns of the row. (alpha.65's
-`dependsOn` option is gone, and `jazz-tools upgrade` refuses an app that uses it.) To derive a
+`dependsOn` option is gone.) To derive a
 read-only value from several columns, use a computed field.
 
 ## Computed Columns

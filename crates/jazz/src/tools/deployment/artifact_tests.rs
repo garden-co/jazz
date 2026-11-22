@@ -2299,16 +2299,7 @@ fn every_committed_app_file_fits_its_json_schema() {
         // Legacy files (`format` and/or the unversioned URL) still load, and
         // the old JSON Schema still describes them.
         let legacy_validator = jsonschema::validator_for(&json_schema(legacy_schema)).unwrap();
-        // `jazz-tools upgrade`'s input fixtures are alpha.64 apps on purpose:
-        // their files carry alpha.63's `tsOnly`, which upgrade converts. What
-        // upgrade writes from them (`expected/`) is checked like any app.
-        let legacy = repo_root().join("packages/jazz-tools/tests/upgrade/fixtures");
-        let files: Vec<_> = committed(file)
-            .into_iter()
-            .filter(|path| {
-                !path.starts_with(&legacy) || path.components().any(|c| c.as_os_str() == "expected")
-            })
-            .collect();
+        let files = committed(file);
         assert!(files.len() > 10, "{file}: {files:?}");
         for path in files {
             let text = std::fs::read_to_string(&path).unwrap();

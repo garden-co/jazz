@@ -15,9 +15,6 @@ const SIGN_DOMAIN: &str = "jazz-auth-sign-v1";
 /// Issuer of self-signed device-account JWTs. The value predates the rename
 /// and is signed into every token, so it stays `urn:jazz:local-first`.
 pub const DEVICE_ACCOUNT_ISSUER: &str = "urn:jazz:local-first";
-/// Deprecated alias of [`DEVICE_ACCOUNT_ISSUER`].
-#[deprecated(note = "renamed to DEVICE_ACCOUNT_ISSUER")]
-pub const LOCAL_FIRST_ISSUER: &str = DEVICE_ACCOUNT_ISSUER;
 pub const ANONYMOUS_ISSUER: &str = "urn:jazz:anonymous";
 
 const KNOWN_SELF_SIGNED_ISSUERS: &[&str] = &[DEVICE_ACCOUNT_ISSUER, ANONYMOUS_ISSUER];
@@ -446,18 +443,6 @@ pub fn verify_device_account_challenge(proof: &str, challenge: &str) -> Result<U
     )
     .map_err(|_| invalid())?;
     Ok(user_id_from_public_key(&public_key))
-}
-
-/// Deprecated alias of [`sign_device_account_challenge`].
-#[deprecated(note = "renamed to sign_device_account_challenge")]
-pub fn sign_local_first_challenge(seed: &[u8; 32], challenge: &str) -> Result<String, String> {
-    sign_device_account_challenge(seed, challenge)
-}
-
-/// Deprecated alias of [`verify_device_account_challenge`].
-#[deprecated(note = "renamed to verify_device_account_challenge")]
-pub fn verify_local_first_challenge(proof: &str, challenge: &str) -> Result<Uuid, String> {
-    verify_device_account_challenge(proof, challenge)
 }
 
 #[cfg(test)]

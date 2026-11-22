@@ -79,6 +79,11 @@ can't talk to a newer backend.
 Back up before you upgrade. Releases don't migrate a data directory back to an older format, so
 rolling back means restoring the backup.
 
+From `2.0.0-beta.0` on, we try not to break the parts that [What beta means](#what-beta-means)
+lists as stable. When a beta release must, it gets an "Upgrading from …" section below, and where
+feasible the old API keeps working for a deprecation period first. Experimental parts can change in
+any release.
+
 On Vercel, there's no supported way to back up or export a `vercel()` core's data yet
 ([jazz#5441](https://github.com/garden-co/jazz/issues/5441)). Upgrading keeps the data as long as
 `namespace` names the same core, and a different namespace opens a new, empty one. Keeping the old
@@ -86,6 +91,183 @@ deployment isn't a fallback: the core always runs the newest `jazz-tools` its Dr
 once the new deployment has woken it, promoting the old deployment again doesn't roll back its data.
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
+
+## Upgrading from alpha.70 to beta.0
+
+`2.0.0-beta.0` is the first beta of Jazz 2. Data directories, Vercel and Durable Object cores, and the sync
+protocol are unchanged from alpha.70: upgrade by bumping every Jazz package to `2.0.0-beta.0` and
+redeploying, as usual.
+
+The code changes are removals of everything earlier alphas deprecated. Each subsection below names
+what was removed, who hits it, and what to use instead. Most of them fail at build time ("not
+exported"), so your typecheck finds whatever a search misses. `jazz-tools upgrade` is removed too:
+these sections are the upgrade path, written so you or an AI coding assistant can follow them.
+
+### What beta means
+
+From beta.0 on, we try not to break these between beta releases:
+
+- the TypeScript client and backend APIs (`jazz-tools` and its entry points);
+- the schema and permissions DSL in `schema.ts`, and the migrations `migrations create` writes;
+- the storage format: a data directory a beta wrote opens in later betas;
+- the wire protocol between clients, backends and cores;
+- running your main backend with `createJazz`, on your own server, on Vercel with `vercel()`, with
+  its core on another machine through `remote()`, or with the core in a Cloudflare Durable Object
+  with `durableObjects()` (and large values in R2).
+
+When a beta must break one of them, its release notes say so, it gets an "Upgrading from …" section
+here, and where feasible the old API keeps working for a deprecation period first.
+
+These stay **experimental** and may change in any release: the Rust, Swift, Kotlin and Go clients
+([Language Support](/docs/reference/language-support)),
+[transformed columns](/docs/schemas/column-types#transformed-columns), and running your backend in a
+Cloudflare Worker with `jazzBackend`.
+
+[Jazz Cloud](/docs/setup/deployment/jazz-cloud) stays deprecated for new apps; existing apps keep
+running.
+
+### Removed: `useSession()` (Svelte: `getSession()`)
+
+Deprecated since alpha.66, these hooks are no longer exported, so code that imports them fails to
+build. Read the signed-in user from the session instead:
+
+| Entry point                                                                               | Before                 | After                                                    |
+| ----------------------------------------------------------------------------------------- | ---------------------- | -------------------------------------------------------- |
+| `jazz-tools/react`, `jazz-tools/react-core`, `jazz-tools/react-native`, `jazz-tools/expo` | `useSession()`         | `useJazzSession().user`                                  |
+| `jazz-tools/vue`                                                                          | `useSession()`         | `useJazzSession().snapshot.value.user`                   |
+| `jazz-tools/solid`                                                                        | `useSession()`         | `useJazzSession().snapshot().user`                       |
+| `jazz-tools/svelte`                                                                       | `getSession().current` | `const session = getJazzSession()`, then `$session.user` |
+
+The fields change too, as in [alpha.66](#upgrading-from-alpha65):
+
+| Old session               | New user                   |
+| ------------------------- | -------------------------- |
+| `session.user`            | `user.accountId`           |
+| `session.identity`        | `user.identity`            |
+| `session.claims`          | `user.claims`              |
+| `authMode: "external"`    | `user?.kind === "backend"` |
+| `authMode: "local-first"` | `user?.kind === "device"`  |
+| `authMode: "anonymous"`   | `user === null`            |
+
+`grep -rnE "\b(useSession|getSession)\b" --include='*.ts' --include='*.tsx' --include='*.vue' --include='*.svelte' . --exclude-dir=node_modules`
+finds them. Then run your typecheck: it flags anything the search missed.
+
+### Removed: the alpha.61 auth stubs
+
+In alpha.61 these names became stubs that throw `JAZZ_API_REMOVED` when called. They're gone now, so
+importing one fails at build time. Only apps that still import them hit this, and those apps have
+been throwing at runtime since alpha.61.
+
+| Removed                                                                                                                                  | Use instead                                                                                                               |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `useJazzAuth`, `useJazzSessionOwner`, `useAccountState`, `accountState` (Svelte)                                                         | `useJazzSession()` (Svelte: `getJazzSession()`)                                                                           |
+| `createAccountState`, `createJazzSessionState`                                                                                           | `useJazzSession()`                                                                                                        |
+| `createAccountManager`, `AccountManager`                                                                                                 | `createJazzClient(config)`, whose session signs in (`initial: "device"`, `createDeviceAccount()`, or your backend's user) |
+| `createDb`                                                                                                                               | `createJazzClient(config)`, then `session.db`                                                                             |
+| `createJazzApp`                                                                                                                          | `createJazzClient(config)`, or `<JazzProvider config={…}>`                                                                |
+| `exportLocalFirstSecret`                                                                                                                 | `session.exportDeviceKey()`                                                                                               |
+| `useLocalFirstAuth`, `createUseLocalFirstAuth`, `LocalFirstAuth`, `BrowserAuthSecretStore`, `ExpoAuthSecretStore`, `expoAuthSecretStore` | device accounts on the session: `createDeviceAccount()`, `exportDeviceKey()`, `restoreDeviceAccount(key)`                 |
+| `JazzSessionProvider`                                                                                                                    | `<JazzProvider session={session}>`                                                                                        |
+| `JazzSvelteProvider`                                                                                                                     | `<JazzProvider config={…}>`, or `<JazzSvelteClientProvider client>` for a client you opened yourself                      |
+| `acceptLocalFirstAuth` (`jazz-tools/backend`)                                                                                            | `acceptDeviceAccounts`                                                                                                    |
+
+[Upgrading from alpha.60](#upgrading-from-alpha60) has the same mapping, with more detail. Errors that
+named `loginWithBackend` or `linkWithBackend` now name the session's `refresh()` and
+`linkDeviceAccount()` (for example "refresh() and linkDeviceAccount() need a browser: …"). That only
+matters to tests that match the message.
+
+### Removed: the alpha.68 TypeScript aliases
+
+These were deprecated aliases since the device-account rename (see [Upgrading from alpha.68](#upgrading-from-alpha68)).
+They're gone now, so using one fails at typecheck and build. Only apps that mint device-account
+proofs for their own backend, or annotate `acceptDeviceAccounts()` results with the old type, hit
+this. Nothing on the wire changes.
+
+| Before                                           | After                                                          |
+| ------------------------------------------------ | -------------------------------------------------------------- |
+| `db.getLocalFirstIdentityProof(options)`         | `db.getDeviceAccountProof(options)` (same options, same token) |
+| type `LocalFirstGuest` from `jazz-tools/backend` | type `DeviceAccountsAnswer` from `jazz-tools/backend`          |
+
+`grep -rnE "getLocalFirstIdentityProof|LocalFirstGuest" . --exclude-dir=node_modules` finds them.
+
+### Removed: the alpha.64 schema DSL names
+
+Since alpha.65 these were stubs that threw `JAZZ_API_REMOVED`. They're no longer exported, so using
+one fails at build time. The `jazz-tools/permissions` subpath is removed, and so are the `schema` and
+`migration` exports of `jazz-tools/react-native`. Only apps whose `schema.ts`, `permissions.ts` or
+`migrations/index.ts` are still alpha.64-style hit this.
+
+| Removed                                                                                                 | Use instead                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `defineApp`                                                                                             | `s.defineSchema({ … })` in `schema.ts`; runtime code imports `app` from `./jazz.generated`                                                                 |
+| root `defineSchema`, `table`                                                                            | `s.defineSchema`, `s.table` (`import { schema as s } from "jazz-tools"`)                                                                                   |
+| `definePermissions`, `anyOf`, `allOf`, `createSessionContext` (root, `s.*` or `jazz-tools/permissions`) | the defined schema's own `definePermissions`, `anyOf`, `allOf` and `session` (`const { definePermissions } = schema`), compiled to `jazz.permissions.json` |
+| `defineMigration`, `renameTableFrom`                                                                    | `m.defineMigration`, `m.renameTableFrom` (`import { migration as m } from "jazz-tools"`)                                                                   |
+| `defineSliceableApp`, `schemaToWasm`                                                                    | nothing: slicing is gone, and `jazz.generated.ts` embeds the compiled schema                                                                               |
+| `schema`, `migration` from `jazz-tools/react-native`                                                    | write `schema.ts` against `jazz-tools`; runtime code imports `./jazz.generated`                                                                            |
+
+An app in this shape is an alpha.64 or alpha.65 app: convert it with
+`npx jazz-tools@2.0.0-alpha.70 upgrade` before moving to beta.0 (see [Removed: `jazz-tools upgrade`](#removed-jazz-tools-upgrade)).
+
+### Removed: the alpha.68 Rust aliases
+
+Only Rust code that calls the `jazz` or `jazz-server` crate APIs directly hits this; TypeScript apps
+don't. The device-account renames kept the old `local_first` names as deprecated aliases, and beta.0
+removes them, so code that still uses one fails to compile:
+
+| Before                                                              | After                                                              |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `identity::LOCAL_FIRST_ISSUER`, `AuthorSubject::LOCAL_FIRST_ISSUER` | `DEVICE_ACCOUNT_ISSUER`                                            |
+| `sign_local_first_challenge`, `verify_local_first_challenge`        | `sign_device_account_challenge`, `verify_device_account_challenge` |
+| `local_first_account_id`                                            | `device_account_id`                                                |
+| `Binding::admit_local_first_session`                                | `admit_device_account_session`                                     |
+| `admitted_local_first_accounts` (testing only)                      | `admitted_device_accounts`                                         |
+| `jazz-server`: `LOCAL_FIRST_JWT_ISSUER`, `admit_local_first_jwt`    | `DEVICE_ACCOUNT_JWT_ISSUER`, `admit_device_account_jwt`            |
+| `jazz-server`: `LOCAL_FIRST_AUDIENCE_HEADER`                        | `DEVICE_ACCOUNT_AUDIENCE_HEADER`                                   |
+| `jazz-server`: `local_first_audience`, `local_first_founding_app`   | `device_account_audience`, `device_account_founding_app`           |
+
+Nothing on the wire changes: the issuer stays `urn:jazz:local-first` and the header
+`X-Jazz-Local-First-Audience`, so existing tokens and sessions keep working.
+
+### Removed: `hashes` in the server's schema list
+
+**This changes an HTTP response.** `GET /apps/<appId>/schemas` (admin secret required) no longer
+returns `hashes`, deprecated since alpha.54. Read `schemas` instead: one `{ hash, publishedAt }` per
+schema, so the old list is `schemas.map((s) => s.hash)`. The sync protocol is unchanged.
+
+```jsonc
+// Before
+{ "hashes": ["3f…"], "schemas": [{ "hash": "3f…", "publishedAt": 1744011200000 }] }
+// After
+{ "schemas": [{ "hash": "3f…", "publishedAt": 1744011200000 }] }
+```
+
+Only scripts that call this endpoint directly and read `hashes` are affected. `jazz-tools`
+(`fetchSchemaHashes()` and the inspector) reads `schemas`, from beta.0 and alpha.70 servers
+alike.
+
+### Removed: `jazz-tools upgrade`
+
+The command and its codemods are gone: on beta.0, `npx jazz-tools upgrade` fails with a message
+that points here. Its only job was converting an alpha.65 app (`s.defineApp`, `permissions.ts`,
+`migrations/index.ts`, or a JSON-only app without `schema.ts`) to alpha.66's `schema.ts`. Apps on
+alpha.66 or later don't need it.
+
+An app still on alpha.65 or older: run `npx jazz-tools@2.0.0-alpha.70 upgrade`, which is still on
+npm, and review the diff as [Upgrading from alpha.65](#upgrading-from-alpha65) describes. Then
+follow the sections from alpha.66 up to here. Without the codemod, that section's
+[step-by-step list](#run-jazz-tools-upgrade-and-review-the-diff) is also what to do by hand, or
+what to give an AI coding assistant.
+
+`jazz-tools validate`, renamed to `generate` in alpha.65, is now an unknown command: use
+`npx jazz-tools generate`.
+
+### For an AI coding assistant
+
+Give it this section and a prompt such as: "Upgrade this app to jazz-tools 2.0.0-beta.0 following
+the 'Upgrading from alpha.70 to beta.0' section. Replace each removed API with the one it names,
+then run the typecheck and `npx jazz-tools generate`, and show me the diff." Review the diff before
+you deploy.
 
 ## Upgrading from alpha.68
 

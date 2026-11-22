@@ -3,7 +3,7 @@ title: React Native
 description: "Learn how to use Jazz from React Native and Expo apps."
 ---
 
-React Native and Expo are supported as an alpha through `jazz-tools/react-native` and the direct `jazz-rn` native dependency. Use a matching development or release build: Expo Go is unsupported. On the web target, `jazz-tools/react-native` and `jazz-tools/expo` throw an error that says so: for Expo web, render the [web client](/docs/setup/web-client/thin-client) from `jazz-tools/react` in a `.web.tsx` platform file, which signs in with your backend's same-origin cookie like any web app. Its local-first client needs the [Expo Metro config](/docs/setup/web-client/local-first-client#bundler-config).
+React Native and Expo are supported in the beta through `jazz-tools/react-native` and the direct `jazz-rn` native dependency. Use a matching development or release build: Expo Go is unsupported. On the web target, `jazz-tools/react-native` and `jazz-tools/expo` throw an error that says so: for Expo web, render the [web client](/docs/setup/web-client/thin-client) from `jazz-tools/react` in a `.web.tsx` platform file, which signs in with your backend's same-origin cookie like any web app. Its local-first client needs the [Expo Metro config](/docs/setup/web-client/local-first-client#bundler-config).
 
 ## Setup
 
@@ -89,7 +89,7 @@ their own (for example `jazz/`) with a `package.json` of `{ "type": "module" }`,
 A bare React Native host uses the same direct dependency and New Architecture, with an OS-protected
 account store. The [canonical Expo
 scaffold](https://github.com/garden-co/jazz/tree/v%jazz.version%/examples/todo-client-localfirst-expo)
-shows the complete lifecycle and platform configuration. The alpha has not yet proven two physical JSI
+shows the complete lifecycle and platform configuration. The beta has not yet proven two physical JSI
 runtimes attached to one relay.
 
 ### Loading and errors

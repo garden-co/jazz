@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { contextStore } from "./test-helpers.svelte.js";
 
-const { initJazzContext, getJazzContext, getDb, getSession } = await import("./context.svelte.js");
+const { initJazzContext, getJazzContext, getDb } = await import("./context.svelte.js");
 
 describe("context with real $state", () => {
   beforeEach(() => {
@@ -22,7 +22,7 @@ describe("context with real $state", () => {
   });
 
   it("getJazzContext throws when no context is set", () => {
-    expect(() => getJazzContext()).toThrow("getDb/getSession must be used within");
+    expect(() => getJazzContext()).toThrow("getDb must be used within");
   });
 
   it("mutations to $state proxy are visible through getters", () => {
@@ -39,42 +39,6 @@ describe("context with real $state", () => {
   it("getDb throws when db is null", () => {
     initJazzContext();
     expect(() => getDb()).toThrow("Jazz database is not yet initialised");
-  });
-
-  it("getSession returns a live handle whose .current tracks the current session", () => {
-    const ctx = initJazzContext();
-    const handle = getSession();
-
-    expect(handle.current).toBe(null);
-
-    const session = {
-      user: "alice",
-      identity: { issuer: "test", subject: "alice" },
-      claims: { role: "admin" },
-      authMode: "external" as const,
-    };
-    ctx.session = session;
-
-    expect(handle.current).toStrictEqual(session);
-  });
-
-  it("getSession handle tracks repeated auth changes without re-calling getSession", () => {
-    const ctx = initJazzContext();
-    const handle = getSession();
-
-    expect(handle.current).toBeNull();
-
-    const alice = {
-      user: "alice",
-      identity: { issuer: "test", subject: "alice" },
-      claims: { role: "admin" },
-      authMode: "external" as const,
-    };
-    ctx.session = alice;
-    expect(handle.current).toStrictEqual(alice);
-
-    ctx.session = null;
-    expect(handle.current).toBeNull();
   });
 
   it("reading back a set value returns the proxy-wrapped equivalent", () => {

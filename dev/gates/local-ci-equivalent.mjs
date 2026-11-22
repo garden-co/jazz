@@ -483,7 +483,7 @@ export const ciPartitions = Object.freeze({
       "dev/gates/jazz-swift.sh",
     ]),
   ]),
-  // Every crate publish-jazz-crates-alpha.yml publishes packages and builds from its
+  // Every crate release-publish.yml publishes packages and builds from its
   // .crate against the others, as crates.io will see them.
   "crates-package": Object.freeze([
     command("cargo package, published crates", "node", [

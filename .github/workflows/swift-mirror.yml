@@ -1,6 +1,6 @@
 name: Swift mirror
 
-# Publishes Jazz for Swift to garden-co/jazz-swift, the SwiftPM package
+# Builds Jazz for Swift for garden-co/jazz-swift, the SwiftPM package
 # (SwiftPM takes a package by URL only with Package.swift at a repository's
 # root, and reads binary targets' checksums from the tagged manifest):
 #   1. builds JazzFFI.xcframework (libjazz_ffi for macOS, iOS and the iOS
@@ -10,19 +10,11 @@ name: Swift mirror
 #   3. verifies it, in parallel jobs: a consumer package builds and runs
 #      against the mirror, the package's tests pass on macOS and on an iOS
 #      simulator, and the SwiftUI example builds and passes its UI test.
-# A dry run (pull requests touching Swift, or workflow_dispatch without
-# `publish`) stops there and uploads the XCFramework and the mirror as
-# artifacts. With `publish` (after the release `v<version>` exists), the
-# `publish` environment's approval gates attaching the XCFramework to the
-# release and pushing the mirror commit, tagged `<version>`, to jazz-swift.
-# Publishing takes only `ref: v<version>`, resolved once to a commit SHA that
-# every job builds and the mirror commit records.
-#
-# Recovery: the publish job refuses a version whose mirror tag or release
-# asset exists. If it uploaded the asset but failed to push the mirror,
-# check that garden-co/jazz-swift has no tag <version>, delete the asset
-# (`gh release delete-asset v<version> JazzFFI.xcframework.zip`) and run it
-# again. Never delete or move a pushed mirror tag: SwiftPM pins its checksum.
+# It stops there and uploads the XCFramework and the mirror as artifacts:
+# release-artifacts.yml calls it to build them, and release-publish.yml
+# attaches the XCFramework and pushes the mirror (its former `publish` job
+# here is retired, so the `publish` input does nothing).
+
 on:
   pull_request:
     paths:
@@ -381,71 +373,3 @@ jobs:
           echo "split, cached: $BUILT"
           echo "from scratch:  $REBUILT"
           [[ -n "$BUILT" && "$BUILT" == "$REBUILT" ]] || { echo "::error::the cached build's XCFramework differs from a clean build's"; exit 1; }
-
-  publish:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
-    needs: [resolve, mirror, verify, reproducible]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: publish
-    permissions:
-      contents: write
-    steps:
-      # A token for garden-co/jazz-swift alone, minted per run by the
-      # jazz-swift-mirror GitHub App (contents: write); revoked when the job
-      # ends.
-      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        id: mirror-token
-        with:
-          client-id: ${{ secrets.JAZZ_SWIFT_APP_CLIENT_ID }}
-          private-key: ${{ secrets.JAZZ_SWIFT_APP_PRIVATE_KEY }}
-          owner: garden-co
-          repositories: jazz-swift
-          permission-contents: write
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: JazzFFI.xcframework
-          path: xcf
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: jazz-swift-mirror
-          path: jazz-swift
-      - name: Refuse a version that's already published, or a moved tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MIRROR_TOKEN: ${{ steps.mirror-token.outputs.token }}
-          SHA: ${{ needs.resolve.outputs.sha }}
-        run: |
-          # The release tag still points where the build began.
-          now=$(gh api "repos/${GITHUB_REPOSITORY}/commits/v$VERSION" -q .sha)
-          [[ "$now" == "$SHA" ]] || { echo "::error::v$VERSION is at $now now, not $SHA, which was built"; exit 1; }
-          # A published version's asset is pinned by checksum: never replace it.
-          git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$MIRROR_TOKEN"; }; f'
-          if git ls-remote --exit-code --tags https://github.com/garden-co/jazz-swift.git "refs/tags/$VERSION" >/dev/null; then
-            echo "::error::garden-co/jazz-swift already has tag $VERSION"; exit 1
-          fi
-          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -qx JazzFFI.xcframework.zip; then
-            echo "::error::release v$VERSION already has JazzFFI.xcframework.zip"; exit 1
-          fi
-      - name: Attach the XCFramework to release v${{ env.VERSION }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "v$VERSION" xcf/JazzFFI.xcframework.zip --repo "$GITHUB_REPOSITORY"
-          # What consumers will download must match the checksum the mirror pins.
-          curl -sSfL -o downloaded.zip "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/JazzFFI.xcframework.zip"
-          echo "$(cat xcf/JazzFFI.xcframework.zip.checksum)  downloaded.zip" | sha256sum -c -
-      - name: Push and tag the mirror
-        env:
-          MIRROR_TOKEN: ${{ steps.mirror-token.outputs.token }}
-          SHA: ${{ needs.resolve.outputs.sha }}
-        run: |
-          git config --global credential.helper '!f() { echo username=x-access-token; echo "password=$MIRROR_TOKEN"; }; f'
-          git clone https://github.com/garden-co/jazz-swift.git mirror
-          cd mirror
-          git rm -rq --ignore-unmatch . && cp -R ../jazz-swift/. .
-          git add -A
-          git -c user.name="jazz-release-bot" -c user.email="jazz-release-bot@users.noreply.github.com" \
-            commit -qm "Jazz for Swift $VERSION (garden-co/jazz@${SHA}, ${REF})"
-          git tag "$VERSION"
-          git push origin HEAD:main "refs/tags/$VERSION"

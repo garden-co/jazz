@@ -10,7 +10,6 @@ export {
   useDb,
   useAuthState,
   useJazzClient,
-  useSession,
   type JazzClientProviderProps,
   type JazzProviderProps,
 } from "./provider.js";
@@ -36,15 +35,3 @@ export type {
   JazzUser,
 } from "../session/jazz-session.js";
 export { useJazzSession, type UseJazzSession } from "./session.js";
-
-// Removed in alpha.61: stubs that throw, naming the replacement (one release).
-export {
-  AccountManager,
-  JazzSessionProvider,
-  createAccountManager,
-  createAccountState,
-  createJazzSessionState,
-  exportLocalFirstSecret,
-  useJazzAuth,
-  useLocalFirstAuth,
-} from "../removed-api.js";

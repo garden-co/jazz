@@ -21,7 +21,6 @@ export {
   type JazzClientProviderProps,
   useDb,
   useJazzClient,
-  useSession,
 } from "./provider.js";
 export { useAll, useAllSuspense, type UseAllResult, type UseAllSuspenseResult } from "./use-all.js";
 export { useOne, useOneSuspense, type UseOneResult, type UseOneSuspenseResult } from "./use-one.js";
@@ -37,8 +36,6 @@ export type {
   WhereOf,
   App,
 } from "../typed-app.js";
-// Removed in alpha.65 (files as source): stubs that throw, pointing at `jazz-tools upgrade`.
-export { schema, migration } from "../removed-schema-api.js";
 export {
   REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
@@ -76,16 +73,3 @@ export type {
   Relationship,
   Relationships,
 } from "../relationships.js";
-
-// Removed in alpha.61: stubs that throw, naming the replacement (one release).
-export {
-  AccountManager,
-  JazzSessionProvider,
-  createAccountManager,
-  createDb,
-  exportLocalFirstSecret,
-  useAccountState,
-  useJazzAuth,
-  useJazzSessionOwner,
-  useLocalFirstAuth,
-} from "../removed-api.js";
