@@ -68,16 +68,24 @@ async function sessionSecondOpen(r) {
   equal(value(await process.call("account", { h: "b" }), "account afterwards"), account, "the device account changed");
 }
 
-const NOT_BUILT = "awaiting Anselm, and not built in this harness yet";
-
 export default [
-  ...["close.dns", "close.token-callback", "cancel.no-leak", "close.main-thread"].map((id) => ({
+  // Decided (Anselm approved the lifecycle card's rules 1-4, 23:09 UTC) but not built here: no PASS
+  // over them until they are.
+  ...["close.dns", "close.token-callback", "cancel.no-leak"].map((id) => ({
     id,
-    title: `${id}: the contract's rule (awaiting Anselm)`,
+    title: `${id}: the contract's rule`,
+    basis: "contract",
+    rounds: 1,
+    external: true,
+    notCovered: { all: "decided, not built in this harness yet" },
+  })),
+  {
+    id: "close.main-thread",
+    title: "close.main-thread: the contract's rule (awaiting Anselm)",
     basis: "pending",
     rounds: 1,
-    notCovered: { all: NOT_BUILT },
-  })),
+    notCovered: { all: "awaiting Anselm, and not built in this harness yet" },
+  },
   {
     id: "store.second-session",
     title: "a second JazzSession on a held dir reports storeHeld and keeps the device account",
@@ -102,8 +110,8 @@ export default [
   },
   {
     id: "offline.bearer-open",
-    title: "a signed-in bearer user's app opens its store with no server",
-    basis: "pending",
+    title: "a bearer user reopens a persistent store offline and reads their data",
+    basis: "contract",
     rounds: 8,
     run: bearerColdOpen,
   },

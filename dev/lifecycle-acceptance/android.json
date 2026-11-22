@@ -1,5 +1,5 @@
 {
   "sha": "0b7e30f30dff4ee8d5362e7be2252ff301d4b2c3",
-  "reviewed": false,
-  "owner": "jazz#6246 (#kotlin-beta-gaps), stacked on jazz#6269; move this pin when its head moves, don't edit the test here"
+  "owner": "jazz#6246 (#kotlin-beta-gaps), stacked on jazz#6269; move this pin when its head moves, don't edit the test here",
+  "review": "reviewed, not merged (#review-loop, 22:48 UTC, head unchanged)"
 }

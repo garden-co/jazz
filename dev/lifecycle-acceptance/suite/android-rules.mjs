@@ -17,7 +17,7 @@ const TEST_RULES = [
   ["store.killed-holder", "pending"],
   ["store.reopen-after-failed-open", "pending"],
   ["store.delete-reopen", "pending"],
-  ["offline.bearer-open", "pending"], // observe only: out of beta.1
+  ["offline.bearer-open", "brief"], // a beta.1 rule (Anselm, 23:09 UTC)
 ];
 const NOT_ON_ANDROID = ["store.no-two-writers", "store.per-account"];
 

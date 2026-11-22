@@ -13,7 +13,7 @@ import { ANDROID_RULES, judgeAndroid } from "./suite/android-rules.mjs";
 
 const [source, name, out] = process.argv.slice(2);
 try {
-  const { sha: pinned, reviewed } = JSON.parse(readFileSync(new URL("android.json", import.meta.url), "utf8"));
+  const { sha: pinned, review } = JSON.parse(readFileSync(new URL("android.json", import.meta.url), "utf8"));
   const head = run("git", ["-C", source, "rev-parse", "HEAD"], { capture: true }).trim();
   assert(head === pinned, `the checkout is at ${head}, not the pinned ${pinned}`);
   const { sha, run: runId, version } = candidate();
@@ -61,7 +61,7 @@ try {
   mkdirSync(out, { recursive: true });
   writeFileSync(
     join(out, `${name}-android.json`),
-    JSON.stringify({ name, lang: "android", sha, run: runId, version, pinned, reviewed, ms: Date.now() - started, results }, null, 2),
+    JSON.stringify({ name, lang: "android", sha, run: runId, version, pinned, review, ms: Date.now() - started, results }, null, 2),
   );
   process.exitCode = results.some((result) => result.status === "FAIL") ? 1 : 0;
 } catch (error) {

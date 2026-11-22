@@ -60,8 +60,8 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
     rows.push(`| \`${rule.id}\` (${rule.basis}) | ${cells.join(" | ")} |`);
   }
 
-  if (byLang.android && !byLang.android.reviewed)
-    console.log(`NOTE ${name} android: the pinned test (jazz#6246 @ ${byLang.android.pinned}) is unreviewed`);
+  if (byLang.android)
+    console.log(`NOTE ${name} android: the pinned test, jazz#6246 @ ${byLang.android.pinned}, is ${byLang.android.review ?? "an unreviewed test head"}`);
   const android = ANDROID_RULES.map(({ id }) => {
     const got = byLang.android?.results.find((result) => result.id === id);
     const is = got?.status in totals ? got.status : "FAIL";
@@ -102,7 +102,7 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
     `| --- |${" --- |".repeat(LANGS.length)}`,
     ...rows,
     "",
-    `Android (AAR on an emulator, jazz#6246 @ ${byLang.android?.pinned ?? "?"}${byLang.android && !byLang.android.reviewed ? ", **unreviewed**" : ""}): ${android.join(", ")}`,
+    `Android (AAR on an emulator, jazz#6246 @ ${byLang.android?.pinned ?? "?"}${byLang.android ? `, ${byLang.android.review ?? "unreviewed test head"}` : ""}): ${android.join(", ")}`,
     "",
     `Suite times: ${times.join(", ")}`,
     "",

@@ -187,7 +187,7 @@ function verdict(edit, mustFail = []) {
         passed: rounds,
         failures: {},
       }));
-      results.set(lang, { name: "c", lang, sha, run: "7", ms: 1, reviewed: true, results: rules });
+      results.set(lang, { name: "c", lang, sha, run: "7", ms: 1, review: "reviewed", results: rules });
     }
     edit(results);
     for (const [lang, result] of results) writeFileSync(join(dir, `c-${lang}.json`), JSON.stringify(result));

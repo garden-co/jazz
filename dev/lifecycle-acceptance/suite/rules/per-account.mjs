@@ -93,7 +93,12 @@ async function rootStore(r) {
   value(await one.call("close", { h: "a" }), "A's close");
   await r.endCleanly(one);
   const two = await r.process();
-  value(await two.call("open", { h: "a", dir, app: r.stack.appId, local: true }), "an open with no account");
+  const opened = await two.call("open", { h: "a", dir, app: r.stack.appId, local: true });
+  // With per-account stores (jazz#6275) such an open is refused; reading nothing is fine too.
+  if (!opened.ok) {
+    if (!["Refused", "refused", "StoreHeld"].includes(opened.kind)) throw new Broken(`an open with no account fails as ${opened.kind}`, opened.msg);
+    return;
+  }
   const rows = value(await two.call("read", { h: "a", tier: "local" }), "its local read");
   if (rows.length) throw new Broken("an open with no account reads a signed-in user's rows");
 }
@@ -116,7 +121,7 @@ export default [
   },
   {
     id: "store.per-account.root",
-    title: "an open with no account doesn't read the store a signed-in user wrote in that dir",
+    title: "an open with no account is refused the store a signed-in user wrote in that dir, or reads none of it",
     basis: "pending",
     rounds: 20,
     run: rootStore,
