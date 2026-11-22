@@ -658,6 +658,77 @@ async fn a_rust_reader_waits_for_the_encrypted_metadata_key() {
     let tasks = alice.all(bindings::tasks::query()).await.unwrap();
     assert_eq!(tasks[0].label.as_deref(), Some("streamed label"));
     alice.shutdown().await.unwrap();
+}
+
+/// Contract: an app written against the generated bindings manages a space's
+/// members as typed rows: alice adds bob with a typed member insert, a typed
+/// read of the members table lists the project's members, and bob, delivered
+/// the space's key, reads her encrypted task.
+///
+/// ```text
+/// alice ──NewE2eeMember { bob }──► server
+/// alice ──e2ee_members::query().filter(identifier)──► [alice, bob]
+/// alice ──encrypted task, keys.deliver──► bob reads it
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_bindings_add_and_list_a_spaces_members() {
+    use bindings::{NewE2eeMember, e2ee_members};
+    let app = App::start().await;
+    let alice = app.device().await;
+    let bob = app.device().await;
+    for device in [&alice, &bob] {
+        device
+            .encryption()
+            .ready(Duration::from_secs(30))
+            .await
+            .unwrap();
+    }
+    let project = make_project(&alice, "plans").await;
+    let at = alice
+        .encryption()
+        .call("spaceRow", json!({ "table": "projects", "id": project }))
+        .await
+        .unwrap();
+    let id =
+        |value: &serde_json::Value| ObjectId::from_uuid(value.as_str().unwrap().parse().unwrap());
+    let (scope, identifier) = (id(&at["scopeId"]), id(&at["identifier"]));
+    let alice_account = ObjectId::from_uuid(alice.account().unwrap().0);
+    let bob_account = ObjectId::from_uuid(bob.account().unwrap().0);
+
+    let member = alice
+        .durable(jazz_app_support::DurabilityTier::GlobalServer)
+        .insert(NewE2eeMember::new(scope, identifier, bob_account))
+        .await
+        .expect("a typed insert of a member row");
+    assert_eq!(
+        (member.scope_id, member.identifier, member.account_id),
+        (scope, identifier, bob_account)
+    );
+    let members = alice
+        .all(
+            e2ee_members::query()
+                .filter(e2ee_members::scope_id().eq(scope))
+                .filter(e2ee_members::identifier().eq(identifier)),
+        )
+        .await
+        .expect("a typed read of the members table");
+    let mut accounts: Vec<_> = members.iter().map(|row| row.account_id.uuid()).collect();
+    accounts.sort();
+    let mut expected = vec![alice_account.uuid(), bob_account.uuid()];
+    expected.sort();
+    assert_eq!(accounts, expected);
+    assert!(members.contains(&member));
+
+    add_task(&alice, &project, "for members").await.unwrap();
+    alice
+        .encryption()
+        .call("keysDeliver", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(titles(&bob, 1).await, ["for members"]);
+
+    alice.shutdown().await.unwrap();
+    bob.shutdown().await.unwrap();
     app.stop().await;
 }
 
