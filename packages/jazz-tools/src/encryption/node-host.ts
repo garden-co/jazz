@@ -1,12 +1,21 @@
 /**
- * Builds the end-to-end encryption runtime of an app on a backend's engine
- * (see `backendNative`), over the private store the app supplied. It never
- * imports jazz-napi itself, so a Cloudflare Worker's bundle stays free of it.
+ * Uses the engine installed by `backendNative` for Node device clients
+ * and for backends that manage members without holding keys.
  */
 import { backendNative } from "../backend/backend-native.js";
+import type { WasmSchema } from "../drivers/types.js";
+import type { Db } from "../runtime/db.js";
+import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import type { SchemaSourceInput } from "../schema-source.js";
 import { buildEncryption, compiledBindings, declaresEncryption } from "./build.js";
-import { EncryptionError } from "./index.js";
+import {
+  Devices,
+  EncryptionError,
+  Keys,
+  Members,
+  type Encryption,
+  type Recovery,
+} from "./index.js";
 import type { PrivateStore } from "./private-store.js";
 
 export { declaresEncryption };
@@ -62,4 +71,62 @@ export function keylessBackend(
 ): { bindings: string; appId: string; environment: string } | undefined {
   if (!declaresEncryption(app)) return undefined;
   return { bindings: compiledBindings(app), appId, environment };
+}
+
+/** Member management on the backend's own database, without a device or private store. */
+export function keylessEncryption(
+  db: Db,
+  schema: WasmSchema,
+  runtime: NativeRuntimeAdapter,
+): Encryption {
+  const refuse = (): never => {
+    throw new EncryptionError(
+      "keyless",
+      "The backend holds no encryption keys. Use a device client for this operation.",
+    );
+  };
+  const reject = async (): Promise<never> => refuse();
+  const recovery = {
+    create: refuse,
+    enable: reject,
+    restoreFromPasskey: reject,
+    register: reject,
+    restore: reject,
+    list: reject,
+    retire: reject,
+  } satisfies Pick<Recovery, keyof Recovery>;
+  const members = new Members(
+    async ({ table, id }) => {
+      try {
+        return { scopeId: runtime.tableIdentity(table), identifier: id };
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          (("code" in error && error.code === "not_observed") ||
+            error.message.includes("NotObserved"))
+        ) {
+          throw new EncryptionError("not-observed", error.message);
+        }
+        throw error;
+      }
+    },
+    { db, schema },
+  );
+  const handle = {
+    members,
+    devices: new Devices(reject),
+    keys: new Keys(reject),
+    recovery,
+    deviceId: reject,
+    ready: reject,
+    start: refuse,
+    stop: refuse,
+    onReport: refuse,
+    onUnreadable: refuse,
+    onChallenge: refuse,
+  } satisfies Omit<Pick<Encryption, keyof Encryption>, "recovery"> & {
+    recovery: typeof recovery;
+  };
+  // The public methods match Encryption without constructing a device runtime.
+  return handle as unknown as Encryption;
 }

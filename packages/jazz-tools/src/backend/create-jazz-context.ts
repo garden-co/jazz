@@ -1,7 +1,8 @@
 import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import { clientScope } from "../runtime/client-scope.js";
-import { keylessBackend } from "../encryption/node-host.js";
+import type { Encryption } from "../encryption/index.js";
+import { declaresEncryption, keylessBackend, keylessEncryption } from "../encryption/node-host.js";
 import { declaredEntries } from "../encryption/plain-schema.js";
 import { isWhitespaceOnlySecret, WHITESPACE_BACKEND_SECRET } from "../accounts/registry-client.js";
 import { backendNative } from "./backend-native.js";
@@ -199,6 +200,14 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
 
   get currentRuntime(): FlushableRuntime | undefined {
     return this.runtime;
+  }
+
+  encryptionFor(db: Db): Encryption | undefined {
+    const { app } = this.config;
+    const runtime = this.runtime;
+    if (app && runtime instanceof NativeRuntimeAdapter && declaresEncryption(app)) {
+      return keylessEncryption(db, resolveSchemaSource(app), runtime);
+    }
   }
 
   admitSession(session: Session): void {
@@ -566,6 +575,8 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
 }
 
 class BackendDb extends Db implements BackendMutationErrorSink {
+  private keylessEncryption?: Encryption;
+
   constructor(
     config: DbConfig,
     private readonly coreSource: BackendRuntimeSource,
@@ -584,6 +595,10 @@ class BackendDb extends Db implements BackendMutationErrorSink {
           }
         : undefined,
     );
+  }
+
+  override get encryption(): Encryption {
+    return (this.keylessEncryption ??= this.coreSource.encryptionFor(this)) ?? super.encryption;
   }
 
   protected override getAccessContext(): DbAccessContext | null {

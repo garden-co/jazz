@@ -101,3 +101,6 @@ db.encryption.onReport((report) => {
     console.warn("key not rotated", report.space, report.reason);
 });
 ```
+
+On Node, the database from `createJazz` can add, list and remove members through `db.encryption.members`.
+The backend holds no encryption keys. Use a device client to rotate keys or manage devices and recovery.

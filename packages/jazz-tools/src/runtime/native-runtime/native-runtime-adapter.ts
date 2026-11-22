@@ -322,6 +322,7 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  tableIdentity?(table: string): string;
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
   /** A thin session's transaction request, as its backend's client serves it. */
   serveThinTransaction?(request: Uint8Array): NativeReadResult;
@@ -1217,6 +1218,12 @@ export class NativeRuntimeAdapter implements Runtime {
       serving.stop();
       throw error;
     }
+  }
+
+  /** The authority's catalogue identity for this table. */
+  tableIdentity(table: string): string {
+    if (!this.db.tableIdentity) throw new Error("This runtime does not support table identity.");
+    return this.db.tableIdentity(table);
   }
 
   /** Adopt the private store bridge of the React Native foreground. */
