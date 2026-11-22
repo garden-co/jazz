@@ -44,7 +44,7 @@ const MEMBERS: { [name: string]: readonly string[] | true } = {
   devices: ["list", "challenge", "answer", "remove", "requestRemoval", "completeRemovals"],
   recovery: ["create", "enable", "restoreFromPasskey", "register", "restore", "list", "retire"],
   keys: ["deliver", "rotate"],
-  members: ["row"],
+  members: ["row", "where", "remove"],
 };
 /** For the test that keeps the table in step with the real class. */
 export const PENDING_HANDLE_MEMBERS: Readonly<Record<string, readonly string[] | true>> = MEMBERS;

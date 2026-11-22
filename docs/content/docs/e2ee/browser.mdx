@@ -85,7 +85,7 @@ In an app that declares encryption, `db.encryption` on a thin `Db` is a stand-in
 which only the local-first client has:
 
 - **Async calls wait like any other operation**: `ready()`, `deviceId()`, `devices.*`, `recovery.*`,
-  `keys.*` and `members.*` wait up to 30 seconds for the local-first client, start loading it if it
+  `keys.*`, `members.row`, `members.where` and `members.remove` wait up to 30 seconds for the local-first client, start loading it if it
   has not started, then run on the real handle. The 30 seconds cover the load and the new client
   verifying the account. While the `Db` is thin, `ready({ timeoutMs })` waits for the shorter of
   your `timeoutMs` and those 30 seconds, then rejects with reason `"timeout"`. They reject with the same `EncryptionNeedsLocalFirstError` as

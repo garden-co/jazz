@@ -12,11 +12,12 @@ may add itself in the same transaction.
 ## Create a space and add members
 
 A new space and its creator's own membership are one transaction. `db.encryption.members.row` gives the
-values of a member row, so you insert and delete members with your own permissions:
+values to insert into the generated members table:
 
 ```ts
 const id = crypto.randomUUID();
-const self = await db.encryption.members.row({ table: "projects", id }, accountId);
+const space = { table: "projects", id };
+const self = await db.encryption.members.row(space, accountId);
 const written = await db.transaction((tx) => {
   tx.insert(app.projects, { name: "plans", ownerId: accountId }, { id });
   tx.insert(app.__e2ee_members, self);
@@ -24,12 +25,25 @@ const written = await db.transaction((tx) => {
 await written.wait({ tier: "global" });
 
 // Later, the owner adds a member:
-const row = await db.encryption.members.row({ table: "projects", id }, otherAccountId);
+const row = await db.encryption.members.row(space, otherAccountId);
 await db.insert(app.__e2ee_members, row).wait({ tier: "global" });
 ```
 
 The space's key is made by its first encrypted write. A member gets the key from any device that holds it (the
 first holder to deliver wins), sealed to the member's account, so the member's devices can all read.
+
+## List members
+
+Pass the filter from `members.where` to the ordinary query API. Pass an account ID as the second argument
+to see only that account's rows in the space.
+
+```ts
+const filter = await db.encryption.members.where(space);
+const members = await db.all(app.__e2ee_members.where(filter));
+```
+
+Use the table named by the encryption declaration's `scope`. On a fresh device, these helpers can
+return the error code `not-observed` until the device first receives the table's identity from the server.
 
 ## When keys arrive
 
@@ -46,13 +60,25 @@ delivery arrives; read again, or keep a subscription on the space.
 
 ## Remove a member
 
-Delete the member rows, then rotate the key so that content written from now on is sealed under a key
-the removed member never gets:
+An account can leave a space. Anyone the space's update rule allows to manage members can remove
+another account. `members.remove` deletes only matching member rows the caller is allowed to see. It
+returns the number deleted once the authority accepts the serializable transaction. A result of `0`
+means nothing visible was removed. The account may still be a member if the caller cannot read its
+rows. Removing an already absent account also returns `0`.
+
+A conflicting admission triggers a retry, up to three attempts in all. A refusal reaches the caller.
+To rotate the key immediately after removing a member, call `keys.rotate`.
 
 ```ts
-await db.delete(app.__e2ee_members, memberRowId).wait({ tier: "global" });
-await db.encryption.keys.rotate({ table: "projects", id });
+const removed = await db.encryption.members.remove(space, otherAccountId);
+if (removed > 0) await db.encryption.keys.rotate(space);
 ```
+
+If you also need to delete your own app's rows atomically with the membership, use a single
+`db.serializableTransaction`. Inside its callback, read the matching rows with
+`tx.all(app.__e2ee_members.where(filter))` using the filter from `members.where(space, otherAccountId)`,
+then delete them and the related app rows. Await the transaction result's `wait()` before rotating.
+Retry the whole transaction on a serialization conflict.
 
 If the space has no key yet, nothing has been sealed. For an active member, `rotate` succeeds and
 writes nothing. If the space already has a key, a member whose device is waiting for delivery gets
@@ -60,9 +86,9 @@ writes nothing. If the space already has a key, a member whose device is waiting
 device cannot confirm the space's key state. If the device sees that its account has no membership,
 it gets `not-a-member`. A device waiting for approval gets `no-account`, even in a space with no key yet.
 
-Rotation is otherwise lazy: the next pass notices that a key is held by an account that is no longer a
-member and rotates. A removed member keeps what they could already read; Jazz's permissions stop them
-reading any row after.
+Without an explicit rotation, the next pass notices that a key is held by an account that is no
+longer a member and rotates, once the device has observed the removal. A removed member keeps what
+they could already read; Jazz's permissions stop them reading any row after.
 
 That automatic rotation happens just before a write. If it fails, for example because the writer may
 not update the space's row, the write still goes ahead under the current key, which the removed member

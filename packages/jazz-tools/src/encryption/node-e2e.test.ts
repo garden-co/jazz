@@ -2,7 +2,7 @@ import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
 import permissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
 import { testApp } from "../testing/index.js";
@@ -177,6 +177,134 @@ async function until<T>(read: () => Promise<T | undefined>, what: string, ms = 2
 }
 
 describe("encryption on Node, end to end", () => {
+  it("refuses unknown tables and tables that do not hold spaces before writing", async () => {
+    const host = await serve();
+    const { db, account } = await device(host);
+    for (const table of ["tasks", "no_such_table"]) {
+      const space = { table, id: crypto.randomUUID() };
+      for (const operation of [
+        () => db.encryption.members.row(space, account),
+        () => db.encryption.members.where(space),
+        () => db.encryption.members.remove(space, account),
+      ])
+        await expect(operation()).rejects.toThrow(table);
+    }
+    expect(await host.jazz.db.all(app.__e2ee_members)).toEqual([]);
+  });
+
+  it("refuses a space whose catalogue has never reached this device", async () => {
+    const host = await serve();
+    const accounts = memoryStore();
+    const online = await device(host, { accounts });
+    await online.session.close();
+    await host.stop();
+    // The sign-in survives, but a new in-memory replica has never synced.
+    const { db, account } = await device(host, { accounts, wait: false });
+    const space = { table: "projects", id: crypto.randomUUID() };
+    for (const operation of [
+      () => db.encryption.members.row(space, account),
+      () => db.encryption.members.where(space),
+      () => db.encryption.members.remove(space, account),
+    ])
+      await expect(operation()).rejects.toMatchObject({
+        name: "EncryptionError",
+        code: "not-observed",
+      });
+    expect(await db.all(app.__e2ee_members, { tier: "local-first" })).toEqual([]);
+  });
+
+  it("removes all of one account's rows in one space and keeps the other members and spaces", async () => {
+    const host = await serve();
+    const alice = await device(host);
+    const first = { table: "projects", id: await makeProject(alice, "first") };
+    const second = { table: "projects", id: await makeProject(alice, "second") };
+    const bob = crypto.randomUUID();
+    await addMember(alice, first.id, bob);
+    await addMember(alice, first.id, bob);
+    await addMember(alice, second.id, bob);
+
+    const members = alice.db.encryption.members;
+    const filter = await members.where(first);
+    expect(filter).toEqual({ scopeId: expect.any(String), identifier: first.id });
+    expect(await members.where(first, bob)).toEqual({ ...filter, accountId: bob });
+    const list = async (space: typeof first) =>
+      (await host.jazz.db.all(app.__e2ee_members.where(await members.where(space))))
+        .map((row) => row.accountId)
+        .sort();
+    expect(await list(first)).toEqual([alice.account, bob, bob].sort());
+    const rotate = vi.spyOn(alice.db.encryption.keys, "rotate");
+    expect(await members.remove(first, bob)).toBe(2);
+    expect(await list(first)).toEqual([alice.account]);
+    expect(await list(second)).toEqual([alice.account, bob].sort());
+    expect(await members.remove(first, bob)).toBe(0);
+    expect(rotate).not.toHaveBeenCalled();
+  });
+
+  it("a member can leave without keys or update permission and cannot remove another member", async () => {
+    const host = await serve();
+    const alice = await device(host);
+    const bob = await device(host);
+    const space = { table: "projects", id: await makeProject(alice, "plans") };
+    await addMember(alice, space.id, bob.account);
+    const carol = crypto.randomUUID();
+    await addMember(alice, space.id, carol);
+    const members = bob.db.encryption.members;
+    const matching = async (accountId: string) =>
+      app.__e2ee_members.where(await members.where(space, accountId));
+    await expect(members.remove(space, carol)).rejects.toMatchObject({ code: "permission_denied" });
+    expect(await bob.db.all(await matching(carol), { tier: "remote" })).toHaveLength(1);
+    expect(await members.remove(space, bob.account)).toBe(1);
+    expect(await host.jazz.db.all(await matching(bob.account))).toEqual([]);
+    // A fresh outsider sees no membership to delete. Carol remains entitled.
+    const outsider = await device(host);
+    expect(await outsider.db.all(await matching(carol), { tier: "remote" })).toEqual([]);
+    expect(await outsider.db.encryption.members.remove(space, carol)).toBe(0);
+    expect(await host.jazz.db.all(await matching(carol))).toHaveLength(1);
+  });
+
+  it.each([
+    { existing: true, conflicts: 1 },
+    { existing: false, conflicts: 1 },
+    { existing: true, conflicts: 3 },
+  ])(
+    "retries a removal after a racing admission (already a member: $existing, conflicts: $conflicts)",
+    async ({ existing, conflicts }) => {
+      const host = await serve();
+      const alice = await device(host);
+      const other = await device(host, { key: alice.session.exportDeviceKey() });
+      const space = { table: "projects", id: await makeProject(alice, "plans") };
+      const bob = crypto.randomUUID();
+      if (existing) await addMember(alice, space.id, bob);
+      const run = alice.db.serializableTransaction.bind(alice.db);
+      const attempts = vi.spyOn(alice.db, "serializableTransaction");
+      for (let i = 0; i < conflicts; i++)
+        attempts.mockImplementationOnce((body) =>
+          run(async (tx) => {
+            const result = await body(tx);
+            // The read finished. The authority accepts the new admission before this commit.
+            await addMember(other, space.id, bob);
+            return result;
+          }),
+        );
+      const removal = alice.db.encryption.members.remove(space, bob);
+      if (conflicts === 3) {
+        await expect(removal).rejects.toMatchObject({
+          code: expect.stringMatching(/^(serialization|transaction)_conflict$/),
+        });
+        expect(attempts).toHaveBeenCalledTimes(3);
+      } else {
+        expect(await removal).toBe(existing ? 2 : 1);
+        expect(attempts).toHaveBeenCalledTimes(2);
+        expect(
+          await host.jazz.db.all(
+            app.__e2ee_members.where(await alice.db.encryption.members.where(space, bob)),
+          ),
+        ).toEqual([]);
+      }
+    },
+    60_000,
+  );
+
   it.each(["new", "existing"] as const)(
     "streams encrypted bytes when the project key is %s",
     async (key) => {

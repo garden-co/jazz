@@ -7,6 +7,10 @@
  * not be read. Ordinary reads and writes of encrypted columns need nothing
  * from it.
  */
+import type { WasmSchema } from "../drivers/types.js";
+import { PersistedWriteRejectedError } from "../runtime/client.js";
+import type { Db } from "../runtime/db.js";
+import { boundApp, TypedTableQueryBuilder } from "../typed-app.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { RecoveryPhrase } from "../local-first-auth/recovery-phrase.js";
 import { formatSecret, parseSecret } from "../local-first-auth/secret.js";
@@ -126,8 +130,11 @@ export interface EncryptionOptions {
 const toHex = (bytes: Uint8Array) =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 
-function failure(error: unknown): EncryptionError {
+function failure(error: unknown, operation?: string): EncryptionError {
   const message = error instanceof Error ? error.message : String(error);
+  if (operation === "spaceRow" && message.startsWith("NotObserved: ")) {
+    return new EncryptionError("not-observed", message.slice("NotObserved: ".length));
+  }
   const match = /^([a-z-]+): ([\s\S]*)$/.exec(message);
   if (!match) return new EncryptionError("error", message);
   const [, code, detail] = match;
@@ -152,14 +159,14 @@ export class Encryption {
     this.devices = new Devices(call);
     this.recovery = new Recovery(call, options);
     this.keys = new Keys(call);
-    this.members = new Members(call);
+    this.members = new Members((space) => call("spaceRow", { ...space }));
   }
 
   private async call<T>(op: string, args: Record<string, unknown>): Promise<T> {
     try {
       return JSON.parse(await this.native.encryptionCall(op, args)) as T;
     } catch (error) {
-      throw failure(error);
+      throw failure(error, op);
     }
   }
 
@@ -537,19 +544,82 @@ export class Keys {
   }
 }
 
-export class Members {
-  constructor(private readonly call: Call) {}
+type SpaceAddress = { scopeId: string; identifier: string };
 
-  /**
-   * The values of the `__e2ee_members` row that makes `accountId` a member of
-   * `space`: insert it with the app's own permissions (a space's members
-   * are the rows of that table); delete it to remove the member.
-   */
+/** Bind member queries and writes to the database whose handle the caller took. */
+export function encryptionForDb(real: Encryption, db: Db, schema: WasmSchema): Encryption {
+  const members = new Members((space) => real.members.where(space), { db, schema });
+  return new Proxy(real, {
+    get(target, name) {
+      return name === "members" ? members : Reflect.get(target, name);
+    },
+  });
+}
+
+export class Members {
+  private readonly spaceTables?: Set<string>;
+  constructor(
+    private readonly address: (space: SpaceRef) => Promise<SpaceAddress>,
+    private readonly context?: { db: Db; schema: WasmSchema },
+  ) {
+    if (context) {
+      const schema = boundApp(context.schema)?.schema;
+      const entries = schema?.encryption?.versions?.[schema.current] as
+        | Record<string, { scope: string }>
+        | undefined;
+      this.spaceTables = new Set(Object.values(entries ?? {}).map((entry) => entry.scope));
+    }
+  }
+
+  /** The values to insert into `app.__e2ee_members` to admit an account. */
   async row(
     space: SpaceRef,
     accountId: string,
   ): Promise<{ scopeId: string; identifier: string; accountId: string }> {
-    const at = await this.call<{ scopeId: string; identifier: string }>("spaceRow", { ...space });
-    return { ...at, accountId };
+    return { ...(await this.where(space)), accountId };
+  }
+
+  /** A filter for the space's member rows, optionally restricted to one account. */
+  async where(space: SpaceRef, accountId?: string): Promise<SpaceAddress & { accountId?: string }> {
+    if (this.spaceTables && !this.spaceTables.has(space.table)) {
+      throw new EncryptionError(
+        "not-space-table",
+        `Table '${space.table}' is not a declared encryption space table.`,
+      );
+    }
+    const at = await this.address(space);
+    return accountId === undefined ? at : { ...at, accountId };
+  }
+
+  /**
+   * Delete this account's member rows that the caller can see in the space.
+   * Return the number deleted once the authority accepts the transaction.
+   * Zero means nothing visible was removed. The account may still be a member
+   * if the caller cannot read its rows. Call `keys.rotate` for immediate rotation.
+   */
+  async remove(space: SpaceRef, accountId: string): Promise<number> {
+    if (typeof accountId !== "string")
+      throw new TypeError("Removing a member requires an account ID.");
+    const filter = await this.where(space, accountId);
+    if (!this.context) throw new Error("Removing members requires a database.");
+    const { db, schema } = this.context;
+    const table = new TypedTableQueryBuilder("__e2ee_members", schema);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const written = await db.serializableTransaction(async (tx) => {
+          const rows = await tx.all(table.where(filter), { tier: "remote" });
+          for (const row of rows) tx.delete(table, row.id);
+          return rows.length;
+        });
+        return await written.wait();
+      } catch (error) {
+        if (
+          attempt >= 3 ||
+          !(error instanceof PersistedWriteRejectedError) ||
+          (error.code !== "serialization_conflict" && error.code !== "transaction_conflict")
+        )
+          throw error;
+      }
+    }
   }
 }

@@ -134,6 +134,42 @@ async function firstDevice(host: { serverUrl: string }, user: string) {
 }
 
 describe("encryption on the browser-style client, end to end", () => {
+  it("lists and removes a member through a handle taken while the session is thin", async () => {
+    const host = await serve();
+    const alice = await client(host, "alice");
+    await alice.db.encryption.ready();
+    const space = { table: "projects", id: await makeProject(alice, "plans") };
+    const bob = await client(host, "bob");
+    await bob.db.encryption.ready();
+    const row = await alice.db.encryption.members.row(space, bob.account);
+    await alice.db.insert(app.__e2ee_members, row).wait({ tier: "global" });
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const session = await createJazzClient({
+      serverUrl: host.serverUrl,
+      store: memoryStore(),
+      driver: { type: "memory" },
+      bearer: () => "token-bob",
+      encryption: { app, store: memoryPrivateStore() },
+      async client() {
+        await gate;
+        return { createClient: createLocalFirstDb };
+      },
+    });
+    cleanups.push(() => session.close());
+    const thin = session.getSnapshot().client!.db;
+    expect(isThinDb(thin)).toBe(true);
+    const members = thin.encryption.members;
+    const filter = members.where(space, bob.account);
+    const removing = members.remove(space, bob.account);
+    expect(await host.jazz.db.all(app.__e2ee_members.where(row))).toHaveLength(1);
+    release();
+    expect(await filter).toEqual(row);
+    expect(await removing).toBe(1);
+    expect(await host.jazz.db.all(app.__e2ee_members.where(row))).toEqual([]);
+  }, 90_000);
+
   it("a second device of an app-sign-in account is approved with the challenge notice and the code, then reads", async () => {
     const host = await serve();
     const { first, project } = await firstDevice(host, "alice");

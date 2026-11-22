@@ -52,8 +52,8 @@ Each encrypted column is stored as `bytes`. Your code never sees that: the gener
 values you write and read are the plaintext type (`title` is a string). `equality` lists the columns you
 may filter by equality; each needs a token column (`__e2ee_eq_title`) beside it.
 
-Your permissions decide who is a member of a space: members are the rows of the `__e2ee_members` table,
-and a space's rows are readable to them. See [Sharing and keys](/docs/e2ee/sharing-and-keys).
+Members are rows of `app.__e2ee_members`. Use `db.encryption.members.row` to add an account with an insert,
+`where` to list members and `remove` to remove an account. Your permissions govern these operations. See [Sharing and keys](/docs/e2ee/sharing-and-keys).
 
 ## Give each device a private store
 

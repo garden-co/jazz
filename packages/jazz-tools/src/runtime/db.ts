@@ -151,7 +151,7 @@ import { EncryptedGuard } from "../thin/encrypted-guard.js";
 import { EncryptionNeedsLocalFirstError } from "./encryption-needs-local-first.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 import { RuntimeClosedError } from "./runtime-closed-error.js";
-import { notDeclaredEncryption, type Encryption } from "../encryption/index.js";
+import { encryptionForDb, notDeclaredEncryption, type Encryption } from "../encryption/index.js";
 import { pendingEncryption } from "../encryption/pending-handle.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { declaredEntries } from "../encryption/plain-schema.js";
@@ -2541,10 +2541,13 @@ export class Db {
     const live = this.current();
     if (live !== this) return live.encryption;
     const real = this.runtimeSource?.encryptionHandle();
+    if (real && this.clientSchema)
+      return (this.boundEncryption ??= encryptionForDb(real, this, this.clientSchema));
     if (real) return real;
     return this.thinEncryption() ?? notDeclaredEncryption();
   }
 
+  private boundEncryption: Encryption | undefined;
   private pendingEncryption: Encryption | undefined;
   private encryptedQueries?: EncryptedGuard;
   private encryptedReadsReady?: Promise<unknown>;
