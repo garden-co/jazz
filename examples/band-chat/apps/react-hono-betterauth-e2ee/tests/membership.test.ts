@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "jazz-tools";
 import { admitMember, removeMember, renewRoomKey } from "../src/lib/membership";
-import { app, cleanUp, createRoom, device, serve, until } from "./harness";
+import { app, cleanUp, createRoom, device, memberRow, serve, until } from "./harness";
 
 afterEach(cleanUp);
 
@@ -110,6 +110,45 @@ describe("membership writes", () => {
       expect(
         await host.jazz.db.all(app.roomMembers.where({ roomId, memberAuthor: bob.account })),
       ).toEqual([]);
+    } finally {
+      removal.mockRestore();
+    }
+  }, 90_000);
+
+  it("retries when a concurrent admission changes only Jazz's member rows", async () => {
+    const host = await serve();
+    const alice = await device(host);
+    const bob = await device(host);
+    const roomId = await createRoom(alice, "Rehearsal");
+    const row = await memberRow(alice, roomId, bob.account);
+    const addMember = () => alice.db.insert(app.__e2ee_members, row).wait({ tier: "global" });
+    await addMember();
+
+    const transaction = alice.db.serializableTransaction.bind(alice.db);
+    let addedAgain = false;
+    const removal = vi.spyOn(alice.db, "serializableTransaction");
+    removal.mockImplementation((run) =>
+      transaction(async (tx) => {
+        const all = tx.all.bind(tx);
+        tx.all = (async (...args: Parameters<Db["all"]>) => {
+          const rows = await all(...args);
+          // Both reads have returned. Only the member read should conflict.
+          if (!addedAgain && args[0]._table === "roomMembers") {
+            addedAgain = true;
+            await addMember();
+          }
+          return rows;
+        }) as typeof tx.all;
+        return run(tx);
+      }),
+    );
+
+    try {
+      expect(await removeMember({ db: alice.db, roomId, accountId: bob.account })).toBe(2);
+      expect(removal).toHaveBeenCalledTimes(2);
+      expect((await memberRowsOf(host, alice, roomId)).map((member) => member.accountId)).toEqual([
+        alice.account,
+      ]);
     } finally {
       removal.mockRestore();
     }
