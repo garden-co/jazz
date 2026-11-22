@@ -526,6 +526,29 @@ rows, nothing about unreadable rows may reach a reader:
   no outcome of a search of a built index, at any cap, one-shot or live.
 - A live search is held to its caps at each change (20.8), so it is refused
   at the readable change that takes it over, not at a later write.
+- **Proposed, not yet decided:** one exception, while an index builds. The
+  authority refuses every search of it with `IndexBuilding` for as long as
+  the build runs, and that depends on rows the reader may not read: on how
+  many rows the table held when the build started, on the indexes ahead of
+  it in build order (other tables' included), and on how often the host
+  ticks. It says nothing about which rows exist or what they hold, and the
+  query makes no difference to it. Writes during a build do not move its
+  end (`build_to`), though draining them takes time of the same ticks. A
+  build starts whenever `state` resets:
+  - an index this store has no record of: new, renamed, or declared again
+    after a schema without it dropped it (so rolling an app back and
+    forward rebuilds);
+  - a change to its `jazz-ix-decl/1` bytes over stored names: kind, fields,
+    weights, reference lengths, analyzer, prefix, column, metric, `ann`,
+    `serverOnly`, or a stored column behind it that was replaced (a rename
+    alone is none);
+  - a change of stored table under it;
+  - a change of the kind's encoding, which a new build of Jazz can make
+    without any schema change: geo's `jazz-ix-geo-z62/1`, vector's
+    `jazz-ix-vector/1 f32le/1`, or the analyzer's.
+
+  A restart resumes a build rather than resetting it, and an empty table's
+  index is built at once.
 - An empty result and a result of hidden rows are indistinguishable.
 
 A client indexes only rows the server let it hold, and eviction removes their
