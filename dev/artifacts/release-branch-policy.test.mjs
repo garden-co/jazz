@@ -73,7 +73,9 @@ const pr = {
   head: { ref: "changeset-release/release", sha: "preview" },
 };
 test("release triggers and cache trust retain development and release separation", () => {
-  assert.deepEqual(publisher.on.push.branches, ["release"]);
+  // Retired as a publisher: no trigger on release; release-publish.yml publishes.
+  assert.equal(publisher.on.push, undefined);
+  assert.deepEqual(publisher.on.workflow_dispatch.inputs.mode.options, ["dry-run"]);
   const changesets = workflow("changesets-release-pr");
   assert.deepEqual(changesets.on.push.branches, ["release"]);
   assert.match(changesets.jobs["release-pr"].if, /refs\/heads\/release/);
@@ -98,38 +100,17 @@ test("release triggers and cache trust retain development and release separation
   assert.match(JSON.stringify(workflow("ci")), /OWNER.*MEMBER.*COLLABORATOR/);
   assert.equal(JSON.parse(readFileSync(join(root, ".changeset/config.json"))).baseBranch, "main");
 });
-test("publisher requires the exact merged release version PR and fails closed for manual publication", async () => {
-  assert.equal((await runGate({ prs: [pr] })).outputs.should_run, "true");
-  for (const options of [
-    {},
-    { prs: [{ ...pr, merge_commit_sha: "old" }] },
-    { prs: [{ ...pr, head: { ...pr.head, ref: "changeset-release/main" } }] },
-    { ref: "refs/heads/main", prs: [pr] },
-    { event: "workflow_dispatch", prs: [pr] },
-  ])
-    assert.equal((await runGate(options)).outputs.should_run, "false");
-  const manual = {
-    event: "workflow_dispatch",
-    prs: [pr],
-    expectedSha: "candidate",
-    expectedVersion: "1.0.0-alpha.55",
-  };
-  assert.equal((await runGate(manual)).outputs.should_run, "true");
-  assert.equal(
-    (await runGate({ ...manual, expectedVersion: "wrong" })).outputs.should_run,
-    "false",
-  );
-  assert.equal(
-    (await runGate({ event: "workflow_dispatch", ref: "refs/heads/feature", mode: "dry-run" }))
-      .outputs.should_run,
-    "true",
-  );
-  // Prove the wrong-branch assertion detects removal of the actual workflow guard.
-  const mutated = gate.replace('ref !== "refs/heads/release"', "false");
-  assert.equal(
-    (await runGate({ ref: "refs/heads/main", prs: [pr], script: mutated })).outputs.should_run,
-    "true",
-  );
+test("the retired publisher only dry-runs: any other mode fails closed", async () => {
+  for (const options of [{}, { mode: "publish" }, { mode: "publish", prs: [pr] }]) {
+    const { outputs, failures } = await runGate(options);
+    assert.equal(outputs.should_run, "false");
+    assert.ok(failures.length > 0);
+  }
+  for (const ref of ["refs/heads/release", "refs/heads/feature"])
+    assert.equal(
+      (await runGate({ event: "workflow_dispatch", ref, mode: "dry-run" })).outputs.should_run,
+      "true",
+    );
 });
 test("Changesets prerelease consumption survives release cut, fix, version and merge back", () => {
   const dir = mkdtempSync(join(tmpdir(), "jazz-release-cycle-"));
@@ -242,10 +223,10 @@ test("release refresh dispatches required CI and refuses a moved branch", () => 
 
 test("a called publish dry run ignores the caller's dispatch inputs", () => {
   // Called from release-candidate.yml, github.event is the gate's dispatch:
-  // its `version` (an rc version) is not publish's manual version override.
+  // its `version` (an rc version) is never a version override here.
   const source = readFileSync(join(root, ".github/workflows/publish-jazz-tools-alpha.yml"), "utf8");
-  const uses = source.match(/EXPECTED_VERSION="\$\{\{[^}]*\}\}"/g) ?? [];
+  const uses = source.match(/EXPECTED_VERSION="[^"]*"/g) ?? [];
   assert.ok(uses.length >= 2);
-  for (const use of uses)
-    assert.match(use, /inputs\.artifacts_run_id == '' && github\.event\.inputs\.version/);
+  for (const use of uses) assert.equal(use, 'EXPECTED_VERSION=""');
+  assert.doesNotMatch(source, /github\.event\.inputs\.version/);
 });
