@@ -83,9 +83,10 @@ enum Commands {
         #[arg(long)]
         check: bool,
     },
-    /// Renamed to `generate`.
-    #[command(hide = true)]
-    Validate {
+    /// Removed in 2.0.0-beta.0: refuses, pointing at alpha.70's `upgrade`
+    /// and the upgrade guide.
+    #[command(hide = true, disable_help_flag = true)]
+    Upgrade {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -389,6 +390,12 @@ const JSON_ONLY_APP: &str = "TS is the source in alpha.66: this app has jazz.app
      then edit schema.ts beside your app's manifest (package.json, Cargo.toml, go.mod, \
      Package.swift, build.gradle, …) and run `npx jazz-tools generate`.";
 
+/// `jazz-tools upgrade` is gone: shared with `npx jazz-tools`
+/// (`packages/jazz-tools/src/cli.ts`).
+const UPGRADE_REMOVED: &str = "`jazz-tools upgrade` was removed in 2.0.0-beta.0. To convert an \
+     alpha.65 (or older) app, run `npx jazz-tools@2.0.0-alpha.70 upgrade`, then follow the upgrade \
+     guide: https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0";
+
 /// Refuse to write an app's files: TypeScript is the only authoring source,
 /// so `jazz.app.json`, `jazz.permissions.json` and the bindings are written
 /// from `schema.ts` by `npx jazz-tools generate` (and migrations by `npx
@@ -513,9 +520,7 @@ async fn run() {
     }
 
     match cli.command {
-        Commands::Validate { .. } => finish_app_files(Err(
-            "`jazz-tools validate` is renamed to `jazz-tools generate`: run `npx jazz-tools generate` (`jazz-tools generate --check` for CI)".into(),
-        )),
+        Commands::Upgrade { .. } => finish_app_files(Err(UPGRADE_REMOVED.into())),
         Commands::Generate {
             dir,
             lang: name,

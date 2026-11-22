@@ -177,22 +177,25 @@ describe("bin integration", () => {
     expect(result.stderr).toContain("found schema.ts in both");
   });
 
-  it("refuses the removed upgrade command and points at the upgrade guide", async () => {
-    const { root } = await createWorkspace();
-    await writeAppFiles(root);
-    const before = await readFile(join(root, "jazz.app.json"), "utf8");
+  it.each([[["upgrade"]], [["upgrade", "--help"]]])(
+    "refuses the removed upgrade command (%j) and points at the upgrade guide",
+    async (command) => {
+      const { root } = await createWorkspace();
+      await writeAppFiles(root);
+      const before = await readFile(join(root, "jazz.app.json"), "utf8");
 
-    const result = runBin(["upgrade", "--dir", root]);
+      const result = runBin([...command, "--dir", root]);
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("`jazz-tools upgrade` was removed in 2.0.0-beta.0");
-    expect(result.stderr).toContain("`npx jazz-tools@2.0.0-alpha.70 upgrade`");
-    expect(result.stderr).toContain(
-      "https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0",
-    );
-    expect(await readFile(join(root, "jazz.app.json"), "utf8")).toBe(before);
-    expect(await fileExists(join(root, "schema.ts"))).toBe(false);
-  });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("`jazz-tools upgrade` was removed in 2.0.0-beta.0");
+      expect(result.stderr).toContain("`npx jazz-tools@2.0.0-alpha.70 upgrade`");
+      expect(result.stderr).toContain(
+        "https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0",
+      );
+      expect(await readFile(join(root, "jazz.app.json"), "utf8")).toBe(before);
+      expect(await fileExists(join(root, "schema.ts"))).toBe(false);
+    },
+  );
 
   it("treats the old validate command as unknown", async () => {
     const { root } = await createWorkspace();

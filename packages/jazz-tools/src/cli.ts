@@ -479,8 +479,8 @@ if (isMainModule()) {
   const command = args[0] ?? "";
   // Cloud commands (login, apps, ...) have their own help.
   const cloudCommand = isCloudCommand(command);
-  // Cloud commands and `inspect` have their own help.
-  const ownHelp = cloudCommand || command === "inspect";
+  // Cloud commands and `inspect` have their own help; `upgrade` only refuses.
+  const ownHelp = cloudCommand || command === "inspect" || command === "upgrade";
   if (!ownHelp && args.some((arg) => arg === "--help" || arg === "-h")) {
     printHelp();
     process.exit(0);

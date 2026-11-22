@@ -197,3 +197,35 @@ fn a_ts_authored_app_s_bindings_are_checked_against_its_committed_files() {
     assert!(!output.status.success(), "a hand edit passed");
     assert!(stderr.contains("was edited since"), "{stderr}");
 }
+
+#[test]
+fn removed_upgrade_refuses_with_a_pointer_and_validate_is_unknown() {
+    let dir = app_dir("removed-upgrade");
+    std::fs::write(dir.join("jazz.app.json"), APP).unwrap();
+    for args in [&["upgrade"][..], &["upgrade", "--help"][..]] {
+        let output = run(&dir, args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains(
+                "`jazz-tools upgrade` was removed in 2.0.0-beta.0. To convert an alpha.65 (or \
+                 older) app, run `npx jazz-tools@2.0.0-alpha.70 upgrade`, then follow the \
+                 upgrade guide: \
+                 https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0"
+            ),
+            "{args:?}: {stderr}"
+        );
+        assert!(!dir.join("schema.ts").exists(), "{args:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("jazz.app.json")).unwrap(),
+            APP
+        );
+    }
+    let output = run(&dir, &["validate"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        !stderr.contains("renamed to `jazz-tools generate`"),
+        "{stderr}"
+    );
+}
