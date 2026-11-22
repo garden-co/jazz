@@ -363,9 +363,8 @@ fn check_recovery_readiness(allow_registration: bool) {
         )
         .unwrap();
     let laptop_status = wait_for_ready("laptop", &laptop, Duration::from_secs(15));
-    let (phone_timeout, expected) = if allow_registration {
+    if allow_registration {
         assert_eq!(laptop_status.unwrap(), "active");
-        (Duration::from_secs(15), "active")
     } else {
         let refused = laptop_status.unwrap_err();
         assert!(
@@ -373,17 +372,38 @@ fn check_recovery_readiness(allow_registration: bool) {
                 if reason.contains("authorization_denied") && reason.contains(system_tables::RECOVERY_ROOTS)),
             "the authority refused the founder's recovery registration: {refused}"
         );
-        // Long enough to finish preparing recovery on a slow CI runner, so the
-        // deadline (not the preparation) decides the answer.
-        (Duration::from_secs(10), "awaiting-approval")
-    };
+    }
     let phone = relay
         .attach_client_encrypted(identity(0x34), BTreeMap::new(), device(Some(secret)))
         .unwrap();
-    assert_eq!(
-        wait_for_ready("phone", &phone, phone_timeout).unwrap(),
-        expected
-    );
+    if allow_registration {
+        assert_eq!(
+            wait_for_ready("phone", &phone, Duration::from_secs(15)).unwrap(),
+            "active"
+        );
+        return;
+    }
+    // The phone's first pass finds no recovery root. How long that takes
+    // depends on the runner, so wait for it with short deadlines: before
+    // it, a deadline has no evidence to preserve and times out.
+    let first_pass = Instant::now() + Duration::from_secs(60);
+    let first = loop {
+        match wait_for_ready("phone", &phone, Duration::from_secs(2)) {
+            Err(RelayError::Drive(reason))
+                if reason.starts_with("timeout:") && Instant::now() < first_pass => {}
+            outcome => break outcome,
+        }
+    };
+    assert_eq!(first.unwrap(), "awaiting-approval");
+    // The runtime keeps looking for the root on a backoff. Each later
+    // deadline, whether it falls inside one of those passes or between
+    // them, still answers with the missing evidence.
+    for _ in 0..4 {
+        assert_eq!(
+            wait_for_ready("phone", &phone, Duration::from_millis(1500)).unwrap(),
+            "awaiting-approval"
+        );
+    }
 }
 
 /// Readiness spends its own budget while the relay owner is busy with a

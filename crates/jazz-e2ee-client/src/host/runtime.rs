@@ -895,8 +895,15 @@ async fn main_loop(this: Rc<Encryption>) {
                     Verification::Complete | Verification::Failed(_)
                 )
             });
+            // A device already awaiting recovery keeps that evidence while
+            // it looks again: a readiness deadline that falls inside this
+            // pass still answers `awaiting-approval`, not a timeout. The
+            // pass's own outcome replaces it below.
             if let Some(native) = recovering {
-                *native.result.borrow_mut() = Verification::Pending;
+                let mut result = native.result.borrow_mut();
+                if !matches!(*result, Verification::AwaitingRecovery) {
+                    *result = Verification::Pending;
+                }
             }
             let mut verified = client.ensure_account(&db).await.map(Some);
             if let (Ok(Some(status)), Some(native)) = (&verified, recovering) {
