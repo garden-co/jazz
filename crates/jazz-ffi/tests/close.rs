@@ -188,8 +188,8 @@ enum Then {
     CloseSession(Session),
 }
 
-/// A host's token callback and ctx. Leaked: a test that fails may leave a
-/// callback running.
+/// A host's token callback and ctx. Leaked until `free_ctx`: a test that
+/// fails may leave a callback running.
 struct Host {
     token: &'static str,
     then: Mutex<Then>,
@@ -253,6 +253,14 @@ impl Host {
             "a token callback ran after free"
         );
     }
+}
+
+/// The host frees its ctx, once free returned: for a sanitizer to see any
+/// later use.
+fn free_ctx(host: *const Host) {
+    // SAFETY: leaked from a `Box` by `Host::new`, and not used again: the
+    // handle it was given to is freed.
+    drop(unsafe { Box::from_raw(host.cast_mut()) });
 }
 
 unsafe extern "C" fn token_cb(
@@ -597,6 +605,7 @@ fn close_ends_a_for_user_handles_wait_at_once() {
     );
     job.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 /// A wait abandoned by a for_user handle's close doesn't take the writes it
@@ -762,6 +771,7 @@ fn session_close_ends_an_operation_stuck_in_the_token_callback() {
     assert_eq!(kind(&session.jazz().map(|_| Value::Null)), "closed");
     session.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 /// A refresh stuck on the backend's HTTP answer (30 s of it).
@@ -779,6 +789,7 @@ fn session_close_ends_an_operation_stuck_on_http() {
     assert_eq!(kind(&refreshing.within(PROMPT, "refresh")), "closed");
     session.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 /// A token callback that never returns on its own holds up close, as
@@ -798,6 +809,7 @@ fn a_stuck_token_callback_holds_up_close_but_not_the_calls() {
     assert_eq!(closing.within(PROMPT, "close"), Ok(Value::Null));
     alice.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 #[test]
@@ -814,6 +826,7 @@ fn close_from_inside_the_token_callback() {
     assert_eq!(*host.closed_inside.lock().unwrap(), [Ok(Value::Null)]);
     alice.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 #[test]
@@ -829,6 +842,7 @@ fn session_close_from_inside_the_token_callback() {
     assert_eq!(*host.closed_inside.lock().unwrap(), [Ok(Value::Null)]);
     session.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 /// Close waits for the callback, and the callback closes: the second close
@@ -849,6 +863,7 @@ fn close_from_the_callback_that_a_close_is_waiting_for() {
     assert_eq!(*host.closed_inside.lock().unwrap(), [Ok(Value::Null)]);
     alice.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 /// Two token callbacks running at once (two for_user fetches), both
@@ -877,6 +892,7 @@ fn two_callbacks_closing_at_once() {
     });
     job.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 /// The same for a handle, whose ctx may go after `jazz_close`.
@@ -896,6 +912,7 @@ fn freeing_a_handle_waits_for_the_callback_that_closed() {
     });
     alice.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 /// Freeing waits for the callback that closed, so ctx can go right after.
@@ -912,6 +929,7 @@ fn free_waits_for_the_callback_that_closed() {
     // No waiting for the callback's own return: free does that.
     session.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 #[test]
@@ -981,6 +999,7 @@ fn close_during_a_drain_leaves_the_drain_alone() {
     );
     job.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 #[test]
@@ -1087,6 +1106,7 @@ fn for_user_as_the_parent_closes() {
     }
     job.free();
     host.assert_freeable();
+    free_ctx(host);
 }
 
 /// `jazz_session_jazz` as the session closes: `closed`, or a handle that is.
