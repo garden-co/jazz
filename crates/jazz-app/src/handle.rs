@@ -363,11 +363,17 @@ impl Jazz {
                 // the client: the other jobs and the client run on.
                 // Calling `job` happens inside the guard too: a closure
                 // that panics before returning its future is caught.
-                let result = std::panic::AssertUnwindSafe(async move { job(client).await })
-                    .catch_unwind()
+                let refusals = crate::writes::Heard::default();
+                let result = refusals
+                    .collect(
+                        std::panic::AssertUnwindSafe(async move { job(client).await })
+                            .catch_unwind(),
+                    )
                     .await
                     .unwrap_or_else(|panic| Err(Error::Panicked(panic_message(&*panic))));
-                let _ = reply.send(result);
+                // A caller that stopped waiting didn't hear what its
+                // durable waits reported (`Heard`).
+                refusals.replied(reply.send(result).is_ok());
             })
         });
         self.commands

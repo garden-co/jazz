@@ -3,7 +3,7 @@
 //! (TS's `disconnect`, `reconnect`, `deleteClientStorage`, `onMutationError`).
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -13,10 +13,10 @@ use std::time::Duration;
 
 use futures_core::Stream;
 use jazz::tools::{JazzClient, MutationError, TransactionId};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{Error, Result};
-use crate::handle::Jazz;
+use crate::handle::{Command, Jazz, STREAM_SESSION_END};
 
 /// How often refusals are collected from the client.
 const POLL: Duration = Duration::from_millis(50);
@@ -26,13 +26,56 @@ const PENDING_MAX: usize = 1024;
 /// for it.
 const LISTENER_MAX: usize = 1024;
 
+/// A durable wait's hold on its write's refusal.
+enum Claim {
+    /// The wait's, should it come.
+    Waiting,
+    /// Taken by the reporter before the wait's caller heard it.
+    Taken(MutationError),
+    /// Its caller heard it, before the reporter took it: dropped then.
+    Heard,
+}
+
 #[derive(Default)]
 struct Reports {
-    /// Commits a durable wait is waiting on: their refusals are its.
-    claimed: HashSet<TransactionId>,
+    /// Commits a durable wait is waiting on: their refusals are its, kept
+    /// here once the reporter took them until the wait's caller heard
+    /// them. A caller that stopped waiting gets them back as mutation
+    /// errors.
+    claimed: HashMap<TransactionId, Claim>,
     listeners: Vec<mpsc::Sender<MutationError>>,
     /// Refusals no listener has taken yet, oldest first.
     pending: Vec<MutationError>,
+}
+
+impl Reports {
+    /// Hands `error` to the listeners, or keeps it until one comes.
+    fn deliver(&mut self, error: MutationError) {
+        self.listeners.retain(|listener| !listener.is_closed());
+        if self.listeners.is_empty() {
+            if self.pending.len() >= PENDING_MAX {
+                let dropped = self.pending.remove(0);
+                tracing::warn!(
+                    transaction = %dropped.transaction,
+                    message = %dropped.message,
+                    "jazz: dropping the oldest unreported mutation error: \
+                     {PENDING_MAX} wait for a mutation_errors() listener"
+                );
+            }
+            self.pending.push(error);
+        } else {
+            for listener in &self.listeners {
+                if listener.try_send(error.clone()).is_err() && !listener.is_closed() {
+                    tracing::warn!(
+                        transaction = %error.transaction,
+                        message = %error.message,
+                        "jazz: dropping a mutation error: its listener left \
+                         {LISTENER_MAX} unread"
+                    );
+                }
+            }
+        }
+    }
 }
 
 thread_local! {
@@ -40,12 +83,35 @@ thread_local! {
     static REPORTS: RefCell<Reports> = RefCell::default();
 }
 
+/// A durable wait is waiting on `written`: its refusal is the wait's.
 pub(crate) fn claim(written: TransactionId) {
-    REPORTS.with(|reports| reports.borrow_mut().claimed.insert(written));
+    REPORTS.with(|reports| reports.borrow_mut().claimed.insert(written, Claim::Waiting));
 }
 
+/// The wait on `written` handled nothing (it ended otherwise than by a
+/// refusal, or its caller stopped waiting): its refusal, taken already
+/// or still to come, is a mutation error.
 pub(crate) fn unclaim(written: TransactionId) {
-    REPORTS.with(|reports| reports.borrow_mut().claimed.remove(&written));
+    REPORTS.with(|reports| {
+        let mut reports = reports.borrow_mut();
+        if let Some(Claim::Taken(error)) = reports.claimed.remove(&written) {
+            reports.deliver(error);
+        }
+    });
+}
+
+/// The caller of the wait on `written` heard its refusal: it is no
+/// mutation error, and no later `wait_for_sync` reports it again.
+pub(crate) fn heard(client: &JazzClient, written: TransactionId) {
+    REPORTS.with(|reports| {
+        let mut reports = reports.borrow_mut();
+        if let Some(claim @ Claim::Waiting) = reports.claimed.get_mut(&written) {
+            *claim = Claim::Heard;
+        } else {
+            reports.claimed.remove(&written);
+        }
+    });
+    client.mark_transaction_reported(written);
 }
 
 /// Runs on the client's thread for its lifetime: hands each refusal no
@@ -60,32 +126,15 @@ pub(crate) async fn report_mutation_errors(client: JazzClient) {
         REPORTS.with(|reports| {
             let mut reports = reports.borrow_mut();
             for error in errors {
-                if reports.claimed.remove(&error.transaction) {
-                    continue;
-                }
-                reports.listeners.retain(|listener| !listener.is_closed());
-                if reports.listeners.is_empty() {
-                    if reports.pending.len() >= PENDING_MAX {
-                        let dropped = reports.pending.remove(0);
-                        tracing::warn!(
-                            transaction = %dropped.transaction,
-                            message = %dropped.message,
-                            "jazz: dropping the oldest unreported mutation error: \
-                             {PENDING_MAX} wait for a mutation_errors() listener"
-                        );
+                match reports.claimed.get_mut(&error.transaction) {
+                    // Its wait's, unless its caller turns out to be gone.
+                    Some(claim @ Claim::Waiting) => *claim = Claim::Taken(error),
+                    Some(Claim::Heard) => {
+                        reports.claimed.remove(&error.transaction);
                     }
-                    reports.pending.push(error);
-                } else {
-                    for listener in &reports.listeners {
-                        if listener.try_send(error.clone()).is_err() && !listener.is_closed() {
-                            tracing::warn!(
-                                transaction = %error.transaction,
-                                message = %error.message,
-                                "jazz: dropping a mutation error: its listener left \
-                                 {LISTENER_MAX} unread"
-                            );
-                        }
-                    }
+                    // Taken twice: reported once.
+                    Some(Claim::Taken(_)) => {}
+                    None => reports.deliver(error),
                 }
             }
         });
@@ -206,8 +255,30 @@ impl Jazz {
             return Ok(());
         };
         let deleting = StoreDir::begin_delete(dir)?;
-        self.shutdown().await?;
-        deleting.finish()
+        // Once begun, the delete finishes even if its caller stops waiting
+        // (its call dropped, as `tokio::time::timeout` drops it): a thread
+        // of its own waits for the client to stop, then deletes.
+        let (reply, stopped) = oneshot::channel();
+        if self
+            .commands
+            .send(Command::Shutdown(reply, STREAM_SESSION_END))
+            .is_err()
+        {
+            // Stopped already.
+            return deleting.finish();
+        }
+        let (done, deleted) = oneshot::channel();
+        std::thread::Builder::new()
+            .name("jazz-delete-store".into())
+            .spawn(move || {
+                let result = stopped
+                    .blocking_recv()
+                    .unwrap_or(Ok(()))
+                    .and_then(|()| deleting.finish());
+                let _ = done.send(result);
+            })
+            .map_err(io)?;
+        deleted.await.unwrap_or(Err(Error::Stopped))
     }
 }
 

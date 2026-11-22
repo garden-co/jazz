@@ -19,10 +19,11 @@ use jazz::account_registry::{AccountId, SYSTEM_ACCOUNT_ID};
 use jazz::tools::{AppContext, AppId, JazzClient, Session};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
 
 use crate::auth::{Bearer, TokenReason};
 use crate::error::{Error, Result};
-use crate::handle::Jazz;
+use crate::handle::{Command, Jazz};
 use crate::session::{Credential, User, UserKind};
 
 /// What a trusted backend client states as its secret: its credential, on
@@ -322,16 +323,24 @@ impl Jazz {
             return Ok(());
         }
         let started = std::time::Instant::now();
-        if !self.info.serverless && !timeout.is_zero() {
-            // An outage, or the server refusing, ends the wait: what is still
-            // pending then is counted below.
-            // Every write the client holds, its users' handles' too (TS
-            // `close()` drains them all), not only this handle's: wait until
-            // none is pending, re-reading on each change of the client's
-            // status. The wait ends on the client's thread too, so shutting
-            // down does not wait for it in turn.
-            let _ = self
-                .with_client(move |client| async move {
+        let drains = !self.info.serverless && !timeout.is_zero();
+        // Once begun, the close runs on the client's thread to its end, even
+        // if its caller stops waiting (its call dropped, as
+        // `tokio::time::timeout` drops it): the job sends the shutdown
+        // itself, so the client stops and lets go of its store.
+        let (stop, stopped) = oneshot::channel();
+        let commands = self.commands.clone();
+        let pending = self
+            .with_client(move |client| async move {
+                if drains {
+                    // An outage, or the server refusing, ends the wait: what
+                    // is still pending then is counted below.
+                    // Every write the client holds, its users' handles' too
+                    // (TS `close()` drains them all), not only this
+                    // handle's: wait until none is pending, re-reading on
+                    // each change of the client's status. The wait ends on
+                    // the client's thread too, so shutting down does not
+                    // wait for it in turn.
                     let mut changes = client.status_changes();
                     let drained = async {
                         while client.pending_uploads() > 0 {
@@ -345,18 +354,30 @@ impl Jazz {
                         // A shutdown meanwhile.
                         () = client.waits_ended() => {}
                     }
-                    Ok(())
-                })
-                .await;
-        }
-        let pending = self
-            .with_client(|client| async move { Ok(client.pending_uploads()) })
-            .await
-            .unwrap_or(0);
-        // Ending the client's HTTP stream sessions gets what is left of
-        // `timeout`: nothing at all for `Duration::ZERO`.
-        self.shutdown_within(session_end_budget(timeout, started.elapsed()))
-            .await?;
+                }
+                let pending = client.pending_uploads();
+                // Ending the client's HTTP stream sessions gets what is left
+                // of `timeout`: nothing at all for `Duration::ZERO`. Once
+                // the client stops, nothing takes this: `stopped` reads it.
+                let _ = commands.send(Command::Shutdown(
+                    stop,
+                    session_end_budget(timeout, started.elapsed()),
+                ));
+                Ok(pending)
+            })
+            .await;
+        let pending = match pending {
+            Ok(pending) => pending,
+            // Stopped already (or its job cut short by a shutdown): stop it,
+            // as `shutdown` would, if it isn't.
+            Err(_) => {
+                self.shutdown_within(session_end_budget(timeout, started.elapsed()))
+                    .await?;
+                0
+            }
+        };
+        // Stopped already (nothing took the shutdown): nothing to report.
+        stopped.await.unwrap_or(Ok(()))?;
         if pending > 0 && self.info.memory && !self.info.serverless && !timeout.is_zero() {
             return Err(Error::Unsynced { pending });
         }

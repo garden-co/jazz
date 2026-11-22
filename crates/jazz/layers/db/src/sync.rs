@@ -9980,6 +9980,15 @@ impl Db {
         fate
     }
 
+    /// A rejection of this local transaction was reported (a caller of
+    /// [`Db::observe_transaction`] heard it): a later [`Db::wait_for_sync`]
+    /// doesn't report it again.
+    pub fn mark_rejection_reported(&self, tx: u64) {
+        if let Some(client) = self.inner.borrow_mut().client.as_mut() {
+            client.unreported_rejections.remove(&tx);
+        }
+    }
+
     /// Like [`Db::wait_for_transaction`], but a rejection it sees stays
     /// unreported: a later [`Db::wait_for_sync`] reports it. For
     /// waits that only watch a write (a host routing its mutation errors).

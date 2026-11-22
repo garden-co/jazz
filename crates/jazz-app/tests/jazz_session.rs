@@ -337,6 +337,32 @@ async fn changes_end_with_the_closed_snapshot() {
     app.stop().await;
 }
 
+/// A close its caller stopped waiting for (dropped, as
+/// `tokio::time::timeout` drops it) still closes the session: it runs on the
+/// session's runtime to its end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_abandoned_close_still_closes() {
+    use futures::FutureExt as _;
+    let app = App::start().await;
+    let session = JazzSession::open(client_files(), app.session(&bearer(Some("token-gus"))))
+        .await
+        .unwrap();
+    let jazz = session.jazz().unwrap();
+    assert!(session.close().now_or_never().is_none(), "closed at once");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while session.snapshot().status != SessionStatus::Closed {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the session closes");
+    assert!(matches!(
+        jazz.all(todos::query()).await,
+        Err(Error::Stopped)
+    ));
+    app.stop().await;
+}
+
 #[allow(dead_code)]
 fn _assert_send_sync()
 where
