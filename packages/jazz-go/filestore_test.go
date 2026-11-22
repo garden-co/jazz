@@ -161,3 +161,32 @@ func TestOpenKeepsADamagedKey(t *testing.T) {
 		t.Errorf("a cut key was replaced (%v)", err)
 	}
 }
+
+// A file another opener creates between Load's read and its Lstat is the
+// key, not an error.
+func TestFileStoreLoadsAKeyCreatedMeanwhile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "device-key")
+	written := path + ".written"
+	if err := os.WriteFile(written, []byte("key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 500; i++ {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		linked := make(chan error, 1)
+		go func() { linked <- os.Link(written, path) }()
+		for {
+			key, err := FileStore(path).Load()
+			if err != nil {
+				t.Fatalf("round %d: %v", i, err)
+			}
+			if key != "" {
+				break
+			}
+		}
+		if err := <-linked; err != nil {
+			t.Fatal(err)
+		}
+	}
+}

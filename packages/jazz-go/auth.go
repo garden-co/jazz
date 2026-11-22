@@ -117,11 +117,13 @@ func (f fileStore) Load() (string, error) {
 	path := string(f)
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		// A link to a file that isn't there (an unmounted volume, say)
-		// isn't a missing key.
 		if _, lerr := os.Lstat(path); errors.Is(lerr, os.ErrNotExist) {
 			return "", nil
 		}
+		// Something is there: a key another opener created just now, or a
+		// link to a file that isn't (an unmounted volume, say), which
+		// isn't a missing key.
+		b, err = os.ReadFile(path)
 	}
 	if err != nil {
 		return "", err
