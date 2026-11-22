@@ -1,7 +1,12 @@
 package tools.jazz
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
@@ -197,6 +202,89 @@ class CancellationTest {
             }
             assertTrue(written, "not written")
             assertEquals(false, aborted)
+        }
+    }
+
+    @Test
+    fun a_transaction_cancelled_during_its_block_rolls_back_only_if_the_block_throws() {
+        val blocks = listOf<Triple<String, String, suspend () -> Unit>>(
+            Triple("suspends", "rolled back", { kotlinx.coroutines.delay(10) }),
+            Triple("only computes", "committed", { Thread.sleep(10) }),
+            Triple("returns at once", "committed", { }),
+        )
+        for ((name, expected, afterCancel) in blocks) {
+            var ended = "neither"
+            val tx = object : NativeTransaction {
+                override fun all(queryJson: String): String = "[]"
+                override fun one(queryJson: String): String? = null
+                override fun insert(table: String, rowJson: String): String = error("the block writes nothing")
+                override fun update(table: String, id: String, patchJson: String): Unit = error("the block writes nothing")
+                override fun delete(table: String, id: String): Unit = error("the block writes nothing")
+                override fun commit(tier: String?) {
+                    ended = "committed"
+                }
+                override fun rollback() {
+                    ended = "rolled back"
+                }
+            }
+            val native = object : Native by FakeNative() {
+                override fun beginMergeable(): NativeTransaction = tx
+            }
+            runBlocking {
+                val jazz = open(native)
+                val caller = launch {
+                    jazz.transaction {
+                        // Cancelled inside the block, so before any commit starts.
+                        currentCoroutineContext().cancel()
+                        afterCancel()
+                    }
+                }
+                caller.join()
+                assertTrue(caller.isCancelled, "$name: the caller wasn't cancelled")
+            }
+            assertEquals(expected, ended, "a block that $name")
+        }
+    }
+
+    @Test
+    fun an_upload_cancelled_before_its_data_completes_writes_nothing() {
+        // However the data ends after the cancel: by suspending, by emitting, or by just completing.
+        val rests = listOf<Pair<String, suspend FlowCollector<ByteArray>.() -> Unit>>(
+            "suspends" to { kotlinx.coroutines.delay(10) },
+            "emits" to { emit(byteArrayOf(1)) },
+            "completes" to { },
+        )
+        val starts = listOf<suspend (Jazz, Flow<ByteArray>) -> Unit>(
+            { jazz, data -> jazz.insertStreaming(Items, ItemInsert("t", 1.0, ItemKind.C), Items.note, data) },
+            { jazz, data -> jazz.updateStreaming(Items, "i", Items.note, data) },
+            { jazz, data -> jazz.upsertStreaming(Items, "i", ItemInsert("t", 1.0, ItemKind.C), Items.note, data) },
+        )
+        for ((name, rest) in rests) {
+            for (start in starts) {
+                var ended = "neither"
+                val upload = object : NativeUpload {
+                    override fun push(bytes: ByteArray) {}
+                    override fun finish(): String {
+                        ended = "written"
+                        return """{"id":"i","title":"t","rank":1,"kind":"c"}"""
+                    }
+                    override fun abort() {
+                        if (ended != "written") ended = "aborted"
+                    }
+                }
+                val native = object : Native by FakeNative() {
+                    override fun beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?): NativeUpload = upload
+                }
+                runBlocking {
+                    val jazz = open(native)
+                    val data = flow {
+                        currentCoroutineContext().cancel()
+                        rest()
+                    }
+                    launch { start(jazz, data) }.join()
+                }
+                assertEquals("aborted", ended, "data that $name")
+            }
         }
     }
 

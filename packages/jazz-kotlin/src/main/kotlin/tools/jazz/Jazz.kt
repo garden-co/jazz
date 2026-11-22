@@ -356,8 +356,9 @@ public class Jazz internal constructor(
      * with a concurrent one throws [JazzException.Conflict] instead. It commits when [block] returns (at [tier]:
      * with [WriteTier.Global] it returns once the server accepted it) and
      * rolls back when [block] throws, rethrowing. Returns [block]'s value.
-     * Cancelling before the commit starts rolls back; cancelling once it has
-     * started doesn't undo it.
+     * If cancellation makes [block] throw, it rolls back. Once [block] has
+     * returned it commits, even if the caller was cancelled, and cancelling
+     * doesn't undo that.
      *
      * ```kotlin
      * val moved = jazz.transaction { tx ->
