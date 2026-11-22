@@ -272,6 +272,23 @@ describe("later versions of an encrypted app", () => {
     ).toEqual([TEXT_ENTRY]);
   });
 
+  it("refuses a new equality column on an existing table, writing no stub", async () => {
+    const root = await firstVersion();
+    // The rows stored before it would hold no equality token, and writing
+    // theirs (a backfill) needs their spaces' keys: refused before a stub
+    // with a TODO the author couldn't resolve.
+    await writeFile(
+      join(root, "schema.ts"),
+      chat({ messages: ", subject: s.string().optional().encrypted({ equality: true })" }),
+    );
+    await expect(createAppMigration({ cwd: root, name: "second" })).rejects.toThrow(
+      /messages\.subject: finding rows by an encrypted column's value \(\.encrypted\(\{ equality: true \}\)\) on a table that already has rows isn't supported yet/,
+    );
+    expect(
+      (await readdir(join(root, "migrations"))).filter((file) => file.endsWith(".ts")),
+    ).toEqual([]);
+  });
+
   it("fills a new encrypted column with a declared default without asking", async () => {
     const root = await firstVersion();
     const files = await secondVersion(
