@@ -65,7 +65,7 @@ with the same bundle ID. The new variants are additive extensions of it.
 - **Row storage.** Unchanged: the nodes are policy, not data.
 - **Stored permissions.** A server binary that predates these variants fails
   to decode a bundle or stored schema version holding one (`unknown
-variant`) and refuses it, so a downgrade fails closed rather than dropping
+  variant`) and refuses it, so a downgrade fails closed rather than dropping
   a policy. Bundles and schema versions without them decode as before.
 - **Activation digest.** The digest recorded when a schema becomes current
   hashes the Debug form of the lowered read policies. Only a policy that
