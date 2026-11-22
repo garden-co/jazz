@@ -157,8 +157,9 @@ that free) gives the calls in flight the same guarantees:
 - A `for_user` or session handle closes only itself, and rolls back what it
   began.
 - A session doesn't wait for the operation in flight, which fails `Closed`
-  and installs no client. `Replaced` is only for a session that goes on:
-  closing is always `Closed`, and wins when both hold.
+  and installs no client; an open it interrupted gets up to 2 s to let go of
+  its store. `Replaced` is only for a session that goes on: closing is
+  always `Closed`, and wins when both hold.
 - Closing waits for a token callback that is running, so hosts make theirs
   cancellable.
 

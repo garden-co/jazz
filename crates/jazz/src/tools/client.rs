@@ -2572,6 +2572,14 @@ impl JazzClient {
         }
     }
 
+    /// Whether this client's waits on the server are over already. Not
+    /// public API.
+    #[doc(hidden)]
+    pub fn waits_are_over(&self) -> bool {
+        *self.shared.waits_ended.borrow()
+            || self.waits_end.as_ref().is_some_and(|ends| *ends.borrow())
+    }
+
     /// A wait on the server. The answer wins over the end of waiting: it
     /// is polled first, so what is already there is still returned.
     async fn unless_waits_end<T>(
