@@ -80,11 +80,11 @@ fn invalid_stream_metadata_leaves_an_upsert_source_unread() {
     refuses_invalid_stream_metadata(jazz::db::StreamingMutationKind::Upsert);
 }
 
-/// Alice can stream a plain patch without a row at begin. The same API
-/// refuses to create an encrypted row or attach encrypted metadata later.
+/// Alice can stream a plain patch without a row at begin. A patch that
+/// supplies encrypted metadata at begin or finish leaves the secret alone.
 #[test]
 fn a_rowless_stream_only_publishes_plain_patches_of_an_encrypted_table() {
-    use jazz::db::StreamingMutationKind::{Insert, Update, Upsert};
+    use jazz::db::StreamingMutationKind::Update;
 
     let server = authority();
     let client = open_client(Rc::new(MemoryStore::new()));
@@ -94,7 +94,6 @@ fn a_rowless_stream_only_publishes_plain_patches_of_an_encrypted_table() {
     let row = block_on(db.insert("notes", note(space, SECRET), Default::default()))
         .unwrap()
         .row_uuid();
-    let new_row = jazz::ids::RowUuid(uuid::Uuid::now_v7());
     let metadata = BTreeMap::from([("body".to_owned(), text("caption"))]);
     let error = db
         .begin_streaming_value_upload("notes", &metadata, "title")
@@ -103,16 +102,16 @@ fn a_rowless_stream_only_publishes_plain_patches_of_an_encrypted_table() {
     assert_eq!(error.code, ErrorCode::Query);
     assert!(error.message.contains("notes.body"));
 
-    let publish = |kind, id, cells| {
+    let publish = |cells| {
         let mut upload = db
             .begin_streaming_value_upload("notes", &BTreeMap::new(), "title")
             .unwrap();
         block_on(db.push_streaming_value_upload(&mut upload, b"plain title")).unwrap();
         block_on(db.finish_streaming_value_upload(
             upload,
-            kind,
+            Update,
             "notes",
-            id,
+            row,
             cells,
             "title",
             Default::default(),
@@ -121,21 +120,8 @@ fn a_rowless_stream_only_publishes_plain_patches_of_an_encrypted_table() {
             None,
         ))
     };
-    publish(Update, row, BTreeMap::new()).unwrap();
-    for kind in [Insert, Upsert] {
-        let error = publish(
-            kind,
-            new_row,
-            BTreeMap::from([("projectId".to_owned(), Value::Uuid(space))]),
-        )
-        .unwrap_err();
-        assert_eq!(error.code, ErrorCode::Query);
-        assert!(error.message.contains("encrypted table `notes`"));
-    }
-    assert_eq!(
-        publish(Update, row, metadata).unwrap_err().code,
-        ErrorCode::Query
-    );
+    publish(BTreeMap::new()).unwrap();
+    assert_eq!(publish(metadata).unwrap_err().code, ErrorCode::Query);
     pump(&server, &db);
     let rows = all(&server, Query::from("notes")).unwrap();
     assert_eq!(rows.len(), 1);
@@ -145,6 +131,46 @@ fn a_rowless_stream_only_publishes_plain_patches_of_an_encrypted_table() {
         cell(&all(&db, Query::from("notes")).unwrap()[0], "body"),
         text(SECRET)
     );
+}
+
+/// Alice has the vault key and supplies its plain label. An insert or upsert
+/// would also create an encrypted null secret, so a rowless stream must refuse
+/// publication when it learns the mutation kind at finish.
+#[test]
+fn a_rowless_stream_cannot_create_an_encrypted_default() {
+    use jazz::db::StreamingMutationKind::{Insert, Upsert};
+
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (db, _link, _) = online(&client, &server, None);
+    let vault = uuid::Uuid::now_v7();
+    let held = new_space_key(&client.device().unwrap(), &address_in(&db, "vaults", vault));
+    block_on(client.keep(held)).unwrap();
+    for kind in [Insert, Upsert] {
+        let cells = BTreeMap::new();
+        let mut upload = db
+            .begin_streaming_value_upload("vaults", &cells, "label")
+            .unwrap();
+        block_on(db.push_streaming_value_upload(&mut upload, b"plain label")).unwrap();
+        let error = block_on(db.finish_streaming_value_upload(
+            upload,
+            kind,
+            "vaults",
+            jazz::ids::RowUuid(vault),
+            cells,
+            "label",
+            Default::default(),
+            None,
+            None,
+            None,
+        ))
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Query);
+        assert!(error.message.contains("encrypted table `vaults`"));
+    }
+    pump(&server, &db);
+    assert!(all(&db, Query::from("vaults")).unwrap().is_empty());
+    assert!(all(&server, Query::from("vaults")).unwrap().is_empty());
 }
 
 /// Contract: alice's encrypted cells of every type (required text with an
