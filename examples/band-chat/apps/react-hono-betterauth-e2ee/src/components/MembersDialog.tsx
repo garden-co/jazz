@@ -13,7 +13,8 @@ import {
   TextInput,
   VStack,
 } from "@astryxdesign/core";
-import { app, type JoinRequest, type RoomMember } from "../../jazz.generated";
+import { app, type E2eeMember, type JoinRequest } from "../../jazz.generated";
+import { admitMember, removeMember, rotateRoomKey } from "../lib/membership";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
 import { roomLink } from "../lib/url-state";
 
@@ -36,28 +37,60 @@ export function MembersDialog({
   roomId: string;
   author: string;
   isCreator: boolean;
-  members: RoomMember[];
+  /** The room's member rows; undefined while they load. */
+  members: E2eeMember[] | undefined;
   requests: JoinRequest[];
 }) {
   const db = useDb();
   const directory = useDirectory();
-  const memberAuthors = new Set(members.map((member) => member.memberAuthor));
+  const memberAuthors = new Set((members ?? []).map((member) => member.accountId));
   const pending = requests.filter((request) => !memberAuthors.has(request.requester));
   const [error, setError] = useState<string | null>(null);
+  // What the last admission or removal left undone, each with its retry.
+  const [notice, setNotice] = useState<"delivery" | "rotation" | null>(null);
 
-  // Admission and clearing the request commit together. Both policies check
-  // only the committed room, profile and request, never each other.
+  const describe = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
+
+  // The member row and the profile membership commit with the cleared
+  // request, then keys are delivered. A delivery that reports a failure
+  // leaves the person admitted but unable to read yet.
   function admit(memberAuthor: string, memberProfileId: string) {
     setError(null);
-    db.transaction((tx) => {
-      tx.insert(app.roomMembers, { roomId, memberAuthor, memberProfileId });
-      for (const request of requests)
-        if (request.requester === memberAuthor) tx.delete(app.joinRequests, request.id);
-    })
-      .then((result) => result.wait({ tier: "global" }))
-      .catch((cause: unknown) =>
-        setError(`Could not admit them: ${cause instanceof Error ? cause.message : String(cause)}`),
-      );
+    setNotice(null);
+    admitMember({
+      db,
+      roomId,
+      memberAuthor,
+      memberProfileId,
+      requestIds: requests.filter((r) => r.requester === memberAuthor).map((r) => r.id),
+    }).then(
+      (delivery) => setNotice(delivery.failed > 0 ? "delivery" : null),
+      (cause: unknown) => setError(`Admission refused: ${describe(cause)}`),
+    );
+  }
+
+  function retryDelivery() {
+    setNotice(null);
+    db.encryption.keys.deliver().then(
+      (delivery) => setNotice(delivery.failed > 0 ? "delivery" : null),
+      () => setNotice("delivery"),
+    );
+  }
+
+  function renewKey() {
+    setNotice(null);
+    rotateRoomKey(db, roomId).catch(() => setNotice("rotation"));
+  }
+
+  // Removal waits for the authority; only then is the room's key renewed, so
+  // the removed member reads nothing written later.
+  function remove(accountId: string) {
+    setError(null);
+    setNotice(null);
+    removeMember({ db, roomId, accountId }).then(
+      () => renewKey(),
+      (cause: unknown) => setError(`Could not remove them: ${describe(cause)}`),
+    );
   }
 
   return (
@@ -69,6 +102,26 @@ export function MembersDialog({
       <VStack gap={6} padding={4}>
         {error ? (
           <Banner status="error" title={error} container="section" collapsible={false} />
+        ) : null}
+        {notice === "delivery" ? (
+          <Banner
+            status="warning"
+            title="Key not delivered yet"
+            description="They are admitted, but cannot read the room until their key arrives."
+            container="section"
+            collapsible={false}
+            endContent={<Button label="Retry" size="sm" onClick={retryDelivery} />}
+          />
+        ) : null}
+        {notice === "rotation" ? (
+          <Banner
+            status="warning"
+            title="Removed, but the room's key is not renewed yet"
+            description="They stay able to read what is written until the key is renewed."
+            container="section"
+            collapsible={false}
+            endContent={<Button label="Retry" size="sm" onClick={renewKey} />}
+          />
         ) : null}
         {isCreator ? <InviteLink roomId={roomId} /> : null}
         {isCreator && pending.length > 0 ? (
@@ -101,38 +154,42 @@ export function MembersDialog({
             })}
           </List>
         ) : null}
-        <List header={<SectionTitle>{`${members.length} members`}</SectionTitle>} hasDividers>
-          {members.map((member) => {
-            const profile =
-              (member.memberProfileId ? directory.byId.get(member.memberProfileId) : undefined) ??
-              directory.byAuthor.get(member.memberAuthor);
-            const isMe = member.memberAuthor === author;
-            return (
-              <ListItem
-                key={member.id}
-                data-member-author={member.memberAuthor}
-                startContent={<ProfileAvatar profile={profile} size="md" />}
-                label={
-                  isMe
-                    ? `${profile?.displayName ?? "You"} (you)`
-                    : (profile?.displayName ?? "Bandmate")
-                }
-                endContent={
-                  isMe && isCreator ? (
-                    <Badge label="Creator" />
-                  ) : isCreator ? (
-                    <Button
-                      label="Remove"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => db.delete(app.roomMembers, member.id)}
-                    />
-                  ) : undefined
-                }
-              />
-            );
-          })}
-        </List>
+        {members ? (
+          <List header={<SectionTitle>{`${members.length} members`}</SectionTitle>} hasDividers>
+            {members.map((member) => {
+              const profile = directory.byAuthor.get(member.accountId);
+              const isMe = member.accountId === author;
+              return (
+                <ListItem
+                  key={member.id}
+                  data-member-author={member.accountId}
+                  startContent={<ProfileAvatar profile={profile} size="md" />}
+                  label={
+                    isMe
+                      ? `${profile?.displayName ?? "You"} (you)`
+                      : (profile?.displayName ?? "Unknown")
+                  }
+                  endContent={
+                    isMe && isCreator ? (
+                      <Badge label="Creator" />
+                    ) : isCreator ? (
+                      <Button
+                        label="Remove"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => remove(member.accountId)}
+                      />
+                    ) : undefined
+                  }
+                />
+              );
+            })}
+          </List>
+        ) : (
+          <Text type="label" color="secondary">
+            Loading members…
+          </Text>
+        )}
       </VStack>
     </Dialog>
   );

@@ -24,9 +24,12 @@ import {
   VStack,
 } from "@astryxdesign/core";
 import { app, type Reaction } from "../../jazz.generated";
+import { useMarkRead } from "../lib/mark-read";
+import { removeMember, useRoomMembers } from "../lib/membership";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
 import { Attachment } from "./Attachment";
 import { Composer } from "./Composer";
+import { useNewestMessage } from "./RoomActivity";
 import { MembersDialog } from "./MembersDialog";
 import { MessageActions } from "./MessageActions";
 import { RenameRoomDialog } from "./RenameRoomDialog";
@@ -70,7 +73,6 @@ export const roomMessagesQuery = (roomId: string) =>
     .orderBy("$createdAt", "desc")
     .limit(HISTORY_PAGE);
 export const roomReactionsQuery = (roomId: string) => app.reactions.where({ roomId });
-export const roomMembersQuery = (roomId: string) => app.roomMembers.where({ roomId });
 
 /**
  * Opens a room's queries before its view mounts. Queries are shared by key,
@@ -80,36 +82,45 @@ export const roomMembersQuery = (roomId: string) => app.roomMembers.where({ room
 export function usePrefetchRoom(roomId: string | null) {
   useAll(roomId ? roomMessagesQuery(roomId) : undefined);
   useAll(roomId ? roomReactionsQuery(roomId) : undefined);
-  useAll(roomId ? roomMembersQuery(roomId) : undefined);
 }
 
 export function RoomView({ summary, author }: { summary: RoomSummary; author: string }) {
   const directory = useDirectory();
   const { room, isCreator } = summary;
   const roomId = room.id;
-  const { data: newestFirst, db } = useAll(roomMessagesQuery(roomId));
+  const { data: newestFirst, unreadable, db } = useAll(roomMessagesQuery(roomId));
+  // Messages this browser holds no key for yet are left out of the read.
+  const lockedCount = unreadable.length;
   // Undefined until the first result: "No messages yet" only for a room that has none.
   const isLoadingMessages = newestFirst === undefined;
   const messages = useMemo(() => [...(newestFirst ?? [])].reverse(), [newestFirst]);
   const { data: reactions = [] } = useAll(roomReactionsQuery(roomId));
-  const { data: loadedMembers } = useAll(roomMembersQuery(roomId));
+  const { members: loadedMembers } = useRoomMembers(roomId);
   const members = loadedMembers ?? [];
   const { data: requests = [] } = useAll(
     isCreator ? app.joinRequests.where({ roomId }) : undefined,
   );
-  const { data: loadedMarkers } = useAll(app.readMarkers.where({ roomId, reader: author }));
-  const markers = loadedMarkers ?? [];
+  const { data: loadedMarkers, unreadable: unreadableMarkers } = useAll(
+    app.readMarkers.where({ roomId, reader: author }),
+  );
+  const newest = useNewestMessage(roomId);
   const [isMembersOpen, setMembersOpen] = useState(false);
   const [isRenameOpen, setRenameOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const reportFailure = (action: string) => (cause: unknown) =>
     setActionError(`${action}: ${cause instanceof Error ? cause.message : String(cause)}`);
 
+  const decryptedIds = useMemo(
+    () => (newestFirst ? new Set(newestFirst.map((message) => message.id)) : undefined),
+    [newestFirst],
+  );
   useMarkRead({
     roomId,
     author,
-    summary,
-    markerIds: loadedMarkers?.map((marker) => marker.id),
+    newest,
+    decryptedIds,
+    markers: loadedMarkers,
+    markersUnreadable: unreadableMarkers.length,
   });
 
   const reactionsByMessage = useMemo(() => {
@@ -123,27 +134,12 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   }, [reactions]);
 
   function leave() {
-    const mine = members.find((member) => member.memberAuthor === author);
-    if (!mine) return;
-    // Leaving and dropping this reader's private markers commit together.
+    // The member rows, the profile membership and this reader's markers go in
+    // one serializable transaction; the screen waits for the authority.
     setActionError(null);
-    db.transaction((tx) => {
-      for (const marker of markers) tx.delete(app.readMarkers, marker.id);
-      tx.delete(app.roomMembers, mine.id);
-    })
-      .then((result) => result.wait({ tier: "global" }))
-      .catch(reportFailure("Could not leave the room"));
-  }
-
-  // A creator without a membership (a room created before the room and its
-  // membership were written in one transaction) can still read the room;
-  // this puts them back in.
-  const isMember = members.some((member) => member.memberAuthor === author);
-  function rejoin() {
-    setActionError(null);
-    db.insert(app.roomMembers, { roomId, memberAuthor: author, memberProfileId: directory.me.id })
-      .wait({ tier: "global" })
-      .catch(reportFailure("Could not join the room"));
+    removeMember({ db, roomId, accountId: author, deleteMarkers: true }).catch(
+      reportFailure("Could not leave the room"),
+    );
   }
 
   function startSketch() {
@@ -186,10 +182,7 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
             <ProfileAvatar
               key={member.id}
               size="sm"
-              profile={
-                (member.memberProfileId ? directory.byId.get(member.memberProfileId) : undefined) ??
-                directory.byAuthor.get(member.memberAuthor)
-              }
+              profile={directory.byAuthor.get(member.accountId)}
             />
           ))}
         </AvatarGroup>
@@ -210,13 +203,13 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
         <MoreMenu label="Room options" size="sm" alignment="end" items={menuItems} />
       </HStack>
       <Divider />
-      {isCreator && loadedMembers && !isMember ? (
+      {lockedCount > 0 ? (
         <Banner
           status="warning"
-          title="You are not a member of this room yet"
+          title={`${lockedCount} ${lockedCount === 1 ? "message is" : "messages are"} locked on this browser`}
+          description="This browser does not hold the room's key yet. They show here once it arrives, for example after another of your devices approves this one."
           container="section"
           collapsible={false}
-          endContent={<Button label="Join room" size="sm" onClick={rejoin} />}
         />
       ) : null}
       {actionError ? (
@@ -242,7 +235,7 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
               <Center axis="both" padding={4}>
                 <Spinner label="Loading messages…" />
               </Center>
-            ) : (
+            ) : lockedCount > 0 ? null : (
               <EmptyState
                 title="No messages yet"
                 description={
@@ -397,39 +390,4 @@ function MessageGroup({
       })}
     </ChatMessage>
   );
-}
-
-/**
- * Moves this reader's private marker to now while the room is open and the
- * page is visible. Only this account can read the marker.
- */
-function useMarkRead({
-  roomId,
-  author,
-  summary,
-  markerIds,
-}: {
-  roomId: string;
-  author: string;
-  summary: RoomSummary;
-  /** Undefined until this reader's markers have loaded. */
-  markerIds: string[] | undefined;
-}) {
-  const db = useDb();
-  const [isVisible, setVisible] = useState(
-    () => typeof document === "undefined" || document.visibilityState === "visible",
-  );
-  useEffect(() => {
-    const update = () => setVisible(document.visibilityState === "visible");
-    document.addEventListener("visibilitychange", update);
-    return () => document.removeEventListener("visibilitychange", update);
-  }, []);
-  const needsMarker = !!markerIds && (summary.hasUnread || markerIds.length === 0);
-  const markerId = markerIds?.[0];
-  useEffect(() => {
-    if (!isVisible || !needsMarker) return;
-    const lastReadAt = new Date();
-    if (markerId) db.update(app.readMarkers, markerId, { lastReadAt });
-    else db.insert(app.readMarkers, { roomId, reader: author, lastReadAt });
-  }, [db, isVisible, needsMarker, markerId, roomId, author]);
 }

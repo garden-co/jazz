@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { JazzClientConfig } from "jazz-tools";
 import { JazzProvider, useAll, useJazzSession } from "jazz-tools/react";
 import { AppShell, Button, Center, EmptyState, Spinner } from "@astryxdesign/core";
@@ -7,10 +7,12 @@ import { ThemeProvider } from "../components/theme-provider";
 import { JoinRoom } from "./components/JoinRoom";
 import { NewRoomDialog } from "./components/NewRoomDialog";
 import { ProfileDialog, ProfileSetup } from "./components/ProfileDialog";
-import { RoomNav, type RoomSummary } from "./components/RoomNav";
+import { RoomActivityProbes } from "./components/RoomActivity";
+import { RoomNav } from "./components/RoomNav";
 import { RoomView, usePrefetchRoom } from "./components/RoomView";
 import { UnsentMessagesProvider, UnsentNotices } from "./components/UnsentNotices";
 import { ProfileDirectoryProvider } from "./lib/profiles";
+import { summariseRooms, type NewestMessage } from "./lib/room-summaries";
 import { memoryStore, ParamStoreProvider, useSearchParam } from "./lib/url-state";
 
 export interface BandChatProps {
@@ -82,12 +84,15 @@ function Workspace({ author, ...props }: BandChatProps & { author: string }) {
 
 type RoomData = ReturnType<typeof useRoomData>;
 
-/** The rooms, memberships and read markers behind the room list; undefined while loading. */
+/**
+ * The rooms this account is sent (it holds a member row of each) and its
+ * read markers; each undefined while loading. The list never waits for the
+ * markers: they need the local-first client and a key.
+ */
 function useRoomData(author: string) {
   const { data: rooms } = useAll(app.rooms.select("*", "$createdBy", "$createdAt"));
-  const { data: memberships } = useAll(app.roomMembers.where({ memberAuthor: author }));
   const { data: markers } = useAll(app.readMarkers.where({ reader: author }));
-  return { rooms, memberships, markers };
+  return { rooms, markers };
 }
 
 function Rooms({
@@ -96,37 +101,43 @@ function Rooms({
   roomData,
   onSignOut,
 }: BandChatProps & { author: string; profile: Profile; roomData: RoomData }) {
-  const { rooms = [], memberships = [], markers = [] } = roomData;
+  const { rooms = [] } = roomData;
   // "No rooms yet" and the join prompt wait for the real answer.
-  const isLoadingRooms = !roomData.rooms || !roomData.memberships || !roomData.markers;
+  const isLoadingRooms = !roomData.rooms;
   const [selectedRoomId, setSelectedRoomId] = useSearchParam("room");
   const [joinRoomId, setJoinRoomId] = useSearchParam("join");
   const [isNewRoomOpen, setNewRoomOpen] = useState(false);
   const [isProfileOpen, setProfileOpen] = useState(false);
   const [isNavOpen, setNavOpen] = useState(false);
+  const [newest, setNewest] = useState<ReadonlyMap<string, NewestMessage | null>>(new Map());
+  const onNewest = useCallback((roomId: string, latest: NewestMessage | null | undefined) => {
+    setNewest((current) => {
+      if (latest === undefined) {
+        if (!current.has(roomId)) return current;
+        const next = new Map(current);
+        next.delete(roomId);
+        return next;
+      }
+      const next = new Map(current);
+      next.set(roomId, latest);
+      return next;
+    });
+  }, []);
 
-  const summaries = useMemo<RoomSummary[]>(() => {
-    const memberOf = new Set(memberships.map((membership) => membership.roomId));
-    const lastRead = new Map<string, Date>();
-    for (const marker of markers) {
-      const previous = lastRead.get(marker.roomId);
-      if (!previous || previous < marker.lastReadAt) lastRead.set(marker.roomId, marker.lastReadAt);
+  const markers = roomData.markers;
+  const roomIds = useMemo(() => rooms.map((room) => room.id), [rooms]);
+  const summaries = useMemo(() => {
+    let lastRead: Map<string, Date> | undefined;
+    if (markers) {
+      lastRead = new Map();
+      for (const marker of markers) {
+        const previous = lastRead.get(marker.roomId);
+        if (!previous || previous < marker.lastReadAt)
+          lastRead.set(marker.roomId, marker.lastReadAt);
+      }
     }
-    return rooms
-      .filter((room) => memberOf.has(room.id) || room.$createdBy.account === author)
-      .map((room) => {
-        const activityAt = room.$createdAt;
-        const readAt = lastRead.get(room.id);
-        return {
-          room,
-          activityAt,
-          readAt,
-          isCreator: room.$createdBy.account === author,
-          hasUnread: false,
-        };
-      })
-      .sort((a, b) => b.activityAt.getTime() - a.activityAt.getTime());
-  }, [rooms, memberships, markers, author]);
+    return summariseRooms({ rooms, newest, lastRead, author, profileId: profile.id });
+  }, [rooms, newest, markers, author, profile.id]);
 
   const selected =
     summaries.find((summary) => summary.room.id === selectedRoomId) ??
@@ -172,6 +183,7 @@ function Rooms({
 
   return (
     <>
+      <RoomActivityProbes roomIds={roomIds} onNewest={onNewest} />
       <AppShell
         variant="section"
         contentPadding={0}
