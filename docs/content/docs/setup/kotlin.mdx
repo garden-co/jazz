@@ -161,6 +161,17 @@ or as a user your backend signs in, with their bearer token:
 native core syncs on a thread of its own. Call `jazz.close()` (it's `AutoCloseable`) when you're
 done; closing ends open `watch`es and subscriptions with `JazzException.Closed`.
 
+`jazz.deleteClientStorage()` closes the app and deletes its local store. It throws
+`JazzException.Refused` while another open app uses the same `dataDir`. Whether your app is still
+open afterwards depends on where that other app runs:
+
+- **In the same process:** your app stays open, and so do its watches. Close the other app and call
+  it again.
+- **In another process:** that is only seen once your app has stopped, so your app is closed and
+  the store is left in place. Open the app again if you need it.
+
+Any other failure closes your app too. Once it is closed, `jazz.session` reads `SignedOut`.
+
 Writes are local-first: a write the server's permissions refuse doesn't fail the call, it rolls
 back once the server answers. Write at `WriteTier.Global` (or call `waitForSync`) to see the
 refusal as a `JazzException.Permission`.

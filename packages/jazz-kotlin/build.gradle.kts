@@ -91,17 +91,16 @@ if (withFfi) {
     // linux-aarch64, darwin-aarch64, darwin-x86-64, win32-x86-64). A
     // distribution jar bundles every platform's from -PnativeLibs=<dir>, laid
     // out so (dev/scripts/build-kotlin-dist.sh); otherwise this platform's own.
+    // Copied by processResources, never a resources srcDir: the sources jar
+    // packs the source directories, and would pack the libraries with them.
     val nativeLibs = findProperty("nativeLibs") as String?
-    if (nativeLibs != null) {
-        sourceSets.main { resources.srcDir(file(nativeLibs)) }
-    } else {
-        val bundleFfi by tasks.registering(Copy::class) {
+    tasks.named<ProcessResources>("processResources") {
+        if (nativeLibs != null) {
+            from(file(nativeLibs))
+        } else {
             dependsOn(cargoBuildFfi)
-            from(ffiLib)
-            into(layout.buildDirectory.dir("ffi-resources/${jnaPrefix()}"))
+            from(ffiLib) { into(jnaPrefix()) }
         }
-        sourceSets.main { resources.srcDir(layout.buildDirectory.dir("ffi-resources")) }
-        tasks.named("processResources") { dependsOn(bundleFfi) }
     }
 }
 
