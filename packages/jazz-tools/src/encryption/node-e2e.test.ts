@@ -334,6 +334,27 @@ describe("encryption on Node, end to end", () => {
     expect(back.map((row) => row.title).sort()).toEqual(["alice's secret", "bob's reply"]);
   }
 
+  it("rotates an empty space and explains when a member is waiting for delivery", async () => {
+    const host = await serve();
+    const alice = await device(host);
+    const bob = await device(host);
+    const project = await makeProject(alice, "plans");
+    const space = { table: "projects", id: project };
+    await expect.soft(alice.db.encryption.keys.rotate(space)).resolves.toBe(0);
+
+    await alice.db
+      .insert(app.tasks, { projectId: project, title: "first" })
+      .wait({ tier: "global" });
+    // The only holder is offline when Bob joins, so no delivery can race his rotation.
+    await alice.session.close();
+    const row = await bob.db.encryption.members.row(space, bob.account);
+    await host.jazz.db.insert(membersTable, row as never).wait({ tier: "global" });
+    await expect(bob.db.encryption.keys.rotate(space)).rejects.toMatchObject({
+      code: "rotation-needs-key",
+      message: "This device does not hold the space's current key yet",
+    });
+  }, 90_000);
+
   it("a removed member cannot open what is written after the rotation", async () => {
     // Tasks are readable to everyone here, so the removed member is handed the
     // ciphertext of the rows written after the rotation: it holds no key for them.

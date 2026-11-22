@@ -28,7 +28,7 @@ const row = await db.encryption.members.row({ table: "projects", id }, otherAcco
 await db.insert(app.__e2ee_members, row).wait({ tier: "global" });
 ```
 
-The space's key is made by its first write. A member gets the key from any device that holds it (the
+The space's key is made by its first encrypted write. A member gets the key from any device that holds it (the
 first holder to deliver wins), sealed to the member's account, so the member's devices can all read.
 
 ## When keys arrive
@@ -53,6 +53,12 @@ the removed member never gets:
 await db.delete(app.__e2ee_members, memberRowId).wait({ tier: "global" });
 await db.encryption.keys.rotate({ table: "projects", id });
 ```
+
+If the space has no key yet, nothing has been sealed. For an active member, `rotate` succeeds and
+writes nothing. If the space already has a key, a member whose device is waiting for delivery gets
+`rotation-needs-key`. Retry once the device has the current key. The same code can also mean the
+device cannot confirm the space's key state. If the device sees that its account has no membership,
+it gets `not-a-member`. A device waiting for approval gets `no-account`, even in a space with no key yet.
 
 Rotation is otherwise lazy: the next pass notices that a key is held by an account that is no longer a
 member and rotates. A removed member keeps what they could already read; Jazz's permissions stop them

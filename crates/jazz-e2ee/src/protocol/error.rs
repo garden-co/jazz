@@ -116,6 +116,8 @@ pub enum RefusalCode {
     SpacePending,
     SpaceCreateRefused,
     RotationNeedsKey,
+    RotationKeyStateUnconfirmed,
+    NotAMember,
     DeviceAccountIdentityMismatch,
 }
 
@@ -140,7 +142,8 @@ impl RefusalCode {
             Self::AccountResetNotAllowed => "account-reset-not-allowed",
             Self::SpacePending => "space-pending",
             Self::SpaceCreateRefused => "space-create-refused",
-            Self::RotationNeedsKey => "rotation-needs-key",
+            Self::RotationNeedsKey | Self::RotationKeyStateUnconfirmed => "rotation-needs-key",
+            Self::NotAMember => "not-a-member",
             Self::DeviceAccountIdentityMismatch => "device-account-identity-mismatch",
         }
     }
@@ -196,7 +199,12 @@ pub enum ProtocolError {
     /// duplicate row IDs or reads at different cuts.
     #[error("E2EE evidence is inconsistent")]
     InconsistentEvidence,
-    #[error("E2EE operation refused")]
+    #[error("{}", match .0 {
+        RefusalCode::RotationNeedsKey => "This device does not hold the space's current key yet",
+        RefusalCode::RotationKeyStateUnconfirmed => "This device cannot confirm the space's key state",
+        RefusalCode::NotAMember => "Your account is not a member of this space",
+        _ => "E2EE operation refused",
+    })]
     Refused(RefusalCode),
     /// The account key is not available from the evidence: a required proof
     /// is provably invalid or missing (§2.7). Not a provider failure.

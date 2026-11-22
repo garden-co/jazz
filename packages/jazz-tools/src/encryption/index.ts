@@ -50,7 +50,11 @@ export class EncryptionStoreRequiredError extends Error {
  * `protocol` for a protocol failure without one, ...).
  */
 export class EncryptionError extends Error {
-  readonly code: string;
+  readonly code:
+    | "rotation-needs-key"
+    | "not-a-member"
+    | "no-account"
+    | (string & Record<never, never>);
   constructor(code: string, message: string) {
     super(message);
     this.name = "EncryptionError";
@@ -515,7 +519,7 @@ export class Keys {
   /**
    * Rotates a space's key at once (whoever may update the space's row can).
    * Call it right after removing a member: rotation is otherwise lazy.
-   * Returns how many deliveries it wrote.
+   * Returns how many deliveries it wrote, or zero if the space has no key yet.
    */
   async rotate(space: SpaceRef): Promise<number> {
     const done = await this.call<{ delivered: number }>("keysRotate", { ...space });

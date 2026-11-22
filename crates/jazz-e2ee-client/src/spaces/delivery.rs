@@ -280,7 +280,7 @@ impl E2eeClient {
     /// exists. Call it right after removing a member. A refusal by the
     /// authority stops the automatic rotation of the space while the client
     /// runs; an explicit call always attempts. How many deliveries were
-    /// written. Needs the authority.
+    /// written, or zero if the space has no key yet. Needs the authority.
     pub async fn rotate(&self, db: &Db, space: &SpaceAddress) -> Result<usize, ClientError> {
         self.rotate_with(db, space, Rotation::Ordinary).await
     }
@@ -313,7 +313,8 @@ impl E2eeClient {
         })
         .await;
         let (first, rest) = match rotated {
-            Ok(done) => done,
+            Ok(Some(done)) => done,
+            Ok(None) => return Ok(0),
             Err(ClientError::Database(error))
                 if error.reason == Some(Reason::AuthorizationDenied) =>
             {
@@ -342,14 +343,15 @@ impl E2eeClient {
     }
 
     /// One rotation transaction: the successor and the first batch. Its
-    /// first-batch size and the accounts left for the batches that follow.
+    /// first-batch size and the accounts left for the batches that follow,
+    /// or `None` when an ordinary rotation found no key to rotate.
     async fn rotate_step(
         &self,
         db: &Db,
         tx: OpenTransactionId,
         address: &ProtocolAddress,
         kind: Rotation,
-    ) -> Result<(usize, Vec<String>), ClientError> {
+    ) -> Result<Option<(usize, Vec<String>)>, ClientError> {
         let read = self.read_space_of(db, tx, address, true).await?;
         let Replayed {
             chain,
@@ -357,12 +359,22 @@ impl E2eeClient {
             acquisition,
             ..
         } = self.replay_space(&read).await?;
+        if !member {
+            return Err(ProtocolError::Refused(RefusalCode::NotAMember).into());
+        }
+        if kind == Rotation::Ordinary && chain.is_none() {
+            // A skipped row could be the root. A locally held key also
+            // contradicts a read that shows membership but no root.
+            if read.skipped > 0 || self.holds_live_key(address) {
+                return Err(
+                    ProtocolError::Refused(RefusalCode::RotationKeyStateUnconfirmed).into(),
+                );
+            }
+            return Ok(None);
+        }
         let (Some(chain), Some(acquisition)) = (chain, acquisition) else {
             return Err(ProtocolError::Refused(RefusalCode::RotationNeedsKey).into());
         };
-        if !member {
-            return Err(ProtocolError::Refused(RefusalCode::RotationNeedsKey).into());
-        }
         let directory = AccountDirectory::new(
             &read.accounts,
             &self.shared.domain,
@@ -407,7 +419,7 @@ impl E2eeClient {
             self.stage(db, tx, delivery).await?;
         }
         self.publish(db, tx).await?;
-        Ok((records.deliveries.len(), recipients.rest))
+        Ok(Some((records.deliveries.len(), recipients.rest)))
     }
 
     /// One batch of deliveries of the current version to `accounts`, each

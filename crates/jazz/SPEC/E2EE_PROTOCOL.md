@@ -2941,6 +2941,7 @@ Refusal codes:
 | `space-pending`                    | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2).            |
 | `space-create-refused`             | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
 | `rotation-needs-key`               | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                         |
+| `not-a-member`                     | The account asking to rotate the space has no current member row (§3.5).                                                                                                  |
 | `device-account-identity-mismatch` | A device-account root written with an identity whose key does not derive the account ID (§2.3).                                                                           |
 
 ## 8. Security properties and limits

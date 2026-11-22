@@ -808,7 +808,17 @@ impl Encryption {
             }
             "keysRotate" => {
                 let space = self.space_address(&text("table")?, &text("id")?)?;
-                let delivered = client.rotate(db, &space).await.map_err(describe)?;
+                let delivered = client
+                    .rotate(db, &space)
+                    .await
+                    .map_err(|error| match error {
+                        ClientError::NoAccount
+                            if self.status.get() == Some(AccountStatus::AwaitingApproval) =>
+                        {
+                            "no-account: This device is waiting for approval".to_owned()
+                        }
+                        other => describe(other),
+                    })?;
                 json!({ "delivered": delivered })
             }
             other => return Err(format!("unknown encryption operation `{other}`")),

@@ -1863,6 +1863,149 @@ fn deliver(server: &Db, holder: &Device, other: &[&Device], space: uuid::Uuid) -
     .unwrap()
 }
 
+/// Alice can rotate her new project before its first encrypted write.
+#[test]
+fn explicit_rotation_of_a_space_without_a_key_writes_nothing() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let space = new_project(&server, &alice, "plans");
+        assert_eq!(
+            drive(
+                &server,
+                &[&alice.db],
+                alice
+                    .client
+                    .rotate(&alice.db, &space_address(&alice, space))
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(count(&server, SPACES), 0);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+        assert_eq!(count(&server, "__e2ee_space_deliveries"), 0);
+    });
+}
+
+/// Bob is a member, but Alice has yet to deliver the project's key to him.
+#[test]
+fn explicit_rotation_tells_a_member_to_wait_for_the_key() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (_alice, bob, space) = shared_space(&server);
+        let error = drive(
+            &server,
+            &[&bob.db],
+            bob.client.rotate(&bob.db, &space_address(&bob, space)),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientError::Protocol(ProtocolError::Refused(RefusalCode::RotationNeedsKey))
+        ));
+        assert_eq!(
+            error.to_string(),
+            "This device does not hold the space's current key yet"
+        );
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+    });
+}
+
+/// Bob keeps the key Alice delivered, but losing his membership prevents him from rotating.
+#[test]
+fn explicit_rotation_refuses_a_removed_member_who_holds_the_key() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+        let address = space_address(&bob, space);
+        assert_eq!(
+            drive(&server, &[&bob.db], bob.client.acquire(&bob.db, &address)).unwrap(),
+            SpaceKeyState::Held
+        );
+        block_on(
+            alice
+                .db
+                .delete(MEMBERS, member_row(&server, &bob.id()), Default::default()),
+        )
+        .unwrap();
+        pump(&server, &alice.db);
+        pump(&server, &bob.db);
+        assert_eq!(count(&server, MEMBERS), 1, "only Alice is a member");
+        // A fresh replica sees the removal. Bob's original replica can
+        // still show his former member row alongside an invisible root.
+        let (fresh, _link) = session(
+            &bob.client,
+            &server,
+            bob.who,
+            &EncryptionSettings::default(),
+            3,
+            None,
+        );
+        let refusal = |db| {
+            let error = drive(&server, &[db], bob.client.rotate(db, &address)).unwrap_err();
+            let ClientError::Protocol(error) = error else {
+                panic!("unexpected error: {error}")
+            };
+            (error.code(), error.to_string())
+        };
+        let removed = (
+            Some("not-a-member"),
+            "Your account is not a member of this space".to_owned(),
+        );
+        assert_eq!(refusal(&fresh), removed);
+        let original = refusal(&bob.db);
+        assert!(
+            original == removed
+                || original
+                    == (
+                        Some("rotation-needs-key"),
+                        "This device cannot confirm the space's key state".to_owned()
+                    ),
+            "{original:?}"
+        );
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+    });
+}
+
+/// Alice's second device must be approved even when her project has no key yet.
+#[test]
+fn explicit_rotation_on_a_device_awaiting_approval_explains_why() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let space = new_project(&server, &alice, "plans");
+        let second = device(&server, alice.who, MemoryStore::new(), 2);
+        let db = Rc::new(second.db);
+        let runtime = jazz_e2ee_client::host::runtime::Encryption::new(
+            jazz_e2ee_client::host::runtime::Built {
+                spaces: serde_json::json!({}),
+                client: Rc::new(second.client),
+                reports: Rc::default(),
+            },
+            Rc::new(jazz_e2ee_client::host::bridge::JsStore::default()),
+            Rc::clone(&db),
+        );
+        assert_eq!(
+            drive(
+                &server,
+                &[&db],
+                runtime.call("ready".into(), serde_json::json!({}))
+            )
+            .unwrap(),
+            "awaiting-approval"
+        );
+        let args = serde_json::json!({ "table": "projects", "id": space.to_string() });
+        assert_eq!(
+            drive(&server, &[&db], runtime.call("keysRotate".into(), args)).unwrap_err(),
+            "no-account: This device is waiting for approval"
+        );
+        assert_eq!(count(&server, SPACES), 0);
+    });
+}
+
 /// Contract: alice and bob share a space end to end: alice's pass delivers
 /// the current version to bob, who acquires it from the delivery row and
 /// reads what alice wrote; a second pass writes nothing.
