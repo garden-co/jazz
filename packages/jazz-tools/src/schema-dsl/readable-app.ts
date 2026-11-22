@@ -30,7 +30,7 @@ export interface ReadableApp {
 }
 
 /** The column holding an equality column's tokens (protocol §1.5). */
-const EQUALITY_PREFIX = "__e2ee_eq_";
+export const EQUALITY_PREFIX = "__e2ee_eq_";
 
 const SCALAR_NAMES: Record<string, string> = {
   TEXT: "string",

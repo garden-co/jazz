@@ -48,6 +48,12 @@ export function printSchemaTs(
     unsupported,
     transforms: app.transforms,
   });
+  if (app.encryption !== undefined && Object.keys(app.encryption).length > 0)
+    unsupported.push({
+      path: "encryption",
+      text: JSON.stringify(app.encryption),
+      reason: "Printing app-wide encryption settings is not supported yet",
+    });
   // Transforms are spelt on the columns that use them: one no column uses would be lost.
   const used = new Set(
     JSON.stringify(app.tables)
