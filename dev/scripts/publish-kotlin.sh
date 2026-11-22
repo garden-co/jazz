@@ -85,11 +85,13 @@ for artifact in jazz-kotlin jazz-kotlin-android; do
   # JNA is `implementation`: a runtime dependency, which consumers still get.
   tr -d ' \n' <"$pom" | grep -q '<artifactId>jna</artifactId><version>5.17.0</version>\(<type>aar</type>\)\?<scope>runtime</scope>' ||
     fail "$artifact's POM lacks JNA 5.17.0 at runtime scope"
-  [ "$(unzip -l "$dir/$artifact-$version-sources.jar" | grep -c '\.kt$')" -gt 0 ] || fail "$artifact's sources jar holds no .kt"
+  bash dev/scripts/check-kotlin-sources-jar.sh "$dir/$artifact-$version-sources.jar"
 done
 listing="$(unzip -l "$m2/jazz-kotlin/$version/jazz-kotlin-$version.jar")"
 for platform in "${platforms[@]}"; do
-  grep -q " $platform/" <<<"$listing" || fail "jazz-kotlin-$version.jar lacks $platform/"
+  # The library itself: a directory entry alone would match "$platform/".
+  grep -Eq " $platform/(lib)?jazz_ffi\.(so|dylib|dll)\$" <<<"$listing" ||
+    fail "jazz-kotlin-$version.jar lacks $platform's libjazz_ffi"
 done
 grep -q "uniffi/jazz_ffi/" <<<"$listing" || fail "jazz-kotlin-$version.jar lacks the UniFFI bindings"
 listing="$(unzip -l "$m2/jazz-kotlin-android/$version/jazz-kotlin-android-$version.aar")"

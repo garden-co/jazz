@@ -494,7 +494,7 @@ pub unsafe extern "C" fn jazz_close(handle: *mut JazzHandle) {
 /// `"pending"` under contract 2) or closing failed. The handle is closed and
 /// freed either way; after a `"close"` call it only frees. `timeout_ms` 0
 /// waits for no writes, but is not instant: local work already started
-/// finishes, and stream sessions get up to 2 s to end.
+/// finishes, and stream sessions get up to 2 s to end (no hard limit).
 ///
 /// # Safety
 /// As [`jazz_close`]; `err` is NULL or writable.

@@ -237,8 +237,8 @@ green gate and CI on that exact head. If a run is missing, dispatch it on
 
 Once the release PR is merged,
 [Release publish](.github/workflows/release-publish.yml) publishes npm,
-crates.io, Maven Central, the Go module tag and the Swift mirror from those
-artifacts, behind the `publish` environment's approval, and then publishes the
+crates.io, the Go module tag and the Swift mirror from those artifacts (Kotlin
+is on the GitHub release while Maven Central is paused), behind the `publish` environment's approval, and then publishes the
 GitHub release. Its default mode, `dry-run`, publishes nothing. See
 [the release runbook](dev/RELEASE_RUNBOOK.md).
 

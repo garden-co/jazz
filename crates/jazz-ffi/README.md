@@ -137,7 +137,8 @@ Linking reopens the account on the bearer: `clientEpoch` moves on.
 - `watch(listener)` / `jazz_session_watch`: each snapshot, the current one
   first, and a last `{"kind": "closed"}` when the session closes.
 - `shutdown()` / `jazz_session_close`: closes the session; its handles fail
-  `Closed`, its watches end, and no token callback runs after.
+  `Closed` and its watches end. No C token callback runs after; a Swift or
+  Kotlin token provider already asked may outlive it (see "Closing").
 
 Not yet: deleting a session account's store through its handle (refused).
 
@@ -153,15 +154,19 @@ that free) gives the calls in flight the same guarantees:
   later refusal of it is still reported.
 - Local work already started finishes, with 30 s as its backstop, and
   stream sessions get up to 2 s to end. So closing takes about `timeout_ms`,
-  plus that: `0` is not instant.
+  plus that: `0` is not instant. Nor is that a hard limit: work can't be
+  interrupted while it runs, and closing also waits for the store to close
+  and for a host name lookup in progress. Don't close on a UI thread.
 - A `for_user` or session handle closes only itself, and rolls back what it
   began.
 - A session doesn't wait for the operation in flight, which fails `Closed`
   and installs no client; an open it interrupted gets up to 2 s to let go of
   its store. `Replaced` is only for a session that goes on: closing is
   always `Closed`, and wins when both hold.
-- Closing waits for a token callback that is running, so hosts make theirs
-  cancellable.
+- On the C ABI, closing waits for a token callback that is running, as the
+  host frees its `ctx` after: hosts make theirs cancellable. Through UniFFI
+  (Swift, Kotlin) it doesn't wait: a token provider already asked may still
+  run after `shutdown` returns, and what it gives is dropped.
 
 On the C ABI, `jazz_close`, `jazz_close_within` and `jazz_session_close`
 free, so nothing may run beside them. To close with calls in flight:

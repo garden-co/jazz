@@ -44,7 +44,8 @@ pub(crate) enum Command {
 
 /// How long [`Jazz::shutdown`] lets the local work of the calls already
 /// made run before it cancels them: the backstop, as their waits on the
-/// server end when it begins.
+/// server end when it begins. Not a hard limit: it can't interrupt work
+/// that doesn't yield.
 const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How long shutdown waits for the backend to answer the requests that end
@@ -535,6 +536,11 @@ impl Jazz {
     /// with [`Error::Stopped`]. Call it before the process exits when the app
     /// keeps a persistent store ([`crate::Storage::Dir`]), so its last
     /// writes are flushed and the store closed.
+    ///
+    /// The 30 seconds are not a hard limit: work that doesn't yield isn't
+    /// interrupted, and shutdown also waits for the store to close and for
+    /// a host name lookup in progress. It doesn't wait for the token
+    /// provider's own threads or tasks.
     ///
     /// On a handle acting for a user ([`Jazz::for_user`], or
     /// `Endpoint::for_user`) it does nothing: the client it shares stops

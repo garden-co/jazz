@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { parse } from "yaml";
 import { checkManifest, npmAnswer, publishLevels } from "./npm-publish.mjs";
 import { isPayload, requiredFiles, servedUrls } from "./maven-central.mjs";
 import { pickGateRun, summarize } from "./rc-verdict.mjs";
@@ -151,4 +155,114 @@ test("Maven Central counts as served when repo1 has both POMs", () => {
     "https://repo1.maven.org/maven2/tools/jazz/jazz-kotlin/2.0.0-alpha.69/jazz-kotlin-2.0.0-alpha.69.pom",
     "https://repo1.maven.org/maven2/tools/jazz/jazz-kotlin-android/2.0.0-alpha.69/jazz-kotlin-android-2.0.0-alpha.69.pom",
   ]);
+});
+
+const repoFile = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+const kotlinChannel = (...args) =>
+  execFileSync("bash", [fileURLToPath(new URL("./kotlin-channel.sh", import.meta.url)), ...args], {
+    encoding: "utf8",
+  }).trim();
+
+test("Central is paused from beta.1; the versions before it are smoked from Central", () => {
+  assert.equal(kotlinChannel(), "github-release");
+  for (const version of ["2.0.0-alpha.66", "2.0.0-alpha.70", "2.0.0-beta.0"])
+    assert.equal(kotlinChannel(version), "central", version);
+  for (const version of ["2.0.0-beta.1", "2.0.0-beta.10", "2.0.0-beta.0.1-rc.1"])
+    assert.equal(kotlinChannel(version), "github-release", version);
+});
+
+const workflow = parse(repoFile(".github/workflows/release-publish.yml"));
+
+/** The value of one of release-publish.yml's job expressions. */
+function evaluate(expression, { channel, mode, portalDryRun = false, results = {} }) {
+  const inputs = {
+    mode,
+    "maven-publishing-type": "AUTOMATIC",
+    "maven-portal-dry-run": portalDryRun,
+  };
+  const needs = new Proxy(
+    {},
+    {
+      get: (_, job) => ({
+        result: results[job] ?? "success",
+        outputs: { kotlin_channel: channel },
+      }),
+    },
+  );
+  const js = expression
+    .trim()
+    .replace(/^\$\{\{([\s\S]*)\}\}$/, "$1")
+    .replace(/\.([A-Za-z_][\w-]*)/g, '["$1"]')
+    .replace(/\s+/g, " ");
+  return new Function("inputs", "needs", "cancelled", `return (${js});`)(
+    inputs,
+    needs,
+    () => false,
+  );
+}
+
+test("while Central is paused the Maven leg gets no secrets, uploads nothing and isn't awaited", () => {
+  const { maven, finalize, "maven-published": served } = workflow.jobs;
+  for (const mode of ["publish", "dry-run"])
+    for (const portalDryRun of [false, true]) {
+      const run = { channel: "github-release", mode, portalDryRun };
+      assert.equal(evaluate(maven.environment, run), "", JSON.stringify(run));
+      assert.equal(evaluate(maven.env.PORTAL, run), false, JSON.stringify(run));
+      assert.equal(evaluate(served.if, run), false, JSON.stringify(run));
+      // The leg still runs, and finalize follows it with the served job skipped.
+      assert.equal(evaluate(maven.if, run), true);
+      const results = { "maven-published": "skipped" };
+      assert.equal(evaluate(finalize.if, { ...run, results }), true);
+    }
+  for (const step of maven.steps)
+    if (JSON.stringify(step).includes("secrets.")) assert.match(JSON.stringify(step), /PORTAL/);
+});
+
+test("a failed or skipped Maven bundle still blocks the GitHub release", () => {
+  for (const maven of ["failure", "skipped"])
+    assert.equal(
+      evaluate(workflow.jobs.finalize.if, {
+        channel: "github-release",
+        mode: "publish",
+        results: { maven },
+      }),
+      false,
+    );
+});
+
+test("switched back to central, the Maven leg publishes as before", () => {
+  const { maven, "maven-published": served } = workflow.jobs;
+  const publish = { channel: "central", mode: "publish" };
+  assert.equal(evaluate(maven.environment, publish), "publish");
+  assert.equal(evaluate(maven.env.PORTAL, publish), true);
+  assert.equal(evaluate(served.if, publish), true);
+  const dry = { channel: "central", mode: "dry-run" };
+  assert.equal(evaluate(maven.environment, dry), "");
+  assert.equal(evaluate(maven.env.PORTAL, { ...dry, portalDryRun: true }), true);
+});
+
+test("the jar and AAR installs declare exactly the dependencies of the Kotlin builds", () => {
+  const MAVEN = /\b(?:api|implementation)\("([^"]+:[^"]+:[^"]+)"\)/g;
+  const coordinates = (text) => [...text.matchAll(MAVEN)].map((match) => match[1]).sort();
+  const jvm = coordinates(repoFile("packages/jazz-kotlin/build.gradle.kts"));
+  const android = coordinates(repoFile("packages/jazz-kotlin-android/build.gradle.kts"));
+  assert.equal(jvm.length, 3);
+  assert.equal(android.length, 3);
+  assert.deepEqual(
+    coordinates(repoFile("dev/adopter-gate/t9.sh")).filter((c) => !c.startsWith("tools.jazz:")),
+    jvm,
+  );
+
+  const install = (path, heading) => {
+    const section = repoFile(path).split(`${heading}\n`)[1].split("\n## ")[0];
+    const blocks = [...section.matchAll(/```kotlin[^\n]*\n([\s\S]*?)```/g)].map((match) =>
+      coordinates(match[1]).filter((c) => !c.startsWith("tools.jazz:")),
+    );
+    assert.deepEqual(blocks, [jvm, android], path);
+  };
+  install("docs/content/docs/setup/kotlin.mdx", "## Install");
+  install(
+    "docs/content/docs/operating/backups-and-upgrades.mdx",
+    "## Upgrading from beta.0 to beta.1",
+  );
 });

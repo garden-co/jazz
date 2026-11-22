@@ -1492,8 +1492,10 @@ impl Core {
     /// `None` or zero, the calls waiting on the server or the network end
     /// `Closed`; local work already started finishes (jazz-app-support's
     /// 30 s drain is its backstop), and stream sessions get up to 2 s to
-    /// end: not instant. A derived handle's client lives on: its waiting
-    /// calls end `Closed` at once, and what it began is cleaned up.
+    /// end: not instant, and no hard limit (synchronous work isn't
+    /// interrupted; the store closes, and dropping the runtime waits for a
+    /// name lookup in progress). A derived handle's client lives on: its
+    /// waiting calls end `Closed` at once, and what it began is cleaned up.
     ///
     /// Returns once no host callback runs (but the caller's own).
     pub fn close_within(&self, timeout: Option<std::time::Duration>) -> Result<()> {

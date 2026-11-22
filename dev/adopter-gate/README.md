@@ -22,7 +22,7 @@ The verdict is FAIL, NEEDS_REVIEW or PASS.
 | `sizes`                                     | `sizes.sh [prev]`        | Browser wasm and jazz-tools JS gzip size vs the previous release: over `AG_SIZE_REVIEW_PCT` (3%) is REVIEW, a missing or empty file FAIL. Cloudflare Worker bundles (`durable-object/`, `backend/`): FAIL over Cloudflare's 64 MiB uncompressed Worker limit | npm                                                                                                                                                                                           |
 | `t4`                                        | `t4.sh` (`t4/README.md`) | Next.js + Better Auth on `vercel()` in the long-lived eval project: missing-region error, deploy, same core and data, smoke, wrong-region probe. No retries: a failed step fails (jazz#5553 shows as `invalid_link_challenge`). Serialised                   | `VERCEL_TOKEN` and the t4 vars. Without them: SKIP                                                                                                                                            |
 
-Post-publish: `registry-smoke.sh <version> npm|create-jazz|crates|go|swift|kotlin` installs from npm, crates.io, the Go proxy, the jazz-swift mirror and Maven Central into clean projects, and runs the t9 checks. `AG_WAIT_MIN` polls for registry lag.
+Post-publish: `registry-smoke.sh <version> npm|create-jazz|crates|go|swift|kotlin` installs from npm, crates.io, the Go proxy, the jazz-swift mirror and, for Kotlin, where `../release-publish/kotlin-channel.sh` says the version is (Maven Central, or the GitHub release's checksummed jar) into clean projects, and runs the t9 checks. `AG_WAIT_MIN` polls for registry lag.
 
 ## Running locally
 
