@@ -778,11 +778,19 @@ impl<'a> Ctx<'a> {
                 Ok((column_sql(table, alias, column)?, ty))
             };
             // A vector or point has no order and no sum: only `count`.
-            if !matches!(output.function, F::Count)
-                && let Some(column) = output.column.as_deref()
-                && is_whole_only(table, column)
+            if let Some(column) = output.column.as_deref()
+                && let Some(kind) = whole_only(table, column)
             {
-                return Err(whole_only_refusal(&format!("`{}`", output.alias), column));
+                let op = match output.function {
+                    F::Count => None,
+                    F::Sum => Some("sum"),
+                    F::Avg => Some("avg"),
+                    F::Min => Some("min"),
+                    F::Max => Some("max"),
+                };
+                if let Some(op) = op {
+                    return Err(unsupported_operator(kind, op, column));
+                }
             }
             // MIN and MAX of an enum column are variants, in the query
             // schema's declaration order.
@@ -856,8 +864,8 @@ impl<'a> Ctx<'a> {
             let term = if let Some(rank) = ordered.get(&key.column) {
                 rank.clone()
             } else if aggregate.group_by.as_deref() == Some(key.column.as_str()) {
-                if is_whole_only(table, &key.column) {
-                    return Err(whole_only_refusal("an order", &key.column));
+                if let Some(kind) = whole_only(table, &key.column) {
+                    return Err(unordered(kind, &key.column));
                 }
                 group.clone().expect("grouped")
             } else if aggregate.aggregates.iter().any(|a| a.alias == key.column) {
@@ -1773,6 +1781,19 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// The root's part of [`Self::validate_prepared`], which `prepare`
+    /// runs before it compiles: what the table refuses is said in the
+    /// table's words (compiling would call `$score` an unknown column).
+    pub fn validate_root_operators(mut self, query: &Query) -> Result<(), Error> {
+        if query.flat_join.is_some() {
+            return Ok(());
+        }
+        let Ok(table) = self.table(&query.table) else {
+            return Ok(());
+        };
+        check_operators(table, &query.filters, &query.order_by)
+    }
+
     /// Checks `query`'s array relations as reads of them would compile them
     /// ([`Ctx::compile_children`]): parent and child columns, filters and
     /// order, nested relations too. An optional relation is compiled only
@@ -2492,12 +2513,9 @@ impl<'a> Ctx<'a> {
         if is_range(&op) {
             for operand in [left, right] {
                 if let Operand::Column(column) = operand
-                    && is_whole_only(table, column)
+                    && let Some(kind) = whole_only(table, column)
                 {
-                    return Err(query_error(format!(
-                        "operand type mismatch: a range on {column}: vector and point \
-                         columns compare whole (eq, ne, in, notIn, isNull)"
-                    )));
+                    return Err(unsupported_operator(kind, op_name(&op), column));
                 }
             }
         }
@@ -2674,16 +2692,20 @@ impl<'a> Ctx<'a> {
                 op,
                 value: PolicyValue::SessionRef(path),
             } if is_claim(path) => {
-                if is_range(op) && is_whole_only(table, column) {
-                    return Err(whole_only_refusal("a range", column));
+                if is_range(op)
+                    && let Some(kind) = whole_only(table, column)
+                {
+                    return Err(unsupported_operator(kind, op_name(op), column));
                 }
                 let left = self.column_term(table, alias, column)?;
                 let right = self.claim_term(session, path, table.column_type(column))?;
                 self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::Cmp { column, op, value } => {
-                if is_range(op) && is_whole_only(table, column) {
-                    return Err(whole_only_refusal("a range", column));
+                if is_range(op)
+                    && let Some(kind) = whole_only(table, column)
+                {
+                    return Err(unsupported_operator(kind, op_name(op), column));
                 }
                 let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
@@ -2705,8 +2727,8 @@ impl<'a> Ctx<'a> {
             PolicyExpr::SessionIsNull { path } => bool_sql(session.is_null(path)),
             PolicyExpr::SessionIsNotNull { path } => bool_sql(session.is_not_null(path)),
             PolicyExpr::Contains { column, value } => {
-                if is_whole_only(table, column) {
-                    return Err(whole_only_refusal("contains", column));
+                if let Some(kind) = whole_only(table, column) {
+                    return Err(unsupported_operator(kind, "contains", column));
                 }
                 let left = self.column_term(table, alias, column)?;
                 let right = match value {
@@ -3339,10 +3361,17 @@ impl<'a> Ctx<'a> {
             }
             RelationPredicate::Cmp { left, op, right } => {
                 let ty = self.rel_column_type(rel, left);
-                if !matches!(op, RelationCmpOp::Eq | RelationCmpOp::Ne)
-                    && ty.as_ref().is_some_and(is_whole_only_type)
-                {
-                    return Err(whole_only_refusal("a range", &left.column));
+                if let Some(kind) = ty.as_ref().and_then(whole_only_kind) {
+                    let refused = match op {
+                        RelationCmpOp::Eq | RelationCmpOp::Ne => None,
+                        RelationCmpOp::Lt => Some("lt"),
+                        RelationCmpOp::Le => Some("lte"),
+                        RelationCmpOp::Gt => Some("gt"),
+                        RelationCmpOp::Ge => Some("gte"),
+                    };
+                    if let Some(op) = refused {
+                        return Err(unsupported_operator(kind, op, &left.column));
+                    }
                 }
                 let right = self.rel_value_as(right, ty.as_ref(), rel, scope)?;
                 let left = self.resolve_term(rel, left)?;
@@ -3372,12 +3401,12 @@ impl<'a> Ctx<'a> {
                 self.in_list(left, options)?
             }
             RelationPredicate::Contains { left, right } => {
-                if self
+                if let Some(kind) = self
                     .rel_column_type(rel, left)
                     .as_ref()
-                    .is_some_and(is_whole_only_type)
+                    .and_then(whole_only_kind)
                 {
-                    return Err(whole_only_refusal("contains", &left.column));
+                    return Err(unsupported_operator(kind, "contains", &left.column));
                 }
                 let ty = match self.rel_column_type(rel, left) {
                     Some(ValueType::Array(element)) => Some(*element),
@@ -3710,37 +3739,62 @@ fn check_candidate(table: &Table, column: &str, option: &Operand) -> Result<(), 
     )))
 }
 
-/// Whether `column` is a vector or point column (nullable or not): one
-/// that compares only whole, by `eq`, `ne`, `in`, `notIn` and `isNull`
-/// (SPEC 20.1). Its bytes have no order a range or `orderBy` could mean,
-/// and no part `contains` could find.
-fn is_whole_only(table: &Table, column: &str) -> bool {
-    table
-        .column(column)
-        .is_some_and(|declared| is_whole_only_type(&declared.ty))
+/// A vector or point column's kind (nullable or not): one that compares
+/// only whole, by `eq`, `ne`, `in`, `notIn` and `isNull` (SPEC 20.1). Its
+/// bytes have no order a range or `orderBy` could mean, and no part
+/// `contains` could find.
+fn whole_only(table: &Table, column: &str) -> Option<&'static str> {
+    whole_only_kind(&table.column(column)?.ty)
 }
 
-/// [`is_whole_only`] for a column's type.
-fn is_whole_only_type(ty: &ValueType) -> bool {
+/// [`whole_only`] for a column's type.
+fn whole_only_kind(ty: &ValueType) -> Option<&'static str> {
     match ty {
-        ValueType::Nullable(inner) => is_whole_only_type(inner),
-        ValueType::Vector(_) | ValueType::Point => true,
-        _ => false,
+        ValueType::Nullable(inner) => whole_only_kind(inner),
+        ValueType::Vector(_) => Some("vector"),
+        ValueType::Point => Some("point"),
+        _ => None,
     }
 }
 
-/// The refusal of `what` (a range, `contains`, an order) on whole-only
-/// `column`.
-fn whole_only_refusal(what: &str, column: &str) -> Error {
+/// An operator the column's kind does not support, as [`check_operators`]
+/// words it. Compiling refuses the same for carriers `prepare` never sees
+/// (policies, queries off the wire).
+fn unsupported_operator(kind: &str, op: &str, column: &str) -> Error {
+    let supported = if kind == "bytes" {
+        "eq, ne, in, notIn, contains, isNull or isNotNull"
+    } else {
+        "eq, ne, in, notIn, isNull or isNotNull"
+    };
     query_error(format!(
-        "operand type mismatch: {what} on {column}: vector and point columns compare whole \
-         (eq, ne, in, notIn, isNull)"
+        "{kind} column \"{column}\" does not support \"{op}\"; use {supported}"
     ))
+}
+
+/// An `orderBy` the column's kind does not support.
+fn unordered(kind: &str, column: &str) -> Error {
+    query_error(format!(
+        "{kind} column \"{column}\" cannot be used in orderBy"
+    ))
+}
+
+/// A comparison's name in a query.
+fn op_name(op: &CmpOp) -> &'static str {
+    match op {
+        CmpOp::Eq => "eq",
+        CmpOp::Ne => "ne",
+        CmpOp::Lt => "lt",
+        CmpOp::Le => "lte",
+        CmpOp::Gt => "gt",
+        CmpOp::Ge => "gte",
+    }
 }
 
 /// What a column's type supports beyond what compiling a query checks: a
 /// JSON or bytes column takes no range comparison (`gt`, `gte`, `lt`,
 /// `lte`) and can't order a query, and a JSON column takes no `contains`.
+/// A vector or point column takes none of the three (SPEC 20.1), and
+/// `$score` is only ever an order, of a query with an index search.
 /// JSON is stored as text and bytes as a blob, so SQLite would compare
 /// them as such, which means nothing for either. Bytes keep `contains` (a
 /// byte subsequence, SPEC 19.5). Every other column type keeps what the
@@ -3764,6 +3818,9 @@ fn check_operators_by<'t>(
     // the restricted kinds.
     let restricted = |column: &str| {
         let declared = lookup(column)?;
+        if let Some(kind) = whole_only_kind(&declared.ty) {
+            return Some(kind);
+        }
         match type_kind(&declared.ty) {
             Kind::Bytes => Some("bytes"),
             Kind::Array => None,
@@ -3796,27 +3853,28 @@ fn check_operators_by<'t>(
                 if kind == "bytes" && op == "contains" {
                     continue;
                 }
-                let supported = if kind == "bytes" {
-                    "eq, ne, in, notIn, contains, isNull or isNotNull"
-                } else {
-                    "eq, ne, in, notIn, isNull or isNotNull"
-                };
-                return Err(query_error(format!(
-                    "{kind} column \"{column}\" does not support \"{op}\"; use {supported}"
-                )));
+                return Err(unsupported_operator(kind, op, column));
             }
         }
         Ok(())
     }
+    let score = crate::query::SCORE_COLUMN;
+    let mut searched = false;
     for filter in filters {
+        searched |= matches!(filter, Predicate::Search(_));
+        if filter.any_operand(&mut |operand| matches!(operand, Operand::Column(c) if c == score)) {
+            return Err(query_error(format!(
+                "\"{score}\" cannot be used in where; a search can only be ordered by it"
+            )));
+        }
         walk(filter, &restricted)?;
     }
     for key in order_by {
+        if key.column == score && !searched {
+            return Err(query_error("ordering by $score needs an index search"));
+        }
         if let Some(kind) = restricted(&key.column) {
-            return Err(query_error(format!(
-                "{kind} column \"{}\" cannot be used in orderBy",
-                key.column
-            )));
+            return Err(unordered(kind, &key.column));
         }
     }
     Ok(())
@@ -3841,11 +3899,8 @@ fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
     let Some(declared) = table.column(column) else {
         return Ok(());
     };
-    if is_whole_only(table, column) {
-        return Err(query_error(format!(
-            "operand type mismatch: contains on {column}: vector and point columns compare \
-             whole (eq, ne, in, notIn, isNull)"
-        )));
+    if let Some(kind) = whole_only(table, column) {
+        return Err(unsupported_operator(kind, "contains", column));
     }
     match type_kind(&declared.ty) {
         Kind::Text | Kind::Bytes | Kind::Array | Kind::Other => Ok(()),
@@ -4744,12 +4799,8 @@ impl Ctx<'_> {
                     key.column
                 )));
             }
-            if is_whole_only(table, &key.column) {
-                return Err(query_error(format!(
-                    "column {} cannot be ordered by: vector and point columns compare whole \
-                     (eq, ne, in, notIn, isNull)",
-                    key.column
-                )));
+            if let Some(kind) = whole_only(table, &key.column) {
+                return Err(unordered(kind, &key.column));
             }
             if key.column == crate::query::SCORE_COLUMN {
                 if !self.search_compiling(alias) {

@@ -1,7 +1,8 @@
 //! What each column type supports in a query, as `prepare` checks it: a
 //! JSON or bytes column takes no range comparison and can't order a query,
-//! and JSON takes no `contains`; every other type keeps what the engine
-//! supports. One
+//! and JSON takes no `contains`; a vector or point column takes none of
+//! the three, and `$score` only orders a search; every other type keeps
+//! what the engine supports. One
 //! checker for every client (#5927 R13): TS, the FFI and the inspector
 //! leave it to the engine.
 
@@ -17,7 +18,10 @@ use jazz::tools::public_schema::{
     RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate, RelationProjectColumn,
     RelationProjectExpr, RelationRowIdRef, RelationUnionArm, RelationValueRef,
 };
-use jazz::tools::{ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema};
+use jazz::tools::{
+    ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, TableName, TableSchema,
+    TableSchemaBuilder,
+};
 
 use common::{allow_all_policies, compile_schema};
 
@@ -293,4 +297,152 @@ fn gathers_flat_joins_and_nested_joins_are_checked_too() {
         .remove(0);
     nested.joins[0].nested_joins.push(inner);
     refused(nested, "JSON column \"meta\" does not support \"gt\"");
+}
+
+/// `places(label, location, spot, embedding, guess)`: a point and a vector
+/// column, required and nullable, and a text index for `$score`; `visits`
+/// refers to it.
+fn open_places() -> Db {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("places")
+                    .column("label", ColumnType::Text)
+                    .column("location", ColumnType::Point)
+                    .nullable_column("spot", ColumnType::Point)
+                    .column("embedding", ColumnType::Vector { dimensions: 2 })
+                    .nullable_column("guess", ColumnType::Vector { dimensions: 2 })
+                    .policies(allow_all_policies())
+                    .text_index("search", [("label", 1)], "jazz-text/1:en", false),
+            )
+            .table(
+                TableSchemaBuilder::new("visits")
+                    .fk_column("place", "places")
+                    .column("spot", ColumnType::Point)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    block_on(Db::open(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x13; 16]),
+            author: AuthorSubject::for_test_bytes([0xa3; 16]),
+        },
+    )))
+    .unwrap()
+}
+
+fn bytes(len: usize) -> q::Operand {
+    q::lit(Value::Bytes(vec![0; len]))
+}
+
+/// A column of the kind refuses every range, `contains` and `orderBy`, at
+/// the root, in a join and in a relation, and keeps equality.
+fn assert_compares_only_whole(kind: &str, columns: [&str; 2], literal_len: usize) {
+    let db = open_places();
+    let places = || Query::from("places");
+    for column in columns {
+        let c = || q::col(column);
+        let v = || bytes(literal_len);
+        for (op, predicate) in [
+            ("gt", q::gt(c(), v())),
+            ("gte", q::gte(c(), v())),
+            ("lt", q::lt(c(), v())),
+            ("lte", q::lte(c(), v())),
+            ("contains", q::contains(c(), v())),
+        ] {
+            let expected = format!(
+                "{kind} column \"{column}\" does not support \"{op}\"; use eq, ne, in, notIn, \
+                 isNull or isNotNull"
+            );
+            let message = refusal(&db, places().filter(predicate.clone()));
+            assert!(message.contains(&expected), "{message}");
+            let message = refusal(
+                &db,
+                places().filter(q::Predicate::Any(vec![
+                    q::eq(q::col("label"), text("a")),
+                    predicate.clone(),
+                ])),
+            );
+            assert!(message.contains(&expected), "nested: {message}");
+        }
+        let message = refusal(&db, places().order_by(column, OrderDirection::Asc));
+        let expected = format!("{kind} column \"{column}\" cannot be used in orderBy");
+        assert!(message.contains(&expected), "{message}");
+        let message = refusal(
+            &db,
+            Query::from("visits").array_subquery(
+                ArraySubquery::new("at", "places", "id", "place")
+                    .order_by(column, OrderDirection::Desc),
+            ),
+        );
+        assert!(message.contains(&expected), "in a relation: {message}");
+        for query in [
+            places().filter(q::eq(c(), v())),
+            places().filter(q::Predicate::Ne(c(), v())),
+            places().filter(q::Predicate::In(c(), vec![v()])),
+            places().filter(q::Predicate::IsNull(c())),
+        ] {
+            db.prepare_query(&query)
+                .unwrap_or_else(|error| panic!("{query:?}: {error}"));
+        }
+    }
+}
+
+#[test]
+fn point_columns_compare_only_whole() {
+    assert_compares_only_whole("point", ["location", "spot"], 16);
+    let message = refusal(
+        &open_places(),
+        Query::from("places").join_via("visits", "place", [q::gt(q::col("spot"), bytes(16))]),
+    );
+    assert!(
+        message.contains("point column \"spot\" does not support \"gt\""),
+        "in a join: {message}"
+    );
+}
+
+#[test]
+fn vector_columns_compare_only_whole() {
+    assert_compares_only_whole("vector", ["embedding", "guess"], 8);
+}
+
+/// `$score` orders a search and nothing else.
+#[test]
+fn score_only_orders_a_search() {
+    let db = open_places();
+    let searched = || {
+        Query::from("places").search(
+            "search",
+            q::IndexOp::Match {
+                text: "cafe".into(),
+                mode: q::MatchMode::Any,
+            },
+        )
+    };
+    for direction in [OrderDirection::Asc, OrderDirection::Desc] {
+        db.prepare_query(&searched().order_by("$score", direction))
+            .expect("a search orders by its score");
+    }
+    let message = refusal(
+        &db,
+        Query::from("places").order_by("$score", OrderDirection::Asc),
+    );
+    assert!(
+        message.contains("ordering by $score needs an index search"),
+        "{message}"
+    );
+    let one = || q::lit(Value::F64(1.0));
+    for predicate in [
+        q::eq(q::col("$score"), one()),
+        q::gt(q::col("$score"), one()),
+        q::Predicate::IsNull(q::col("$score")),
+    ] {
+        let message = refusal(&db, searched().filter(predicate));
+        assert!(
+            message.contains("\"$score\" cannot be used in where"),
+            "{message}"
+        );
+    }
 }

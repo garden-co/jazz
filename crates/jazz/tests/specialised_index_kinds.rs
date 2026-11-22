@@ -640,9 +640,8 @@ fn a_reopened_store_recreates_missing_queue_triggers() {
 
 /// Vector and point columns compare whole (SPEC 20.1): the engine accepts
 /// `eq`, `ne`, `in`, `notIn` and `isNull` on them, and refuses a range,
-/// `contains` and `orderBy`, whose bytes mean nothing for either. These
-/// cases join `column_operators.rs` once jazz#5966 moves the operator
-/// table into the engine.
+/// `contains` and `orderBy`, whose bytes mean nothing for either
+/// (`column_operators.rs` pins the table's wording).
 #[test]
 fn vector_and_point_columns_compare_only_whole() {
     use jazz::query::{Operand, OrderDirection, Predicate};
@@ -692,7 +691,7 @@ fn vector_and_point_columns_compare_only_whole() {
         ] {
             let error = run(query).expect_err(&format!("{column} {op}"));
             assert!(
-                error.message.contains("compare whole"),
+                error.message.contains("does not support") || error.message.contains("orderBy"),
                 "{column} {op}: {error}"
             );
         }
@@ -744,7 +743,9 @@ fn vector_and_point_refusals_reach_policies_relations_and_aggregates() {
     let refused = |result: Result<usize, String>, case: &str| {
         let error = result.expect_err(case);
         assert!(
-            error.contains("compare whole") || error.contains("operand type mismatch"),
+            error.contains("does not support")
+                || error.contains("cannot be used in orderBy")
+                || error.contains("operand type mismatch"),
             "{case}: {error}"
         );
     };

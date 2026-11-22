@@ -3535,6 +3535,7 @@ impl Db {
             // included, so their metadata columns are accepted). Once per
             // shape: reads, fanout and paging don't validate again.
             let session = Session::system();
+            Ctx::new(&inner.schema, None, &session, &binding).validate_root_operators(query)?;
             Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
             Ctx::new(&inner.schema, None, &session, &binding).validate_prepared(query)?;
             if inner.validated_shapes.len() >= VALIDATED_SHAPES_MAX {
