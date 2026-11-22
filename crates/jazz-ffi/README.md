@@ -128,6 +128,9 @@ Linking reopens the account on the bearer: `clientEpoch` moves on.
   `"replaced"`; `Closed` without contract 2): fetch the new one when
   `clientEpoch` changes. Its `shutdown` / `jazz_close` leaves the session
   open.
+- A client that ends by itself (its bearer names no one at a renewal or a
+  handle's `refresh`) signs the session out: `signed-out`, a new
+  `clientEpoch`, and the old handles `Replaced`.
 - `refresh()` (the app's auth changed: ask the bearer and follow),
   `create_device_account()`, `restore_device_account(key)`,
   `reopen_device_account()`, `link_device_account()`,
