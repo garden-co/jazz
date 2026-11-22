@@ -119,6 +119,27 @@ impl Hooks {
         SpaceAddress::new(catalogue.table(&plan.entry.scope)?, identifier)
             .map_err(|_| rejected("an encrypted row's space is not a row ID"))
     }
+
+    /// Ask the binding to serve pending removals and rotate before choosing the write key.
+    fn check_rotation(&self, address: &SpaceAddress) -> Result<(), SealError> {
+        let mut keys = self.shared.keys.borrow_mut();
+        let call = self.shared.current_write.get();
+        let mark = (call, address.clone());
+        // A retry without a wrapping write call takes its mark here, so the
+        // next write gets its own attempt. A wrapped call keeps it until exit.
+        let tried = if call.is_none() {
+            keys.rotation_tried.remove(&mark)
+        } else {
+            keys.rotation_tried.contains(&mark)
+        };
+        let removal = !self.shared.member_removals.borrow().is_empty();
+        if keys.online && !tried && (keys.rotation_pending.contains(address) || removal) {
+            return Err(SealError::NeedsKey {
+                space: db_address(address),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Whether the stored `cell` names an epoch whose key this device holds only
@@ -257,8 +278,7 @@ impl E2eeHooks for Hooks {
             return Ok(());
         };
         let refused = |message: &str| SealError::Refused(rejected(message));
-        let keys = self.shared.keys.borrow();
-        if keys.closed {
+        if self.shared.keys.borrow().closed {
             return Err(SealError::Refused(closed()));
         }
         let invalid_space = || refused("an encrypted row's space is not a row ID");
@@ -300,7 +320,7 @@ impl E2eeHooks for Hooks {
         };
         if creates {
             for (name, codec) in &plan.columns {
-                if write.cells.contains_key(name) {
+                if write.cells.contains_key(name) || write.streamed_column == Some(name) {
                     continue;
                 }
                 let filled = match &codec.default {
@@ -324,7 +344,7 @@ impl E2eeHooks for Hooks {
                 "a move writes every encrypted column of the row again",
             ));
         }
-        if encrypted.is_empty() {
+        if encrypted.is_empty() && write.streamed_column.is_none() {
             return Ok(());
         }
         let identifier = match plan.self_space() {
@@ -334,36 +354,18 @@ impl E2eeHooks for Hooks {
                 .or(stored)
                 .ok_or_else(|| refused("an encrypted write names its space"))?,
         };
-        let address = Self::address(&keys, plan, &identifier).map_err(SealError::Refused)?;
-        let refused_here = keys.creation_refused.contains(&address);
-        // The marks of the `write` call this write runs in, or of the
-        // writes no call wraps.
-        let mark = (self.shared.current_write.get(), address.clone());
-        let tried = keys.rotation_tried.contains(&mark);
-        // A write no `write` call wraps is the retry the mark was made for:
-        // it takes the mark, and the next write gets its own chance.
-        let keys = if tried && mark.0.is_none() {
-            drop(keys);
-            self.shared.keys.borrow_mut().rotation_tried.remove(&mark);
-            self.shared.keys.borrow()
-        } else {
-            keys
-        };
-        // The space needs rotation, or a removal this client wrote has not
-        // been served yet and may mark it: the runtime serves the removal,
-        // rotates the space if it needs it, and the write is tried again
-        // (protocol §3.5).
-        let removal = !self.shared.member_removals.borrow().is_empty();
-        if (keys.rotation_pending.contains(&address) || removal) && !tried && keys.online {
-            return Err(SealError::NeedsKey {
-                space: db_address(&address),
-            });
+        let address = Self::address(&self.shared.keys.borrow(), plan, &identifier)
+            .map_err(SealError::Refused)?;
+        // An encrypted upload checked for rotation before consuming its source.
+        if write.streamed_column.is_none() {
+            self.check_rotation(&address)?;
         }
+        let keys = self.shared.keys.borrow();
         let key = write_key(
             &keys,
             &self.shared.creations.borrow().dropped,
             &address,
-            refused_here,
+            keys.creation_refused.contains(&address),
         )?;
         let catalogue = keys
             .catalogue
@@ -844,8 +846,7 @@ impl E2eeHooks for Hooks {
             .columns
             .get(target.column)
             .ok_or_else(|| refused("a streamed value of a column that is not encrypted"))?;
-        let keys = self.shared.keys.borrow();
-        if keys.closed {
+        if self.shared.keys.borrow().closed {
             return Err(SealError::Refused(closed()));
         }
         let row_id = target.row.0.to_string();
@@ -855,7 +856,10 @@ impl E2eeHooks for Hooks {
                 .map_err(|()| refused("a streamed value's space is not a row ID"))?,
         }
         .ok_or_else(|| refused("a streamed value names its space"))?;
-        let address = Self::address(&keys, plan, &identifier).map_err(SealError::Refused)?;
+        let address = Self::address(&self.shared.keys.borrow(), plan, &identifier)
+            .map_err(SealError::Refused)?;
+        self.check_rotation(&address)?;
+        let keys = self.shared.keys.borrow();
         let key = write_key(
             &keys,
             &self.shared.creations.borrow().dropped,

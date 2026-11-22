@@ -14,6 +14,7 @@ import {
   sqlite,
 } from "../backend/index.js";
 import { generateTs } from "../dev/codegen-napi.js";
+import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import {
   EncryptionNotDeclaredError,
@@ -141,6 +142,8 @@ async function device(
 
 type Device = Awaited<ReturnType<typeof device>>;
 
+const spacesTable = (app as unknown as Record<string, never>)["__e2ee_spaces"];
+
 /** A new project, with its creator as its first member in the same transaction. */
 async function makeProject(owner: Device, name: string) {
   const id = crypto.randomUUID();
@@ -174,6 +177,128 @@ async function until<T>(read: () => Promise<T | undefined>, what: string, ms = 2
 }
 
 describe("encryption on Node, end to end", () => {
+  it.each(["new", "existing"] as const)(
+    "streams encrypted bytes when the project key is %s",
+    async (key) => {
+      const host = await serve();
+      const alice = await device(host);
+      const projectId = await makeProject(alice, "plans");
+      const content = new TextEncoder().encode("private attachment bytes across two chunks");
+      const ordinary = () =>
+        alice.db.insert(app.files, { projectId, content }).wait({ tier: "global" });
+      if (key === "existing") await ordinary();
+      async function* chunks() {
+        yield content.subarray(0, 9);
+        yield content.subarray(9);
+      }
+      const streamed = await alice.db.insertStreaming(app.files, { projectId, content: chunks() });
+      await streamed.wait({ tier: "global" });
+      expect(await host.jazz.db.all(spacesTable)).toMatchObject([{ identifier: projectId }]);
+      if (key === "new") await ordinary();
+      const rows = await alice.db.all(app.files.where({ projectId }), { tier: "remote" });
+      expect(rows.map((row) => row.content)).toEqual([content, content]);
+      const stored = await storedBytes(host.dir);
+      expect(stored.includes(Buffer.from(content.subarray(0, 9)))).toBe(false);
+      expect(stored.includes(Buffer.from(content.subarray(9)))).toBe(false);
+    },
+    60_000,
+  );
+
+  it("aborting the first encrypted stream discards its upload and publishes no root or row", async () => {
+    const host = await serve();
+    const alice = await device(host);
+    const projectId = await makeProject(alice, "plans");
+    async function* interrupted() {
+      yield new Uint8Array(256 * 1024).fill(42);
+      throw new Error("attachment interrupted");
+    }
+    await expect(
+      alice.db.insertStreaming(app.files, { projectId, content: interrupted() }),
+    ).rejects.toThrow("attachment interrupted");
+    const runtime = alice.db.currentRuntime() as NativeRuntimeAdapter;
+    runtime.setLargeValueStagingPolicy(Number.MAX_SAFE_INTEGER, 60_000, 0);
+    expect(await runtime.evictExpiredStagedLargeValues()).toBe(0);
+    expect(await host.jazz.db.all(spacesTable)).toEqual([]);
+    expect(await alice.db.all(app.files.where({ projectId }), { tier: "remote" })).toEqual([]);
+    async function* replacement() {
+      yield Uint8Array.of(7);
+    }
+    const written = await alice.db.insertStreaming(app.files, {
+      projectId,
+      content: replacement(),
+    });
+    await written.wait({ tier: "global" });
+    expect(await host.jazz.db.all(spacesTable)).toMatchObject([{ identifier: projectId }]);
+    expect(await alice.db.all(app.files.where({ projectId }), { tier: "remote" })).toMatchObject([
+      { content: Uint8Array.of(7) },
+    ]);
+  }, 60_000);
+
+  it.each(["files", "captionedFiles"] as const)(
+    "rotates before pulling the first byte from %s after a member is removed",
+    async (table) => {
+      const open = structuredClone(permissions) as { tables: Record<string, unknown> };
+      // Bob can fetch the new row after removal, so the read tests decryption.
+      open.tables[table] = { read: "true", insert: "allowedTo.read(project)" };
+      const host = await serve(undefined, open as never);
+      const alice = await device(host);
+      const bob = await device(host);
+      const projectId = await makeProject(alice, "plans");
+      await addMember(alice, projectId, bob.account);
+      await alice.db
+        .insert(app.tasks, { projectId, title: "before removal" })
+        .wait({ tier: "global" });
+      await alice.db.encryption.keys.deliver();
+      await until(async () => {
+        const rows = await bob.db.all(app.tasks.where({ projectId }), { tier: "remote" });
+        return rows[0]?.title === "before removal" ? true : undefined;
+      }, "Bob to receive the original key");
+
+      const members = await alice.db.all(app.__e2ee_members, { tier: "remote" });
+      const member = members.find((row) => row.accountId === bob.account)!;
+      await alice.db.delete(app.__e2ee_members, member.id).wait({ tier: "global" });
+      async function* chunks() {
+        const successors = (app as unknown as Record<string, never>)["__e2ee_space_successors"];
+        expect(await host.jazz.db.all(successors)).toMatchObject([{ identifier: projectId }]);
+        yield Uint8Array.of(3, 4);
+      }
+      const streamed =
+        table === "files"
+          ? await alice.db.insertStreaming(app.files, { projectId, content: chunks() })
+          : await alice.db.insertStreaming(app.captionedFiles, {
+              projectId,
+              content: chunks(),
+              caption: "after removal",
+            });
+      await streamed.wait({ tier: "global" });
+
+      const query = app[table].where({ projectId });
+      expect(await alice.db.all(query, { tier: "remote" })).toMatchObject([
+        {
+          content: Uint8Array.of(3, 4),
+          ...(table === "captionedFiles" ? { caption: "after removal" } : {}),
+        },
+      ]);
+      // Read each encrypted column on its own: one unreadable column hides the whole row.
+      const contentQuery =
+        table === "files"
+          ? app.files.where({ projectId }).select("projectId", "content")
+          : app.captionedFiles.where({ projectId }).select("projectId", "content");
+      const locked = await bob.db.all(contentQuery, { tier: "remote" });
+      expect(locked).toEqual([]);
+      expect(unreadableRows(locked)).toMatchObject([{ column: "content" }]);
+      if (table === "captionedFiles") {
+        const caption = await bob.db.all(
+          app.captionedFiles.where({ projectId }).select("projectId", "caption"),
+          { tier: "remote" },
+        );
+        expect(caption).toEqual([]);
+        expect(unreadableRows(caption)).toMatchObject([{ column: "caption" }]);
+      }
+    },
+    90_000,
+  );
+
   it("two members share a space and read each other's encrypted rows", async () => {
     await twoMembersShareASpace(await serve());
   }, 90_000);

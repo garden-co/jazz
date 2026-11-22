@@ -134,6 +134,8 @@ pub struct WriteCells<'a> {
     /// out. During a conversion the hook also writes the target and
     /// clears the source here.
     pub cells: &'a mut BTreeMap<String, Value>,
+    /// The encrypted column already sealed while streaming, omitted from `cells`.
+    pub streamed_column: Option<&'a str>,
     /// For updates, upserts and moves of a table with an encryption
     /// entry: the space cell of the row as the write finds it, `None` when
     /// there is no such row (yet).

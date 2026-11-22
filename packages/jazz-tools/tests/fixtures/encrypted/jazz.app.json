@@ -57,6 +57,46 @@
         ]
       }
     },
+    "files": {
+      "columns": {
+        "projectId": "uuid",
+        "content": "bytes"
+      },
+      "relations": {
+        "project": {
+          "rel": "projects",
+          "column": "projectId"
+        }
+      },
+      "encryption": {
+        "space": "projectId",
+        "scope": "projects",
+        "columns": {
+          "content": "bytes"
+        }
+      }
+    },
+    "captionedFiles": {
+      "columns": {
+        "projectId": "uuid",
+        "content": "bytes",
+        "caption": "bytes"
+      },
+      "relations": {
+        "project": {
+          "rel": "projects",
+          "column": "projectId"
+        }
+      },
+      "encryption": {
+        "space": "projectId",
+        "scope": "projects",
+        "columns": {
+          "content": "bytes",
+          "caption": "string"
+        }
+      }
+    },
     "notes": {
       "columns": {
         "text": "string"

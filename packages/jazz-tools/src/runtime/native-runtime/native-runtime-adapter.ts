@@ -1,3 +1,4 @@
+import { createOpenTransactionId } from "../client.js";
 import type { ClientMigrations } from "../client-migrations.js";
 import type { Encryption, EncryptionNative } from "../../encryption/index.js";
 import { servePrivateStore, type PrivateStore } from "../../encryption/private-store.js";
@@ -2255,7 +2256,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission(operation);
     const tx = this.currentTx(writeContext, operation);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
     const attribution = this.backendAttribution(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -2275,44 +2275,51 @@ export class NativeRuntimeAdapter implements Runtime {
         `Streaming insert requires a Text, Json, or Bytea column: ${table}.${column}`,
       );
     }
-    const rowId = objectId ? parseUuid(objectId) : runtimeRandomBytes(16);
+    const rowId = parseUuid(objectId ?? createOpenTransactionId());
     const cells =
       mutation === "insert"
         ? encodeCellsForStreamingRow(definition, values, column, table)
         : encodeCellsForStreamingPatch(definition, values, column);
-    const upload = begin.call(
-      this.db,
-      table,
-      rowId,
-      cells,
-      column,
-      mutation,
-      attribution ? undefined : writeIdentity,
-      attribution,
-      updatedAtMs ?? undefined,
-      branchView?.head,
-      branchView?.base,
-      tx?.id,
-    );
-    if (tx && !upload.finishInTransaction) {
-      await upload.abort();
-      throw new Error("This native runtime does not support streaming inside a transaction yet");
-    }
     const owner = this.ownerRuntime;
     let releaseAdmission!: () => void;
     const admission = new Promise<void>((resolve) => {
       releaseAdmission = resolve;
     });
     owner.pendingStreamingMutations.add(admission);
-    const encoder = new TextEncoder();
-    const pushBounded = async (bytes: Uint8Array): Promise<void> => {
-      const hostWindowBytes = 64 * 1024;
-      for (let offset = 0; offset < bytes.byteLength; offset += hostWindowBytes) {
-        await upload.push(bytes.subarray(offset, offset + hostWindowBytes));
-      }
-    };
-    let pendingHighSurrogate = "";
+    let opened: NativeStreamingMutation | undefined;
     try {
+      // Only opening the upload can be replayed: the caller owns a one-shot source.
+      const opening = this.retryAfterKey(() => {
+        this.assertMutationAdmission(operation);
+        this.applySessionClaims(writeSession);
+        return begin.call(
+          this.db,
+          table,
+          rowId,
+          cells,
+          column,
+          mutation,
+          attribution ? undefined : writeIdentity,
+          attribution,
+          updatedAtMs ?? undefined,
+          branchView?.head,
+          branchView?.base,
+          tx?.id,
+        );
+      });
+      const upload = opening instanceof Promise ? await opening : opening;
+      opened = upload;
+      if (tx && !upload.finishInTransaction) {
+        throw new Error("This native runtime does not support streaming inside a transaction yet");
+      }
+      const encoder = new TextEncoder();
+      const pushBounded = async (bytes: Uint8Array): Promise<void> => {
+        const hostWindowBytes = 64 * 1024;
+        for (let offset = 0; offset < bytes.byteLength; offset += hostWindowBytes) {
+          await upload.push(bytes.subarray(offset, offset + hostWindowBytes));
+        }
+      };
+      let pendingHighSurrogate = "";
       for await (const chunk of streamingChunks(source)) {
         if (typeof chunk === "string") {
           if (kind === "Bytea") throw new Error("Bytea streams require Uint8Array chunks");
@@ -2356,7 +2363,7 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       return { id: formatUuid(rowId), ...receipt };
     } catch (error) {
-      await upload.abort();
+      await opened?.abort();
       throw error;
     } finally {
       releaseAdmission();

@@ -299,6 +299,7 @@ impl Inner {
             row,
             kind,
             cells,
+            streamed_column: streamed.as_ref().map(|(name, _)| name.as_str()),
             stored_space: stored_space.as_ref(),
             companion_rows: &mut companions,
         });

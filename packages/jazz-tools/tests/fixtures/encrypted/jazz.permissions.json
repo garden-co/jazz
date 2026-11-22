@@ -14,6 +14,14 @@
       "read": "allowedTo.read(project)",
       "insert": "allowedTo.read(project)"
     },
+    "files": {
+      "read": "allowedTo.read(project)",
+      "insert": "allowedTo.read(project)"
+    },
+    "captionedFiles": {
+      "read": "allowedTo.read(project)",
+      "insert": "allowedTo.read(project)"
+    },
     "notes": {
       "read": "true",
       "insert": "true"
