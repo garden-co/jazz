@@ -635,10 +635,11 @@ mod tests {
             .expect("hashes body");
         let hashes_json: Value = serde_json::from_slice(&hashes_body).expect("hashes json");
         let expected_hash = schema_hash.to_string();
-        assert_eq!(
-            hashes_json["hashes"][0].as_str(),
-            Some(expected_hash.as_str())
+        assert!(
+            hashes_json.get("hashes").is_none(),
+            "the deprecated `hashes` field is gone: {hashes_json}"
         );
+        assert_eq!(hashes_json["schemas"].as_array().map(Vec::len), Some(1));
         assert_eq!(
             hashes_json["schemas"][0]["hash"].as_str(),
             Some(expected_hash.as_str())
