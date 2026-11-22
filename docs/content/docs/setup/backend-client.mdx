@@ -249,6 +249,8 @@ backend's `authenticate` names the user by.
 
     `client.ForUser(ctx, userID, claims)` returns an error matching `jazz.ErrNoAccount` for a user
     with no account yet, and `jazz.ErrPermission` when your main backend refuses the identity.
+    The session is the backend client's: on a user's DB, `Session`, `OnSession`, `Refresh`, `Link`
+    and `SignOut` fail with `jazz.ErrNotSupported`. Close that DB when you're done with the user.
 
   </Tab>
 </Tabs>
