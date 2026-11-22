@@ -7,13 +7,13 @@ import { createInterface } from "node:readline";
 import { ROOT, WORK, assert, fetchStep, filesUnder, run, sha256, timed } from "../lib/common.mjs";
 import { isJazzName } from "./names.mjs";
 
-const { version } = JSON.parse(readFileSync(join(WORK, "candidate.json"), "utf8"));
 const tarballs = join(WORK, "artifacts", "release-npm");
 const dir = join(WORK, "npm");
 const NAPI = ["darwin-arm64", "darwin-x64", "linux-arm64-gnu", "linux-x64-gnu", "win32-x64-msvc"];
 const HERE_NAPI = `@garden-co/jazz-napi-${process.arch === "arm64" ? "linux-arm64-gnu" : "linux-x64-gnu"}`;
 
 export async function installNpm() {
+  const { version } = JSON.parse(readFileSync(join(WORK, "candidate.json"), "utf8"));
   rmSync(dir, { recursive: true, force: true });
   cpSync(join(ROOT, "backend"), dir, { recursive: true });
   cpSync(join(ROOT, "..", "adopter-gate", "t9", "oidc.ts"), join(dir, "oidc.ts"));
