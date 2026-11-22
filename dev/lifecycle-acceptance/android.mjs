@@ -9,11 +9,11 @@ import { WORK, assert, die, run } from "./lib/common.mjs";
 import { candidate, cleanEnv } from "./build/consumer.mjs";
 import { within } from "./suite/process.mjs";
 import { redact } from "./suite/redact.mjs";
-import { ANDROID_RULES } from "./suite/android-rules.mjs";
+import { ANDROID_RULES, judgeAndroid } from "./suite/android-rules.mjs";
 
 const [source, name, out] = process.argv.slice(2);
 try {
-  const pinned = JSON.parse(readFileSync(new URL("android.json", import.meta.url), "utf8")).sha;
+  const { sha: pinned, predatesOneStore } = JSON.parse(readFileSync(new URL("android.json", import.meta.url), "utf8"));
   const head = run("git", ["-C", source, "rev-parse", "HEAD"], { capture: true }).trim();
   assert(head === pinned, `the checkout is at ${head}, not the pinned ${pinned}`);
   const { sha, run: runId, version } = candidate();
@@ -54,33 +54,25 @@ try {
   });
 
   // What was tested is the candidate's: the script prints the AAR's sha256 before it uses it.
-  const sameAar = log.includes(`testing ${listed.sha256} `);
-  const results = ANDROID_RULES.map(({ id, phase, title }) => {
-    const passed = sameAar && log.includes(`: ${phase} passed`);
-    const tag = !sameAar
-      ? "the emulator test didn't test the candidate's AAR"
-      : log.includes(`: ${phase} FAILED`)
-        ? `phase ${phase} failed (see the job's log)`
-        : `phase ${phase} didn't run (exit ${code})`;
-    return {
-      id,
-      title,
-      basis: "brief",
-      status: passed ? "PASS" : "FAIL",
-      rounds: 1,
-      passed: passed ? 1 : 0,
-      failures: passed ? {} : { [tag]: { count: 1, example: tag } },
-    };
-  });
-  const allPassed = results.every((result) => result.status === "PASS");
-  assert(!allPassed || code === 0, `every phase passed and the script still exited ${code}`);
-  for (const { status, id } of results) console.log(`${status} android ${id}`);
+  const judged = judgeAndroid(log, { aarSha256: listed.sha256, code, predatesOneStore });
+  const results = judged.map(({ id, status, why }) => ({
+    id,
+    title: ANDROID_RULES.find((rule) => rule.id === id).title,
+    basis: "brief",
+    status,
+    why,
+    rounds: 1,
+    passed: status === "PASS" ? 1 : 0,
+    failures: status === "FAIL" ? { [why]: { count: 1, example: why } } : {},
+  }));
+  assert(code === 0 || /: \w+ FAILED/.test(log), `the script exited ${code} without a failed phase (see the log above)`);
+  for (const { status, id, why } of results) console.log(`${status} android ${id}${why ? ` - ${why}` : ""}`);
   mkdirSync(out, { recursive: true });
   writeFileSync(
     join(out, `${name}-android.json`),
     JSON.stringify({ name, lang: "android", sha, run: runId, version, pinned, ms: Date.now() - started, results }, null, 2),
   );
-  process.exitCode = allPassed ? 0 : 1;
+  process.exitCode = results.some((result) => result.status === "FAIL") ? 1 : 0;
 } catch (error) {
   die(`android: ${redact(error.message)}`);
 }

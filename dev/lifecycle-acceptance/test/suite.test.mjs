@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { isJazzName } from "../build/names.mjs";
 import { LANGS } from "../lib/common.mjs";
 import { checkFiles, checkManifest, checkRun } from "../lib/provenance.mjs";
-import { ANDROID_RULES } from "../suite/android-rules.mjs";
+import { ANDROID_RULES, judgeAndroid } from "../suite/android-rules.mjs";
 import { storeHeld } from "../suite/errors.mjs";
 import { Proxy } from "../suite/proxy.mjs";
 import { redact } from "../suite/redact.mjs";
@@ -150,6 +150,24 @@ async function fetchEcho(port) {
     socket.destroy();
   }
 }
+
+test("the Android leg", () => {
+  const options = { aarSha256: "f00", code: 1, predatesOneStore: true };
+  const tested = "testing f00  /repo/x.aar\nx: 64s: memory passed\n";
+  const steps = "I/JazzSmoke: ok: read from the store after the process was killed\nI/JazzSmoke: ok: the offline write synced to a second client\n";
+  const judge = (log, more) => judgeAndroid(log, { ...options, ...more }).map((result) => result.status);
+
+  const noStorage = `${tested}x: 65s: write FAILED\nx: 66s: restart FAILED\n`;
+  assert.deepEqual(judge(noStorage), ["PASS", "FAIL", "NOT_COVERED", "NOT_COVERED"]);
+  // A one-store candidate fails the pinned test's two-apps step: no product failure, and no pass.
+  const oneStore = `${tested}x: 65s: write passed\n${steps}x: 66s: restart FAILED\n`;
+  assert.deepEqual(judge(oneStore), ["PASS", "PASS", "PASS", "NOT_COVERED"]);
+  const shared = `${tested}x: 65s: write passed\n${steps}x: 66s: restart passed\n`;
+  assert.deepEqual(judge(shared, { code: 0 }), ["PASS", "PASS", "PASS", "NOT_COVERED"]);
+  assert.deepEqual(judge(oneStore, { predatesOneStore: false })[3], "FAIL");
+  assert.deepEqual(judge(`${tested}x: 65s: write passed\nx: 66s: restart FAILED\n`)[2], "FAIL");
+  assert.deepEqual(judge(shared, { aarSha256: "other" }), ["FAIL", "FAIL", "FAIL", "FAIL"]);
+});
 
 function verdict(edit, mustFail = []) {
   const dir = mkdtempSync(join(tmpdir(), "la-verdict-"));

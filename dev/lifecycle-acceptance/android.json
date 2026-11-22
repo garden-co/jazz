@@ -1,4 +1,5 @@
 {
   "sha": "2bee7fccefaaa8cac58c1ffbfbb36053eec09252",
-  "owner": "jazz#6246 (ci/kotlin-android-smoke); move this pin when its head is reworked, don't edit the test here"
+  "owner": "jazz#6246 (ci/kotlin-android-smoke); move this pin when its head is reworked, don't edit the test here",
+  "predatesOneStore": true
 }

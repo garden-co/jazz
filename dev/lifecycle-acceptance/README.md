@@ -44,6 +44,9 @@ candidate's own `jazz-tools generate`.
 - `NOT_COVERED`: the language has no API for it, the workflow doesn't cover it, or the contract
   doesn't decide it yet (`pending`: the line says what was observed).
 - The verdict is `INCOMPLETE`, never `PASS`, while a rule is pending or covered elsewhere.
+- Android: while `android.json` says `predatesOneStore`, the pinned test's store-sharing part is
+  `NOT_COVERED`: it asserts the opposite of one app per store. A phase that wasn't reached is
+  `NOT_COVERED` too.
 - `CONTROL_BROKEN`: a candidate in `candidates.json` known to break a rule (`mustFail`) didn't. The
   harness is then broken, whatever else it says.
 

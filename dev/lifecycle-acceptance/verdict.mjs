@@ -61,11 +61,15 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
   }
 
   const android = ANDROID_RULES.map(({ id }) => {
-    const is = byLang.android?.results.find((result) => result.id === id)?.status ?? "FAIL";
+    const got = byLang.android?.results.find((result) => result.id === id);
+    const is = got?.status in totals ? got.status : "FAIL";
+    const why = got ? got.why : "no result (setup broke, see the job)";
     totals[is]++;
+    if (is === "NOT_COVERED") open++;
     status[`${id} android`] = is;
-    console.log(`${is} ${name} android ${id}${byLang.android ? "" : ": no result (setup broke, see the job)"}`);
-    return `\`${id}\` ${is}${byLang.android ? "" : " (no result)"}`;
+    console.log(`${is} ${name} android ${id}${why ? `: ${why}` : ""}`);
+    if (why && is !== "PASS") reasons.push(`- \`${id}\` android ${is}: ${why}`);
+    return `\`${id}\` ${is}`;
   });
 
   // The negative control: a harness that passes a candidate known to break a rule is itself broken.
