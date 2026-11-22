@@ -7,7 +7,9 @@ use std::rc::Rc;
 use super::{Inner, PreparedQuery};
 use std::collections::BTreeMap;
 
-use crate::e2ee::{E2eeRefusal, EncryptionEntry, EpochSetId, QueryPlan, Residual, SpaceAddress};
+use crate::e2ee::{
+    E2eeHooks, E2eeRefusal, EncryptionEntry, EpochSetId, QueryPlan, Residual, SpaceAddress,
+};
 use crate::options::{Error, ErrorCode};
 use crate::query::{ArraySubquery, JoinVia, Operand, Predicate, Query, ReachableVia};
 use crate::schema::history::history_source_table;
@@ -83,19 +85,18 @@ impl Inner {
         let Some(hooks) = &self.e2ee else {
             return Ok((query.clone(), None));
         };
-        let tables = &hooks.declarations().tables;
-        self.refuse_reads(tables, query, true)?;
+        self.refuse_reads(hooks.as_ref(), query, true)?;
         let plan = hooks.plan_query(query)?;
         // Whatever the hook returns, a condition on an encrypted column must
         // not go upstream as written, and nothing but the conditions and
         // the window may differ from the query it was given.
         match &plan {
-            QueryPlan::Plain => self.refuse_reads(tables, query, false)?,
+            QueryPlan::Plain => self.refuse_reads(hooks.as_ref(), query, false)?,
             QueryPlan::Rewritten {
                 physical, residual, ..
             } => {
                 refuse_changed_beyond_conditions(query, physical)?;
-                self.refuse_reads(tables, physical, false)?;
+                self.refuse_reads(hooks.as_ref(), physical, false)?;
                 let physical_has_window = physical.limit.is_some() || physical.offset != 0;
                 let residual_has_window = residual.limit.is_some() || residual.offset != 0;
                 if physical_has_window && (!residual.preds.is_empty() || residual_has_window) {
@@ -135,14 +136,20 @@ impl Inner {
     /// ordering columns are refused.
     fn refuse_reads(
         &self,
-        encrypted: &BTreeMap<String, EncryptionEntry>,
+        hooks: &dyn E2eeHooks,
         query: &Query,
         plannable: bool,
     ) -> Result<(), Error> {
+        let encrypted = &hooks.declarations().tables;
         self.refuse_unopened(encrypted, query)?;
-        refuse_unplannable(encrypted, query, plannable)?;
-        // What the application wrote never names a reserved column: only
-        // the hook writes token conditions, into the query it returns.
+        refuse_unplannable(encrypted, query, |entry, filter| {
+            plannable
+                && matches!(filter, Predicate::Eq(Operand::Column(column), value)
+                if entry.equality.contains(column)
+                    && matches!(value, Operand::Literal(_) | Operand::Param(_) | Operand::Claim(_)))
+        })?;
+        // Application queries cannot name reserved columns. A worker receives
+        // the tab's rewritten query and may serve its physical token filters.
         let reserved = plannable.then(|| self.reserved_columns());
         if let Some(union) = crate::db::union_plan(query, &self.schema)? {
             let table = query.table.as_str();
@@ -151,14 +158,16 @@ impl Inner {
             }
             for (_, arm) in &union.arms {
                 self.refuse_unopened(encrypted, arm)?;
-                refuse_unplannable(encrypted, arm, false)?;
+                refuse_unplannable(encrypted, arm, |_, _| false)?;
                 if let Some(reserved) = &reserved {
-                    refuse_reserved(reserved, arm)?;
+                    refuse_reserved(reserved, arm, |_| false)?;
                 }
             }
         }
         if let Some(reserved) = &reserved {
-            refuse_reserved(reserved, query)?;
+            refuse_reserved(reserved, query, |filter| {
+                hooks.relays_token_filter(&query.table, filter)
+            })?;
         }
         Ok(())
     }
@@ -273,12 +282,12 @@ impl Inner {
 /// Conditions of joins, nested joins, correlations, reachability, parent
 /// inheritance and policy branches are refused whenever they name an
 /// encrypted column of the table they run on: the hook plans none of them.
-/// With `plannable` false even the top-level equality is refused, which is
-/// how a query the hook returned is checked.
+/// Only top-level filters can be exempted. A plan returned by a hook
+/// must pass this check without any exemption on encrypted columns.
 fn refuse_unplannable(
     encrypted: &BTreeMap<String, EncryptionEntry>,
     query: &Query,
-    plannable: bool,
+    allows_filter: impl Fn(&EncryptionEntry, &Predicate) -> bool,
 ) -> Result<(), Error> {
     refuse_in_relations(encrypted, query)?;
     let Some(entry) = encrypted.get(&query.table) else {
@@ -293,16 +302,7 @@ fn refuse_unplannable(
         })
     };
     for filter in &query.filters {
-        // A top-level equality of an equality column with a value is the
-        // one shape the hook plans.
-        if plannable
-            && let Predicate::Eq(Operand::Column(column), value) = filter
-            && entry.equality.contains(column)
-            && matches!(
-                value,
-                Operand::Literal(_) | Operand::Param(_) | Operand::Claim(_)
-            )
-        {
+        if allows_filter(entry, filter) {
             continue;
         }
         if let Some(error) = refused_in_predicate(entry, table, filter) {
@@ -375,8 +375,9 @@ fn refused_in_predicate(
 fn refuse_reserved(
     reserved: &BTreeMap<String, EncryptionEntry>,
     query: &Query,
+    relays_token_filter: impl Fn(&Predicate) -> bool,
 ) -> Result<(), Error> {
-    refuse_unplannable(reserved, query, false)?;
+    refuse_unplannable(reserved, query, |_, filter| relays_token_filter(filter))?;
     if let Some(entry) = reserved.get(&query.table) {
         for column in query.select.iter().flatten() {
             if entry.columns.contains_key(column.as_str()) {

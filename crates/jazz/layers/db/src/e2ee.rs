@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use crate::db::Shape;
 use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode, Reason};
-use crate::query::Query;
+use crate::query::{Predicate, Query};
 use crate::records::{Value, ValueType};
 use crate::values::CurrentRow;
 
@@ -65,6 +65,13 @@ pub trait E2eeHooks {
     /// of an encrypted app.
     fn built_from_encrypted_app(&self) -> bool {
         !self.declarations().tables.is_empty()
+    }
+
+    /// Whether a keyless relay accepts this top-level filter on a reserved
+    /// equality-token column from a keyed tab. Application queries cannot
+    /// name reserved columns, so client and backend hooks keep the default.
+    fn relays_token_filter(&self, _table: &str, _filter: &Predicate) -> bool {
+        false
     }
 
     /// Seal one write before it is stored or uploaded: replace each

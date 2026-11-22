@@ -1,17 +1,6 @@
-//! The hooks of a database that holds no encryption keys: a backend that
-//! relays an encrypted app's clients and runs code of its own on the app's
-//! plain columns.
-//!
-//! Encrypted cells are ciphertext to such a database, so it never answers
-//! with them: a read returns each row of an encrypted table without its
-//! encrypted columns (and their equality tokens, and any other column with
-//! the reserved `__e2ee_eq_` prefix), a write that names an
-//! encrypted column is refused, and a query that filters, orders or selects
-//! one is refused naming the pattern: core refuses every condition and
-//! ordering on an encrypted column but a top-level equality before the hook
-//! plans, and this hook refuses that equality and a selection. Plain tables and plain columns of an
-//! encrypted table work as usual. It has no account, no store and nothing
-//! to configure.
+//! A keyless backend runs application queries on plain columns. A browser
+//! worker instead serves a tab's physical queries over sealed rows. The
+//! tab holds the keys and opens the rows it receives through sync.
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -21,19 +10,34 @@ use jazz::e2ee::{
     E2eeDeclarations, E2eeHooks, OpenOutcome, QueryPlan, ReadSite, SealError, StreamSealer,
     StreamTarget, WriteCells, WriteKind,
 };
-use jazz::query::{Operand, Query};
-use jazz::tools::deployment::artifact::encryption::{EQUALITY_PREFIX, equality_column};
+use jazz::query::{Operand, Predicate, Query};
+use jazz::records::Value;
+use jazz::tools::deployment::artifact::encryption::{
+    EQUALITY_PREFIX, equality_column, is_equality_token_column,
+};
 
 use crate::hooks::unsupported_query;
 
 /// The hooks of a keyless database, built from the app's own declarations.
 pub struct KeylessHooks {
     declarations: E2eeDeclarations,
+    relay: bool,
 }
 
 impl KeylessHooks {
     pub fn hooks(declarations: E2eeDeclarations) -> Rc<dyn E2eeHooks> {
-        Rc::new(Self { declarations })
+        Rc::new(Self {
+            declarations,
+            relay: false,
+        })
+    }
+
+    /// The browser worker serves sealed rows to tabs that hold the keys.
+    pub fn relay(declarations: E2eeDeclarations) -> Rc<dyn E2eeHooks> {
+        Rc::new(Self {
+            declarations,
+            relay: true,
+        })
     }
 
     /// The encrypted columns of `table` and the equality token columns that
@@ -72,6 +76,14 @@ impl E2eeHooks for KeylessHooks {
         true
     }
 
+    fn relays_token_filter(&self, table: &str, filter: &Predicate) -> bool {
+        self.relay
+            && matches!(filter, Predicate::In(Operand::Column(name), tokens)
+                if is_equality_token_column(self.declarations.tables.get(table), name)
+                    && !tokens.is_empty()
+                    && tokens.iter().all(|token| matches!(token, Operand::Literal(Value::Bytes(_)))))
+    }
+
     fn seal_write(&self, write: &mut WriteCells<'_>) -> Result<(), SealError> {
         let sealed = self.sealed(write.table);
         if matches!(write.kind, WriteKind::Move { .. })
@@ -90,6 +102,9 @@ impl E2eeHooks for KeylessHooks {
         site: &ReadSite<'_>,
         rows: &mut Vec<CurrentRow>,
     ) -> Result<OpenOutcome, Error> {
+        if self.relay {
+            return Ok(OpenOutcome::default());
+        }
         let sealed = self.sealed(site.table);
         for row in rows.iter_mut() {
             for name in &sealed {
@@ -111,6 +126,11 @@ impl E2eeHooks for KeylessHooks {
     }
 
     fn plan_query(&self, query: &Query) -> Result<QueryPlan, Error> {
+        if self.relay {
+            // The tab already planned the query. Core still checks that
+            // a plain plan has no condition on an encrypted column.
+            return Ok(QueryPlan::Plain);
+        }
         let sealed = self.sealed(&query.table);
         if sealed.is_empty() {
             return Ok(QueryPlan::Plain);

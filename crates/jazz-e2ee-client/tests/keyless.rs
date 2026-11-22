@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use common::*;
 use jazz::db::{Db, DbConfig, FileOptions, ReadOpts, ReadTier, block_on};
-use jazz::query::{OrderDirection, Query, col, eq, gt, lit};
+use jazz::query::{OrderDirection, Query, col, eq, gt, in_list, lit, not};
 use jazz::records::Value;
 use jazz_e2ee_client::{KeylessHooks, MemoryStore};
 
@@ -203,6 +203,75 @@ fn a_keyless_backend_relays_ciphertext_and_works_on_plain_columns() {
         !contains(&stored, SECRET.as_bytes()),
         "alice's plaintext never reached it"
     );
+}
+
+/// Alice's worker returns the stored cell bytes when her tab asks for an
+/// encrypted column. The worker has no device, store of keys or account.
+#[test]
+fn a_worker_reads_the_same_sealed_cell_as_the_authority() {
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (alice, _link, _) = online(&client, &server, None);
+    let space = project(&alice, "plans");
+    hold_new_space(&client, &alice, space);
+    block_on(alice.insert("notes", note(space, SECRET), Default::default())).unwrap();
+    pump(&server, &alice);
+
+    let query = Query::from("notes").select(["projectId", "body"]);
+    let rows = all(&server, query.clone()).unwrap();
+    let [row] = rows.as_slice() else {
+        panic!("the authority should hold Alice's row");
+    };
+    let Some(Value::Bytes(sealed)) = row.cell("body") else {
+        panic!("the authority should hold a sealed cell");
+    };
+    assert!(!contains(&sealed, SECRET.as_bytes()));
+
+    let config =
+        DbConfig::new(schema(), identity(2)).with_e2ee(KeylessHooks::relay(declarations()));
+    let worker = block_on(Db::open(config)).unwrap();
+    let (_upstream, wire) = link(&worker, &server);
+    let rows = fetch(&server, &worker, query).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].cell("body"), Some(Value::Bytes(sealed)));
+    assert!(!contains(&wire.borrow(), SECRET.as_bytes()));
+}
+
+/// Only Alice's worker accepts the physical token filter her tab sends.
+/// Her tab and the backend refuse reserved columns in application queries,
+/// and other reserved-column predicates are refused even by the worker.
+#[test]
+fn only_the_worker_accepts_the_tabs_token_filter() {
+    let open = |hooks| {
+        block_on(Db::open(
+            DbConfig::new(schema(), identity(2)).with_e2ee(hooks),
+        ))
+        .unwrap()
+    };
+    let worker = open(KeylessHooks::relay(declarations()));
+    let backend = open(KeylessHooks::hooks(declarations()));
+    let alice = open_client(Rc::new(MemoryStore::new()));
+    let tab = client_db(&alice, None);
+    let token = "__e2ee_eq_body";
+    let bytes = lit(Value::Bytes(vec![12; 32]));
+    let filter = in_list(col(token), [bytes.clone()]);
+    let query = Query::from("notes").filter(filter.clone());
+    worker.prepare_query(&query).unwrap();
+    for db in [&backend, &tab] {
+        let error = db.prepare_query(&query).unwrap_err();
+        assert!(error.to_string().contains(token), "{error}");
+    }
+    for query in [
+        Query::from("notes").filter(eq(col(token), bytes.clone())),
+        Query::from("notes").filter(in_list(col(token), [lit("plaintext")])),
+        Query::from("notes").filter(in_list(col(token), [col("body")])),
+        Query::from("notes").filter(in_list(col("__e2ee_eq_note"), [bytes])),
+        Query::from("notes").filter(not(filter.clone())),
+        Query::from("notes").filter(filter).select([token]),
+        Query::from("notes").filter(eq(col("body"), lit("plaintext"))),
+    ] {
+        assert!(worker.prepare_query(&query).is_err(), "{query:?}");
+    }
 }
 
 /// Contract: a keyless backend never seals a streamed value, whatever column

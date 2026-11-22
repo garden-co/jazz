@@ -217,6 +217,36 @@ it("encrypts in a real browser: a device's keys in the browser's own store, a ta
   );
 }, 240_000);
 
+it.each(["select", "equality"] as const)(
+  "a keyed tab reads an encrypted column through its worker with %s",
+  async (operation) => {
+    const server = await serverAt("encrypted-column");
+    const session = await load(server, uniqueDbName("encrypted-column-db"));
+    const db = session.getSnapshot().client!.db;
+    expect(await db.encryption.ready({ timeoutMs: 40_000 })).toBe("active");
+    const account = session.getSnapshot().user!.accountId;
+    const projectId = crypto.randomUUID();
+    const self = await db.encryption.members.row({ table: "projects", id: projectId }, account);
+    const project = await db.transaction((tx) => {
+      tx.insert(app.projects, { name: "plans", ownerId: account }, { id: projectId });
+      tx.insert(membersTable, self as never);
+    });
+    await project.wait({ tier: "global" });
+    const title = `secret-${crypto.randomUUID()}`;
+    await db.insert(app.tasks, { projectId, title }).wait({ tier: "global" });
+    await db.insert(app.tasks, { projectId, title: "another task" }).wait({ tier: "global" });
+
+    const query = app.tasks
+      .where(operation === "select" ? { projectId } : { projectId, title })
+      .select("projectId", "title");
+    const rows = await db.all(query, { tier: "remote" });
+    expect(rows.map((row) => row.title).sort()).toEqual(
+      operation === "select" ? ["another task", title] : [title],
+    );
+  },
+  120_000,
+);
+
 it("a one-shot read in the browser names the rows it leaves out undecrypted", async () => {
   // Tasks are readable to everyone here, so a device of another account is
   // handed the ciphertext of alice's task: it holds no key for her space.

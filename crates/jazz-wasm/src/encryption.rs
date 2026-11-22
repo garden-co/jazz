@@ -175,7 +175,7 @@ pub(crate) fn keyless_hooks(
     )
     .map_err(|failure| error(failure.to_string()))?
     .ok_or_else(|| error("the app's bindings declare no encryption"))?;
-    Ok(jazz_e2ee_client::KeylessHooks::hooks(declarations))
+    Ok(jazz_e2ee_client::KeylessHooks::relay(declarations))
 }
 
 fn error(message: impl AsRef<str>) -> JsValue {
