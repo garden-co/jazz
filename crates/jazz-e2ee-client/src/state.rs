@@ -312,6 +312,7 @@ impl TablePlan {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Catalogue {
     tables: BTreeMap<String, String>,
+    pub(crate) table_names: BTreeMap<String, String>,
     columns: BTreeMap<(String, String), String>,
     /// Per declared table, the encrypted columns a migration added to rows
     /// stored before them: those rows hold no equality token for them.
@@ -347,13 +348,22 @@ impl Catalogue {
                 Err(error) => Err(error.into()),
             }
         }
+        let Some(names) = db.table_names_by_identity()? else {
+            return Ok(None);
+        };
         let mut catalogue = Self::default();
+        for (identity, name) in names {
+            let id = identity.0.to_string();
+            catalogue.tables.insert(name.clone(), id.clone());
+            catalogue.table_names.insert(id, name);
+        }
         for (table, plan) in plans {
             for name in [table, &plan.entry.scope] {
-                let Some(id) = known(db.table_identity(name), name)? else {
-                    return Ok(None);
-                };
-                catalogue.tables.insert(name.clone(), id.0.to_string());
+                if !catalogue.tables.contains_key(name) {
+                    return Err(ClientError::Unsupported(format!(
+                        "the encryption declarations name `{name}`, which the schema does not have"
+                    )));
+                }
             }
             let added = db.lens_added_columns(table)?;
             catalogue.lens_added.insert(
@@ -554,8 +564,11 @@ pub(crate) struct AccountStream {
 pub(crate) struct MemberWatch {
     pub space_streams: Vec<(&'static str, WatchedRows<SpaceAddress>)>,
     pub covered: BTreeSet<SpaceAddress>,
+    pub subscribed: BTreeSet<SpaceAddress>,
     #[cfg(any(test, feature = "testing"))]
     pub last_check_rows: usize,
+    #[cfg(any(test, feature = "testing"))]
+    pub delivery_reads: (usize, usize),
     #[cfg(any(test, feature = "testing"))]
     pub chain_reads: usize,
     #[cfg(any(test, feature = "testing"))]
@@ -655,7 +668,13 @@ impl Shared {
         let space = db_address(address);
         let now = self.now();
         let last = self.written.borrow_mut().insert(space.clone(), now);
-        if last.is_none_or(|time| now.duration_since(time) >= std::time::Duration::from_secs(60)) {
+        let watch = self.member_watch.borrow();
+        let subscribed = watch.covered.contains(&space) && watch.subscribed.contains(&space);
+        drop(watch);
+        if !subscribed
+            && last
+                .is_none_or(|time| now.duration_since(time) >= std::time::Duration::from_secs(60))
+        {
             self.member_watch
                 .borrow_mut()
                 .spaces

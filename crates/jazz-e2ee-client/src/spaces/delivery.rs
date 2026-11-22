@@ -22,10 +22,10 @@ use jazz_e2ee::protocol::records::space::SpaceAddress as ProtocolAddress;
 use jazz_e2ee::protocol::space::AccountDirectory;
 use jazz_e2ee::protocol::space::build::{Author, SpaceWriter, deliver, recover_rotation, rotate};
 use jazz_e2ee::protocol::space::members::{
-    DELIVERY_BATCH, lacking, rotation_mark, rotation_recipients,
+    DELIVERY_BATCH, lacking_held, rotation_mark, rotation_recipients,
 };
 
-use super::{ATTEMPTS, Replayed, offline, protocol_address};
+use super::{ATTEMPTS, Replayed, SpaceReadPurpose, offline, protocol_address};
 use crate::client::{E2eeClient, SharedRandom};
 use crate::error::ClientError;
 use crate::state::{Report, db_address};
@@ -57,7 +57,9 @@ impl E2eeClient {
         address: &ProtocolAddress,
         space: &SpaceAddress,
     ) -> Result<usize, ClientError> {
-        let read = self.read_space_of(db, tx, address, true).await?;
+        let mut read = self
+            .read_space_of(db, tx, address, SpaceReadPurpose::Deliver)
+            .await?;
         let members = read.ledger.member_accounts().len();
         if members > MEMBER_LIMIT {
             self.shared.event(
@@ -73,7 +75,7 @@ impl E2eeClient {
             member,
             acquisition,
             ..
-        } = self.replay_space(&read).await?;
+        } = self.replay_space(&mut read).await?;
         let (Some(chain), Some(acquisition)) = (chain, acquisition) else {
             if let Some(deps) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
                 *deps = Default::default();
@@ -164,7 +166,7 @@ impl E2eeClient {
                 .rotation_pending
                 .remove(address);
         }
-        let lacking = lacking(&chain, &read.ledger, &directory)?;
+        let lacking = lacking_held(&chain, &read.ledger, &directory, &acquisition.keys)?;
         let suite = self.shared.registry.select(&self.shared.selected)?;
         let writer = SpaceWriter {
             suite,
@@ -427,13 +429,15 @@ impl E2eeClient {
         kind: Rotation,
         deadline: Option<web_time::Instant>,
     ) -> Result<Option<(usize, Vec<String>)>, ClientError> {
-        let read = self.read_space_of(db, tx, address, true).await?;
+        let mut read = self
+            .read_space_of(db, tx, address, SpaceReadPurpose::Rotate)
+            .await?;
         let Replayed {
             chain,
             member,
             acquisition,
             ..
-        } = self.replay_space(&read).await?;
+        } = self.replay_space(&mut read).await?;
         if !member {
             return Err(ProtocolError::Refused(RefusalCode::NotAMember).into());
         }
@@ -522,10 +526,12 @@ impl E2eeClient {
         address: &ProtocolAddress,
         accounts: &[String],
     ) -> Result<usize, ClientError> {
-        let read = self.read_space_of(db, tx, address, true).await?;
+        let mut read = self
+            .read_space_of(db, tx, address, SpaceReadPurpose::Rotate)
+            .await?;
         let Replayed {
             chain, acquisition, ..
-        } = self.replay_space(&read).await?;
+        } = self.replay_space(&mut read).await?;
         let (Some(chain), Some(acquisition)) = (chain, acquisition) else {
             return Ok(0);
         };

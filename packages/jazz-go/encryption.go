@@ -339,6 +339,8 @@ func (e *Encryption) DeviceID(ctx context.Context) (string, error) {
 type Device struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
+	// RemovalRequested says whether this device has published a request to be removed.
+	RemovalRequested bool `json:"removalRequested"`
 }
 
 // Devices lists the account's devices.

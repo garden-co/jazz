@@ -65,11 +65,11 @@ pub use account::{
 pub use client::{ClientConfig, E2eeClient};
 pub use error::ClientError;
 pub use keyless::KeylessHooks;
-#[cfg(any(test, feature = "testing"))]
-pub use spaces::successor_probe;
 pub use spaces::{
     MEMBER_LIMIT, SpaceCreation, SpaceKeyState, SpaceWatch, account_watch_queries, watch_queries,
 };
+#[cfg(any(test, feature = "testing"))]
+pub use spaces::{epoch_deliveries_query, successor_probe};
 pub use state::{MAX_REPORTS, Report};
 pub use store::{MemoryStore, PrivateStore, StoreError, Stored};
 pub use values::CELL_TYPE_ENCODING;

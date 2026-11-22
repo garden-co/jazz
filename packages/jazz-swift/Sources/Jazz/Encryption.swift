@@ -167,6 +167,8 @@ public struct EncryptionState: Decodable, Sendable {
 public struct Device: Decodable, Hashable, Sendable {
     public var id: String
     public var status: String
+    /// Whether this device has published a request to be removed.
+    public var removalRequested: Bool
 }
 
 /// The deliveries written and the spaces whose delivery failed in one pass.

@@ -138,6 +138,14 @@ impl E2eeClient {
     ) -> Result<(Vec<Accepted<R>>, u64), ClientError> {
         let prepared = db.prepare_query(&query)?;
         let read = db.tx_ref(tx).ledger_read(&prepared).await?;
+        #[cfg(any(test, feature = "testing"))]
+        if R::TABLE == rows::SPACE_DELIVERIES {
+            let bounded = query.filters.iter().any(|filter| matches!(filter,
+                Predicate::Eq(Operand::Column(name), _) | Predicate::In(Operand::Column(name), _) if name == "keyEpochId"));
+            let mut watch = self.shared.member_watch.borrow_mut();
+            watch.delivery_reads.0 += read.rows.len();
+            watch.delivery_reads.1 += usize::from(!bounded);
+        }
         let mut rows = Vec::with_capacity(read.rows.len());
         for (row, at) in &read.rows {
             match R::decode(row) {
