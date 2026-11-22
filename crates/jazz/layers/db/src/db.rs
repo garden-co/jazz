@@ -2497,6 +2497,13 @@ impl Db {
             .collect()
     }
 
+    /// The specialised indexes whose last build batch failed, as (table,
+    /// index, why). Each is retried every tick; until it succeeds, searches
+    /// of that index say it is building.
+    pub fn index_build_errors(&self) -> Vec<(String, String, Error)> {
+        crate::ix::build_errors(&self.inner().conn)
+    }
+
     /// This store's own commits the authority refused, with their payloads,
     /// oldest first (INV-TX-9). Kept only while
     /// [`Db::track_upstream_rejections`] is on, until discarded.
@@ -5241,12 +5248,29 @@ impl Inner {
         Ok(())
     }
 
-    /// Build one batch of an index still building, in its own savepoint
-    /// (a transaction of its own outside any other). Returns whether one
-    /// is still building.
-    pub(crate) fn build_indexes_step(&self) -> Result<bool, Error> {
+    /// Build one batch of the first index still building whose batch
+    /// succeeds. A failed one is reported ([`Db::index_build_errors`]) and
+    /// retried at a later tick: it stops neither this tick nor the other
+    /// indexes' builds.
+    pub(crate) fn build_indexes_step(&self) -> Result<(), Error> {
         self.ensure_indexes()?;
-        self.conn.scope("jazz_ix_build", crate::ix::build_step)
+        for index in crate::ix::building_indexes(&self.conn)? {
+            if self.build_index_batch(&index).is_ok() {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Build `index`'s next batch in a scope of its own (a transaction of
+    /// its own outside any other), and record how it went. Whether there
+    /// was one to take.
+    fn build_index_batch(&self, index: &crate::ix::Index) -> Result<bool, Error> {
+        let built = self
+            .conn
+            .scope("jazz_ix_build", |conn| crate::ix::build_batch(conn, index));
+        crate::ix::batch_ended(&self.conn, index, built.as_ref().err());
+        built
     }
 
     /// Plan `search` for a read of `prepared` (SPEC 20.4-20.5): the index
@@ -5284,8 +5308,10 @@ impl Inner {
             if authority {
                 return Err(crate::ix::building(&table.name, &index.decl.name));
             }
-            if !self.build_indexes_step()? {
-                break;
+            // Its own batches only: no other index's build is waited on.
+            // Without one to take it stays unbuilt, and is never read so.
+            if !self.build_index_batch(&index)? {
+                return Err(crate::ix::building(&table.name, &index.decl.name));
             }
         }
         if !crate::ix::is_scored(&index.decl.kind) {

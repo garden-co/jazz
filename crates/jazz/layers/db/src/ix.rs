@@ -15,7 +15,7 @@
 //!   released (see [`crate::values::end_savepoint`]) and before any read of
 //!   a shadow table.
 //! - **Builds.** A new or changed declaration is built in bounded batches
-//!   ([`build_step`]), each its own transaction, with `state = 0` until done.
+//!   ([`build_batch`]), each its own transaction, with `state = 0` until done.
 //! - **Queries.** A kind plans a search as a candidate relation
 //!   `ix(rid, score)`, either SQL ([`Candidates::Sql`]) or scored in Rust
 //!   over the rows the query's other clauses match ([`Candidates::Scored`]).
@@ -43,6 +43,7 @@ use jazz_model::model::public_schema::{SpecialisedIndex, SpecialisedIndexKind};
 pub(crate) const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS _jazz_ix (tbl TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, \
  encoding TEXT NOT NULL, decl BLOB NOT NULL, state INTEGER NOT NULL, built INTEGER NOT NULL DEFAULT 0, \
+ build_to INTEGER NOT NULL DEFAULT 0, \
  PRIMARY KEY (tbl, name));
 CREATE TABLE IF NOT EXISTS _jazz_ix_dirty (tbl TEXT NOT NULL, rid INTEGER NOT NULL, PRIMARY KEY (tbl, rid));
 CREATE TABLE IF NOT EXISTS _jazz_ix_incomplete (tbl TEXT NOT NULL, rid INTEGER NOT NULL, PRIMARY KEY (tbl, rid));";
@@ -290,6 +291,9 @@ pub(crate) struct Indexes {
     /// client), by logical table and name.
     pub declared: BTreeMap<(String, String), SpecialisedIndex>,
     pub chunks: Option<Arc<crate::large::Chunks>>,
+    /// The indexes whose last build batch failed, by stored table and
+    /// name: the logical table, and why (see [`batch_ended`]).
+    pub build_errors: BTreeMap<(String, String), (String, Error)>,
     /// The schema version and replica-ness [`reconcile`] last ran for.
     pub reconciled: Option<(crate::ids::SchemaVersionId, bool)>,
 }
@@ -369,7 +373,7 @@ fn kind_parts(kind: &str) -> &'static [&'static str] {
 /// under its stored names): drop removed ones, (re)create new and changed
 /// ones as building, and (re)write each indexed table's triggers. A
 /// client (`replica`) leaves server-only indexes out. Runs inside the
-/// caller's transaction; builds happen later, in [`build_step`].
+/// caller's transaction; builds happen later, in [`build_batch`].
 pub(crate) fn reconcile(conn: &Storage, schema: &Schema, replica: bool) -> Result<(), Error> {
     let registry = registry(conn);
     let mut desired: BTreeMap<(String, String), Rc<Index>> = BTreeMap::new();
@@ -460,24 +464,28 @@ pub(crate) fn reconcile(conn: &Storage, schema: &Schema, replica: bool) -> Resul
             continue;
         }
         crate::db::execute_script(conn, &index.kind.ddl(&index.prefix))?;
-        // An empty table's index is built as soon as it exists.
-        let empty: bool = conn
-            .query_row(
-                &format!("SELECT NOT EXISTS (SELECT 1 FROM {})", quote(tbl)),
-                [],
-                |r| r.get(0),
-            )
+        // A build covers the rows stored as it starts, so it stops at the
+        // highest `rid` there is now. An empty table's index has none to
+        // cover: it is built as soon as it exists.
+        let build_to: Option<i64> = conn
+            .query_row(&format!("SELECT max(rid) FROM {}", quote(tbl)), [], |r| {
+                r.get(0)
+            })
             .map_err(storage)?;
         conn.execute(
-            "INSERT INTO _jazz_ix (tbl, name, kind, encoding, decl, state, built) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, -9223372036854775808)",
+            "INSERT INTO _jazz_ix (tbl, name, kind, encoding, decl, state, built, build_to) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, -9223372036854775808, ?7)",
             crate::storage::params![
                 tbl,
                 name,
                 index.decl.kind.kind_name().as_str(),
                 index.kind.encoding(),
                 stored_decl_bytes(index),
-                if empty { STATE_READY } else { STATE_BUILDING }
+                match build_to {
+                    Some(_) => STATE_BUILDING,
+                    None => STATE_READY,
+                },
+                build_to.unwrap_or(i64::MIN)
             ],
         )
         .map_err(storage)?;
@@ -518,6 +526,7 @@ pub(crate) fn reconcile(conn: &Storage, schema: &Schema, replica: bool) -> Resul
     let mut registry = registry.borrow_mut();
     registry.by_table = by_table;
     registry.declared = declared;
+    registry.build_errors.clear();
     Ok(())
 }
 
@@ -794,76 +803,121 @@ fn read_whole(registry: &Indexes, column: &Column, cell: ValueRef<'_>) -> Result
     }
 }
 
-/// One build batch: the first index still building indexes its next
-/// [`BUILD_BATCH`] rows by `rid`. Returns whether any index is still
-/// building. The caller runs each step in its own transaction.
-pub(crate) fn build_step(conn: &Storage) -> Result<bool, Error> {
+/// The maintained indexes still building, in `(table, name)` order. One
+/// recorded but not maintained here (reconcile drops those) is passed over,
+/// so it holds up no other's build.
+pub(crate) fn building_indexes(conn: &Storage) -> Result<Vec<Rc<Index>>, Error> {
+    let Some(registry) = registered(conn) else {
+        return Ok(Vec::new());
+    };
+    let registry = registry.borrow();
+    if registry.by_table.is_empty() {
+        return Ok(Vec::new());
+    }
+    let recorded: Vec<(String, String)> = conn
+        .prepare_cached("SELECT tbl, name FROM _jazz_ix WHERE state = ?1 ORDER BY tbl, name")
+        .and_then(|mut s| {
+            s.query_map([STATE_BUILDING], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })
+        .map_err(storage)?;
+    Ok(recorded
+        .into_iter()
+        .filter_map(|(tbl, name)| {
+            let indexes = registry.by_table.get(&tbl)?;
+            indexes.iter().find(|i| i.decl.name == name).cloned()
+        })
+        .collect())
+}
+
+/// Build `index`'s next batch, in the caller's transaction: the rows past
+/// `built`, up to `build_to`, the highest `rid` stored when the build
+/// started. A row written after that (a higher `rid`, a lower one, a
+/// reused one) is in the queue its triggers fill, so the build ends however
+/// fast rows arrive. Returns whether there was a batch to take: `false`
+/// when the index records no build.
+pub(crate) fn build_batch(conn: &Storage, index: &Index) -> Result<bool, Error> {
     let Some(registry) = registered(conn) else {
         return Ok(false);
     };
     let registry = registry.borrow();
-    if registry.by_table.is_empty() {
-        return Ok(false);
-    }
-    let building: Option<(String, String, i64)> = conn
+    let (tbl, name) = (&index.stored, &index.decl.name);
+    let progress: Option<(i64, i64)> = conn
         .prepare_cached(
-            "SELECT tbl, name, built FROM _jazz_ix WHERE state = ?1 ORDER BY tbl, name LIMIT 1",
+            "SELECT built, build_to FROM _jazz_ix WHERE tbl = ?1 AND name = ?2 AND state = ?3",
         )
         .and_then(|mut s| {
-            let mut rows = s.query([STATE_BUILDING])?;
-            rows.next()?
-                .map(|r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .transpose()
+            let mut rows = s.query(crate::storage::params![tbl, name, STATE_BUILDING])?;
+            rows.next()?.map(|r| Ok((r.get(0)?, r.get(1)?))).transpose()
         })
         .map_err(storage)?;
-    let Some((tbl, name, built)) = building else {
-        return Ok(false);
-    };
-    let Some(index) = registry
-        .by_table
-        .get(&tbl)
-        .and_then(|indexes| indexes.iter().find(|i| i.decl.name == name))
-    else {
-        // Recorded but not maintained here: reconcile drops it.
+    let Some((built, build_to)) = progress else {
         return Ok(false);
     };
     let rids: Vec<i64> = conn
         .prepare_cached(&format!(
-            "SELECT rid FROM {} WHERE rid > ?1 ORDER BY rid LIMIT ?2",
-            quote(&tbl)
+            "SELECT rid FROM {} WHERE rid > ?1 AND rid <= ?2 ORDER BY rid LIMIT ?3",
+            quote(tbl)
         ))
         .and_then(|mut s| {
-            s.query_map(crate::storage::params![built, BUILD_BATCH as i64], |r| {
-                r.get(0)
-            })?
+            s.query_map(
+                crate::storage::params![built, build_to, BUILD_BATCH as i64],
+                |r| r.get(0),
+            )?
             .collect()
         })
         .map_err(storage)?;
     for rid in &rids {
         write_row(conn, &registry, index, *rid)?;
     }
-    let done = rids.len() < BUILD_BATCH;
+    let last = rids.last().copied().unwrap_or(built);
+    let done = rids.len() < BUILD_BATCH || last >= build_to;
     conn.execute(
         "UPDATE _jazz_ix SET built = ?3, state = ?4 WHERE tbl = ?1 AND name = ?2",
         crate::storage::params![
             tbl,
             name,
-            rids.last().copied().unwrap_or(built),
+            last,
             if done { STATE_READY } else { STATE_BUILDING }
         ],
     )
     .map_err(storage)?;
-    if !done {
-        return Ok(true);
+    Ok(true)
+}
+
+/// Record how `index`'s last batch went: what [`build_errors`] reports,
+/// logged when it changes rather than at every retry.
+pub(crate) fn batch_ended(conn: &Storage, index: &Index, failed: Option<&Error>) {
+    let registry = registry(conn);
+    let mut registry = registry.borrow_mut();
+    let key = (index.stored.clone(), index.decl.name.clone());
+    let Some(error) = failed else {
+        registry.build_errors.remove(&key);
+        return;
+    };
+    let failure = (index.table.clone(), error.clone());
+    let last = registry.build_errors.insert(key, failure);
+    if last.is_none_or(|(_, last)| last.message != error.message) {
+        tracing::warn!(
+            table = %index.table,
+            index = %index.decl.name,
+            %error,
+            "a specialised index's build failed on a batch; it is retried, and searches of it wait"
+        );
     }
-    let more: bool = conn
-        .query_row(
-            "SELECT EXISTS (SELECT 1 FROM _jazz_ix WHERE state = ?1)",
-            [STATE_BUILDING],
-            |r| r.get(0),
-        )
-        .map_err(storage)?;
-    Ok(more)
+}
+
+/// The indexes whose last batch failed: logical table, name and why.
+pub(crate) fn build_errors(conn: &Storage) -> Vec<(String, String, Error)> {
+    let Some(registry) = registered(conn) else {
+        return Vec::new();
+    };
+    let registry = registry.borrow();
+    registry
+        .build_errors
+        .iter()
+        .map(|((_, name), (table, error))| (table.clone(), name.clone(), error.clone()))
+        .collect()
 }
 
 /// Whether `index` on stored table `tbl` is built.
