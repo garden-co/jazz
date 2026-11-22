@@ -141,10 +141,13 @@ describe("vector filters compare whole values, bit for bit (SPEC 6.1.1)", () => 
     expect(() => conditions("isNull", true)).not.toThrow();
   });
 
-  it("refuses ordering, contains, a wrong length and non-finite literals", () => {
+  it("leaves which operators a vector takes to the engine (jazz#5966)", () => {
     for (const op of ["gt", "gte", "lt", "lte", "contains"]) {
-      expect(() => conditions(op, [1, 2])).toThrow(/only supports eq\/ne\/in\/notIn\/isNull/);
+      expect(() => conditions(op, [1, 2])).not.toThrow();
     }
+  });
+
+  it("refuses a wrong length and non-finite literals", () => {
     expect(() => conditions("eq", [1, 2, 3])).toThrow(/3 elements, expected 2/);
     expect(() => conditions("eq", { $f32le: "0000c07f0000803f" })).toThrow(/element 0/);
   });
