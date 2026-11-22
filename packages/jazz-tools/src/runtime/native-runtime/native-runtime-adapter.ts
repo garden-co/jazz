@@ -1177,6 +1177,13 @@ export class NativeRuntimeAdapter implements Runtime {
     handle?: Encryption;
     online?: boolean;
   };
+  /**
+   * The server link of the shared worker this tab follows, as the worker's
+   * link fates relay it, and the worker connection that relayed it. A tab
+   * behind a worker has no link of its own: without this its encryption
+   * would take the tab's own `local-only` status for the server's.
+   */
+  private workerLink: { from: object; link: LinkStatus } | null = null;
 
   static fromDb(
     db: NativeDb,
@@ -1878,11 +1885,38 @@ export class NativeRuntimeAdapter implements Runtime {
     this.syncStatusPublisher.changed();
   }
 
-  /** Tells the encryption runtime when the connection to the server goes away or comes back. */
+  /**
+   * The server link of the worker this tab follows, from a link fate the
+   * worker connection `from` received. The tab's encryption is online
+   * only while it is connected.
+   */
+  noteWorkerLink(from: object, link: LinkStatus): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.noteWorkerLink(from, link);
+    this.workerLink = { from, link };
+    this.signalEncryptionOnline();
+  }
+
+  /**
+   * The worker connection `from` failed: until another relays the
+   * worker's link, this tab cannot reach the server.
+   */
+  forgetWorkerLink(from: object): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.forgetWorkerLink(from);
+    if (this.workerLink?.from !== from) return;
+    this.workerLink = { from, link: offlineLink("stopped") };
+    this.signalEncryptionOnline();
+  }
+
+  /**
+   * Tells the encryption runtime when the connection to the server goes away
+   * or comes back: the worker's link in a tab that follows one, this
+   * runtime's own otherwise.
+   */
   private signalEncryptionOnline(): void {
     const state = this.ownerRuntime.encryptionState;
     if (!state || this !== this.ownerRuntime || this.closed) return;
-    const online = this.upstreamLinkStatus().state === "connected";
+    const link = this.workerLink?.link ?? this.upstreamLinkStatus();
+    const online = link.state === "connected";
     if (state.online === online) return;
     state.online = online;
     try {

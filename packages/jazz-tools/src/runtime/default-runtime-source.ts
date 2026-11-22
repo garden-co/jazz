@@ -353,6 +353,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     if (!(runtime instanceof NativeRuntimeAdapter)) {
       throw new Error("Browser worker connections require the native runtime adapter");
     }
+    ({ onRemoteLinkChange, onFailure } = relayWorkerLink(runtime, onRemoteLinkChange, onFailure));
     const session = sessionFromConfig(config);
     const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
     const backendMode = isBackendRuntime(config);
@@ -443,6 +444,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     if (!(runtime instanceof NativeRuntimeAdapter)) {
       throw new Error("Browser follower connections require the native runtime adapter");
     }
+    ({ onRemoteLinkChange, onFailure } = relayWorkerLink(runtime, onRemoteLinkChange, onFailure));
     const sessionClaims = sessionFromConfig(config)?.claims ?? {};
     const connection = new MessagePortBrowserFollowerConnection(
       runtime,
@@ -568,5 +570,29 @@ export function browserWorkerTransportAuth(config: DbConfig): Record<string, unk
     // Sending them here would override JWT admission at the server and remove
     // this connection's scope-isolated client-relay capability.
     ...(config.cookieSession ? { backend_session: config.cookieSession } : {}),
+  };
+}
+
+/**
+ * The callbacks of one connection to the shared worker, also telling the
+ * tab's runtime the worker's server link: a tab has no link of its own, and
+ * its encryption is online only while the worker is connected. A connection
+ * that fails takes its link with it.
+ */
+function relayWorkerLink(
+  runtime: NativeRuntimeAdapter,
+  onRemoteLinkChange: BrowserWorkerConnectionContext["onRemoteLinkChange"],
+  onFailure: BrowserWorkerConnectionContext["onFailure"],
+): Pick<BrowserWorkerConnectionContext, "onRemoteLinkChange" | "onFailure"> {
+  const connection = {};
+  return {
+    onRemoteLinkChange: (state, link) => {
+      if (link) runtime.noteWorkerLink(connection, link);
+      onRemoteLinkChange?.(state, link);
+    },
+    onFailure: (error) => {
+      runtime.forgetWorkerLink(connection);
+      onFailure(error);
+    },
   };
 }
