@@ -166,6 +166,8 @@ One `Jazz` at a time has a persistent `dataDir` open. Opening it again, in this 
 writer, so share that `Jazz`, or use another directory. On Android, keep it somewhere that outlives
 a screen, such as your `Application`. Opening right after `close()` waits for it to finish.
 
+An end user's persistent store goes in `dataDir/<account>/`, so each user of one directory has their own. An app without a user keeps its store in `dataDir` itself, and refuses one there that a signed-in user wrote (an earlier version kept users' stores there): open it as that user, or delete it.
+
 `jazz.deleteClientStorage()` closes the app and deletes its local store. Once it is closed,
 `jazz.session` reads `SignedOut`.
 

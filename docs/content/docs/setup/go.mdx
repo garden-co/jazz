@@ -86,6 +86,8 @@ db, err := jazzapp.Open(ctx, jazz.Config{
 })
 ```
 
+An end user's persistent store goes in `DataDir/<account>/`, so each user of one directory has their own. An app without a user keeps its store in `DataDir` itself, and refuses one there that a signed-in user wrote (an earlier version kept users' stores there): open it as that user, or delete it.
+
 Keep a device key like a password: `jazz.FileStore` keeps it in a file only its owner can read;
 implement `jazz.SecretStore` to keep it in the OS keychain. `db.Session(ctx)` is who is signed in,
 `db.OnSession(ctx)` and `db.OnSyncStatus(ctx)` are channels of their changes, and `db.Refresh(ctx)`

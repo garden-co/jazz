@@ -31,6 +31,8 @@ test-relay = [
 ]
 
 [dependencies]
+# Reads an old store's authors before the engine opens it.
+rusqlite = "0.40"
 axum = { version = "0.8.9", optional = true, default-features = false, features = [
   "http1",
   "tokio",

@@ -211,6 +211,54 @@ impl Jazz {
     }
 }
 
+/// Refuses a store at `dir` that a signed-in user wrote, which an earlier
+/// version kept at the dir itself, for an open with no user: every author
+/// of a store such an app writes is its own anonymous one (or there is none
+/// yet, and nothing in it is anyone's).
+pub(crate) fn refuse_a_users_store(dir: &Path) -> Result<()> {
+    let store = dir.join("jazz.sqlite");
+    if !store.exists() {
+        return Ok(());
+    }
+    let own = std::fs::read_to_string(dir.join("client_id")).unwrap_or_default();
+    let unreadable = |error: rusqlite::Error| {
+        Error::Config(format!(
+            "cannot read the store at {}: {error}",
+            dir.display()
+        ))
+    };
+    let db = rusqlite::Connection::open_with_flags(
+        &store,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(unreadable)?;
+    let has_authors = db
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_authors'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !has_authors {
+        return Ok(());
+    }
+    let others: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM _jazz_authors WHERE NOT (issuer = ?1 AND subject = ?2)",
+            [jazz::tools::identity::ANONYMOUS_ISSUER, own.trim()],
+            |row| row.get(0),
+        )
+        .map_err(unreadable)?;
+    if others > 0 {
+        return Err(Error::Refused(format!(
+            "the store at {} holds a signed-in user's data, kept there by an earlier version: \
+             open it as that user, or delete it",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
 /// The store files a client keeps in its directory.
 const STORE_FILES: [&str; 4] = [
     "jazz.sqlite",

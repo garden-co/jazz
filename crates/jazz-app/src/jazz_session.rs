@@ -684,22 +684,18 @@ impl JazzSession {
             self.set(|snapshot| snapshot.status = SessionStatus::Ready);
             return Ok(());
         }
-        let Some(signed_in) = crate::backend::sign_in(&endpoint, app, &token).await? else {
+        let Some(_signed_in) = crate::backend::sign_in(&endpoint, app, &token).await? else {
             self.replace(None, None, SessionStatus::SignedOut).await;
             return Ok(());
         };
         self.transition();
-        let config = self
-            .user_config(signed_in.account)
-            .user(Auth::Bearer(bearer));
+        let config = self.user_config().user(Auth::Bearer(bearer));
         self.switch_to(config, None).await
     }
 
     async fn sign_in_device(&self, key: DeviceKey) -> Result<()> {
         self.transition();
-        let config = self
-            .user_config(key.account(self.inner.config.app_id))
-            .user(Auth::Device(key.clone()));
+        let config = self.user_config().user(Auth::Device(key.clone()));
         self.switch_to(config, Some(key)).await
     }
 
@@ -741,12 +737,10 @@ impl JazzSession {
         let session = jazz
             .session()
             .ok_or_else(|| Error::Config("the device account's client has no session".into()))?;
-        let user = session.link(token).await?;
+        session.link(token).await?;
         drop(jazz);
         self.transition();
-        let config = self
-            .user_config(user.account)
-            .user(Auth::Bearer(bearer.clone()));
+        let config = self.user_config().user(Auth::Bearer(bearer.clone()));
         self.switch_to(config, None).await
     }
 
@@ -831,11 +825,12 @@ impl JazzSession {
 
     /// A user's client config: their own store under the session's
     /// directory.
-    fn user_config(&self, account: AccountId) -> Config {
+    fn user_config(&self) -> Config {
         let config = &self.inner.config;
         let storage = match &config.storage {
             Storage::Memory => Storage::Memory,
-            Storage::Dir(dir) => Storage::Dir(dir.join(account.0.to_string())),
+            // The client keeps the account's store in `<dir>/<account>/`.
+            Storage::Dir(dir) => Storage::Dir(dir.clone()),
         };
         let mut user = Config::new(config.app_id)
             .server(self.endpoint())

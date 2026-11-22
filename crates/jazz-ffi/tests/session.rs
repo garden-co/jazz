@@ -517,3 +517,49 @@ async fn no_token_callback_runs_after_the_session_closes() {
     .unwrap();
     app.backend.shutdown().await.unwrap();
 }
+
+/// Kotlin's path, which has no session: a user signs out of an app with a
+/// `dataDir`, and the next opens it as someone else. They see none of the
+/// first user's data, which stays theirs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signing_out_and_opening_as_someone_else_keeps_stores_apart() {
+    let app = App::start().await;
+    let dir = std::env::temp_dir().join(format!("jazz-ffi-users-{}", app.app_id));
+    let config = app.config(json!({ "auth": { "bearer": true }, "storage": "persistent",
+        "dataDir": dir.to_str().unwrap() }));
+    tokio::task::spawn_blocking(move || {
+        let open = |user: &str| {
+            jazz_ffi::JazzHandle::open_with_tokens(
+                config.clone(),
+                Arc::new(Bearer(Mutex::new(Some(format!("token-{user}"))))),
+            )
+            .unwrap()
+        };
+        let shows = || json!({ "table": "shows" }).to_string();
+        let alice = open("alice");
+        let account = alice.account().unwrap().unwrap();
+        alice.insert("shows".into(), show(&account)).unwrap();
+        alice.sign_out().unwrap();
+
+        let bob = open("bob");
+        assert_eq!(
+            parse(&bob.all_at(shows(), "local".into()).unwrap()),
+            json!([])
+        );
+        let account = bob.account().unwrap().unwrap();
+        bob.insert("shows".into(), show(&account)).unwrap();
+        bob.wait_for_sync("global".into())
+            .expect("bob's own write syncs");
+        bob.shutdown().unwrap();
+
+        let alice = open("alice");
+        let theirs = parse(&alice.all_at(shows(), "local".into()).unwrap());
+        assert_eq!(theirs.as_array().unwrap().len(), 1, "{theirs}");
+        alice.wait_for_sync("global".into()).unwrap();
+        alice.shutdown().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    })
+    .await
+    .unwrap();
+    app.backend.shutdown().await.unwrap();
+}
