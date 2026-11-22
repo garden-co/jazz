@@ -93,9 +93,15 @@ Both are baked into each posting's impact when a row is indexed, so changing
 a field's weight or length, like any change to the declaration, changes the
 declaration's canonical bytes and rebuilds the index (20.2).
 
-The artifact is the only place indexes are declared; generated bindings
-for each language read them from it. The JSON Schema in
-`docs/public/schemas/` lists the same keys as the reader.
+A TypeScript app declares them in `schema.ts`, from which `jazz.app.json`
+is generated (10.10): the column builders `s.vector(n)` and `s.point()`,
+and on a table `textIndex(name, fields, { analyzer, prefix })`,
+`vectorIndex(name, column, { metric })` and `geoIndex(name, column)`. Each
+emits the object above; `analyzer` and `metric` have no default there
+either, since both are part of the schema's id. An app in another language
+writes the objects in `jazz.app.json`. Generated bindings for each language
+read them from that artifact. The JSON Schema in `docs/public/schemas/`
+lists the same keys as the reader.
 
 Validation, at schema construction, with a typed error naming the table,
 index and option:
@@ -845,8 +851,9 @@ validation errors are query errors naming the table and index. A search at
 ## 20.13 Compatibility with v2.0.0-beta.0
 
 What the released v2.0.0-beta.0 crates and this chapter's implementation do
-with each other's stores and peers, as observed on native storage. The two
-items marked so are open.
+with each other's stores and peers, as observed: peers on native storage,
+opening and downgrade also on browser (IndexedDB) and Durable Object
+storage. The two items marked so are open.
 
 **Stores of beta.0.** One whose app declares none of this chapter gains no
 schema object on opening, and beta.0 reads it back, this build's writes
