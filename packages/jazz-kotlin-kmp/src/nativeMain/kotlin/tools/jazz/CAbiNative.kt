@@ -145,6 +145,7 @@ public class CAbiNative private constructor(private var handle: CPointer<JazzHan
         return (result as? JsonPrimitive)?.booleanOrNull
     }
 
+    override fun bundle(): String? = (callJson("bundle") as? JsonPrimitive)?.takeUnless { it is JsonNull }?.content
     override fun waitForSync(tier: String) {
         call("waitForSync", buildJsonObject { put("tier", tier) })
     }

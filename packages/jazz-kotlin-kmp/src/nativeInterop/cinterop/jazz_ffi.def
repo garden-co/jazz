@@ -3,4 +3,7 @@
 # library (libjazz_ffi.a for the target), which the klib then carries.
 headers = jazz_ffi.h
 package = tools.jazz.cabi
-
+# What libjazz_ffi.a needs on Apple platforms (as jazz-swift's Package.swift
+# declares). Here rather than in Gradle, so a consumer linking the klib gets them.
+linkerOpts.ios = -framework CoreFoundation -framework Security -framework SystemConfiguration -liconv -lresolv
+linkerOpts.osx = -framework CoreFoundation -framework Security -framework SystemConfiguration -liconv -lresolv

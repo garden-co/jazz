@@ -9,6 +9,8 @@
 // `gradle jvmTest linuxX64Test` (Gradle 8.14, as dev/scripts/kotlin-toolchain.sh pins).
 
 import org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget
+import org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType
+import org.jetbrains.kotlin.konan.target.Family
 import org.jetbrains.kotlin.konan.target.KonanTarget
 
 plugins {
@@ -25,6 +27,7 @@ version = (groovy.json.JsonSlurper().parse(repo.resolve("packages/jazz-tools/pac
 
 repositories { mavenCentral() }
 
+val iosMinVersion = "16.0"
 val cargoProfile = (findProperty("cargoProfile") as String?) ?: "dev"
 val profileDir = if (cargoProfile == "dev") "debug" else cargoProfile
 val hostLib = repo.resolve("target/$profileDir/libjazz_ffi.so")
@@ -82,9 +85,21 @@ kotlin {
                 tasks.named(interopProcessingTaskName) { dependsOn(buildGlibcShim) }
             }
         }
-        if (konanTarget.family.isAppleFamily) {
+        if (konanTarget.family == Family.IOS) {
+            // libjazz_ffi.a is built for iOS 16.0, as JazzFFI.xcframework is
+            // (dev/scripts/build-swift-xcframework.sh); Kotlin/Native's default is older.
             binaries.all {
-                linkerOpts("-framework", "CoreFoundation", "-framework", "Security", "-framework", "SystemConfiguration", "-liconv", "-lresolv")
+                freeCompilerArgs += "-Xoverride-konan-properties=osVersionMin.${konanTarget.name}=$iosMinVersion"
+            }
+            if (konanTarget == KonanTarget.IOS_ARM64) {
+                // The iOS gate (src/iosTest/…/DeviceLink.kt): an app's binary that
+                // calls the real jazz-ffi. Its linker map says what of it is jazz-ffi.
+                val linkMap = layout.buildDirectory.file("ios-gate-link-map.txt").get().asFile
+                binaries.executable("gate", listOf(NativeBuildType.RELEASE)) {
+                    compilation = compilations.getByName("test")
+                    entryPoint = "tools.jazz.gate.gateMain"
+                    linkerOpts("-map", linkMap.path)
+                }
             }
         }
     }
