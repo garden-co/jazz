@@ -383,8 +383,15 @@ describe("encryption on Node, end to end", () => {
     const unsubscribe = alice.db.encryption.onReport((report) => reports.push(report));
     const native = alice.db.encryption["native"];
     const call = native.encryptionCall.bind(native);
-    const resume = Promise.withResolvers<void>();
-    const finished = Promise.withResolvers<void>();
+    function signal() {
+      let resolve!: () => void;
+      const promise = new Promise<void>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    }
+    const resume = signal();
+    const finished = signal();
     const delayed = vi.spyOn(native, "encryptionCall").mockImplementation(async (op, args) => {
       if (op !== "prepareSpace") return call(op, args);
       await resume.promise;

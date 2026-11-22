@@ -813,15 +813,22 @@ impl Encryption {
                             .map_err(describe)?
                     )
                 } else {
-                    let deadline = args.get("deadline").and_then(Value::as_u64).map(|millis| {
+                    let deadline = if let Some(value) = args.get("deadline") {
+                        // NAPI passes JavaScript numbers above u32::MAX as
+                        // floats, including integer Unix timestamps in ms.
+                        let millis = value.as_f64().ok_or("expected deadline in milliseconds")?;
                         let now = web_time::SystemTime::now()
                             .duration_since(web_time::UNIX_EPOCH)
                             .unwrap_or_default();
-                        web_time::Instant::now()
-                            + Duration::from_millis(millis)
-                                .saturating_sub(now)
-                                .min(Duration::from_secs(10))
-                    });
+                        Some(
+                            web_time::Instant::now()
+                                + Duration::from_millis(millis as u64)
+                                    .saturating_sub(now)
+                                    .min(Duration::from_secs(10)),
+                        )
+                    } else {
+                        None
+                    };
                     json!(self.prepare_host_write(&space, deadline).await?)
                 }
             }
