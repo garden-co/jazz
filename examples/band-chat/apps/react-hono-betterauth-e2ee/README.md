@@ -79,9 +79,11 @@ authenticator, which needs a host name (`localhost`), not an IP address.
    profile and the join request. Admitting inserts both and clears the
    request in one transaction, then delivers the room's key ("Key not
    delivered yet" with a retry if that fails). Removing and leaving delete both
-   in one serializable transaction and wait for the server's answer; after a
-   removal the room's key is renewed at once ("Removed, but the room's key is
-   not renewed yet" with a retry if that fails).
+   in one serializable transaction and wait for the server's answer. When
+   the creator removes someone, BandChat tries to renew the room's key
+   immediately and offers a retry if it fails. A member who leaves cannot
+   renew the key. Once the creator's browser learns that the member left,
+   Jazz tries to renew the key before the creator's next encrypted write.
 8. **The members dialog** lists from the member rows, joined to profiles for
    names. A member with no profile shows as Unknown.
 9. **Devices and recovery**, in Your profile: this browser's status, approving

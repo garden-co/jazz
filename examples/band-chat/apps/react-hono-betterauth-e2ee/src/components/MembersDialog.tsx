@@ -49,7 +49,9 @@ export function MembersDialog({
   const pending = requests.filter((request) => !memberAuthors.has(request.requester));
   const [error, setError] = useState<string | null>(null);
   // What the last admission or removal left undone, each with its retry.
-  const [notice, setNotice] = useState<"delivery" | "rotation" | null>(null);
+  const [notice, setNotice] = useState<
+    { kind: "delivery"; reason?: string } | { kind: "rotation" } | null
+  >(null);
 
   const describe = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
@@ -65,32 +67,34 @@ export function MembersDialog({
       memberAuthor,
       memberProfileId,
       requestIds: requests.filter((r) => r.requester === memberAuthor).map((r) => r.id),
-    }).then(
-      (delivery) => setNotice(delivery.failed > 0 ? "delivery" : null),
-      (cause: unknown) => setError(`Admission refused: ${describe(cause)}`),
-    );
+    }).then(retryDelivery, (cause: unknown) => setError(`Admission refused: ${describe(cause)}`));
   }
 
   function retryDelivery() {
     setNotice(null);
     db.encryption.keys.deliver().then(
-      (delivery) => setNotice(delivery.failed > 0 ? "delivery" : null),
-      () => setNotice("delivery"),
+      (delivery) => setNotice(delivery.failed > 0 ? { kind: "delivery" } : null),
+      (cause: unknown) => setNotice({ kind: "delivery", reason: describe(cause) }),
     );
   }
 
   function renewKey() {
     setNotice(null);
-    renewRoomKey(db, roomId).catch(() => setNotice("rotation"));
+    renewRoomKey(db, roomId).catch(() => setNotice({ kind: "rotation" }));
   }
 
-  // Removal waits for the authority; only then is the room's key renewed, so
-  // the removed member reads nothing written later.
+  // Renew the key after the authority confirms that member rows were removed.
   function remove(accountId: string) {
     setError(null);
     setNotice(null);
     removeMember({ db, roomId, accountId }).then(
-      () => renewKey(),
+      (removed) => {
+        if (removed === 0) {
+          setError("No member rows were removed. You may not be able to see that member's rows.");
+          return;
+        }
+        renewKey();
+      },
       (cause: unknown) => setError(`Could not remove them: ${describe(cause)}`),
     );
   }
@@ -105,17 +109,21 @@ export function MembersDialog({
         {error ? (
           <Banner status="error" title={error} container="section" collapsible={false} />
         ) : null}
-        {notice === "delivery" ? (
+        {notice?.kind === "delivery" ? (
           <Banner
             status="warning"
             title="Key not delivered yet"
-            description="They are admitted, but cannot read the room until their key arrives."
+            description={
+              notice.reason
+                ? `They are admitted. Key delivery failed. ${notice.reason}`
+                : "They are admitted and can read the room once their key arrives."
+            }
             container="section"
             collapsible={false}
             endContent={<Button label="Retry" size="sm" onClick={retryDelivery} />}
           />
         ) : null}
-        {notice === "rotation" ? (
+        {notice?.kind === "rotation" ? (
           <Banner
             status="warning"
             title="Removed, but the room's key is not renewed yet"

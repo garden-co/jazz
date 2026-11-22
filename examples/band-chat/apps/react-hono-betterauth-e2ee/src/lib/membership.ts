@@ -93,8 +93,8 @@ export async function removeMember({
 
 /**
  * Admits an account: its member row and `roomMembers` row go in the one
- * transaction that clears its join requests, then keys are delivered.
- * Resolves with what delivery reported.
+ * transaction that clears its join requests. Resolves when the authority
+ * accepts the admission. The caller then delivers the keys.
  */
 export async function admitMember({
   db,
@@ -108,7 +108,7 @@ export async function admitMember({
   memberAuthor: string;
   memberProfileId: string;
   requestIds: string[];
-}): Promise<{ delivered: number; failed: number }> {
+}): Promise<void> {
   const memberRow = await db.encryption.members.row(roomSpace(roomId), memberAuthor);
   const written = await db.transaction((tx) => {
     tx.insert(app.__e2ee_members, memberRow);
@@ -116,7 +116,6 @@ export async function admitMember({
     for (const id of requestIds) tx.delete(app.joinRequests, id);
   });
   await written.wait({ tier: "global" });
-  return db.encryption.keys.deliver();
 }
 
 /**
