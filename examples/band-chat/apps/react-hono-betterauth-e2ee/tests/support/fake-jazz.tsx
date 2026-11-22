@@ -73,6 +73,7 @@ export function resetWorld() {
   world.asked = [];
   world.account = "alice-account";
   for (const fn of Object.values(db) as unknown[]) if (vi.isMockFunction(fn)) fn.mockClear();
+  db.all.mockReset().mockResolvedValue([{ id: "m" }]);
   db.encryption.keys.deliver.mockReset().mockResolvedValue({ delivered: 1, failed: 0 });
   db.encryption.keys.rotate.mockReset().mockResolvedValue(1);
   db.encryption.members.where.mockReset().mockImplementation(async (space, accountId) => ({
@@ -87,7 +88,9 @@ export function resetWorld() {
   }));
 }
 
-const written = () => ({ wait: vi.fn(async () => undefined) });
+const written = (): { wait: (options?: unknown) => Promise<unknown> } => ({
+  wait: async () => undefined,
+});
 
 export const db = {
   insert: vi.fn((..._args: unknown[]) => written()),
@@ -95,6 +98,8 @@ export const db = {
   delete: vi.fn((..._args: unknown[]) => written()),
   transaction: vi.fn(async (_run: (tx: unknown) => unknown) => written()),
   serializableTransaction: vi.fn(async (_run: (tx: unknown) => unknown) => written()),
+  /** The plain read of a room's first message: the room has one unless a test empties it. */
+  all: vi.fn(async (..._args: unknown[]) => [{ id: "m" }] as unknown[]),
   beginTransaction: vi.fn(),
   onMutationError: vi.fn(() => () => undefined),
   encryption: {

@@ -132,6 +132,16 @@ describe("removal", () => {
     expect(db.encryption.keys.rotate).toHaveBeenCalledWith({ table: "rooms", id: "room" });
   });
 
+  it("renews nothing, with no notice, when the room has no message and so no key yet", async () => {
+    db.serializableTransaction.mockImplementation(async () => ({ wait: async () => 1 }));
+    db.all.mockResolvedValue([]);
+    open([member("1", "alice-account"), member("2", "bob-account")]);
+    await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Remove" })));
+    await waitFor(() => expect(db.serializableTransaction).toHaveBeenCalled());
+    expect(db.encryption.keys.rotate).not.toHaveBeenCalled();
+    expect(screen.queryByText(/key is not renewed yet/)).toBeNull();
+  });
+
   it("does not renew the key when the removal is refused", async () => {
     db.serializableTransaction.mockRejectedValue(new Error("not allowed"));
     open([member("1", "alice-account"), member("2", "bob-account")]);

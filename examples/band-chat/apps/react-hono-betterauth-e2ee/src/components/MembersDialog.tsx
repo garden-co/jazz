@@ -14,7 +14,7 @@ import {
   VStack,
 } from "@astryxdesign/core";
 import { app, type E2eeMember, type JoinRequest } from "../../jazz.generated";
-import { admitMember, removeMember, rotateRoomKey } from "../lib/membership";
+import { admitMember, removeMember, renewRoomKey } from "../lib/membership";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
 import { roomLink } from "../lib/url-state";
 
@@ -79,7 +79,7 @@ export function MembersDialog({
 
   function renewKey() {
     setNotice(null);
-    rotateRoomKey(db, roomId).catch(() => setNotice("rotation"));
+    renewRoomKey(db, roomId).catch(() => setNotice("rotation"));
   }
 
   // Removal waits for the authority; only then is the room's key renewed, so
