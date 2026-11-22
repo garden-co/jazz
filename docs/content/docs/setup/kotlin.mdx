@@ -21,9 +21,10 @@ The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). It
 </Callout>
 
 <Callout type="warn" title="Known issue: close() can block for 30 seconds">
-  In 2.0.0-beta.0, `close()` (and the end of `use {}`) can block for 30 seconds while a call is
-  still waiting for the server: a write or `waitForSync` at `Global`, or a `Remote` read. On
-  Android's main thread that makes the app stop responding (ANR). Call it off the main thread:
+  In every release up to and including 2.0.0-beta.0, `close()` (and the end of `use {}`) can block
+  for 30 seconds while a call is still waiting for the server: a write or `waitForSync` at `Global`,
+  or a `Remote` read. On Android's main thread that makes the app stop responding (ANR). Call it off
+  the main thread:
 
 ```kotlin
 withContext(NonCancellable + Dispatchers.IO) { jazz.close() }

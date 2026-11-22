@@ -27,6 +27,12 @@ compared with TypeScript.
     **Known issue in Rust apps built for Android:** `Storage::Dir` fails to open with
     `try_lock_shared() not supported`, in every release up to and including 2.0.0-beta.0.
 
+    **Known issue in Rust apps on Android 6.0 and 7.0** (API 23 and 24; newer versions haven't been
+    checked yet): `DeviceKey::load_or_create` can't create a key and fails with
+    `Permission denied (os error 13)`, in every release up to and including 2.0.0-beta.0. Use
+    `DeviceKey::generate()` and keep the key's text form in the platform's secure store instead
+    (untested on Android).
+
     It doesn't support yet:
 
     - running your app's main backend (serving its `/jazz` and publishing its permissions): run it
