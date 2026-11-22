@@ -56,6 +56,7 @@ export class Wire {
   }
 
   async close(): Promise<void> {
+    this.resumeOutgoing();
     this.server?.closeAllConnections();
     await new Promise((resolve) => this.server?.close(resolve) ?? resolve(undefined));
   }
