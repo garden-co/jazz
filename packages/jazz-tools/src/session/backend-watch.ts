@@ -412,7 +412,13 @@ export function watchBackendUser<Client>(
         refusedLink.issuer === signedIn.issuer &&
         refusedLink.subject === signedIn.subject;
       // Not linking on its own: the app decides what becomes of this guest.
-      if (guest && !linkGuest && signedIn.hasAccount === false) return;
+      // A check of the watch's own leaves it as it is; the app's
+      // `reauthenticate` (its `refresh()`) is that decision: an account of
+      // the user's own, the guest staying on this device.
+      if (guest && !linkGuest && signedIn.hasAccount === false) {
+        if (!asked) return;
+        return attempt(session.loginWithBackend());
+      }
       if (guest && signedIn.hasAccount === false && !refusedBefore) {
         const link = { done: linkWithBackend(), result: undefined as unknown };
         linking = link;

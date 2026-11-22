@@ -1367,8 +1367,8 @@ it("keeps the guest when the user signs out while the link runs", async () => {
 it("with linkGuest off, leaves a guest whose user has no account to the app", async () => {
   const t = await guestSetup({ linkWithBackend: async () => user("alice"), linkGuest: false });
   t.backendNames(user("alice"));
-  await t.watch.reauthenticate();
   t.focus();
+  t.otherTab();
   await settle();
   expect(t.linkWithBackend).not.toHaveBeenCalled();
   expect(t.loginWithBackend).not.toHaveBeenCalled();
@@ -1384,6 +1384,30 @@ it("with linkGuest off, leaves a guest whose user has no account to the app", as
   expect(u.subject()).toBe("bob");
   await t.close();
   await u.close();
+});
+
+it("with linkGuest off, signs a user with no account in to their own on the app's reauthenticate", async () => {
+  const t = await guestSetup({
+    linkWithBackend: async () => user("alice"),
+    loginWithBackend: async () => user("alice"),
+    linkGuest: false,
+  });
+  t.backendNames(user("alice"));
+  t.focus();
+  await settle();
+  expect(t.subject()).toBe("guest");
+  // The app's decision after its own sign-in: an account of the user's own.
+  await t.watch.reauthenticate();
+  expect(t.linkWithBackend).not.toHaveBeenCalled();
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  expect(t.subject()).toBe("alice");
+  expect(t.session.getSnapshot().account?.identity.issuer).not.toBe("urn:jazz:local-first");
+  // Later checks leave the user signed in as themselves.
+  t.focus();
+  await settle();
+  expect(t.subject()).toBe("alice");
+  expect(t.linkWithBackend).not.toHaveBeenCalled();
+  await t.close();
 });
 
 it("keeps linking, never signs in instead, when the link fails for a reason that may pass", async () => {
