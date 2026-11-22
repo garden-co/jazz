@@ -834,9 +834,6 @@ pub async fn validate_jwt_with_cache_at(
 /// with this header and its backend secret; the core verifies the proof for
 /// that audience. The audience also namespaces the founder's account id.
 pub const DEVICE_ACCOUNT_AUDIENCE_HEADER: &str = "X-Jazz-Local-First-Audience";
-/// Deprecated alias of [`DEVICE_ACCOUNT_AUDIENCE_HEADER`].
-#[deprecated(note = "renamed to DEVICE_ACCOUNT_AUDIENCE_HEADER")]
-pub const LOCAL_FIRST_AUDIENCE_HEADER: &str = DEVICE_ACCOUNT_AUDIENCE_HEADER;
 
 /// The audience device-account proofs on this request are verified against: the
 /// app id, or the audience a trusted backend vouches for.
@@ -861,22 +858,6 @@ pub fn device_account_audience(
 /// the audience its proof was verified against, read as an app id.
 pub fn device_account_founding_app(audience: &str) -> AppId {
     crate::portable::accounts::device_account_founding_app(audience)
-}
-
-/// Deprecated alias of [`device_account_audience`].
-#[deprecated(note = "renamed to device_account_audience")]
-pub fn local_first_audience(
-    headers: &HeaderMap,
-    app_id: AppId,
-    config: &AuthConfig,
-) -> Result<String, UnauthenticatedResponse> {
-    device_account_audience(headers, app_id, config)
-}
-
-/// Deprecated alias of [`device_account_founding_app`].
-#[deprecated(note = "renamed to device_account_founding_app")]
-pub fn local_first_founding_app(audience: &str) -> AppId {
-    device_account_founding_app(audience)
 }
 
 /// Extract session from headers with priority resolution.
