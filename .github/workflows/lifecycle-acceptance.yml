@@ -48,7 +48,7 @@ jobs:
         lang:
           - { name: rust, runner: blacksmith-16vcpu-ubuntu-2404, artifacts: "release-server,release-npm", source: true }
           - { name: go, runner: blacksmith-4vcpu-ubuntu-2404, artifacts: "release-server,release-npm,release-languages", source: true }
-          - { name: kotlin, runner: ubuntu-24.04, artifacts: "release-server,release-npm,release-maven" }
+          - { name: kotlin, runner: blacksmith-16vcpu-ubuntu-2404, artifacts: "release-server,release-npm,release-maven" }
           - {
               name: swift,
               runner: ubuntu-24.04,

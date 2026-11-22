@@ -51,7 +51,7 @@ async function oneRound(context, rule, index) {
   } finally {
     await round.cleanup();
   }
-  return { ...outcome, notes: round.notes, ms: Date.now() - started };
+  return { ...outcome, notes: round.notes, times: round.times, ms: Date.now() - started };
 }
 
 async function runRule(context, rule) {
@@ -60,7 +60,7 @@ async function runRule(context, rule) {
   const outcomes = [];
   const gap = rule.notCovered?.[lang] ?? rule.notCovered?.all;
   if (gap) {
-    outcomes.push({ status: "NOT_COVERED", why: gap, notes: [], ms: 0 });
+    outcomes.push({ status: "NOT_COVERED", why: gap, notes: [], times: [], ms: 0 });
   } else {
     let next = 0;
     const worker = async () => {
@@ -71,7 +71,7 @@ async function runRule(context, rule) {
         if (outcomes[index].status === "NOT_COVERED") next = total;
       }
     };
-    await Promise.all(Array.from({ length: Math.min(rule.serial ? 1 : jobs, total) }, worker));
+    await Promise.all(Array.from({ length: Math.min(rule.jobs ?? jobs, total) }, worker));
   }
   const done = outcomes.filter(Boolean);
   const count = (status) => done.filter((outcome) => outcome.status === status).length;
@@ -82,6 +82,12 @@ async function runRule(context, rule) {
     (failures[outcome.tag] ??= { count: 0, example: outcome.why }).count++;
   const notes = {};
   for (const note of done.flatMap((outcome) => outcome.notes)) notes[note] = (notes[note] ?? 0) + 1;
+  const timings = {};
+  for (const [what, took] of done.flatMap((outcome) => outcome.times)) (timings[what] ??= []).push(took);
+  for (const took of Object.values(timings)) took.sort((a, b) => a - b);
+  const times = Object.fromEntries(
+    Object.entries(timings).map(([what, took]) => [what, { median: took[Math.floor(took.length / 2)], max: took.at(-1) }]),
+  );
 
   let status = failed ? "FAIL" : gaps ? "NOT_COVERED" : "PASS";
   let why = done.find((outcome) => outcome.status === "NOT_COVERED")?.why;
@@ -90,7 +96,7 @@ async function runRule(context, rule) {
     status = "NOT_COVERED";
   }
   const { id, title, basis } = rule;
-  return { id, title, basis, status, rounds: done.length, passed, failed, why, failures, notes, ms: Date.now() - started };
+  return { id, title, basis, status, rounds: done.length, passed, failed, why, failures, notes, times, ms: Date.now() - started };
 }
 
 const started = Date.now();
@@ -107,6 +113,8 @@ try {
     console.log(`${result.status} ${lang} ${result.id}${count} (${(result.ms / 1000).toFixed(1)}s)${result.why ? ` - ${result.why}` : ""}`);
     for (const [tag, { count: n, example }] of Object.entries(result.failures))
       console.log(`  ${n}x ${tag}${example === tag ? "" : `\n      e.g. ${example.slice(0, 700)}`}`);
+    for (const [what, { median, max }] of Object.entries(result.times))
+      console.log(`  ${what}: median ${median} ms, max ${max} ms`);
     for (const [note, n] of Object.entries(result.notes).slice(0, 8)) console.log(`  note ${n}x ${note}`);
   }
   const ms = Date.now() - started;

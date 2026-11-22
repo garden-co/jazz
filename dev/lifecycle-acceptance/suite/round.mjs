@@ -48,6 +48,7 @@ export class Round {
   #proxies = [];
   #base;
   notes = [];
+  times = [];
 
   constructor({ lang, driver, stack }, index) {
     Object.assign(this, { lang, driver, stack, index, sleep });
@@ -57,6 +58,10 @@ export class Round {
 
   note(text) {
     this.notes.push(redact(text));
+  }
+
+  time(what, ms) {
+    this.times.push([what, ms]);
   }
 
   dir(name = "store") {

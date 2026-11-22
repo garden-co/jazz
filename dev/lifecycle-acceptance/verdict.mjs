@@ -1,6 +1,7 @@
 // PASS / FAIL / NOT_COVERED per rule and language, from suite/run.mjs's results.
 // usage: CANDIDATES='<json list>' node verdict.mjs <results dir>
-// Fails closed: a language without results, or a rule without a result, is a FAIL.
+// Fails closed: a language without results, or a rule without a result, is a FAIL. Without a FAIL,
+// a rule that is undecided or covered elsewhere makes the verdict INCOMPLETE, never PASS.
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { LANGS } from "./lib/common.mjs";
@@ -23,6 +24,7 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
     const result = JSON.parse(readFileSync(file, "utf8"));
     if (result.sha === sha && result.run === String(run) && result.lang === lang) byLang[lang] = result;
   }
+  let open = 0; // rules nobody has decided or covered yet: no PASS over them
   const totals = { PASS: 0, FAIL: 0, NOT_COVERED: 0 };
   const rows = [];
   const reasons = [];
@@ -32,6 +34,7 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
       const got = byLang[lang]?.results.find((result) => result.id === rule.id);
       const is = got?.status ?? "FAIL";
       totals[is]++;
+      if (is === "NOT_COVERED" && (rule.basis === "pending" || rule.external)) open++;
       status[`${rule.id} ${lang}`] = is;
       if (!got) {
         console.log(`FAIL ${name} ${lang} ${rule.id}: no result (setup broke, see the job)`);
@@ -58,9 +61,9 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
     }
   }
 
-  const verdict = totals.FAIL ? "FAIL" : "PASS";
+  const verdict = totals.FAIL ? "FAIL" : open ? "INCOMPLETE" : "PASS";
   green &&= verdict === "PASS";
-  const line = `VERDICT ${name} ${verdict}: ${totals.PASS} PASS, ${totals.FAIL} FAIL, ${totals.NOT_COVERED} NOT_COVERED (sha ${sha}, run ${run})`;
+  const line = `VERDICT ${name} ${verdict}: ${totals.PASS} PASS, ${totals.FAIL} FAIL, ${totals.NOT_COVERED} NOT_COVERED, ${open} of them open (sha ${sha}, run ${run})`;
   console.log(line);
   const times = LANGS.map((lang) => (byLang[lang] ? `${lang} ${(byLang[lang].ms / 1000).toFixed(0)} s` : `${lang} none`));
   summary.push(
