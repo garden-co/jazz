@@ -7,7 +7,7 @@ import android.util.Log
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.concurrent.thread
-import kotlin.system.exitProcess
+import android.os.Process
 
 /**
  * Another process with an app open on the same store (`android:process` in
@@ -36,7 +36,8 @@ class HolderService : Service() {
         // Reading it here keeps R8 from dropping it, and the GC the app.
         Log.i(TAG, "the holder process stops, holding $open")
         File(filesDir, HELD).delete()
-        exitProcess(0)
+        // SIGKILL, with the app open: the lock has to go with the process.
+        Process.killProcess(Process.myPid())
     }
 
     @Volatile private var open: tools.jazz.Jazz? = null

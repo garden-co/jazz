@@ -190,7 +190,10 @@ timeout 20 "$adb" reverse "tcp:$relay_port" "tcp:$relay_port"
 mark "app installed"
 
 run="run-$app_id"
-for phase in write restart; do
+failed=()
+# Every phase runs, so one failure doesn't hide the next.
+for phase in memory write restart; do
+  # SIGKILLs the last phase's process, which `write` leaves with its app open.
   timeout 30 "$adb" shell am force-stop "$package"
   timeout 30 "$adb" logcat -c
   timeout 90 "$adb" shell am start -n "$package/smoke.SmokeActivity" \
@@ -198,16 +201,20 @@ for phase in write restart; do
   deadline=$((SECONDS + phase_seconds))
   while :; do
     log="$(timeout 20 "$adb" logcat -d -v brief -s JazzSmoke:V AndroidRuntime:E libc:F 2>/dev/null || true)"
-    if grep -q "$run $phase PASS" <<<"$log"; then break; fi
-    if grep -q "$run $phase FAIL\|FATAL EXCEPTION.*\|Fatal signal" <<<"$log"; then
-      echo "$log" >&2
-      fail "$phase failed"
+    if grep -q "$run $phase PASS" <<<"$log"; then
+      grep 'JazzSmoke' <<<"$log"
+      mark "$phase passed"
+      break
     fi
-    [ "$SECONDS" -lt "$deadline" ] || { echo "$log" >&2; fail "$phase gave no result in ${phase_seconds}s"; }
+    if grep -q "$run $phase FAIL\|FATAL EXCEPTION\|Fatal signal" <<<"$log" || [ "$SECONDS" -ge "$deadline" ]; then
+      echo "$log" >&2
+      mark "$phase FAILED"
+      failed+=("$phase")
+      break
+    fi
     sleep 1
   done
-  grep 'JazzSmoke' <<<"$log"
-  mark "$phase passed"
 done
+[ "${#failed[@]}" = 0 ] || fail "failed: ${failed[*]}"
 passed=true
 mark "passed"
