@@ -74,6 +74,7 @@ export async function installNpm() {
     console.log(`RESOLVED npm ${name} ${version} sha256 ${await sha256(tgz(name))}`);
   }
   for (const name of direct) assert(checked.has(name), `${name} wasn't installed`);
+  generate("backend", {}); // the app the backend serves
 }
 
 /** Copies schema.ts beside `markers` under the npm dir and generates there. Returns that dir. */

@@ -65,7 +65,7 @@ async fn perform(state: &State, request: &Value) -> Result<Value, Failure> {
             let jazz = jazz_app::open(config).await.map_err(failed)?;
             state.clients.lock().unwrap().insert(h.clone(), jazz);
         }
-        "account" => return Ok(json!(client()?.account().map(|account| account.to_string()))),
+        "account" => return Ok(json!(client()?.account().map(|account| account.0.to_string()))),
         "write" => {
             let owner = uuid::Uuid::parse_str(&text(request, "owner")).map_err(bad)?;
             let new = NewNote::new(text(request, "title"), ObjectId::from_uuid(owner));
@@ -78,7 +78,7 @@ async fn perform(state: &State, request: &Value) -> Result<Value, Failure> {
         "read" => {
             let tier = match text(request, "tier").as_str() {
                 "remote" => ReadTier::Remote,
-                _ => ReadTier::Local,
+                _ => ReadTier::LocalOnly,
             };
             let rows = client()?.all_with(jazz_app::notes::query(), tier).await.map_err(failed)?;
             let mut titles: Vec<String> = rows.into_iter().map(|note| note.title).collect();

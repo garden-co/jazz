@@ -148,6 +148,7 @@ jobs:
         with: { sparse-checkout: dev/lifecycle-acceptance, persist-credentials: false }
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with: { path: results, pattern: "lifecycle-*", merge-multiple: true }
+        # None at all means every leg broke in setup: the verdict says so.
         continue-on-error: true
       - name: PASS / FAIL / NOT_COVERED per rule and language
         env:

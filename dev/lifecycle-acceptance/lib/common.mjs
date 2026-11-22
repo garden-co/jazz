@@ -2,12 +2,13 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
 export const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
-export const WORK = resolve(process.env.LA_WORK ?? join(ROOT, ".work"));
+export const WORK = resolve(process.env.LA_WORK ?? join(tmpdir(), "jazz-lifecycle"));
 export const LANGS = ["rust", "swift", "kotlin", "go"];
 export const REPO = "garden-co/jazz";
 

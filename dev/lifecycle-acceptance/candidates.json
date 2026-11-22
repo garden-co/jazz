@@ -1,4 +1,4 @@
 [
-  { "name": "beta0", "sha": "7ea1e85606e8570554851de3f0d3c00c6dcfd373", "run": "44970010209" },
-  { "name": "main-14e731f9", "sha": "14e731f91f56b296c873d9adde0af2c1551f9fa3", "run": "45054796919" }
+  {"name": "beta0", "sha": "7ea1e85606e8570554851de3f0d3c00c6dcfd373", "run": "44970010209", "mustFail": ["store.second-open.same-process", "store.second-open.other-process"]},
+  {"name": "main-14e731f9", "sha": "14e731f91f56b296c873d9adde0af2c1551f9fa3", "run": "45054796919"}
 ]
