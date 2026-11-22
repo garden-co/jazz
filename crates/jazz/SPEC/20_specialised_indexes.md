@@ -270,9 +270,8 @@ error on the authority.
 ## 20.4 Queries and the wire
 
 A search is one new predicate, postcard tag 15, after every existing
-predicate (12 is `IsNull`; 13 and 14 are jazz#5983's `StartsWith` and
-`EndsWith`, held as uninhabited placeholders until it lands), so every
-existing predicate keeps its encoding:
+predicate (12 is `IsNull`; 13 and 14 are `StartsWith` and `EndsWith`), so
+every existing predicate keeps its encoding:
 
 ```rust
 pub enum Predicate { /* … existing variants, 13 and 14 … */ Search(IndexSearch) }
@@ -348,9 +347,12 @@ it keeps syncing the versions it knows. (Independently, a peer decodes each
 catalogue version on its own and skips one it cannot read with
 `SchemaVersionUnsupported`, 8.10.)
 
-`FEATURE_SPECIALISED_INDEXES` is bit 15 (`1 << 15`). Its neighbours: bit 12 is
-`FEATURE_SERIALIZABLE_BRANCH_READS`, bit 13 `FEATURE_TEXT_AFFIX_PREDICATES`
-(jazz#5983) and bit 14 is taken by jazz#5991. TS clients declare it in
+`FEATURE_SPECIALISED_INDEXES` is bit 16 (`1 << 16`), above every bit
+v2.0.0-beta.0 defines: 12 `FEATURE_SERIALIZABLE_BRANCH_READS`, 13
+`FEATURE_TEXT_AFFIX_PREDICATES`, 14 `FEATURE_TYPED_ERROR_REASON` and 15
+`FEATURE_REPLACE_HOLDS` are released and mean what they mean there. A peer
+offering exactly that release's features is sent no schema version using
+this chapter and no search. TS clients declare the bit in
 `CLIENT_WIRE_FEATURES`.
 
 Validation refuses, with typed errors: an unknown index; an op not of the
