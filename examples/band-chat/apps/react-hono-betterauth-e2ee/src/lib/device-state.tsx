@@ -189,7 +189,15 @@ export function DeviceStateProvider({
     await refresh();
   }, [encryption, refresh]);
 
-  const leaving = leaveState(record, accountId, thisDeviceId, failure?.code === "closed");
+  const removalRequested =
+    devices?.some((device) => device.id === thisDeviceId && device.removalRequested) ?? false;
+  const leaving = leaveState(
+    record,
+    accountId,
+    thisDeviceId,
+    failure?.code === "closed",
+    removalRequested,
+  );
 
   const value = useMemo<DeviceState>(
     () => ({
@@ -233,7 +241,8 @@ function sameDevices(a: DeviceInfo[] | null, b: DeviceInfo[] | null): boolean {
       (device, i) =>
         device.id === b[i]!.id &&
         device.status === b[i]!.status &&
-        device.isThisDevice === b[i]!.isThisDevice,
+        device.isThisDevice === b[i]!.isThisDevice &&
+        device.removalRequested === b[i]!.removalRequested,
     )
   );
 }

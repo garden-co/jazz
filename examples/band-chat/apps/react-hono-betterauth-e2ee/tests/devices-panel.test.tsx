@@ -364,13 +364,60 @@ describe("leaving this browser", () => {
     expect(screen.queryByText("Removal pending")).toBeNull();
   });
 
-  it("shows removal pending after a reload while the device ID is unchanged", async () => {
+  it("shows removal pending after a reload when the request was published", async () => {
+    const fake = threeDevices();
+    fake.state.devices[0]!.removalRequested = true;
     writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-this" });
-    show(threeDevices());
+    show(fake);
     await screen.findAllByText("Removal pending");
     expect(
       screen.getByText(/Waiting for another of your devices to remove this browser/),
     ).not.toBeNull();
+  });
+
+  it("still offers to leave after a tab closes before its request was sent", async () => {
+    const fake = threeDevices();
+    fake.state.devices[1]!.removalRequested = true;
+    writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-this" });
+    show(fake);
+    expect(
+      await within(await findRow("device-this")).findByRole("button", {
+        name: "Leave this browser",
+      }),
+    ).toBeTruthy();
+    expect(screen.queryByText("Removal pending")).toBeNull();
+    expect(fake.handle.devices.requestRemoval).not.toHaveBeenCalled();
+  });
+
+  it("can retry after reloading following a transient request failure", async () => {
+    const fake = threeDevices();
+    fake.handle.devices.requestRemoval.mockRejectedValueOnce(
+      encryptionError("database", "offline"),
+    );
+    const firstPage = show(fake);
+
+    async function requestLeave() {
+      fireEvent.click(
+        await within(await findRow("device-this")).findByRole("button", {
+          name: "Leave this browser",
+        }),
+      );
+      fireEvent.click(
+        within(screen.getByRole("alertdialog")).getByRole("button", { name: "Leave this browser" }),
+      );
+    }
+
+    await requestLeave();
+    await screen.findByText("Could not ask to leave: offline");
+    expect(readLeaveRecord()).toEqual({ accountId: ACCOUNT, deviceId: "device-this" });
+    firstPage.unmount();
+
+    show(fake);
+    await findRow("device-this");
+    expect(screen.queryByText("Removal pending")).toBeNull();
+    await requestLeave();
+    await screen.findAllByText("Removal pending");
+    expect(fake.handle.devices.requestRemoval).toHaveBeenCalledTimes(2);
   });
 });
 
