@@ -110,6 +110,35 @@ fn column<'a>(
 }
 
 impl Hooks {
+    fn stage_write_root(
+        &self,
+        address: &SpaceAddress,
+        key: &WriteKey<'_>,
+        rows: &mut Vec<(String, RowUuid, BTreeMap<String, Value>)>,
+    ) -> Result<(), SealError> {
+        // The key is this device's own creation, not yet accepted: the
+        // write stages its prepared root, once (protocol §3.2, §5.4).
+        if matches!(key.mark(), KeyMark::Unpublished { .. }) {
+            let mut creations = self.shared.creations.borrow_mut();
+            if creations
+                .prepared
+                .get(address)
+                .is_some_and(|root| root.id == key.root_id())
+            {
+                let root = creations.prepared.remove(address).expect("checked above");
+                let row = uuid::Uuid::parse_str(&root.id)
+                    .map_err(|_| SealError::Refused(rejected("a space root's ID is not a UUID")))?;
+                let cells = root.cells().ok_or_else(|| {
+                    SealError::Refused(rejected("a space root's IDs are not UUIDs"))
+                })?;
+                rows.push((SPACE_ROOTS.to_owned(), RowUuid(row), cells));
+                creations.staged.insert(root.id.clone());
+                creations.attempt.push((address.clone(), root.id));
+            }
+        }
+        Ok(())
+    }
+
     fn plan(&self, table: &str) -> Option<&TablePlan> {
         self.shared.plans.get(table)
     }
@@ -359,6 +388,12 @@ impl E2eeHooks for Hooks {
                 let filled = match &codec.default {
                     Some(default) => Some(default.clone()),
                     None if codec.nullable => Some(Value::Nullable(None)),
+                    None if write.streamed_column.is_some() => {
+                        return Err(refused(&format!(
+                            "a streamed row requires encrypted column `{}.{name}`",
+                            write.table
+                        )));
+                    }
                     None => None,
                 };
                 if let Some(value) = filled {
@@ -377,7 +412,10 @@ impl E2eeHooks for Hooks {
                 "a move writes every encrypted column of the row again",
             ));
         }
-        if encrypted.is_empty() && write.streamed_column.is_none() {
+        let encrypted_stream = write
+            .streamed_column
+            .is_some_and(|name| plan.columns.contains_key(name));
+        if encrypted.is_empty() && !encrypted_stream {
             return Ok(());
         }
         let identifier = match plan.self_space() {
@@ -390,7 +428,7 @@ impl E2eeHooks for Hooks {
         let address = Self::address(&self.shared.keys.borrow(), plan, &identifier)
             .map_err(SealError::Refused)?;
         // An encrypted upload checked for rotation before consuming its source.
-        if write.streamed_column.is_none() {
+        if !encrypted_stream {
             self.check_rotation(&address)?;
         }
         let keys = self.shared.keys.borrow();
@@ -456,29 +494,45 @@ impl E2eeHooks for Hooks {
                     .insert(format!("__e2ee_eq_{name}"), Value::Bytes(token));
             }
         }
-        // The key is this device's own creation, not yet accepted: the
-        // write stages its prepared root, once (protocol §3.2, §5.4).
-        if matches!(key.mark(), KeyMark::Unpublished { .. }) {
-            let mut creations = self.shared.creations.borrow_mut();
-            if creations
-                .prepared
-                .get(&address)
-                .is_some_and(|root| root.id == key.root_id())
-            {
-                let root = creations.prepared.remove(&address).expect("checked above");
-                let row = uuid::Uuid::parse_str(&root.id)
-                    .map_err(|_| refused("a space root's ID is not a UUID"))?;
-                let cells = root
-                    .cells()
-                    .ok_or_else(|| refused("a space root's IDs are not UUIDs"))?;
-                write
-                    .companion_rows
-                    .push((SPACE_ROOTS.to_owned(), RowUuid(row), cells));
-                creations.staged.insert(root.id.clone());
-                creations.attempt.push((address.clone(), root.id));
-            }
+        if write.streamed_column.is_some() {
+            write.stream_root = Some(key.root_id().to_owned());
+            return Ok(());
         }
-        Ok(())
+        self.stage_write_root(&address, &key, write.companion_rows)
+    }
+
+    fn claim_stream_companions(
+        &self,
+        table: &str,
+        space: Option<&Value>,
+        root: Option<&str>,
+        rows: &mut Vec<(String, RowUuid, BTreeMap<String, Value>)>,
+    ) -> Result<(), SealError> {
+        let keys = self.shared.keys.borrow();
+        if keys.closed {
+            return Err(SealError::Refused(closed()));
+        }
+        let Some(root) = root else {
+            return Ok(());
+        };
+        let id = identifier(space)
+            .ok()
+            .flatten()
+            .ok_or_else(|| SealError::Refused(rejected("an encrypted write names its space")))?;
+        let address = Self::address(&keys, self.plan(table).expect("sealed table"), &id)
+            .map_err(SealError::Refused)?;
+        let key = write_key(
+            &keys,
+            &self.shared.creations.borrow().dropped,
+            &address,
+            keys.creation_refused.contains(&address),
+        )?;
+        if key.root_id() != root {
+            return Err(SealError::Refused(rejected(
+                "the space root changed during the upload",
+            )));
+        }
+        self.stage_write_root(&address, &key, rows)
     }
 
     /// A space root a write staged and the database dropped: its creation

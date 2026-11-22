@@ -1863,6 +1863,72 @@ fn deliver(server: &Db, holder: &Device, other: &[&Device], space: uuid::Uuid) -
     .unwrap()
 }
 
+/// Alice starts an attachment, rotates the space key, then publishes. Its
+/// body, optional metadata and stream all carry the epoch chosen at begin.
+///
+/// ```text
+/// begin (root epoch) ──► rotate ──► push and finish ──► inspect the stored row
+/// ```
+#[test]
+fn stream_metadata_keeps_the_epoch_chosen_before_pulling() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, _bob, space) = shared_space(&server);
+        let db = &alice.db;
+        let row = jazz::ids::RowUuid(uuid::Uuid::now_v7());
+        let mut cells = note(space, "caption");
+        let mut upload = db
+            .begin_streaming_value_upload_for(
+                jazz::db::StreamingMutationKind::Insert,
+                "notes",
+                row,
+                &mut cells,
+                "attachment",
+                &jazz::db::WriteTarget::Root,
+            )
+            .unwrap();
+        drive(
+            &server,
+            &[db],
+            alice.client.rotate(db, &space_address(&alice, space)),
+        )
+        .unwrap();
+        assert_eq!(count(&server, "__e2ee_space_successors"), 1);
+        block_on(db.push_streaming_value_upload(&mut upload, b"contents")).unwrap();
+        block_on(db.finish_streaming_value_upload(
+            upload,
+            jazz::db::StreamingMutationKind::Insert,
+            "notes",
+            row,
+            cells,
+            "attachment",
+            Default::default(),
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+        pump(&server, db);
+        let stored = all(&server, Query::from("notes"))
+            .unwrap()
+            .into_iter()
+            .find(|note| note.row_uuid() == row)
+            .unwrap();
+        let root_epoch = all(&server, Query::from(SPACES)).unwrap()[0].cell("epochId");
+        for name in ["attachment", "body", "note", "rank"] {
+            let Some(Value::Bytes(bytes)) = stored.cell(name) else {
+                panic!("missing stored {name}");
+            };
+            let record = jazz_e2ee::records::read_stored_record(&bytes).unwrap();
+            assert_eq!(
+                Some(Value::Uuid(uuid::Uuid::parse_str(record.epoch_id).unwrap())),
+                root_epoch,
+                "{name}"
+            );
+        }
+    });
+}
+
 /// Alice can rotate her new project before its first encrypted write.
 #[test]
 fn explicit_rotation_of_a_space_without_a_key_writes_nothing() {

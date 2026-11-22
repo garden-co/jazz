@@ -2634,6 +2634,8 @@ dependencies (or, for mergeable content, the space coordinate) are unchanged.
 An interrupted source is never resumed; a new attempt starts from a fresh
 source.
 
+A rowless upload rejects named encrypted cells at begin and checks the mutation kind at finish, when it is first known. On an encrypted table it can publish only a plain-column update.
+
 ### 5.6 Atomicity
 
 - One public mutation or transaction callback is one Jazz transaction;

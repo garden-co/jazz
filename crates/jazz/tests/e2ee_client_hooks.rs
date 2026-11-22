@@ -1749,9 +1749,10 @@ fn only_the_streamed_write_leaves_its_column_unsealed() {
     let streamed = RowUuid(uuid::Uuid::now_v7());
     let mut upload = alice
         .begin_streaming_value_upload_for(
+            jazz::db::StreamingMutationKind::Insert,
             "notes",
             streamed,
-            &note(space, "streamed"),
+            &mut note(space, "streamed"),
             "attachment",
             &jazz::db::WriteTarget::Root,
         )
@@ -1762,7 +1763,7 @@ fn only_the_streamed_write_leaves_its_column_unsealed() {
         jazz::db::StreamingMutationKind::Insert,
         "notes",
         streamed,
-        note(space, "streamed"),
+        BTreeMap::new(),
         "attachment",
         Default::default(),
         None,
@@ -2825,9 +2826,10 @@ fn a_sealed_stream_is_published_only_where_it_was_sealed_for() {
     let begin = || {
         let mut upload = alice
             .begin_streaming_value_upload_for(
+                jazz::db::StreamingMutationKind::Insert,
                 "notes",
                 sealed_row,
-                &note(home, "body"),
+                &mut note(home, "body"),
                 "attachment",
                 &jazz::db::WriteTarget::Root,
             )
@@ -2841,7 +2843,7 @@ fn a_sealed_stream_is_published_only_where_it_was_sealed_for() {
             jazz::db::StreamingMutationKind::Insert,
             "notes",
             row,
-            note(space, "body"),
+            BTreeMap::from([("projectId".to_owned(), Value::Uuid(space))]),
             "attachment",
             Default::default(),
             None,
@@ -2954,13 +2956,21 @@ fn sealed_upload(
     let target = jazz::db::WriteTarget::Root;
     let mut upload = match tx {
         Some(id) => db.tx_ref(id).begin_streaming_value_upload_for(
+            jazz::db::StreamingMutationKind::Update,
             "notes",
             row,
-            cells,
+            &mut cells.clone(),
             "attachment",
             &target,
         )?,
-        None => db.begin_streaming_value_upload_for("notes", row, cells, "attachment", &target)?,
+        None => db.begin_streaming_value_upload_for(
+            jazz::db::StreamingMutationKind::Update,
+            "notes",
+            row,
+            &mut cells.clone(),
+            "attachment",
+            &target,
+        )?,
     };
     block_on(db.push_streaming_value_upload(&mut upload, bytes))?;
     Ok(upload)
@@ -3095,9 +3105,10 @@ fn a_stream_into_a_new_self_space_row_publishes() {
     let tx = alice.tx_ref(id);
     let mut upload = tx
         .begin_streaming_value_upload_for(
+            jazz::db::StreamingMutationKind::Insert,
             "vaults",
             staged,
-            &BTreeMap::new(),
+            &mut BTreeMap::new(),
             "secret",
             &jazz::db::WriteTarget::Root,
         )
