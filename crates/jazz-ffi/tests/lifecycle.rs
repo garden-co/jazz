@@ -178,11 +178,14 @@ fn delete_client_storage_empties_the_store() {
     let second = JazzHandle::open(held.to_string());
     let second = second.expect("a second app on the same store opens");
     {
+        let open = second.clone().begin_mergeable().unwrap();
         let refused = second.delete_client_storage();
         assert!(
             matches!(refused, Err(JazzError::Refused { .. })),
             "{refused:?}"
         );
+        open.commit(None)
+            .expect("a refused delete leaves the transaction open");
         assert!(holder.all(json!({ "table": "shows" }).to_string()).is_ok());
         second.shutdown().unwrap();
     }

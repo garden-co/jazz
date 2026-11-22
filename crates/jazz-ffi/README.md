@@ -186,8 +186,9 @@ another thread: waiting there deadlocks.
 - `disconnect()` / `reconnect()` (C `"disconnect"`, `"reconnect"`): leave
   the server, with local reads and writes going on, then resume sync.
 - `delete_client_storage()` / `"deleteClientStorage"`: closes the app and
-  deletes its local store, so the next open starts empty. It is refused,
-  and the app left open, while another open app holds the same `dataDir`.
+  deletes its local store, so the next open starts empty; open transactions
+  roll back and uploads abort first. It is refused, and the app left open
+  with them, while another open app holds the same `dataDir`.
   On the C ABI, free the handle with `jazz_close` afterwards, as after
   `signOut`.
 - `watch_mutation_errors(listener)` / `jazz_watch(h, "mutationErrors", …)`:
