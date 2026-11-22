@@ -946,7 +946,8 @@ export function driveName(name: string): string {
  */
 export function defaultCoreTarballUrl(version: string): string {
   const name = "jazz-napi-linux-x64-gnu";
-  if (/^2\.0\.0-alpha\.[0-9]+-rc\.[0-9]+$/.test(version)) {
+  // The versions dev/artifacts/rc-tarballs.mjs stamps on a candidate.
+  if (/^2\.0\.0-(alpha|beta)\.[0-9]+(\.[0-9]+)?-rc\.[0-9]+$/.test(version)) {
     return `https://github.com/garden-co/jazz/releases/download/v${version}/garden-co-${name}-${version}.tgz`;
   }
   return `https://registry.npmjs.org/@garden-co/${name}/-/${name}-${version}.tgz`;
