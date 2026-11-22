@@ -38,8 +38,9 @@ Invariant digest:
   step (20.3).
 - `INV-IX-3`: a search returns only rows the reader may read. The read policy
   is applied to the final row set exactly as for any query, and nothing about
-  unreadable rows reaches the result: not their ids, counts, scores or
-  statistics (20.7).
+  unreadable rows reaches the result or a refusal: not their ids, counts,
+  scores or statistics. Adding or removing rows the reader may not read
+  changes no outcome of a search (20.7).
 - `INV-IX-4`: every query using an index costs work proportional to the
   shadow rows and rows it touches; a shape that cannot be answered so fails
   with a typed error naming it (20.11).
@@ -129,8 +130,10 @@ stored-scalar header (a vector is never a large value, 19); the persisted
 record descriptor names it with node 27 (`Vector`, field `dimensions: u32`),
 and the binding descriptor with type tag 19 and the dimensions. A vector is
 not a tuple member, an array element, a payload-enum field or a B-tree index
-column. As a filter operand it compares as a whole value, bit for bit (6.1.1);
-nearness is only a search (20.4). The dimensions are part of the type, so
+column. As a filter operand it compares as a whole value, bit for bit (6.1.1):
+the engine's operator table gives it `eq`, `ne`, `in`, `notIn` and the null
+tests, and refuses ranges, `contains` and `orderBy`, wherever a query or
+policy carries them; nearness is only a search (20.4). The dimensions are part of the type, so
 changing them is a type change, refused like any other to or from `vector`.
 
 A new scalar column type, written `"point"` (`"point?"` when optional; the
@@ -149,8 +152,8 @@ variable-width with no stored-scalar header; the persisted record descriptor
 names it with node 28 (`Point`, no fields) and the binding descriptor with
 type tag 20. A point is not a tuple member, an array element, a payload-enum
 field, a B-tree index column or an ordering key. As a filter operand it
-compares as a whole value, bit for bit (6.1.1: `Eq` and `in` only, `-0.0` ≠
-`0.0`); nearness and containment are only a search (20.4). The migration
+compares as a whole value, bit for bit (6.1.1: the operators of a `vector`,
+above; `-0.0` ≠ `0.0`); nearness and containment are only a search (20.4). The migration
 diff refuses changes to or from `point`.
 
 Specialised indexes are part of a table's version id (a new schema-id
@@ -166,8 +169,8 @@ shadow tables.
 Each index owns shadow tables named `_jazz_ix_<stored>__<name>_<part>` on
 the current table only (never on `__h`), plus one row in `_jazz_ix`. The
 `_jazz_` prefix keeps them out of what a store lists as its tables, so a
-build of Jazz without specialised indexes opening the file leaves them
-alone (its triggers keep queueing rows, which a later build drains):
+build of Jazz without specialised indexes never mistakes them for tables
+(whether such a build opens the file at all: 20.13):
 
 ```sql
 CREATE TABLE _jazz_ix (
@@ -177,6 +180,7 @@ CREATE TABLE _jazz_ix (
   decl BLOB NOT NULL,        -- canonical declaration bytes
   state INTEGER NOT NULL,    -- 0 building, 1 ready
   built INTEGER NOT NULL,    -- while building: the highest rid indexed so far
+  build_to INTEGER NOT NULL, -- the highest rid stored when the build started
   PRIMARY KEY (tbl, name));
 ```
 
@@ -260,12 +264,27 @@ because of a value (`INV-IX-7`): a write admitted under the table's own
 rules is always indexable, or else unindexed, so the same row can never be
 accepted by one node and wedge another's sync.
 
-Building an index (a new declaration, or a rebuilt one) indexes every
-current row in `rid` order, in batches of bounded size (512 rows, one per
-tick), each its own transaction, with `_jazz_ix.state = 0` and `built`
-advancing meanwhile (an index on an empty table is built at once); a query using an index that is still
-building waits for the build on a client and is refused with a typed retryable
-error on the authority.
+On storage whose only transactions are callback scopes (Durable Objects),
+the drain runs inside the outermost scope before it commits, the same way.
+
+Building an index (a new declaration, or a rebuilt one) indexes the rows
+stored when it starts, in `rid` order up to `build_to`, in batches of
+bounded size (512 rows), each its own transaction, with `_jazz_ix.state = 0`
+and `built` advancing meanwhile (an index on an empty table is built at
+once). A row written after the build started, whatever its `rid` (higher,
+lower or reused), reaches the index through the queue, so a build ends
+however fast rows arrive, and one interrupted by a restart resumes to the
+same `build_to`.
+
+A tick builds one batch: that of the first maintained index still building
+whose batch succeeds, in `(table, name)` order. A recorded index this store
+does not maintain is passed over. A batch that fails is reported
+(`Db::index_build_errors`) and retried at a later tick, and stops neither
+the rest of the tick nor another index's build.
+
+A search never reads an index that is not built. On a client it first
+builds that index; on the authority, and on any store that cannot take a
+batch for it, it is refused with a typed retryable error (`IndexBuilding`).
 
 ## 20.4 Queries and the wire
 
@@ -401,10 +420,13 @@ in the score; `count(DISTINCT q.slot)` still requires every slot under
 run` does not match a row holding only `runway`). Under `Any` every row
 holding a slot matches.
 
-Before it runs, a text search is admitted against its caps (20.12), each
-read at most one row past it: its prefix may stand for at most 1 000
-indexed terms, and the search may read at most 200 000 postings; beyond
-either it is refused with `SearchTooBroad`.
+Before it runs, and once the index is built and its queue drained, a text
+search is admitted against its caps, which count only the rows the reader
+may read (20.7): its prefix may stand for at most 1 000 terms that such
+rows hold, and at most 200 000 postings of such rows may hold the query's
+terms; beyond either it is refused with `SearchTooBroad`. Where no read
+policy applies (a replica reading for itself, the system) every row of the
+view is readable. What admission costs: 20.12.
 
 **Geo** is pure SQL. Rust covers the query region with at most 16 ranges of
 cells (20.10.3) and computes a chord threshold; SQL reads those ranges and
@@ -497,13 +519,13 @@ rows, nothing about unreadable rows may reach a reader:
 - Vector candidates on the authority are chosen by the same filters and
   policy as the final rows (filter-first), and the policy is applied again in
   phase 2.
-- Typed errors name the query's shape, never whether rows exist, with one
-  bounded exception (under review): `SearchTooBroad` counts the postings
-  and prefix terms of all rows, readable or not. Refusal therefore says
-  that more than 200 000 postings hold the query's terms, or more than
-  1 000 indexed terms start with its prefix, across every row the node
-  holds. That is a coarse signal at a high threshold: it never names a
-  row, a count below the threshold, or which rows hold a term.
+- Typed errors name the query's shape, never whether rows exist. Every cap
+  counts only rows the reader may read, in the read's view and as they are
+  now: the prefix-expansion and postings caps (20.5) and the vector
+  candidate cap. So adding or removing rows the reader may not read changes
+  no outcome of a search of a built index, at any cap, one-shot or live.
+- A live search is held to its caps at each change (20.8), so it is refused
+  at the readable change that takes it over, not at a later write.
 - An empty result and a result of hidden rows are indistinguishable.
 
 A client indexes only rows the server let it hold, and eviction removes their
@@ -512,7 +534,9 @@ shadow rows in the same transaction (20.3).
 ## 20.8 Live queries
 
 A subscription with a `search` clause watches its table (`Watch::Table`),
-narrowed by any key its other filters or policy pin, as today. Text and geo
+narrowed by any key its policy pins and, except for a text search, by any
+key its other filters pin. A text search's caps count readable rows the
+other filters drop, so those rows' writes wake it too (20.7). Text and geo
 queries are recheckable under the existing rules (13.13): their CTE reads
 only the changed row's shadow rows, so re-running the statement narrowed to
 `id IN (changed)` gives each changed row's exact new score, and the row is
@@ -525,7 +549,10 @@ subscription rechecks the same way, with `k` as its window's limit: a
 changed row is scored alone; if it now beats the window's last row it is
 spliced in and the `k`-th leaves; if a window member gets worse or leaves a
 full window, the search re-runs (a row the window never read may take its
-place). Re-runs are coalesced per fan-out tick, one per subscription. A
+place). A re-checked vector search still counts the whole query's readable
+candidates against their cap at each change. A re-check's statement is
+planned anew each time, never kept: it binds what its planning read.
+Re-runs are coalesced per fan-out tick, one per subscription. A
 full page whose last row is removed refetches, as today.
 
 ## 20.9 Replicas and tiers
@@ -742,8 +769,9 @@ All are typed, name the table and index, and carry no data about rows:
   of the index than the answering node maintains (20.4);
 - `SearchQueryTooLong`: a text query over 1 KiB or 32 terms (the analyzer's
   caps, 20.10.1);
-- `SearchTooBroad`: a text prefix standing for more than 1 000 indexed terms,
-  or a search that would read more than 200 000 postings (20.5, 20.7).
+- `SearchTooBroad`: a text prefix standing for more than 1 000 terms on
+  rows the reader may read, or a search whose terms more than 200 000
+  postings of such rows hold (20.5, 20.7).
 
 These are `Reason`s (`index_server_only`,
 `index_search_unsupported_upstream`, `index_building`,
@@ -763,11 +791,17 @@ validation errors are query errors naming the table and index. A search at
 - **Storage:** text roughly 1.5 times the analyzed text (about three times
   FTS5's compressed postings); vector `4n` bytes per row; geo about 40 bytes
   per row.
-- **Query:** text, the postings of the query terms, capped: a query text of
-  at most 1 KiB and 32 terms (the analyzer), a prefix of at least 2
-  characters standing for at most 1 000 indexed terms, and at most 200 000
-  postings read (`SearchTooBroad`, 20.7 for what refusing reveals); each
-  cap is checked by reading at most one row past it. Geo, the cells of the
+- **Query:** text, the postings of the query's terms: a query text is at
+  most 1 KiB and 32 terms (the analyzer) with a prefix of at least 2
+  characters, and its caps (20.5) bound what a reader's readable rows can
+  make it cost. They do **not** bound the work by themselves: admission
+  passes over every term in the prefix's range and every posting of the
+  query's terms until it is one past a cap in readable rows, one read-policy
+  check each, and the search then reads those terms' postings before the
+  policy drops the unreadable ones. Both costs grow with the table, not
+  with what the reader may read. That is the price of refusals that depend
+  on readable rows only (20.7); the scaling follow-up is partitioned
+  indexes (jazz#6260). Geo, the cells of the
   cover; vector, the candidates read and scored (at most
   `VECTOR_EXACT_MAX`).
   Scoring is latency-bound by the sequential `f64` sum (about 1.5 ns per
@@ -776,12 +810,50 @@ validation errors are query errors naming the table and index. A search at
   plus reading the 77 MB of shadow rows (about 60 ms warm natively; more in
   a browser's OPFS-backed SQLite), and 1536 dimensions about four times that.
 - **Live:** a changed row is rechecked alone: for text and geo, its own
-  postings or cell; for vector, its own vector scored once. A vector window
+  postings or cell; for vector, its own vector scored once. The caps are
+  counted at each change all the same: text admission as for a query, and
+  for vector a count of the readable candidates up to the cap. A vector window
   member that gets worse re-runs the search: phase 1 again, at most once per
   subscription per fan-out tick.
 - **Bundle:** each kind is a cargo feature of `jazz-index`, on by default in
   every build, so each one's size is measured and can be dropped. The text
   kind adds 11.2 KB gzipped to the browser WASM.
+
+## 20.13 Compatibility with v2.0.0-beta.0
+
+What the released v2.0.0-beta.0 crates and this chapter's implementation do
+with each other's stores and peers, as observed on native storage. The two
+items marked so are open.
+
+**Stores of beta.0.** One whose app declares none of this chapter gains no
+schema object on opening, and beta.0 reads it back, this build's writes
+included. One whose app adds an index, a vector or point column or a table
+of them opens and builds over the rows beta.0 wrote.
+
+**Peers.** Plain apps sync in every mix of beta.0 and newer client, relay
+and server. A beta.0 client, directly or behind a relay of either build,
+reads and writes a newer server's tables whose schema uses this chapter: it
+is sent no such schema version (20.4), and keeps the columns it knows. An
+app using this chapter on an older server or relay is an app ahead of its
+deployed schema: its writes are refused with `schema_version_not_deployed`
+(8.9), and its searches stay on its replica.
+
+**Downgrade (proposed, not yet decided).** beta.0 refuses to open a store
+that ever admitted a version using this chapter, leaving the file byte for
+byte as it was: `schema of version … compiles to another version` for an
+index alone, `bad value type in _jazz_stored_columns` for a vector or point
+column, both under code `storage`. Dropping the index does not undo it,
+since admitted versions are kept, and a replica of a plain app that
+mirrored such a version from its upstream is refused the same way. beta.0
+therefore never runs an index's triggers or meets its queue. Whether and
+how to narrow or stage this is not decided.
+
+**Upgrade of a replica that synced without a column (open).** A replica
+that was not sent a version holds its tables' rows without that version's
+columns. Once it can read the version, those rows must be fetched again
+before a vector or point column of theirs is read: resuming from the
+replica's watermarks alone reads them as null. Vector and point columns are
+not ready to release before this holds.
 
 ## Open questions
 
