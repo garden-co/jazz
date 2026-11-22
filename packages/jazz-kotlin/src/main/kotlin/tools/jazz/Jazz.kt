@@ -209,7 +209,8 @@ public class Jazz internal constructor(
     /**
      * Inserts [row] with [column]'s value streamed from [data] (e.g. a file:
      * `jazz.insertStreaming(Files, NewFile(name = "a.mov"), Files.content, file.inputStream().chunks())`).
-     * Nothing is written if [data] fails or the call is cancelled.
+     * Nothing is written if [data] fails or the call is cancelled before [data]
+     * completes; a cancellation after that may still write it.
      */
     public suspend fun <Row : Any, Insert : Any, P : Patch> insertStreaming(
         table: Table<Row, Insert, P>,
@@ -218,11 +219,19 @@ public class Jazz internal constructor(
         data: Flow<ByteArray>,
     ): Row = stream(table, column, "insert", null, insertJson(table, row), data)
 
-    /** Replaces [column] of row [id] with a value streamed from [data]. */
+    /**
+     * Replaces [column] of row [id] with a value streamed from [data].
+     * Nothing is written if [data] fails or the call is cancelled before [data]
+     * completes; a cancellation after that may still write it.
+     */
     public suspend fun <Row : Any> updateStreaming(table: Table<Row, *, *>, id: String, column: Column<*>, data: Flow<ByteArray>): Row =
         stream(table, column, "update", id, null, data)
 
-    /** [upsert], with [column]'s value streamed from [data]. */
+    /**
+     * [upsert], with [column]'s value streamed from [data].
+     * Nothing is written if [data] fails or the call is cancelled before [data]
+     * completes; a cancellation after that may still write it.
+     */
     public suspend fun <Row : Any, Insert : Any, P : Patch> upsertStreaming(
         table: Table<Row, Insert, P>,
         id: String,
@@ -347,6 +356,8 @@ public class Jazz internal constructor(
      * with a concurrent one throws [JazzException.Conflict] instead. It commits when [block] returns (at [tier]:
      * with [WriteTier.Global] it returns once the server accepted it) and
      * rolls back when [block] throws, rethrowing. Returns [block]'s value.
+     * Cancelling before the commit starts rolls back; cancelling once it has
+     * started doesn't undo it.
      *
      * ```kotlin
      * val moved = jazz.transaction { tx ->

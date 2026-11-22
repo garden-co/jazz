@@ -153,6 +153,53 @@ class CancellationTest {
         open(native).mutationErrors.collect { }
     }
 
+    @Test
+    fun an_upload_cancelled_while_it_finishes_is_still_written() {
+        // As the streaming writes' KDoc says: once [data] has completed, cancelling doesn't undo the write.
+        val starts = listOf<suspend (Jazz) -> Unit>(
+            { it.insertStreaming(Items, ItemInsert("t", 1.0, ItemKind.C), Items.note, emptyFlow()) },
+            { it.updateStreaming(Items, "i", Items.note, emptyFlow()) },
+            { it.upsertStreaming(Items, "i", ItemInsert("t", 1.0, ItemKind.C), Items.note, emptyFlow()) },
+        )
+        for (start in starts) {
+            val finishing = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            var written = false
+            var aborted = false
+            val upload = object : NativeUpload {
+                override fun push(bytes: ByteArray) {}
+                override fun finish(): String {
+                    finishing.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                    written = true
+                    return """{"id":"i","title":"t","rank":1,"kind":"c"}"""
+                }
+                override fun abort() {
+                    // Nothing is left to abort by then, as with jazz-ffi's.
+                    if (!written) aborted = true
+                }
+            }
+            val native = object : Native by FakeNative() {
+                override fun beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?): NativeUpload = upload
+            }
+            runBlocking {
+                val jazz = open(native)
+                var returned = false
+                val caller = launch(Dispatchers.Default) {
+                    start(jazz)
+                    returned = true
+                }
+                assertTrue(finishing.await(5, TimeUnit.SECONDS), "finish never ran")
+                caller.cancel()
+                release.countDown()
+                caller.join()
+                assertTrue(caller.isCancelled && !returned, "the caller got the row")
+            }
+            assertTrue(written, "not written")
+            assertEquals(false, aborted)
+        }
+    }
+
     // `subscribe` already gave its handle back: the control for the tests above.
     @Test
     fun cancelling_while_subscribing_unsubscribes(): Unit = givesBack { made ->
