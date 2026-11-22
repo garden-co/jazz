@@ -346,8 +346,6 @@ jobs:
           restore-caches: "false"
           setup-node: "false"
           rust-cache: "false"
-      - name: Grant the runner user access to KVM
-        run: sudo setfacl -m "u:${USER}:rw" /dev/kvm
       - name: Download the built AAR and server
         env:
           GH_TOKEN: ${{ github.token }}

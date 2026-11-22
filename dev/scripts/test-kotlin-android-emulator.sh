@@ -38,9 +38,15 @@ if [ "$accel" = off ]; then
   export ANDROID_I_WANT_MY_TCG=yes
   boot_seconds=2400
   phase_seconds=600
-elif [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
-  echo "the emulator needs a readable and writable /dev/kvm" >&2
-  exit 1
+else
+  # A GitHub runner has /dev/kvm, but its user isn't in the kvm group.
+  if [ "${GITHUB_ACTIONS:-}" = true ] && [ -c /dev/kvm ] && [ ! -w /dev/kvm ]; then
+    sudo -n setfacl -m "u:$(id -un):rw" /dev/kvm
+  fi
+  if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+    echo "the emulator needs a readable and writable /dev/kvm" >&2
+    exit 1
+  fi
 fi
 
 export KOTLIN_TOOLCHAIN=pinned

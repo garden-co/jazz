@@ -930,8 +930,6 @@ jobs:
           sccache: "true"
           sccache-sticky-disk: "false"
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
-      - name: Grant the runner user access to KVM
-        run: sudo setfacl -m "u:${USER}:rw" /dev/kvm
       - name: Run CI-equivalent Kotlin Android emulator partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition kotlin-android-emulator
       - name: Report sccache statistics
