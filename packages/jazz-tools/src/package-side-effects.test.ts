@@ -100,21 +100,15 @@ const REVIEWED_CALLS = new Set([
   "dsl.ts: DropBuilder",
   "permissions/dsl.ts: comparison",
   "permissions/dsl.ts: TYPED",
-  // The alpha.64 names in the `schema` namespace, as throwing stubs.
-  "schema-builders.ts: removedSchemaApi",
   "upgrade/index.ts: join",
   "upgrade/project.ts: join",
   "dev/inspector-overlay/loader.ts: HostBinding",
   "inspect/mcp.ts: WHERE_OPERATORS.join",
   "local-first-auth/identity.ts: utf8",
-  "permissions/index.ts: removedSchemaApi",
   "prosemirror/overlays.ts: PluginKey",
   "prosemirror/sync.ts: PluginKey",
   "react-core/provider.tsx: createContext",
   "react-core/session-context.ts: createContext",
-  // Each builds a throwing stub (or a frozen object of them) for the module to export.
-  "removed-schema-api.ts: removedNamespace",
-  "removed-schema-api.ts: removedSchemaApi",
   "runtime/author-id.ts: Utf8Decoder",
   "runtime/native-runtime/native-codec.ts: Utf8Decoder",
   "runtime/native-runtime/native-row-codec.ts: Utf8Decoder",
@@ -231,7 +225,6 @@ describe("package.json sideEffects", () => {
     ]) {
       expect(topLevelEffects(`${srcRoot}/${path}`), path).not.toEqual([]);
     }
-    expect(initializerCalls(`${srcRoot}/removed-schema-api.ts`)).toContain("removedNamespace");
     expect(initializerCalls(`${srcRoot}/vue/session.ts`)).toContain("defineComponent");
   });
 });
