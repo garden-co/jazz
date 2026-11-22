@@ -613,6 +613,97 @@ describe("encryption on Node, end to end", () => {
     expect(await offline.db.encryption.ready({ timeoutMs: 30_000 })).toBe("active");
   }, 120_000);
 
+  it("a returning device reads its encrypted rows offline, and its live query goes on once the server is back", async () => {
+    const first = await serve();
+    const accounts = memoryStore();
+    const privateStore = memoryPrivateStore();
+    const dataPath = `${await mkdtemp(`${tmpdir()}/e2ee-client-`)}/device`;
+    const online = await device(first, { accounts, privateStore, dataPath });
+    const project = await makeProject(online, "plans");
+    await online.db
+      .insert(app.tasks, { projectId: project, title: "kept" })
+      .wait({ tier: "global" });
+    await online.session.close();
+    const { dir, port, serverUrl, jazz } = first;
+    const appId = jazz.appId;
+    await first.stop();
+    // The same device opens with the server down. It has synced before: it
+    // reads what its store holds with the keys it holds, at once.
+    const offline = await device(
+      { serverUrl, jazz: { appId } as never },
+      { accounts, privateStore, dataPath, wait: false },
+    );
+    const seen: string[][] = [];
+    const errors: unknown[] = [];
+    const stop = offline.db.subscribe(
+      app.tasks.where({ projectId: project }),
+      {
+        onUpdate: (rows) => seen.push(rows.map((row) => row.title).sort()),
+        onError: (error) => errors.push(error),
+      },
+      { tier: "local-first" },
+    );
+    cleanups.push(async () => stop());
+    await expect.poll(() => seen.at(-1), { timeout: 5_000 }).toEqual(["kept"]);
+    expect(errors).toEqual([]);
+    // The server comes back. Another client of the device writes a task: the
+    // same live query, never ended, picks it up.
+    const back = await serve({ dir, port });
+    const other = await device(back, { accounts, privateStore });
+    await other.db
+      .insert(app.tasks, { projectId: project, title: "later" })
+      .wait({ tier: "global" });
+    await expect.poll(() => seen.at(-1), { timeout: 30_000 }).toEqual(["kept", "later"]);
+    expect(errors).toEqual([]);
+    // Its open sockets would hold the restarted server's close.
+    stop();
+    await other.session.close();
+    await offline.session.close();
+  }, 120_000);
+
+  it("a device that never synced answers an encrypted live query only once it has synced", async () => {
+    const first = await serve();
+    const accounts = memoryStore();
+    const privateStore = memoryPrivateStore();
+    const online = await device(first, { accounts, privateStore });
+    const project = await makeProject(online, "plans");
+    await online.db
+      .insert(app.tasks, { projectId: project, title: "kept" })
+      .wait({ tier: "global" });
+    await online.session.close();
+    const { dir, port, serverUrl, jazz } = first;
+    const appId = jazz.appId;
+    await first.stop();
+    // A new store, with the server down: it has never seen the app's
+    // catalogue, so it cannot say what its encrypted rows are. The query
+    // waits and says nothing, rather than answer an empty result.
+    const fresh = await device(
+      { serverUrl, jazz: { appId } as never },
+      { accounts, privateStore, wait: false },
+    );
+    const seen: string[][] = [];
+    const errors: unknown[] = [];
+    const stop = fresh.db.subscribe(
+      app.tasks.where({ projectId: project }),
+      {
+        onUpdate: (rows) => seen.push(rows.map((row) => row.title).sort()),
+        onError: (error) => errors.push(error),
+      },
+      { tier: "local-first" },
+    );
+    cleanups.push(async () => stop());
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(seen).toEqual([]);
+    expect(errors).toEqual([]);
+    // The server comes back: the first sync brings the catalogue and the rows.
+    await serve({ dir, port });
+    await expect.poll(() => seen.at(-1), { timeout: 30_000 }).toEqual(["kept"]);
+    expect(errors).toEqual([]);
+    // Its open socket would hold the restarted server's close.
+    stop();
+    await fresh.session.close();
+  }, 120_000);
+
   it("the runtime's loop tries a failed verification again (a store that fails twice)", async () => {
     const host = await serve();
     const inner = memoryPrivateStore();

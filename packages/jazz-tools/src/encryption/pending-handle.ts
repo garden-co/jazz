@@ -36,6 +36,7 @@ const LISTENERS = new Set(["onReport", "onUnreadable", "onChallenge"]);
 const MEMBERS: { [name: string]: readonly string[] | true } = {
   deviceId: true,
   ready: true,
+  readable: true,
   start: true,
   stop: true,
   onReport: true,
