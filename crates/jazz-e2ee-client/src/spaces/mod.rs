@@ -96,6 +96,16 @@ pub(crate) fn protocol_address(space: &SpaceAddress) -> Result<ProtocolAddress, 
     Ok(ProtocolAddress::new(&space.scope_id, &space.identifier)?)
 }
 
+#[doc(hidden)]
+pub fn successor_probe(address: &ProtocolAddress, epoch: &str) -> Result<Query, ClientError> {
+    let id = |s| uuid_cell(s).ok_or(ProtocolError::InconsistentEvidence);
+    Ok(Query::from(rows::SPACE_SUCCESSORS)
+        .filter(eq(col("scopeId"), lit(id(&address.scope_id)?)))
+        .filter(eq(col("identifier"), lit(id(&address.identifier)?)))
+        .filter(eq(col("predecessor"), lit(id(epoch)?)))
+        .limit(1))
+}
+
 pub(crate) fn offline() -> ClientError {
     ClientError::Database(Error::new(
         ErrorCode::NotObserved,
@@ -202,6 +212,223 @@ impl E2eeClient {
         })
     }
 
+    /// Reuse a replay only while the live watch covers the space's roots and
+    /// successors. Confirm the signed records and positions still match the
+    /// authority and probe the predecessor index for an extension that has
+    /// not reached the watch yet. Any discrepancy requires a fresh replay.
+    async fn still_current(
+        &self,
+        db: &Db,
+        tx: OpenTransactionId,
+        address: &ProtocolAddress,
+        version: &jazz_e2ee::protocol::space::members::CurrentVersion,
+    ) -> Result<bool, ClientError> {
+        let skipped = Cell::new(0);
+        let by_id = |table: &str, id: &str| -> Result<Query, ClientError> {
+            Ok(Query::from(table).filter(eq(
+                col("id"),
+                lit(uuid_cell(id).ok_or(ProtocolError::InconsistentEvidence)?),
+            )))
+        };
+        let (roots, _) = self
+            .read_rows(
+                db,
+                tx,
+                &skipped,
+                by_id(rows::SPACE_ROOTS, &version.root().row.id)?,
+            )
+            .await?;
+        if roots.as_slice() != std::slice::from_ref(version.root()) {
+            return Ok(false);
+        }
+        if let Some(tip) = version.successor() {
+            let (successors, _) = self
+                .read_rows(
+                    db,
+                    tx,
+                    &skipped,
+                    by_id(rows::SPACE_SUCCESSORS, &tip.row.id)?,
+                )
+                .await?;
+            if successors.as_slice() != std::slice::from_ref(tip) {
+                return Ok(false);
+            }
+        }
+        let probe = successor_probe(address, version.epoch())?;
+        Ok(db
+            .tx_ref(tx)
+            .ledger_read(&db.prepare_query(&probe)?)
+            .await?
+            .rows
+            .is_empty())
+    }
+
+    /// Authenticate the chain using the normal acquisition read. The mark
+    /// uses the same serializable cut and only the current version's
+    /// envelopes. Former recipients of earlier versions need no account read.
+    async fn check_write_version(
+        &self,
+        db: &Db,
+        space: &SpaceAddress,
+        address: &ProtocolAddress,
+    ) -> Result<bool, ClientError> {
+        if self.shared.keys.borrow().rotation_refused.contains(address) {
+            return Ok(false);
+        }
+        crate::account::serializable(db, ATTEMPTS, async |tx| {
+            let by_space = |table: &str| {
+                Query::from(table)
+                    .filter(eq(
+                        col("scopeId"),
+                        lit(uuid_cell(&address.scope_id).expect("validated address")),
+                    ))
+                    .filter(eq(
+                        col("identifier"),
+                        lit(uuid_cell(&address.identifier).expect("validated address")),
+                    ))
+            };
+            let cached = self
+                .shared
+                .member_watch
+                .borrow()
+                .spaces
+                .get(space)
+                .and_then(|deps| deps.version.clone());
+            let version = match cached {
+                Some(version) if self.still_current(db, tx, address, &version).await? => version,
+                _ => {
+                    #[cfg(any(test, feature = "testing"))]
+                    {
+                        self.shared.member_watch.borrow_mut().chain_reads += 1;
+                    }
+                    let read = self.read_space(db, tx, address).await?;
+                    if read.skipped != 0 {
+                        return Err(ProtocolError::InconsistentEvidence.into());
+                    }
+                    let acquired = self.take_space(db, space, address, &read).await?;
+                    let Some(chain) = acquired.chain else {
+                        return Ok(false);
+                    };
+                    if !acquired.member || acquired.state != SpaceKeyState::Held {
+                        return Ok(false);
+                    }
+                    jazz_e2ee::protocol::space::members::CurrentVersion::from_chain(&chain)?
+                }
+            };
+            let skipped = Cell::new(0);
+            let (members, through) = self
+                .read_rows::<jazz_e2ee::protocol::records::space::SpaceMember>(
+                    db,
+                    tx,
+                    &skipped,
+                    by_space(rows::SPACE_MEMBERS),
+                )
+                .await?;
+            if !members
+                .iter()
+                .any(|member| member.row.account_id == self.shared.account_id)
+            {
+                if let Some(deps) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
+                    *deps = Default::default();
+                }
+                return Ok(false);
+            }
+            let query = by_space(rows::SPACE_DELIVERIES).filter(eq(
+                col("keyEpochId"),
+                lit(uuid_cell(version.epoch()).ok_or(ProtocolError::InconsistentEvidence)?),
+            ));
+            let (deliveries, _) = self
+                .read_rows::<jazz_e2ee::protocol::records::space::SpaceDelivery>(
+                    db, tx, &skipped, query,
+                )
+                .await?;
+            let mut holders = BTreeSet::from([version.writer().to_owned()]);
+            holders.extend(
+                deliveries
+                    .iter()
+                    .map(|delivery| delivery.row.recipient_account_id.clone()),
+            );
+            let mut named = holders.clone();
+            named.insert(version.root().row.creator_account_id.clone());
+            let named: Vec<_> = named.into_iter().collect();
+            let accounts = self
+                .read_public_many(db, tx, &skipped, &named, BTreeSet::new())
+                .await?;
+            if skipped.get() != 0 {
+                return Err(ProtocolError::InconsistentEvidence.into());
+            }
+            #[cfg(any(test, feature = "testing"))]
+            {
+                let history = accounts
+                    .iter()
+                    .map(|a| {
+                        a.roots.len()
+                            + a.successors.len()
+                            + a.approvals.len()
+                            + a.keys.len()
+                            + a.recovery_roots.len()
+                            + a.account_keys.len()
+                            + a.removal_requests.len()
+                    })
+                    .sum::<usize>();
+                self.shared.member_watch.borrow_mut().last_check_rows =
+                    members.len() + deliveries.len() + history;
+            }
+            let through = Position(through);
+            let directory = AccountDirectory::new(
+                &accounts,
+                &self.shared.domain,
+                &self.shared.registry,
+                through,
+            )?;
+            let own = &self.shared.account_id;
+            if directory.has_ledger(own)
+                && let Some(floor) = self.floor(own).await
+            {
+                directory
+                    .current(own)?
+                    .ok_or(ProtocolError::StaleState)?
+                    .check_floor(through, &floor)?;
+            }
+            let floors = self.check_others(&accounts, through, &directory).await?;
+            let marked = version
+                .rotation_mark(address, through, &members, &deliveries, &directory)?
+                .needs_rotation();
+            for (id, floor) in floors {
+                self.advance_floor(&id, &floor).await?;
+            }
+            let members: BTreeSet<_> = members
+                .iter()
+                .map(|row| row.row.account_id.clone())
+                .collect();
+            let holders: BTreeSet<_> = holders.intersection(&members).cloned().collect();
+            let removals = holders
+                .iter()
+                .any(|account| match directory.current(account) {
+                    Ok(Some(state)) => !state.removed.is_empty() || state.generation > 0,
+                    Ok(None) => false,
+                    Err(_) => true,
+                });
+            let covered = self.shared.member_watch.borrow().covered.contains(space);
+            if let Some(deps) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
+                deps.version = covered.then_some(version);
+                deps.waiting.retain(|account| members.contains(account));
+                deps.members = members;
+                deps.holders = holders;
+            }
+            let mut keys = self.shared.keys.borrow_mut();
+            keys.rotation_evaluated.insert(address.clone());
+            keys.space_removals.insert(address.clone(), removals);
+            if marked {
+                keys.rotation_pending.insert(address.clone());
+            } else {
+                keys.rotation_pending.remove(address);
+            }
+            Ok(true)
+        })
+        .await
+    }
+
     /// The chain of `read`, with the keys this account obtains from it, and
     /// whether it is a member. Every account history in the read is checked
     /// against this device's floor for that account first (§6.3a): a server
@@ -234,7 +461,9 @@ impl E2eeClient {
                 .ok_or(ProtocolError::StaleState)?;
             state.check_floor(read.ledger.through, floor)?;
         }
-        let floors = self.check_others(read, &directory).await?;
+        let floors = self
+            .check_others(&read.accounts, read.ledger.through, &directory)
+            .await?;
         let member = read.ledger.is_member(own);
         let replayed = {
             let account = self.account.borrow();
@@ -277,12 +506,12 @@ impl E2eeClient {
     /// sealing keys, its current epoch) fails the same way.
     async fn check_others(
         &self,
-        read: &SpaceRead,
+        accounts: &[PublicAccountLedger],
+        through: Position,
         directory: &AccountDirectory<'_>,
     ) -> Result<Vec<(String, AccountFloor)>, ClientError> {
-        let through = read.ledger.through;
         let mut advance = Vec::new();
-        for ledger in &read.accounts {
+        for ledger in accounts {
             let account_id = &ledger.account_id;
             if *account_id == self.shared.account_id {
                 continue;
@@ -813,6 +1042,35 @@ impl E2eeClient {
         Ok(())
     }
 
+    /// Only an observed tombstone ends administration. A missing row can
+    /// simply be outside the local store's subscriptions.
+    async fn space_deleted(&self, db: &Db, space: &SpaceAddress) -> Result<bool, ClientError> {
+        let table = {
+            let keys = self.shared.keys.borrow();
+            let catalogue = keys
+                .catalogue
+                .as_ref()
+                .ok_or_else(crate::state::not_observed)?;
+            self.shared
+                .plans
+                .values()
+                .map(|plan| &plan.entry.scope)
+                .find(|table| catalogue.table(table).is_ok_and(|id| id == space.scope_id))
+                .ok_or_else(crate::state::not_observed)?
+        };
+        let id = uuid_cell(&space.identifier).ok_or(ProtocolError::InconsistentEvidence)?;
+        let query = Query::from(table)
+            .select(["id"])
+            .filter(eq(col("id"), lit(id)));
+        let mut opts = jazz::db::ReadOpts::for_read_tier(jazz::db::ReadTier::LocalOnly);
+        opts.read_view.include_deleted = true;
+        Ok(db
+            .all(&db.prepare_query(&query)?, opts)
+            .await?
+            .iter()
+            .any(|row| row.is_deleted()))
+    }
+
     /// Gets a key ready for a write to `space`: whether the write can be
     /// tried again. `call` is the [`E2eeClient::write`] call the write runs
     /// in (`None` for a write no call wraps), whose mark a rotation tried
@@ -832,13 +1090,10 @@ impl E2eeClient {
         // account, or this device before the runtime opened) is known only
         // once a pass has read it. A pass that fails marks the space (fail
         // closed), as after a removal.
-        self.shared
-            .written
-            .borrow_mut()
-            .entry(space.clone())
-            .or_default();
+        self.shared.note_write(&address);
         self.shared.notice_member_changes();
         let unevaluated = |keys: &crate::state::KeyState| keys.needs_evaluation(&address);
+        let mut ready = false;
         if online && unevaluated(&self.shared.keys.borrow()) {
             self.shared
                 .keys
@@ -846,12 +1101,21 @@ impl E2eeClient {
                 .rotation_tried
                 .insert((call, address.clone()));
             let unverified = self.account.borrow().is_none();
-            if unverified {
-                let _ = self.ensure_account(db).await;
+            let checked = async {
+                if unverified {
+                    self.ensure_account(db).await?;
+                }
+                if unevaluated(&self.shared.keys.borrow()) {
+                    ready = self.check_write_version(db, space, &address).await?;
+                }
+                Ok::<_, ClientError>(())
             }
-            // The verification may show that no removed device can hold it.
-            let still = unevaluated(&self.shared.keys.borrow());
-            if still && self.deliver_pass(db, space).await.is_err() {
+            .await;
+            if let Err(error) = checked {
+                self.shared.flush(vec![Report::RotationCheckFailed {
+                    space: space.clone(),
+                    reason: error.to_string(),
+                }]);
                 let mut keys = self.shared.keys.borrow_mut();
                 if !keys.rotation_refused.contains(&address) {
                     keys.rotation_pending.insert(address.clone());
@@ -879,12 +1143,18 @@ impl E2eeClient {
             // that failed for another reason leaves it for the next write.
             // Either way the app is told why: the write goes on under the
             // current version.
-            if online && let Err(error) = self.rotate(db, space).await {
+            if online
+                && !self.space_deleted(db, space).await?
+                && let Err(error) = self.rotate(db, space).await
+            {
                 self.shared.flush(vec![Report::RotationFailed {
                     space: space.clone(),
                     reason: error.to_string(),
                 }]);
             }
+            return Ok(true);
+        }
+        if ready {
             return Ok(true);
         }
         if online {

@@ -534,6 +534,37 @@ impl E2eeClient {
         self.shared.member_removals.borrow().len()
     }
 
+    /// The table and account pairs covered by live account streams for this
+    /// space. Exposed to tests because an unnecessary subscription has no
+    /// observable effect on decrypted rows.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn watched_member_accounts(
+        &self,
+        space: &jazz::e2ee::SpaceAddress,
+    ) -> Vec<(&'static str, String)> {
+        let watch = self.shared.member_watch.borrow();
+        watch
+            .by_account
+            .iter()
+            .filter(|((table, account), spaces)| {
+                spaces.contains(space)
+                    && watch
+                        .streams
+                        .get(table)
+                        .is_some_and(|sub| sub.accounts.contains(account))
+            })
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn write_check_reads(&self) -> (usize, usize) {
+        let watch = self.shared.member_watch.borrow();
+        (watch.last_check_rows, watch.chain_reads)
+    }
+
     /// Holds the settle back-off's clock still, or moves it on by `by` when
     /// already held (tests: a wait is stepped, never slept).
     #[doc(hidden)]

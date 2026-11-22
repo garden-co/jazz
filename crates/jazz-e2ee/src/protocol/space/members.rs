@@ -27,8 +27,11 @@ use super::super::account::{AccountReplay, AccountState};
 use super::super::error::{
     IntrinsicContradiction, ProtocolError, ProtocolResult, UnsupportedCapability,
 };
-use super::super::position::Position;
+use super::super::position::{Accepted, Position, check_read};
 use super::super::records::account::AccountAction;
+use super::super::records::space::{
+    SpaceAddress, SpaceDelivery, SpaceMember, SpaceRoot, SpaceSuccessor,
+};
 use super::chain::SpaceChain;
 use super::ledger::{AccountDirectory, Recipient, SpaceLedger};
 
@@ -355,6 +358,142 @@ pub fn rotation_mark(
     let depth = chain.current_depth()?;
     let members = ledger.member_accounts();
     let found = version_envelopes(chain, ledger, depth, false)?;
+    mark_envelopes(&chain.versions[depth].epoch_id, &members, found, accounts)
+}
+
+/// The current version's own envelope, copied from the result of chain
+/// replay. Only the runtime observing the chain can establish freshness.
+/// An observed change of root or successor requires a fresh acquisition.
+#[derive(Clone, Debug)]
+pub struct CurrentVersion {
+    address: SpaceAddress,
+    epoch: String,
+    through: Position,
+    writer: VersionEnvelope,
+    root: Accepted<SpaceRoot>,
+    successor: Option<Accepted<SpaceSuccessor>>,
+}
+
+impl CurrentVersion {
+    pub fn from_chain(chain: &SpaceChain) -> ProtocolResult<Self> {
+        let version = chain.current()?;
+        let (account, epoch) = version.writer(&chain.root.row);
+        let (source, id) = match &version.successor {
+            Some(s) => (EnvelopeSource::Successor, &s.row.id),
+            None => (EnvelopeSource::Root, &chain.root.row.id),
+        };
+        Ok(Self {
+            address: chain.address().clone(),
+            epoch: version.epoch_id.clone(),
+            through: chain.through(),
+            root: chain.root.clone(),
+            successor: version.successor.clone(),
+            writer: VersionEnvelope {
+                account_id: account.to_owned(),
+                account_epoch_id: epoch.to_owned(),
+                source,
+                record_id: id.clone(),
+                position: version.position,
+            },
+        })
+    }
+
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+    pub fn writer(&self) -> &str {
+        &self.writer.account_id
+    }
+
+    pub fn root(&self) -> &Accepted<SpaceRoot> {
+        &self.root
+    }
+    pub fn successor(&self) -> Option<&Accepted<SpaceSuccessor>> {
+        self.successor.as_ref()
+    }
+
+    /// All membership rows of this address and all accepted deliveries of
+    /// this epoch, read at one cut. Deliveries count even when the envelope
+    /// cannot be opened. The version writer counts without a delivery row.
+    pub fn rotation_mark(
+        &self,
+        address: &SpaceAddress,
+        through: Position,
+        members: &[Accepted<SpaceMember>],
+        deliveries: &[Accepted<SpaceDelivery>],
+        accounts: &AccountDirectory<'_>,
+    ) -> ProtocolResult<RotationMark> {
+        if address != &self.address || through < self.through || through != accounts.through() {
+            return Err(ProtocolError::InconsistentEvidence);
+        }
+        let root = &self.root.row;
+        let application = accounts.domain().account(&root.creator_account_id)?;
+        let verify =
+            |account: &str, device: &str, epoch: &str, position, bytes: &[u8], signature: &[u8]| {
+                match accounts.verify_author(account, device, epoch, position, bytes, signature)? {
+                    super::AuthorCheck::Valid => Ok(()),
+                    _ => Err(ProtocolError::InconsistentEvidence),
+                }
+            };
+        verify(
+            &root.creator_account_id,
+            &root.device_id,
+            &root.account_epoch_id,
+            self.root.position,
+            &root.signed_bytes(&application)?,
+            &root.signature,
+        )?;
+        if let Some(successor) = &self.successor {
+            let row = &successor.row;
+            verify(
+                &row.author_account_id,
+                &row.author_device_id,
+                &row.author_epoch_id,
+                successor.position,
+                &row.signed_bytes(&application, &root.scope()?)?,
+                &row.signature,
+            )?;
+        }
+        check_read(members, through)?;
+        check_read(deliveries, through)?;
+        let mut membership = BTreeSet::new();
+        for member in members {
+            if member.row.scope_id != address.scope_id
+                || member.row.identifier != address.identifier
+            {
+                return Err(ProtocolError::InconsistentEvidence);
+            }
+            membership.insert(member.row.account_id.clone());
+        }
+        let mut found = vec![self.writer.clone()];
+        let mut ordered = deliveries.iter().collect::<Vec<_>>();
+        super::by_position_then_id(&mut ordered);
+        for delivery in ordered {
+            let row = &delivery.row;
+            if row.scope_id != address.scope_id
+                || row.identifier != address.identifier
+                || row.key_epoch_id != self.epoch
+            {
+                return Err(ProtocolError::InconsistentEvidence);
+            }
+            found.push(VersionEnvelope {
+                account_id: row.recipient_account_id.clone(),
+                account_epoch_id: row.recipient_account_epoch_id.clone(),
+                source: EnvelopeSource::Delivery,
+                record_id: row.id.clone(),
+                position: delivery.position,
+            });
+        }
+        mark_envelopes(&self.epoch, &membership, found, accounts)
+    }
+}
+
+fn mark_envelopes(
+    epoch: &str,
+    members: &BTreeSet<String>,
+    found: Vec<VersionEnvelope>,
+    accounts: &AccountDirectory<'_>,
+) -> ProtocolResult<RotationMark> {
     let former_members: BTreeSet<String> = found
         .iter()
         .filter(|envelope| !members.contains(&envelope.account_id))
@@ -397,7 +536,7 @@ pub fn rotation_mark(
         }
     }
     Ok(RotationMark {
-        epoch_id: chain.versions[depth].epoch_id.clone(),
+        epoch_id: epoch.to_owned(),
         former_members: former_members.into_iter().collect(),
         superseded,
         reset,

@@ -124,11 +124,7 @@ impl Hooks {
     fn check_rotation(&self, address: &SpaceAddress) -> Result<(), SealError> {
         // The space joins the watch of its member accounts, and an update
         // of theirs the runtime has not served yet is taken now.
-        self.shared
-            .written
-            .borrow_mut()
-            .entry(db_address(address))
-            .or_default();
+        self.shared.note_write(address);
         self.shared.notice_member_changes();
         let mut keys = self.shared.keys.borrow_mut();
         let call = self.shared.current_write.get();

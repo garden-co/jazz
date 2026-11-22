@@ -75,12 +75,18 @@ impl E2eeClient {
             ..
         } = self.replay_space(&read).await?;
         let (Some(chain), Some(acquisition)) = (chain, acquisition) else {
+            if let Some(deps) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
+                *deps = Default::default();
+            }
             return Ok(0);
         };
         // Only a member delivers (R17). What it delivers is what it holds of
         // this chain, which can be a skipped version without the current one
         // (protocol §3.4).
         if !member {
+            if let Some(deps) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
+                *deps = Default::default();
+            }
             return Ok(0);
         }
         let holds_current = acquisition.has_current(&chain);
@@ -109,32 +115,48 @@ impl E2eeClient {
                 );
             }
         }
-        let marked = rotation_mark(&chain, &read.ledger, &directory)?.needs_rotation();
-        // Whether any member account removed a device or was reset: only
-        // then can a later write need this read again. A member whose state
-        // does not replay counts as one that did.
-        let removals =
-            read.ledger
-                .member_accounts()
+        let eligible =
+            holds_current && !self.shared.keys.borrow().rotation_refused.contains(address);
+        let mut deps = crate::state::WatchedMembers {
+            members: read.ledger.member_accounts(),
+            ..Default::default()
+        };
+        if eligible {
+            if self.shared.member_watch.borrow().covered.contains(space) {
+                deps.version =
+                    Some(jazz_e2ee::protocol::space::members::CurrentVersion::from_chain(&chain)?);
+            }
+            let marked = rotation_mark(&chain, &read.ledger, &directory)?.needs_rotation();
+            deps.holders = jazz_e2ee::protocol::space::members::holders(
+                &chain,
+                &read.ledger,
+                chain.current_depth()?,
+            )?
+            .intersection(&deps.members)
+            .cloned()
+            .collect();
+            let removals = deps
+                .holders
                 .iter()
                 .any(|account| match directory.current(account) {
                     Ok(Some(state)) => !state.removed.is_empty() || state.generation > 0,
                     Ok(None) => false,
                     Err(_) => true,
                 });
-        if let Some(members) = self.shared.written.borrow_mut().get_mut(space) {
-            *members = read.ledger.member_accounts().into_iter().collect();
-        }
-        {
             let mut keys = self.shared.keys.borrow_mut();
             keys.rotation_evaluated.insert(address.clone());
             keys.space_removals.insert(address.clone(), removals);
-            // Only a device that holds the current version acts on the mark.
-            if holds_current && marked && !keys.rotation_refused.contains(address) {
+            if marked {
                 keys.rotation_pending.insert(address.clone());
             } else {
                 keys.rotation_pending.remove(address);
             }
+        } else {
+            self.shared
+                .keys
+                .borrow_mut()
+                .rotation_pending
+                .remove(address);
         }
         let lacking = lacking(&chain, &read.ledger, &directory)?;
         let suite = self.shared.registry.select(&self.shared.selected)?;
@@ -149,10 +171,18 @@ impl E2eeClient {
             if member.account_id == self.shared.account_id {
                 continue;
             }
+            if !member
+                .epoch_ids
+                .iter()
+                .any(|epoch| acquisition.keys.version(epoch).is_some())
+            {
+                continue;
+            }
             // A member with no sealing key yet waits for a later pass.
             let Some(recipient) =
                 directory.recipient(&member.account_id, suite.key_seal.mechanism())?
             else {
+                deps.waiting.insert(member.account_id.clone());
                 continue;
             };
             for epoch in &member.epoch_ids {
@@ -176,6 +206,9 @@ impl E2eeClient {
         }
         if written > 0 {
             self.publish(db, tx).await?;
+        }
+        if let Some(watched) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
+            *watched = deps;
         }
         Ok(written)
     }
@@ -336,6 +369,9 @@ impl E2eeClient {
                 if error.reason == Some(Reason::AuthorizationDenied) =>
             {
                 let mut keys = self.shared.keys.borrow_mut();
+                if let Some(deps) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
+                    deps.holders.clear();
+                }
                 keys.rotation_refused.insert(address.clone());
                 keys.rotation_pending.remove(&address);
                 return Err(ClientError::Database(error));

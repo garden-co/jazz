@@ -472,10 +472,13 @@ struct SharedSpace {
 
 impl SharedSpace {
     fn new() -> Self {
+        Self::with_store(memory())
+    }
+
+    fn with_store(alice_store: Rc<dyn jazz_e2ee_client::PrivateStore>) -> Self {
         let settings = EncryptionSettings::default();
         let server = secure_authority_with(&settings, None);
         let (alice_id, bob_id) = (account(0xa1), account(0xb0));
-        let alice_store = memory();
         let alice = device(&server, alice_id, alice_store.clone(), 1, &settings);
         assert_eq!(alice.status(&server, &[]), AccountStatus::Active);
         let watch = drive(&server, &[&alice.db], alice.client.watch_spaces(&alice.db)).unwrap();
@@ -630,6 +633,247 @@ fn a_members_removed_device_cannot_read_what_another_member_writes_after() {
         shared.turns();
         shared.alice_writes("after");
         shared.assert_removed_device_left_out();
+    });
+}
+
+/// Alice resumes her device and uses the space before its first write.
+enum BeforeWrite {
+    Deliver,
+    Rotate,
+    Read,
+}
+
+fn reopen_and_write(first: BeforeWrite) {
+    let mut shared = SharedSpace::new();
+    shared.alice = device(
+        &shared.server,
+        account(0xa1),
+        shared.alice_store.clone(),
+        4,
+        &shared.settings,
+    );
+    assert_eq!(
+        shared.alice.status(&shared.server, &[]),
+        AccountStatus::Active
+    );
+    shared.watch = block_on(shared.alice.client.watch_spaces(&shared.alice.db)).unwrap();
+    let address = space_address(&shared.alice, shared.space);
+    match first {
+        BeforeWrite::Deliver => {
+            drive(
+                &shared.server,
+                &[&shared.alice.db],
+                shared
+                    .alice
+                    .client
+                    .deliver_space(&shared.alice.db, &address),
+            )
+            .unwrap();
+        }
+        BeforeWrite::Rotate => {
+            drive(
+                &shared.server,
+                &[&shared.alice.db],
+                shared.alice.client.rotate(&shared.alice.db, &address),
+            )
+            .unwrap();
+        }
+        BeforeWrite::Read => {
+            let prepared = shared
+                .alice
+                .db
+                .prepare_query(&Query::from("notes"))
+                .unwrap();
+            let subscription =
+                block_on(shared.alice.db.subscribe(&prepared, Default::default())).unwrap();
+            shared.watch.use_space(&address);
+            shared.turns();
+            assert_eq!(
+                notes_of(&shared.server, &shared.alice, shared.space).len(),
+                1
+            );
+            drop(subscription);
+            shared.watch.release_space(&address);
+            shared.turns();
+        }
+    }
+    shared.alice_writes("before");
+    shared.turns();
+    let before = count(&shared.server, "__e2ee_space_successors");
+    shared.bob_removes_his_second_device();
+    shared.turns();
+    shared.alice_writes("after");
+    assert_eq!(count(&shared.server, "__e2ee_space_successors"), before + 1);
+}
+
+/// Alice's explicit delivery before her first write still tracks Bob as a holder.
+#[test]
+fn a_delivery_before_the_first_write_keeps_the_member_watch() {
+    within(|| reopen_and_write(BeforeWrite::Deliver));
+}
+
+/// Alice's explicit rotation before her first write still tracks Bob as a holder.
+#[test]
+fn a_rotation_before_the_first_write_keeps_the_member_watch() {
+    within(|| reopen_and_write(BeforeWrite::Rotate));
+}
+
+/// Closing Alice's subscription before her first write still tracks Bob as a holder.
+#[test]
+fn a_closed_read_before_the_first_write_keeps_the_member_watch() {
+    within(|| reopen_and_write(BeforeWrite::Read));
+}
+
+/// Alice stops watching an idle room, then checks its members on first reuse.
+/// Bob removes his second device during the idle period.
+#[test]
+fn a_write_after_the_member_watch_expires_checks_the_room_again() {
+    within(|| {
+        let mut shared = SharedSpace::new();
+        let space = space_address(&shared.alice, shared.space);
+        let bob = account_id(account(0xb0));
+        assert!(
+            shared
+                .alice
+                .client
+                .watched_member_accounts(&space)
+                .contains(&("__e2ee_public_account_successors", bob.clone()))
+        );
+        assert!(
+            !shared
+                .alice
+                .client
+                .watched_member_accounts(&space)
+                .contains(&("__e2ee_account_keys", bob))
+        );
+        shared
+            .alice
+            .client
+            .advance_settle_clock(std::time::Duration::from_secs(61));
+        shared.turns();
+        assert!(
+            shared
+                .alice
+                .client
+                .watched_member_accounts(&space)
+                .is_empty()
+        );
+        shared.bob_removes_his_second_device();
+        shared.turns();
+        let before = count(&shared.server, "__e2ee_space_successors");
+        shared.alice_writes("resumed");
+        assert_eq!(count(&shared.server, "__e2ee_space_successors"), before + 1);
+    });
+}
+
+/// Alice evaluates only the current envelopes after each idle period. Past
+/// rotations add retained deliveries to the server but no rows to the mark check.
+#[test]
+fn a_write_checks_the_same_number_of_rows_after_many_rotations() {
+    within(|| {
+        let mut shared = SharedSpace::new();
+        let address = space_address(&shared.alice, shared.space);
+        let mut counts = Vec::new();
+        for rotations in [1, 5] {
+            for _ in 0..rotations {
+                drive(
+                    &shared.server,
+                    &[&shared.alice.db],
+                    shared.alice.client.rotate(&shared.alice.db, &address),
+                )
+                .unwrap();
+            }
+            shared
+                .alice
+                .client
+                .advance_settle_clock(std::time::Duration::from_secs(61));
+            shared.turns();
+            shared.alice_writes("resumed");
+            let probe = jazz_e2ee_client::successor_probe(
+                &jazz_e2ee::protocol::records::space::SpaceAddress::new(
+                    &address.scope_id,
+                    &address.identifier,
+                )
+                .unwrap(),
+                &uuid::Uuid::new_v4().to_string(),
+            )
+            .unwrap();
+            let (_, plan) = shared
+                .server
+                .explain_query_plan(&shared.server.prepare_query(&probe).unwrap(), None)
+                .unwrap();
+            assert!(
+                plan.contains("SEARCH") && plan.contains("predecessor=?"),
+                "{plan}"
+            );
+            counts.push(shared.alice.client.write_check_reads().0);
+        }
+        assert!(counts[0] > 0);
+        assert_eq!(counts[0], counts[1]);
+    });
+}
+
+/// A change to Bob's account invalidates only Alice's shared room. Her
+/// personal room still accepts a synchronous write with its evaluated key.
+#[test]
+fn an_unrelated_account_update_does_not_invalidate_another_room() {
+    within(|| {
+        let mut shared = SharedSpace::new();
+        let personal = space_with_a_note(&shared.server, &shared.alice, &account_id(account(0xa1)));
+        shared.turns();
+        let persist = || {
+            block_on(shared.alice.db.insert(
+                "notes",
+                note(personal, "personal"),
+                Default::default(),
+            ))
+        };
+        // Settle the opening subscription snapshots and validate this room.
+        drive(
+            &shared.server,
+            &[&shared.alice.db],
+            shared.alice.client.write(&shared.alice.db, async || {
+                shared
+                    .alice
+                    .db
+                    .insert("notes", note(personal, "ready"), Default::default())
+                    .await
+            }),
+        )
+        .unwrap();
+        shared.bob_removes_his_second_device();
+        pump(&shared.server, &shared.alice.db);
+        persist().unwrap();
+    });
+}
+
+/// A private-store failure checking Bob's removal is reported with its
+/// original reason. Once Alice's storage recovers, the marked room rotates.
+#[test]
+fn a_rotation_check_reports_storage_failure_even_when_rotation_succeeds() {
+    within(|| {
+        use jazz_e2ee_client::Report;
+        let store = FaultyStore::default();
+        let mut shared = SharedSpace::with_store(Rc::new(store.clone()));
+        shared
+            .alice
+            .client
+            .advance_settle_clock(std::time::Duration::from_secs(61));
+        shared.turns();
+        shared.bob_removes_his_second_device();
+        let reports = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let events = reports.clone();
+        let failing = store.failing.clone();
+        shared.alice.client.on_report(move |report| {
+            if let Report::RotationCheckFailed { reason, .. } = report {
+                events.borrow_mut().push(reason.clone());
+                failing.set(false);
+            }
+        });
+        store.failing.set(true);
+        shared.alice_writes("after the check");
+        assert_eq!(&*reports.borrow(), &["the disk is full"]);
+        assert_eq!(count(&shared.server, "__e2ee_space_successors"), 1);
     });
 }
 

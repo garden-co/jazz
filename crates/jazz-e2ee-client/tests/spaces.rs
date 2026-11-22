@@ -2073,6 +2073,48 @@ fn two_holders_racing_write_exactly_one_delivery() {
     });
 }
 
+/// Once Alice has seen the project tombstone she can still write retained
+/// notes where policy allows, without attempting a rotation of the deleted project.
+#[test]
+fn a_deleted_project_skips_automatic_rotation() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        deliver(&server, &alice, &[&bob], space);
+        block_on(
+            alice
+                .db
+                .delete(MEMBERS, member_row(&server, &bob.id()), Default::default()),
+        )
+        .unwrap();
+        pump(&server, &alice.db);
+        let address = space_address(&alice, space);
+        deliver(&server, &alice, &[], space);
+        assert!(alice.client.needs_rotation(&address).unwrap());
+        block_on(
+            alice
+                .db
+                .delete("projects", jazz::ids::RowUuid(space), Default::default()),
+        )
+        .unwrap();
+        pump(&server, &alice.db);
+        let events = reports_of(&alice);
+        write_note(&server, &alice, space, "retained note").unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .all(|report| !matches!(report, Report::RotationFailed { .. }))
+        );
+        assert!(
+            alice.client.needs_rotation(&address).unwrap(),
+            "restoring the row can resume rotation"
+        );
+    });
+}
+
 /// Contract: after bob's member row is deleted, the space needs rotation;
 /// alice's next encrypted write rotates it first (a successor and a delivery
 /// to carol, none to bob), and carol reads what alice writes under the new
