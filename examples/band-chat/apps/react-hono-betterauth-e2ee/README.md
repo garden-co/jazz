@@ -139,7 +139,10 @@ listed: press the button again, and both steps run again.
 
 The removed device keeps the keys it already holds. It receives no new keys.
 Other room members learn of the removal one sync round trip after it commits.
-During that round trip, their writes may still use the old key.
+Writes can still use the current key during that round trip, while offline
+after learning of the removal, or when an online rotation is refused or
+undecided by the write's deadline. The write goes ahead and the room's key
+rotates at the next opportunity.
 
 ## Signing out, and leaving a browser
 

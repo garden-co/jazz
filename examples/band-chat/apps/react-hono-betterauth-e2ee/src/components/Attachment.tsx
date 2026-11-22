@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
-import { Skeleton, Thumbnail, Token, useLightbox } from "@astryxdesign/core";
+import { unreadableRows, useAll, useDb } from "jazz-tools/react";
+import { Banner, Skeleton, Thumbnail, Token, useLightbox } from "@astryxdesign/core";
 import { app } from "../../jazz.generated";
 import { downloadBytes, formatBytes, isAudioType, isImageType } from "../lib/attachments";
 import { useObjectUrl } from "../lib/use-object-url";
@@ -34,11 +34,28 @@ function useNearViewport<T extends Element>() {
 }
 
 /** One message's attachment bytes, queried only once `isEnabled` turns true. */
-function useAttachmentBytes(messageId: string, isEnabled: boolean): Uint8Array | undefined {
-  const { data } = useAll(
+function useAttachmentBytes(messageId: string, isEnabled: boolean) {
+  const { data, error, unreadable } = useAll(
     isEnabled ? app.messages.where({ id: messageId }).select("roomId", "attachment") : undefined,
   );
-  return data?.[0]?.attachment ?? undefined;
+  const bytes = data?.[0]?.attachment ?? undefined;
+  const reason =
+    error?.message ??
+    unreadable[0]?.code ??
+    (data && !bytes ? "The attachment data is missing." : undefined);
+  return { bytes, reason };
+}
+
+function LockedAttachment({ reason }: { reason: string }) {
+  return (
+    <Banner
+      status="warning"
+      title="Attachment is unreadable on this browser"
+      description={reason}
+      container="section"
+      collapsible={false}
+    />
+  );
 }
 
 export function Attachment({ message }: { message: MessageSummary }) {
@@ -49,10 +66,11 @@ export function Attachment({ message }: { message: MessageSummary }) {
 
 function ImageAttachment({ message }: { message: MessageSummary }) {
   const [ref, isNear] = useNearViewport<HTMLDivElement>();
-  const bytes = useAttachmentBytes(message.id, isNear);
+  const { bytes, reason } = useAttachmentBytes(message.id, isNear);
   const src = useObjectUrl(bytes, message.attachmentType);
   const name = message.attachmentName ?? "Image";
   const lightbox = useLightbox({ media: { src: src ?? "", alt: name, caption: name } });
+  if (reason !== undefined) return <LockedAttachment reason={reason} />;
   return (
     <div ref={ref}>
       <Thumbnail
@@ -69,8 +87,9 @@ function ImageAttachment({ message }: { message: MessageSummary }) {
 
 function AudioAttachment({ message }: { message: MessageSummary }) {
   const [ref, isNear] = useNearViewport<HTMLDivElement>();
-  const bytes = useAttachmentBytes(message.id, isNear);
+  const { bytes, reason } = useAttachmentBytes(message.id, isNear);
   const src = useObjectUrl(bytes, message.attachmentType);
+  if (reason !== undefined) return <LockedAttachment reason={reason} />;
   return (
     <div ref={ref}>
       {src ? (
@@ -91,18 +110,24 @@ function AudioAttachment({ message }: { message: MessageSummary }) {
 function FileAttachment({ message }: { message: MessageSummary }) {
   const db = useDb();
   const [isLoading, setLoading] = useState(false);
+  const [reason, setReason] = useState<string>();
   const name = message.attachmentName ?? "Attachment";
   async function download() {
     setLoading(true);
     try {
-      const row = await db.one(
-        app.messages.where({ id: message.id }).select("roomId", "attachment"),
+      const rows = await db.all(
+        app.messages.where({ id: message.id }).select("roomId", "attachment").limit(1),
       );
-      if (row?.attachment) downloadBytes(row.attachment, name, message.attachmentType);
+      const bytes = rows[0]?.attachment;
+      if (bytes) downloadBytes(bytes, name, message.attachmentType);
+      else setReason(unreadableRows(rows)[0]?.code ?? "The attachment data is missing.");
+    } catch (error) {
+      setReason(error instanceof Error ? error.message : String(error));
     } finally {
       setLoading(false);
     }
   }
+  if (reason !== undefined) return <LockedAttachment reason={reason} />;
   return (
     <Token
       label={name}

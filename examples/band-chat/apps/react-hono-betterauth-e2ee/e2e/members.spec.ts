@@ -11,6 +11,8 @@ import {
   message,
   myAccountId,
   newDevice,
+  pageStorage,
+  watchMarkerWrites,
   reopen,
   roomList,
   send,
@@ -22,7 +24,13 @@ import {
   waitingBanner,
   reportPages,
 } from "./support";
-import { serverMarkerCount, serverRead, serverSuccessors, storedBytes } from "./server-snapshot";
+import {
+  serverMarkerCount,
+  serverRead,
+  serverSpaceRoot,
+  serverSuccessors,
+  storedBytes,
+} from "./server-snapshot";
 
 test.describe.configure({ timeout: 300_000 });
 // Playwright reads fixtures from a destructured first argument; this hook needs none.
@@ -40,7 +48,11 @@ test("no message text or attachment reaches the server or the wire; a room name 
   const roomName = unique("Rehearsal room");
   const roomId = await createRoom(a.page, roomName);
   await signUp(b.page, bob);
+  await deviceIdOf(a.page);
+  await deviceIdOf(b.page);
   await joinThroughLink(a.page, b.page, roomId, bob);
+  await watchMarkerWrites(a.page);
+  await watchMarkerWrites(b.page);
 
   const fromAlice = unique("Soundcheck at six");
   const fromBob = unique("Bringing the spare amp");
@@ -91,6 +103,19 @@ test("no message text or attachment reaches the server or the wire; a room name 
     expect(device.wire.saw(roomName)).toBe(true);
     for (const secret of secrets) expect(device.wire.saw(secret), secret).toBe(false);
   }
+  const markerTimes = await Promise.all(
+    [a, b].map((device) => device.page.evaluate(() => window.bandChatMarkerWrites ?? [])),
+  );
+  for (const times of markerTimes) expect(times.length).toBeGreaterThan(0);
+  const storedSecrets = [
+    ...secrets,
+    ...markerTimes.flat().flatMap((time) => [time, String(Date.parse(time))]),
+  ];
+  for (const device of [a, b]) {
+    const storage = await pageStorage(device.page);
+    for (const secret of storedSecrets)
+      expect(storage.includes(secret), "plaintext was found in browser storage").toBe(false);
+  }
 });
 
 test("removing a member renews the room's key at once; they read nothing written later", async ({
@@ -123,6 +148,9 @@ test("removing a member renews the room's key at once; they read nothing written
     (n) => n === 1,
   );
   const before = await serverSuccessors(roomId);
+  expect(before).toHaveLength(0);
+  const roots = await serverSpaceRoot(roomId);
+  expect(roots).toEqual([expect.any(String)]);
 
   await a.page.getByRole("button", { name: /^Invite( \d+)?$/ }).click();
   const dialog = a.page.getByRole("dialog");
@@ -140,7 +168,7 @@ test("removing a member renews the room's key at once; they read nothing written
     () => serverSuccessors(roomId),
     (rows) => rows.length > before.length,
   );
-  expect(after.length).toBe(before.length + 1);
+  expect(after).toEqual([expect.objectContaining({ predecessor: roots[0] })]);
   await expect(dialog.getByText(/key is not renewed yet/)).toHaveCount(0);
   await closeDialog(a.page);
 
@@ -218,4 +246,55 @@ test("a read marker is written only once this browser can read the room", async 
     () => serverMarkerCount(roomId, bobId),
     (n) => n === 1,
   );
+});
+
+test("an active new member attempts no read marker until the room key arrives", async ({
+  browser,
+}) => {
+  const a = await newDevice(browser);
+  const b = await newDevice(browser);
+  const alice = unique("Alice");
+  const bob = unique("Bob");
+  await signUp(a.page, alice);
+  const roomId = await createRoom(a.page, unique("Rehearsal"));
+  const text = unique("Before admission");
+  await send(a.page, text);
+  await signUp(b.page, bob);
+  await deviceIdOf(b.page);
+  await b.page.goto(`/?join=${roomId}`);
+  await b.page.getByRole("button", { name: "Ask to join" }).click();
+  await expect(b.page.getByText("Waiting for the room creator")).toBeVisible({ timeout: T });
+  await deviceIdOf(b.page);
+  await watchMarkerWrites(b.page);
+
+  // Admission's delivery call happens after its transaction is accepted.
+  // Hold that call while Bob's active device reads the newly visible room.
+  await a.page.evaluate(() => {
+    const db = [...(window.__jazzWindowStorageContexts__ ?? [])].at(-1)
+      ?.db as import("jazz-tools").Db;
+    const keys = db.encryption.keys;
+    const deliver = keys.deliver.bind(keys);
+    keys.deliver = async () => {
+      await new Promise<void>((release) => {
+        window.releaseBandChatDelivery = release;
+      });
+      return deliver();
+    };
+  });
+  await admit(a.page, bob);
+  await a.page.waitForFunction(() => typeof window.releaseBandChatDelivery === "function");
+  await expect(lockedBanner(b.page)).toBeVisible({ timeout: T });
+  await expect(waitingBanner(b.page)).toHaveCount(0);
+  const bobId = await myAccountId(b.page);
+  expect(await serverMarkerCount(roomId, bobId)).toBe(0);
+  expect(await b.page.evaluate(() => window.bandChatMarkerWrites)).toEqual([]);
+
+  await a.page.evaluate(() => window.releaseBandChatDelivery!());
+  await expect(message(b.page, text)).toBeVisible({ timeout: T });
+  await until(
+    "the read marker after the key arrived",
+    () => serverMarkerCount(roomId, bobId),
+    (count) => count === 1,
+  );
+  expect(await b.page.evaluate(() => window.bandChatMarkerWrites)).toHaveLength(1);
 });

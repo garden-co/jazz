@@ -22,7 +22,7 @@ import {
   type Failure,
 } from "../lib/device-state";
 import { endOtherSignIns } from "../lib/end-other-sign-ins";
-import { writeLeaveRecord } from "../lib/leave-record";
+import { clearLeaveRecord, writeLeaveRecord } from "../lib/leave-record";
 
 /** How BandChat names itself on the recovery passkey. */
 const APP_NAME = "BandChat";
@@ -206,15 +206,22 @@ function LeaveThisBrowser({ device }: { device: DeviceInfo }) {
     setBusy(true);
     setError(null);
     try {
-      await encryption.devices.requestRemoval();
-      // Kept across reloads: the page signs out once it sees a new device
-      // ID, which exists only after the old keys are erased.
+      // A tab can close before the authority's answer reaches it. Keep the
+      // intent so the next page can sign out after Jazz changes its device ID.
       writeLeaveRecord({ accountId, deviceId: device.id });
+      await encryption.devices.requestRemoval();
       reloadLeaveRecord();
       setConfirming(false);
       void refresh();
     } catch (cause) {
       const failed = failureOf(cause);
+      if (
+        failed.code === "no-other-device" ||
+        failed.code === "device-not-active" ||
+        (failed.code === "database" && failed.message.startsWith("WriteRejected:"))
+      ) {
+        clearLeaveRecord();
+      }
       setError(
         failed.code === "no-other-device"
           ? "This is your only device, so it can't leave: no other device would hold your keys. Nothing was removed, and your messages stay readable here."
@@ -266,7 +273,7 @@ function RemoveLostDevice({ device }: { device: DeviceInfo }) {
         await endOtherSignIns();
       } catch (cause) {
         setError(
-          `Your other browsers were not signed out, so nothing was removed: ${failureOf(cause).message} Try again.`,
+          `Sign-out could not be confirmed. Your other browsers may have been signed out. ${failureOf(cause).message} Try again to finish removing the device.`,
         );
         return;
       }
@@ -435,7 +442,7 @@ function ApproveDevice({ device }: { device: DeviceInfo }) {
  * this component's state, and is gone once the user has written it down.
  */
 function RecoverySetup({ accountName }: { accountName: string }) {
-  const { encryption } = useDeviceState();
+  const { devices, encryption } = useDeviceState();
   const [count, setCount] = useState<number | null>(null);
   const [result, setResult] = useState<
     { method: "passkey" } | { method: "phrase"; phrase: string } | null
@@ -447,12 +454,16 @@ function RecoverySetup({ accountName }: { accountName: string }) {
     let stopped = false;
     encryption.recovery
       .list()
-      .then((roots) => !stopped && setCount(roots.length))
+      .then((roots) => {
+        if (stopped) return;
+        setCount(roots.length);
+        if (roots.length === 0) setResult(null);
+      })
       .catch((cause: unknown) => !stopped && setError(failureOf(cause).message));
     return () => {
       stopped = true;
     };
-  }, [encryption]);
+  }, [devices, encryption]);
 
   async function enable() {
     setBusy(true);

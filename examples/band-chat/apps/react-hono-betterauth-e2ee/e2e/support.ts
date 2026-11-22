@@ -11,6 +11,7 @@ import {
 } from "node:http";
 import { connect, type AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
+import type { Db } from "jazz-tools";
 import {
   expect,
   type Browser,
@@ -466,4 +467,91 @@ export async function until<V>(
       throw new Error(`Timed out waiting for ${what}; last value: ${JSON.stringify(last)}`);
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
+}
+
+/** Everything this origin keeps in the browser, as text. */
+export async function pageStorage(page: Page): Promise<string> {
+  return page.evaluate(async () => {
+    const text = (value: unknown): string => {
+      if (value instanceof ArrayBuffer) return new TextDecoder().decode(value);
+      if (ArrayBuffer.isView(value))
+        return new TextDecoder().decode(
+          new Uint8Array(value.buffer, value.byteOffset, value.byteLength),
+        );
+      if (value instanceof Date) return value.toISOString();
+      if (Array.isArray(value)) return value.map(text).join("\n");
+      if (value && typeof value === "object")
+        return Object.entries(value)
+          .map(([key, inner]) => `${key}=${text(inner)}`)
+          .join("\n");
+      return String(value);
+    };
+    const parts: string[] = [];
+    for (const store of [localStorage, sessionStorage])
+      for (let i = 0; i < store.length; i++) {
+        const key = store.key(i)!;
+        parts.push(key, store.getItem(key) ?? "");
+      }
+    for (const { name } of await indexedDB.databases()) {
+      if (!name) continue;
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const open = indexedDB.open(name);
+        open.onsuccess = () => resolve(open.result);
+        open.onerror = () => reject(open.error);
+      });
+      for (const storeName of Array.from(db.objectStoreNames)) {
+        const all = await new Promise<unknown[]>((resolve, reject) => {
+          const request = db.transaction(storeName).objectStore(storeName).getAll();
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {
+          const request = db.transaction(storeName).objectStore(storeName).getAllKeys();
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        parts.push(name, storeName, text(keys), text(all));
+      }
+      db.close();
+    }
+    for (const name of await caches.keys()) {
+      const cache = await caches.open(name);
+      parts.push(name);
+      for (const request of await cache.keys()) {
+        const response = await cache.match(request);
+        parts.push(request.url, response ? await response.text() : "");
+      }
+    }
+    return parts.join("\n");
+  });
+}
+
+declare global {
+  interface Window {
+    bandChatMarkerWrites?: string[];
+    releaseBandChatDelivery?: () => void;
+    bandChatRemovalAccepted?: boolean;
+  }
+}
+
+/** Count calls at the Db so a write refused locally still counts as an attempt. */
+export async function watchMarkerWrites(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const db = [...(window.__jazzWindowStorageContexts__ ?? [])].at(-1)?.db;
+    if (!db) throw new Error("The page has no Jazz Db to observe");
+    const prototype = Object.getPrototypeOf(db) as Db;
+    const writes: string[] = (window.bandChatMarkerWrites = []);
+    const insert = prototype.insert;
+    const update = prototype.update;
+    prototype.insert = function (this: Db, ...args: Parameters<Db["insert"]>) {
+      if (args[0]._table === "readMarkers")
+        writes.push((args[1] as { lastReadAt: Date }).lastReadAt.toISOString());
+      return Reflect.apply(insert, this, args);
+    } as Db["insert"];
+    prototype.update = function (this: Db, ...args: Parameters<Db["update"]>) {
+      if (args[0]._table === "readMarkers")
+        writes.push((args[2] as { lastReadAt: Date }).lastReadAt.toISOString());
+      return Reflect.apply(update, this, args);
+    } as Db["update"];
+  });
 }

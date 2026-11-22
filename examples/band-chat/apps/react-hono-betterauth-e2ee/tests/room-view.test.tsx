@@ -2,8 +2,8 @@
 // The open room: locked messages are shown as locked, never as an empty room,
 // and a read marker is written only once the newest message is decrypted here.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
-import { db, resetWorld, world, type Q } from "./support/fake-jazz";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { db, reactMock, resetWorld, world, type Q } from "./support/fake-jazz";
 
 vi.mock("../jazz.generated", async () => ({ app: (await import("./support/fake-jazz")).fakeApp }));
 vi.mock("jazz-tools/react", async () => (await import("./support/fake-jazz")).reactMock);
@@ -41,14 +41,16 @@ function show(answers: {
   messages: { data: unknown[]; unreadable?: unknown[] } | undefined;
   newest?: unknown[];
   markers?: unknown[];
+  attachment?: ReturnType<typeof world.answer>;
 }) {
   world.answer = (q: Q) => {
     if (q.table === "profiles") return { data: [alice, bob] };
+    if (q.table === "messages" && q.columns?.includes("attachment")) return answers.attachment;
     if (q.table === "messages" && q.max === 1) return { data: answers.newest ?? [newest] };
     if (q.table === "messages") return answers.messages;
     if (q.table === "readMarkers") return { data: answers.markers ?? [] };
-    if (q.table === "reactions" || q.table === "joinRequests" || q.table === "__e2ee_members")
-      return { data: [] };
+    if (q.table === "__e2ee_members") return { data: [{ id: "member", accountId: alice.author }] };
+    if (q.table === "reactions" || q.table === "joinRequests") return { data: [] };
     return undefined;
   };
   return render(
@@ -107,4 +109,93 @@ describe("the room view's read marker", () => {
     await screen.findByText("text m3");
     expect(db.insert).toHaveBeenCalledTimes(1);
   });
+});
+
+describe("an unreadable attachment", () => {
+  it.each([
+    ["image/png", { data: [], unreadable: [{ code: "invalid-ciphertext" }] }, "invalid-ciphertext"],
+    [
+      "audio/ogg",
+      { error: new Error("unsupported attachment read") },
+      "unsupported attachment read",
+    ],
+  ] satisfies [string, NonNullable<ReturnType<typeof world.answer>>, string][])(
+    "shows the reason for a preview of %s",
+    async (attachmentType, answer, reason) => {
+      show({
+        messages: {
+          data: [{ ...message("m3", "2026-01-03"), attachmentName: "take", attachmentType }],
+        },
+        attachment: answer,
+      });
+      expect(await screen.findByText("Attachment is unreadable on this browser")).toBeTruthy();
+      expect(screen.getByText(reason)).toBeTruthy();
+      expect(screen.getByText("text m3")).toBeTruthy();
+    },
+  );
+
+  it("shows why a requested download was omitted and keeps the message readable", async () => {
+    const rows: unknown[] = [];
+    db.all.mockImplementation(async (query) =>
+      (query as Q).columns?.includes("attachment") ? rows : [{ id: "m" }],
+    );
+    const unreadableRows = vi
+      .spyOn(reactMock, "unreadableRows")
+      .mockImplementation((result) => (result === rows ? [{ code: "unsupported-format" }] : []));
+    try {
+      show({
+        messages: { data: [{ ...message("m3", "2026-01-03"), attachmentName: "take.txt" }] },
+      });
+      fireEvent.click(await screen.findByLabelText("Download take.txt"));
+      expect(await screen.findByText("Attachment is unreadable on this browser")).toBeTruthy();
+      expect(screen.getByText("unsupported-format")).toBeTruthy();
+      expect(screen.getByText("text m3")).toBeTruthy();
+    } finally {
+      unreadableRows.mockRestore();
+    }
+  });
+});
+
+it("shows why members could not load and retries in the same room", async () => {
+  db.encryption.members.where.mockRejectedValueOnce(
+    new Error("The table identity has not been observed"),
+  );
+  show({ messages: { data: [] }, newest: [] });
+  fireEvent.click(await screen.findByRole("button", { name: "Invite" }));
+  const dialog = within(screen.getByRole("dialog"));
+  expect(await dialog.findByText("Could not load members")).toBeTruthy();
+  expect(dialog.getByText("The table identity has not been observed")).toBeTruthy();
+  expect(dialog.queryByText("Loading members…")).toBeNull();
+  fireEvent.click(dialog.getByRole("button", { name: "Retry" }));
+  expect(await dialog.findByText("1 members")).toBeTruthy();
+  expect(db.encryption.members.where).toHaveBeenCalledTimes(2);
+});
+
+it("shows when a send used the current key after rotation failed and retries for this room", async () => {
+  show({ messages: { data: [message("m3", "2026-01-03")] } });
+  const report = db.encryption.onReport.mock.calls[0]![0];
+  act(() =>
+    report({
+      type: "rotation-failed",
+      space: { table: "rooms", id: "elsewhere" },
+      reason: "offline",
+    }),
+  );
+  expect(screen.queryByText("The room key could not be renewed")).toBeNull();
+  act(() =>
+    report({ type: "rotation-failed", space: { table: "rooms", id: "room" }, reason: "offline" }),
+  );
+  expect(await screen.findByText("The room key could not be renewed")).toBeTruthy();
+  expect(screen.getByText("offline")).toBeTruthy();
+  expect(screen.getByText("text m3")).toBeTruthy();
+
+  db.encryption.keys.rotate.mockRejectedValueOnce(new Error("refused"));
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByText("refused")).toBeTruthy();
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry" })));
+  expect(screen.queryByText("The room key could not be renewed")).toBeNull();
+  expect(db.encryption.keys.rotate.mock.calls).toEqual([
+    [{ table: "rooms", id: "room" }],
+    [{ table: "rooms", id: "room" }],
+  ]);
 });

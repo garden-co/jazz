@@ -25,7 +25,7 @@ import {
 } from "@astryxdesign/core";
 import { app, type Reaction } from "../../jazz.generated";
 import { useMarkRead } from "../lib/mark-read";
-import { removeMember, useRoomMembers } from "../lib/membership";
+import { removeMember, renewRoomKey, useRoomMembers } from "../lib/membership";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
 import { Attachment } from "./Attachment";
 import { Composer } from "./Composer";
@@ -95,7 +95,7 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   const isLoadingMessages = newestFirst === undefined;
   const messages = useMemo(() => [...(newestFirst ?? [])].reverse(), [newestFirst]);
   const { data: reactions = [] } = useAll(roomReactionsQuery(roomId));
-  const { members: loadedMembers } = useRoomMembers(roomId);
+  const { members: loadedMembers, loadFailure } = useRoomMembers(roomId);
   const members = loadedMembers ?? [];
   const { data: requests = [] } = useAll(
     isCreator ? app.joinRequests.where({ roomId }) : undefined,
@@ -107,6 +107,21 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   const [isMembersOpen, setMembersOpen] = useState(false);
   const [isRenameOpen, setRenameOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [rotationFailure, setRotationFailure] = useState<string>();
+  useEffect(() => {
+    return db.encryption.onReport((report) => {
+      if (report.type !== "rotation-failed" || typeof report.reason !== "string") return;
+      const space = report.space as { table?: string; id?: string } | null | undefined;
+      if (space?.table === "rooms" && space.id === roomId) setRotationFailure(report.reason);
+    });
+  }, [db, roomId]);
+
+  function retryRotation() {
+    setRotationFailure(undefined);
+    renewRoomKey(db, roomId).catch((error: unknown) =>
+      setRotationFailure(error instanceof Error ? error.message : String(error)),
+    );
+  }
   const reportFailure = (action: string) => (cause: unknown) =>
     setActionError(`${action}: ${cause instanceof Error ? cause.message : String(cause)}`);
 
@@ -203,6 +218,16 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
         <MoreMenu label="Room options" size="sm" alignment="end" items={menuItems} />
       </HStack>
       <Divider />
+      {rotationFailure !== undefined ? (
+        <Banner
+          status="warning"
+          title="The room key could not be renewed"
+          description={rotationFailure}
+          container="section"
+          collapsible={false}
+          endContent={<Button label="Retry" size="sm" onClick={retryRotation} />}
+        />
+      ) : null}
       {lockedCount > 0 ? (
         <Banner
           status="warning"
@@ -278,7 +303,8 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
         roomId={roomId}
         author={author}
         isCreator={isCreator}
-        members={members}
+        members={loadedMembers}
+        loadFailure={loadFailure}
         requests={requests}
       />
       {isCreator ? (

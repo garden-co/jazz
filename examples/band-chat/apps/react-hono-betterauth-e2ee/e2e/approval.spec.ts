@@ -1,6 +1,6 @@
 // A new browser of a user: waiting for approval, approval across a reload,
 // cleared site data, and recovery by phrase or by passkey.
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext } from "@playwright/test";
 import {
   addApprovedBrowser,
   createRoom,
@@ -11,6 +11,7 @@ import {
   newDevice,
   openDevices,
   openRoom,
+  pageStorage,
   roomList,
   send,
   shownCode,
@@ -28,49 +29,6 @@ test.describe.configure({ timeout: 300_000 });
 // Playwright reads fixtures from a destructured first argument; this hook needs none.
 // eslint-disable-next-line no-empty-pattern
 test.afterEach(async ({}, testInfo) => reportPages(testInfo));
-
-/** Everything this origin keeps in the browser, as text. */
-async function pageStorage(page: Page): Promise<string> {
-  return page.evaluate(async () => {
-    const text = (value: unknown): string => {
-      if (value instanceof ArrayBuffer) return new TextDecoder().decode(value);
-      if (ArrayBuffer.isView(value))
-        return new TextDecoder().decode(
-          new Uint8Array(value.buffer, value.byteOffset, value.byteLength),
-        );
-      if (Array.isArray(value)) return value.map(text).join("\n");
-      if (value && typeof value === "object")
-        return Object.entries(value)
-          .map(([key, inner]) => `${key}=${text(inner)}`)
-          .join("\n");
-      return String(value);
-    };
-    const parts: string[] = [];
-    for (const store of [localStorage, sessionStorage])
-      for (let i = 0; i < store.length; i++) {
-        const key = store.key(i)!;
-        parts.push(key, store.getItem(key) ?? "");
-      }
-    for (const { name } of await indexedDB.databases()) {
-      if (!name) continue;
-      const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const open = indexedDB.open(name);
-        open.onsuccess = () => resolve(open.result);
-        open.onerror = () => reject(open.error);
-      });
-      for (const storeName of Array.from(db.objectStoreNames)) {
-        const all = await new Promise<unknown[]>((resolve, reject) => {
-          const request = db.transaction(storeName).objectStore(storeName).getAll();
-          request.onsuccess = () => resolve(request.result);
-          request.onerror = () => reject(request.error);
-        });
-        parts.push(name, storeName, text(all));
-      }
-      db.close();
-    }
-    return parts.join("\n");
-  });
-}
 
 /** Clears everything the browser keeps for the app's origin: storage and cookies. */
 async function clearSiteData(device: Device): Promise<void> {
