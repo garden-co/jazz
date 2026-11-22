@@ -77,6 +77,7 @@ private suspend fun perform(r: JsonObject): JsonElement {
         "disconnect" -> client().disconnect()
         "reconnect" -> client().reconnect()
         "signout" -> client().signOut()
+        "hrefresh" -> client().refreshSession()
         "cancel" -> running[r["target"]!!.jsonPrimitive.long]?.cancel()
         // jazz-kotlin has no JazzSession.
         else -> throw Unsupported(op)

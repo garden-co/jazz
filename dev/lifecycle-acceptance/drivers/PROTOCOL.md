@@ -21,6 +21,7 @@ At end of input the process exits without closing anything.
 | `sync` | `h` | null, once waitForSync returns |
 | `close` | `h`, `ms?` (close with that timeout, where the language has one) | null |
 | `delete` `signout` `disconnect` `reconnect` | `h` | null |
+| `hrefresh` | `h` | null: the handle's own session refresh (its renewal) |
 | `cancel` | `target` (a request id) | null; the target then answers as the language does |
 | `sopen` | `h dir url app start=backend\|device\|signed-out`, `token?` | null |
 | `stoken` | `h token` (`""` is signed out) | null; what the bearer provider gives from now on |

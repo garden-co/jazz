@@ -23,6 +23,9 @@ export const closed = kinds("closed (Rust Stopped)", {
   go: "closed",
 });
 
+/** A handle whose session's user changed. */
+export const replaced = kinds("replaced", { rust: "Replaced", swift: "replaced", go: "replaced" });
+
 /** A memory store closed with writes the server never got. */
 export const unsynced = kinds("unsynced", { rust: "Unsynced", go: "unsynced" });
 

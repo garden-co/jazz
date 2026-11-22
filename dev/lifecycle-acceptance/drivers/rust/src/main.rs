@@ -99,6 +99,11 @@ async fn perform(state: &State, request: &Value) -> Result<Value, Failure> {
         "disconnect" => client()?.disconnect().await.map_err(failed)?,
         "reconnect" => client()?.reconnect().await.map_err(failed)?,
         "signout" => client()?.sign_out().await.map_err(failed)?,
+        "hrefresh" => {
+            let jazz = client()?;
+            let session = jazz.session().ok_or_else(|| bad("the handle has no session"))?;
+            session.refresh().await.map_err(failed)?
+        }
         "sopen" => {
             let token: Token = Arc::new(Mutex::new(text(request, "token")));
             let config = SessionConfig::new(app()?)

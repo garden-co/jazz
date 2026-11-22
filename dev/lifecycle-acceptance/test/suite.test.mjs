@@ -85,7 +85,7 @@ test("errors match by kind alone, and only the expected one", () => {
 });
 
 for (const [fake, ids] of [
-  ["yes", ["persist.clean-exit", "persist.sigkill", "store.second-open", "store.second-open.race", "close.ends-waits", "close.drain", "close.session", "signout.derived", "signout.follow"]],
+  ["yes", ["persist.clean-exit", "persist.sigkill", "store.second-open", "store.second-open.race", "close.ends-waits", "close.drain", "close.session", "signout.derived", "signout.client-ends", "cancel.sync.refuse"]],
   ["throws", ["store.second-open", "store.second-open.race"]],
 ])
   for (const id of ids)

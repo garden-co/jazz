@@ -91,7 +91,7 @@ func perform(ctx context.Context, r request) (any, error) {
 	mu.Unlock()
 
 	switch r.Op {
-	case "account", "write", "read", "sync", "close", "delete", "disconnect", "reconnect", "signout":
+	case "account", "write", "read", "sync", "close", "delete", "disconnect", "reconnect", "signout", "hrefresh":
 		if !hasDB {
 			return nil, badRequest("no handle")
 		}
@@ -170,6 +170,8 @@ func perform(ctx context.Context, r request) (any, error) {
 		return nil, db.Reconnect(ctx)
 	case "signout":
 		return nil, db.SignOut(ctx)
+	case "hrefresh":
+		return nil, db.Refresh(ctx)
 	case "sopen":
 		tokenMu, token := &sync.Mutex{}, new(string)
 		*token = r.Token

@@ -1,9 +1,10 @@
 // Cancel while the server is unreachable: not decided (cancel.*), so these report NOT_COVERED with
 // what was observed. waiting() sets up a call pending on that server, for close.* too.
-import { CANCELLED } from "../errors.mjs";
 import { Broken, equal, value } from "../round.mjs";
 
-const CANCEL_MS = 2_000;
+// "Promptly" (#native-language-apis, 23:16 UTC): the worst cancel measured in CI was 16 ms (Rust,
+// Go); 250 ms leaves room for a loaded runner.
+const CANCEL_MS = 250;
 const MEASURE_MS = 40_000; // past jazz-app's 30 s drain, to tell slow from never
 const ROUNDS = 8; // all at once: these rounds wait, they don't compute
 
@@ -42,7 +43,8 @@ async function cancel(r, options) {
   r.time("cancel", took);
   if (reply.ok) throw new Broken("the cancelled wait succeeded with no server");
   if (reply.kind === "harness.timeout") throw new Broken("cancel doesn't end the wait", `still waiting ${took} ms after the cancel`);
-  if (reply.kind !== CANCELLED[r.lang]) throw new Broken(`a cancelled wait ends as ${reply.kind}`, reply.msg);
+  // The surface ("still queued") waits on Anselm: any prompt end but success or a time-out passes.
+  if (reply.kind.startsWith("harness.")) throw new Broken(`a cancelled wait ends as ${reply.kind}`, reply.msg);
   if (took > CANCEL_MS) throw new Broken(`cancel took over ${CANCEL_MS} ms`, `${took} ms`);
   const local = value(await process.call("read", { h: "a", tier: "local" }), "local read after the cancel");
   equal(local, [`online ${r.id}`, title].sort(), "cancelling the wait lost a write");
@@ -55,11 +57,19 @@ for (const outage of ["refuse", "hole"]) {
     rules.push({
       id: `cancel.${wait}.${outage}`,
       title: `cancel a ${wait} waiting on a ${how} server, within ${CANCEL_MS} ms`,
-      basis: "pending",
+      basis: "contract",
       rounds: ROUNDS,
       jobs: ROUNDS,
       idle: true,
       run: (r) => cancel(r, { wait, outage }),
     });
 }
+// The other cancel rules, decided but not built here: no driver op cancels before a call starts,
+// none runs a transaction, and none reads mutation errors yet.
+for (const [id, title] of [
+  ["cancel.before-start", "a call cancelled before it starts does nothing"],
+  ["cancel.before-commit", "a transaction cancelled before commit rolls back"],
+  ["cancel.refusal-reported", "a refusal after a cancelled wait still reaches mutation errors"],
+])
+  rules.push({ id, title, basis: "contract", rounds: 1, external: true, notCovered: { all: "decided, not built in this harness yet" } });
 export default rules;

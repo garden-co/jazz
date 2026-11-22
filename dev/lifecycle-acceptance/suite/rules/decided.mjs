@@ -1,5 +1,5 @@
 // The five rules #native-language-apis decided (relayed 22:37 UTC). Scored.
-import { closed, inLang, notSupported, unsynced } from "../errors.mjs";
+import { closed, inLang, notSupported, replaced, unsynced } from "../errors.mjs";
 import { Broken, equal, refusal, show, value } from "../round.mjs";
 import { waiting } from "./waits.mjs";
 
@@ -102,7 +102,37 @@ async function follow(r) {
   if (after.clientEpoch === before.clientEpoch) throw new Broken("clientEpoch didn't change", String(after.clientEpoch));
 }
 
+/** jazz#6242: the client's own renewal finds no token, and the session follows it. */
+async function clientEnds(r) {
+  const token = await r.stack.token(`ends-${r.id}`);
+  const { process, owner } = await sessionAndHandle(r, "backend", token);
+  const title = `before ${r.id}`;
+  value(await process.call("write", { h: "a", title, owner, tier: "global" }), "write");
+  const before = value(await process.call("ssnap", { h: "s" }), "snapshot");
+  equal(before.status, "ready", "the session didn't sign in");
+  value(await process.call("stoken", { h: "s", token: "" }), "the provider gives no token");
+  const renewed = await process.call("hrefresh", { h: "a" });
+  r.note(`the handle's refresh: ${renewed.ok ? "ok" : renewed.kind}`);
+  const after = value(await process.call("ssnap", { h: "s" }), "snapshot after");
+  if (after.status !== "signed-out") throw new Broken(`the session reads ${after.status}, not signed-out`);
+  if (after.clientEpoch === before.clientEpoch) throw new Broken("clientEpoch didn't change");
+  refusal(await process.call("read", { h: "a", tier: "local" }), inLang(replaced, r.lang), "the old handle's read");
+  value(await process.call("stoken", { h: "s", token }), "the provider gives the token again");
+  value(await process.call("srefresh", { h: "s" }), "session refresh");
+  value(await process.call("sjazz", { h: "s", as: "b" }), "the new client");
+  equal(value(await process.call("read", { h: "b", tier: "local" }), "the new client's read"), [title], "the new client doesn't work");
+  value(await process.call("write", { h: "b", title: `after ${r.id}`, owner, tier: "global" }), "the new client's write");
+}
+
 export default [
+  {
+    id: "signout.client-ends",
+    title: "the client's own renewal finds no token: session signed out with a new clientEpoch, old handles replaced, and it signs in again",
+    basis: "contract",
+    rounds: 100,
+    notCovered: NO_SESSION,
+    run: clientEnds,
+  },
   {
     id: "close.ends-waits",
     title: "close with a wait pending on an unreachable server: the wait fails as closed, close returns within 3 s",

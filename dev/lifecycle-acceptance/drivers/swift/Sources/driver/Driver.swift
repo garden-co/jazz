@@ -121,6 +121,8 @@ func perform(_ shared: Shared, _ r: Request) async throws -> Any {
         try await shared.client(h).reconnect()
     case "signout":
         try await shared.client(h).signOut()
+    case "hrefresh":
+        try await shared.client(h).refresh()
     case "sopen":
         let token = Token(r.token ?? "")
         let start = Jazz.JazzSession.Start(rawValue: r.start ?? "backend")
