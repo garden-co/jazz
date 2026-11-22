@@ -2,6 +2,7 @@
   "title": "End-to-end Encryption",
   "pages": [
     "getting-started",
+    "bandchat-walkthrough",
     "private-store",
     "browser",
     "native",
