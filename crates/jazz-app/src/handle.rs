@@ -42,8 +42,9 @@ pub(crate) enum Command {
     Shutdown(oneshot::Sender<Result<()>>, std::time::Duration),
 }
 
-/// How long [`Jazz::shutdown`] lets the calls already made run before it
-/// cancels them.
+/// How long [`Jazz::shutdown`] lets the local work of the calls already
+/// made run before it cancels them: the backstop, as their waits on the
+/// server end when it begins.
 const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How long shutdown waits for the backend to answer the requests that end
@@ -71,6 +72,9 @@ pub struct Jazz {
     /// The tier this handle's writes wait for ([`Jazz::durable`]); `None`
     /// returns once a write is committed locally.
     pub(crate) durability: Option<DurabilityTier>,
+    /// Ends this handle's calls' waits on the server once true
+    /// ([`Jazz::ending_waits_with`]).
+    pub(crate) waits_end: Option<watch::Receiver<bool>>,
 }
 
 #[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
@@ -96,9 +100,10 @@ pub(crate) struct Info {
     pub(crate) backend_client: Option<crate::backend_client::BackendClientLink>,
     /// The store keeps nothing past the process.
     pub(crate) memory: bool,
-    /// Its [`crate::JazzSession`] replaced it: calls fail with
-    /// [`Error::Replaced`], not [`Error::Stopped`].
-    pub(crate) replaced: std::sync::atomic::AtomicBool,
+    /// Its [`crate::JazzSession`] replaced it, with that session's closing
+    /// signal: calls fail with [`Error::Replaced`] while the session goes
+    /// on, and with [`Error::Stopped`] once it closes.
+    pub(crate) replaced: std::sync::OnceLock<watch::Receiver<bool>>,
 }
 
 /// A backend's way to the core, for the endpoint it serves its users with.
@@ -272,11 +277,12 @@ impl Jazz {
                 opened_with,
                 backend_client,
                 memory,
-                replaced: std::sync::atomic::AtomicBool::new(false),
+                replaced: std::sync::OnceLock::new(),
             }),
             scope: None,
             for_user: false,
             durability: None,
+            waits_end: None,
         })
     }
 
@@ -304,6 +310,7 @@ impl Jazz {
             scope: Some(Arc::new(session)),
             for_user: true,
             durability: self.durability,
+            waits_end: self.waits_end.clone(),
         }
     }
 
@@ -322,9 +329,14 @@ impl Jazz {
     {
         let (reply, answer) = oneshot::channel();
         let scope = self.scope.clone();
+        let waits_end = self.waits_end.clone();
         let job: Job = Box::new(move |client| {
             let client = match scope {
                 Some(session) => client.for_session((*session).clone()),
+                None => client,
+            };
+            let client = match waits_end {
+                Some(ends) => client.ending_waits_with(ends),
                 None => client,
             };
             Box::pin(async move {
@@ -342,23 +354,37 @@ impl Jazz {
         self.commands
             .send(Command::Run(job))
             .map_err(|_| self.stopped())?;
-        answer.await.map_err(|_| self.stopped())?
+        match answer.await.map_err(|_| self.stopped())? {
+            // A wait on the server, ended as the client (or handle) closes.
+            Err(Error::Stopped | Error::Jazz(jazz::tools::JazzError::ChannelClosed)) => {
+                Err(self.stopped())
+            }
+            answer => answer,
+        }
     }
 
     /// Why calls fail now that the client stopped.
     fn stopped(&self) -> Error {
-        if self.info.replaced.load(std::sync::atomic::Ordering::SeqCst) {
-            Error::Replaced
-        } else {
-            Error::Stopped
+        match self.info.replaced.get() {
+            // Replaced only while its session goes on: closed wins.
+            Some(session_closing) if !*session_closing.borrow() => Error::Replaced,
+            _ => Error::Stopped,
         }
     }
 
-    /// Its [`crate::JazzSession`] is replacing it.
-    pub(crate) fn mark_replaced(&self) {
-        self.info
-            .replaced
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    /// Its [`crate::JazzSession`] is replacing it (or closing it, as
+    /// `session_closing` then reads).
+    pub(crate) fn mark_replaced(&self, session_closing: watch::Receiver<bool>) {
+        let _ = self.info.replaced.set(session_closing);
+    }
+
+    /// This handle with its calls' waits on the server ended once `ends`
+    /// reads true: for a binding's handle that closes while the client
+    /// lives on. Not public API.
+    #[doc(hidden)]
+    pub fn ending_waits_with(mut self, ends: watch::Receiver<bool>) -> Self {
+        self.waits_end = Some(ends);
+        self
     }
 
     /// Sends `job` to the client's thread without waiting for it: for
@@ -481,9 +507,12 @@ impl Jazz {
         Ok(Subscription::new(receiver, self.clone()))
     }
 
-    /// Stops the client for every clone: the calls already made finish
-    /// first (for up to 30 seconds, after which they fail with
-    /// [`Error::Stopped`]), then open subscriptions end. Calls made once
+    /// Stops the client for every clone. The calls already made that wait
+    /// on the server or the network (`wait_for_sync`, a global tier, a
+    /// remote read) fail with [`Error::Stopped`] at once, though what they
+    /// sent may still apply; their local work finishes first (for up to 30
+    /// seconds, after which it fails with [`Error::Stopped`] too), then
+    /// open subscriptions end. Calls made once
     /// shutdown has begun, including from a call still finishing, fail
     /// with [`Error::Stopped`]. Call it before the process exits when the app
     /// keeps a persistent store ([`crate::Storage::Dir`]), so its last
@@ -696,6 +725,10 @@ fn run(
                 Some(_) = jobs.join_next(), if !jobs.is_empty() => {}
             }
         }
+        // What waits on the server or the network ends here, on this
+        // thread, so each wait's own bookkeeping runs; what is left to
+        // drain is local work.
+        client.end_waits();
         // Nothing new starts: a call made from here on (even by a job that
         // is draining) fails with `Stopped` instead of waiting on a job
         // that never runs.
@@ -718,8 +751,8 @@ fn run(
                 }
             }
         };
-        // The jobs already started finish, within a limit: a remote read
-        // waiting on an unreachable server must not hold shutdown forever.
+        // Local work already started finishes. The limit is the backstop
+        // for work that doesn't.
         if tokio::time::timeout(SHUTDOWN_DRAIN, drain).await.is_err() {
             jobs.abort_all();
             while jobs.join_next().await.is_some() {}
