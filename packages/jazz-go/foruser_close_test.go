@@ -48,8 +48,9 @@ func openForUserOffline(t *testing.T) (parent, child *DB) {
 func TestForUserDBCloseWithAPendingCall(t *testing.T) {
 	t.Parallel()
 	_, child := openForUserOffline(t)
-	pendingSync(t, context.Background(), child)
+	waited := pendingSync(t, context.Background(), child)
 	if err := returnsWithin(t, "the ForUser DB's Close", closeBudget, child.Close); err != nil {
 		t.Fatal(err)
 	}
+	endsClosed(t, waited)
 }

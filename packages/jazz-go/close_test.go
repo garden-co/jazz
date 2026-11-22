@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// closeBudget is how long a close may take: the core drains for up to 30s,
-// plus room for a slow CI machine.
-const closeBudget = 45 * time.Second
+// closeBudget is how long a close may take: it ends the calls waiting for
+// the server at once (Shutdown when its drain ends), then gives stream
+// sessions up to 2s to end.
+const closeBudget = 5 * time.Second
 
 // offlineConfig is an app with a server nothing answers on: what a client
 // on a lost network has.
@@ -97,6 +98,16 @@ func returnsWithin(t *testing.T, what string, budget time.Duration, f func() err
 	}
 }
 
+// endsClosed is the call a close interrupted failing with ErrClosed (its
+// write may still apply).
+func endsClosed(t *testing.T, waited <-chan error) {
+	t.Helper()
+	err := returnsWithin(t, "the interrupted WaitForSync", closeBudget, func() error { return <-waited })
+	if !errors.Is(err, ErrClosed) {
+		t.Fatalf("the interrupted WaitForSync: %v, want ErrClosed", err)
+	}
+}
+
 func TestCloseEndsAPendingCall(t *testing.T) {
 	t.Parallel()
 	db, cfg := openOffline(t)
@@ -104,10 +115,7 @@ func TestCloseEndsAPendingCall(t *testing.T) {
 	if err := returnsWithin(t, "Close", closeBudget, db.Close); err != nil {
 		t.Fatal(err)
 	}
-	err := returnsWithin(t, "the pending WaitForSync", 5*time.Second, func() error { return <-waited })
-	if !errors.Is(err, ErrClosed) {
-		t.Fatalf("the pending call: %v, want ErrClosed", err)
-	}
+	endsClosed(t, waited)
 	// Closed means the store is free again.
 	reopened, err := Open(context.Background(), cfg)
 	if err != nil {
@@ -148,10 +156,14 @@ func TestCloseAfterACancelledCall(t *testing.T) {
 func TestShutdownWithAPendingCall(t *testing.T) {
 	t.Parallel()
 	db, _ := openOffline(t)
-	pendingSync(t, context.Background(), db)
+	waited := pendingSync(t, context.Background(), db)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_ = returnsWithin(t, "Shutdown", closeBudget, func() error { return db.Shutdown(ctx) })
+	// Persistent storage keeps the unsent write: no ErrUnsynced.
+	if err := returnsWithin(t, "Shutdown", closeBudget, func() error { return db.Shutdown(ctx) }); err != nil {
+		t.Fatal(err)
+	}
+	endsClosed(t, waited)
 }
 
 func openOfflineSession(t *testing.T) (*Session, *DB) {
@@ -186,16 +198,18 @@ func TestSessionCloseEndsItsDBsPendingCall(t *testing.T) {
 	if err := returnsWithin(t, "Session.Close", closeBudget, session.Close); err != nil {
 		t.Fatal(err)
 	}
-	_ = returnsWithin(t, "the pending WaitForSync", 5*time.Second, func() error { return <-waited })
-	_ = returnsWithin(t, "the session DB's Close", 5*time.Second, db.Close)
+	// Closed, not replaced: there is no session to fetch a new DB from.
+	endsClosed(t, waited)
+	_ = returnsWithin(t, "the session DB's Close", closeBudget, db.Close)
 }
 
 func TestSessionDBCloseWithAPendingCall(t *testing.T) {
 	t.Parallel()
 	session, db := openOfflineSession(t)
-	pendingSync(t, context.Background(), db)
+	waited := pendingSync(t, context.Background(), db)
 	if err := returnsWithin(t, "the session DB's Close", closeBudget, db.Close); err != nil {
 		t.Fatal(err)
 	}
+	endsClosed(t, waited)
 	_ = returnsWithin(t, "Session.Close", closeBudget, session.Close)
 }
