@@ -50,7 +50,9 @@ export const permissions = definePermissions({
 stored as `bytes`. Your code never sees that: the generated types and the values you write and read are
 the plaintext type (`title` is a string, `notes` a string or `null`). `equality: true` lets you filter
 by a column's exact value, through tokens that show the server which rows share a value; the other
-encrypted columns can't be filtered.
+encrypted columns can't be filtered. Apply `.encrypted()` to a whole stored column, such as
+`s.array(s.string()).encrypted()`. Encryption applies to the entire array or JSON value.
+Computed fields, transformed columns and relation columns cannot be encrypted.
 
 Your permissions decide who is a member of a space: members are the rows of the `__e2ee_members` table,
 and `isMember(table, id)` holds when the signed-in account has a member row for that space. A space

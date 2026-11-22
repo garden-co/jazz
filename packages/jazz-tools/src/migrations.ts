@@ -15,7 +15,7 @@ import type {
   ColumnBuilderReferences,
   ColumnBuilderSqlType,
 } from "./dsl.js";
-import { isComputedColumn } from "./dsl.js";
+import { hasEncryptionDeclaration, isComputedColumn } from "./dsl.js";
 import { assertUserTableColumnNameAllowed } from "./magic-columns.js";
 import type { ForwardRelationship } from "./relationships.js";
 import type {
@@ -625,7 +625,7 @@ export function renameTableFrom<const TOldName extends string>(
 type BuiltColumns = Record<string, Column>;
 
 /** A witness table's stored columns, built, with forward relations' targets as `references`. */
-export function witnessColumns(table: TableSource): BuiltColumns {
+export function witnessColumns(table: TableSource, tableName?: string): BuiltColumns {
   const columns = (isDefinedTable(table) ? table.columns : table) as Record<
     string,
     AnyColumnDefinition
@@ -633,8 +633,16 @@ export function witnessColumns(table: TableSource): BuiltColumns {
   const relations = isDefinedTable(table) ? table.relations : {};
   const out: BuiltColumns = {};
   for (const [name, builder] of Object.entries(columns)) {
-    if (isComputedColumn(builder)) continue;
-    const column = (builder as unknown as { _build(name: string): Column })._build(name);
+    const computed = isComputedColumn(builder);
+    if (
+      tableName !== undefined &&
+      hasEncryptionDeclaration(computed ? builder._computed.type : builder)
+    )
+      throw new Error(
+        `${tableName}.${name}: declare encryption in schema.ts; migration witnesses describe stored columns (use s.bytes() for ciphertext).`,
+      );
+    if (computed) continue;
+    const column = builder._build(name);
     const forward = Object.values(relations).find(
       (relation) => relation.kind === "forward" && relation.column === name,
     );
@@ -721,6 +729,12 @@ function buildSteps(config: {
   const created = tableMarkers("createTables", config.createTables, to, from, renames);
   const dropped = tableMarkers("dropTables", config.dropTables, from, to, usedSources);
 
+  const sourceWitnesses = new Map(
+    Object.entries(from).map(([table, witness]) => [table, witnessColumns(witness, table)]),
+  );
+  const targetWitnesses = new Map(
+    Object.entries(to).map(([table, witness]) => [table, witnessColumns(witness, table)]),
+  );
   const migrate: Record<string, Record<string, ReadableColumnStep>> = {};
   for (const [table, rawOps] of Object.entries((config.migrate ?? {}) as Record<string, unknown>)) {
     if (!rawOps || typeof rawOps !== "object") continue;
@@ -728,17 +742,24 @@ function buildSteps(config: {
       throw new Error(
         `Table ${table} cannot have column operations when declared in createTables or dropTables.`,
       );
-    const targetTable = to[table];
     const sourceName = renames.get(table) ?? table;
-    const sourceTable = from[sourceName];
-    const targetColumns = targetTable ? witnessColumns(targetTable) : {};
-    const sourceColumns = sourceTable ? witnessColumns(sourceTable) : {};
+    const targetColumns = targetWitnesses.get(table);
+    const sourceColumns = sourceWitnesses.get(sourceName);
     const steps: Record<string, ReadableColumnStep> = {};
     const renamedSources = new Set<string>();
     const droppedColumns = new Set<string>();
     for (const [column, op] of Object.entries(
       rawOps as Record<string, AddOp | DropOp | RenameOp>,
     )) {
+      if (
+        op &&
+        typeof op === "object" &&
+        "_containsEncryptionDeclaration" in op &&
+        op._containsEncryptionDeclaration
+      )
+        throw new Error(
+          `${table}.${column}: declare encryption on the whole column in schema.ts. Migration operations describe stored types (use m.add.bytes or m.drop.bytes for ciphertext).`,
+        );
       switch (op?._type) {
         case "rename": {
           assertUserTableColumnNameAllowed(column);
@@ -752,7 +773,7 @@ function buildSteps(config: {
         }
         case "add": {
           assertUserTableColumnNameAllowed(column);
-          const target = targetColumns[column];
+          const target = targetColumns?.[column];
           if (!target)
             throw new Error(`Migration references unknown target column ${table}.${column}.`);
           steps[column] = {
@@ -765,7 +786,7 @@ function buildSteps(config: {
           if (renamedSources.has(column))
             throw new Error(`Migration for ${table} cannot both drop and rename ${column}.`);
           droppedColumns.add(column);
-          const source = sourceColumns[column];
+          const source = sourceColumns?.[column];
           if (!source)
             throw new Error(`Migration references unknown source column ${sourceName}.${column}.`);
           steps[column] = {

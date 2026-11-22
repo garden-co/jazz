@@ -3,8 +3,12 @@
  * input of the Rust writer, which checks and prints the file. Nothing here
  * hashes or lowers a schema; Rust does.
  */
-import type { AnyColumnDefinition, ColumnEncryption } from "../dsl.js";
-import { isComputedColumn } from "../dsl.js";
+import type { AnyColumnDefinition } from "../dsl.js";
+import {
+  hasEncryptionDeclaration,
+  hasEncryptionDeclarationInJsonSchema,
+  isComputedColumn,
+} from "../dsl.js";
 import type { Column, SqlType } from "../schema.js";
 import type { DefinedTable } from "./table.js";
 
@@ -23,13 +27,6 @@ export type ReadableTable = { [key: string]: ReadableJson };
 export interface ReadableApp {
   tables: { [table: string]: ReadableTable };
   transforms?: { [name: string]: { stored: ReadableJson; view: ReadableJson } };
-}
-
-interface BuilderInternals {
-  _build(name: string): Column;
-  _sqlType: SqlType;
-  _transform?: { name: string; view: BuilderInternals };
-  _encryption?: ColumnEncryption;
 }
 
 /** The column holding an equality column's tokens (protocol §1.5). */
@@ -119,10 +116,7 @@ function readableSpace(tableName: string, table: DefinedTable): { space: string;
   if (relation.kind !== "forward")
     throw new Error(`${tableName}: space "${space}" is a reverse relation; ${how}.`);
   const builder = (table.columns as Record<string, AnyColumnDefinition>)[relation.column];
-  const sqlType =
-    builder && !isComputedColumn(builder)
-      ? (builder as unknown as BuilderInternals)._sqlType
-      : undefined;
+  const sqlType = builder && !isComputedColumn(builder) ? builder._sqlType : undefined;
   if (sqlType !== "UUID")
     throw new Error(
       `${tableName}: space "${space}" goes through ${relation.column}, which is not a uuid column ` +
@@ -143,8 +137,13 @@ export function readableApp(tables: Record<string, DefinedTable>): ReadableApp {
     for (const [name, definition] of Object.entries(
       table.columns as Record<string, AnyColumnDefinition>,
     )) {
+      const refuse = (reason: string) => {
+        throw new Error(`${tableName}.${name}: ${reason}`);
+      };
       if (isComputedColumn(definition)) {
-        const builder = definition._computed.type as unknown as BuilderInternals;
+        const builder = definition._computed.type;
+        if (hasEncryptionDeclaration(builder))
+          refuse("computed fields cannot be encrypted; encrypt a stored column.");
         const column = builder._build(name);
         const type = readableType(column.sqlType);
         computed[name] = {
@@ -161,12 +160,21 @@ export function readableApp(tables: Record<string, DefinedTable>): ReadableApp {
         };
         continue;
       }
-      const builder = definition as unknown as BuilderInternals;
+      const builder = definition;
+      if (hasEncryptionDeclaration(builder._element))
+        refuse("array elements cannot be encrypted individually; encrypt the whole array column.");
+      if (hasEncryptionDeclaration(builder._transform?.view))
+        refuse("transform views cannot be encrypted; use a stored column without a transform.");
       const column = builder._build(name);
+      if (
+        typeof column.sqlType === "object" &&
+        column.sqlType.kind === "JSON" &&
+        hasEncryptionDeclarationInJsonSchema(column.sqlType.schema)
+      )
+        refuse(
+          "JSON schema properties cannot be encrypted individually; encrypt the whole JSON column.",
+        );
       if (builder._encryption) {
-        const refuse = (reason: string) => {
-          throw new Error(`${tableName}.${name}: ${reason}`);
-        };
         if (column.mergeStrategy)
           refuse(
             "an encrypted column takes no merge strategy: the server can't merge ciphertext, " +
