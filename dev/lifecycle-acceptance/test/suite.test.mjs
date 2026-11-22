@@ -225,6 +225,13 @@ test("the verdict fails closed", () => {
   }, ["store.second-open"]);
   assert.match(observedFail.stdout, /CONTROL_OK c go store\.second-open/);
   assert.doesNotMatch(observedFail.stdout, /CONTROL_BROKEN/);
+  // Kotlin declares it has no session: it isn't held to a session rule's control.
+  const sessionIndex = RULES.findIndex((rule) => rule.id === "signout.derived");
+  const gap = verdict((results) => {
+    for (const lang of LANGS) results.get(lang).results[sessionIndex].status = lang === "kotlin" ? "NOT_COVERED" : "FAIL";
+  }, ["signout.derived"]);
+  assert.doesNotMatch(gap.stdout, /CONTROL_BROKEN/);
+  assert.match(gap.stdout, /CONTROL_OK c go signout\.derived/);
 });
 
 test("secrets don't reach a log", () => {

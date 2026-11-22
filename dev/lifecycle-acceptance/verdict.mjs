@@ -76,7 +76,10 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
 
   // The negative control: a harness that passes a candidate known to break a rule is itself broken.
   const controls = mustFail.flatMap((id) =>
-    (id.startsWith("android.") ? ["android"] : LANGS).map((lang) => [id, lang, status[`${id} ${lang}`], byLang[lang]]),
+    (id.startsWith("android.") ? ["android"] : LANGS)
+      // A language that declares it can't run the rule can't be its control.
+      .filter((lang) => !RULES.find((rule) => rule.id === id)?.notCovered?.[lang])
+      .map((lang) => [id, lang, status[`${id} ${lang}`], byLang[lang]]),
   );
   for (const [id, lang, is, result] of controls) {
     if (is === "FAIL" && result) console.log(`CONTROL_OK ${name} ${lang} ${id} fails, as it must`);
