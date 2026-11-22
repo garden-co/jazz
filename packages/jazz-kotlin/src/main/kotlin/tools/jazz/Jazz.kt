@@ -47,6 +47,21 @@ internal fun openReflectively(className: String, config: String, tokens: ((Strin
     }
 }
 
+/**
+ * What [start] returns on [dispatcher], for a handle someone must give back:
+ * withContext drops its result when the caller was cancelled meanwhile, so
+ * [giveBack] gets the handle then.
+ */
+private suspend fun <T : Any> startHandle(dispatcher: CoroutineDispatcher, giveBack: (T) -> Unit, start: () -> T): T {
+    var started: T? = null
+    try {
+        return withContext(dispatcher) { start().also { started = it } }
+    } catch (e: Throwable) {
+        started?.let { handle -> withContext(dispatcher + NonCancellable) { runCatching { giveBack(handle) } } }
+        throw e
+    }
+}
+
 /** The JSON settings rows, inserts and patches go through. */
 public val jazzJson: Json = Json {
     ignoreUnknownKeys = true
@@ -86,7 +101,7 @@ public class Jazz internal constructor(
 
         /** Opens the app [app] (the text of its `jazz.app.json`), as generated bindings' `open` does. */
         public suspend fun open(app: String, config: JazzConfig, implementations: Any? = null): Jazz =
-            withContext(config.dispatcher) {
+            startHandle(config.dispatcher, giveBack = { it.close() }) {
                 if (config.serverUrl != null && config.auth == null) {
                     throw JazzException.Refused(
                         "connecting to ${config.serverUrl} needs JazzConfig.auth (a device account, or your backend's sign-in). " +
@@ -152,7 +167,7 @@ public class Jazz internal constructor(
      * Collecting starts watching.
      */
     public val mutationErrors: Flow<MutationError> get() = callbackFlow {
-        val cancel = withContext(dispatcher) {
+        val cancel = startHandle(dispatcher, giveBack = { it() }) {
             native.watchMutationErrors { json ->
                 // The app closing ends the watch: the Flow completes.
                 if (isClosedNotice(json)) close() else trySend(MutationError.parse(json))
@@ -224,7 +239,7 @@ public class Jazz internal constructor(
         row: String?,
         data: Flow<ByteArray>,
     ): Row {
-        val upload = io { native.beginUpload(table.tableName, column.name, kind, id, row) }
+        val upload = startHandle(dispatcher, giveBack = { it.abort() }) { native.beginUpload(table.tableName, column.name, kind, id, row) }
         try {
             data.collect { chunk -> io { upload.push(chunk) } }
             return decodeStored(table, io { upload.finish() })
@@ -346,7 +361,7 @@ public class Jazz internal constructor(
         serializable: Boolean = false,
         block: suspend (Transaction) -> T,
     ): T {
-        val native = io { if (serializable) native.begin() else native.beginMergeable() }
+        val native = startHandle(dispatcher, giveBack = { it.rollback() }) { if (serializable) native.begin() else native.beginMergeable() }
         val tx = Transaction(native)
         val result = try {
             block(tx)
