@@ -555,6 +555,7 @@ rows, nothing about unreadable rows may reach a reader:
 
   A restart resumes a build rather than resetting it, and an empty table's
   index is built at once.
+
 - An empty result and a result of hidden rows are indistinguishable.
 
 A client indexes only rows the server let it hold, and eviction removes their
