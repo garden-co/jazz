@@ -316,8 +316,13 @@ describe("deploy", () => {
       });
       expect(response.status).toBe(200);
 
-      const body = (await response.json()) as { hashes?: string[] };
-      expect(body.hashes?.length).toBeGreaterThan(0);
+      const body = (await response.json()) as {
+        hashes?: unknown;
+        schemas: Array<{ hash: string; publishedAt: number | null }>;
+      };
+      expect(body.hashes).toBeUndefined();
+      expect(body.schemas.length).toBeGreaterThan(0);
+      expect(body.schemas.map((schema) => schema.hash)).toContain(result.schema.hash);
     } finally {
       await stopTrackedLocalJazzServer(server);
     }
