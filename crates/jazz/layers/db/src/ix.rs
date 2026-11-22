@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use rusqlite::Connection;
+use crate::storage::Storage;
 use rusqlite::types::ValueRef;
 
 use crate::options::{Error, ErrorCode, Reason};
@@ -122,14 +122,14 @@ pub(crate) trait Kind {
     /// (`None`: the row is gone or deleted).
     fn write(
         &self,
-        conn: &Connection,
+        conn: &Storage,
         prefix: &str,
         rid: i64,
         cells: Option<&[Cell]>,
     ) -> Result<(), Error>;
     /// Refuse `op` before it runs if it would cost more than the kind's
     /// caps allow (SPEC 20.12): a typed error, never a long scan.
-    fn admit(&self, _conn: &Connection, _prefix: &str, _op: &IndexOp) -> Result<(), Error> {
+    fn admit(&self, _conn: &Storage, _prefix: &str, _op: &IndexOp) -> Result<(), Error> {
         Ok(())
     }
     /// Plan `op` (already checked against the declaration by query
@@ -301,13 +301,12 @@ thread_local! {
     static REGISTRY: RefCell<HashMap<usize, Rc<RefCell<Indexes>>>> = RefCell::default();
 }
 
-fn conn_key(conn: &Connection) -> usize {
-    // SAFETY: the handle is only compared, never dereferenced.
-    unsafe { conn.handle() as usize }
+fn conn_key(conn: &Storage) -> usize {
+    conn.key()
 }
 
 /// `conn`'s registry, created empty on first use.
-pub(crate) fn registry(conn: &Connection) -> Rc<RefCell<Indexes>> {
+pub(crate) fn registry(conn: &Storage) -> Rc<RefCell<Indexes>> {
     REGISTRY.with(|registry| {
         registry
             .borrow_mut()
@@ -317,12 +316,12 @@ pub(crate) fn registry(conn: &Connection) -> Rc<RefCell<Indexes>> {
     })
 }
 
-fn registered(conn: &Connection) -> Option<Rc<RefCell<Indexes>>> {
+fn registered(conn: &Storage) -> Option<Rc<RefCell<Indexes>>> {
     REGISTRY.with(|registry| registry.borrow().get(&conn_key(conn)).cloned())
 }
 
 /// Drop `conn`'s registry as it closes.
-pub(crate) fn forget(conn: &Connection) {
+pub(crate) fn forget(conn: &Storage) {
     REGISTRY.with(|registry| registry.borrow_mut().remove(&conn_key(conn)));
 }
 
@@ -336,7 +335,7 @@ struct Recorded {
     decl: Vec<u8>,
 }
 
-fn recorded(conn: &Connection) -> Result<BTreeMap<(String, String), Recorded>, Error> {
+fn recorded(conn: &Storage) -> Result<BTreeMap<(String, String), Recorded>, Error> {
     let mut statement = conn
         .prepare("SELECT tbl, name, kind, encoding, decl FROM _jazz_ix")
         .map_err(storage)?;
@@ -371,7 +370,7 @@ fn kind_parts(kind: &str) -> &'static [&'static str] {
 /// ones as building, and (re)write each indexed table's triggers. A
 /// client (`replica`) leaves server-only indexes out. Runs inside the
 /// caller's transaction; builds happen later, in [`build_step`].
-pub(crate) fn reconcile(conn: &Connection, schema: &Schema, replica: bool) -> Result<(), Error> {
+pub(crate) fn reconcile(conn: &Storage, schema: &Schema, replica: bool) -> Result<(), Error> {
     let registry = registry(conn);
     let mut desired: BTreeMap<(String, String), Rc<Index>> = BTreeMap::new();
     let mut declared = BTreeMap::new();
@@ -472,7 +471,7 @@ pub(crate) fn reconcile(conn: &Connection, schema: &Schema, replica: bool) -> Re
         conn.execute(
             "INSERT INTO _jazz_ix (tbl, name, kind, encoding, decl, state, built) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, -9223372036854775808)",
-            rusqlite::params![
+            crate::storage::params![
                 tbl,
                 name,
                 index.decl.kind.kind_name().as_str(),
@@ -524,7 +523,7 @@ pub(crate) fn reconcile(conn: &Connection, schema: &Schema, replica: bool) -> Re
 
 /// Whether this store has the framework's tables (some schema it opened
 /// declared a specialised index).
-fn framework_exists(conn: &Connection) -> Result<bool, Error> {
+fn framework_exists(conn: &Storage) -> Result<bool, Error> {
     conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_ix')",
         [],
@@ -623,7 +622,7 @@ fn triggers(tbl: &str, indexes: Option<&[Rc<Index>]>) -> String {
 /// its indexes' shadow rows recomputed from its current values (a missing
 /// or deleted row has none), then leaves the queue. Called inside the
 /// transaction that queued them.
-pub(crate) fn drain(conn: &Connection) -> Result<(), Error> {
+pub(crate) fn drain(conn: &Storage) -> Result<(), Error> {
     let Some(registry) = registered(conn) else {
         return Ok(());
     };
@@ -649,14 +648,14 @@ pub(crate) fn drain(conn: &Connection) -> Result<(), Error> {
                 }
             }
             conn.prepare_cached("DELETE FROM _jazz_ix_dirty WHERE tbl = ?1 AND rid = ?2")
-                .and_then(|mut s| s.execute(rusqlite::params![tbl, rid]))
+                .and_then(|mut s| s.execute(crate::storage::params![tbl, rid]))
                 .map_err(storage)?;
         }
     }
 }
 
 /// Whether `conn` has queued rows its indexes have not taken in yet.
-pub(crate) fn has_queued(conn: &Connection) -> Result<bool, Error> {
+pub(crate) fn has_queued(conn: &Storage) -> Result<bool, Error> {
     if registered(conn).is_none_or(|r| r.borrow().by_table.is_empty()) {
         return Ok(false);
     }
@@ -666,7 +665,7 @@ pub(crate) fn has_queued(conn: &Connection) -> Result<bool, Error> {
 }
 
 /// Recompute `index`'s shadow rows for row `rid`.
-fn write_row(conn: &Connection, registry: &Indexes, index: &Index, rid: i64) -> Result<(), Error> {
+fn write_row(conn: &Storage, registry: &Indexes, index: &Index, rid: i64) -> Result<(), Error> {
     let columns: String = index
         .columns
         .iter()
@@ -704,7 +703,7 @@ fn write_row(conn: &Connection, registry: &Indexes, index: &Index, rid: i64) -> 
     drop(rows);
     if incomplete {
         conn.prepare_cached("INSERT OR IGNORE INTO _jazz_ix_incomplete (tbl, rid) VALUES (?1, ?2)")
-            .and_then(|mut s| s.execute(rusqlite::params![index.stored, rid]))
+            .and_then(|mut s| s.execute(crate::storage::params![index.stored, rid]))
             .map_err(storage)?;
     }
     index.kind.write(conn, &index.prefix, rid, cells.as_deref())
@@ -713,7 +712,7 @@ fn write_row(conn: &Connection, registry: &Indexes, index: &Index, rid: i64) -> 
 /// Chunks arrived on this replica: every row indexed while one of its
 /// values was missing them is queued again, so it is indexed by its whole
 /// value (`INV-IX-1`). One still missing some is recorded again.
-pub(crate) fn chunks_arrived(conn: &Connection) -> Result<(), Error> {
+pub(crate) fn chunks_arrived(conn: &Storage) -> Result<(), Error> {
     if registered(conn).is_none_or(|r| r.borrow().by_table.is_empty()) {
         return Ok(());
     }
@@ -798,7 +797,7 @@ fn read_whole(registry: &Indexes, column: &Column, cell: ValueRef<'_>) -> Result
 /// One build batch: the first index still building indexes its next
 /// [`BUILD_BATCH`] rows by `rid`. Returns whether any index is still
 /// building. The caller runs each step in its own transaction.
-pub(crate) fn build_step(conn: &Connection) -> Result<bool, Error> {
+pub(crate) fn build_step(conn: &Storage) -> Result<bool, Error> {
     let Some(registry) = registered(conn) else {
         return Ok(false);
     };
@@ -834,8 +833,10 @@ pub(crate) fn build_step(conn: &Connection) -> Result<bool, Error> {
             quote(&tbl)
         ))
         .and_then(|mut s| {
-            s.query_map(rusqlite::params![built, BUILD_BATCH as i64], |r| r.get(0))?
-                .collect()
+            s.query_map(crate::storage::params![built, BUILD_BATCH as i64], |r| {
+                r.get(0)
+            })?
+            .collect()
         })
         .map_err(storage)?;
     for rid in &rids {
@@ -844,7 +845,7 @@ pub(crate) fn build_step(conn: &Connection) -> Result<bool, Error> {
     let done = rids.len() < BUILD_BATCH;
     conn.execute(
         "UPDATE _jazz_ix SET built = ?3, state = ?4 WHERE tbl = ?1 AND name = ?2",
-        rusqlite::params![
+        crate::storage::params![
             tbl,
             name,
             rids.last().copied().unwrap_or(built),
@@ -866,7 +867,7 @@ pub(crate) fn build_step(conn: &Connection) -> Result<bool, Error> {
 }
 
 /// Whether `index` on stored table `tbl` is built.
-pub(crate) fn is_ready(conn: &Connection, tbl: &str, index: &str) -> Result<bool, Error> {
+pub(crate) fn is_ready(conn: &Storage, tbl: &str, index: &str) -> Result<bool, Error> {
     conn.prepare_cached("SELECT state FROM _jazz_ix WHERE tbl = ?1 AND name = ?2")
         .and_then(|mut s| {
             let mut rows = s.query([tbl, index])?;
@@ -902,7 +903,7 @@ pub(crate) enum Planned {
 /// the checks only the store can make: a declared index this node does
 /// not maintain is server-only.
 pub(crate) fn index_for(
-    conn: &Connection,
+    conn: &Storage,
     table: &Table,
     search: &IndexSearch,
 ) -> Result<Rc<Index>, Error> {

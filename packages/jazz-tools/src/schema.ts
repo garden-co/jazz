@@ -110,13 +110,17 @@ type EnumCaseFieldIsOptional<Field extends Column> = Field["nullable"] extends t
 type EnumCasePayload<Fields extends readonly Column[], Init extends boolean> = Init extends false
   ? { [Field in Fields[number] as Field["name"]]: EnumCaseFieldValue<Field, false> }
   : {
-      [Field in Fields[number] as EnumCaseFieldIsOptional<Field> extends true
-        ? never
-        : Field["name"]]: EnumCaseFieldValue<Field, true>;
+      [
+        Field in Fields[number] as EnumCaseFieldIsOptional<Field> extends true
+          ? never
+          : Field["name"]
+      ]: EnumCaseFieldValue<Field, true>;
     } & {
-      [Field in Fields[number] as EnumCaseFieldIsOptional<Field> extends true
-        ? Field["name"]
-        : never]?: EnumCaseFieldValue<Field, true>;
+      [
+        Field in Fields[number] as EnumCaseFieldIsOptional<Field> extends true
+          ? Field["name"]
+          : never
+      ]?: EnumCaseFieldValue<Field, true>;
     };
 
 export type EnumValueFromCases<

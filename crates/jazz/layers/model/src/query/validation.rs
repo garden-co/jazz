@@ -1691,7 +1691,9 @@ fn rewrite_flat_join_predicate_columns(
         | Predicate::Gte(left, right)
         | Predicate::Lt(left, right)
         | Predicate::Lte(left, right)
-        | Predicate::Contains(left, right) => {
+        | Predicate::Contains(left, right)
+        | Predicate::StartsWith(left, right)
+        | Predicate::EndsWith(left, right) => {
             rewrite_operand(left)?;
             rewrite_operand(right)
         }
@@ -1699,9 +1701,7 @@ fn rewrite_flat_join_predicate_columns(
             rewrite_operand(value)?;
             options.iter_mut().try_for_each(rewrite_operand)
         }
-        Predicate::Removed(removed)
-        | Predicate::ReservedStartsWith(removed)
-        | Predicate::ReservedEndsWith(removed) => match *removed {},
+        Predicate::Removed(removed) => match *removed {},
         Predicate::IsNull(operand) => rewrite_operand(operand),
         Predicate::Search(_) => Err(QueryError::SearchMisplaced("in a flat join".into())),
     }
@@ -2591,9 +2591,7 @@ fn validate_predicate(
                 "nested in a condition, a join, a policy or a subquery".into(),
             ));
         }
-        Predicate::Removed(removed)
-        | Predicate::ReservedStartsWith(removed)
-        | Predicate::ReservedEndsWith(removed) => match *removed {},
+        Predicate::Removed(removed) => match *removed {},
         _ => {}
     }
     if let ParameterPhase::Prepare(domain) = params {
@@ -2603,7 +2601,10 @@ fn validate_predicate(
             | Predicate::Gt(left, right)
             | Predicate::Gte(left, right)
             | Predicate::Lt(left, right)
-            | Predicate::Lte(left, right) => {
+            | Predicate::Lte(left, right)
+            // Text against text, so a parameter takes the other side's type.
+            | Predicate::StartsWith(left, right)
+            | Predicate::EndsWith(left, right) => {
                 domain.relationship(table, left, right, ParameterRelationship::Compare)
             }
             Predicate::In(left, values) if values.is_empty() => {
@@ -2622,7 +2623,11 @@ fn validate_predicate(
                 Ok(())
             }
             Predicate::IsNull(_) => Ok(()),
-            _ => unreachable!("recursive predicates handled by the shared traversal"),
+            // Listed, not `_`: a new variant must be placed here to compile.
+            Predicate::All(_) | Predicate::Any(_) | Predicate::Not(_) | Predicate::Search(_) => {
+                unreachable!("recursive predicates and searches handled by the shared traversal")
+            }
+            Predicate::Removed(removed) => match *removed {},
         };
     }
     let ParameterPhase::Check(params) = params else {
@@ -2632,9 +2637,7 @@ fn validate_predicate(
         Predicate::All(_) | Predicate::Any(_) | Predicate::Not(_) | Predicate::Search(_) => {
             unreachable!("recursive predicates and searches handled by the shared traversal")
         }
-        Predicate::Removed(removed)
-        | Predicate::ReservedStartsWith(removed)
-        | Predicate::ReservedEndsWith(removed) => match *removed {},
+        Predicate::Removed(removed) => match *removed {},
         Predicate::Eq(left, right) | Predicate::Ne(left, right) => {
             validate_comparable_operands(table, left, right, params).map(|_| ())
         }
@@ -2712,6 +2715,19 @@ fn validate_predicate(
                 Some(_) => Ok(()),
                 None => check_inferred_param(right, expected, params),
             }
+        }
+        // Text against text only: a prefix or suffix of an array, JSON or
+        // bytes value is not defined.
+        Predicate::StartsWith(left, right) | Predicate::EndsWith(left, right) => {
+            for operand in [&mut *left, &mut *right] {
+                match operand_type(table, operand, params)? {
+                    Some(column_type)
+                        if matches!(non_null_column_type(&column_type), ColumnType::String) => {}
+                    Some(_) => return Err(QueryError::OperandTypeMismatch),
+                    None => check_inferred_param(operand, ColumnType::String, params)?,
+                }
+            }
+            Ok(())
         }
         // Claims are dynamically typed and become literals when binding the session.
         // Either can be checked for nullness without a statically nullable column.

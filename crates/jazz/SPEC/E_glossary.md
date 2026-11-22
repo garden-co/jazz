@@ -74,7 +74,7 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
 - **current row** — visible content winner gated by the deletion register; **local
   current** vs **global current** (`HistoryEntry::is_locally/globally_current`).
 - **deletion register** (`MergeAspect::Deletion`, `DeletionEvent::{Deleted,
-Restored}`) · **global-current overwrite table** — node-local derived current
+  Restored}`) · **global-current overwrite table** — node-local derived current
   state · **merge version** — an upstream-created merge of concurrent heads.
 
 ### Reads & queries (ch. 5–6)

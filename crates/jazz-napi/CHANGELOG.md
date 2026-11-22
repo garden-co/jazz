@@ -1,5 +1,39 @@
 # jazz-napi
 
+## 2.0.0-beta.0
+
+## 2.0.0-alpha.70
+
+### Patch Changes
+
+- f393bab: Add `db.getPendingUploadRows(table)` and `db.onPendingUploadRowsChange(table, listener)`: the ids of a table's rows with a write the server has neither accepted nor refused yet, so an app can show "not sent yet" beside a row. In Node and React Native this includes writes recovered from local storage after a restart. `null` means the runtime cannot tell (no client yet, or a native build without the report), never "none pending".
+
+## 2.0.0-alpha.69
+
+## 2.0.0-alpha.68
+
+### Patch Changes
+
+- 47af91a: Mergeable transaction reads now fetch as reads outside a transaction do.
+  A cold foreground loads them from its durable local relay, even while its
+  server is offline, and a Remote read waits for the server, on any client.
+  Branch-view reads fetch too, including over a frozen base the foreground has
+  not synced yet. Preserve staged writes, cancellation and mergeable conflict
+  semantics instead of returning an empty foreground cache. Inside a
+  transaction, a Remote read still shows other writers' unsettled rows, as a
+  serializable read does. These reads now go through the same synced query-shape
+  check as reads outside a transaction, so a shape the relay cannot answer is
+  refused there too.
+- a58dd33: `jazz.revokeUser` now ends a user's sessions on every backend instance, not only on the one that runs it. On serverless hosts (Vercel and the like) the sign-out handler usually runs on a different instance from the user's sockets and HTTP streams. The revocation is now recorded at the core, which closes the user's live sessions on any instance, idle ones included. It also refuses sessions that any instance admits later on an `authenticate` answer from before the call, such as a sign-in still in flight or an HTTP stream's reused answer. A sign-in that starts after the call works as before. `revokeUser` still resolves with the number of sessions it ended on the calling instance.
+
+  **Upgrade the core before backends to get cross-instance revocation.** A newer backend in front of an older core warns once and ends only its own instance's sessions, as before. An older backend in front of a newer core is unaffected.
+  - **Rollback:** an older core opens the same store. The revocation marks live in a new table (`_jazz_host_account_session_revocations`) that an older core never reads. After a rollback, recorded revocations stop applying, and sessions on other instances end at their `expiresAt` again.
+  - **Clients:** no client changes. The backend ends a revoked session with the same refused close it already sends for `revokeUser`, so every client that handles that close today handles this one.
+
+- 241df88: A `sqlite({ path })` store and a self-hosted server's data dir now keep their identity inside `jazz.sqlite`: the app id, the store's own id, and where its large values live. `jazz.sqlite` alone is now the whole store, so a copy or restore of it is the same store, for the same app, with the same chunks. The `app-id`, `store-id` and `blob-store` files stay beside it as copies each start rewrites, so an earlier release opened on the directory keeps the same identity; a copy that disagrees with `jazz.sqlite` is refused, not chosen. The Inspector's `inspect-token-secret` stays a file of its own (readable by its owner only) and never enters `jazz.sqlite`. To open a copy next to the original (a staging copy of a backup), run `npx jazz-tools store detach <path>` on the stopped copy: it gets its own store id and agent-token secret instead of claiming the original's chunks. **New refusal:** a store keeps the app it was first opened for, so a self-hosted server started with a different `--app-id` on an existing data dir now refuses to start instead of serving that data as another app; `npx jazz-tools store set-app-id <path> <app id>` changes it, and the error says so.
+
+## 2.0.0-alpha.67
+
 ## 2.0.0-alpha.66
 
 ### Minor Changes

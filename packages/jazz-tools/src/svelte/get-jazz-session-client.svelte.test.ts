@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 import { contextStore } from "./test-helpers.svelte.js";
 
-const { initJazzContext, getSession } = await import("./context.svelte.js");
+const { initJazzContext } = await import("./context.svelte.js");
 const { getJazzSession, hideJazzSession, setJazzSession } = await import("./session-state.js");
 
 const session = {
@@ -62,15 +62,9 @@ describe("getJazzSession under <JazzSvelteClientProvider client>", () => {
     expect(() => getJazzSession()).toThrow(/<JazzProvider> or <JazzSvelteClientProvider>/);
   });
 
-  it("getSession() still works and warns once, naming getJazzSession", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const ctx = initJazzContext();
-    ctx.session = session;
-    expect(getSession().current?.user).toBe(session.user);
-    getSession();
-    const calls = warn.mock.calls.filter((call) => String(call[0]).includes("getSession()"));
-    expect(calls).toHaveLength(1);
-    expect(String(calls[0]![0])).toContain("getJazzSession()");
-    warn.mockRestore();
+  it("getSession() was removed in beta.0: getJazzSession() replaces it", async () => {
+    const svelte = await import("./index.js");
+    expect("getSession" in svelte).toBe(false);
+    expect("getJazzSession" in svelte).toBe(true);
   });
 });

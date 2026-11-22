@@ -18,9 +18,11 @@ test("assembly and release gate packs and publication consumes the verified tarb
       readFileSync(new URL(`../../.github/workflows/${file}`, import.meta.url), "utf8"),
       /node dev\/artifacts\/rn-packages.mjs pack/,
     );
-  const release = readFileSync(
-    new URL("../../.github/workflows/publish-jazz-tools-alpha.yml", import.meta.url),
+  // release-publish.yml publishes the prebuilt tarballs; its publisher holds
+  // every jazz-rn tarball to the same size budget before uploading.
+  const publisher = readFileSync(
+    new URL("../release-publish/npm-publish.mjs", import.meta.url),
     "utf8",
   );
-  assert.match(release, /node dev\/artifacts\/publish-rn-packages.mjs/);
+  assert.match(publisher, /verifyRnPackSize\(statSync\(tarball\)\.size\)/);
 });

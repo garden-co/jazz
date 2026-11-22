@@ -3,7 +3,7 @@ import React, { useEffect } from "react";
 import { act, render, waitFor } from "@testing-library/react";
 import { expect, it } from "vitest";
 import { app } from "./apps/notes/jazz.generated.js";
-import { useAll, useOne, useDb, useSession, type Db } from "../../src/react-native/index.js";
+import { useAll, useOne, useDb, useJazzSession, type Db } from "../../src/react-native/index.js";
 import { JazzDbProvider } from "../../src/react-core/provider.js";
 import {
   openJazzClient,
@@ -33,7 +33,7 @@ function Probe({
   onDb: (db: Db) => void;
 }) {
   const db = useDb();
-  const session = useSession();
+  const { user } = useJazzSession();
   const all = useAll(query, options);
   const one = useOne(query, options);
   useEffect(() => onDb(db), [db, onDb]);
@@ -58,7 +58,7 @@ function Probe({
               : (one.data?.title ?? "empty")}
       </output>
       <output data-testid="session">
-        {JSON.stringify({ user: session?.user, identity: session?.identity })}
+        {JSON.stringify({ user: user?.accountId, identity: user?.identity })}
       </output>
     </>
   );

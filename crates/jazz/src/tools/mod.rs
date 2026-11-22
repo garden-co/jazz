@@ -318,7 +318,11 @@ pub enum SubscriptionStreamItem {
 /// Stream of row deltas from a subscription.
 #[cfg(feature = "runtime")]
 pub struct SubscriptionStream {
-    receiver: tokio::sync::mpsc::UnboundedReceiver<SubscriptionStreamItem>,
+    /// Bounded: a reader that falls behind leaves the rest in the core,
+    /// which coalesces it into one reset (`OrderedRowDelta::coalesced`).
+    receiver: tokio::sync::mpsc::Receiver<SubscriptionStreamItem>,
+    /// Asks the forwarder for more once the reader made room.
+    on_read: Box<dyn Fn()>,
     /// Signals the facade's forwarding task to drop its core subscription when
     /// the public stream is dropped. Closing `receiver` alone cannot do that
     /// for an otherwise idle core subscription.
@@ -333,12 +337,14 @@ impl SubscriptionStream {
     /// Create a new subscription stream.
     #[allow(dead_code)]
     pub(crate) fn new(
-        receiver: tokio::sync::mpsc::UnboundedReceiver<SubscriptionStreamItem>,
+        receiver: tokio::sync::mpsc::Receiver<SubscriptionStreamItem>,
         cancellation: tokio::sync::oneshot::Sender<()>,
         on_drop: Box<dyn FnOnce()>,
+        on_read: Box<dyn Fn()>,
     ) -> Self {
         Self {
             receiver,
+            on_read,
             cancellation: Some(cancellation),
             on_drop: Some(on_drop),
         }
@@ -346,7 +352,9 @@ impl SubscriptionStream {
 
     /// Get the next subscription item, waiting if necessary.
     pub async fn next(&mut self) -> Option<SubscriptionStreamItem> {
-        self.receiver.recv().await
+        let item = self.receiver.recv().await;
+        (self.on_read)();
+        item
     }
 }
 

@@ -11,8 +11,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::storage::Storage;
 use jazz_index::text::{Analyzer, PrefixTerm, QueryError, QueryTerms};
-use rusqlite::Connection;
 
 use super::{Candidates, Cell, Kind, shadow};
 use crate::options::{Error, ErrorCode};
@@ -59,7 +59,7 @@ impl Kind for Text {
 
     fn write(
         &self,
-        conn: &Connection,
+        conn: &Storage,
         prefix: &str,
         rid: i64,
         cells: Option<&[Cell]>,
@@ -97,12 +97,12 @@ impl Kind for Text {
                     conn.prepare_cached(&format!(
                         "UPDATE {post} SET impact = ?3 WHERE tid = ?1 AND rid = ?2"
                     ))
-                    .and_then(|mut s| s.execute(rusqlite::params![tid, rid, new_impact]))
+                    .and_then(|mut s| s.execute(crate::storage::params![tid, rid, new_impact]))
                     .map_err(storage)?;
                 }
                 None => {
                     conn.prepare_cached(&format!("DELETE FROM {post} WHERE tid = ?1 AND rid = ?2"))
-                        .and_then(|mut s| s.execute(rusqlite::params![tid, rid]))
+                        .and_then(|mut s| s.execute(crate::storage::params![tid, rid]))
                         .map_err(storage)?;
                     conn.prepare_cached(&format!("UPDATE {terms} SET n = n - 1 WHERE tid = ?1"))
                         .and_then(|mut s| s.execute([tid]))
@@ -129,13 +129,13 @@ impl Kind for Text {
             conn.prepare_cached(&format!(
                 "INSERT INTO {post} (tid, rid, impact) VALUES (?1, ?2, ?3)"
             ))
-            .and_then(|mut s| s.execute(rusqlite::params![tid, rid, impact]))
+            .and_then(|mut s| s.execute(crate::storage::params![tid, rid, impact]))
             .map_err(storage)?;
         }
         Ok(())
     }
 
-    fn admit(&self, conn: &Connection, prefix: &str, op: &IndexOp) -> Result<(), Error> {
+    fn admit(&self, conn: &Storage, prefix: &str, op: &IndexOp) -> Result<(), Error> {
         let query = self.query(op)?;
         let terms = quote(&shadow(prefix, "terms"));
         let post = quote(&shadow(prefix, "post"));
@@ -150,7 +150,9 @@ impl Kind for Text {
             let expanded: i64 = conn
                 .prepare_cached(&sql)
                 .and_then(|mut s| {
-                    s.query_row(rusqlite::params_from_iter(params.iter()), |r| r.get(0))
+                    s.query_row(crate::storage::params_from_iter(params.iter()), |r| {
+                        r.get(0)
+                    })
                 })
                 .map_err(storage)?;
             if expanded as usize > PREFIX_TERMS_MAX {
@@ -172,7 +174,11 @@ impl Kind for Text {
         );
         let postings: i64 = conn
             .prepare(&sql)
-            .and_then(|mut s| s.query_row(rusqlite::params_from_iter(params.iter()), |r| r.get(0)))
+            .and_then(|mut s| {
+                s.query_row(crate::storage::params_from_iter(params.iter()), |r| {
+                    r.get(0)
+                })
+            })
             .map_err(storage)?;
         if postings as usize > postings_cap() {
             return Err(super::too_broad(format!(

@@ -119,7 +119,13 @@ async fn admin_schema_api_publishes_lists_and_gets_schema_json() {
         .unwrap();
     assert_eq!(list.status(), 200);
     let list = json_response(list).await;
-    assert_eq!(list["hashes"], json!([hash]));
+    assert_eq!(list.get("hashes"), None, "{list}");
+    assert_eq!(list["schemas"].as_array().map(Vec::len), Some(1), "{list}");
+    assert_eq!(list["schemas"][0]["hash"], json!(hash));
+    assert!(
+        list["schemas"][0]["publishedAt"].as_u64().is_some(),
+        "{list}"
+    );
 
     let fetched = admin_request(client.get(app_url(&server, &format!("/schema/{hash}"))))
         .send()
@@ -243,7 +249,10 @@ async fn admin_schema_api_persists_catalogue_in_the_production_storage_backend()
         .await
         .unwrap();
     assert_eq!(list.status(), 200);
-    assert_eq!(json_response(list).await["hashes"], json!([hash]));
+    let list = json_response(list).await;
+    assert_eq!(list.get("hashes"), None, "{list}");
+    assert_eq!(list["schemas"].as_array().map(Vec::len), Some(1), "{list}");
+    assert_eq!(list["schemas"][0]["hash"], json!(hash));
 
     restarted.shutdown().await;
 }

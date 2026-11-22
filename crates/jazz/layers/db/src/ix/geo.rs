@@ -7,8 +7,8 @@
 //! the squared chord distance (also its score, smaller-better), a box by
 //! the stored degrees (score 0, so rows order by id).
 
+use crate::storage::Storage;
 use jazz_index::geo::{self, GeoError};
-use rusqlite::Connection;
 
 use super::{Candidates, Cell, Kind, shadow};
 use crate::options::{Error, ErrorCode};
@@ -38,7 +38,7 @@ impl Kind for Geo {
 
     fn write(
         &self,
-        conn: &Connection,
+        conn: &Storage,
         prefix: &str,
         rid: i64,
         cells: Option<&[Cell]>,
@@ -63,7 +63,7 @@ impl Kind for Geo {
         conn.prepare_cached(&format!(
             "INSERT INTO {table} (rid, cell, lat, lng, x, y, z) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
         ))
-        .and_then(|mut s| s.execute(rusqlite::params![rid, point.cell, lat, lng, x, y, z]))
+        .and_then(|mut s| s.execute(crate::storage::params![rid, point.cell, lat, lng, x, y, z]))
         .map_err(storage)?;
         Ok(())
     }

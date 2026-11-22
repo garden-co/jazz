@@ -199,3 +199,74 @@ where
 
 #[cfg(any(test, feature = "testing"))]
 pub use crate::model::test_support::{AllowAll, allow_all_policies};
+
+/// Wait until `client`'s upstream link is attached. Opening a client does
+/// not wait for the server (as TS's does not), so a test that needs the
+/// link live waits for it here.
+#[cfg(feature = "testing")]
+pub async fn wait_for_connected(client: &JazzClient) {
+    let timeout = load_tolerant_wait_timeout(DEFAULT_QUERY_TIMEOUT);
+    let mut changes = client.status_changes();
+    let connected = tokio::time::timeout(timeout, async {
+        while !client.is_connected() {
+            tokio::select! {
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                () = tokio::time::sleep(DEFAULT_POLL_INTERVAL) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        connected.is_ok() && client.is_connected(),
+        "client did not connect within {timeout:?}; last status: {:?}",
+        client.upstream_status()
+    );
+}
+
+/// Wait until the server has refused `client`'s link: its status names a
+/// refusal (a credential refused, the link stopped, or a refused attempt
+/// it retries) and the link is not attached. Returns that status.
+#[cfg(feature = "testing")]
+pub async fn wait_for_refusal(client: &JazzClient) -> crate::link::LinkStatus {
+    use crate::link::LinkPhase;
+    let timeout = load_tolerant_wait_timeout(DEFAULT_QUERY_TIMEOUT);
+    let refused = |client: &JazzClient| {
+        client.upstream_status().filter(|status| {
+            !client.is_connected()
+                && status.reason.is_some()
+                && matches!(
+                    status.phase,
+                    LinkPhase::AwaitingCredential(_) | LinkPhase::Stopped | LinkPhase::Backoff
+                )
+        })
+    };
+    let mut changes = client.status_changes();
+    let status = tokio::time::timeout(timeout, async {
+        loop {
+            if let Some(status) = refused(client) {
+                return Some(status);
+            }
+            tokio::select! {
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        return None;
+                    }
+                }
+                () = tokio::time::sleep(DEFAULT_POLL_INTERVAL) => {}
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    status.unwrap_or_else(|| {
+        panic!(
+            "client was not refused within {timeout:?}; last status: {:?}",
+            client.upstream_status()
+        )
+    })
+}

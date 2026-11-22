@@ -77,20 +77,37 @@ fn schema() -> JazzSchema {
     schema_with(Indexes::Both, false)
 }
 
+fn config(node: u8, schema: JazzSchema, author: AuthorSubject) -> DbConfig {
+    DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author,
+        },
+    )
+}
+
+/// An authority in a store file, which a deployment can reopen under a
+/// newer schema (a running store never switches schema).
+fn authority_at(path: &std::path::Path, schema: JazzSchema) -> Db {
+    jazz::use_test_kinds(true);
+    let db = block_on(Db::open_at(
+        config(0, schema, AuthorSubject::SYSTEM),
+        path,
+        jazz::db::FileOptions::default(),
+    ))
+    .unwrap();
+    db.set_authority();
+    db
+}
+
 fn open(node: u8, schema: JazzSchema) -> Db {
     open_as(node, schema, AuthorSubject::SYSTEM)
 }
 
 fn open_as(node: u8, schema: JazzSchema, author: AuthorSubject) -> Db {
     jazz::use_test_kinds(true);
-    block_on(Db::open(DbConfig::new(
-        schema,
-        DbIdentity {
-            node: NodeUuid::from_bytes([node; 16]),
-            author,
-        },
-    )))
-    .unwrap()
+    block_on(Db::open(config(node, schema, author))).unwrap()
 }
 
 fn authority(schema: JazzSchema) -> Db {
@@ -310,7 +327,8 @@ fn local_writes_reach_the_index_in_their_transaction() {
     block_on(db.restore("notes", row(2), None, Default::default())).unwrap();
     assert_eq!(ids(&db, &search("garden")), [1, 2, 3]);
     // Several writes in one transaction are indexed when it commits.
-    block_on(db.transaction(async |tx| {
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
         tx.update(
             "notes",
             row(1),
@@ -325,8 +343,8 @@ fn local_writes_reach_the_index_in_their_transaction() {
             Default::default(),
         )
         .await?;
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
     assert_eq!(ids(&db, &search("shed")), [1, 3]);
     assert_eq!(ids(&db, &search("garden")), [2]);
@@ -384,7 +402,9 @@ fn synced_versions_and_removed_pending_writes_reach_a_clients_index() {
 /// searches with a retryable `index_building` error.
 #[test]
 fn declarations_build_rebuild_and_drop_with_the_schema() {
-    let db = authority(schema_with(Indexes::None, false));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jazz.sqlite");
+    let db = authority_at(&path, schema_with(Indexes::None, false));
     for n in 0..1200u32 {
         let id = RowUuid::from_bytes({
             let mut b = [0u8; 16];
@@ -402,7 +422,16 @@ fn declarations_build_rebuild_and_drop_with_the_schema() {
         ))
         .unwrap();
     }
-    block_on(db.activate_schema(schema_with(Indexes::TitleOnly, false))).unwrap();
+    let db = crate::common::reinstall(
+        db,
+        &path,
+        config(
+            0,
+            schema_with(Indexes::TitleOnly, false),
+            AuthorSubject::SYSTEM,
+        ),
+        vec![],
+    );
     let error = try_ids(&db, &search("garden")).expect_err("still building");
     assert_eq!(error.code, ErrorCode::Backpressure);
     assert_eq!(error.reason, Some(Reason::IndexBuilding));
@@ -414,13 +443,23 @@ fn declarations_build_rebuild_and_drop_with_the_schema() {
     assert_eq!(count(&db, "garden").unwrap(), 12);
 
     // Weighting the field anew is a new declaration: rebuilt.
-    block_on(db.activate_schema(schema_with(Indexes::Both, false))).unwrap();
+    let db = crate::common::reinstall(
+        db,
+        &path,
+        config(0, schema_with(Indexes::Both, false), AuthorSubject::SYSTEM),
+        vec![],
+    );
     for _ in 0..3 {
         block_on(db.tick()).unwrap();
     }
     assert_eq!(count(&db, "garden").unwrap(), 12);
 
-    block_on(db.activate_schema(schema_with(Indexes::None, false))).unwrap();
+    let db = crate::common::reinstall(
+        db,
+        &path,
+        config(0, schema_with(Indexes::None, false), AuthorSubject::SYSTEM),
+        vec![],
+    );
     block_on(db.tick()).unwrap();
     let error = try_ids(&db, &search("garden")).expect_err("no index any more");
     assert!(
@@ -823,6 +862,80 @@ impl Transport for Offering {
     fn features(&self) -> jazz::wire::WireFeatures {
         self.features
     }
+}
+
+/// On managed storage (a Durable Object's SQL, whose only transactions are
+/// callback scopes) a write reaches its indexes as its scope commits
+/// (`INV-IX-2`), as on native SQLite: nothing is left queued for a later
+/// read to drain, and a restarted object searches the same.
+#[test]
+fn writes_on_managed_storage_reach_the_index_as_their_scope_commits() {
+    use jazz::storage::{Storage, managed_emulation::EmulatedObjectSql};
+    jazz::use_test_kinds(true);
+    let sql = EmulatedObjectSql::open_in_memory().unwrap();
+    let open_object = || {
+        let db = block_on(Db::open_storage(
+            config(0, schema(), AuthorSubject::SYSTEM),
+            Storage::from_backend(sql.clone()),
+        ))
+        .unwrap();
+        db.set_authority();
+        db
+    };
+    let db = open_object();
+    // The indexes exist from the store's first look at them.
+    let _ = try_ids(&db, &search("garden"));
+    block_on(db.tick()).unwrap();
+    let queued = || -> i64 {
+        Storage::from_backend(sql.clone())
+            .query_row("SELECT count(*) FROM _jazz_ix_dirty", [], |r| r.get(0))
+            .unwrap()
+    };
+    insert(&db, 1, note("Garden plans", None, "home", &[0.0, 0.0]));
+    assert_eq!(queued(), 0, "the insert's scope drained what it queued");
+    update(&db, 1, "title", Value::String("Shed plans".into()));
+    assert_eq!(queued(), 0, "the update's scope drained what it queued");
+    assert_eq!(ids(&db, &search("shed")), [1]);
+    assert_eq!(ids(&db, &search("garden")), Vec::<u8>::new());
+    drop(db);
+    assert_eq!(ids(&open_object(), &search("shed")), [1], "after a restart");
+}
+
+/// A local-first search opened before a link is up learns on it that the
+/// upstream cannot search: it shows this store's rows, and is never sent,
+/// nor reported as settled by that upstream.
+#[test]
+fn a_search_opened_before_an_older_upstream_connects_is_never_confirmed_by_it() {
+    let server = authority(schema());
+    let bob = client(1, schema());
+    insert(&bob, 1, note("Garden plans", None, "home", &[0.0, 0.0]));
+    let prepared = bob.prepare_query(&search("garden")).unwrap();
+    let mut local = block_on(bob.subscribe(&prepared, ReadOpts::default())).unwrap();
+
+    let (up, down) = jazz::db::duplex();
+    let searches = Rc::new(RefCell::new(0));
+    let _link = block_on(bob.connect_upstream(Box::new(Offering {
+        inner: up,
+        features: BETA_0_NATIVE,
+        versions: Rc::default(),
+        searches: searches.clone(),
+    })));
+    server.accept_subscriber(down, alice()).unwrap();
+    pump(&server, &[&bob]);
+
+    let mut shown = Vec::new();
+    while let Some(event) = local.try_next_event() {
+        match event {
+            SubscriptionEvent::Delta { added, settled, .. } => {
+                assert!(!settled, "nothing upstream confirmed a local-only search");
+                shown.extend(added.iter().map(|row| row.row_uuid().0.as_bytes()[0]));
+            }
+            SubscriptionEvent::Rejected { reason, .. } => panic!("{reason}"),
+            SubscriptionEvent::Closed => {}
+        }
+    }
+    assert_eq!(shown, [1]);
+    assert_eq!(*searches.borrow(), 0, "no search crossed the link");
 }
 
 /// A peer offering exactly what beta.0 offers, up to every bit that release
@@ -1264,8 +1377,15 @@ fn a_rename_only_migration_keeps_the_declaration() {
         }],
     )
     .unwrap();
-    let server = authority(v1.clone());
-    block_on(server.activate_schema_with_lenses(v2, &[rename])).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jazz.sqlite");
+    let server = authority_at(&path, v1.clone());
+    let server = crate::common::reinstall(
+        server,
+        &path,
+        config(0, v2, AuthorSubject::SYSTEM),
+        vec![rename],
+    );
     block_on(server.insert(
         "notes",
         BTreeMap::from([("heading".to_owned(), Value::String("Garden plans".into()))]),

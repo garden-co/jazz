@@ -5,7 +5,7 @@
 //! old schema syncs with a server on the new one. No data is copied.
 //!
 //! The lens ops that do write values (INV-LENS-13, INV-LENS-17): a copy is a
-//! stored column of its own, filled from its source at activation and in
+//! stored column of its own, filled from its source when it is admitted and in
 //! rows older versions insert; a dropped column gets the lens's backwards
 //! default in rows newer versions insert; the identity transform changes no
 //! value.
@@ -129,6 +129,29 @@ fn open_at(schema: JazzSchema, path: &Path) -> Db {
     .unwrap()
 }
 
+/// Reopen `db`'s file under `config`: a deployment installs its schema
+/// when the store opens, never while it runs. An authority stays one.
+fn reopen(db: Db, path: &Path, config: DbConfig) -> Db {
+    let authority = db.is_authority();
+    drop(db);
+    let db = block_on(Db::open_at(config, path, FileOptions::default())).unwrap();
+    if authority {
+        db.set_authority();
+    }
+    db
+}
+
+/// `schema`'s config on node 1, as SYSTEM, with the app's lenses.
+fn system(schema: JazzSchema) -> DbConfig {
+    config(schema, 1, AuthorSubject::SYSTEM)
+}
+
+/// `schema`'s config on node 1, as SYSTEM, shipping only `source` and
+/// `lens` into it.
+fn shipped(schema: JazzSchema, source: JazzSchema, lens: MigrationLens) -> DbConfig {
+    bare_config(schema, 1, AuthorSubject::SYSTEM).with_migrations(vec![source], vec![lens])
+}
+
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("jazz-rename-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -244,7 +267,7 @@ fn a_renamed_column_is_read_and_written_by_both_versions() {
     let db = open_at(v1(), &path);
     insert(&db, "todos", 1, "title", "a");
     let before = stored(&path);
-    block_on(db.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+    let db = reopen(db, &path, system(v2()));
     assert_eq!(stored(&path), before, "no column is added or copied");
 
     let old = block_on(db.register_schema_view(v1())).unwrap();
@@ -277,9 +300,10 @@ fn a_renamed_column_is_read_and_written_by_both_versions() {
 
 #[test]
 fn a_subscription_on_the_old_version_sees_writes_under_the_new_name() {
-    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    let path = scratch("subscription");
+    let db = open_at(v1(), &path);
     insert(&db, "todos", 1, "title", "a");
-    block_on(db.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+    let db = reopen(db, &path, system(v2()));
     let old = block_on(db.register_schema_view(v1())).unwrap();
     let prepared = old.prepare_query(&Query::from("todos")).unwrap();
     let mut stream = block_on(old.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -315,8 +339,8 @@ fn a_renamed_table_keeps_its_stored_table() {
     let path = scratch("table");
     let db = open_at(v1(), &path);
     insert(&db, "todos", 1, "title", "a");
-    block_on(db.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
-    block_on(db.activate_schema_with_lenses(v3(), &[rename_todos()])).unwrap();
+    let db = reopen(db, &path, system(v2()));
+    let db = reopen(db, &path, system(v3()));
     assert_eq!(
         stored(&path),
         BTreeMap::from([(
@@ -336,13 +360,34 @@ fn a_renamed_table_keeps_its_stored_table() {
     assert!(db.prepare_query(&Query::from("todos")).is_err());
 }
 
+/// Pending uploads are kept under stored names; a host asks under the
+/// table's current name. A rename keeps the stored table, so `tasks`' rows
+/// are stored in `todos`, and asking for `tasks` must find them.
+#[test]
+fn pending_upload_rows_answers_under_a_renamed_tables_current_name() {
+    let path = scratch("pending-rows");
+    let db = open_at(v1(), &path);
+    let db = reopen(db, &path, system(v2()));
+    let db = reopen(db, &path, system(v3()));
+    // An upstream that never answers: the commit stays pending.
+    let (client_side, _never_answered) = pipe();
+    let _link = block_on(db.connect_upstream(client_side));
+    insert(&db, "tasks", 2, "name", "b");
+
+    assert_eq!(db.pending_upload_rows("tasks").unwrap(), [row(2)]);
+    assert!(
+        db.pending_upload_rows("todos").is_err(),
+        "the stored name is not a table of the current schema"
+    );
+}
+
 #[test]
 fn reopening_finds_the_renamed_columns_again() {
     let path = scratch("reopen");
     {
         let db = open_at(v1(), &path);
         insert(&db, "todos", 1, "title", "a");
-        block_on(db.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+        let db = reopen(db, &path, system(v2()));
         insert(&db, "todos", 2, "name", "b");
     }
     let after_rename = stored(&path);
@@ -391,7 +436,11 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
     {
         let db = open_at(before.clone(), &path);
         insert(&db, "notes", 1, "body", "a");
-        block_on(db.activate_schema_with_lenses(after.clone(), &[rename.clone()])).unwrap();
+        let db = reopen(
+            db,
+            &path,
+            shipped(after.clone(), before.clone(), rename.clone()),
+        );
         let old = block_on(db.register_schema_view(before.clone())).unwrap();
         insert(&old, "notes", 2, "body", "b");
     }
@@ -448,13 +497,15 @@ fn a_name_freed_by_a_rename_gets_its_own_stored_column() {
     let path = scratch("freed");
     let db = open_at(v1(), &path);
     insert(&db, "todos", 1, "title", "old");
-    block_on(db.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+    let db = reopen(db, &path, system(v2()));
     // v4 adds a new, unrelated `title` next to the renamed `name`.
     let v4 = schema(vec![
         todos("todos", "name").nullable_column("title", ColumnType::Text),
     ]);
     let add = lens(&v2(), &v4, "todos", "todos", vec![]);
-    block_on(db.activate_schema_with_lenses(v4.clone(), &[add])).unwrap();
+    let mut v4_config = system(v4.clone());
+    v4_config.migrations.lenses.push(add);
+    let db = reopen(db, &path, v4_config);
 
     assert_eq!(read(&db, "todos", "name"), texts(&["old"]));
     assert_eq!(read(&db, "todos", "title"), vec![Value::Nullable(None)]);
@@ -482,12 +533,12 @@ fn renaming_a_missing_column_or_table_is_rejected() {
             to: "name".into(),
         }],
     );
-    let error = block_on(db.activate_schema_with_lenses(v2(), &[wrong])).unwrap_err();
+    let error = block_on(db.admit_schema_with_lenses(v2(), &[wrong])).unwrap_err();
     assert!(error.to_string().contains("missing"), "{error}");
 
     let renamed = schema(vec![todos("tasks", "title")]);
     let wrong = lens(&v1(), &renamed, "nothing", "tasks", vec![]);
-    let error = block_on(db.activate_schema_with_lenses(renamed, &[wrong])).unwrap_err();
+    let error = block_on(db.admit_schema_with_lenses(renamed, &[wrong])).unwrap_err();
     assert!(error.to_string().contains("nothing"), "{error}");
 }
 
@@ -514,7 +565,7 @@ fn renaming_a_branch_column_is_not_supported_yet() {
             to: "area".into(),
         }],
     );
-    let error = block_on(db.activate_schema_with_lenses(to, &[rename])).unwrap_err();
+    let error = block_on(db.admit_schema_with_lenses(to, &[rename])).unwrap_err();
     assert!(error.to_string().contains("not supported"), "{error}");
 }
 
@@ -575,33 +626,43 @@ fn user(n: u8) -> AuthorSubject {
     AuthorSubject::for_test_bytes([n; 16])
 }
 
-/// A server that started on `first` and then activated each of `steps`
-/// with the lens into it.
+/// A server deployed at the last of `steps` (or `first`), shipping `first`
+/// and every step with the lens into it: it installs that schema when it
+/// opens.
 fn server(first: JazzSchema, steps: Vec<(JazzSchema, MigrationLens)>) -> Db {
-    let db = block_on(Db::open_history_complete(config(
-        first,
-        0,
-        AuthorSubject::SYSTEM,
-    )))
-    .unwrap();
-    for (schema, lens) in steps {
-        block_on(db.activate_schema_with_lenses(schema, &[lens])).unwrap();
+    let current = steps
+        .last()
+        .map_or(first.clone(), |(schema, _)| schema.clone());
+    let mut config = config(current, 0, AuthorSubject::SYSTEM);
+    for schema in std::iter::once(&first).chain(steps.iter().map(|(schema, _)| schema)) {
+        if !config.migrations.schemas.contains(schema) {
+            config.migrations.schemas.push(schema.clone());
+        }
     }
-    db
+    for (_, lens) in steps {
+        if !config.migrations.lenses.contains(&lens) {
+            config.migrations.lenses.push(lens);
+        }
+    }
+    block_on(Db::open_history_complete(config)).unwrap()
 }
 
 fn seed(server: &Db, table: &str, n: u8, cells: &[(&str, Value)]) {
-    server
-        .seed_settled_mergeable_for_bootstrap(
+    jazz::db::block_on(
+        server.insert(
             table,
-            row(n),
-            AuthorSubject::SYSTEM,
             cells
                 .iter()
                 .map(|(column, value)| ((*column).to_owned(), value.clone()))
                 .collect(),
-        )
-        .unwrap();
+            jazz::db::InsertOptions {
+                row_id: Some(row(n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -734,7 +795,8 @@ fn branch(byte: u8) -> jazz::protocol::BranchSelector {
 fn a_frozen_base_from_before_a_table_rename_still_copies_the_frozen_row() {
     use jazz::db::{ExactWriteTarget, WriteTarget};
     use jazz::protocol::BranchViewBase;
-    let db = block_on(Db::open(config(branched("docs"), 1, AuthorSubject::SYSTEM))).unwrap();
+    let path = scratch("frozen-base");
+    let db = open_at(branched("docs"), &path);
     let (main, draft) = (branch(1), branch(2));
     block_on(db.insert(
         "docs",
@@ -764,7 +826,7 @@ fn a_frozen_base_from_before_a_table_rename_still_copies_the_frozen_row() {
 
     let pages = branched("pages");
     let rename = lens(&branched("docs"), &pages, "docs", "pages", vec![]);
-    block_on(db.activate_schema_with_lenses(pages, &[rename])).unwrap();
+    let db = reopen(db, &path, shipped(pages, branched("docs"), rename));
 
     let frozen = Some(BranchViewBase::snapshot(main.clone(), snapshot));
     block_on(db.update("pages", row(1), BTreeMap::new(), on(&draft, frozen.clone()))).unwrap();
@@ -824,7 +886,7 @@ fn a_copied_column_is_filled_from_its_source_in_current_rows_and_history() {
     insert(&db, "todos", 1, "title", "a");
     update(&db, "todos", 1, "title", "a2");
     insert(&db, "todos", 2, "title", "b");
-    block_on(db.activate_schema_with_lenses(with_copy(), &[copy_title()])).unwrap();
+    let db = reopen(db, &path, system(with_copy()));
 
     assert_eq!(read(&db, "todos", "search_title"), texts(&["a2", "b"]));
     assert_eq!(read(&db, "todos", "title"), texts(&["a2", "b"]));
@@ -840,9 +902,8 @@ fn a_row_an_older_version_inserts_gets_the_copy_of_its_source() {
     let path = scratch("copy-mirror");
     let db = open_at(v1(), &path);
     insert(&db, "todos", 1, "title", "a");
-    // A handle opened before the copy existed keeps it in step too.
+    let db = reopen(db, &path, system(with_copy()));
     let old = block_on(db.register_schema_view(v1())).unwrap();
-    block_on(db.activate_schema_with_lenses(with_copy(), &[copy_title()])).unwrap();
 
     insert(&old, "todos", 2, "title", "b");
     assert_eq!(read(&db, "todos", "search_title"), texts(&["a", "b"]));
@@ -903,7 +964,7 @@ fn a_copy_must_name_a_new_column_of_the_source_type() {
             to: "search_title".into(),
         }],
     );
-    let error = block_on(db.activate_schema_with_lenses(with_copy(), &[missing])).unwrap_err();
+    let error = block_on(db.admit_schema_with_lenses(with_copy(), &[missing])).unwrap_err();
     assert!(error.to_string().contains("no `nope`"), "{error}");
 
     let typed = schema(vec![
@@ -919,13 +980,14 @@ fn a_copy_must_name_a_new_column_of_the_source_type() {
             to: "search_title".into(),
         }],
     );
-    let error = block_on(db.activate_schema_with_lenses(typed, &[retyped])).unwrap_err();
+    let error = block_on(db.admit_schema_with_lenses(typed, &[retyped])).unwrap_err();
     assert!(error.to_string().contains("another type"), "{error}");
 }
 
 #[test]
 fn the_identity_transform_is_accepted_and_changes_no_value() {
-    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    let path = scratch("identity-transform");
+    let db = open_at(v1(), &path);
     insert(&db, "todos", 1, "title", "a");
     let identity = lens(
         &v1(),
@@ -943,7 +1005,7 @@ fn the_identity_transform_is_accepted_and_changes_no_value() {
             },
         ],
     );
-    block_on(db.activate_schema_with_lenses(v2(), &[identity])).unwrap();
+    let db = reopen(db, &path, shipped(v2(), v1(), identity));
     let old = block_on(db.register_schema_view(v1())).unwrap();
     assert_eq!(read(&db, "todos", "name"), texts(&["a"]));
     update(&old, "todos", 1, "title", "b");
@@ -969,7 +1031,7 @@ fn an_unregistered_transform_is_rejected() {
             },
         ],
     );
-    let error = block_on(db.activate_schema_with_lenses(v2(), &[upper])).unwrap_err();
+    let error = block_on(db.admit_schema_with_lenses(v2(), &[upper])).unwrap_err();
     assert_eq!(error.code, jazz::db::ErrorCode::Schema);
     assert!(
         error.to_string().contains("unregistered transform"),
@@ -989,7 +1051,8 @@ fn without_rank() -> JazzSchema {
 
 #[test]
 fn a_row_a_newer_version_inserts_gives_a_dropped_column_its_backwards_default() {
-    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    let path = scratch("backwards-default");
+    let db = open_at(v1(), &path);
     block_on(db.insert(
         "todos",
         BTreeMap::from([
@@ -1002,7 +1065,7 @@ fn a_row_a_newer_version_inserts_gives_a_dropped_column_its_backwards_default() 
         },
     ))
     .unwrap();
-    block_on(db.activate_schema_with_lenses(without_rank(), &[drop_rank()])).unwrap();
+    let db = reopen(db, &path, shipped(without_rank(), v1(), drop_rank()));
     let old = block_on(db.register_schema_view(v1())).unwrap();
 
     insert(&db, "todos", 2, "title", "new");

@@ -50,6 +50,7 @@ pub mod options;
 pub mod slow;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
+pub mod storage;
 pub mod thin_transactions;
 pub mod values;
 

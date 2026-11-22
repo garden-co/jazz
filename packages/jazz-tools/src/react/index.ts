@@ -13,7 +13,6 @@ export {
   type JazzClientProviderProps,
   useDb,
   useJazzClient,
-  useSession,
 } from "./provider.js";
 export { useAll, useAllSuspense, type UseAllResult, type UseAllSuspenseResult } from "./use-all.js";
 export { useOne, useOneSuspense, type UseOneResult, type UseOneSuspenseResult } from "./use-one.js";
@@ -33,23 +32,13 @@ export {
 export type {
   JazzSession,
   JazzSessionSnapshot,
+  JazzSessionErrorViewProps,
   JazzSessionOperation,
   JazzUser,
+  LocalFirstUnavailable,
 } from "../session/jazz-session.js";
 export {
   useJazzSession,
   type UseJazzSessionResult,
   type JazzSessionViewProps,
 } from "../react-core/session.js";
-
-// Removed in alpha.61: stubs that throw, naming the replacement (one release).
-export {
-  AccountManager,
-  JazzSessionProvider,
-  createAccountManager,
-  exportLocalFirstSecret,
-  useAccountState,
-  useJazzAuth,
-  useJazzSessionOwner,
-  useLocalFirstAuth,
-} from "../removed-api.js";

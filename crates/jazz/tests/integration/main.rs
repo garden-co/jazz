@@ -25,8 +25,6 @@ mod branch_view_sync;
 mod branch_views;
 #[path = "../bundle_permissions.rs"]
 mod bundle_permissions;
-#[path = "../callback_transaction_cancellation.rs"]
-mod callback_transaction_cancellation;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
 #[path = "../catalogue_unsupported_versions.rs"]
@@ -37,6 +35,8 @@ mod claims_change;
 mod claims_registry_refresh;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
+#[path = "../column_operators.rs"]
+mod column_operators;
 #[path = "../commit_atomicity_frames.rs"]
 mod commit_atomicity_frames;
 #[path = "../composite_indexes.rs"]
@@ -77,6 +77,8 @@ mod history_reads;
 mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
+#[path = "../kept_plans.rs"]
+mod kept_plans;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
 #[path = "../large_value_chunk_store.rs"]
@@ -103,6 +105,8 @@ mod link_identities;
 mod local_first_first_load_gate;
 #[path = "../local_first_server_wait.rs"]
 mod local_first_server_wait;
+#[path = "../managed_storage.rs"]
+mod managed_storage;
 #[path = "../maybe_conflicting.rs"]
 mod maybe_conflicting;
 #[path = "../mirrored_lens_defaults.rs"]
@@ -121,10 +125,10 @@ mod parameterized_subscription_routing;
 mod pending_commit_reopen;
 #[path = "../pending_rebase_scope.rs"]
 mod pending_rebase_scope;
+#[path = "../pending_upload_rows.rs"]
+mod pending_upload_rows;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
-#[path = "../policy_activation.rs"]
-mod policy_activation;
 #[path = "../policy_check_plans.rs"]
 mod policy_check_plans;
 #[path = "../policy_claim_coercion.rs"]
@@ -159,6 +163,8 @@ mod relation_queries;
 mod relation_results;
 #[path = "../relational_delete_retraction.rs"]
 mod relational_delete_retraction;
+#[path = "../relations_parity.rs"]
+mod relations_parity;
 #[path = "../relay_local_seqs.rs"]
 mod relay_local_seqs;
 #[path = "../relay_policy_subscriptions.rs"]
@@ -197,6 +203,8 @@ mod session_policy_values;
 mod session_write_checks;
 #[path = "../shard_role.rs"]
 mod shard_role;
+#[path = "../shared_sqlite.rs"]
+mod shared_sqlite;
 #[path = "../slow_queries.rs"]
 mod slow_queries;
 #[path = "../snapshots.rs"]
@@ -207,6 +215,8 @@ mod specialised_index_kinds;
 mod specialised_index_policies;
 #[path = "../specialised_indexes.rs"]
 mod specialised_indexes;
+#[path = "../staged_transaction_cancellation.rs"]
+mod staged_transaction_cancellation;
 #[path = "../storage_corpus.rs"]
 mod storage_corpus;
 #[path = "../storage_errors.rs"]
@@ -219,6 +229,10 @@ mod streaming_transaction;
 mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../subscription_backlog.rs"]
+mod subscription_backlog;
+#[path = "../subscription_scope_sharing.rs"]
+mod subscription_scope_sharing;
 #[path = "../sync_access_loss.rs"]
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
@@ -237,6 +251,8 @@ mod sync_frame_bounds;
 mod sync_gather;
 #[path = "../sync_join.rs"]
 mod sync_join;
+#[path = "../sync_read_state.rs"]
+mod sync_read_state;
 #[path = "../sync_resume.rs"]
 mod sync_resume;
 #[path = "../sync_sessions.rs"]
@@ -251,6 +267,8 @@ mod sync_untrusted_clients;
 mod sync_wire_corpus;
 #[path = "../sync_write_only.rs"]
 mod sync_write_only;
+#[path = "../text_affix_predicates.rs"]
+mod text_affix_predicates;
 #[path = "../text_merge.rs"]
 mod text_merge;
 #[path = "../text_splices.rs"]
@@ -271,6 +289,8 @@ mod transaction_policy_exists;
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
 mod union_queries;
+#[path = "../unit_using_evidence.rs"]
+mod unit_using_evidence;
 #[path = "../unsupported_json_schemas.rs"]
 mod unsupported_json_schemas;
 #[path = "../uuid_page_probe.rs"]

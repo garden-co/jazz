@@ -1,6 +1,6 @@
 {
   "name": "jazz-napi",
-  "version": "2.0.0-alpha.66",
+  "version": "2.0.0-beta.0",
   "description": "Native Node.js bindings for Jazz runtime",
   "license": "MIT",
   "repository": {
@@ -40,7 +40,7 @@
     "build:perf:sccache": "RUSTC_WRAPPER=sccache node scripts/build.js --profile perf",
     "prepack": "node ../../dev/artifacts/stage-napi-loader.mjs",
     "test": "node --test tests/*.test.cjs && pnpm typecheck:consumer",
-    "typecheck:consumer": "tsc --project tests/types/tsconfig.json"
+    "typecheck:consumer": "tsrs --project tests/types/tsconfig.json"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3",

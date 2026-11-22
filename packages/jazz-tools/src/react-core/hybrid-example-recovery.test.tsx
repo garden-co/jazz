@@ -23,7 +23,6 @@ const fixture = vi.hoisted(() => ({
 }));
 vi.mock("jazz-tools/react", async () => ({
   ...(await import("../react/index.js")),
-  useJazzSessionOwner: () => ({ session: fixture.session }),
   JazzProvider: ({
     children,
     signedOut,
@@ -146,7 +145,7 @@ async function setup() {
   fixture.session = await createJazzSessionOwner({
     accounts,
     async openClient() {
-      return makeFakeClient({ authMode: "local-first", userId: "guest", claims: {} });
+      return makeFakeClient({ authMode: "device-account", userId: "guest", claims: {} });
     },
   });
   return { enroll, link, createLocal };

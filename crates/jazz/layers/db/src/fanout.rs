@@ -38,8 +38,206 @@ use super::*;
 use crate::schema::history::{history_source_table, is_history_table};
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 
-pub(super) type Queue = Rc<RefCell<VecDeque<SubscriptionEvent>>>;
+pub(super) type Queue = Rc<RefCell<EventQueue>>;
+
+/// The default for [`crate::db::Db::set_subscription_backlog_limit`]: how
+/// many changed rows a subscription's undelivered deltas may hold before
+/// they are coalesced into one reset of the current result.
+pub const DEFAULT_SUBSCRIPTION_BACKLOG_LIMIT: NonZeroUsize = NonZeroUsize::new(10_000).unwrap();
+
+/// One member's undelivered events.
+///
+/// A local reader's queue is bounded: once its deltas hold more than
+/// `limit` changed rows, they are dropped and the reader is told the
+/// current result instead, as one reset marked `coalesced` (built when it
+/// next reads, from the group's rows then). A result is a set, so the
+/// current one supersedes every delta that led to it: what the reader
+/// holds is never more than its limit, one dispatch's deltas, and the
+/// result it asked for. A reset counts for nothing, as the result is that
+/// size anyway.
+///
+/// Only a reader that fell behind is coalesced: it takes two queued
+/// deltas, so one big delta a drained reader has not had the chance to
+/// read yet (a bulk import) is delivered as it is.
+///
+/// A replica's queue (a sync session's) is not bounded here: it is drained
+/// every tick, and must see every removal, which a reset would not list.
+pub(super) struct EventQueue {
+    events: VecDeque<SubscriptionEvent>,
+    /// Changed rows the queued deltas hold (a delta counts at least one).
+    rows: usize,
+    /// Deltas queued (resets included).
+    deltas: usize,
+    /// `None`: never coalesced (a replica's).
+    limit: Option<NonZeroUsize>,
+    /// Coalesced: a reset of the current result is due after the events
+    /// queued ahead of it.
+    stale: Option<Stale>,
+    /// Counts coalescings, for [`FanoutStats::coalesced`].
+    coalesced: Rc<std::cell::Cell<u64>>,
+}
+
+/// A due coalesced reset.
+#[derive(Clone, Copy)]
+struct Stale {
+    /// The last dropped delta's settlement, which the reset carries.
+    settled: bool,
+    tier: DurabilityTier,
+    /// Events queued before the dropped deltas (an error ending the
+    /// stream), read before the reset.
+    ahead: usize,
+}
+
+impl EventQueue {
+    fn new(
+        limit: Option<NonZeroUsize>,
+        coalesced: Rc<std::cell::Cell<u64>>,
+        first: Option<SubscriptionEvent>,
+    ) -> Self {
+        let mut queue = Self {
+            events: VecDeque::new(),
+            rows: 0,
+            deltas: 0,
+            limit,
+            stale: None,
+            coalesced,
+        };
+        if let Some(first) = first {
+            queue.deltas += usize::from(matches!(first, SubscriptionEvent::Delta { .. }));
+            queue.events.push_back(first);
+        }
+        queue
+    }
+
+    fn weight(event: &SubscriptionEvent) -> usize {
+        match event {
+            SubscriptionEvent::Delta { reset: true, .. } => 0,
+            SubscriptionEvent::Delta {
+                added,
+                updated,
+                removed,
+                ..
+            } => (added.len() + updated.len() + removed.len()).max(1),
+            _ => 0,
+        }
+    }
+
+    pub(super) fn push_back(&mut self, event: SubscriptionEvent, table: &str) {
+        if let SubscriptionEvent::Delta { settled, tier, .. } = &event
+            && let Some(stale) = &mut self.stale
+        {
+            // Superseded by the reset the reader is told next.
+            stale.settled = *settled;
+            stale.tier = *tier;
+            return;
+        }
+        let stamp = match &event {
+            SubscriptionEvent::Delta { settled, tier, .. } => Some((*settled, *tier)),
+            _ => None,
+        };
+        self.rows += Self::weight(&event);
+        self.deltas += usize::from(stamp.is_some());
+        self.events.push_back(event);
+        let (Some(limit), Some((settled, tier))) = (self.limit, stamp) else {
+            return;
+        };
+        if self.rows <= limit.get() || self.deltas < 2 {
+            return;
+        }
+        let dropped = self.rows;
+        // Deltas go. An error or close keeps its place: ahead of the reset
+        // if it was queued before the dropped deltas, after it otherwise.
+        let ahead = self
+            .events
+            .iter()
+            .position(|event| matches!(event, SubscriptionEvent::Delta { .. }))
+            .unwrap_or(self.events.len());
+        self.events
+            .retain(|event| !matches!(event, SubscriptionEvent::Delta { .. }));
+        self.rows = 0;
+        self.deltas = 0;
+        self.stale = Some(Stale {
+            settled,
+            tier,
+            ahead,
+        });
+        self.coalesced.set(self.coalesced.get() + 1);
+        tracing::warn!(
+            target: "jazz::subscription",
+            table,
+            rows = dropped,
+            limit = limit.get(),
+            "subscription reader fell behind: its undelivered changes are coalesced \
+             into one reset of the current result",
+        );
+    }
+
+    /// Whether a coalesced reset is due next, which [`Self::pop_front`]
+    /// builds from the group's rows.
+    pub(super) fn reset_due(&self) -> bool {
+        self.stale.is_some_and(|stale| stale.ahead == 0)
+    }
+
+    /// The next event. A due coalesced reset reads as a reset of `rows`:
+    /// `None` when the group cannot be read now, and the reset then waits
+    /// for the next read instead of being lost.
+    pub(super) fn pop_front(&mut self, rows: Option<&[CurrentRow]>) -> Option<SubscriptionEvent> {
+        if let Some(stale) = &mut self.stale {
+            if stale.ahead > 0 {
+                stale.ahead -= 1;
+                return self.events.pop_front();
+            }
+            let rows = rows?;
+            let Stale { settled, tier, .. } = *stale;
+            self.stale = None;
+            let mut event = opening(rows);
+            if let SubscriptionEvent::Delta {
+                settled: s,
+                tier: t,
+                coalesced,
+                ..
+            } = &mut event
+            {
+                *s = settled;
+                *t = tier;
+                *coalesced = true;
+            }
+            return Some(event);
+        }
+        let event = self.events.pop_front()?;
+        self.rows = self.rows.saturating_sub(Self::weight(&event));
+        if matches!(event, SubscriptionEvent::Delta { .. }) {
+            self.deltas -= 1;
+        }
+        Some(event)
+    }
+
+    /// Every queued event, for a replica's tick (never coalesced).
+    pub(super) fn drain_all(&mut self) -> Vec<SubscriptionEvent> {
+        debug_assert!(self.stale.is_none(), "a replica's queue is not coalesced");
+        self.rows = 0;
+        self.deltas = 0;
+        self.events.drain(..).collect()
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.events.clear();
+        self.rows = 0;
+        self.deltas = 0;
+        self.stale = None;
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.stale.is_none()
+    }
+
+    /// Changed rows the queued deltas hold, for tests.
+    pub(super) fn backlog_rows(&self) -> usize {
+        self.rows
+    }
+}
 
 /// What a group reads.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -229,6 +427,7 @@ fn correlation_enabled() -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct GroupKey {
+    dormant: bool,
     /// The renamed tables and columns of the schema naming the rows:
     /// versions on either side of a rename compile to the same SQL but
     /// label rows differently.
@@ -236,7 +435,10 @@ struct GroupKey {
     sql: String,
     params: String,
     /// Set only when the SQL depends on the identity's session (array
-    /// relations, read as the identity, always may).
+    /// relations, read as the identity, always may): the identity and where
+    /// its claims come from. A registry-following read and one carrying
+    /// fixed request claims can compile to the same SQL today, but only the
+    /// first follows a later registry change.
     identity: Option<String>,
     /// The array relations nested in each row: queries that differ only
     /// in them compile to the same root SQL.
@@ -251,8 +453,18 @@ struct GroupKey {
     position: String,
 }
 
+/// Whose queue a member's events go to.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Backlog {
+    /// A local reader's ([`crate::db::SubscriptionStream`]): bounded at its
+    /// read's limit, or the store's ([`Fanout::backlog_limit`]).
+    Reader(Option<NonZeroUsize>),
+    /// A sync session's: drained every tick, never coalesced.
+    Replica,
+}
+
 struct Member {
-    queue: Weak<RefCell<VecDeque<SubscriptionEvent>>>,
+    queue: Weak<RefCell<EventQueue>>,
     shape: Shape,
     bound: bool,
     /// Where this member's `settled` flag comes from, and the tier it was
@@ -354,6 +566,45 @@ pub(super) struct Group {
     /// self-relation): the root rows the result holds, which wake it
     /// whatever their images say.
     root_held: Option<HashSet<RowUuid>>,
+    /// Its relation statements, kept across runs
+    /// ([`Inner::nest_relations_kept`]).
+    plans: crate::db::RelationPlans,
+    /// Its re-check's root statement, kept per number of ids
+    /// ([`Inner::root_plan`]).
+    root_plans: RootPlans,
+}
+
+/// A re-check's root statement (the query narrowed to the changed ids),
+/// kept per number of ids. Kept only where the ids bind as one blob
+/// parameter each and nothing else of the statement depends on them
+/// ([`Inner::build_root_plan`]); `None` marks a count that does not, which
+/// compiles as before. At most [`ROOT_PLANS_MAX`] counts are kept: past
+/// that the map starts over, so a result re-checking many distinct
+/// numbers of ids compiles as it would without it.
+#[derive(Default)]
+struct RootPlans {
+    stamp: Option<crate::db::PlanStamp>,
+    by_count: HashMap<usize, Option<(Compiled, Vec<usize>)>>,
+    /// Statements reused (for [`FanoutStats::kept_root_plans`]).
+    hits: u64,
+}
+
+const ROOT_PLANS_MAX: usize = 32;
+
+/// `prepared` narrowed to the root rows `ids` (as a root filter, unordered
+/// and unbounded): a re-check's query.
+fn narrowed_to(prepared: &PreparedQuery, ids: &[Value]) -> PreparedQuery {
+    let mut prepared = prepared.clone();
+    prepared.query.filters.push(crate::query::Predicate::In(
+        crate::query::Operand::Column("id".to_owned()),
+        ids.iter()
+            .cloned()
+            .map(crate::query::Operand::Literal)
+            .collect(),
+    ));
+    prepared.query.order_by.clear();
+    prepared.query.limit = None;
+    prepared
 }
 
 type SortKey = Vec<(Sql, bool)>;
@@ -392,7 +643,6 @@ impl Group {
 /// Counters for the fan-out bench and tests.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FanoutStats {
-    pub groups: usize,
     pub shared_joins: u64,
     /// Groups a commit refreshed, by any path: a re-run, a re-check, or a
     /// re-nest alone (a group woken only through correlated relations).
@@ -409,6 +659,12 @@ pub struct FanoutStats {
     /// Of those re-nests, the ones that read only the relations on the
     /// matched levels' paths, every other relation keeping its cells.
     pub renested_narrowly: u64,
+    /// Relation statements a live result reused from an earlier run
+    /// instead of compiling them again (over the results it holds now).
+    pub kept_plans: u64,
+    /// Re-check root statements a live result reused instead of compiling
+    /// them again (over the results it holds now).
+    pub kept_root_plans: u64,
     /// Woken groups that re-ran their query and diffed the whole result.
     pub reran: u64,
     /// Changed rows of a correlation-watched table that a watching group
@@ -418,6 +674,9 @@ pub struct FanoutStats {
     /// skipped: no occurrence of it in the group's policies could see the
     /// change.
     pub unevidenced: u64,
+    /// Times a local reader's undelivered deltas passed its backlog limit
+    /// and were coalesced into one reset.
+    pub coalesced: u64,
 }
 
 #[derive(Default)]
@@ -433,6 +692,10 @@ pub(super) struct Fanout {
     stats: FanoutStats,
     /// Bumped by every dropped stream, so `collect` scans only when needed.
     pub(super) dropped: Rc<std::cell::Cell<usize>>,
+    /// Bumped by every coalesced backlog ([`EventQueue`]).
+    coalesced: Rc<std::cell::Cell<u64>>,
+    /// A local reader's backlog limit when its read sets none.
+    pub(super) backlog_limit: Option<NonZeroUsize>,
 }
 
 /// The canonical form of a stored SQL value, for watch matching.
@@ -550,9 +813,22 @@ impl Fanout {
     fn drop_group(&mut self, gid: u64) {
         if let Some(group) = self.groups.remove(&gid) {
             let group = group.borrow();
-            self.by_key.remove(&group.key);
+            // A refreshed group may have converged on a key another group
+            // already owns: that owner's entry stays.
+            if self.by_key.get(&group.key) == Some(&gid) {
+                self.by_key.remove(&group.key);
+            }
             self.unindex(gid, &group.watches);
         }
+    }
+
+    /// An already active identical group can keep serving new subscribers.
+    fn activate(&mut self, gid: u64, group: &mut Group) {
+        if self.by_key.get(&group.key) == Some(&gid) {
+            self.by_key.remove(&group.key);
+        }
+        group.key.dormant = false;
+        self.by_key.entry(group.key.clone()).or_insert(gid);
     }
 
     /// Forget groups no live subscription holds.
@@ -593,8 +869,15 @@ impl Fanout {
     }
 
     pub(super) fn stats(&self) -> FanoutStats {
+        let (kept_plans, kept_root_plans) =
+            self.groups.values().fold((0, 0), |(plans, roots), group| {
+                let group = group.borrow();
+                (plans + group.plans.hits, roots + group.root_plans.hits)
+            });
         FanoutStats {
-            groups: self.groups.len(),
+            coalesced: self.coalesced.get(),
+            kept_plans,
+            kept_root_plans,
             ..self.stats.clone()
         }
     }
@@ -626,7 +909,7 @@ impl Fanout {
                         *settled = true;
                         *tier = now;
                     }
-                    queue.borrow_mut().push_back(event);
+                    queue.borrow_mut().push_back(event, &group.query().table);
                 }
             }
         }
@@ -634,6 +917,31 @@ impl Fanout {
 }
 
 impl Inner {
+    /// The key subscriptions share a group by (see [`GroupKey`]).
+    fn group_key(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        compiled: &Compiled,
+        session_used: bool,
+        dormant: bool,
+    ) -> GroupKey {
+        let effective = identity.unwrap_or(self.identity.author);
+        GroupKey {
+            dormant,
+            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
+            sql: compiled.sql.clone(),
+            params: format!("{:?}", compiled.params),
+            identity: (session_used || !prepared.query.array_subqueries.is_empty())
+                .then(|| format!("{identity:?} {:?}", prepared.fixed_claims_for(effective))),
+            relations: format!("{:?}", prepared.query.array_subqueries),
+            partial: format!("{:?}", compiled.partial),
+            splices: read.splices.clone(),
+            position: format!("{:?}", read.position),
+        }
+    }
+
     /// Open a subscription: join the group with identical SQL, or start one.
     pub(super) fn subscribe_member(
         &mut self,
@@ -641,20 +949,28 @@ impl Inner {
         identity: Option<AuthorSubject>,
         read: ReadSpec,
         settled: sync::SettledBy,
+        backlog: Backlog,
+        dormant: bool,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
+        let limit = match backlog {
+            Backlog::Replica => None,
+            Backlog::Reader(limit) => Some(
+                limit
+                    .or(self.fan.backlog_limit)
+                    .unwrap_or(DEFAULT_SUBSCRIPTION_BACKLOG_LIMIT),
+            ),
+        };
+        let coalesced = self.fan.coalesced.clone();
+        let new_queue = |first: Option<SubscriptionEvent>| -> Queue {
+            Rc::new(RefCell::new(EventQueue::new(
+                limit,
+                coalesced.clone(),
+                first,
+            )))
+        };
         self.check_splices(&prepared.query, &read.splices)?;
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
-        let key = GroupKey {
-            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
-            sql: compiled.sql.clone(),
-            params: format!("{:?}", compiled.params),
-            identity: (session_used || !prepared.query.array_subqueries.is_empty())
-                .then(|| format!("{identity:?}")),
-            relations: format!("{:?}", prepared.query.array_subqueries),
-            partial: format!("{:?}", compiled.partial),
-            splices: read.splices.clone(),
-            position: format!("{:?}", read.position),
-        };
+        let key = self.group_key(prepared, identity, &read, &compiled, session_used, dormant);
         let now = settled.get();
         // `opened`: the member's queue starts with an opening.
         let member = |queue: &Queue, opened: bool| Member {
@@ -692,34 +1008,37 @@ impl Inner {
             // While the group awaits chunks its rows may be stale: the
             // joiner opens with the group's next successful run instead.
             let opened = group.opened && !group.awaiting;
-            let queue: Queue = Rc::new(RefCell::new(if opened {
-                VecDeque::from([open(&group.rows)])
-            } else {
-                VecDeque::new()
-            }));
+            let queue = new_queue(opened.then(|| open(&group.rows)));
             group.members.push(member(&queue, opened));
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
-        // A replica missing chunks the result needs opens it once they
-        // arrive. Its cut is decided over its relations' tables too.
+        let (gid, handle) = self.register_read_watches(prepared, identity, read, &compiled, key)?;
+        let mut group = handle.borrow_mut();
+        if !dormant && let Err(error) = self.open_registered_read(&mut group, &compiled) {
+            drop(group);
+            self.fan.drop_group(gid);
+            return Err(error);
+        }
+        let opened = group.opened;
+        let queue = new_queue(opened.then(|| open(&group.rows)));
+        group.members.push(member(&queue, opened));
+        Ok((queue, Rc::downgrade(&handle)))
+    }
+
+    /// Register a new group's watches without executing its query or sending an opening.
+    /// The caller has already checked for a shared group with this key.
+    fn register_read_watches(
+        &mut self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: ReadSpec,
+        compiled: &Compiled,
+        key: GroupKey,
+    ) -> Result<(u64, Rc<RefCell<Group>>), Error> {
         let tables = self.with_relation_tables(prepared, &compiled.tables)?;
-        let visible = self.visible_read(&read, &tables);
-        let applied = cut_of(&visible);
-        let run = match &visible {
-            Cow::Borrowed(_) => self.execute(&compiled, &prepared.query.table),
-            Cow::Owned(visible) => self
-                .compile(prepared, identity, visible)
-                .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
-        };
-        let (rows, awaiting) =
-            match run.and_then(|rows| self.nest_relations(prepared, identity, &visible, rows)) {
-                Ok(rows) => (rows, false),
-                Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
-                Err(error) => return Err(error),
-            };
         let (watches, correlations, evidence) =
-            self.watch_plan(prepared, identity, &read, &compiled)?;
+            self.watch_plan(prepared, identity, &read, compiled)?;
         let root = prepared
             .schema
             .as_ref()
@@ -730,7 +1049,7 @@ impl Inner {
             .to_owned();
         // With relations, the watches must also allow it: decided at each
         // refresh (`Group::rechecks`), as `refresh_where` rebuilds them.
-        let recheck = recheckable(&prepared.query, &root, &read, &compiled);
+        let recheck = recheckable(&prepared.query, &root, &read, compiled);
         let branches = view_branches(
             prepared.schema.as_ref().unwrap_or(&self.owner),
             &read,
@@ -742,13 +1061,8 @@ impl Inner {
             &read,
             watches.iter().map(Watch::table),
         );
-        let projected = order_projected(&prepared.query, &compiled);
-        let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
-        let queue: Queue = Rc::new(RefCell::new(if awaiting {
-            VecDeque::new()
-        } else {
-            VecDeque::from([open(&rows)])
-        }));
+        let projected = order_projected(&prepared.query, compiled);
+        let includes = self.output_only_includes(prepared, identity, &read, compiled)?;
         let gid = self.fan.next;
         self.fan.next += 1;
         self.fan.index(gid, &watches);
@@ -759,20 +1073,20 @@ impl Inner {
             root,
             identity,
             read,
-            rows,
-            members: vec![member(&queue, !awaiting)],
+            rows: Vec::new(),
+            members: Vec::new(),
             watches,
             evidence,
             recheck,
             projected,
             keys: Vec::new(),
             includes,
-            awaiting,
-            opened: !awaiting,
+            awaiting: false,
+            opened: false,
             branches,
             masks,
             tables,
-            applied,
+            applied: None,
             correlations,
             held: Vec::new(),
             by_root: HashMap::new(),
@@ -785,12 +1099,39 @@ impl Inner {
             #[cfg(any(test, feature = "testing"))]
             renest_follows: false,
             root_held: None,
+            plans: crate::db::RelationPlans::default(),
+            root_plans: RootPlans::default(),
         }));
-        Self::hold(&mut handle.borrow_mut(), false);
-        self.read_keys(&mut handle.borrow_mut());
-        let weak = Rc::downgrade(&handle);
-        self.fan.groups.insert(gid, handle);
-        Ok((queue, weak))
+        self.fan.groups.insert(gid, handle.clone());
+        Ok((gid, handle))
+    }
+
+    fn open_registered_read(&self, group: &mut Group, compiled: &Compiled) -> Result<(), Error> {
+        let prepared = &group.prepared;
+        let identity = group.identity;
+        // A replica missing chunks the result needs opens it once they
+        // arrive. Its cut is decided over its relations' tables too.
+        let visible = self.visible_read(&group.read, &group.tables);
+        let applied = cut_of(&visible);
+        let run = match &visible {
+            Cow::Borrowed(_) => self.execute(compiled, &prepared.query.table),
+            Cow::Owned(visible) => self
+                .compile(prepared, identity, visible)
+                .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
+        };
+        let (rows, awaiting) =
+            match run.and_then(|rows| self.nest_relations(prepared, identity, &visible, rows)) {
+                Ok(rows) => (rows, false),
+                Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
+                Err(error) => return Err(error),
+            };
+        group.rows = rows;
+        group.applied = applied;
+        group.awaiting = awaiting;
+        group.opened = !awaiting;
+        Self::hold(group, false);
+        self.read_keys(group);
+        Ok(())
     }
 
     /// The optional includes that only shape output: their target is read
@@ -1128,6 +1469,7 @@ impl Inner {
                 kept: &self.kept_variants,
                 out: Evidence::new(),
                 through: Vec::new(),
+                reader: reader.clone(),
             };
             let understood = policy_pins_enabled()
                 && read.view.is_none()
@@ -1329,6 +1671,10 @@ impl Inner {
                 {
                     continue;
                 }
+                if group.key.dormant {
+                    woken.insert(*gid, None);
+                    continue;
+                }
                 let root = group.root == table;
                 let entry = woken.entry(*gid).or_insert_with(|| Some(BTreeSet::new()));
                 let columns: Vec<&String> = group
@@ -1405,6 +1751,10 @@ impl Inner {
                 let Some(group) = self.fan.groups.get(gid) else {
                     continue;
                 };
+                if group.borrow().key.dormant {
+                    woken.insert(*gid, None);
+                    continue;
+                }
                 let rechecking = woken
                     .get(gid)
                     .is_some_and(|ids| ids.as_ref().is_some_and(|ids| ids.contains(&row)))
@@ -1498,7 +1848,7 @@ impl Inner {
                 let Some(group) = self.fan.groups.get(gid) else {
                     continue;
                 };
-                if evidenced(&group.borrow(), table, images, gone) {
+                if group.borrow().key.dormant || evidenced(&group.borrow(), table, images, gone) {
                     woken.insert(*gid, None);
                 } else {
                     unread += 1;
@@ -1556,6 +1906,12 @@ impl Inner {
             .collect();
         for (gid, group, ids) in groups {
             let mut group = group.borrow_mut();
+            if group.key.dormant {
+                self.fan.activate(gid, &mut group);
+                self.reset_group(&mut group);
+                self.fan.stats.reran += 1;
+                continue;
+            }
             // Only include targets changed: the result's rows are as before.
             if ids.as_ref().is_none_or(|ids| !ids.is_empty()) {
                 #[cfg(any(test, feature = "testing"))]
@@ -1685,10 +2041,26 @@ impl Inner {
             // which a schema change can rename or renumber: they are
             // rebuilt with the watches, and dropped (the tables watched
             // whole) when the watches cannot be.
+            // The group is found by what it now compiles to: its old key
+            // may name SQL (claim values, policies) it no longer runs.
+            if self.fan.by_key.get(&group.key) == Some(&gid) {
+                self.fan.by_key.remove(&group.key);
+            }
             let (watches, correlations, evidence) = self
-                .compile(&group.prepared, group.identity, &group.read)
-                .and_then(|compiled| {
-                    self.watch_plan(&group.prepared, group.identity, &group.read, &compiled)
+                .compile_tracked(&group.prepared, group.identity, &group.read)
+                .and_then(|(compiled, session_used)| {
+                    let plan =
+                        self.watch_plan(&group.prepared, group.identity, &group.read, &compiled)?;
+                    group.key = self.group_key(
+                        &group.prepared,
+                        group.identity,
+                        &group.read,
+                        &compiled,
+                        session_used,
+                        group.key.dormant,
+                    );
+                    self.fan.by_key.entry(group.key.clone()).or_insert(gid);
+                    Ok(plan)
                 })
                 .unwrap_or_else(|_| {
                     let watches = old
@@ -1706,8 +2078,16 @@ impl Inner {
             group.correlations = correlations;
             group.by_root.clear();
             group.held.clear();
+            // Claims or the schema changed: nothing compiled before holds.
+            group.plans.clear();
+            group.root_plans.stamp = None;
+            group.root_plans.by_count.clear();
             Self::hold(&mut group, false);
-            if reset {
+            let dormant = group.key.dormant;
+            if dormant {
+                self.fan.activate(gid, &mut group);
+            }
+            if reset || dormant {
                 self.reset_group(&mut group);
             } else {
                 self.refresh_group(&mut group, None);
@@ -1756,9 +2136,8 @@ impl Inner {
             let mut names: Vec<String> = Vec::new();
             let rows = statement.query_map(params, |r| {
                 if names.is_empty() {
-                    let statement = r.as_ref();
-                    names = (0..statement.column_count())
-                        .map(|i| statement.column_name(i).map(str::to_owned))
+                    names = (0..r.column_count())
+                        .map(|i| r.column_name(i).map(str::to_owned))
                         .collect::<Result<_, _>>()?;
                 }
                 let mut seq = 0i64;
@@ -1804,6 +2183,96 @@ impl Inner {
         )
     }
 
+    /// The re-check statement for `ids`, from the kept one for their
+    /// number (built on a first use, see [`Self::build_root_plan`]) with
+    /// `ids` bound in; `None`: compile it as usual.
+    fn root_plan(
+        &self,
+        plans: &mut RootPlans,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        ids: &BTreeSet<RowUuid>,
+        read: &ReadSpec,
+    ) -> Option<Compiled> {
+        // The sessions a compile would resolve anyway; the kept stamp is
+        // compared with them where they stand.
+        let sessions = self.read_sessions(prepared, identity);
+        if !crate::db::PlanStamp::keep(
+            &mut plans.stamp,
+            &self.plan_inputs(prepared, &sessions, read),
+        ) {
+            plans.by_count.clear();
+        }
+        let n = ids.len();
+        let kept = match plans.by_count.get(&n) {
+            Some(kept) => {
+                plans.hits += u64::from(kept.is_some());
+                kept.clone()
+            }
+            None => {
+                let built = self.build_root_plan(prepared, identity, n, read);
+                if plans.by_count.len() >= ROOT_PLANS_MAX {
+                    plans.by_count.clear();
+                }
+                plans.by_count.insert(n, built.clone());
+                built
+            }
+        };
+        let (mut compiled, slots) = kept?;
+        // `id IN (...)` does not care in which order its ids come: the
+        // slots are filled in the set's order, and nothing reads a
+        // position as naming a particular id.
+        for (slot, id) in slots.iter().zip(ids) {
+            compiled.params[*slot] = Sql::Blob(id.0.as_bytes().to_vec());
+        }
+        Some(compiled)
+    }
+
+    /// The re-check statement for `n` ids, kept with the parameters that
+    /// hold them: compiled for two sets of `n` sentinel ids, and kept only
+    /// when the two are one statement whose parameters differ in exactly
+    /// `n` places, each holding the matching sentinel as a blob (so the
+    /// ids are bound literals and nothing else depends on them).
+    fn build_root_plan(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        n: usize,
+        read: &ReadSpec,
+    ) -> Option<(Compiled, Vec<usize>)> {
+        let sentinels = |tag: u8| -> Vec<[u8; 16]> {
+            (0..n)
+                .map(|k| {
+                    let mut id = [tag; 16];
+                    id[8..].copy_from_slice(&(k as u64).to_be_bytes());
+                    id
+                })
+                .collect()
+        };
+        let compile = |ids: &[[u8; 16]]| {
+            let ids: Vec<Value> = ids
+                .iter()
+                .map(|id| Value::Uuid(uuid::Uuid::from_bytes(*id)))
+                .collect();
+            self.compile(&narrowed_to(prepared, &ids), identity, read)
+                .ok()
+        };
+        let (a, b) = (sentinels(0xa5), sentinels(0x5a));
+        let (plan_a, plan_b) = (compile(&a)?, compile(&b)?);
+        if plan_a.sql != plan_b.sql || plan_a.params.len() != plan_b.params.len() {
+            return None;
+        }
+        let slots: Vec<usize> = (0..plan_a.params.len())
+            .filter(|at| plan_a.params[*at] != plan_b.params[*at])
+            .collect();
+        let bound = slots.len() == n
+            && slots.iter().enumerate().all(|(k, at)| {
+                plan_a.params[*at] == Sql::Blob(a[k].to_vec())
+                    && plan_b.params[*at] == Sql::Blob(b[k].to_vec())
+            });
+        bound.then_some((plan_a, slots))
+    }
+
     /// Apply a commit that changed only the root rows `ids` to a result in
     /// place: re-check those ids and splice them in by the query's order
     /// (sort keys are kept per row), emitting a delta for just those rows.
@@ -1836,17 +2305,6 @@ impl Inner {
                 Err(error) => return Some(Err(error)),
             };
         }
-        // The same query narrowed to the changed ids, as a root filter, so
-        // SQLite seeks them by primary key instead of sorting the view.
-        let mut prepared = group.prepared.clone();
-        prepared.query.filters.push(crate::query::Predicate::In(
-            crate::query::Operand::Column("id".to_owned()),
-            ids.iter()
-                .map(|id| crate::query::Operand::Literal(Value::Uuid(id.0)))
-                .collect(),
-        ));
-        prepared.query.order_by.clear();
-        prepared.query.limit = None;
         // Under a cut, a row changed past it still reads as it was. The
         // other rows were read through the cut the last run applied: under
         // another, only a full run (which records it) keeps them one state.
@@ -1854,16 +2312,65 @@ impl Inner {
         if cut_of(&read) != group.applied {
             return None;
         }
-        let narrowed = match self.compile(&prepared, group.identity, &read) {
-            Ok(compiled) => compiled,
-            Err(error) => return Some(Err(error)),
+        // The same query narrowed to the changed ids, as a root filter, so
+        // SQLite seeks them by primary key instead of sorting the view.
+        let ids_as_values: Vec<Value> = ids.iter().map(|id| Value::Uuid(id.0)).collect();
+        // A search's statement is planned anew each time (SPEC 20.8): it
+        // binds what planning read (the changed rows' scores, the caps'
+        // admission), which no stamp of schema and sessions covers.
+        let kept = if read.view.is_none()
+            && read.cut.is_none()
+            && crate::ix::search_of(&group.prepared.query).is_none()
+        {
+            self.root_plan(
+                &mut group.root_plans,
+                &group.prepared,
+                group.identity,
+                ids,
+                &read,
+            )
+        } else {
+            None
+        };
+        let narrowed = match kept {
+            Some(kept) => {
+                if crate::db::plan_oracle() {
+                    let fresh = self
+                        .compile(
+                            &narrowed_to(&group.prepared, &ids_as_values),
+                            group.identity,
+                            &read,
+                        )
+                        .ok();
+                    assert!(
+                        fresh.is_some_and(|fresh| crate::db::same_compiled(&kept, &fresh)),
+                        "a kept re-check statement differs from a fresh one on {}",
+                        group.root
+                    );
+                }
+                kept
+            }
+            None => match self.compile(
+                &narrowed_to(&group.prepared, &ids_as_values),
+                group.identity,
+                &read,
+            ) {
+                Ok(compiled) => compiled,
+                Err(error) => return Some(Err(error)),
+            },
         };
         let fresh = match self.execute(&narrowed, &group.prepared.query.table) {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
         // Relations of the changed roots only; the others' are unchanged.
-        let fresh = match self.nest_relations(&group.prepared, group.identity, &read, fresh) {
+        let fresh = match self.nest_relations_kept(
+            &group.prepared,
+            group.identity,
+            &read,
+            fresh,
+            &mut group.plans,
+        ) {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
@@ -2142,13 +2649,14 @@ impl Inner {
         };
         let read = || -> rusqlite::Result<HashMap<Vec<u8>, Vec<Sql>>> {
             let mut statement = self.conn.prepare_cached(&sql)?;
-            let found = statement.query_map(rusqlite::params_from_iter(params.iter()), |r| {
-                let id: Vec<u8> = r.get(0)?;
-                let values = (1..=order.len())
-                    .map(|i| r.get::<_, Sql>(i))
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok((id, values))
-            })?;
+            let found =
+                statement.query_map(crate::storage::params_from_iter(params.iter()), |r| {
+                    let id: Vec<u8> = r.get(0)?;
+                    let values = (1..=order.len())
+                        .map(|i| r.get::<_, Sql>(i))
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok((id, values))
+                })?;
             found.collect()
         };
         let mut found = match read() {
@@ -2196,7 +2704,13 @@ impl Inner {
         let read = self.visible_read(&group.read, &group.tables);
         group.applied = cut_of(&read);
         let rows = self.run(&group.prepared, group.identity, &read)?;
-        self.nest_relations(&group.prepared, group.identity, &read, rows)
+        self.nest_relations_kept(
+            &group.prepared,
+            group.identity,
+            &read,
+            rows,
+            &mut group.plans,
+        )
     }
 
     /// Re-run the live results whose cut moved: their read's settle rose,
@@ -2522,12 +3036,18 @@ impl Inner {
                 || tree.values().any(|node| matches!(node, ScopeNode::Part(_)))
         });
         let nested = match &scope {
-            None => self.nest_relations(&group.prepared, group.identity, &read, bare),
+            None => self.nest_relations_kept(
+                &group.prepared,
+                group.identity,
+                &read,
+                bare,
+                &mut group.plans,
+            ),
             Some(scope) => {
                 let mut scoped = group.prepared.clone();
                 scoped.query.array_subqueries =
                     scope_prune(&group.prepared.query.array_subqueries, scope);
-                self.nest_relations(&scoped, group.identity, &read, bare)
+                self.nest_relations_kept(&scoped, group.identity, &read, bare, &mut group.plans)
             }
         };
         let nested = nested.ok()?;
@@ -2748,6 +3268,8 @@ fn compose(
         removed,
         settled,
         tier,
+        // Composed from plain deltas only: never a coalesced reset.
+        coalesced: false,
     }]
 }
 
@@ -2864,7 +3386,7 @@ impl Group {
                 }
                 member.told.set(told);
             }
-            queue.borrow_mut().push_back(event);
+            queue.borrow_mut().push_back(event, &query.table);
         }
     }
 }
@@ -3791,6 +4313,21 @@ struct Occurrence {
     pin: Option<(String, String)>,
     /// The stored application columns of the table's rows it reads.
     columns: BTreeSet<String>,
+    /// Set for the source of an `INHERITS_REFERENCING` in the reader's own
+    /// policy: a row of this table can only change whether the reader rows
+    /// its `via` names are visible.
+    link: Option<Link>,
+}
+
+/// The reader an [`Occurrence`]'s rows grant through `INHERITS_REFERENCING`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct Link {
+    /// The reader's stored table.
+    reader: String,
+    /// The source's stored `via` column.
+    via: String,
+    /// `via` is a list of references (one per element).
+    list: bool,
 }
 
 /// The stored tables read policies read as evidence, each with every
@@ -3830,6 +4367,8 @@ struct EvidenceWalk<'a> {
     /// The tables (and operations) whose policies an `INHERITS` is being
     /// read through: a chain back to one is watched whole.
     through: Vec<(String, Operation)>,
+    /// The stored table whose policy is walked.
+    reader: String,
 }
 
 impl EvidenceWalk<'_> {
@@ -3931,7 +4470,7 @@ impl EvidenceWalk<'_> {
                 else {
                     return false;
                 };
-                self.inherit(target, *operation, BTreeSet::new())
+                self.inherit(target, *operation, BTreeSet::new(), None)
             }
             PolicyExpr::InheritsReferencing {
                 operation,
@@ -3943,7 +4482,18 @@ impl EvidenceWalk<'_> {
                     return false;
                 };
                 let mut columns = BTreeSet::new();
-                column(via_column, &mut columns) && self.inherit(source, *operation, columns)
+                // Only the reader's own policy: one reached through another
+                // table's INHERITS decides other rows. A `via` that holds no
+                // row references cannot be matched to held parents.
+                let link = (self.through.is_empty() && table.stored == self.reader)
+                    .then(|| link_kind(source, via_column))
+                    .flatten()
+                    .map(|list| Link {
+                        reader: table.stored.clone(),
+                        via: source.stored_name(via_column).to_owned(),
+                        list,
+                    });
+                column(via_column, &mut columns) && self.inherit(source, *operation, columns, link)
             }
             PolicyExpr::ExistsRel { .. } => false,
         }
@@ -3958,6 +4508,7 @@ impl EvidenceWalk<'_> {
         table: &Table,
         operation: Operation,
         mut columns: BTreeSet<String>,
+        link: Option<Link>,
     ) -> bool {
         let key = (table.stored.clone(), operation);
         if self.through.contains(&key) {
@@ -3977,11 +4528,21 @@ impl EvidenceWalk<'_> {
         let pin = conjuncts(policy)
             .into_iter()
             .find_map(|c| value_pin(table, c, self.session, self.kept));
-        self.occurrence(table, pin, columns);
+        self.linked_occurrence(table, pin, columns, link);
         true
     }
 
     fn occurrence(&mut self, table: &Table, pin: Option<Pin>, columns: BTreeSet<String>) {
+        self.linked_occurrence(table, pin, columns, None)
+    }
+
+    fn linked_occurrence(
+        &mut self,
+        table: &Table,
+        pin: Option<Pin>,
+        columns: BTreeSet<String>,
+        link: Option<Link>,
+    ) {
         let columns = columns
             .iter()
             .map(|c| table.stored_name(c).to_owned())
@@ -3989,7 +4550,7 @@ impl EvidenceWalk<'_> {
         add_evidence(
             &mut self.out,
             &table.stored,
-            Some(Occurrence { pin, columns }),
+            Some(Occurrence { pin, columns, link }),
         );
     }
 }
@@ -4482,8 +5043,53 @@ fn evidenced(
                 }
                 _ => true,
             };
-        pinned && changed
+        pinned && changed && linked(group, occurrence, images)
     })
+}
+
+/// Whether a change matching a linked [`Occurrence`] can reach the
+/// result. The reader rows its `via` names (in its old or new image) are
+/// the only ones it can show or hide; when the result reads the reader
+/// only at relation levels keyed by `id` (every one complete), those rows
+/// matter only if a held parent names them. Anything else: yes.
+fn linked(group: &Group, occurrence: &Occurrence, images: &[Vec<(String, Sql)>]) -> bool {
+    let Some(Link { reader, via, list }) = occurrence.link.as_ref() else {
+        return true;
+    };
+    if group.awaiting || group.root == *reader {
+        return true;
+    }
+    let levels: Vec<&Held> = group
+        .correlations
+        .iter()
+        .zip(&group.held)
+        .filter(|(level, _)| level.table == *reader)
+        .map(|(level, held)| (level.inner == "id" && held.complete()).then_some(held))
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    if levels.is_empty()
+        || levels.len()
+            != group
+                .correlations
+                .iter()
+                .filter(|l| l.table == *reader)
+                .count()
+    {
+        return true;
+    }
+    images.iter().any(|image| {
+        image
+            .iter()
+            .filter(|(column, _)| column == via)
+            .any(|(_, cell)| match stored_atoms(cell, *list) {
+                Some(atoms) => atoms
+                    .iter()
+                    .any(|atom| levels.iter().any(|held| held.parents.contains_key(atom))),
+                None => true,
+            })
+    }) || !images
+        .iter()
+        .any(|image| image.iter().any(|(column, _)| column == via))
 }
 
 fn correlated(
@@ -4536,6 +5142,97 @@ fn cut_of(read: &ReadSpec) -> Option<(sync::Pos, usize)> {
         .then_some(read.cut.as_ref())
         .flatten()
         .map(|cut| (cut.seq, cut.extra.len()))
+}
+
+/// The queue's own order rules, white-box: a subscription only rejects
+/// when its query fails or its server refuses it, which no public API
+/// makes happen in the middle of a backlog on demand.
+#[cfg(test)]
+mod event_queue_tests {
+    use super::*;
+
+    fn one_row_delta() -> SubscriptionEvent {
+        delta(false, Vec::new(), Vec::new(), vec![removed()])
+    }
+
+    fn removed() -> RemovedRow {
+        RemovedRow {
+            table: "notes".to_owned(),
+            row_uuid: RowUuid::from_bytes([1; 16]),
+            joined: Vec::new(),
+            version: None,
+            union_arm: None,
+            index: 0,
+        }
+    }
+
+    fn rejected() -> SubscriptionEvent {
+        SubscriptionEvent::Rejected {
+            code: ErrorCode::Storage,
+            message: "gone".to_owned(),
+            reason: "gone".to_owned(),
+        }
+    }
+
+    fn queue(limit: usize) -> EventQueue {
+        EventQueue::new(
+            NonZeroUsize::new(limit),
+            Rc::new(std::cell::Cell::new(0)),
+            None,
+        )
+    }
+
+    fn is_reset(event: &Option<SubscriptionEvent>) -> bool {
+        matches!(
+            event,
+            Some(SubscriptionEvent::Delta {
+                reset: true,
+                coalesced: true,
+                ..
+            })
+        )
+    }
+
+    /// A rejection queued before the deltas that are coalesced is read
+    /// before the reset; one queued after them, after it.
+    #[test]
+    fn a_rejection_keeps_its_place_around_the_coalesced_reset() {
+        let mut before = queue(2);
+        before.push_back(rejected(), "notes");
+        for _ in 0..3 {
+            before.push_back(one_row_delta(), "notes");
+        }
+        assert!(matches!(
+            before.pop_front(Some(&[])),
+            Some(SubscriptionEvent::Rejected { .. })
+        ));
+        assert!(is_reset(&before.pop_front(Some(&[]))));
+        assert!(before.pop_front(Some(&[])).is_none());
+
+        let mut after = queue(2);
+        for _ in 0..3 {
+            after.push_back(one_row_delta(), "notes");
+        }
+        after.push_back(rejected(), "notes");
+        assert!(is_reset(&after.pop_front(Some(&[]))));
+        assert!(matches!(
+            after.pop_front(Some(&[])),
+            Some(SubscriptionEvent::Rejected { .. })
+        ));
+    }
+
+    /// A due reset that cannot be built now (its group is busy) stays due.
+    #[test]
+    fn a_reset_that_cannot_be_built_stays_due() {
+        let mut queue = queue(1);
+        queue.push_back(one_row_delta(), "notes");
+        queue.push_back(one_row_delta(), "notes");
+        assert!(queue.reset_due());
+        assert!(queue.pop_front(None).is_none());
+        assert!(queue.reset_due());
+        assert!(is_reset(&queue.pop_front(Some(&[]))));
+        assert!(queue.is_empty());
+    }
 }
 
 #[cfg(test)]

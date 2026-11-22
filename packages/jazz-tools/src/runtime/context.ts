@@ -70,7 +70,7 @@ export interface RuntimeSourcesConfig {
 /**
  * Mirrors the Rust `AuthMode` enum in `crates/jazz-tools/src/public_schema.rs`.
  */
-export type AuthMode = "external" | "local-first" | "anonymous";
+export type AuthMode = "external" | "device-account" | "anonymous";
 
 /**
  * Session context for policy evaluation.
@@ -159,4 +159,11 @@ export interface AppContext {
    * log off).
    */
   slowQueryThresholdMs?: number;
+
+  /**
+   * How many changed rows a subscription's undelivered deltas may hold before
+   * they are coalesced into one update of its current result, marked
+   * `reason: "backlog"` (default 10000; at least 1, it cannot be turned off).
+   */
+  subscriptionBacklogRows?: number;
 }

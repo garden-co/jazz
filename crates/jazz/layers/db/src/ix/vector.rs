@@ -6,8 +6,8 @@
 //! other clauses match (see [`super::Candidates::Scored`]): SQL cannot
 //! compute the distance on every target.
 
+use crate::storage::Storage;
 use jazz_index::vector::{self, Metric};
-use rusqlite::Connection;
 use rusqlite::types::ValueRef;
 
 use super::{Candidates, Cell, Kind, Scorer, shadow};
@@ -50,7 +50,7 @@ impl Kind for Vector {
 
     fn write(
         &self,
-        conn: &Connection,
+        conn: &Storage,
         prefix: &str,
         rid: i64,
         cells: Option<&[Cell]>,
@@ -73,7 +73,12 @@ impl Kind for Vector {
             return Ok(());
         };
         conn.prepare_cached(&format!("INSERT INTO {table} (rid, v) VALUES (?1, ?2)"))
-            .and_then(|mut s| s.execute(rusqlite::params![rid, vector::encode_f32le(&prepared)]))
+            .and_then(|mut s| {
+                s.execute(crate::storage::params![
+                    rid,
+                    vector::encode_f32le(&prepared)
+                ])
+            })
             .map_err(storage)?;
         Ok(())
     }

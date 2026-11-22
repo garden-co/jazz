@@ -9,6 +9,8 @@ use base64::Engine as _;
 use jazz_app_support::jazz::query::where_condition::{WhereValueRole, decode_where_condition};
 use jazz_app_support::jazz::query::{self as q, OrderDirection, Predicate};
 use jazz_app_support::jazz::records::Value as CoreValue;
+use jazz_app_support::jazz::tools::deployment::artifact::load_relations;
+use jazz_app_support::jazz::tools::deployment::artifact::relations::RelationKind;
 use jazz_app_support::jazz::tools::{
     ColumnType, ObjectId, OrderedRowDelta, QueryResultField, Schema, TableName, TableSchema, Value,
 };
@@ -332,56 +334,36 @@ pub(crate) struct Relation {
 }
 
 impl Relations {
-    /// From the text of `jazz.app.json` (already checked by the loader).
-    pub(crate) fn read(app: &str) -> Self {
-        let Ok(app) = serde_json::from_str::<Json>(app) else {
-            return Self::default();
-        };
-        let tables = app.get("tables").and_then(Json::as_object);
-        let forward = |table: &str, name: &str| -> Option<(String, String)> {
-            let relation = tables?.get(table)?.get("relations")?.get(name)?;
-            Some((
-                relation.get("rel")?.as_str()?.to_owned(),
-                relation.get("column")?.as_str()?.to_owned(),
-            ))
-        };
-        let mut relations = std::collections::HashMap::new();
-        for (table, spec) in tables.into_iter().flatten() {
-            let mut list = Vec::new();
-            for (name, relation) in spec
-                .get("relations")
-                .and_then(Json::as_object)
-                .into_iter()
-                .flatten()
-            {
-                if let (Some(to_table), Some(column)) = (
-                    relation.get("rel").and_then(Json::as_str),
-                    relation.get("column").and_then(Json::as_str),
-                ) {
-                    list.push(Relation {
-                        name: name.clone(),
-                        to_table: to_table.to_owned(),
-                        column: column.to_owned(),
-                        forward: true,
-                    });
-                } else if let (Some(to_table), Some(via)) = (
-                    relation.get("reverse").and_then(Json::as_str),
-                    relation.get("relation").and_then(Json::as_str),
-                ) && let Some((target, column)) = forward(to_table, via)
-                    // A reverse relation reverses a forward one pointing here.
-                    && target == *table
-                {
-                    list.push(Relation {
-                        name: name.clone(),
-                        to_table: to_table.to_owned(),
-                        column,
-                        forward: false,
-                    });
-                }
-            }
-            relations.insert(table.clone(), list);
-        }
-        Self(relations)
+    /// From the text of `jazz.app.json`, as jazz resolves them: an app
+    /// whose relations don't resolve is refused. Only relations are checked
+    /// here; opening checks the rest as for any client.
+    pub(crate) fn read(app: &str) -> Result<Self> {
+        let relations = load_relations(app.as_bytes())
+            .map_err(|error| refused(format!("app files: {error}")))?;
+        Ok(Self(
+            relations
+                .iter()
+                .map(|(table, relations)| {
+                    let relations = relations
+                        .iter()
+                        .map(|relation| {
+                            let forward = relation.kind == RelationKind::Forward;
+                            Relation {
+                                name: relation.name.clone(),
+                                to_table: relation.to_table.clone(),
+                                column: if forward {
+                                    relation.from_column.clone()
+                                } else {
+                                    relation.to_column.clone()
+                                },
+                                forward,
+                            }
+                        })
+                        .collect();
+                    (table.clone(), relations)
+                })
+                .collect(),
+        ))
     }
 
     pub(crate) fn get(&self, table: &str, name: &str) -> Option<&Relation> {

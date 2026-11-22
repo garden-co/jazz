@@ -391,19 +391,17 @@ export function LensDiagram() {
         },
       ];
     }),
-    ...([0, 1] as const).map(
-      (idx): GraphNode => ({
-        id: lensId(idx),
-        slot: { row: `${2 * (idx + 1) + 1} / ${2 * (idx + 1) + 2}`, col: "2 / 3" },
-        content: (
-          <LensCard
-            lens={LENSES[idx]}
-            isOnPath={isLensOnPath(idx, dataVersion, client)}
-            direction={direction}
-          />
-        ),
-      }),
-    ),
+    ...([0, 1] as const).map((idx): GraphNode => ({
+      id: lensId(idx),
+      slot: { row: `${2 * (idx + 1) + 1} / ${2 * (idx + 1) + 2}`, col: "2 / 3" },
+      content: (
+        <LensCard
+          lens={LENSES[idx]}
+          isOnPath={isLensOnPath(idx, dataVersion, client)}
+          direction={direction}
+        />
+      ),
+    })),
     {
       id: CLIENT_ID,
       slot: { row: "2 / 7", col: "3 / 4" },

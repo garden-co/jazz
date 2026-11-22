@@ -14,7 +14,11 @@ export function makeFakeClient(params: {
     user: "00000000-0000-4000-8000-000000000002",
     identity: {
       issuer:
-        params.authMode === "external" ? "https://issuer.example" : `urn:jazz:${params.authMode}`,
+        params.authMode === "external"
+          ? "https://issuer.example"
+          : params.authMode === "device-account"
+            ? "urn:jazz:local-first"
+            : `urn:jazz:${params.authMode}`,
       subject: params.userId,
     },
     claims: params.claims,

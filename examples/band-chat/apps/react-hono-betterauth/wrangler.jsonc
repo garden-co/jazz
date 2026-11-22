@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // BandChat entirely on Cloudflare (see server/worker.ts and README.md).
+  "name": "band-chat",
+  "main": "server/worker.ts",
+  "compatibility_date": "2026-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/jazz/*", "/jazz", "/health"],
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "JAZZ", "class_name": "JazzCore" },
+      { "name": "JAZZ_BACKEND", "class_name": "JazzBackend" },
+    ],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["JazzCore", "JazzBackend"] }],
+  // Attachments and avatars over 64 KiB go to R2, not the core's SQLite:
+  // `wrangler r2 bucket create band-chat-jazz-blobs` before the first deploy.
+  "r2_buckets": [{ "binding": "JAZZ_BLOBS", "bucket_name": "band-chat-jazz-blobs" }],
+  "rules": [{ "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": true }],
+  // APP_ORIGIN: set to the deployed URL. Secrets: `wrangler secret put
+  // BETTER_AUTH_SECRET` and `wrangler secret put JAZZ_CORE_SECRET`.
+  "vars": { "APP_ORIGIN": "http://localhost:8787" },
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.permissions.schema.json",
+  "format": 1,
+  "tables": {
+    "better_auth_account": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_session": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "better_auth_user": { "read": "false", "insert": "false", "update": "false", "delete": "false" },
+    "better_auth_verification": {
+      "read": "false",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    },
+    "private_notes": {
+      "read": "$createdBy = session.user",
+      "insert": "$createdBy = session.user",
+      "update": "$createdBy = session.user",
+      "delete": "$createdBy = session.user"
+    },
+    "team_notes": {
+      "read": "team = session.claims.team",
+      "insert": "team = session.claims.team",
+      "update": "false",
+      "delete": "false"
+    }
+  }
+}

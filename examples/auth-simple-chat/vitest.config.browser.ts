@@ -9,13 +9,14 @@ import {
   jazzAppRequest,
   jazzAppUser,
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   stopJazzServerByUrl,
 } from "../../packages/jazz-tools/tests/browser/testing-server-node.js";
 import { TEST_APP_ID } from "./tests/browser/test-constants.js";
 
 export default defineConfig(async (): Promise<ViteUserConfig> => {
   return {
-    plugins: [wasm(), topLevelAwait(), react()],
+    plugins: [jazzBrowserServerLifecycle, wasm(), topLevelAwait(), react()],
     worker: {
       plugins: () => [wasm(), topLevelAwait()],
     },
@@ -39,7 +40,6 @@ export default defineConfig(async (): Promise<ViteUserConfig> => {
         },
       },
       include: ["tests/browser/**/*.test.{ts,tsx}"],
-      globalSetup: ["../../packages/jazz-tools/tests/browser/global-setup.ts"],
       testTimeout: 30000,
     },
   };

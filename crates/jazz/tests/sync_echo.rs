@@ -145,7 +145,31 @@ impl Transport for Pipe {
     }
 }
 
-type Down = Rc<RefCell<Vec<SyncMessage>>>;
+struct Down {
+    received: Rc<RefCell<Vec<SyncMessage>>>,
+    sent: Rc<RefCell<Vec<SyncMessage>>>,
+}
+
+impl std::ops::Deref for Down {
+    type Target = RefCell<Vec<SyncMessage>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.received
+    }
+}
+
+impl Down {
+    fn whole_rows_requested(&self) -> usize {
+        self.sent
+            .borrow()
+            .iter()
+            .map(|message| match message {
+                SyncMessage::ResendWhole { rows } => rows.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+}
 
 fn connect(server: &Db, client: &Db, identity: AuthorSubject) -> (Upstream, Down) {
     let (upstream, down, _up) = connect_raw(server, client, identity);
@@ -161,10 +185,11 @@ fn connect_raw(
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let log = Rc::new(RefCell::new(Vec::new()));
+    let sent = Rc::new(RefCell::new(Vec::new()));
     let upstream = block_on(client.connect_upstream(Box::new(Pipe {
         out: up.clone(),
         inbound: down.clone(),
-        log: None,
+        log: Some(sent.clone()),
     })));
     server
         .accept_subscriber(
@@ -176,7 +201,14 @@ fn connect_raw(
             identity,
         )
         .unwrap();
-    (upstream, log, up)
+    (
+        upstream,
+        Down {
+            received: log,
+            sent,
+        },
+        up,
+    )
 }
 
 fn subscribe(client: &Db) -> jazz::db::SubscriptionStream {
@@ -186,21 +218,23 @@ fn subscribe(client: &Db) -> jazz::db::SubscriptionStream {
     block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap()
 }
 
-/// Pump to quiescence. Every row the authority names as written must be
-/// the writer's own image of it: the inference never misses here.
-fn pump(server: &Db, clients: &[&Db]) {
-    pump_counting(server, clients);
-    for client in clients {
+/// Pump to quiescence. Honest writers need no whole-row fetches.
+fn pump(server: &Db, clients: &[(&Db, &Down)]) {
+    pump_allowing_whole(
+        server,
+        &clients.iter().map(|(db, _)| *db).collect::<Vec<_>>(),
+    );
+    for (_, log) in clients {
         assert_eq!(
-            client.as_written_mismatches(),
+            log.whole_rows_requested(),
             0,
-            "an as-written row differed"
+            "an as-written row needed a whole-row fetch"
         );
     }
 }
 
-/// Pump to quiescence, as-written mismatches counted rather than failed.
-fn pump_counting(server: &Db, clients: &[&Db]) {
+/// Pump to quiescence, allowing whole-row fetches.
+fn pump_allowing_whole(server: &Db, clients: &[&Db]) {
     for _ in 0..6 {
         for client in clients {
             block_on(client.tick()).unwrap();
@@ -265,7 +299,7 @@ fn one_keystroke_sends_only_fate_and_settled() {
     let client = open(1, user(1));
     let (_upstream, down) = connect(&server, &client, user(1));
     let _live = subscribe(&client);
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     write_late(&server, &client, || {
         block_on(client.insert(
             "docs",
@@ -277,7 +311,7 @@ fn one_keystroke_sends_only_fate_and_settled() {
         ))
         .unwrap();
     });
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     assert_eq!(
         shipped(&down),
         (0, vec![1]),
@@ -291,7 +325,7 @@ fn one_keystroke_sends_only_fate_and_settled() {
         block_on(client.update("docs", row(1), cells(&[("body", "he")]), Default::default()))
             .unwrap();
     });
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     let kinds: Vec<&str> = down
         .borrow()
         .iter()
@@ -319,7 +353,7 @@ fn one_keystroke_sends_only_fate_and_settled() {
     // The client's copy is the settled version: a reconnect ships nothing.
     assert!(client.detach_connection(&_upstream));
     let (_upstream, down) = connect(&server, &client, user(1));
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     assert_eq!(
         shipped(&down).0,
         0,
@@ -345,7 +379,7 @@ fn a_concurrent_write_still_ships_the_image() {
         },
     ))
     .unwrap();
-    pump(&server, &[&a, &b]);
+    pump(&server, &[(&a, &a_down), (&b, &b_down)]);
     a_down.borrow_mut().clear();
     b_down.borrow_mut().clear();
 
@@ -356,7 +390,7 @@ fn a_concurrent_write_still_ships_the_image() {
     block_on(a.tick()).unwrap();
     block_on(b.tick()).unwrap();
     block_on(server.tick()).unwrap();
-    pump(&server, &[&a, &b]);
+    pump(&server, &[(&a, &a_down), (&b, &b_down)]);
 
     let (a_images, a_as_written) = shipped(&a_down);
     let (b_images, b_as_written) = shipped(&b_down);
@@ -394,7 +428,7 @@ fn a_write_landing_between_ships_the_image() {
         },
     ))
     .unwrap();
-    pump(&server, &[&a, &b]);
+    pump(&server, &[(&a, &a_down), (&b, &_b_down)]);
     a_down.borrow_mut().clear();
 
     // b's write lands first; a writes before hearing of it.
@@ -402,7 +436,7 @@ fn a_write_landing_between_ships_the_image() {
     block_on(b.tick()).unwrap();
     block_on(server.tick()).unwrap();
     block_on(a.update("docs", row(1), cells(&[("title", "A")]), Default::default())).unwrap();
-    pump(&server, &[&a, &b]);
+    pump(&server, &[(&a, &a_down), (&b, &_b_down)]);
 
     let (images, as_written) = shipped(&a_down);
     assert!(images > 0, "a's base was stale");
@@ -421,7 +455,7 @@ fn a_write_stamped_as_another_author_is_asked_for_whole() {
     let client = open(1, AuthorSubject::SYSTEM);
     let (_upstream, down) = connect(&server, &client, user(9));
     let _live = subscribe(&client);
-    pump_counting(&server, &[&client]);
+    pump_allowing_whole(&server, &[&client]);
     block_on(client.insert(
         "docs",
         cells(&[("title", "Doc"), ("body", "")]),
@@ -431,14 +465,14 @@ fn a_write_stamped_as_another_author_is_asked_for_whole() {
         },
     ))
     .unwrap();
-    pump_counting(&server, &[&client]);
+    pump_allowing_whole(&server, &[&client]);
     block_on(client.update("docs", row(1), cells(&[("body", "x")]), Default::default())).unwrap();
-    pump_counting(&server, &[&client]);
+    pump_allowing_whole(&server, &[&client]);
 
     let (images, as_written) = shipped(&down);
     assert_eq!(as_written, vec![1, 1]);
     assert!(images >= 2, "each is asked for whole: {images}");
-    assert_eq!(client.as_written_mismatches(), 2);
+    assert_eq!(down.whole_rows_requested(), 2);
     let settled = snapshot(&server);
     assert!(settled[0].contains(&user(9).principal_parts().1));
     assert_eq!(snapshot(&client), settled);
@@ -450,7 +484,7 @@ fn a_chain_of_pending_writes_ships_as_written() {
     let client = open(1, user(1));
     let (_upstream, down) = connect(&server, &client, user(1));
     let _live = subscribe(&client);
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     block_on(client.insert(
         "docs",
         cells(&[("title", "Doc"), ("body", "")]),
@@ -460,7 +494,7 @@ fn a_chain_of_pending_writes_ships_as_written() {
         },
     ))
     .unwrap();
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     down.borrow_mut().clear();
 
     // Three keystrokes, each written before the fate of the one before
@@ -472,7 +506,7 @@ fn a_chain_of_pending_writes_ships_as_written() {
         block_on(client.tick()).unwrap();
         block_on(server.tick()).unwrap();
     }
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     assert_eq!(shipped(&down), (0, vec![1, 1, 1]));
     assert_eq!(snapshot(&client), snapshot(&server));
 }
@@ -494,7 +528,7 @@ fn a_chain_over_a_write_landing_between_ships() {
         },
     ))
     .unwrap();
-    pump(&server, &[&a, &b]);
+    pump(&server, &[(&a, &a_down), (&b, &_b_down)]);
     a_down.borrow_mut().clear();
 
     // a writes twice, the second over its first; b's write lands before
@@ -510,7 +544,7 @@ fn a_chain_over_a_write_landing_between_ships() {
         Default::default(),
     ))
     .unwrap();
-    pump(&server, &[&a, &b]);
+    pump(&server, &[(&a, &a_down), (&b, &_b_down)]);
 
     let (images, as_written) = shipped(&a_down);
     assert!(images > 0, "a's base was stale");
@@ -527,7 +561,7 @@ fn an_upsert_of_a_new_row_ships_as_written() {
     let client = open(1, user(1));
     let (_upstream, down) = connect(&server, &client, user(1));
     let _live = subscribe(&client);
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     write_late(&server, &client, || {
         block_on(client.upsert(
             "docs",
@@ -537,7 +571,7 @@ fn an_upsert_of_a_new_row_ships_as_written() {
         ))
         .unwrap();
     });
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     assert_eq!(shipped(&down), (0, vec![1]));
     assert_eq!(snapshot(&client), snapshot(&server));
 }
@@ -557,7 +591,7 @@ fn a_serializable_commit_ships_as_written() {
         },
     ))
     .unwrap();
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     down.borrow_mut().clear();
 
     let tx = jazz::tools::OpenTransactionId::new();
@@ -569,7 +603,7 @@ fn a_serializable_commit_ships_as_written() {
     )
     .unwrap();
     block_on(client.commit_serializable_handle(tx)).unwrap();
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     assert_eq!(shipped(&down), (0, vec![1]));
     assert_eq!(snapshot(&client), snapshot(&server));
 }
@@ -589,7 +623,7 @@ fn a_lost_fate_resumes_correctly() {
         },
     ))
     .unwrap();
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &_down)]);
 
     // The authority applies the write, but its Fate never arrives.
     write_late(&server, &client, || {
@@ -598,7 +632,7 @@ fn a_lost_fate_resumes_correctly() {
     });
     assert!(client.detach_connection(&upstream));
     let (_upstream, down) = connect(&server, &client, user(1));
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
 
     // The resend gets the recorded fate, which holds nothing: the image
     // ships.
@@ -610,7 +644,7 @@ fn a_lost_fate_resumes_correctly() {
     // And later writes ship as written again.
     down.borrow_mut().clear();
     block_on(client.update("docs", row(1), cells(&[("body", "xy")]), Default::default())).unwrap();
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     assert_eq!(shipped(&down), (0, vec![1]));
     assert_eq!(snapshot(&client), snapshot(&server));
 }
@@ -632,7 +666,7 @@ fn a_text_merge_against_a_concurrent_edit_ships() {
         },
     ))
     .unwrap();
-    pump(&server, &[&a, &b]);
+    pump(&server, &[(&a, &a_down), (&b, &b_down)]);
     a_down.borrow_mut().clear();
     b_down.borrow_mut().clear();
 
@@ -653,7 +687,7 @@ fn a_text_merge_against_a_concurrent_edit_ships() {
         Default::default(),
     ))
     .unwrap();
-    pump(&server, &[&a, &b]);
+    pump(&server, &[(&a, &a_down), (&b, &b_down)]);
 
     let (a_images, a_as_written) = shipped(&a_down);
     assert!(
@@ -697,7 +731,7 @@ fn a_commit_restored_after_a_reopen_ships_as_written() {
             },
         ))
         .unwrap();
-        pump(&server, &[&client]);
+        pump(&server, &[(&client, &_down)]);
         // Written offline: it is pending when the store closes.
         assert!(client.detach_connection(&upstream));
         block_on(client.update("docs", row(1), cells(&[("body", "x")]), Default::default()))
@@ -706,7 +740,7 @@ fn a_commit_restored_after_a_reopen_ships_as_written() {
     let client = open_file();
     let (_upstream, down) = connect(&server, &client, user(1));
     let _live = subscribe(&client);
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
 
     // The reopened store still holds what its commit left, at the
     // commit's local seq: the row ships as written.
@@ -723,7 +757,7 @@ fn explicit_timestamps_reach_the_authority_per_write() {
     let client = open(1, user(1));
     let (_upstream, _down) = connect(&server, &client, user(1));
     let _live = subscribe(&client);
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &_down)]);
     let batch = jazz::tools::OpenTransactionId::new();
     block_on(client.begin_mergeable(batch)).unwrap();
     for (n, at) in [(1u8, 1_704_067_200_001u64), (2, 1_704_067_200_002)] {
@@ -739,7 +773,7 @@ fn explicit_timestamps_reach_the_authority_per_write() {
         .unwrap();
     }
     block_on(client.commit_mergeable_handle(batch)).unwrap();
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &_down)]);
     let created: Vec<bool> = snapshot(&server)
         .iter()
         .zip(["1704067200001", "1704067200002"])
@@ -758,7 +792,7 @@ fn a_write_over_a_pending_create_ships_as_written_with_the_authoritys_stamps() {
     let client = open(1, user(1));
     let (_upstream, down) = connect(&server, &client, user(1));
     let _live = subscribe(&client);
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     down.borrow_mut().clear();
     write_late(&server, &client, || {
         block_on(client.insert(
@@ -775,7 +809,7 @@ fn a_write_over_a_pending_create_ships_as_written_with_the_authoritys_stamps() {
         block_on(client.update("docs", row(1), cells(&[("body", "x")]), Default::default()))
             .unwrap();
     });
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     assert_eq!(shipped(&down), (0, vec![1, 1]));
     assert_eq!(snapshot(&client), snapshot(&server));
 }
@@ -790,7 +824,7 @@ fn a_commit_writing_rows_twice_ships_as_written_with_each_writes_stamps() {
     let client = open(1, user(1));
     let (_upstream, down) = connect(&server, &client, user(1));
     let _live = subscribe(&client);
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     for n in [1, 2] {
         block_on(client.insert(
             "docs",
@@ -802,7 +836,7 @@ fn a_commit_writing_rows_twice_ships_as_written_with_each_writes_stamps() {
         ))
         .unwrap();
     }
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     down.borrow_mut().clear();
     let at = 1_704_067_200_001u64;
     write_late(&server, &client, || {
@@ -837,7 +871,7 @@ fn a_commit_writing_rows_twice_ships_as_written_with_each_writes_stamps() {
         }
         block_on(client.commit_mergeable_handle(batch)).unwrap();
     });
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     assert_eq!(shipped(&down), (0, vec![4]));
     let settled = snapshot(&server);
     let explicit: Vec<bool> = settled
@@ -868,7 +902,7 @@ fn a_row_its_head_branch_copies_from_a_base_ships() {
     let _head =
         block_on(client.subscribe(&_head, ReadOpts::default().branch_view(branch(2), None)))
             .unwrap();
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     block_on(client.insert(
         "todos",
         cells(&[("title", "seed"), ("body", "")]),
@@ -879,7 +913,7 @@ fn a_row_its_head_branch_copies_from_a_base_ships() {
         },
     ))
     .unwrap();
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     std::thread::sleep(Duration::from_millis(5));
     down.borrow_mut().clear();
     write_late(&server, &client, || {
@@ -897,7 +931,7 @@ fn a_row_its_head_branch_copies_from_a_base_ships() {
         ))
         .unwrap();
     });
-    pump(&server, &[&client]);
+    pump(&server, &[(&client, &down)]);
     let (images, as_written) = shipped(&down);
     assert_eq!(as_written, vec![0]);
     assert!(images > 0, "{images}");
@@ -915,9 +949,9 @@ fn a_mismatched_row_stays_until_its_whole_image_arrives() {
     // commit stays pending: its row stays, and the replica writes on.
     let server = open(0, AuthorSubject::SYSTEM);
     let client = open(1, user(1));
-    let (upstream, _down) = connect(&server, &client, user(9));
+    let (upstream, down) = connect(&server, &client, user(9));
     let _live = subscribe(&client);
-    pump_counting(&server, &[&client]);
+    pump_allowing_whole(&server, &[&client]);
     block_on(client.insert(
         "docs",
         cells(&[("title", "Doc"), ("body", "")]),
@@ -930,13 +964,14 @@ fn a_mismatched_row_stays_until_its_whole_image_arrives() {
     block_on(client.tick()).unwrap();
     block_on(server.tick()).unwrap();
     block_on(client.tick()).unwrap();
-    assert_eq!(client.as_written_mismatches(), 1);
+    assert_eq!(down.whole_rows_requested(), 1);
+    assert_eq!(client.pending_upload_count(), 1, "the commit stays pending");
     assert_eq!(snapshot(&client).len(), 1, "the row stays");
     assert!(client.detach_connection(&upstream));
     assert_eq!(snapshot(&client).len(), 1, "the row stays offline");
     block_on(client.update("docs", row(1), cells(&[("body", "y")]), Default::default())).unwrap();
     let (_upstream, _down) = connect(&server, &client, user(9));
-    pump_counting(&server, &[&client]);
+    pump_allowing_whole(&server, &[&client]);
     let settled = snapshot(&server);
     assert!(settled[0].contains(&user(9).principal_parts().1));
     assert!(settled[0].contains("\"y\""), "{settled:?}");
@@ -978,12 +1013,12 @@ fn a_resent_commit_ships_its_rows_though_superseded() {
         block_on(client.tick()).unwrap();
         block_on(server.tick()).unwrap();
     }
-    pump(&server, &[&other]);
+    pump(&server, &[(&other, &_other_down)]);
     block_on(other.update("docs", row(1), cells(&[("body", "o")]), Default::default())).unwrap();
-    pump(&server, &[&other]);
+    pump(&server, &[(&other, &_other_down)]);
     let client = open_file();
     let (_upstream, _down) = connect(&server, &client, user(1));
-    pump(&server, &[&client, &other]);
+    pump(&server, &[(&client, &_down), (&other, &_other_down)]);
     assert_eq!(client.pending_upload_count(), 0);
     assert_eq!(snapshot(&client), snapshot(&server));
 }
@@ -1019,7 +1054,7 @@ fn a_whole_ask_names_only_versions_the_sessions_own_commits_produced() {
         .prepare_query(&Query::from("owned").select(["title", "body", "owner"]))
         .unwrap();
     let _live = block_on(reader.subscribe(&prepared, ReadOpts::default())).unwrap();
-    pump(&server, &[&reader]);
+    pump(&server, &[(&reader, &down)]);
     let shipped = |down: &Down| {
         down.borrow().iter().find_map(|message| match message {
             SyncMessage::Rows { images, .. } => images

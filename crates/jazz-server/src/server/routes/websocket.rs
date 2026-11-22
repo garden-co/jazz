@@ -9,10 +9,23 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::runtime::ServerLinkAdmission;
-use crate::runtime::{
-    CommitUnitTrust, ConnectionSessionContext, ServerRuntimeHandle, ServerSession,
+#[cfg(test)]
+use crate::portable::admission::ws_link_admission;
+use crate::portable::admission::{
+    RequestedWebSocketLink, SessionRevocation, WebSocketAdmission, WebSocketCredential,
+    WebSocketPrelude,
 };
+use crate::portable::session::{session_claims, ws_peer_identity, ws_validate_session_identity};
+#[cfg(test)]
+use crate::portable::websocket_codec::decode_ws_frame_batch;
+#[cfg(test)]
+use crate::portable::websocket_codec::decode_ws_hello;
+use crate::portable::websocket_codec::{
+    decode_ws_encoded_frame_batch, encode_ws_frame_batches, ws_foreign_version_refusal,
+};
+#[cfg(test)]
+use crate::runtime::ServerLinkAdmission;
+use crate::runtime::{CommitUnitTrust, ServerRuntimeHandle, ServerSession};
 use axum::{
     extract::FromRequestParts as _,
     extract::State,
@@ -21,14 +34,15 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt as _, StreamExt as _};
-use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::ids::AuthorSubject;
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
+#[cfg(test)]
 use jazz::records::Value as CoreValue;
+#[cfg(test)]
 use jazz::tools::Session;
-use jazz::wire::{
-    WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
-    current_wire_features, encode_frame, negotiate_wire,
-};
+use jazz::wire::{WireError, WireErrorCode, WireErrorReason, WireFrame, WireRetry, encode_frame};
+#[cfg(test)]
+use jazz::wire::{WireHello, WirePeerRole, current_wire_features};
 use tokio::sync::mpsc;
 
 use super::metered_socket::{MeteredWebSocket, PeerActivity};
@@ -220,35 +234,6 @@ async fn serve_upgraded_ws<IO>(
     .await;
 }
 
-#[derive(Clone, Debug)]
-struct WebSocketAdmission {
-    identity: AuthorSubject,
-    claims: BTreeMap<String, CoreValue>,
-    trust: CommitUnitTrust,
-    credential: WebSocketCredential,
-    requested_link: RequestedWebSocketLink,
-    /// The published permissions bundle the backend pinned this session
-    /// to (see [`jazz::catalogue`]).
-    bundle: Option<jazz::catalogue::BundleId>,
-    /// A user session the app's backend stated: `jazz.revokeUser` can end
-    /// it from any backend instance (see [`SessionRevocation`]).
-    revocation: Option<SessionRevocation>,
-}
-
-/// What a backend-stated user session is checked against: the user's
-/// session revocation mark in the account registry. The session ends once
-/// the mark is past the time the backend's `authenticate` started for it
-/// (`authenticatedAt` in the stated session, on the backend's clock), so a
-/// revocation from one backend instance reaches sessions another holds, and
-/// refuses those it admits later on an answer from before the revocation.
-#[derive(Clone, Debug)]
-struct SessionRevocation {
-    principal: jazz::account_registry::Principal,
-    /// Unix milliseconds. A backend that doesn't state it (older than this
-    /// check) gets the time the core admitted the session.
-    authenticated_at_ms: u64,
-}
-
 fn unix_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -337,24 +322,13 @@ async fn session_not_revoked(
     let (Some(revocation), Some(registry)) = (revocation, state.accounts.as_ref()) else {
         return Ok(());
     };
-    match registry
+    let mark = registry
         .sessions_revoked_before(revocation.principal.clone())
-        .await?
-    {
-        Some(before) if before > revocation.authenticated_at_ms => {
-            Err(super::accounts::AdmissionError::Revoked)
-        }
-        _ => Ok(()),
+        .await?;
+    if crate::portable::accounts::session_revoked(mark, revocation.authenticated_at_ms) {
+        return Err(super::accounts::AdmissionError::Revoked);
     }
-}
-
-/// Authentication class selected by the prelude, independently of the
-/// permission subject carried by each forwarded transaction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WebSocketCredential {
-    Admin,
-    Backend,
-    Session,
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -542,76 +516,6 @@ fn ws_live_admissions_for(state: &ServerState, key: WebSocketAdmissionKey) -> us
         .map_or(0, VecDeque::len)
 }
 
-#[derive(serde::Deserialize)]
-struct WebSocketPrelude {
-    peer_identity: String,
-    auth: jazz::tools::websocket_prelude_auth::AuthConfig,
-    /// A one-shot authenticated authority-catalogue transfer. This is not a
-    /// subscriber session and never admits application frames.
-    #[serde(default)]
-    bootstrap_catalogue: bool,
-    /// Requested before any wire frame.  It is only a request: after JWT/cookie
-    /// authentication and feature negotiation the server either creates its
-    /// own immutable admitted relay capability or rejects the connection.
-    #[serde(default)]
-    requested_link: RequestedWebSocketLink,
-    /// The audience a trusted backend verified the client's local-first
-    /// proof against; honoured only with that backend's secret (see
-    /// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
-    #[serde(default)]
-    local_first_audience: Option<String>,
-    /// The published permissions bundle (hex id) the backend that opened
-    /// this socket serves with; honoured only on that backend's word (its
-    /// credential on the upgrade, or its secret here), as a client could
-    /// otherwise pick an older bundle's laxer policies.
-    #[serde(default)]
-    bundle: Option<String>,
-}
-
-/// The only client-selectable *request* at the WebSocket boundary.  This is
-/// intentionally separate from `WirePeerRole`: a wire hello says what a peer
-/// implements, not what authority it receives.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RequestedWebSocketLink {
-    #[default]
-    OrdinarySession,
-    ScopeIsolatedClientRelay,
-}
-
-/// Select the server-owned link capability after credential admission and wire
-/// feature negotiation. This stays separate from the client prelude because a
-/// request alone cannot grant scoped relay authority.
-fn ws_link_admission(
-    admission: &WebSocketAdmission,
-    negotiated_features: u64,
-    admission_epoch: u64,
-) -> Result<ServerLinkAdmission, WireError> {
-    match admission.requested_link {
-        RequestedWebSocketLink::OrdinarySession
-            if admission.credential == WebSocketCredential::Admin
-                && admission.identity == AuthorSubject::SYSTEM
-                && admission.trust == CommitUnitTrust::TrustedAuthority =>
-        {
-            Ok(ServerLinkAdmission::AuthorityQueryDelegate)
-        }
-        RequestedWebSocketLink::OrdinarySession => Ok(ServerLinkAdmission::OrdinarySession),
-        RequestedWebSocketLink::ScopeIsolatedClientRelay
-            if admission.trust == CommitUnitTrust::Session
-                && negotiated_features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY != 0 =>
-        {
-            // This epoch was minted by the server for this accepted socket.
-            // Reconnects necessarily get a fresh capability.
-            Ok(ServerLinkAdmission::ScopeIsolatedClientRelay { admission_epoch })
-        }
-        RequestedWebSocketLink::ScopeIsolatedClientRelay => Err(WireError::new(
-            WireErrorCode::UnsupportedFeature,
-            WireRetry::Never,
-            "scope-isolated client relay requires an authenticated session and negotiated relay feature",
-        )),
-    }
-}
-
 async fn ws_admission(
     prelude: WebSocketPrelude,
     request_headers: &HeaderMap,
@@ -646,9 +550,10 @@ async fn ws_admission(
                 auth.backend_secret = backend;
             }
             None if check.required() => {
-                return Err("this server admits only sockets its trusted workload opens"
-                    .to_owned()
-                    .into());
+                return Err(super::accounts::AdmissionError::refused(
+                    "this server admits only sockets its trusted workload opens",
+                    WireErrorReason::Invalid,
+                ));
             }
             None => {}
         }
@@ -656,7 +561,9 @@ async fn ws_admission(
 
     if let Some(admin_secret) = auth.admin_secret.as_deref() {
         crate::middleware::auth::validate_admin_secret(Some(admin_secret), &state.auth_config)
-            .map_err(|(_, message)| message.to_owned())?;
+            .map_err(|(_, message)| {
+                super::accounts::AdmissionError::refused(message, WireErrorReason::Invalid)
+            })?;
         // Forwarded commits keep their own permission subjects. Admin
         // authentication is not a substitute for per-transaction authorization.
         let trust = CommitUnitTrust::TrustedAuthority;
@@ -694,7 +601,10 @@ async fn ws_admission(
     if let Some(audience) = local_first_audience.as_deref() {
         let value = axum::http::HeaderValue::from_str(audience)
             .map_err(|error| format!("invalid local_first_audience value: {error}"))?;
-        headers.insert(crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER, value);
+        headers.insert(
+            crate::middleware::auth::DEVICE_ACCOUNT_AUDIENCE_HEADER,
+            value,
+        );
     }
     if let Some(session_value) = auth.backend_session.as_ref() {
         use base64::Engine as _;
@@ -721,22 +631,33 @@ async fn ws_admission(
     );
     // A core admits its own backend only: the app's backend (`createJazz`)
     // decides who a user is and opens their sessions with its credential,
-    // and relays a local-first guest's proof with it (or on an upgrade its
+    // and relays a device account's proof with it (or on an upgrade its
     // trusted workload vouched for).
     if !backend_credential && !vouched_upgrade {
         return Err(match backend_secret {
-            Some(_) => "Invalid backend secret",
-            None => {
-                "this core admits only its app's backend: connect through the app's createJazz handler"
-            }
-        }
-        .into());
+            Some(_) => super::accounts::AdmissionError::refused(
+                "Invalid backend secret",
+                WireErrorReason::Invalid,
+            ),
+            // A credential the client sent (a token, a stated session) that
+            // this core does not take is `invalid`, as createJazz reports it;
+            // only a client that sent none is `missing`.
+            None => super::accounts::AdmissionError::refused(
+                "this core admits only its app's backend: connect through the app's createJazz handler",
+                if has_jwt || has_session_header {
+                    WireErrorReason::Invalid
+                } else {
+                    WireErrorReason::Missing
+                },
+            ),
+        });
     }
     if !has_jwt && !has_session_header {
         if !backend_credential {
-            return Err(
-                "Session required. Provide a backend session or a local-first proof.".into(),
-            );
+            return Err(super::accounts::AdmissionError::refused(
+                "Session required. Provide a backend session or a device-account proof.",
+                WireErrorReason::Missing,
+            ));
         }
         return Ok(WebSocketAdmission {
             identity: peer_identity,
@@ -757,7 +678,10 @@ async fn ws_admission(
             .map_err(super::accounts::AdmissionError::from)?;
 
     let Some(mut session) = session else {
-        return Err("Session required. Provide a backend session or a local-first proof.".into());
+        return Err(super::accounts::AdmissionError::refused(
+            "Session required. Provide a backend session or a device-account proof.",
+            WireErrorReason::Missing,
+        ));
     };
 
     // A session the backend states is policy-scoped, and its authority is the
@@ -767,23 +691,26 @@ async fn ws_admission(
     // off both so the skip never rests on the header alone.)
     let backend_stated = backend_credential && has_session_header;
     if !backend_stated {
-        let account = peer_identity
-            .account_id()
-            .ok_or("public sessions require an enrolled account identity")?;
-        let principal = jazz::account_registry::Principal {
-            issuer: session.issuer.clone(),
-            subject: session.user_id.clone(),
-        };
-        if session.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
+        // The steps of `crate::portable::guest::admit_guest`, in its order,
+        // with the registry reached through its owner thread.
+        let account =
+            crate::portable::guest::enrolled_account(peer_identity).map_err(|message| {
+                super::accounts::AdmissionError::refused(message, WireErrorReason::Invalid)
+            })?;
+        let principal = crate::portable::guest::principal_of(&session);
+        if session.issuer == jazz::tools::identity::DEVICE_ACCOUNT_ISSUER {
             super::accounts::admit_local_founder(state, &principal, &headers).await?;
         }
         let assignment = super::accounts::resolve_assignment(state, principal).await?;
-        if assignment != account {
-            return Err("account does not match authenticated identity assignment".into());
-        }
-        session.account_id = Some(account);
+        // A principal assigned to another account: the identity was
+        // reassigned.
+        crate::portable::guest::bind_account(&mut session, account, assignment).map_err(
+            |message| super::accounts::AdmissionError::refused(message, WireErrorReason::Revoked),
+        )?;
     }
-    ws_validate_session_identity(&session, peer_identity)?;
+    ws_validate_session_identity(&session, peer_identity).map_err(|message| {
+        super::accounts::AdmissionError::refused(message, WireErrorReason::Invalid)
+    })?;
     let revocation = backend_stated.then(|| SessionRevocation {
         principal: jazz::account_registry::Principal {
             issuer: session.issuer.clone(),
@@ -814,7 +741,10 @@ async fn account_still_admitted(
         return Ok(());
     };
     let Some(account) = identity.account_id() else {
-        return Err("account identity revoked".into());
+        return Err(super::accounts::AdmissionError::Refused {
+            message: "account identity revoked".into(),
+            reason: jazz::wire::WireErrorReason::Revoked,
+        });
     };
     let (issuer, subject) = identity.principal_parts();
     let assignment = super::accounts::resolve_assignment(
@@ -825,7 +755,10 @@ async fn account_still_admitted(
     if assignment == account {
         Ok(())
     } else {
-        Err("account identity revoked".into())
+        Err(super::accounts::AdmissionError::Refused {
+            message: "account identity revoked".into(),
+            reason: jazz::wire::WireErrorReason::Revoked,
+        })
     }
 }
 
@@ -913,51 +846,6 @@ async fn account_admission_current(
         }
     }
     account_still_admitted(state, identity).await
-}
-
-fn session_claims(
-    session: jazz::tools::public_schema::Session,
-) -> Result<BTreeMap<String, CoreValue>, String> {
-    let author = session
-        .author_subject()
-        .map_err(|error| error.to_string())?;
-    let provider_claims = match session.claims {
-        serde_json::Value::Object(map) => {
-            // Middleware exposes these convenient aliases to server handlers,
-            // but they duplicate the verified transport identity. A relay
-            // capability must use the one canonical binding vocabulary: the
-            // shared admission constructor derives `claims.iss`/`claims.sub`,
-            // `user`, and `authMode` from the verified AuthorSubject.
-            map.into_iter().collect()
-        }
-        _ => BTreeMap::new(),
-    };
-    let provider_claims =
-        crate::runtime::auth_admission::jwt_json_claims_to_policy_claims(provider_claims)
-            .map_err(|error| error.to_string())?;
-    Ok(crate::runtime::auth_admission::admitted_session_claims(
-        &session.issuer,
-        &session.user_id,
-        author,
-        provider_claims,
-    ))
-}
-
-fn ws_peer_identity(identity: &str) -> Result<AuthorSubject, String> {
-    AuthorSubject::from_canonical(identity).map_err(|error| error.to_string())
-}
-
-fn ws_validate_session_identity(
-    session: &Session,
-    peer_identity: AuthorSubject,
-) -> Result<(), String> {
-    let session_identity = session
-        .author_subject()
-        .map_err(|error| error.to_string())?;
-    if session_identity != peer_identity {
-        return Err("websocket peer_identity must match authenticated session author".to_owned());
-    }
-    Ok(())
 }
 
 /// How long a new connection's peer may take to send its prelude and Hello.
@@ -1064,6 +952,13 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     else {
         return;
     };
+    // What the client reads: a refusal names its reason to a client that
+    // offered `FEATURE_TYPED_ERROR_REASON`, even before the server's hello.
+    // `first` is the websocket batch, not the frame: read it as the hello
+    // below does.
+    let client_features = crate::portable::websocket_codec::decode_ws_hello(&first)
+        .map(|hello| hello.features)
+        .unwrap_or(0);
     if let Some(refusal) = ws_foreign_version_refusal(&first) {
         let _ = send_ws_encoded_frames(&mut socket, &[refusal]).await;
         let _ = socket.close().await;
@@ -1076,6 +971,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         Err(error) => {
             send_ws_error(
                 &mut socket,
+                client_features,
                 WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error),
             )
             .await;
@@ -1087,7 +983,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     let admission = match ws_admission(prelude, &request_headers, &state).await {
         Ok(admission) => admission,
         Err(error) => {
-            send_ws_error(&mut socket, error.into_wire()).await;
+            send_ws_error(&mut socket, client_features, error.into_wire()).await;
             let _ = socket.close().await;
             return;
         }
@@ -1109,53 +1005,24 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 cap = refused.cap,
                 "refusing websocket: identity is at its connection cap with no silent connection to evict"
             );
-            send_ws_error(&mut socket, refused.into_wire()).await;
+            send_ws_error(&mut socket, client_features, refused.into_wire()).await;
             let _ = socket.close().await;
             return;
         }
     };
 
-    let remote_hello = match decode_ws_hello(&first) {
+    let hello = match crate::portable::handshake::negotiate_hello(
+        &first,
+        bootstrap_catalogue,
+        jazz::wire::FEATURE_HEARTBEAT,
+    ) {
         Ok(hello) => hello,
         Err(error) => {
-            send_ws_error(&mut socket, error).await;
+            send_ws_error(&mut socket, client_features, error).await;
             let _ = socket.close().await;
             return;
         }
     };
-
-    // Thin clients (SPEC 8.14) are served on the same route: a client that
-    // advertises thin results is answered with results, not sync.
-    let negotiated = match negotiate_wire(
-        &remote_hello,
-        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS | jazz::wire::FEATURE_HEARTBEAT,
-    ) {
-        Ok(negotiated) => negotiated,
-        Err(error) => {
-            send_ws_error(&mut socket, error).await;
-            let _ = socket.close().await;
-            return;
-        }
-    };
-    // A downstream browser may be authority-unbound while still accepting the
-    // server's authenticated authority in its response Hello.  The server
-    // never installs scoped authority semantics without an admitted remote
-    // endpoint (below), so this directional capability advertisement does not
-    // turn a client self-assertion into authority proof.
-
-    if bootstrap_catalogue {
-        send_ws_error(
-            &mut socket,
-            WireError::new(
-                WireErrorCode::UnsupportedFeature,
-                WireRetry::Never,
-                "edge catalogue bootstrap is no longer supported; open an ordinary client session",
-            ),
-        )
-        .await;
-        let _ = socket.close().await;
-        return;
-    }
 
     let Some(core_server_shell) = state.runtime_for_client() else {
         let message = if state.shutdown.is_shutting_down() {
@@ -1170,63 +1037,23 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         };
         send_ws_error(
             &mut socket,
+            client_features,
             WireError::new(WireErrorCode::NotReady, WireRetry::Later, message),
         )
         .await;
         let _ = socket.close().await;
         return;
     };
-    // Every admitted server link receives a fresh server endpoint. A browser
-    // client need not (and must not) self-assert one merely to learn which
-    // authority issued its downstream fates.
-    let server_endpoint = WireAuthorityEndpoint::fresh(NodeUuid::from_bytes([0x5e; 16]));
-    let session_context =
-        if negotiated.features & jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0 {
-            // An authenticated client can request current rows without itself
-            // being an authority. Retain our receipt epoch and its admitted identity
-            // independently of whether it advertises a remote authority endpoint.
-            Some(ConnectionSessionContext {
-                local: server_endpoint,
-                remote: remote_hello.authority,
-                link_identity: admission.identity,
-                negotiated_features: negotiated.features,
-            })
-        } else {
-            None
-        };
-    let link_admission =
-        match ws_link_admission(&admission, negotiated.features, server_endpoint.epoch) {
-            Ok(link_admission) => link_admission,
-            Err(error) => {
-                send_ws_error(&mut socket, error).await;
-                let _ = socket.close().await;
-                return;
-            }
-        };
-    let thin = negotiated.features & jazz::wire::FEATURE_THIN_RESULTS != 0;
+    let link = match crate::portable::handshake::link(&admission, &hello) {
+        Ok(link) => link,
+        Err(error) => {
+            send_ws_error(&mut socket, client_features, error).await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+    let thin = link.thin;
     let mut thin_reader = ThinReader::default();
-    // A thin connection is one session reading finished results: it holds
-    // no replica to relay for tabs, so it is never a client relay. An admin
-    // link is served as SYSTEM either way. `session_context` is for sync
-    // links alone.
-    if thin
-        && matches!(
-            link_admission,
-            ServerLinkAdmission::ScopeIsolatedClientRelay { .. }
-        )
-    {
-        send_ws_error(
-            &mut socket,
-            WireError::new(
-                WireErrorCode::UnsupportedFeature,
-                WireRetry::Never,
-                "a thin connection serves one session: it cannot relay for other tabs",
-            ),
-        )
-        .await;
-        let _ = socket.close().await;
-        return;
-    }
     let opened = if thin {
         core_server_shell
             .open_thin_session(
@@ -1243,40 +1070,26 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 admission.claims,
                 admission.bundle,
                 admission.trust,
-                negotiated.features,
-                session_context,
-                link_admission,
+                hello.features,
+                link.session_context,
+                link.link_admission,
             )
             .await
     };
     let session = match opened {
         Ok(session) => session,
         Err(error) => {
-            send_ws_error(&mut socket, session_open_wire_error(&error)).await;
-            let _ = socket.close().await;
-            return;
-        }
-    };
-    let server_hello = WireFrame::Hello(
-        WireHello::current(WirePeerRole::Core, negotiated.features)
-            .with_authority(server_endpoint.node, server_endpoint.epoch),
-    );
-    let server_hello = match encode_frame(&server_hello) {
-        Ok(frame) => frame,
-        Err(error) => {
             send_ws_error(
                 &mut socket,
-                WireError::new(
-                    WireErrorCode::Internal,
-                    WireRetry::Never,
-                    format!("failed to encode websocket server hello: {error}"),
-                ),
+                client_features,
+                session_open_wire_error(&error),
             )
             .await;
             let _ = socket.close().await;
             return;
         }
     };
+    let server_hello = link.server_hello;
     // From here the peer can be heard from; until now it ranked as the most
     // recent connection (see `WS_STILL_HANDSHAKING`).
     admission_registration.heard();
@@ -1288,8 +1101,8 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     }
 
     tracing::info!(
-        protocol_version = negotiated.protocol_version,
-        features = negotiated.features,
+        protocol_version = hello.protocol_version,
+        features = hello.features,
         identity = ?admission.identity,
         "websocket negotiated"
     );
@@ -1310,7 +1123,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         refused => refused,
     };
     if let Err(error) = admitted {
-        send_ws_error(&mut socket, error.into_wire()).await;
+        send_ws_error(&mut socket, client_features, error.into_wire()).await;
         let _ = socket.close().await;
         core_server_shell.close(session);
         return;
@@ -1320,6 +1133,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         Err(error) => {
             send_ws_error(
                 &mut socket,
+                client_features,
                 WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
             )
             .await;
@@ -1331,13 +1145,25 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // One writer owns each partially sent carrier until completion. Four
     // bounded pump batches cap the queue while the reader remains independent
     // of a slow sink and can receive credit or chunks needed by a pending tick.
-    let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<Message>>(4);
+    let (writer_tx, mut writer_rx) = mpsc::channel::<Outgoing>(4);
     let (writer_stopped, mut writer_terminal) = tokio::sync::oneshot::channel();
+    // The session's output counts as held until it is written to the
+    // socket, a message at a time: a client reading slowly is seen reading
+    // as each message goes, not only when a whole batch is taken. If the
+    // writer fails or is aborted, the messages still queued for it are
+    // never released: they stay counted until the session closes, which
+    // the failed writer ends the connection with anyway.
+    let egress = output.egress_release();
+    if let Some(activity) = &peer_activity {
+        activity.report_writes(output.written_bytes());
+    }
     let mut writer = tokio::spawn(async move {
         let result = async {
             while let Some(batch) = writer_rx.recv().await {
-                for message in batch {
+                let mut written = batch.release.into_iter();
+                for message in batch.messages {
                     socket_writer.send(message).await?;
+                    egress.release(written.next().unwrap_or(0));
                 }
             }
             socket_writer.close().await
@@ -1355,7 +1181,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // (`peer_activity`): a large message on a slow uplink can take longer
     // than the timeout to complete, and its bytes are the peer at work.
     let mut last_inbound = tokio::time::Instant::now();
-    let heartbeat = negotiated.features & jazz::wire::FEATURE_HEARTBEAT != 0;
+    let heartbeat = hello.features & jazz::wire::FEATURE_HEARTBEAT != 0;
     let mut keepalive = tokio::time::interval_at(
         last_inbound + WS_KEEPALIVE_PING_INTERVAL,
         WS_KEEPALIVE_PING_INTERVAL,
@@ -1383,7 +1209,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     }
                 };
                 if let Err(error) = refused {
-                    queue_ws_error(&writer_tx, error.into_wire());
+                    queue_ws_error(&writer_tx, client_features, error.into_wire());
                     break;
                 }
             }
@@ -1402,15 +1228,15 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 }
                 if last_inbound.elapsed() >= WS_IDLE_TIMEOUT {
                     tracing::debug!("closing idle websocket: no inbound traffic within the idle timeout");
-                    let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
+                    let _ = writer_tx.try_send(Outgoing::from(vec![Message::Close(Some(CloseFrame {
                         code: close_code::AWAY, reason: "websocket idle timeout".into(),
-                    }))]);
+                    }))]));
                     break;
                 }
                 // A full writer queue already proves the link is busy; the
                 // next tick pings again. A client that cannot see pings (a
                 // browser) asked for a heartbeat frame it can see instead.
-                let _ = writer_tx.try_send(keepalive_beat(heartbeat));
+                let _ = writer_tx.try_send(keepalive_beat(heartbeat).into());
             }
             wake = account_changes.wake() => {
                 let admitted = match wake {
@@ -1418,7 +1244,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     AccountWake::RegistryGone => Err(super::accounts::AdmissionError::Unavailable),
                 };
                 if let Err(error) = admitted {
-                    queue_ws_error(&writer_tx, error.into_wire());
+                    queue_ws_error(&writer_tx, client_features, error.into_wire());
                     break;
                 }
             }
@@ -1429,7 +1255,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     // half-open socket whose peer is gone. Should the peer be
                     // alive after all, it may come back like after any drop;
                     // a live link is never evicted in turn.
-                    queue_ws_error(&writer_tx, WireError::new(
+                    queue_ws_error(&writer_tx, client_features, WireError::new(
                         WireErrorCode::Backpressure, WireRetry::Later,
                         format!(
                             "websocket connection replaced: silent for over {} s while this \
@@ -1437,53 +1263,58 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                             WS_ZOMBIE_SILENCE.as_secs()
                         ),
                     ));
-                    let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
+                    let _ = writer_tx.try_send(Outgoing::from(vec![Message::Close(Some(CloseFrame {
                         code: close_code::AWAY, reason: "websocket silent; replaced".into(),
-                    }))]);
+                    }))]));
                 }
                 break;
             }
             changed = shutdown_rx.changed() => {
                 if changed.is_ok() && state.shutdown.is_shutting_down() {
-                    let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
+                    let _ = writer_tx.try_send(Outgoing::from(vec![Message::Close(Some(CloseFrame {
                         code: close_code::RESTART, reason: "server shutting down".into(),
-                    }))]);
+                    }))]));
                     break;
                 }
             }
             outgoing = async {
                 let permit = writer_tx.reserve().await.ok()?;
-                let result = output.recv().await?;
+                let result = output.recv_held().await?;
                 Some((permit, result))
             } => {
-                let Some((permit, outgoing)) = outgoing else { break };
+                let Some((permit, (outgoing, held_bytes))) = outgoing else { break };
                 let outgoing = match outgoing {
                     Ok(frames) => frames,
                     Err(error) => {
                         drop(permit);
-                        queue_ws_error(&writer_tx, error);
+                        queue_ws_error(&writer_tx, client_features, error);
                         break;
                     }
                 };
                 if let Err(error) = account_admission_current(&state, account_identity, &mut account_changes).await {
                     drop(permit);
-                    queue_ws_error(&writer_tx, error.into_wire());
+                    output.egress_release().release(held_bytes);
+                    queue_ws_error(&writer_tx, client_features, error.into_wire());
                     break;
                 }
                 match encode_ws_frame_batches(&outgoing) {
                     Ok(batches) => {
-                        permit.send(batches.into_iter().map(|bytes| Message::Binary(bytes.into())).collect());
+                        if batches.is_empty() {
+                            output.egress_release().release(held_bytes);
+                        }
+                        permit.send(Outgoing::releasing(batches, held_bytes));
                     }
                     Err(error) => {
                         drop(permit);
-                        queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Internal, WireRetry::Never, error.to_string()));
+                        output.egress_release().release(held_bytes);
+                        queue_ws_error(&writer_tx, client_features, WireError::new(WireErrorCode::Internal, WireRetry::Never, error.to_string()));
                         break;
                     }
                 }
             }
             room = thin_reader.admitted() => {
                 if let Err(error) = thin_reader.grant(&core_server_shell, session, room) {
-                    queue_ws_error(&writer_tx, error);
+                    queue_ws_error(&writer_tx, client_features, error);
                     break 'connection;
                 }
             }
@@ -1493,7 +1324,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     None => std::future::pending().await,
                 }
             } => {
-                queue_ws_error(&writer_tx, WireError::new(
+                queue_ws_error(&writer_tx, client_features, WireError::new(
                     WireErrorCode::Backpressure, WireRetry::Later,
                     "a split thin request stalled before its next part",
                 ));
@@ -1508,7 +1339,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 let (frames, _) = held.take().expect("a held batch is waiting");
                 let received = room.and_then(|room| core_server_shell.receive_wire_frames(session, frames, room));
                 if let Err(error) = received {
-                    queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                    queue_ws_error(&writer_tx, client_features, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
                     break 'connection;
                 }
             }
@@ -1518,13 +1349,13 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 match msg {
                 Some(Ok(Message::Binary(bytes))) => {
                     if let Err(error) = account_admission_current(&state, account_identity, &mut account_changes).await {
-                        queue_ws_error(&writer_tx, error.into_wire());
+                        queue_ws_error(&writer_tx, client_features, error.into_wire());
                         break;
                     }
                     let frames = match decode_ws_encoded_frame_batch(&bytes) {
                         Ok(frames) => frames,
                         Err(_) => {
-                            queue_ws_error(&writer_tx, WireError::new(
+                            queue_ws_error(&writer_tx, client_features, WireError::new(
                                 WireErrorCode::MalformedFrame, WireRetry::Never,
                                 "failed to decode websocket frame batch",
                             ));
@@ -1533,7 +1364,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     };
                     if thin {
                         if let Err(error) = thin_reader.read(&core_server_shell, session, frames) {
-                            queue_ws_error(&writer_tx, error);
+                            queue_ws_error(&writer_tx, client_features, error);
                             break 'connection;
                         }
                         continue;
@@ -1551,13 +1382,13 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                         Err(error) => Err(error),
                     };
                     if let Err(error) = received {
-                        queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                        queue_ws_error(&writer_tx, client_features, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
                         break 'connection;
                     }
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(Message::Ping(payload))) => {
-                    if writer_tx.try_send(vec![Message::Pong(payload)]).is_err() { break; }
+                    if writer_tx.try_send(vec![Message::Pong(payload)].into()).is_err() { break; }
                 }
                 _ => {}
                 }
@@ -1744,6 +1575,49 @@ impl Drop for SocketWriterGuard {
 
 /// One keepalive tick's messages: a ping, and for a client that negotiated
 /// [`jazz::wire::FEATURE_HEARTBEAT`] a heartbeat frame it can see.
+/// Messages for the connection's writer, with the session output bytes
+/// each one releases once written (none for the connection's own).
+struct Outgoing {
+    messages: Vec<Message>,
+    release: Vec<usize>,
+}
+
+impl From<Vec<Message>> for Outgoing {
+    fn from(messages: Vec<Message>) -> Self {
+        Self {
+            messages,
+            release: Vec::new(),
+        }
+    }
+}
+
+impl Outgoing {
+    /// `messages` carrying `bytes` of session output: each releases its
+    /// own length, the last whatever is left (batching changes the sizes).
+    fn releasing(batches: Vec<Vec<u8>>, bytes: usize) -> Self {
+        let mut left = bytes;
+        let count = batches.len();
+        let release = batches
+            .iter()
+            .enumerate()
+            .map(|(index, batch)| {
+                let share = if index + 1 == count {
+                    left
+                } else {
+                    batch.len().min(left)
+                };
+                left -= share;
+                share
+            })
+            .collect();
+        let messages = batches
+            .into_iter()
+            .map(|bytes| Message::Binary(bytes.into()))
+            .collect();
+        Self { messages, release }
+    }
+}
+
 fn keepalive_beat(heartbeat: bool) -> Vec<Message> {
     let mut beat = vec![Message::Ping(Default::default())];
     if heartbeat {
@@ -1755,91 +1629,21 @@ fn keepalive_beat(heartbeat: bool) -> Vec<Message> {
     beat
 }
 
-fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
-    if let Ok(frame) = encode_frame(&WireFrame::Error(error))
+fn queue_ws_error(
+    writer: &mpsc::Sender<Outgoing>,
+    client_features: jazz::wire::WireFeatures,
+    error: WireError,
+) {
+    if let Ok(frame) = jazz::wire::encode_error_frame_for_client(&error, client_features)
         && let Ok(batches) = encode_ws_frame_batches(&[frame])
     {
-        let _ = writer.try_send(
+        let _ = writer.try_send(Outgoing::from(
             batches
                 .into_iter()
                 .map(|bytes| Message::Binary(bytes.into()))
-                .collect(),
-        );
+                .collect::<Vec<_>>(),
+        ));
     }
-}
-
-/// Decode the opening `Hello`, which arrives as a one-frame batch or a bare
-/// frame. A peer on another wire version gets `UnsupportedProtocolVersion`
-/// even when the rest of its `Hello` uses that version's layout.
-fn decode_ws_hello(bytes: &[u8]) -> Result<WireHello, WireError> {
-    let not_hello = || {
-        WireError::new(
-            WireErrorCode::MalformedFrame,
-            WireRetry::Never,
-            "websocket expects first wire frame to be WireFrame::Hello",
-        )
-    };
-    let frame = match decode_ws_encoded_frame_batch(bytes) {
-        Ok(mut frames) if frames.len() == 1 => frames.remove(0),
-        Ok(_) => return Err(not_hello()),
-        Err(_) => bytes.to_vec(),
-    };
-    jazz::wire::decode_hello_frame(&frame).map_err(|error| match error.code {
-        WireErrorCode::UnsupportedProtocolVersion => error,
-        _ => not_hello(),
-    })
-}
-
-/// The refusal for a client whose `Hello` advertises a wire version range
-/// without this server's, encoded so that client decodes it: an alpha.59
-/// client is told to upgrade instead of failing on a frame it cannot read.
-/// `None` when the first frame is not a `Hello` or speaks this version.
-fn ws_foreign_version_refusal(bytes: &[u8]) -> Option<Vec<u8>> {
-    let frame = match decode_ws_encoded_frame_batch(bytes) {
-        Ok(mut frames) if frames.len() == 1 => frames.remove(0),
-        Ok(_) => return None,
-        Err(_) => bytes.to_vec(),
-    };
-    let (min, max) = jazz::wire::wire_hello_version_range(&frame)?;
-    let ours = jazz::wire::WIRE_PROTOCOL_VERSION;
-    let message = if max < ours {
-        format!(
-            "this Jazz client speaks wire protocol {min}..={max}, older than this server's \
-             {ours}: upgrade the client to the server's Jazz release (a client from \
-             2.0.0-alpha.59 or earlier cannot connect to 2.0.0-alpha.60 or later)"
-        )
-    } else if min > ours {
-        format!(
-            "this Jazz client speaks wire protocol {min}..={max}, newer than this server's \
-             {ours}: upgrade the server to the client's Jazz release"
-        )
-    } else if min == ours && max == ours {
-        return None;
-    } else {
-        format!(
-            "this Jazz client advertises wire protocol {min}..={max}; this server speaks \
-             exactly {ours}: use the same Jazz release on client and server"
-        )
-    };
-    let error = WireError::new(
-        WireErrorCode::UnsupportedProtocolVersion,
-        WireRetry::Never,
-        message,
-    );
-    jazz::wire::encode_error_frame_for_peer(&error, max).ok()
-}
-
-#[cfg(test)]
-fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error> {
-    let encoded_frames = decode_ws_encoded_frame_batch(bytes)?;
-    encoded_frames
-        .iter()
-        .map(|frame| jazz::wire::decode_frame(frame))
-        .collect()
-}
-
-fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    jazz::wire::decode_websocket_frame_batch(bytes)
 }
 
 async fn send_ws_encoded_frames<S: SyncSocket>(
@@ -1852,46 +1656,16 @@ async fn send_ws_encoded_frames<S: SyncSocket>(
     Ok(())
 }
 
-async fn send_ws_error<S: SyncSocket>(socket: &mut S, error: WireError) {
-    let _ = send_ws_frames(socket, &[WireFrame::Error(error)]).await;
-}
-
-async fn send_ws_frames<S: SyncSocket>(
+/// Send `error` as a client whose `Hello` offered `client_features` reads it:
+/// with its reason when it reads one.
+async fn send_ws_error<S: SyncSocket>(
     socket: &mut S,
-    frames: &[WireFrame],
-) -> Result<(), axum::Error> {
-    let encoded = frames
-        .iter()
-        .map(encode_frame)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(axum::Error::new)?;
-    send_ws_encoded_frames(socket, &encoded).await
-}
-
-/// Pack encoded wire frames into as few bounded WebSocket batch payloads as fit.
-pub(crate) fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    let mut batches = Vec::new();
-    let mut current = Vec::new();
-    for frame in frames {
-        let mut candidate = current.clone();
-        candidate.push(frame.clone());
-        let candidate_fits = jazz::wire::encode_websocket_frame_batch(&candidate).is_ok();
-        if !candidate_fits && !current.is_empty() {
-            batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
-            current.clear();
-            // A singleton has its own count and length prefixes. Validate the
-            // actual carrier after the flush instead of assuming a raw frame
-            // at the frame limit can fit by itself.
-            jazz::wire::encode_websocket_frame_batch(std::slice::from_ref(frame))?;
-        } else if !candidate_fits {
-            return Err(postcard::Error::SerializeBufferFull);
-        }
-        current.push(frame.clone());
+    client_features: jazz::wire::WireFeatures,
+    error: WireError,
+) {
+    if let Ok(frame) = jazz::wire::encode_error_frame_for_client(&error, client_features) {
+        let _ = send_ws_encoded_frames(socket, &[frame]).await;
     }
-    if !current.is_empty() {
-        batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
-    }
-    Ok(batches)
 }
 
 async fn close_ws_for_shutdown<S: SyncSocket>(socket: &mut S) {
@@ -1964,8 +1738,9 @@ mod tests {
     #[tokio::test]
     async fn account_watch_does_not_spin_once_the_registry_is_gone() {
         let registry = crate::server::accounts::AccountRegistryOwner::in_memory_for_test();
-        let identity = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, "alice")
-            .expect("author");
+        let identity =
+            AuthorSubject::reserved(jazz::tools::identity::DEVICE_ACCOUNT_ISSUER, "alice")
+                .expect("author");
         let mut unaccounted = AccountWatch::subscribe(None, Some(&registry));
         let mut account = AccountWatch::subscribe(Some(identity), Some(&registry));
         registry.close().expect("close registry");
@@ -2086,8 +1861,8 @@ mod tests {
             ws_validate_session_identity(&external_session, same_subject_other_issuer).is_err(),
             "a shared provider subject must not bridge issuer domains"
         );
-        let local_first = Session::new(AuthorSubject::LOCAL_FIRST_ISSUER, "local-user")
-            .with_auth_mode(AuthMode::LocalFirst);
+        let local_first = Session::new(AuthorSubject::DEVICE_ACCOUNT_ISSUER, "local-user")
+            .with_auth_mode(AuthMode::DeviceAccount);
         let local_first_peer =
             AuthorSubject::from_canonical(r#"["urn:jazz:local-first","local-user"]"#).unwrap();
         assert!(ws_validate_session_identity(&local_first, local_first_peer).is_ok());
@@ -2599,15 +2374,15 @@ mod tests {
         let seed = [0x71; 32];
         let proof = jazz::tools::identity::mint_jazz_self_signed_token(
             &seed,
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             &state.app_id.to_string(),
             3_600,
         )
-        .expect("mint local-first proof");
+        .expect("mint device-account proof");
         let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
-        let guest = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, &subject)
-            .expect("local-first author")
-            .with_account(jazz::account_registry::local_first_account_id(
+        let guest = AuthorSubject::reserved(jazz::tools::identity::DEVICE_ACCOUNT_ISSUER, &subject)
+            .expect("device-account author")
+            .with_account(jazz::account_registry::device_account_id(
                 *state.app_id.uuid(),
                 &subject,
             ));
@@ -2990,6 +2765,81 @@ mod tests {
             !admitted,
             "a prelude larger than the Axum message cap must not reach admission"
         );
+    }
+
+    /// #5927 R3b: a refusal whose reason the server knows (the auth check's
+    /// typed code, a revoked identity) names it to a client whose `Hello`
+    /// offered `FEATURE_TYPED_ERROR_REASON`. Any other client gets the bytes
+    /// it always got, and reads the reason from the message as before.
+    ///
+    /// ```text
+    /// auth check ──Expired──► AdmissionError ──► client offered bit:  Error + reason
+    ///                                        └─► client did not:      Error (unchanged)
+    /// ```
+    #[test]
+    fn a_refusal_names_its_reason_to_a_client_that_reads_one() {
+        use super::super::accounts::AdmissionError;
+        use jazz::tools::transport_error::{UnauthenticatedCode, UnauthenticatedResponse};
+        use jazz::wire::{
+            FEATURE_TYPED_ERROR_REASON, WireErrorReason, decode_frame_with_error_reason,
+            encode_error_frame_for_client,
+        };
+        let unauthenticated = |code| UnauthenticatedResponse {
+            error: "unauthenticated",
+            code,
+            message: "nope".into(),
+        };
+        let revoked = || AdmissionError::Refused {
+            message: "account identity revoked".into(),
+            reason: WireErrorReason::Revoked,
+        };
+        for (refusal, reason) in [
+            (
+                AdmissionError::from(unauthenticated(UnauthenticatedCode::Expired)),
+                WireErrorReason::Expired,
+            ),
+            (
+                AdmissionError::from(unauthenticated(UnauthenticatedCode::Missing)),
+                WireErrorReason::Missing,
+            ),
+            (
+                AdmissionError::from(unauthenticated(UnauthenticatedCode::Invalid)),
+                WireErrorReason::Invalid,
+            ),
+            (
+                AdmissionError::from(unauthenticated(UnauthenticatedCode::Disabled)),
+                WireErrorReason::Disabled,
+            ),
+            (revoked(), WireErrorReason::Revoked),
+        ] {
+            let error = refusal.into_wire();
+            assert_eq!(error.code, WireErrorCode::AuthFailed);
+            assert_eq!(error.reason, Some(reason));
+            let named = encode_error_frame_for_client(
+                &error,
+                current_wire_features() | FEATURE_TYPED_ERROR_REASON,
+            )
+            .unwrap();
+            let WireFrame::Error(read) = decode_frame_with_error_reason(&named).unwrap() else {
+                panic!("an error frame")
+            };
+            assert_eq!(read.reason, Some(reason));
+            let unnamed = encode_error_frame_for_client(&error, current_wire_features()).unwrap();
+            assert_eq!(
+                unnamed,
+                encode_frame(&WireFrame::Error(error.clone())).unwrap()
+            );
+            let WireFrame::Error(read) = decode_frame(&unnamed).unwrap() else {
+                panic!("an error frame")
+            };
+            assert_eq!(read.reason, None);
+            assert_eq!(read.message, error.message);
+        }
+        // The auth check being down is not a refusal and names nothing.
+        let unavailable =
+            AdmissionError::from(unauthenticated(UnauthenticatedCode::Unavailable)).into_wire();
+        assert_eq!(unavailable.code, WireErrorCode::NotReady);
+        assert_eq!(unavailable.reason, None);
     }
 
     fn ws_client_hello_batch_with_features(features: u64) -> Vec<u8> {
@@ -4292,6 +4142,66 @@ mod tests {
         ));
     }
 
+    /// #5927 R3b, over a real socket: the server reads the bit from the
+    /// client's Hello (sent behind its prelude, before admission decides),
+    /// and names why it refused to a client that offered it. Without the
+    /// bit the client gets the plain `Error` bytes.
+    ///
+    /// ```text
+    /// client ─prelude, Hello{+typed reasons}─► server ─Error + reason──► client
+    /// client ─prelude, Hello──────────────────► server ─Error (unchanged)─► client
+    /// ```
+    #[tokio::test]
+    async fn a_refusal_over_a_socket_names_its_reason_to_a_client_that_reads_one() {
+        use jazz::wire::{FEATURE_TYPED_ERROR_REASON, decode_frame_with_error_reason};
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let refusal = |features: u64| {
+            let state = state.clone();
+            async move {
+                let (_, prelude) = ws_anonymous_prelude(state.app_id, [0xb4; 32]);
+                let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+                    .await
+                    .expect("connect");
+                ws.send(WsMessage::Binary(prelude.into()))
+                    .await
+                    .expect("send proof");
+                ws.send(WsMessage::Binary(
+                    ws_client_hello_batch_with_features(features).into(),
+                ))
+                .await
+                .expect("send hello");
+                let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("admission resolves")
+                    .expect("response")
+                    .expect("wire response");
+                let WsMessage::Binary(bytes) = response else {
+                    panic!("expected admission error")
+                };
+                let frames: Vec<Vec<u8>> = postcard::from_bytes(&bytes).expect("frame batch");
+                assert_eq!(frames.len(), 1);
+                frames.into_iter().next().unwrap()
+            }
+        };
+        let named = refusal(current_wire_features() | FEATURE_TYPED_ERROR_REASON).await;
+        let WireFrame::Error(error) = decode_frame_with_error_reason(&named).expect("error frame")
+        else {
+            panic!("an error frame")
+        };
+        assert_eq!(error.code, WireErrorCode::AuthFailed);
+        // A token this core does not take (it admits only its backend):
+        // `invalid`, as the message-read classification has always said.
+        assert_eq!(error.reason, Some(WireErrorReason::Invalid), "{error:?}");
+
+        let plain = refusal(current_wire_features()).await;
+        let WireFrame::Error(error) = decode_frame(&plain).expect("plain error frame") else {
+            panic!("an error frame")
+        };
+        assert_eq!(error.code, WireErrorCode::AuthFailed);
+        assert_eq!(error.reason, None);
+    }
+
     /// The app's backend's word on the account registry (its admin calls).
     #[cfg(feature = "embedded-server")]
     async fn admin_accounts(
@@ -4350,7 +4260,7 @@ mod tests {
         .await
     }
 
-    /// A local-first guest of `core`: its proof, its founding author (with the
+    /// A device account of `core`: its proof, its founding author (with the
     /// account the core assigns it) and its subject. The only public session
     /// a core admits, relayed by the backend with its secret.
     #[cfg(feature = "embedded-server")]
@@ -4360,17 +4270,17 @@ mod tests {
     ) -> (String, AuthorSubject, String) {
         let token = jazz::tools::identity::mint_jazz_self_signed_token(
             &seed,
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             &core.app_id().to_string(),
             3600,
         )
         .expect("mint guest proof");
         let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
-        let account =
-            jazz::account_registry::local_first_account_id(*core.app_id().uuid(), &subject);
-        let identity = AuthorSubject::reserved(jazz::tools::identity::LOCAL_FIRST_ISSUER, &subject)
-            .expect("local-first author")
-            .with_account(account);
+        let account = jazz::account_registry::device_account_id(*core.app_id().uuid(), &subject);
+        let identity =
+            AuthorSubject::reserved(jazz::tools::identity::DEVICE_ACCOUNT_ISSUER, &subject)
+                .expect("device-account author")
+                .with_account(account);
         (token, identity, subject)
     }
 
@@ -4468,6 +4378,7 @@ mod tests {
                 code: WireErrorCode::AuthFailed,
                 retry: WireRetry::AfterAuth,
                 message,
+                ..
             }) if message == super::super::accounts::SESSION_REVOKED
         )
     }
@@ -4623,7 +4534,7 @@ mod tests {
 
         let revoked = revoke(
             &core,
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             &alice_subject,
         )
         .await;
@@ -4666,7 +4577,7 @@ mod tests {
         core.shutdown().await;
     }
 
-    /// A browser without an app id signs its local-first proof for the
+    /// A browser without an app id signs its device-account proof for the
     /// endpoint it syncs with. Its backend verifies that audience and vouches
     /// for it with the backend secret; the core then admits the founder, with
     /// the account id namespaced by that audience. Without the backend secret
@@ -4690,19 +4601,19 @@ mod tests {
         let endpoint = "https://app.example.com/jazz";
         let token = jazz::tools::identity::mint_jazz_self_signed_token(
             &[0x5a; 32],
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             endpoint,
             3600,
         )
         .expect("mint endpoint-scoped proof");
         let verified = jazz::tools::identity::verify_jazz_self_signed_proof(&token, endpoint)
             .expect("verify endpoint-scoped proof");
-        let account = jazz::account_registry::local_first_account_id(
-            *crate::middleware::auth::local_first_founding_app(endpoint).uuid(),
+        let account = jazz::account_registry::device_account_id(
+            *crate::middleware::auth::device_account_founding_app(endpoint).uuid(),
             &verified.user_id,
         );
         let identity = AuthorSubject::reserved(verified.issuer, &verified.user_id)
-            .expect("local-first author")
+            .expect("device-account author")
             .with_account(account);
 
         async fn first_frames(core: &JazzServer, prelude: serde_json::Value) -> Vec<WireFrame> {
@@ -4850,7 +4761,7 @@ mod tests {
         registry.fail_next_write_for_test();
         let revoked = revoke(
             &core,
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
             &alice_subject,
         )
         .await;
@@ -4868,7 +4779,7 @@ mod tests {
         let lookup = super::super::accounts::resolve_assignment(
             &core.server_state(),
             jazz::account_registry::Principal {
-                issuer: jazz::tools::identity::LOCAL_FIRST_ISSUER.into(),
+                issuer: jazz::tools::identity::DEVICE_ACCOUNT_ISSUER.into(),
                 subject: alice_subject.clone(),
             },
         )
@@ -6279,7 +6190,11 @@ mod tests {
         .await
     }
 
-    async fn send_thin(ws: &mut TestWs, id: u64, op: jazz::thin::ThinOp) {
+    async fn send_thin<IO: TestWsIo>(
+        ws: &mut tokio_tungstenite::WebSocketStream<IO>,
+        id: u64,
+        op: jazz::thin::ThinOp,
+    ) {
         let frame = encode_frame(&WireFrame::ThinRequest(jazz::thin::ThinRequest { id, op }))
             .expect("encode thin request");
         // A request over one frame goes in parts, a message each.
@@ -6292,8 +6207,8 @@ mod tests {
     }
 
     /// Thin responses until `done` holds for the ones so far.
-    async fn thin_responses_until(
-        ws: &mut TestWs,
+    async fn thin_responses_until<IO: TestWsIo>(
+        ws: &mut tokio_tungstenite::WebSocketStream<IO>,
         done: impl Fn(&[jazz::thin::ThinResponse]) -> bool,
     ) -> Vec<jazz::thin::ThinResponse> {
         let mut responses = Vec::new();
@@ -6328,7 +6243,10 @@ mod tests {
         responses
     }
 
-    async fn thin_answer(ws: &mut TestWs, id: u64) -> jazz::thin::ThinBody {
+    async fn thin_answer<IO: TestWsIo>(
+        ws: &mut tokio_tungstenite::WebSocketStream<IO>,
+        id: u64,
+    ) -> jazz::thin::ThinBody {
         let responses =
             thin_responses_until(ws, |responses| responses.iter().any(|r| r.id == id)).await;
         responses
@@ -6394,7 +6312,10 @@ mod tests {
         titles
     }
 
-    async fn bind_thin_schema(ws: &mut TestWs, schema: &Schema) {
+    async fn bind_thin_schema<IO: TestWsIo>(
+        ws: &mut tokio_tungstenite::WebSocketStream<IO>,
+        schema: &Schema,
+    ) {
         send_thin(
             ws,
             0,
@@ -6469,6 +6390,159 @@ mod tests {
         assert!(
             titles_of(jazz::binding_codec::decode_rows(&rows).unwrap()).is_empty(),
             "bob must not see alice's private doc"
+        );
+    }
+
+    /// A connection's prelude, `Hello` and `frames` sent back to back,
+    /// without waiting for the server's `Hello`, as a pipelining thin client
+    /// sends them (SPEC §8.1.2).
+    async fn send_ahead_of_hello(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        prelude: Vec<u8>,
+        requests: Vec<jazz::thin::ThinRequest>,
+    ) -> TestWs {
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect websocket");
+        ws.send(WsMessage::Binary(prelude.into())).await.unwrap();
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(jazz::wire::FEATURE_THIN_RESULTS).into(),
+        ))
+        .await
+        .unwrap();
+        for request in requests {
+            let frame = encode_frame(&WireFrame::ThinRequest(request)).unwrap();
+            let batch = postcard::to_allocvec(&vec![frame]).unwrap();
+            ws.send(WsMessage::Binary(batch.into())).await.unwrap();
+        }
+        ws
+    }
+
+    fn insert_doc(id: u64, title: &str, owner: AuthorSubject) -> jazz::thin::ThinRequest {
+        jazz::thin::ThinRequest {
+            id,
+            op: jazz::thin::ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells(title, owner),
+                options: Vec::new(),
+                transaction: None,
+            },
+        }
+    }
+
+    // Pipelining (SPEC §8.1.2, §8.14): a thin client sends its schema and
+    // first requests right behind its `Hello`. The server reads none of them
+    // before it admitted the connection and said hello, then serves them in
+    // order, each against the schema declared before it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_requests_sent_before_the_servers_hello_are_served_in_order() {
+        use jazz::thin::{ThinBody, ThinOp, ThinRequest};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bundle = current_bundle(addr, &state).await;
+        let mut ws = send_ahead_of_hello(
+            addr,
+            &state,
+            ws_pinned_session_prelude(alice, &bundle),
+            vec![
+                ThinRequest {
+                    id: 0,
+                    op: ThinOp::Schema {
+                        schema: serde_json::to_vec(&schema).unwrap(),
+                    },
+                },
+                insert_doc(1, "first", alice),
+                insert_doc(2, "second", alice),
+                ThinRequest {
+                    id: 3,
+                    op: ThinOp::Query {
+                        query: docs_query(),
+                        options: remote_read(),
+                        transaction: None,
+                    },
+                },
+            ],
+        )
+        .await;
+
+        let hello = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("an answer")
+            .expect("a frame")
+            .expect("a message");
+        assert!(
+            matches!(decode_ws_message(&hello).as_slice(), [WireFrame::Hello(_)]),
+            "the server says hello before it answers anything sent ahead"
+        );
+        let responses = thin_responses_until(&mut ws, |responses| responses.len() >= 4).await;
+        assert_eq!(
+            responses
+                .iter()
+                .map(|response| response.id)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+            "answered in the order sent"
+        );
+        assert_eq!(responses[0].body, ThinBody::Ok);
+        let (ThinBody::Written { seq: first, .. }, ThinBody::Written { seq: second, .. }) =
+            (&responses[1].body, &responses[2].body)
+        else {
+            panic!("both inserts commit: {responses:?}");
+        };
+        assert!(first < second, "committed in the order sent");
+        let ThinBody::Rows { rows, .. } = &responses[3].body else {
+            panic!("the query answers rows: {:?}", responses[3]);
+        };
+        assert_eq!(
+            titles_of(jazz::binding_codec::decode_rows(rows).unwrap()),
+            vec!["first".to_owned(), "second".to_owned()],
+            "the query, sent after both inserts, sees them"
+        );
+    }
+
+    // A connection refused before its `Hello` never reads what was sent
+    // behind the client's: nothing sent ahead takes effect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_connection_takes_nothing_sent_ahead_of_the_servers_hello() {
+        use jazz::thin::{ThinOp, ThinRequest};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let schema_request = || ThinRequest {
+            id: 0,
+            op: ThinOp::Schema {
+                schema: serde_json::to_vec(&schema).unwrap(),
+            },
+        };
+        // Refused at admission: a user session not pinned to the app's
+        // bundle, and a prelude that is not JSON.
+        for prelude in [ws_session_prelude(alice), b"not json".to_vec()] {
+            let mut ws = send_ahead_of_hello(
+                addr,
+                &state,
+                prelude,
+                vec![schema_request(), insert_doc(1, "refused", alice)],
+            )
+            .await;
+            let mut frames = Vec::new();
+            while let Ok(Some(Ok(message))) =
+                tokio::time::timeout(Duration::from_secs(5), ws.next()).await
+            {
+                frames.extend(decode_ws_message(&message));
+            }
+            assert!(
+                matches!(frames.as_slice(), [WireFrame::Error(_)]),
+                "refused with one error, then closed, answering nothing sent ahead: {frames:?}"
+            );
+        }
+
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        assert!(
+            thin_titles(&mut ws, 1, None).await.is_empty(),
+            "no insert sent ahead of a refusal was written"
         );
     }
 
@@ -7033,6 +7107,428 @@ mod tests {
         }
         answered.sort();
         assert_eq!(answered, [0, 2, 3, 4], "with {room} bytes of room");
+    }
+
+    /// A thin client that stops reading while others keep writing holds no
+    /// more than its subscription's backlog limit on the server (#5607):
+    /// once its undelivered events pass the limit, they coalesce into one
+    /// reset of the current result. When it reads again it gets that
+    /// reset, holding every row, instead of one event per write.
+    ///
+    /// ```text
+    /// alice (thin, egress full) ◄─✗─ server ◄──insert×40── alice's writes
+    ///                                   │
+    ///                         backlog > 5 rows ──► one reset of all 40
+    /// ```
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_thin_subscription_coalesces_instead_of_growing() {
+        use crate::runtime::{SESSION_QUEUE_BUDGET, ServerRuntimeHandle, StorageConfig};
+        use jazz::thin::{ThinBody, ThinOp, ThinRequest};
+        let source = private_docs_public_schema();
+        let runtime = ServerRuntimeHandle::start_with_storage(
+            JazzSchema::new(&source).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap();
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let session = runtime
+            .open_thin_session(
+                alice,
+                BTreeMap::new(),
+                None,
+                CommitUnitTrust::TrustedBackend,
+            )
+            .await
+            .unwrap();
+        let mut stream = runtime.open_wire_stream(session).unwrap();
+        let mut send = |id: u64, op: ThinOp| {
+            let runtime = runtime.clone();
+            async move {
+                let room = runtime
+                    .admit_thin_request(session, 16, false)
+                    .await
+                    .unwrap();
+                runtime
+                    .receive_thin_request(session, ThinRequest { id, op }, room)
+                    .unwrap();
+                runtime.request_wire_tick(session).unwrap();
+                runtime.settle_for_test().await;
+            }
+        };
+        send(
+            0,
+            ThinOp::Schema {
+                schema: serde_json::to_vec(&source).unwrap(),
+            },
+        )
+        .await;
+        send(
+            1,
+            ThinOp::Subscribe {
+                query: docs_query(),
+                options: br#"{"tier":"local-first","backlog_rows":5}"#.to_vec(),
+            },
+        )
+        .await;
+        // Take the answers and the empty opening, then stop reading.
+        let mut opened = false;
+        while !opened {
+            for frame in stream.recv().await.expect("open").expect("frames") {
+                if let WireFrame::ThinResponse(response) = decode_frame(&frame).unwrap() {
+                    opened |= matches!(response.body, ThinBody::Event { .. });
+                }
+            }
+        }
+        runtime.hold_egress_for_test(session, SESSION_QUEUE_BUDGET);
+        for n in 0..40u64 {
+            send(
+                10 + n,
+                ThinOp::Insert {
+                    table: "docs".to_owned(),
+                    cells: doc_cells(&format!("doc {n:02}"), alice),
+                    options: Vec::new(),
+                    transaction: None,
+                },
+            )
+            .await;
+        }
+        runtime.release_egress_for_test(session, SESSION_QUEUE_BUDGET);
+
+        let (mut events, mut titles, mut answered) = (Vec::new(), Vec::new(), 0);
+        while answered < 40 || titles.len() < 40 {
+            let frames = tokio::time::timeout(std::time::Duration::from_secs(10), stream.recv())
+                .await
+                .expect("the held output drains")
+                .expect("open")
+                .expect("frames");
+            for frame in frames {
+                let WireFrame::ThinResponse(response) = decode_frame(&frame).unwrap() else {
+                    panic!("expected a thin response");
+                };
+                match response.body {
+                    ThinBody::Event { delta, reset, .. } => {
+                        let (added, _) =
+                            jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+                        if reset {
+                            titles.clear();
+                        }
+                        titles.extend(titles_of(added));
+                        events.push(reset);
+                    }
+                    ThinBody::Written { .. } => answered += 1,
+                    other => panic!("unexpected answer to {}: {other:?}", response.id),
+                }
+            }
+        }
+        titles.sort();
+        let expected: Vec<String> = (0..40).map(|n| format!("doc {n:02}")).collect();
+        assert_eq!(titles, expected, "the reader converges to every row");
+        assert_eq!(
+            events.first(),
+            Some(&true),
+            "the backlog reads as one reset first: {events:?}"
+        );
+        assert!(
+            events.len() <= 6,
+            "{} events reached the client: the backlog was not bounded",
+            events.len()
+        );
+    }
+
+    /// Opens a thin session for `alice` with its output stream.
+    async fn thin_session_for_test(
+        runtime: &crate::runtime::ServerRuntimeHandle,
+        alice: AuthorSubject,
+    ) -> (
+        crate::runtime::ServerSession,
+        crate::runtime::ServerRuntimeFrameStream,
+    ) {
+        let session = runtime
+            .open_thin_session(
+                alice,
+                BTreeMap::new(),
+                None,
+                CommitUnitTrust::TrustedBackend,
+            )
+            .await
+            .unwrap();
+        let stream = runtime.open_wire_stream(session).unwrap();
+        (session, stream)
+    }
+
+    /// The next frames or close on `stream`, within a few seconds.
+    async fn next_output(
+        stream: &mut crate::runtime::ServerRuntimeFrameStream,
+    ) -> Option<Result<usize, jazz::wire::WireError>> {
+        tokio::time::timeout(std::time::Duration::from_secs(10), stream.recv())
+            .await
+            .expect("output or a close")
+            .map(|frames| frames.map(|frames| frames.len()))
+    }
+
+    /// A runtime with `limits`, for egress tests.
+    async fn egress_runtime(
+        limits: crate::runtime::EgressLimits,
+    ) -> crate::runtime::ServerRuntimeHandle {
+        use crate::runtime::{ServerRuntimeHandle, StorageConfig};
+        let runtime = ServerRuntimeHandle::start_with_storage(
+            JazzSchema::new(&private_docs_public_schema()).unwrap(),
+            StorageConfig::InMemory,
+        )
+        .unwrap();
+        runtime.set_egress_limits_for_test(limits).await;
+        runtime
+    }
+
+    async fn tick(
+        runtime: &crate::runtime::ServerRuntimeHandle,
+        session: crate::runtime::ServerSession,
+    ) {
+        runtime.request_wire_tick(session).unwrap();
+        runtime.settle_for_test().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    /// A client that keeps reading is never a slow reader, however far its
+    /// output runs past the budget: only one that reads nothing for longer
+    /// than the timeout is closed, with a retryable `Backpressure` error.
+    ///
+    /// ```text
+    /// alice: budget + 64 KiB unread, reads 1 KiB a tick ──► stays open
+    ///        stops reading ── timeout ──────────────────► Backpressure, Later
+    /// bob:   idle ──────────────────────────────────────► stays open
+    /// ```
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_reader_that_stops_reading_is_closed_by_the_slow_reader_timeout() {
+        use crate::runtime::{EgressLimits, SESSION_QUEUE_BUDGET};
+        let runtime = egress_runtime(EgressLimits {
+            slow_reader_timeout: std::time::Duration::from_millis(300),
+            ..EgressLimits::default()
+        })
+        .await;
+        let (alice, mut alice_out) =
+            thin_session_for_test(&runtime, AuthorSubject::for_test_bytes([0xa1; 16])).await;
+        let (bob, _bob_out) =
+            thin_session_for_test(&runtime, AuthorSubject::for_test_bytes([0xb0; 16])).await;
+        runtime.hold_egress_for_test(alice, SESSION_QUEUE_BUDGET + 64 * 1024);
+        tick(&runtime, alice).await;
+        // A slow, steady reader with more to read than the budget, for
+        // well past the timeout.
+        for _ in 0..60 {
+            runtime.release_egress_for_test(alice, 1024);
+            tick(&runtime, alice).await;
+            assert!(
+                runtime.is_thin_session_for_test(alice).await,
+                "a reader that reads stays open"
+            );
+        }
+        // It stops reading: the first tick starts its clock, one past the
+        // timeout closes it.
+        tick(&runtime, alice).await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tick(&runtime, alice).await;
+        let error = next_output(&mut alice_out)
+            .await
+            .expect("a close frame")
+            .expect_err("alice is closed");
+        assert_eq!(
+            (error.code, error.retry),
+            (WireErrorCode::Backpressure, WireRetry::Later),
+            "{error:?}"
+        );
+        assert!(
+            runtime.is_thin_session_for_test(bob).await,
+            "bob stays open"
+        );
+        assert_eq!(runtime.egress_sheds().await.unwrap().slow_reader, 1);
+    }
+
+    /// A thin client WebSocket served exactly as `ws_handler` serves an
+    /// upgraded one, over a link that passes the server's bytes on at `rate`
+    /// bytes a second while `flowing` and none while not: a slow mobile link,
+    /// then one that went dead. The client's bytes pass freely. Each side's
+    /// pipe holds 64 KiB, so the server sees the link's pace, not a buffer.
+    async fn open_thin_ws_over_link(
+        state: &Arc<ServerState>,
+        identity: AuthorSubject,
+        rate: usize,
+        flowing: Arc<std::sync::atomic::AtomicBool>,
+    ) -> tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (server_io, link_server) = tokio::io::duplex(64 * 1024);
+        let (link_client, client_io) = tokio::io::duplex(64 * 1024);
+        let (mut from_server, mut to_server) = tokio::io::split(link_server);
+        let (mut from_client, mut to_client) = tokio::io::split(link_client);
+        tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut from_client, &mut to_server).await;
+        });
+        tokio::spawn(async move {
+            let tick = std::time::Duration::from_millis(20);
+            let mut buf = vec![0; rate / 50];
+            loop {
+                if flowing.load(Ordering::Acquire) {
+                    let read = match from_server.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => read,
+                    };
+                    if to_client.write_all(&buf[..read]).await.is_err() {
+                        break;
+                    }
+                }
+                tokio::time::sleep(tick).await;
+            }
+        });
+        let guard = state
+            .shutdown
+            .try_enter_websocket_within(state.max_websocket_connections)
+            .expect("a websocket slot");
+        tokio::spawn(serve_upgraded_ws(
+            server_io,
+            Arc::clone(state),
+            HeaderMap::new(),
+            guard,
+        ));
+        let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client_io,
+            tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let bundle = current_bundle(([127, 0, 0, 1], 0).into(), state).await;
+        negotiate_ws(
+            ws,
+            ws_pinned_session_prelude(identity, &bundle),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await
+    }
+
+    /// Through the real WebSocket route and writer: a client on a 50 KiB/s
+    /// link, with tens of MiB to read, keeps its session past several
+    /// slow-reader timeouts. Each row is 1 MiB, so each message takes about
+    /// 20 s on that link: what shows it reading is the raw bytes its socket
+    /// writes as the link makes room, not whole messages. Once the link goes
+    /// dead it is closed for reading slower than the minimum rate.
+    ///
+    /// ```text
+    /// writer (alice, 2nd connection) ──insert×40 (1 MiB)──► server
+    /// server ──events──► alice's socket ──50 KiB/s link──► alice
+    ///   8 s reading (timeout 3 s) ───────── stays open
+    ///   link dead ── > 3 s ──────────────── closed, slow_reader = 1
+    /// ```
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_client_on_a_slow_link_is_seen_reading_by_its_socket_writes() {
+        use crate::runtime::EgressLimits;
+        let (state, schema) = private_docs_state().await;
+        let runtime = state.runtime().expect("a runtime");
+        runtime
+            .set_egress_limits_for_test(EgressLimits {
+                slow_reader_timeout: std::time::Duration::from_secs(3),
+                ..EgressLimits::default()
+            })
+            .await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let flowing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut ws = open_thin_ws_over_link(&state, alice, 50 * 1024, Arc::clone(&flowing)).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        send_thin(
+            &mut ws,
+            1,
+            jazz::thin::ThinOp::Subscribe {
+                query: docs_query(),
+                options: br#"{"tier":"local-first"}"#.to_vec(),
+            },
+        )
+        .await;
+        // Alice reads everything that comes over her link.
+        let reader = tokio::spawn(async move { while let Some(Ok(_)) = ws.next().await {} });
+        let mut writer = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut writer, &schema).await;
+        let body = "x".repeat(1024 * 1024);
+        for n in 0..40u64 {
+            send_thin(
+                &mut writer,
+                10 + n,
+                jazz::thin::ThinOp::Insert {
+                    table: "docs".to_owned(),
+                    cells: doc_cells(&format!("{n:05}{body}"), alice),
+                    options: Vec::new(),
+                    transaction: None,
+                },
+            )
+            .await;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        assert_eq!(
+            runtime.egress_sheds().await.unwrap().slow_reader,
+            0,
+            "a client whose link moves is not closed"
+        );
+        // The link goes dead; its output waits at the budget (tens of MiB
+        // are still to go).
+        flowing.store(false, Ordering::Release);
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        assert_eq!(
+            runtime.egress_sheds().await.unwrap().slow_reader,
+            1,
+            "the client whose link went dead is closed"
+        );
+        reader.abort();
+    }
+
+    /// Over the server's egress budget, the stalled session holding the
+    /// most is closed first. Sessions that read, however much they hold,
+    /// stay open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn past_the_egress_budget_the_biggest_stalled_backlog_is_closed() {
+        use crate::runtime::{EgressLimits, SESSION_QUEUE_BUDGET};
+        let runtime = egress_runtime(EgressLimits {
+            egress_budget_bytes: SESSION_QUEUE_BUDGET + 6 * 1024 * 1024,
+            stall_grace: crate::runtime::IDLE_TICK,
+            ..EgressLimits::default()
+        })
+        .await;
+        let (alice, mut alice_out) =
+            thin_session_for_test(&runtime, AuthorSubject::for_test_bytes([0xa1; 16])).await;
+        let (bob, _bob_out) =
+            thin_session_for_test(&runtime, AuthorSubject::for_test_bytes([0xb0; 16])).await;
+        let (carol, _carol_out) =
+            thin_session_for_test(&runtime, AuthorSubject::for_test_bytes([0xc0; 16])).await;
+        // Bob reads steadily through more than alice holds. With carol,
+        // that fits the budget; alice, stalled at hers, takes it past.
+        runtime.hold_egress_for_test(bob, SESSION_QUEUE_BUDGET + 4 * 1024 * 1024);
+        runtime.hold_egress_for_test(carol, 1024 * 1024);
+        tick(&runtime, bob).await;
+        runtime.hold_egress_for_test(alice, SESSION_QUEUE_BUDGET);
+        runtime.release_egress_for_test(bob, 1024);
+        tick(&runtime, alice).await;
+        // Just stalled: within the grace a fresh result gets to be read.
+        assert!(
+            runtime.is_thin_session_for_test(alice).await,
+            "not closed before it had a chance to read"
+        );
+        // Past the grace, bob reading all along.
+        for _ in 0..24 {
+            runtime.release_egress_for_test(bob, 1024);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        runtime.release_egress_for_test(bob, 1024);
+        tick(&runtime, alice).await;
+        let error = next_output(&mut alice_out)
+            .await
+            .expect("a close frame")
+            .expect_err("alice is stalled and holds the most of the stalled");
+        assert_eq!(
+            (error.code, error.retry),
+            (WireErrorCode::Backpressure, WireRetry::Later)
+        );
+        assert!(
+            runtime.is_thin_session_for_test(bob).await,
+            "bob is reading"
+        );
+        assert!(runtime.is_thin_session_for_test(carol).await);
+        assert_eq!(runtime.egress_sheds().await.unwrap().egress_budget, 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

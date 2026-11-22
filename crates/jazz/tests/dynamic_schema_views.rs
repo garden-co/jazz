@@ -574,14 +574,22 @@ mod executing_policy_context {
             )
             .build()
     }
-    fn owner() -> Db {
-        let db = block_on(Db::open(DbConfig::new(
-            compile_schema(&schema(true)),
+    fn config(schema: jazz::schema::JazzSchema) -> DbConfig {
+        DbConfig::new(
+            schema,
             DbIdentity {
                 node: NodeUuid::from_bytes([19; 16]),
                 author: AuthorSubject::SYSTEM,
             },
-        )))
+        )
+    }
+    /// The owner on a store file, with its note.
+    fn owner_at(path: &std::path::Path) -> Db {
+        let db = block_on(Db::open_at(
+            config(compile_schema(&schema(true))),
+            path,
+            jazz::db::FileOptions::default(),
+        ))
         .unwrap();
         block_on(db.insert(
             "notes",
@@ -603,63 +611,40 @@ mod executing_policy_context {
         .unwrap()
         .len()
     }
-    fn pinned(db: &Db, allow: bool) -> Db {
-        let bundle = block_on(db.publish_bundle(&schema(allow))).unwrap();
-        db.pinned_view(db.current_schema().version_id(), Some(&bundle))
+    fn pinned(db: &Db, bundle: &jazz::catalogue::BundleId) -> Db {
+        db.pinned_view(db.current_schema().version_id(), Some(bundle))
             .unwrap()
             .unwrap()
     }
-
-    /// Alice retains a governed (not pinned) view while Bob closes the current
-    /// schema's SELECT policy. The documented current-policy view must follow it.
-    #[test]
-    fn retained_governed_view_observes_current_policy_revocation() {
-        let db = owner();
-        let version = db.current_schema().version_id();
-        let retained = db.governed_view(version).unwrap();
-        assert_eq!(
-            read(
-                &retained,
-                &retained.prepare_query(&Query::from("notes")).unwrap()
-            ),
-            1
-        );
-        block_on(db.activate_schema(compile_schema(&schema(false)))).unwrap();
-        let fresh = db.governed_view(version).unwrap();
-        assert_eq!(
-            read(&fresh, &fresh.prepare_query(&Query::from("notes")).unwrap()),
-            0
-        );
-        // Prepare after activation, isolating a retained-handle issue from stale queries.
-        assert_eq!(
-            read(
-                &retained,
-                &retained.prepare_query(&Query::from("notes")).unwrap()
-            ),
-            0,
-            "retained governed view kept revoked SELECT permission"
-        );
+    /// The owner's store reopened under `closed`: its owner policies change
+    /// only when it opens (a running store never switches schema).
+    fn revoke(db: Db, path: &std::path::Path, closed: &jazz::tools::public_schema::Schema) -> Db {
+        crate::common::reinstall(db, path, config(compile_schema(closed)), Vec::new())
     }
 
     /// Alice explicitly pins an open bundle; Bob changing the current owner policy
     /// must leave that bundle's documented permission contract intact.
     #[test]
     fn pinned_view_keeps_its_bundle_after_owner_policy_revocation() {
-        let db = owner();
-        let pinned = pinned(&db, true);
-        block_on(db.activate_schema(compile_schema(&schema(false)))).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.sqlite");
+        let db = owner_at(&path);
+        let bundle = block_on(db.publish_bundle(&schema(true))).unwrap();
+        let db = revoke(db, &path, &schema(false));
+        let pinned = pinned(&db, &bundle);
         let query = pinned.prepare_query(&Query::from("notes")).unwrap();
         assert_eq!(read(&pinned, &query), 1);
     }
 
-    /// Alice's retained governed handle cannot insert after Bob revokes INSERT;
-    /// a separately pinned open bundle keeps its explicitly selected policy.
+    /// Alice's governed handle cannot insert once the owner reopens with
+    /// INSERT revoked; a pinned open bundle keeps its selected policy.
     #[test]
-    fn retained_governed_write_uses_current_policy_but_pin_stays_fixed() {
+    fn governed_write_uses_current_policy_but_pin_stays_fixed() {
         use jazz::db::{InsertOptions, WriteIdentity};
-        let db = owner();
-        let governed = db.governed_view(db.current_schema().version_id()).unwrap();
-        let pinned = pinned(&db, true);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.sqlite");
+        let db = owner_at(&path);
+        let bundle = block_on(db.publish_bundle(&schema(true))).unwrap();
         let closed = SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("notes")
@@ -671,7 +656,9 @@ mod executing_policy_context {
                     ),
             )
             .build();
-        block_on(db.activate_schema(compile_schema(&closed))).unwrap();
+        let db = revoke(db, &path, &closed);
+        let governed = db.governed_view(db.current_schema().version_id()).unwrap();
+        let pinned = pinned(&db, &bundle);
         let opts = InsertOptions {
             identity: WriteIdentity::Session(AuthorSubject::for_test_bytes([1; 16])),
             ..Default::default()
@@ -689,14 +676,15 @@ mod executing_policy_context {
         }
     }
 
-    /// Alice reads through a retained governed handle using the ordinary binding
-    /// route after Bob revokes SELECT. Preparation must not retain old authority.
+    /// Alice reads through a governed handle using the ordinary binding
+    /// route once the owner reopens with SELECT revoked.
     #[test]
-    fn serialized_identity_read_observes_retained_view_revocation() {
-        let db = owner();
+    fn serialized_identity_read_observes_revocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.sqlite");
+        let db = revoke(owner_at(&path), &path, &schema(false));
         let retained = db.governed_view(db.current_schema().version_id()).unwrap();
         let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
-        block_on(db.activate_schema(compile_schema(&schema(false)))).unwrap();
         let result = block_on(retained.all_serialized_query(
             &query,
             ReadOpts::for_read_tier(ReadTier::LocalOnly),
@@ -712,86 +700,22 @@ mod executing_policy_context {
         );
     }
 
-    /// Alice's serialized query waits for Bob's remote coverage. Her local
-    /// governed view loses SELECT while pending, so evaluation must use the new
-    /// policy when the ordinary response finally arrives.
-    ///
-    /// Alice --Read--> Bob (not driven) ; revoke ; Bob --Rows/Settled--> Alice
+    /// Alice's explicit bundle stays fixed, and an unfiltered ordinary cache
+    /// read stays unfiltered, once the owner reopens with other policies.
+    /// These are distinct from a current-governed identity read.
     #[test]
-    fn serialized_identity_read_rechecks_policy_after_remote_wait() {
-        use std::future::Future;
-        use std::task::{Context, Poll, Waker};
-        let server = owner();
-        server.set_authority();
-        let alice = AuthorSubject::for_test_bytes([1; 16]);
-        let client = block_on(Db::open(DbConfig::new(
-            compile_schema(&schema(true)),
-            DbIdentity {
-                node: NodeUuid::from_bytes([21; 16]),
-                author: alice,
-            },
-        )))
-        .unwrap();
-        let (up, down) = jazz::db::duplex();
-        block_on(client.connect_upstream(up));
-        server.accept_subscriber(down, alice).unwrap();
-        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
-        for _ in 0..4 {
-            block_on(client.tick()).unwrap();
-            block_on(server.tick()).unwrap();
-        }
-        let retained = client
-            .governed_view(client.current_schema().version_id())
-            .unwrap();
-        let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
-        let mut read = Box::pin(retained.all_serialized_query(
-            &query,
-            ReadOpts::for_read_tier(ReadTier::Remote),
-            None,
-            Some((alice, Default::default())),
-            None,
-        ));
-        let mut cx = Context::from_waker(Waker::noop());
-        assert!(read.as_mut().poll(&mut cx).is_pending());
-        block_on(client.tick()).unwrap();
-        assert!(
-            read.as_mut().poll(&mut cx).is_pending(),
-            "read must actually wait for Bob"
-        );
-        block_on(client.activate_schema(compile_schema(&schema(false)))).unwrap();
-        for _ in 0..16 {
-            block_on(server.tick()).unwrap();
-            block_on(client.tick()).unwrap();
-            if let Poll::Ready(result) = read.as_mut().poll(&mut cx) {
-                assert_eq!(
-                    serialized_count(result.unwrap()),
-                    0,
-                    "serialized read kept policy from before remote wait"
-                );
-                return;
-            }
-        }
-        panic!("ordinary remote read did not complete");
-    }
-
-    /// Alice's explicit bundle and exact registered view stay fixed; an
-    /// unfiltered ordinary cache read stays unfiltered when Bob changes owner
-    /// policies. These are distinct from a current-governed identity read.
-    #[test]
-    fn serialized_reads_preserve_pins_exact_views_and_unfiltered_semantics() {
-        let db = owner();
-        let pinned = pinned(&db, true);
-        let exact = block_on(db.register_schema_view(compile_schema(&schema(true)))).unwrap();
+    fn serialized_reads_preserve_pins_and_unfiltered_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.sqlite");
+        let db = owner_at(&path);
+        let bundle = block_on(db.publish_bundle(&schema(true))).unwrap();
+        let db = revoke(db, &path, &schema(false));
+        let pinned = pinned(&db, &bundle);
         let governed = db.governed_view(db.current_schema().version_id()).unwrap();
         let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
-        block_on(db.activate_schema(compile_schema(&schema(false)))).unwrap();
         for (view, scope) in [
             (
                 &pinned,
-                Some((AuthorSubject::for_test_bytes([1; 16]), Default::default())),
-            ),
-            (
-                &exact,
                 Some((AuthorSubject::for_test_bytes([1; 16]), Default::default())),
             ),
             (&governed, None),

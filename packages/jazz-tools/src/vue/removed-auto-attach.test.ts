@@ -1,12 +1,10 @@
 // @vitest-environment jsdom
-import { createApp, h, nextTick, shallowRef, type Component } from "vue";
-import { describe, expect, it, vi } from "vitest";
+import { createApp, h, type Component } from "vue";
+import { describe, expect, it } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 
-const mocks = vi.hoisted(() => ({ openJazzClient: vi.fn() }));
-vi.mock("./create-jazz-client.js", () => ({ openJazzClient: mocks.openJazzClient }));
-import { JazzClientProvider, LegacyJazzProvider } from "./provider.js";
+import { JazzClientProvider } from "./provider.js";
 import { JazzProvider } from "./session.js";
 import { ownJazzSession } from "../session/jazz-session.js";
 
@@ -40,7 +38,6 @@ function mountWith(component: Component, props: () => Record<string, unknown>) {
 // mounts it with `mountInspector(db)` from `jazz-tools/inspector`.
 describe("Vue providers refuse the removed autoAttachDevTools", () => {
   const providers: [string, Component, Record<string, unknown>][] = [
-    ["JazzProvider", LegacyJazzProvider, { config: { appId: "x", driver: { type: "memory" } } }],
     ["JazzClientProvider", JazzClientProvider, { client }],
     ["JazzProvider", JazzProvider, { session }],
   ];
@@ -65,17 +62,4 @@ describe("Vue providers refuse the removed autoAttachDevTools", () => {
       app.unmount();
     });
   }
-
-  it("the config provider refuses it when it arrives on an update", async () => {
-    const extra = shallowRef<Record<string, unknown>>({});
-    const { errors, app } = mountWith(LegacyJazzProvider, () => ({
-      config: { appId: "x", driver: { type: "memory" } },
-      ...extra.value,
-    }));
-    expect(errors).toEqual([]);
-    extra.value = { autoAttachDevTools: false };
-    await nextTick();
-    expect(String(errors[0])).toMatch(/JazzProvider takes no autoAttachDevTools/);
-    app.unmount();
-  });
 });

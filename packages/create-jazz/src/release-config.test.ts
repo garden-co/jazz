@@ -8,13 +8,13 @@ import { parse as parseYaml } from "yaml";
 const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
 
 describe("release config", () => {
-  it("keeps create-jazz on the lockstep Jazz alpha release train", () => {
+  it("keeps create-jazz on the lockstep Jazz beta release train", () => {
     const config = JSON.parse(
       fs.readFileSync(path.join(repoRoot, ".changeset", "config.json"), "utf8"),
     ) as { fixed?: string[][] };
     const preState = JSON.parse(
       fs.readFileSync(path.join(repoRoot, ".changeset", "pre.json"), "utf8"),
-    ) as { initialVersions?: Record<string, string> };
+    ) as { mode?: string; tag?: string; initialVersions?: Record<string, string> };
     const createJazzPackage = JSON.parse(
       fs.readFileSync(path.join(repoRoot, "packages", "create-jazz", "package.json"), "utf8"),
     ) as { version?: string };
@@ -31,10 +31,14 @@ describe("release config", () => {
     ];
 
     expect(config.fixed).toContainEqual(jazzFixedGroup);
-    expect(createJazzPackage.version).toMatch(/^2\.0\.0-alpha\./);
+    expect(preState.mode).toBe("pre");
+    expect(preState.tag).toBe("beta");
+    // alpha until the first beta's Version Packages PR lands.
+    expect(createJazzPackage.version).toMatch(/^2\.0\.0-(alpha|beta)\.[0-9]+$/);
 
+    // The beta train was entered from 2.0.0-alpha.70.
     for (const packageName of originalJazzPackages) {
-      expect(preState.initialVersions?.[packageName]).toBe("2.0.0-alpha.6");
+      expect(preState.initialVersions?.[packageName]).toBe("2.0.0-alpha.70");
     }
     // The payload packages joined later; they share the release version, not
     // the original packages' historical prerelease baseline.
@@ -125,28 +129,27 @@ describe("release config", () => {
     }
   });
 
-  it("establishes the exact source tag before publishing any package", () => {
+  it("tags the exact source commit before publishing the GitHub release", () => {
+    // release-publish.yml publishes every registry; its finalize job pins
+    // v<version> to the published commit, refusing a tag that points
+    // elsewhere, before the draft goes public.
     const workflow = parseYaml(
-      fs.readFileSync(
-        path.join(repoRoot, ".github", "workflows", "publish-jazz-tools-alpha.yml"),
-        "utf8",
-      ),
+      fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release-publish.yml"), "utf8"),
     ) as {
       jobs: {
-        "publish-npm": {
+        finalize: {
           steps: Array<{ name?: string; run?: string }>;
         };
       };
     };
-    const steps = workflow.jobs["publish-npm"].steps;
-    const sourceTagIndex = steps.findIndex((step) => step.name === "Ensure release source tag");
-    const firstPublishIndex = steps.findIndex((step) => step.name?.startsWith("Publish "));
+    const steps = workflow.jobs.finalize.steps;
+    const tagIndex = steps.findIndex((step) => step.name?.startsWith("Tag v"));
+    const publishIndex = steps.findIndex((step) => step.name === "Publish the draft as Latest");
 
-    expect(sourceTagIndex).toBeGreaterThan(-1);
-    expect(firstPublishIndex).toBeGreaterThan(-1);
-    expect(sourceTagIndex).toBeLessThan(firstPublishIndex);
-    expect(steps[sourceTagIndex]?.run).toContain("EXISTING_TAG_TARGET");
-    expect(steps[sourceTagIndex]?.run).toContain("SOURCE_COMMIT");
-    expect(steps[sourceTagIndex]?.run).toContain('git push origin "refs/tags/${TAG}"');
+    expect(tagIndex).toBeGreaterThan(-1);
+    expect(publishIndex).toBeGreaterThan(-1);
+    expect(tagIndex).toBeLessThan(publishIndex);
+    expect(steps[tagIndex]?.run).toContain('[ "${existing}" = "${SHA}" ]');
+    expect(steps[tagIndex]?.run).toContain('git push origin "${SHA}:refs/tags/${TAG}"');
   });
 });

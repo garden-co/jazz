@@ -10,13 +10,13 @@ import { promisify } from "node:util";
 import { afterAll, expect, it, vi } from "vitest";
 
 // A real Turbopack build (`next build`) of jazz-tools' `ws` loading
-// (ws-peer.ts, verbatim) in an app that doesn't install `ws`. Turbopack
+// (node-peers.ts, verbatim) in an app that doesn't install `ws`. Turbopack
 // fails the whole build, and in `next dev` every route that imports
 // jazz-tools, on an optional import it can't resolve unless the import is
 // a literal inside `try` (#5055's E5). Inside this repo `ws` resolves from
 // jazz-tools' own devDependencies, so the app lives under the repo root's
 // `target/`, where it doesn't; bundler-safe-imports.test.ts checks that
-// ws-peer.ts is the only module that imports `ws`.
+// node-peers.ts is the only module that imports `ws`.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "../../../..");
@@ -55,7 +55,7 @@ it("builds with Turbopack where ws isn't installed, and fails only at runtime", 
   mkdirSync(dirname(route), { recursive: true });
   // As jazz-tools ships them: compiled to JS, import specifiers unchanged.
   mkdirSync(join(app, "lib"));
-  for (const file of ["ws-peer", "optional-peer"]) {
+  for (const file of ["node-peers", "optional-peer"]) {
     const source = readFileSync(join(here, `${file}.ts`), "utf8");
     const { outputText } = ts.transpileModule(source, {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
@@ -73,11 +73,14 @@ it("builds with Turbopack where ws isn't installed, and fails only at runtime", 
   writeFileSync(
     route,
     [
-      'import { importWs } from "../../lib/ws-peer.js";',
+      'import { importNodePeer } from "../../lib/node-peers.js";',
+      'import { optionalPeerImportError } from "../../lib/optional-peer.js";',
       "export const dynamic = 'force-dynamic';",
       "export async function GET() {",
       "  try {",
-      '    await importWs("this route");',
+      '    await importNodePeer("ws").catch((error) => {',
+      '      throw optionalPeerImportError("this route", "ws", error);',
+      "    });",
       '    return new Response("loaded");',
       "  } catch (error) {",
       "    return new Response(error.message, { status: 501 });",

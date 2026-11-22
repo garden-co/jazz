@@ -616,13 +616,15 @@ pub enum Predicate {
     Removed(RemovedVariant),
     /// Nullable value is null.
     IsNull(Operand),
-    /// The slot of jazz#5983's `StartsWith` (postcard tag 13), held so
-    /// that `Search` keeps tag 15 whichever lands first.
-    ReservedStartsWith(RemovedVariant),
-    /// The slot of jazz#5983's `EndsWith` (postcard tag 14).
-    ReservedEndsWith(RemovedVariant),
-    /// A specialised index search (SPEC 20.4), postcard tag 15, after the
-    /// two slots above, so every other predicate keeps its encoding. Valid only as a top-level
+    /// Text begins with text, bytewise (UTF-8, case-sensitive); NULL on
+    /// either side never matches. Tag 13, appended so earlier tags keep
+    /// their numbers; sent upstream only over a link that negotiated
+    /// `FEATURE_TEXT_AFFIX_PREDICATES`.
+    StartsWith(Operand, Operand),
+    /// Text ends with text; as [`Self::StartsWith`]. Tag 14.
+    EndsWith(Operand, Operand),
+    /// A specialised index search (SPEC 20.4), postcard tag 15, after
+    /// every beta.0 predicate, so each keeps its encoding. Valid only as a top-level
     /// filter of a query, at most once, and never in a policy, a join, an
     /// include or under `Any`/`Not`.
     Search(IndexSearch),
@@ -733,16 +735,16 @@ impl Predicate {
                 }
             }
             Self::Not(predicate) => predicate.for_each_operand_mut(f),
-            Self::Removed(removed)
-            | Self::ReservedStartsWith(removed)
-            | Self::ReservedEndsWith(removed) => match *removed {},
+            Self::Removed(removed) => match *removed {},
             Self::Eq(left, right)
             | Self::Ne(left, right)
             | Self::Gt(left, right)
             | Self::Gte(left, right)
             | Self::Lt(left, right)
             | Self::Lte(left, right)
-            | Self::Contains(left, right) => {
+            | Self::Contains(left, right)
+            | Self::StartsWith(left, right)
+            | Self::EndsWith(left, right) => {
                 f(left);
                 f(right);
             }
@@ -763,16 +765,16 @@ impl Predicate {
                 predicates.iter().any(|predicate| predicate.any_operand(f))
             }
             Self::Not(predicate) => predicate.any_operand(f),
-            Self::Removed(removed)
-            | Self::ReservedStartsWith(removed)
-            | Self::ReservedEndsWith(removed) => match *removed {},
+            Self::Removed(removed) => match *removed {},
             Self::Eq(left, right)
             | Self::Ne(left, right)
             | Self::Gt(left, right)
             | Self::Gte(left, right)
             | Self::Lt(left, right)
             | Self::Lte(left, right)
-            | Self::Contains(left, right) => f(left) || f(right),
+            | Self::Contains(left, right)
+            | Self::StartsWith(left, right)
+            | Self::EndsWith(left, right) => f(left) || f(right),
             Self::In(left, values) => f(left) || values.iter().any(f),
             Self::IsNull(operand) => f(operand),
             Self::Search(_) => false,
@@ -781,6 +783,25 @@ impl Predicate {
 }
 
 impl Query {
+    /// Whether any predicate anywhere in this query (filters, joins,
+    /// policy branches, includes, subqueries, relation) is a
+    /// `StartsWith`/`EndsWith`, which only a peer that negotiated
+    /// `FEATURE_TEXT_AFFIX_PREDICATES` decodes. Walks the query's
+    /// human-readable form so no nesting is missed; literal values are
+    /// skipped, so data never matches.
+    pub fn uses_text_affix(&self) -> bool {
+        fn walk(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+                    key == "StartsWith" || key == "EndsWith" || (key != "Literal" && walk(value))
+                }),
+                serde_json::Value::Array(items) => items.iter().any(walk),
+                _ => false,
+            }
+        }
+        serde_json::to_value(self).is_ok_and(|value| walk(&value))
+    }
+
     /// Calls `f` on each top-level predicate of the query's row conditions:
     /// its filters, join filters (including nested joins), reachable
     /// access/edge/seed filters, and the same lists in every policy branch.

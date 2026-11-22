@@ -164,9 +164,16 @@ fn cells(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
 }
 
 fn seed(server: &Db, table: &str, row: RowUuid, values: BTreeMap<String, Value>) {
-    server
-        .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        table,
+        values,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
 }
 
 fn insert(server: &Db, table: &str, row: RowUuid, values: BTreeMap<String, Value>) {
@@ -474,35 +481,105 @@ fn comments_ship_exactly_the_docs_and_members_their_read_rests_on() {
         &(&rows("comments", &[c3]) | &rows("docs", &[d3])) | &rows("members", &[m3_cy]),
         "{sent:?}"
     );
-    // What should hold now. The replica also still holds d1 and both of
-    // its members, including Ada's deleted membership: support the reader
-    // lost while offline isn't evicted on reconnect. That is so on main
-    // before #4778 too (#5097); until that is fixed, this test only asserts
-    // that the rows that should be held are.
+    // c1 left the result (its listing drops it), and the support it alone
+    // rested on goes with it (#5097): d1, Bo's membership and Ada's deleted
+    // one, none of which she may read now, are each evicted.
+    assert_eq!(
+        distinct(&sent.lost),
+        &rows("docs", &[d1]) | &rows("members", &[m1_ada, m1_bo]),
+        "the reconnect evicts what Ada lost while offline: {sent:?}"
+    );
     let resumed = expect(&[
         ("comments", &[c2, c3, c4]),
         ("docs", &[d2, d3, d4]),
         ("members", &[m2_bo, m3_cy, m4_cy, m4_ada]),
     ]);
-    for (table, expected) in &resumed {
-        let held = &ids(&now)[table];
-        assert!(
-            expected.iter().all(|row| held.contains(row)),
-            "after reconnecting, {table} holds {expected:?}: {held:?}"
+    assert_eq!(ids(&now), resumed, "after reconnecting");
+    assert_current(&server, &now);
+    // Her stale membership no longer grants her d1 locally.
+    let docs = ada.prepare_query(&Query::from("docs")).unwrap();
+    let local = block_on(ada.all(
+        &docs,
+        ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert!(
+        local.iter().all(|row| row.row_uuid() != d1),
+        "a local read of docs leaves out d1"
+    );
+}
+
+/// The other side of #5097: support the read stops holding across a
+/// reconnect, which the reader may still read, stays. While Ada is away c1
+/// is deleted, so nothing she reads rests on d1 or its members any more,
+/// but she is still d1's member and reads all three. The reconnect asks the
+/// server about them: it ships each as it is now, and evicts none.
+#[test]
+fn support_still_readable_after_a_reconnect_stays_current() {
+    let (d1, m1_ada, m1_bo) = (id(1, 1), id(2, 1), id(2, 2));
+    let c1 = id(3, 1);
+    let server = open(docs_schema(), 0, AuthorSubject::SYSTEM);
+    seed(
+        &server,
+        "docs",
+        d1,
+        cells(&[("owner", subject(BO)), ("visibility", "private".into())]),
+    );
+    for (member, who) in [(m1_ada, ADA), (m1_bo, BO)] {
+        seed(
+            &server,
+            "members",
+            member,
+            cells(&[("doc_id", uuid(d1)), ("user_id", subject(who))]),
         );
     }
-    let expected_rows = now
-        .iter()
-        .map(|(table, rows)| {
-            let rows = rows
-                .iter()
-                .filter(|(row, _)| resumed[table].contains(row))
-                .map(|(row, cells)| (*row, cells.clone()))
-                .collect();
-            (table.clone(), rows)
-        })
-        .collect();
-    assert_current(&server, &expected_rows);
+    seed(
+        &server,
+        "comments",
+        c1,
+        cells(&[("doc", uuid(d1)), ("body", "c".into())]),
+    );
+    let tables = ["comments", "docs", "members"];
+
+    let ada = open(docs_schema(), 1, user(ADA));
+    let (link, _log) = connect(&server, &ada, user(ADA));
+    let comments = ada.prepare_query(&Query::from("comments")).unwrap();
+    let _live = block_on(ada.subscribe(&comments, ReadOpts::default())).unwrap();
+    pump(&server, &ada);
+    assert_eq!(
+        ids(&held(&ada, &tables)),
+        expect(&[
+            ("comments", &[c1]),
+            ("docs", &[d1]),
+            ("members", &[m1_ada, m1_bo]),
+        ])
+    );
+
+    assert!(ada.detach_connection(&link));
+    block_on(server.delete("comments", c1, Default::default())).unwrap();
+    update(&server, "docs", d1, cells(&[("visibility", "team".into())]));
+    let (_link, log) = connect(&server, &ada, user(ADA));
+    pump(&server, &ada);
+    let sent = Sent::take(&log);
+    let now = held(&ada, &tables);
+    assert_eq!(
+        ids(&now),
+        expect(&[
+            ("comments", &[]),
+            ("docs", &[d1]),
+            ("members", &[m1_ada, m1_bo]),
+        ]),
+        "{sent:?}"
+    );
+    assert!(
+        sent.lost.iter().all(|(table, _)| table == "comments"),
+        "no support is evicted: {sent:?}"
+    );
+    // d1 changed while she was away: what she holds is its current version.
+    assert_current(&server, &now);
 }
 
 /// Each note's read rests on the note itself through three arms, at every

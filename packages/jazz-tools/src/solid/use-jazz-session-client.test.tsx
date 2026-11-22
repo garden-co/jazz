@@ -1,7 +1,7 @@
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { JazzClient } from "../web/create-jazz-client.js";
-import { JazzClientProvider, useSession } from "./provider.js";
+import type { SolidJazzClient } from "./create-solid-jazz-client.js";
+import { JazzClientProvider } from "./provider.js";
 import { useJazzSession, type UseJazzSession } from "./session.js";
 import { SessionContext } from "./session-context.js";
 
@@ -9,17 +9,21 @@ vi.mock("../runtime/db.js", () => ({}));
 vi.mock("../session/create-jazz-session.js", () => ({ openBrowserSessionCore: vi.fn() }));
 vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
 
-function makeClient(): JazzClient {
+function makeClient(): SolidJazzClient {
   return {
     db: {} as never,
     session: {
       user: "00000000-0000-4000-8000-000000000002",
       identity: { issuer: "urn:jazz:local-first", subject: "device-1" },
       claims: {},
-      authMode: "local-first",
+      authMode: "device-account",
     },
+    loading: false,
+    error: undefined,
+    state: "ready",
+    authState: null,
     shutdown: vi.fn(async () => undefined),
-  } as unknown as JazzClient;
+  };
 }
 
 describe("solid/useJazzSession under <JazzClientProvider client>", () => {
@@ -84,27 +88,9 @@ describe("solid/useJazzSession under <JazzClientProvider client>", () => {
     dispose();
   });
 
-  it("useSession() still works and warns once, naming useJazzSession", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const client = makeClient();
-    let user: string | null | undefined;
-    const dispose = render(
-      () => (
-        <JazzClientProvider client={client}>
-          {(() => {
-            user = useSession()()?.user;
-            useSession();
-            return null;
-          })()}
-        </JazzClientProvider>
-      ),
-      container,
-    );
-    expect(user).toBe("00000000-0000-4000-8000-000000000002");
-    const calls = warn.mock.calls.filter((call) => String(call[0]).includes("useSession()"));
-    expect(calls).toHaveLength(1);
-    expect(String(calls[0]![0])).toContain("useJazzSession().snapshot().user");
-    warn.mockRestore();
-    dispose();
+  it("useSession() was removed in beta.0: useJazzSession() replaces it", async () => {
+    const solid = await import("./index.js");
+    expect("useSession" in solid).toBe(false);
+    expect("useJazzSession" in solid).toBe(true);
   });
 });

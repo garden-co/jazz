@@ -156,14 +156,19 @@ async fn end_users_sign_in_and_sync_through_the_app() {
         panicky.shutdown().unwrap();
 
         alice.sign_out().unwrap();
+        // The watch reports the sign-out. A shared CI host can take more
+        // than a couple of seconds to deliver it, so allow ten.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut last = Value::Null;
-        while let Ok(state) = states.recv_timeout(Duration::from_secs(2)) {
+        while let Ok(state) =
+            states.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        {
             last = state;
             if last["status"] == "signedOut" {
                 break;
             }
         }
-        assert_eq!(last["status"], "signedOut");
+        assert_eq!(last["status"], "signedOut", "{last}");
         watch.cancel();
         assert!(alice.all(json!({ "table": "shows" }).to_string()).is_err());
         carol.shutdown().unwrap();

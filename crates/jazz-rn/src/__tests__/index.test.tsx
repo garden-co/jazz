@@ -16,6 +16,7 @@ type NativeForegroundCommand =
   | { type: "takeSlowQueryReport"; app?: string }
   | { type: "setSlowQueryThresholdMs"; ms: number }
   | { type: "deleteStore" }
+  | { type: "pendingUploadRows"; table: string }
   | {
       type: "all";
       query: Uint8Array;
@@ -83,7 +84,6 @@ function loadRelay(nativeRelay: FixtureNativeRelay | null) {
   }));
   // Each case supplies the native boundary before importing the wrapper. That
   // is the same one-time lookup Metro performs for an installed native build.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
   return require("../relay") as RelayExports;
 }
 
@@ -523,6 +523,27 @@ it("encodes the store delete and decodes its answer with the native relay's pinn
     type: "storeDeleted",
     pendingUploads: 300,
   });
+});
+
+it("encodes the pending upload rows command and decodes its answer with the native relay's pinned bytes", () => {
+  const relay = loadRelay(null);
+  // Pinned beside pending_upload_rows_has_pinned_bytes_and_names_the_foregrounds_row.
+  expect(relay.encodeNativeForegroundCommand({ type: "pendingUploadRows", table: "t" })).toEqual(
+    Uint8Array.of(41, 1, "t".charCodeAt(0)),
+  );
+  const id = new Uint8Array(16).fill(0xab);
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(32, 1, ...id))).toEqual({
+    type: "pendingUploadRows",
+    rows: [id],
+  });
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(32, 0))).toEqual({
+    type: "pendingUploadRows",
+    rows: [],
+  });
+  // A count that disagrees with the bytes after it is malformed.
+  expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(32, 2, ...id))).toThrow(
+    /malformed pending upload rows/,
+  );
 });
 
 it("decodes a core operation error with its stable code and reason name beside the unchanged reason", () => {

@@ -7,7 +7,7 @@
 use std::cell::Cell as StdCell;
 use std::collections::BTreeMap;
 
-use rusqlite::Connection;
+use crate::storage::Storage;
 use rusqlite::types::ValueRef;
 
 use super::{Candidates, Cell, Kind, Scorer};
@@ -72,7 +72,7 @@ impl Kind for Words {
 
     fn write(
         &self,
-        conn: &Connection,
+        conn: &Storage,
         prefix: &str,
         rid: i64,
         cells: Option<&[Cell]>,
@@ -99,7 +99,7 @@ impl Kind for Words {
             .map_err(storage)?;
         for (word, impact) in impacts {
             insert
-                .execute(rusqlite::params![rid, word, impact])
+                .execute(crate::storage::params![rid, word, impact])
                 .map_err(storage)?;
         }
         Ok(())
@@ -156,7 +156,7 @@ impl Kind for Near {
 
     fn write(
         &self,
-        conn: &Connection,
+        conn: &Storage,
         prefix: &str,
         rid: i64,
         cells: Option<&[Cell]>,
@@ -167,7 +167,7 @@ impl Kind for Near {
             .map_err(storage)?;
         if let Some([Cell::Bytes(bytes)]) = cells {
             conn.prepare_cached(&format!("INSERT INTO {vec} (rid, v) VALUES (?1, ?2)"))
-                .and_then(|mut s| s.execute(rusqlite::params![rid, bytes]))
+                .and_then(|mut s| s.execute(crate::storage::params![rid, bytes]))
                 .map_err(storage)?;
         }
         Ok(())

@@ -1,8 +1,8 @@
 //! The store's catalogue as rows (`_jazz_schemas`, `_jazz_lenses`,
 //! `_jazz_permissions`): what a deploy publishes reads back as it was
 //! written, a reopened store admits every version again from its own rows,
-//! a change that fails leaves nothing behind, and every permissions
-//! revision is kept.
+//! and a change that fails leaves nothing behind. A deploy never makes a
+//! schema current: the store installs it when it opens under it.
 
 use crate::common;
 
@@ -109,8 +109,8 @@ fn open_at(schema: JazzSchema, path: &std::path::Path) -> Db {
     db
 }
 
-/// Publish `v2` with its lens from `v1` and make it current with
-/// `policies` at `revision`.
+/// Publish `v2` with its lens from `v1`, and record permissions revision
+/// `revision` selecting it with `policies`.
 fn deploy(v1: &Schema, v2: &Schema, policies: TablePolicies, revision: u64) -> CatalogueChange {
     let lens = rename(v1, v2);
     let migration = compile_lens(&lens, v1, v2).unwrap();
@@ -132,8 +132,7 @@ fn deploy(v1: &Schema, v2: &Schema, policies: TablePolicies, revision: u64) -> C
             permissions: vec![(revision, SchemaHash::compute(v2), permissions, 3)],
             ..Default::default()
         },
-        admit: vec![(compile_schema(v2), vec![migration.clone()])],
-        activate: Some((revision, current, vec![migration])),
+        admit: vec![(compile_schema(v2), vec![migration])],
     }
 }
 
@@ -168,11 +167,21 @@ fn a_deploy_reads_back_as_it_was_published() {
         head.permissions,
         BTreeMap::from([(TableName::new("notes"), subject_policies())])
     );
-    assert!(head.activated_seq.is_some());
+    // Recorded, not activated: the running store keeps its schema.
+    assert_eq!(head.activated_seq, None);
+    assert_eq!(
+        db.current_schema().version_id(),
+        compile_schema(&v1).version_id()
+    );
+    drop(db);
+
+    // Opened under v2 with its policies, the store installs it.
+    let db = open_at(with_policies(&v2, subject_policies()), &path);
     assert_eq!(
         db.current_schema().public_schema()[&TableName::new("notes")].policies,
         subject_policies()
     );
+    assert_eq!(db.catalogue().unwrap().permissions.len(), 1);
 }
 
 #[test]
@@ -249,11 +258,6 @@ fn a_failed_change_leaves_the_catalogue_and_schema_as_they_were() {
         .build();
     let mut change = deploy(&v1, &v2, allow_all_policies(), 1);
     change.admit.push((compile_schema(&required), Vec::new()));
-    change.activate = Some((
-        1,
-        with_policies(&required, allow_all_policies()),
-        Vec::new(),
-    ));
     assert!(block_on(db.apply_catalogue(change)).is_err());
     assert_eq!(db.catalogue().unwrap(), before);
     assert_eq!(
@@ -266,45 +270,6 @@ fn a_failed_change_leaves_the_catalogue_and_schema_as_they_were() {
     assert_eq!(db.catalogue().unwrap(), before);
     block_on(db.apply_catalogue(deploy(&v1, &v2, allow_all_policies(), 1))).unwrap();
     assert_eq!(db.catalogue().unwrap().head().unwrap().revision, 1);
-}
-
-#[test]
-fn every_permissions_revision_is_kept() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("store.sqlite");
-    let (v1, v2) = (notes("text"), notes("body"));
-    let db = open_at(compile_schema(&v1), &path);
-    block_on(db.apply_catalogue(deploy(&v1, &v2, allow_all_policies(), 1))).unwrap();
-    let first = db.catalogue().unwrap().head().unwrap().clone();
-    // Only the write policy changes: reads take effect where they did.
-    let writes_only = TablePolicies {
-        insert: TablePolicies::default().insert,
-        ..allow_all_policies()
-    };
-    block_on(db.apply_catalogue(CatalogueChange {
-        activate: Some((2, with_policies(&v2, writes_only.clone()), Vec::new())),
-        ..CatalogueChange::default()
-    }))
-    .unwrap();
-    // Reads change too.
-    block_on(db.apply_catalogue(CatalogueChange {
-        activate: Some((3, with_policies(&v2, subject_policies()), Vec::new())),
-        ..CatalogueChange::default()
-    }))
-    .unwrap();
-    let rows = db.catalogue().unwrap();
-    let revisions: Vec<_> = rows.permissions.iter().map(|row| row.revision).collect();
-    assert_eq!(revisions, vec![1, 2, 3]);
-    assert_eq!(rows.permissions[0], first);
-    assert_eq!(rows.permissions[1].activated_seq, first.activated_seq);
-    assert_eq!(
-        rows.permissions[1].permissions,
-        BTreeMap::from([(TableName::new("notes"), writes_only)])
-    );
-    assert_eq!(
-        rows.permissions[2].permissions,
-        BTreeMap::from([(TableName::new("notes"), subject_policies())])
-    );
 }
 
 /// Publish `put` alone (no admission) and read the catalogue back.

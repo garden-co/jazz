@@ -22,6 +22,11 @@ import { assertBrowserStorageOwnerUnchanged } from "../browser-worker-config.js"
 import { waitForInspectorOpening } from "../native-runtime/inspector-control-lifecycle.js";
 import { toError } from "../util.js";
 import { holdAcrossPageCache } from "../page-cache.js";
+import {
+  browserBuildId,
+  newerBuildReloadAllowed,
+  reloadForNewerBuild,
+} from "../newer-build-reload.js";
 
 interface BrowserConnectionScope {
   readonly connection: BrowserWorkerConnection;
@@ -80,6 +85,8 @@ export class BrowserConnectionManager extends ConnectionManager {
     reopen: (connection: BrowserWorkerConnection | null) => void;
   } | null = null;
   private stopHoldingAcrossPageCache: (() => void) | null = null;
+  /** This tab yields the store to a newer build of the app (see `yieldToNewerBuild`). */
+  private olderBuildError: Error | null = null;
   private shutdownStarted = false;
   private shutdownFailure: {
     connection: BrowserWorkerConnection | null;
@@ -104,7 +111,26 @@ export class BrowserConnectionManager extends ConnectionManager {
       this.host.runtimeSource.acquireBrowserForegroundNodeLease(this.host.config));
   }
 
+  /**
+   * The Db takes no new work: it drains for a graceful shutdown, or its
+   * teardown started. Waits for readiness end early then.
+   */
+  private get dbStopping(): boolean {
+    return this.host.phase !== "open" || this.host.draining;
+  }
+
+  /**
+   * The Db's teardown started: final (see `DbPhase`). Only then does this
+   * manager stop recovering its worker connection. While the Db merely
+   * drains, the connection keeps recovering: the drain's upload needs it,
+   * and a failed drain leaves the Db open with a working connection.
+   */
+  private get dbClosing(): boolean {
+    return this.host.phase !== "open";
+  }
+
   override getClient(schema: WasmSchema): JazzClient {
+    if (this.olderBuildError) throw this.olderBuildError;
     if (this.shutdownStarted) throw new Error("Browser connection manager is shut down");
     if (this.storageResetError) throw this.storageResetError;
     if (this.storageReset) throw new Error("Browser storage reset is still in progress");
@@ -133,7 +159,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       !connection ||
       this.pageAway ||
       this.shutdownStarted ||
-      this.host.isShuttingDown ||
+      this.dbStopping ||
       this.storageReset ||
       this.recoverableConnectionFailure ||
       this.configurationAdmissionRetry ||
@@ -166,7 +192,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     const away = this.pageAway;
     if (!away) return;
     this.pageAway = null;
-    if (this.shutdownStarted || this.host.isShuttingDown || !this.browserConnectionInput) {
+    if (this.shutdownStarted || this.dbClosing || !this.browserConnectionInput) {
       away.reopen(null);
       return;
     }
@@ -215,6 +241,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       onFailure: (error) => this.observeConnectionFailure(connection, toError(error)),
       onStorageReset: (resetId) => this.beginStorageReset(scope, resetId),
       onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
+      onNewerBuild: () => this.yieldToNewerBuild(connection),
     });
     scope = {
       connection,
@@ -290,6 +317,10 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.recoverableConnectionFailure = true;
     this.rejectReconnectWaiters(error);
     this.notifyWorkerRemoteLink();
+    // A newer build has the store: this tab reloads to run it too (unless it
+    // already reloaded away from this build in its session and loaded it
+    // again: then it waits, as below, on every later refusal too).
+    if (connection.isOlderThanStore?.()) this.yieldToNewerBuild(connection);
     const refused = this.admissionRefused(connection);
     // A refusal for another reason (an older deploy's schema) means the other
     // tab no longer holds the store: report that refusal. A retry that hit an
@@ -320,7 +351,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.heldPatienceTimer !== null || this.heldTooLong) return;
     this.heldPatienceTimer = setTimeout(() => {
       this.heldPatienceTimer = null;
-      if (this.shutdownStarted || this.host.isShuttingDown) return;
+      if (this.shutdownStarted || this.dbClosing) return;
       // Still waiting: the other tab is frozen in the background, or never
       // follows (another build). Say so, and fail what waits, so the app can
       // ask the user to close it; the retries go on.
@@ -340,18 +371,61 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   /**
    * The worker refused this tab because another tab holds this account's
-   * store under another sign-in: a guest who just signed up here, while
-   * another tab is still the guest. That tab follows the sign-up, or closes
-   * (the worker watches each tab's page lock), so this tab tries again on
-   * its own, meanwhile connecting rather than stopped: its writes wait for
-   * the worker in this tab, and its queries and waits go on once it joins.
-   * Past `HELD_BY_ANOTHER_TAB_PATIENCE_MS` it reports `held-by-another-tab`
-   * and fails those waits with a `StoreHeldByAnotherTabError`, still trying
-   * in the background. Any other refused configuration (an older deploy's
-   * schema) still fails visibly.
+   * store:
+   * - under another sign-in: a guest who just signed up here, while another
+   *   tab is still the guest. That tab follows the sign-up, or closes.
+   * - with another build's schema: another tab still runs the build this
+   *   one replaced (or the one that replaced it). That tab reloads, or
+   *   closes.
+   * The worker watches each tab's page lock, so this tab tries again on its
+   * own, meanwhile connecting rather than stopped: its writes wait for the
+   * worker in this tab, and its queries and waits go on once it joins. Past
+   * `HELD_BY_ANOTHER_TAB_PATIENCE_MS` it reports `held-by-another-tab` and
+   * fails those waits with a `StoreHeldByAnotherTabError`, still trying in
+   * the background. Any other refused configuration (another worker asset,
+   * protocol or storage format) still fails visibly.
    */
   private admissionRefused(connection: BrowserWorkerConnection | null): boolean {
-    return !!connection?.waitsForAnotherSignIn?.();
+    return !!connection?.waitsForAnotherTab?.();
+  }
+
+  /**
+   * A newer build of the app wants the store (the worker said so), or has it
+   * open (it refused this tab as older): this tab stops taking writes (they
+   * fail with `olderBuildError` until it reloads), makes those it took
+   * durable, closes its connection so the worker can hand the store over,
+   * then reloads, through the app's `onNewerBuild` if it has one. A tab
+   * that already reloaded away from this very build in its session, and
+   * loaded it again (a CDN still serving it, or a rollback to it), doesn't:
+   * it waits, as for a build it can't order, for the rest of the session.
+   */
+  private yieldToNewerBuild(connection: BrowserWorkerConnection): void {
+    if (this.olderBuildError || this.shutdownStarted || this.dbStopping) return;
+    const input = this.browserConnectionInput;
+    if (this.connection !== connection || !input) return;
+    const buildId = browserBuildId(input.schema);
+    if (!newerBuildReloadAllowed(buildId)) return;
+    this.olderBuildError = new Error(
+      "This tab runs an older build of this app than another tab, which has its local store now: reload this tab",
+    );
+    // A transaction opened before commits through its client, not the Db.
+    this.getCurrentClient()?.refuseWrites?.(this.olderBuildError);
+    this.wakeReplacementWaiters();
+    void (async () => {
+      // Writes already taken reach the store before the worker hands it over.
+      await connection.flushLocal().catch(() => undefined);
+      await connection.shutdown().catch(() => undefined);
+    })().then(() => reloadForNewerBuild(buildId));
+  }
+
+  /** The error that waits fail with past the patience, saying which other tab to reload. */
+  private heldByAnotherTabError(connection: BrowserWorkerConnection, cause: unknown): Error {
+    return connection.waitsForAnotherTab?.() === "build"
+      ? new StoreHeldByAnotherTabError(
+          "Another tab runs another build of this app (another schema) and holds this account's local store: reload the tab that runs the older build, which may be this one (reloading picks up the newest build), or close it. This tab joins once the other lets go; reloading this tab loses its unsynced writes",
+          { cause },
+        )
+      : new StoreHeldByAnotherTabError(undefined, { cause });
   }
 
   /** Resolves once `failed` is no longer this tab's connection, it shuts down, or `signal` aborts. */
@@ -360,9 +434,10 @@ export class BrowserConnectionManager extends ConnectionManager {
       const check = () => {
         if (
           this.connection === failed &&
+          !this.olderBuildError &&
           !this.heldTooLong &&
           !this.shutdownStarted &&
-          !this.host.isShuttingDown &&
+          !this.dbStopping &&
           !signal?.aborted
         )
           return;
@@ -384,7 +459,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (
       this.workerRecoveryTimer !== null ||
       this.shutdownStarted ||
-      this.host.isShuttingDown ||
+      this.dbClosing ||
       this.storageReset ||
       // A tab the inspector attached recovers only on an explicit call, but
       // waiting for another tab's sign-in is no failure of its own.
@@ -399,7 +474,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         if (
           this.connection !== failed ||
           this.shutdownStarted ||
-          this.host.isShuttingDown ||
+          this.dbClosing ||
           this.storageReset
         )
           return;
@@ -428,7 +503,8 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   async ensureReady(requirement: ConnectionRequirement, signal?: AbortSignal): Promise<void> {
-    if (this.host.isShuttingDown || signal?.aborted) return;
+    if (this.olderBuildError) throw this.olderBuildError;
+    if (this.dbStopping || signal?.aborted) return;
     const reset = this.storageReset;
     // Capture before yielding: callers already waiting on a rejected attempt
     // must see that rejection, even if a later API call starts a replacement.
@@ -436,7 +512,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     const retry = connection !== null && this.observedConfigurationAdmissionFailure === connection;
     await reset;
     if (this.storageResetError) throw this.storageResetError;
-    if (this.host.isShuttingDown || signal?.aborted) return;
+    if (this.dbStopping || signal?.aborted) return;
     // Between a retry's shutdown of the refused connection and its
     // replacement there is none: wait for the replacement.
     connection ??=
@@ -444,7 +520,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       (await this.pageAway?.reopened) ??
       (await this.configurationAdmissionRetry);
     if (retry && connection) connection = await this.retryConfigurationAdmission(connection);
-    if (this.host.isShuttingDown || signal?.aborted) return;
+    if (this.dbStopping || signal?.aborted) return;
     for (;;) {
       try {
         await (connection ? this.readinessByConnection.get(connection) : this.connectionReady);
@@ -453,9 +529,11 @@ export class BrowserConnectionManager extends ConnectionManager {
         // A refused tab tries again by itself (see `admissionRefused`): wait
         // for the attempt that joins, as for a reconnect.
         if (connection && this.admissionRefused(connection) && !signal?.aborted) {
-          if (this.heldTooLong) throw new StoreHeldByAnotherTabError(undefined, { cause: error });
+          if (this.heldTooLong) throw this.heldByAnotherTabError(connection, error);
           await this.replacementOf(connection, signal);
-          if (this.host.isShuttingDown || this.shutdownStarted || signal?.aborted) return;
+          // This tab yielded to a newer build meanwhile: it reloads.
+          if (this.olderBuildError) throw this.olderBuildError;
+          if (this.dbStopping || this.shutdownStarted || signal?.aborted) return;
           connection = this.connection ?? (await this.configurationAdmissionRetry);
           continue;
         }
@@ -469,16 +547,16 @@ export class BrowserConnectionManager extends ConnectionManager {
       }
     }
     await this.connectionReady;
-    if (this.host.isShuttingDown) return;
+    if (this.dbStopping) return;
     if (this.connectionError) throw this.connectionError;
     if (requirement !== "runtime") {
       for (;;) {
         while (this.disconnected) {
           await this.waitForReconnect(signal);
-          if (this.host.isShuttingDown || signal?.aborted) return;
+          if (this.dbStopping || signal?.aborted) return;
         }
         await this.transportTransition;
-        if (!this.disconnected || this.host.isShuttingDown || signal?.aborted) break;
+        if (!this.disconnected || this.dbStopping || signal?.aborted) break;
       }
     }
     if (this.host.config.serverUrl && requirement === "server") {
@@ -493,7 +571,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (failed !== this.connection) return Promise.resolve(this.connection);
     const retry = (async () => {
       await failed.shutdown();
-      if (this.host.isShuttingDown || failed !== this.connection) return null;
+      if (this.dbClosing || failed !== this.connection) return null;
       this.connection = null;
       this.connectionReady = null;
       this.connectionError = null;

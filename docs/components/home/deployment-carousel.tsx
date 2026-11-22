@@ -22,7 +22,7 @@ const scenarios: DeploymentScenario[] = ["vercel", "cloudflare", "aws", "server"
 const INTERVAL_MS = 4500;
 const shortNames: Record<DeploymentScenario, string> = {
   vercel: "Vercel",
-  cloudflare: "Cloudflare (soon)",
+  cloudflare: "Cloudflare",
   aws: "AWS",
   server: "Server",
 };

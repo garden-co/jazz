@@ -264,7 +264,8 @@ fn seed(path: &Path, schema: &Schema, workspace_pages: usize) {
     let mut own = 0;
     let mut big = 0;
     for start in (0..total).step_by(500) {
-        block_on(db.transaction(async |tx| {
+        block_on(async {
+            let tx = db.mergeable_tx().await?;
             for n in start..(start + 500).min(total) {
                 let (band, ordinal, owner) = if n % stride == 0 && own < OWN_PAGES {
                     own += 1;
@@ -299,8 +300,8 @@ fn seed(path: &Path, schema: &Schema, workspace_pages: usize) {
                 )
                 .await?;
             }
-            Ok(())
-        }))
+            tx.commit().await
+        })
         .expect("seed pages");
     }
     assert_eq!((own, big), (OWN_PAGES, workspace_pages));

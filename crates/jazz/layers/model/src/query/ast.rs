@@ -333,6 +333,41 @@ pub enum RelationPredicate {
     Not(Box<RelationPredicate>),
     True,
     False,
+    /// The text `left` begins with the text `right`, compared bytewise
+    /// (UTF-8, case-sensitive). NULL on either side never matches. Appended
+    /// after `False` so every earlier variant keeps its Postcard tag; sent
+    /// upstream only over a link that negotiated
+    /// `FEATURE_TEXT_AFFIX_PREDICATES`.
+    StartsWith {
+        left: RelationColumnRef,
+        right: RelationValueRef,
+    },
+    /// The text `left` ends with the text `right`; as [`Self::StartsWith`].
+    EndsWith {
+        left: RelationColumnRef,
+        right: RelationValueRef,
+    },
+}
+
+impl RelationPredicate {
+    /// Whether this predicate, or any predicate nested in it, is a
+    /// `StartsWith`/`EndsWith`, which only peers that negotiated
+    /// `FEATURE_TEXT_AFFIX_PREDICATES` can decode.
+    pub fn uses_text_affix(&self) -> bool {
+        match self {
+            Self::StartsWith { .. } | Self::EndsWith { .. } => true,
+            Self::And(parts) | Self::Or(parts) => parts.iter().any(Self::uses_text_affix),
+            Self::Not(part) => part.uses_text_affix(),
+            Self::Cmp { .. }
+            | Self::IsNull { .. }
+            | Self::IsNotNull { .. }
+            | Self::In { .. }
+            | Self::Contains { .. }
+            | Self::True
+            | Self::False => false,
+            Self::Removed(removed) => match *removed {},
+        }
+    }
 }
 
 #[allow(missing_docs)]
