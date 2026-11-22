@@ -905,7 +905,13 @@ impl crate::Jazz {
     /// The end user's session, for a client opened with
     /// [`crate::Config::user`]: who is signed in, and whether their
     /// credential still holds.
+    ///
+    /// `None` on a handle acting for a user ([`crate::Jazz::for_user`]): the
+    /// session is the backend client's it came from, shared by every user.
     pub fn session(&self) -> Option<&Session> {
+        if self.for_user {
+            return None;
+        }
         self.info.session.as_ref()
     }
 
@@ -923,7 +929,11 @@ impl crate::Jazz {
     /// client stops ([`crate::Jazz::shutdown`]). Their local store stays
     /// (in [`crate::Storage::Dir`]) for when they sign in again; a device
     /// account's key is the app's to keep or forget.
+    ///
+    /// Refused with [`Error::Unsupported`] on a handle acting for a user
+    /// ([`crate::Jazz::for_user`]): the session is every user's.
     pub async fn sign_out(&self) -> Result<()> {
+        self.refuse_for_user("sign_out")?;
         let session = self.session().ok_or_else(|| {
             Error::Config("only an end user's client signs out (Config::user)".into())
         })?;
