@@ -361,6 +361,15 @@ impl Jazz {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Whether an end user's client still runs: it didn't sign out, and
+    /// wasn't stopped.
+    pub(crate) fn is_live(&self) -> bool {
+        !self.commands.is_closed()
+            && !self.session().is_some_and(|session| {
+                matches!(session.state(), crate::session::SessionState::SignedOut)
+            })
+    }
+
     /// Sends `job` to the client's thread without waiting for it: for
     /// cleanups that must run even when nobody awaits them (from `Drop`).
     pub(crate) fn fire<F, Fut>(&self, job: F)

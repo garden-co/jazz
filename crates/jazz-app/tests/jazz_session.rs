@@ -645,3 +645,169 @@ async fn retry_after_a_link_whose_reopen_failed_signs_the_user_in() {
     session.close().await.unwrap();
     app.stop().await;
 }
+
+/// The session's snapshot once `done` holds.
+async fn snapshot_until(
+    session: &JazzSession,
+    done: impl Fn(&jazz_app_support::SessionSnapshot) -> bool,
+) -> jazz_app_support::SessionSnapshot {
+    let mut changes = session.changes();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(snapshot) = changes.next().await {
+            if done(&snapshot) {
+                return snapshot;
+            }
+        }
+        panic!("the session's changes ended");
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the session stays {:?}", session.snapshot()))
+}
+
+async fn connected(jazz: &Jazz) {
+    let mut changes = jazz.sync_changes();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(status) = changes.next().await {
+            if status.link == jazz_app_support::Link::Connected {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the client connects");
+}
+
+/// An ordinary logout in the app's own auth: the client finds no one at a
+/// renewal or refresh and ends by itself. The session follows it.
+async fn follows_a_client_that_ended(by_refresh: bool) {
+    let app = App::start().await;
+    let token = bearer(Some("token-alice"));
+    let session = JazzSession::open(client_files(), app.session(&token))
+        .await
+        .unwrap();
+    let before = session.snapshot();
+    let old = session.jazz().unwrap();
+    connected(&old).await;
+
+    *token.lock().unwrap() = None;
+    if by_refresh {
+        old.session().unwrap().refresh().await.unwrap();
+    } else {
+        app.relay.refuse("token-alice", "token expired");
+        app.relay.kick();
+    }
+    let out = snapshot_until(&session, |s| s.status == SessionStatus::SignedOut).await;
+    assert!(out.client_epoch > before.client_epoch, "{out:?}");
+    assert_eq!(out.user, None);
+    assert!(matches!(session.jazz(), Err(Error::NoUser { .. })));
+    let read = old.all(todos::query()).await;
+    assert!(matches!(read, Err(Error::Replaced)), "{read:?}");
+
+    // The same user again: a client that works, and stays.
+    *token.lock().unwrap() = Some("token-alice.2".to_owned());
+    session.refresh().await.unwrap();
+    let back = session.snapshot();
+    assert_eq!(back.status, SessionStatus::Ready);
+    assert_eq!(
+        back.user.as_ref().map(|user| user.subject.as_str()),
+        Some("alice")
+    );
+    session.jazz().unwrap().all(todos::query()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(session.snapshot().client_epoch, back.client_epoch);
+    assert_eq!(session.snapshot().status, SessionStatus::Ready);
+
+    session.close().await.unwrap();
+    assert_eq!(session.snapshot().status, SessionStatus::Closed);
+    app.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_follows_its_client_signed_out_at_a_renewal() {
+    follows_a_client_that_ended(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_follows_its_client_signed_out_at_a_refresh() {
+    follows_a_client_that_ended(true).await;
+}
+
+/// The client ends while the session is already following the same user:
+/// following doesn't keep the dead client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn following_the_same_user_needs_a_client_that_lives() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let app = App::start().await;
+    let token = bearer(Some("token-alice"));
+    let hold = Arc::new(AtomicBool::new(false));
+    let (asked, answer) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let provider = {
+        let (token, hold) = (token.clone(), hold.clone());
+        let (asked, answer) = (asked.clone(), answer.clone());
+        move |_: TokenReason| {
+            let held = hold.swap(false, Ordering::SeqCst);
+            let token = token.lock().unwrap().clone();
+            let (asked, answer) = (asked.clone(), answer.clone());
+            async move {
+                if held {
+                    asked.notify_one();
+                    answer.notified().await;
+                    return Ok(Some("token-alice.2".to_owned()));
+                }
+                Ok(token)
+            }
+        }
+    };
+    let config = SessionConfig::new(app.app_id)
+        .server(&app.relay.endpoint)
+        .bearer(provider);
+    let session = JazzSession::open(client_files(), config).await.unwrap();
+    let old = session.jazz().unwrap();
+    let epoch = session.snapshot().client_epoch;
+
+    hold.store(true, Ordering::SeqCst);
+    let following = tokio::spawn({
+        let session = session.clone();
+        async move { session.refresh().await }
+    });
+    asked.notified().await;
+    *token.lock().unwrap() = None;
+    old.session().unwrap().refresh().await.unwrap();
+    *token.lock().unwrap() = Some("token-alice.2".to_owned());
+    answer.notify_one();
+    following.await.unwrap().unwrap();
+
+    let back = session.snapshot();
+    assert_eq!(back.status, SessionStatus::Ready);
+    assert!(back.client_epoch > epoch, "kept the dead client: {back:?}");
+    session.jazz().unwrap().all(todos::query()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(session.snapshot(), back, "the old client's end changed it");
+
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
+/// A guest's client that stops signs the session out, as signing out does:
+/// the key is kept to reopen, and no account is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_guests_key_outlives_its_client() {
+    let app = App::start().await;
+    let token = bearer(None);
+    let config = app.session(&token).initial(Initial::Device);
+    let session = JazzSession::open(client_files(), config).await.unwrap();
+    let guest = session.snapshot().user.unwrap().account;
+    let key = session.export_device_key().unwrap();
+
+    session.jazz().unwrap().shutdown().await.unwrap();
+    snapshot_until(&session, |s| s.status == SessionStatus::SignedOut).await;
+    assert_eq!(session.export_device_key().unwrap(), key);
+    session.reopen_device_account().await.unwrap();
+    assert_eq!(session.snapshot().user.unwrap().account, guest);
+
+    session.close().await.unwrap();
+    app.stop().await;
+}
