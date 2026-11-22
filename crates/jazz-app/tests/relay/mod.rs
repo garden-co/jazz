@@ -75,7 +75,8 @@ impl Relay {
     }
 
     /// Makes the backend unreachable (`true`: open connections drop, new
-    /// ones are closed at once) or reachable again.
+    /// ones are closed at once) or reachable again. Nothing a client sends
+    /// after this returns reaches the core while it is unreachable.
     pub fn set_unreachable(&self, unreachable: bool) {
         self.unreachable
             .store(unreachable, std::sync::atomic::Ordering::SeqCst);
@@ -128,13 +129,21 @@ pub async fn start(
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
+            // Checked and registered under `kick`'s lock: a connection is
+            // either there to be dropped, or sees the backend unreachable.
+            let mut open = open.lock().unwrap();
             if down.load(std::sync::atomic::Ordering::SeqCst) {
                 drop(stream);
                 continue;
             }
-            let connection =
-                tokio::spawn(serve(stream, backend.clone(), log.clone(), refused.clone()));
-            open.lock().unwrap().push(connection.abort_handle());
+            let connection = tokio::spawn(serve(
+                stream,
+                backend.clone(),
+                log.clone(),
+                refused.clone(),
+                down.clone(),
+            ));
+            open.push(connection.abort_handle());
         }
     });
     Relay {
@@ -190,6 +199,7 @@ async fn serve(
     backend: Backend,
     admitted: Arc<Mutex<Vec<String>>>,
     refusing: Arc<Mutex<HashMap<String, String>>>,
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut head = vec![0; 8192];
     let n = loop {
@@ -204,7 +214,7 @@ async fn serve(
     };
     let text = String::from_utf8_lossy(&head[..n]).to_string();
     if text.to_ascii_lowercase().contains("upgrade: websocket") {
-        relay_socket(stream, backend, admitted, refusing).await;
+        relay_socket(stream, backend, admitted, refusing, unreachable).await;
     } else {
         http(stream, &text, backend).await;
     }
@@ -455,6 +465,7 @@ async fn relay_socket(
     backend: Backend,
     admitted: Arc<Mutex<Vec<String>>>,
     refusing: Arc<Mutex<HashMap<String, String>>>,
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let authorization = Arc::new(Mutex::new(None::<String>));
     let seen = authorization.clone();
@@ -513,6 +524,11 @@ async fn relay_socket(
     let (mut to_core, mut from_core) = core.split();
     let up = async {
         while let Some(Ok(message)) = from_client.next().await {
+            // An aborted task runs on until it next waits: it passes
+            // nothing on meanwhile.
+            if unreachable.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             if to_core.send(message).await.is_err() {
                 break;
             }
