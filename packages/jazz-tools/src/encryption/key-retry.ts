@@ -12,6 +12,8 @@ export const KEY_WAIT_MS = 10_000;
 
 const PENDING = /(?:key-pending|space-pending): space ([0-9a-f-]+)\/([0-9a-f-]+)/;
 
+type Space = { scopeId: string; identifier: string };
+
 /** The space a `key-pending` or `space-pending` failure names. */
 export function pendingSpace(error: unknown): { scopeId: string; identifier: string } | undefined {
   const message = error instanceof Error ? error.message : undefined;
@@ -26,32 +28,48 @@ export function pendingSpace(error: unknown): { scopeId: string; identifier: str
  */
 export function retryAfterKey<T>(
   operation: () => T,
-  prepare: (space: { scopeId: string; identifier: string }) => Promise<boolean>,
+  prepare: (space: Space, deadline?: number) => Promise<boolean>,
   waitMs = KEY_WAIT_MS,
+  retryWithCurrentKey?: (space: Space, failure: string) => Promise<boolean>,
 ): T | Promise<T> {
   try {
     return operation();
   } catch (first) {
-    const space = pendingSpace(first);
-    if (!space) throw first;
+    const initialSpace = pendingSpace(first);
+    if (!initialSpace) throw first;
     return (async () => {
+      let space = initialSpace;
       const deadline = Date.now() + waitMs;
       let error: unknown = first;
       do {
         // Making the space ready is bounded by the same window.
         const left = Math.max(0, deadline - Date.now());
-        const ready = await prepareWithin(prepare(space), left);
+        let ready: boolean;
+        try {
+          ready = await prepareWithin(
+            retryWithCurrentKey ? prepare(space, deadline) : prepare(space),
+            left,
+          );
+        } catch (failure) {
+          if (await retryWithCurrentKey?.(space, String(failure))) return operation();
+          throw failure;
+        }
         if (ready) {
           try {
             return operation();
           } catch (next) {
-            if (!pendingSpace(next)) throw next;
+            const nextSpace = pendingSpace(next);
+            if (!nextSpace) throw next;
+            space = nextSpace;
             error = next;
           }
         }
         const delay = Math.min(200, deadline - Date.now());
         if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       } while (Date.now() < deadline);
+      if (await retryWithCurrentKey?.(space, "rotation undecided at the write deadline")) {
+        return operation();
+      }
       throw error;
     })();
   }

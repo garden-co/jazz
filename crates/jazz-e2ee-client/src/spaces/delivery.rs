@@ -299,7 +299,17 @@ impl E2eeClient {
     /// runs; an explicit call always attempts. How many deliveries were
     /// written, or zero if the space has no key yet. Needs the authority.
     pub async fn rotate(&self, db: &Db, space: &SpaceAddress) -> Result<usize, ClientError> {
-        self.rotate_with(db, space, Rotation::Ordinary).await
+        self.rotate_before(db, space, None).await
+    }
+
+    pub(super) async fn rotate_before(
+        &self,
+        db: &Db,
+        space: &SpaceAddress,
+        deadline: Option<web_time::Instant>,
+    ) -> Result<usize, ClientError> {
+        self.rotate_with(db, space, Rotation::Ordinary, deadline)
+            .await
     }
 
     /// The recovery rotation (protocol §3.5): a successor whose history
@@ -311,7 +321,7 @@ impl E2eeClient {
         db: &Db,
         space: &SpaceAddress,
     ) -> Result<usize, ClientError> {
-        self.rotate_with(db, space, Rotation::Recovery).await
+        self.rotate_with(db, space, Rotation::Recovery, None).await
     }
 
     async fn rotate_with(
@@ -319,6 +329,7 @@ impl E2eeClient {
         db: &Db,
         space: &SpaceAddress,
         kind: Rotation,
+        deadline: Option<web_time::Instant>,
     ) -> Result<usize, ClientError> {
         self.ensure_open()?;
         let address = protocol_address(space)?;
@@ -326,7 +337,7 @@ impl E2eeClient {
             return Err(offline());
         }
         let rotated = crate::account::serializable(db, ATTEMPTS, async |tx| {
-            self.rotate_step(db, tx, &address, kind).await
+            self.rotate_step(db, tx, &address, kind, deadline).await
         })
         .await;
         let (first, rest) = match rotated {
@@ -370,6 +381,7 @@ impl E2eeClient {
         tx: OpenTransactionId,
         address: &ProtocolAddress,
         kind: Rotation,
+        deadline: Option<web_time::Instant>,
     ) -> Result<Option<(usize, Vec<String>)>, ClientError> {
         let read = self.read_space_of(db, tx, address, true).await?;
         let Replayed {
@@ -436,6 +448,9 @@ impl E2eeClient {
         self.stage(db, tx, &records.successor).await?;
         for delivery in &records.deliveries {
             self.stage(db, tx, delivery).await?;
+        }
+        if deadline.is_some_and(|end| web_time::Instant::now() >= end) {
+            return Ok(None);
         }
         self.publish(db, tx).await?;
         Ok(Some((records.deliveries.len(), recipients.rest)))

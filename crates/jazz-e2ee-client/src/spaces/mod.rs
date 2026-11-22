@@ -764,7 +764,7 @@ impl E2eeClient {
             let Some(E2eeRefusal::NeedsKey { space }) = E2eeRefusal::of(&error) else {
                 return Err(error.into());
             };
-            if round + 1 == ATTEMPTS || !self.make_ready(db, &space, Some(call.id)).await? {
+            if round + 1 == ATTEMPTS || !self.make_ready(db, &space, Some(call.id), None).await? {
                 return Err(error.into());
             }
         }
@@ -781,10 +781,70 @@ impl E2eeClient {
     /// this prepared seals under whatever version that left; the write after
     /// it gets its own rotation, as each call of `write` does.
     pub async fn prepare_space(&self, db: &Db, space: &SpaceAddress) -> Result<bool, ClientError> {
+        self.prepare_host_write(db, space, None).await
+    }
+
+    /// Keep rotation marks private while preparing. Grant the host its
+    /// retry only if it is still waiting when preparation finishes.
+    pub async fn prepare_host_write(
+        &self,
+        db: &Db,
+        space: &SpaceAddress,
+        deadline: Option<web_time::Instant>,
+    ) -> Result<bool, ClientError> {
         self.ensure_open()?;
+        let expired = || deadline.is_some_and(|end| web_time::Instant::now() >= end);
+        if expired() {
+            return Ok(false);
+        }
+        let call = WrappedWrite::enter(&self.shared);
         self.reconcile_once(db).await?;
         self.begin_attempt(db).await?;
-        self.make_ready(db, space, None).await
+        if !self.make_ready(db, space, Some(call.id), deadline).await? || expired() {
+            return Ok(false);
+        }
+        let address = protocol_address(space)?;
+        let mut keys = self.shared.keys.borrow_mut();
+        if keys
+            .rotation_tried
+            .remove(&(Some(call.id), address.clone()))
+        {
+            keys.rotation_tried.insert((None, address));
+        }
+        Ok(true)
+    }
+
+    /// Grant a host's next retry the current key if a rotation still needs
+    /// attention. The normal seal checks the key again and consumes the mark.
+    pub fn retry_with_current_key(
+        &self,
+        space: &SpaceAddress,
+        failure: &str,
+    ) -> Result<bool, ClientError> {
+        self.ensure_open()?;
+        let address = protocol_address(space)?;
+        let mut keys = self.shared.keys.borrow_mut();
+        let pending = keys.rotation_pending.contains(&address)
+            || keys.needs_evaluation(&address)
+            || !self.shared.member_removals.borrow().is_empty();
+        if !pending
+            || crate::hooks::write_key(
+                &keys,
+                &self.shared.creations.borrow().dropped,
+                &address,
+                keys.creation_refused.contains(&address),
+            )
+            .is_err()
+        {
+            return Ok(false);
+        }
+        keys.rotation_tried.insert((None, address));
+        drop(keys);
+        self.shared.flush(vec![Report::RotationFailed {
+            space: space.clone(),
+            reason: failure.to_owned(),
+        }]);
+        Ok(true)
     }
 
     /// What each attempt of a write starts with, wrapped or not: the
@@ -822,6 +882,7 @@ impl E2eeClient {
         db: &Db,
         space: &SpaceAddress,
         call: Option<u64>,
+        deadline: Option<web_time::Instant>,
     ) -> Result<bool, ClientError> {
         let address = protocol_address(space)?;
         let online = self.shared.keys.borrow().online;
@@ -879,7 +940,10 @@ impl E2eeClient {
             // that failed for another reason leaves it for the next write.
             // Either way the app is told why: the write goes on under the
             // current version.
-            if online && let Err(error) = self.rotate(db, space).await {
+            if online
+                && deadline.is_none_or(|end| web_time::Instant::now() < end)
+                && let Err(error) = self.rotate_before(db, space, deadline).await
+            {
                 self.shared.flush(vec![Report::RotationFailed {
                     space: space.clone(),
                     reason: error.to_string(),

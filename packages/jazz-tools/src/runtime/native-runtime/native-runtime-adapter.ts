@@ -1243,8 +1243,15 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!state) return operation();
     return retryAfterKey(
       operation,
-      async (space) =>
-        JSON.parse(await state.native.encryptionCall("prepareSpace", space)) as boolean,
+      async (space, deadline) =>
+        JSON.parse(
+          await state.native.encryptionCall("prepareSpace", { ...space, deadline }),
+        ) as boolean,
+      undefined,
+      async (space, failure) =>
+        JSON.parse(
+          await state.native.encryptionCall("retryWithCurrentKey", { ...space, failure }),
+        ) as boolean,
     );
   }
 

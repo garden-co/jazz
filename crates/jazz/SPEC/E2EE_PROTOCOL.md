@@ -1337,7 +1337,7 @@ serving it); its spaces then need new keys. A device removal marks every
 space whose current version was sealed to an account epoch the removed
 device held as needing rotation (§3.5), and the next encrypted write by an
 updater rotates it, as after a member's removal. An application that
-wants it sooner calls `db.encryption.rotate(space)`. Developer documentation must
+wants it sooner calls `db.encryption.keys.rotate(space)`. Developer documentation must
 say to revoke the sign-in first.
 
 **What removal achieves also depends on how the account signs in.** For an
@@ -2026,7 +2026,7 @@ applications and users never handle deliveries.
   keyEpochId}`, once per delivery and device. Nothing is written: holders
   cannot see that the envelope failed, so they count the member as holding
   the version and do not deliver again. The member stays `key-pending` until
-  an updater rotates (`db.encryption.rotate(space)`, §3.5), which delivers a
+  an updater rotates (`db.encryption.keys.rotate(space)`, §3.5), which delivers a
   new version to every member. The application decides how the report
   reaches someone who manages members. A device does not report a delivery
   whose opening failed for any other reason: a provider failure (§0), a
@@ -2077,9 +2077,13 @@ found none receives the version with no other write to a space table.
 ### 3.5 Rotation and removal
 
 **Rotation** is by an updater (R16) whose device is active and holds the
-current version (it acquires it first, §3.3; if it cannot, `rotate` fails
-`rotation-needs-key`, and so does a recovery rotation by a device that holds
-no version at all). It generates a new epoch and
+current version (it acquires it first, §3.3). If an active member confirms
+the space has no root, ordinary rotation succeeds with zero deliveries and
+writes nothing. Otherwise a device that cannot confirm the key state or
+acquire the current key gets `rotation-needs-key`, as does a recovery
+rotation by a device that holds no version. A device awaiting approval gets
+`no-account`. An account observed to have no member row gets `not-a-member`.
+A rotation generates a new epoch and
 `K'`, and inserts, in one ledger transaction that read the chain, the
 space's member rows, the chosen members' public account rows and its own
 account's public rows at its cut, one successor whose `predecessor` and `historyEpochId` are both the
@@ -2170,7 +2174,7 @@ rotation is rotated:
   refused (the writer is not an updater), offline, or not decided within
   the deadline, the write uses the current version. A refusal stops
   automatic rotation of the space on this device (below);
-- by `db.encryption.rotate(space)`, at once, when the application wants
+- by `db.encryption.keys.rotate(space)`, at once, when the application wants
   the removal effective immediately.
 
 Several removals before the next rotation are covered by one rotation.
@@ -2180,8 +2184,8 @@ an updater rotates.
 **After a refusal.** When the authority refuses a rotation by this device,
 the write path does not rotate the space on this device while the client
 runs, and the device stops
-evaluating the mark for it. Explicit `db.encryption.rotate(space)` and
-`recoverRotation(space)` always attempt. As for creation (§3.2), this is
+evaluating the mark for it. Explicit `db.encryption.keys.rotate(space)` and
+`db.encryption.keys.recoverRotation(space)` always attempt. As for creation (§3.2), this is
 kept only in memory, so a restart allows one more automatic attempt.
 
 Required tests: a member refused a rotation makes no new automatic attempt
@@ -2190,7 +2194,7 @@ after a further removal; an explicit `rotate` after a refusal attempts.
 **Recovery rotation.** When no online member holds the current version (for
 example the only holder lost its device right after rotating), or a
 successor's `history` is broken (`broken-history`, §3.4), an updater
-may call `db.encryption.recoverRotation(space)`. It is never part of
+may call `db.encryption.keys.recoverRotation(space)`. It is never part of
 routine rotation, and the SDK never calls it on its own: the application
 calls it explicitly, typically after asking a person. It writes a successor
 whose `predecessor` is the current version (so it extends the chain) and
@@ -2211,7 +2215,7 @@ space (§8).
 row's read rule comes from members, R13), no delivery to it is accepted
 (R17), and the space needs rotation, which happens lazily as above. The
 remover is an updater and is online at that moment, so developer
-documentation recommends that a removal UI call `db.encryption.rotate(space)`
+documentation recommends that a removal UI call `db.encryption.keys.rotate(space)`
 right after the delete; otherwise content written before the next updater's
 encrypted write stays under a key the removed account holds (§8). The
 removed account keeps every key it already held, which stay usable for
@@ -2940,7 +2944,8 @@ Refusal codes:
 | `account-reset-not-allowed`        | An account reset by a device-account session, or where the application has not enabled `allowAccountReset` (§2.11).                                                       |
 | `space-pending`                    | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2).            |
 | `space-create-refused`             | The authority refused the root itself, staged with a write or by `createSpace` (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
-| `rotation-needs-key`               | A rotation by a device that holds no authenticated key of the current version (§3.5), or a recovery rotation by one that holds no version at all.                         |
+| `rotation-needs-key`               | No confirmed current key, or no held version for recovery (§3.5). Ordinary rotation returns zero when an active member confirms the space has no root.                    |
+| `no-account`                       | The device has no verified account, including a device awaiting approval that asks to rotate a space (§3.5).                                                              |
 | `not-a-member`                     | The account asking to rotate the space has no current member row (§3.5).                                                                                                  |
 | `device-account-identity-mismatch` | A device-account root written with an identity whose key does not derive the account ID (§2.3).                                                                           |
 
