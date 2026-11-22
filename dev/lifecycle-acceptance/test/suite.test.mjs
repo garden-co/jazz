@@ -1,0 +1,186 @@
+// The harness must not pass what it didn't see. No network, nothing installed: `node --test`.
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { isJazzName } from "../build/names.mjs";
+import { LANGS } from "../lib/common.mjs";
+import { checkFiles, checkManifest, checkRun } from "../lib/provenance.mjs";
+import { ANDROID_RULES } from "../suite/android-rules.mjs";
+import { storeHeld } from "../suite/errors.mjs";
+import { Proxy } from "../suite/proxy.mjs";
+import { redact } from "../suite/redact.mjs";
+import { Broken, Round } from "../suite/round.mjs";
+import { RULES } from "../suite/rules/index.mjs";
+
+const here = fileURLToPath(new URL(".", import.meta.url));
+const sha = "a".repeat(40);
+const want = { sha, run: "7", repo: "garden-co/jazz" };
+const goodRun = {
+  id: 7,
+  head_sha: sha,
+  event: "push",
+  path: ".github/workflows/release-artifacts.yml",
+  conclusion: "success",
+  repository: { full_name: want.repo },
+  head_repository: { full_name: want.repo },
+};
+
+test("provenance fails closed", () => {
+  checkRun(goodRun, want);
+  checkRun({ ...goodRun, event: "workflow_dispatch" }, want);
+  for (const wrong of [
+    { head_sha: "b".repeat(40) },
+    { event: "pull_request" },
+    { path: ".github/workflows/lifecycle-acceptance.yml" },
+    { conclusion: "failure" },
+    { head_repository: { full_name: "someone/jazz" } },
+    { head_repository: null },
+    { id: 8 },
+  ])
+    assert.throws(() => checkRun({ ...goodRun, ...wrong }, want), undefined, JSON.stringify(wrong));
+
+  const manifest = {
+    schema: 1,
+    sha,
+    tree: "c".repeat(40),
+    run_id: 7,
+    repository: want.repo,
+    workflow: "release-artifacts.yml",
+    version: "2.0.0-beta.0",
+    files: [{ artifact: "a", path: "x", sha256: "1" }],
+  };
+  checkManifest(manifest, want);
+  assert.throws(() => checkManifest({ ...manifest, sha: "b".repeat(40) }, want));
+  assert.throws(() => checkManifest({ ...manifest, run_id: 9 }, want));
+  checkFiles(manifest, "a", new Map([["x", "1"]]));
+  assert.throws(() => checkFiles(manifest, "a", new Map([["x", "2"]])), /sha256/);
+  assert.throws(() => checkFiles(manifest, "a", new Map()), /missing/);
+  assert.throws(() => checkFiles(manifest, "a", new Map([["x", "1"], ["y", "1"]])), /not in the manifest/);
+  assert.throws(() => checkFiles(manifest, "b", new Map()), /lists nothing/);
+});
+
+test("the blocking registry's names", () => {
+  for (const name of ["jazz-tools", "jazz-napi", "@garden-co/jazz-napi-linux-x64-gnu", "create-jazz"]) assert.ok(isJazzName(name));
+  for (const name of ["hono", "tsx", "@hono/node-server"]) assert.ok(!isJazzName(name));
+});
+
+test("only StoreHeld is StoreHeld", () => {
+  const held = "the local store is held: /s is open in another app of this process";
+  assert.ok(storeHeld.matches({ kind: "StoreHeld", msg: held }, "rust"));
+  assert.ok(storeHeld.matches({ kind: "refused", msg: held }, "go"));
+  assert.ok(storeHeld.matches({ kind: "refused", msg: held }, "swift"));
+  assert.ok(storeHeld.matches({ kind: "Refused", msg: held }, "kotlin"));
+  assert.ok(!storeHeld.matches({ kind: "Jazz", msg: "database is locked" }, "rust"));
+  assert.ok(!storeHeld.matches({ kind: "Config", msg: held }, "rust"));
+  assert.ok(!storeHeld.matches({ kind: "io", msg: held }, "go"));
+  assert.ok(!storeHeld.matches({ kind: "refused", msg: "permission denied" }, "swift"));
+  assert.ok(!storeHeld.matches({ kind: "Io", msg: "database is locked" }, "kotlin"));
+  assert.ok(!storeHeld.matches({ kind: "harness.timeout", msg: "" }, "kotlin"));
+});
+
+for (const [fake, ids] of [
+  ["yes", ["persist.clean-exit", "persist.sigkill", "store.second-open.same-process", "store.open-race.same-process"]],
+  ["throws", ["store.second-open.same-process", "store.open-race.same-process"]],
+])
+  for (const id of ids)
+    test(`a driver where ${fake === "yes" ? "everything works" : "an open throws something"} fails ${id}`, async () => {
+      const driver = { cmd: [process.execPath, join(here, "fake-driver.mjs")], env: { FAKE: fake } };
+      const round = new Round({ lang: "go", driver, stack: { appId: "app", backendPort: 9 } }, 0);
+      try {
+        await assert.rejects(RULES.find((rule) => rule.id === id).run(round), Broken);
+      } finally {
+        await round.cleanup();
+      }
+    });
+
+test("the proxy's outages are real", async () => {
+  const server = createServer((socket) => socket.on("error", () => {}).pipe(socket)).listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const proxy = await Proxy.start(server.address().port);
+  const answered = () =>
+    fetchEcho(proxy.port).then(
+      (bytes) => bytes === "ping",
+      () => false,
+    );
+  try {
+    assert.ok(await answered());
+    await proxy.refuse();
+    await assert.rejects(fetchEcho(proxy.port), /ECONNREFUSED/);
+    await proxy.hole();
+    assert.equal(await fetchEcho(proxy.port), "no answer");
+    await proxy.up();
+    assert.ok(await answered());
+  } finally {
+    await proxy.stop();
+    server.close();
+  }
+});
+
+async function fetchEcho(port) {
+  const { createConnection } = await import("node:net");
+  const socket = createConnection(port, "127.0.0.1");
+  try {
+    await once(socket, "connect");
+    const data = once(socket, "data").then(([bytes]) => String(bytes), () => "no answer");
+    socket.write("ping");
+    let timer;
+    const late = new Promise((resolve) => (timer = setTimeout(() => resolve("no answer"), 300)));
+    return await Promise.race([data, late]).finally(() => clearTimeout(timer));
+  } finally {
+    socket.destroy();
+  }
+}
+
+function verdict(edit, mustFail = []) {
+  const dir = mkdtempSync(join(tmpdir(), "la-verdict-"));
+  try {
+    const results = new Map();
+    for (const lang of [...LANGS, "android"]) {
+      const rules = (lang === "android" ? ANDROID_RULES : RULES).map(({ id }) => ({
+        id,
+        status: "PASS",
+        rounds: 1,
+        passed: 1,
+        failures: {},
+      }));
+      results.set(lang, { name: "c", lang, sha, run: "7", ms: 1, results: rules });
+    }
+    edit(results);
+    for (const [lang, result] of results) writeFileSync(join(dir, `c-${lang}.json`), JSON.stringify(result));
+    const env = { ...process.env, CANDIDATES: JSON.stringify([{ name: "c", sha, run: "7", mustFail }]) };
+    delete env.GITHUB_STEP_SUMMARY;
+    return spawnSync(process.execPath, [join(here, "..", "verdict.mjs"), dir], { env, encoding: "utf8" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("the verdict fails closed", () => {
+  assert.equal(verdict(() => {}).status, 0);
+  assert.equal(verdict((results) => results.delete("go")).status, 1, "a language without results");
+  assert.equal(verdict((results) => results.delete("android")).status, 1, "no Android results");
+  assert.equal(verdict((results) => results.get("rust").results.pop()).status, 1, "a rule without a result");
+  assert.equal(verdict((results) => (results.get("go").sha = "b".repeat(40))).status, 1, "another candidate's results");
+
+  const undecided = RULES.findIndex((rule) => rule.basis === "pending");
+  const incomplete = verdict((results) => (results.get("go").results[undecided].status = "NOT_COVERED"));
+  assert.equal(incomplete.status, 1);
+  assert.match(incomplete.stdout, /VERDICT c INCOMPLETE/);
+
+  const control = verdict(() => {}, ["store.second-open.same-process"]);
+  assert.equal(control.status, 1);
+  assert.match(control.stdout, /CONTROL_BROKEN c rust store\.second-open\.same-process/);
+});
+
+test("secrets don't reach a log", () => {
+  const key = `jazz-auth-v1:${"k".repeat(43)}`;
+  const token = `eyJ${"h".repeat(20)}.${"p".repeat(20)}.${"s".repeat(20)}`;
+  const out = redact(`key ${key} token ${token} adminSecret: abc123`);
+  for (const secret of [key, token, "abc123"]) assert.ok(!out.includes(secret), secret);
+});

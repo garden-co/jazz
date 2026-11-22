@@ -10,7 +10,11 @@ export async function buildRust() {
   const source = candidateSource();
   const toolchain = readFileSync(join(source, "rust-toolchain.toml"), "utf8").match(/channel = "([^"]+)"/)[1];
   const env = cleanEnv({ RUSTUP_TOOLCHAIN: toolchain, CARGO_TERM_COLOR: "never" });
-  fetchStep("rustup", ["toolchain", "install", toolchain, "--profile", "minimal"], { env });
+  try {
+    run("rustup", ["run", toolchain, "cargo", "--version"], { env, capture: true });
+  } catch {
+    fetchStep("rustup", ["toolchain", "install", toolchain, "--profile", "minimal"], { env });
+  }
 
   const { cargoMetadata, publishPlan, withVendoredMembers } = await import(
     pathToFileURL(join(source, "dev", "scripts", "rust-crates.mjs")).href
