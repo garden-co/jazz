@@ -74,10 +74,13 @@ kotlin {
             includeDirs(repo.resolve("crates/jazz-ffi/include"))
             // The static library goes into the klib: an app linking this
             // klib links jazz-ffi too, with no separate native artifact.
-            // (Only when it's there: a klib without it still compiles, for
-            // the iOS compile check on Linux.)
-            if (libDir.resolve("libjazz_ffi.a").exists()) {
-                extraOpts("-staticLibrary", "libjazz_ffi.a", "-libraryPath", libDir.path)
+            // (Linux's is built by cargoBuildFfi, so it needn't be there yet;
+            // iOS's are built first, by ci/ios-gate.sh rust.)
+            val staticLib = libDir.resolve("libjazz_ffi.a")
+            if (konanTarget == KonanTarget.LINUX_X64 || staticLib.exists()) {
+                extraOpts("-staticLibrary", staticLib.name, "-libraryPath", libDir.path)
+                // extraOpts are opaque to Gradle: without this a rebuilt jazz-ffi stays out of the klib.
+                tasks.named(interopProcessingTaskName) { inputs.files(staticLib) }
             }
             if (konanTarget == KonanTarget.LINUX_X64) {
                 // glibc-shim.c: fcntl64 for Kotlin/Native's glibc 2.19 sysroot.
@@ -86,12 +89,9 @@ kotlin {
             }
         }
         if (konanTarget.family == Family.IOS) {
-            // libjazz_ffi.a is built for iOS 16.0, as JazzFFI.xcframework is
-            // (dev/scripts/build-swift-xcframework.sh); Kotlin/Native's default is older.
-            binaries.all {
-                freeCompilerArgs += "-Xoverride-konan-properties=osVersionMin.${konanTarget.name}=$iosMinVersion"
-            }
             if (konanTarget == KonanTarget.IOS_ARM64) {
+                // Declared before binaries.all below: that realizes each link task, which
+                // takes the binary's compilation as it is then (main, until set here).
                 // The iOS gate (src/iosTest/…/DeviceLink.kt): an app's binary that
                 // calls the real jazz-ffi. Its linker map says what of it is jazz-ffi.
                 val linkMap = layout.buildDirectory.file("ios-gate-link-map.txt").get().asFile
@@ -100,6 +100,11 @@ kotlin {
                     entryPoint = "tools.jazz.gate.gateMain"
                     linkerOpts("-map", linkMap.path)
                 }
+            }
+            // libjazz_ffi.a is built for iOS 16.0, as JazzFFI.xcframework is
+            // (dev/scripts/build-swift-xcframework.sh); Kotlin/Native's default is older.
+            binaries.all {
+                freeCompilerArgs += "-Xoverride-konan-properties=osVersionMin.${konanTarget.name}=$iosMinVersion"
             }
         }
     }
