@@ -14,18 +14,15 @@ import {
   reopen,
   roomList,
   send,
-  serverMarkerCount,
-  serverRead,
-  serverSuccessors,
   signIn,
   signUp,
-  storedBytes,
   T,
   unique,
   until,
   waitingBanner,
   reportPages,
 } from "./support";
+import { serverMarkerCount, serverRead, serverSuccessors, storedBytes } from "./server-snapshot";
 
 test.describe.configure({ timeout: 300_000 });
 // Playwright reads fixtures from a destructured first argument; this hook needs none.
