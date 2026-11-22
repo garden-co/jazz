@@ -252,6 +252,59 @@ fn the_deploy_warns_of_broad_rules_it_can_see() {
     assert!(quiet.warnings().is_empty(), "{:?}", quiet.warnings());
 }
 
+/// Alice deploys an encrypted table that checks membership through its project.
+/// Only the read rule with an additional owner check is narrower than the project's.
+#[test]
+fn the_deploy_compares_membership_through_the_declared_space_column() {
+    let app = app(tasks_entry());
+    let member = MEMBERS_RULE.replace("this.id", "this.projectId");
+    let owner = "$createdBy.account = session.user";
+    for (read, narrower) in [
+        (member.clone(), false),
+        (format!("{owner} and {member}"), true),
+        (
+            format!("{owner} and {}", member.replace("'projects'", "'tasks'")),
+            false,
+        ),
+    ] {
+        let permissions = permissions(MEMBERS_RULE).replace("allowedTo.read(project)", &read);
+        let loaded = load(app.as_bytes(), permissions.as_bytes()).unwrap();
+        let warnings = loaded.warnings();
+        if narrower {
+            assert!(
+                matches!(warnings, [warning] if warning.contains(
+                    "table tasks: its read rule is its space table projects's plus further conditions"
+                )),
+                "{read}: {warnings:?}"
+            );
+        } else {
+            assert!(warnings.is_empty(), "{read}: {warnings:?}");
+        }
+    }
+}
+
+/// Alice sees which column her membership check uses when it differs from the
+/// declared space, even when both columns reference projects.
+#[test]
+fn the_deploy_names_the_wrong_membership_column_and_the_declared_space() {
+    let app = app(tasks_entry()).replace(
+        r#""done": "boolean""#,
+        r#""done": "boolean", "otherProjectId": { "type": "uuid", "references": "projects" }"#,
+    );
+    for column in ["id", "otherProjectId"] {
+        let member = MEMBERS_RULE.replace("this.id", &format!("this.{column}"));
+        let read = format!("{member} and $createdBy.account = session.user");
+        let permissions = permissions(MEMBERS_RULE).replace("allowedTo.read(project)", &read);
+        let loaded = load(app.as_bytes(), permissions.as_bytes()).unwrap();
+        assert_eq!(
+            loaded.warnings(),
+            [format!(
+                "jazz.permissions.json: table tasks: its read rule checks projects membership through {column}, but its space is projectId"
+            )]
+        );
+    }
+}
+
 /// Every schema version records its own declarations, and a migration may
 /// not change an encrypted column's type, scope or space without a
 /// conversion (migrations §3.1).

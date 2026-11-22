@@ -736,38 +736,46 @@ const OUTER_ROW: &str = "__jazz_outer_row";
 /// table_id('table'), identifier = this.id, accountId = session.user)`,
 /// its conditions in any order (protocol R13).
 pub fn is_members_rule(expr: &PolicyExpr, table: &str) -> bool {
+    members_rule_column(expr, table) == Some("id")
+}
+
+/// The checked row's column in an exact membership check for `scope`.
+fn members_rule_column<'a>(expr: &'a PolicyExpr, scope: &str) -> Option<&'a str> {
     let PolicyExpr::Exists {
         table: members,
         condition,
     } = expr
     else {
-        return false;
+        return None;
     };
     let PolicyExpr::And(conditions) = condition.as_ref() else {
-        return false;
+        return None;
     };
-    let eq = |c: &PolicyExpr, name: &str, value: &PolicyValue| matches!(c, PolicyExpr::Cmp { column, op: CmpOp::Eq, value: v } if column == name && v == value);
-    let wanted = [
-        (
-            "scopeId",
-            PolicyValue::TableIdentity {
-                table: table.to_owned(),
-            },
-        ),
-        (
-            "identifier",
-            PolicyValue::SessionRef(vec![OUTER_ROW.to_owned(), "id".to_owned()]),
-        ),
-        (
-            "accountId",
-            PolicyValue::SessionRef(vec!["user".to_owned()]),
-        ),
-    ];
-    members == MEMBERS
-        && conditions.len() == wanted.len()
-        && wanted
-            .iter()
-            .all(|(name, value)| conditions.iter().any(|c| eq(c, name, value)))
+    if members != MEMBERS || conditions.len() != 3 {
+        return None;
+    }
+    let equality = |name: &str| {
+        conditions.iter().find_map(|expr| match expr {
+            PolicyExpr::Cmp {
+                column,
+                op: CmpOp::Eq,
+                value,
+            } if column == name => Some(value),
+            _ => None,
+        })
+    };
+    if let PolicyValue::TableIdentity { table } = equality("scopeId")?
+        && table == scope
+        && let PolicyValue::SessionRef(account) = equality("accountId")?
+        && account.as_slice() == ["user"]
+        && let PolicyValue::SessionRef(identifier) = equality("identifier")?
+        && let [row, column] = identifier.as_slice()
+        && row == OUTER_ROW
+    {
+        Some(column)
+    } else {
+        None
+    }
 }
 
 /// Whether a read rule comes from the members table: `M(table)`, or an
@@ -983,7 +991,27 @@ pub fn warnings(permissions: &Permissions, entries: &Entries) -> Vec<String> {
         };
         let space_conjuncts = conjuncts(space_read);
         let own = conjuncts(read);
-        if own.len() > space_conjuncts.len() && space_conjuncts.iter().all(|c| own.contains(c)) {
+        let membership_columns: BTreeSet<_> = own
+            .iter()
+            .filter_map(|clause| members_rule_column(clause, &entry.scope))
+            .collect();
+        for column in &membership_columns {
+            if *column != entry.space {
+                warnings.push(format!(
+                    "table {table}: its read rule checks {} membership through {column}, but its space is {}",
+                    entry.scope, entry.space
+                ));
+            }
+        }
+        if own.len() > space_conjuncts.len()
+            && space_conjuncts.iter().all(|clause| {
+                if is_members_rule(clause, &entry.scope) {
+                    membership_columns.contains(entry.space.as_str())
+                } else {
+                    own.contains(clause)
+                }
+            })
+        {
             warnings.push(format!(
                 "table {table}: its read rule is its space table {}'s plus further conditions, \
                  so every member of a space can decrypt rows of {table} that Jazz doesn't send \
