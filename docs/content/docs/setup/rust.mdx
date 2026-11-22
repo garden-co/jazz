@@ -53,12 +53,13 @@ or with your own sign-in's bearer token:
 </include>
 
 <Callout type="warn" title="Known issues on Android: this example fails">
-  `DeviceKey::load_or_create` can't create a key on Android 6.0 and 7.0 (API 23 and 24; newer
-  versions haven't been checked yet): it fails with `Permission denied (os error 13)`. Instead,
-  create the key with `DeviceKey::generate()`, keep `key.to_string()` in the platform's secure store
-  and `parse()` it back (untested on Android). Separately, `Storage::Dir` [fails to open on
-  Android](/docs/reference/language-support#jazz-environment-rust). Both issues are in every release
-  up to and including 2.0.0-beta.0.
+  In every release since 2.0.0-alpha.66, `DeviceKey::load_or_create` can't create a key on Android
+  (reproduced on API 23, 24, 29, 30 and 35 emulators; other versions untested): it fails with
+  `Permission denied (os error 13)`. Instead, create the key with `DeviceKey::generate()`, keep
+  `key.to_string()` in the platform's secure store and `parse()` it back (untested on Android).
+  Separately, `Storage::Dir` [fails to open on
+  Android](/docs/reference/language-support#jazz-environment-rust) in every release from
+  2.0.0-alpha.66 to 2.0.0-beta.0.
 </Callout>
 
 To follow who is signed in, as TypeScript's `createJazzClient` does, open a `JazzSession`. With
