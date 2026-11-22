@@ -69,11 +69,10 @@ it("opens an encrypted device from the public React Native session over the app'
 
   const projectId = randomUUID();
   const accountId = first.getSnapshot().user!.accountId;
-  const members = (app as unknown as Record<string, never>).__e2ee_members!;
   const self = await encryption.members.row({ table: "projects", id: projectId }, accountId);
   const project = await first.db.transaction((tx) => {
     tx.insert(app.projects, { name: "plans", ownerId: accountId }, { id: projectId });
-    tx.insert(members, self as never);
+    tx.insert(app.__e2ee_members, self);
   });
   await project.wait({ tier: "global" });
   const write = first.db.insert(app.tasks, { projectId, title: "private plans" });

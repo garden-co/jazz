@@ -9,7 +9,8 @@ import { memoryPrivateStore } from "../encryption/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { testApp } from "../testing/index.js";
+import { app } from "../../tests/browser/apps/encrypted-tab/jazz.generated.js";
+import permissions from "../../tests/browser/apps/encrypted-tab/jazz.permissions.json";
 import { createJazzClient } from "../session/create-jazz-session.js";
 import type { JazzSession } from "../session/jazz-session.js";
 import type { JazzClient } from "./create-jazz-client.js";
@@ -20,37 +21,6 @@ import { useAll } from "./use-all.js";
 // starts thin: it stays loading (never an empty list in place of the rows the
 // thin client can't read) until the local-first client takes over, then
 // shows the rows.
-
-const app = testApp({
-  format: 1,
-  tables: {
-    projects: { columns: { name: "string", ownerId: "uuid" } },
-    tasks: {
-      columns: { projectId: "uuid", title: "bytes", __e2ee_eq_title: "bytes" },
-      relations: { project: { rel: "projects", column: "projectId" } },
-      encryption: {
-        space: "projectId",
-        scope: "projects",
-        columns: { title: "string" },
-        equality: ["title"],
-      },
-    },
-  },
-});
-const members =
-  "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)";
-const permissions = {
-  $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json",
-  tables: {
-    projects: {
-      read: members,
-      insert: "$createdBy.account = session.user",
-      update: "ownerId = session.user",
-    },
-    tasks: { read: "allowedTo.read(project)", insert: "allowedTo.read(project)" },
-  },
-} as never;
-const membersTable = (app as never as Record<string, never>)["__e2ee_members"];
 
 // The DOM environment's WebSocket can't reach the test server; Node's can.
 beforeEach(() => vi.stubGlobal("WebSocket", NodeWebSocket));
@@ -64,7 +34,7 @@ afterEach(async () => {
 
 async function serve() {
   const jazz = await createJazz({
-    app: app as never,
+    app,
     permissions,
     store: memory(),
     authenticate: acceptDeviceAccounts,
@@ -148,7 +118,7 @@ it("a hook on an encrypted table loads while thin, then shows its rows from the 
   await (
     await first.transaction((tx) => {
       tx.insert(app.projects, { name: "plans", ownerId: account } as never, { id: project });
-      tx.insert(membersTable, self as never);
+      tx.insert(app.__e2ee_members, self);
     })
   ).wait({ tier: "global" });
   await first.insert(app.tasks, { projectId: project, title: "hello" } as never).wait({

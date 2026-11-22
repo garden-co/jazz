@@ -27,8 +27,6 @@ import {
 import { app } from "./apps/encrypted-tab/jazz.generated.js";
 import permissions from "./apps/encrypted-tab/jazz.permissions.json";
 
-const membersTable = (app as never as Record<string, never>)["__e2ee_members"];
-
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => {});
@@ -171,7 +169,7 @@ it("encrypts in a real browser: a device's keys in the browser's own store, a ta
   );
   const written = await db.transaction((tx) => {
     tx.insert(app.projects, { name: plainName, ownerId: account }, { id });
-    tx.insert(membersTable, self as never);
+    tx.insert(app.__e2ee_members, self);
   });
   await step("project global", written.wait({ tier: "global" }));
   await step(
@@ -241,7 +239,7 @@ it("a one-shot read in the browser names the rows it leaves out undecrypted", as
   );
   const written = await aliceDb.transaction((tx) => {
     tx.insert(app.projects, { name: "plans", ownerId: account }, { id: project });
-    tx.insert(membersTable, self as never);
+    tx.insert(app.__e2ee_members, self);
   });
   await step("project global", written.wait({ tier: "global" }));
   const task = await aliceDb.insert(app.tasks, { projectId: project, title: "alice's secret" });
@@ -350,7 +348,7 @@ it("a thin load with a loader writes and subscribes to an encrypted table before
     (
       await firstDb.transaction((tx) => {
         tx.insert(app.projects, { name: "plans", ownerId: account }, { id: project });
-        tx.insert(membersTable, self as never);
+        tx.insert(app.__e2ee_members, self);
       })
     ).wait({ tier: "global" }),
   );

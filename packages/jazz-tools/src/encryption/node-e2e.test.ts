@@ -3,6 +3,8 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
+import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
+import permissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
 import { testApp } from "../testing/index.js";
 import {
   acceptDeviceAccounts,
@@ -11,6 +13,7 @@ import {
   memory,
   sqlite,
 } from "../backend/index.js";
+import { generateTs } from "../dev/codegen-napi.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import {
   EncryptionNotDeclaredError,
@@ -23,54 +26,17 @@ import {
 // End to end on Node: device clients with their own private stores talk to a
 // real server through createJazz, which relays them and holds no keys.
 
-const file = {
-  format: 1,
-  tables: {
-    projects: { columns: { name: "string", ownerId: "uuid" } },
-    tasks: {
-      columns: {
-        projectId: "uuid",
-        title: "bytes",
-        __e2ee_eq_title: "bytes",
-        label: "string?",
-      },
-      relations: { project: { rel: "projects", column: "projectId" } },
-      encryption: {
-        space: "projectId",
-        scope: "projects",
-        columns: { title: "string" },
-        equality: ["title"],
-      },
-    },
-    records: {
-      columns: { projectId: "uuid", data: "bytes", __e2ee_eq_data: "bytes" },
-      relations: { project: { rel: "projects", column: "projectId" } },
-      encryption: {
-        space: "projectId",
-        scope: "projects",
-        columns: { data: { json: true } },
-        equality: ["data"],
-      },
-    },
-    notes: { columns: { text: "string" } },
+it.each(["../../tests/fixtures/encrypted/", "../../tests/browser/apps/encrypted-tab/"])(
+  "keeps the generated bindings for %s current",
+  async (path) => {
+    const directory = new URL(path, import.meta.url);
+    const [source, bindings] = await Promise.all([
+      readFile(new URL("jazz.app.json", directory), "utf8"),
+      readFile(new URL("jazz.generated.ts", directory)),
+    ]);
+    expect(Buffer.from(await generateTs(source)).equals(bindings)).toBe(true);
   },
-};
-const app = testApp(file);
-const members =
-  "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)";
-const permissions = {
-  $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json",
-  tables: {
-    projects: {
-      read: members,
-      insert: "$createdBy.account = session.user",
-      update: "ownerId = session.user",
-    },
-    tasks: { read: "allowedTo.read(project)", insert: "allowedTo.read(project)" },
-    records: { read: "allowedTo.read(project)", insert: "allowedTo.read(project)" },
-    notes: { read: "true", insert: "true" },
-  },
-} as never;
+);
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -175,15 +141,13 @@ async function device(
 
 type Device = Awaited<ReturnType<typeof device>>;
 
-const membersTable = (app as never as Record<string, never>)["__e2ee_members"];
-
 /** A new project, with its creator as its first member in the same transaction. */
 async function makeProject(owner: Device, name: string) {
   const id = crypto.randomUUID();
   const self = await owner.db.encryption.members.row({ table: "projects", id }, owner.account);
   const written = await owner.db.transaction((tx) => {
     tx.insert(app.projects, { name, ownerId: owner.account }, { id });
-    tx.insert(membersTable, self as never);
+    tx.insert(app.__e2ee_members, self);
   });
   await written.wait({ tier: "global" });
   return id;
@@ -191,7 +155,7 @@ async function makeProject(owner: Device, name: string) {
 
 async function addMember(owner: Device, project: string, account: string) {
   const row = await owner.db.encryption.members.row({ table: "projects", id: project }, account);
-  await owner.db.insert(membersTable, row as never).wait({ tier: "global" });
+  await owner.db.insert(app.__e2ee_members, row).wait({ tier: "global" });
 }
 
 /** Waits until `read` returns something. */
@@ -264,11 +228,10 @@ describe("encryption on Node, end to end", () => {
       return rows.length > 0 ? rows : undefined;
     }, "bob to read the first task");
     // Alice removes bob and rotates the space's key at once.
-    const rows = await alice.db.all(membersTable, { tier: "remote" });
-    const bobs = (rows as unknown as { id: string; accountId: string }[]).filter(
-      (row) => row.accountId === bob.account,
-    );
-    for (const row of bobs) await alice.db.delete(membersTable, row.id).wait({ tier: "global" });
+    const rows = await alice.db.all(app.__e2ee_members, { tier: "remote" });
+    const bobs = rows.filter((row) => row.accountId === bob.account);
+    for (const row of bobs)
+      await alice.db.delete(app.__e2ee_members, row.id).wait({ tier: "global" });
     const delivered = await alice.db.encryption.keys.rotate({ table: "projects", id: project });
     expect(delivered).toBe(0);
     await alice.db

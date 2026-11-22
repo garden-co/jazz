@@ -1,8 +1,10 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
+import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
+import permissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
 import { testApp } from "../testing/index.js";
-import { createJazz, memory } from "../backend/index.js";
+import { createJazz, memory, type CreateJazzOptions } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
@@ -15,40 +17,6 @@ import { EncryptionNotDeclaredError, memoryPrivateStore, type PrivateStore } fro
 // recover with a phrase rather than by their own secret. Each client opens its
 // own runtime over a private store; a store shared by two clients is two tabs of
 // one device.
-
-const file = {
-  format: 1,
-  tables: {
-    projects: { columns: { name: "string", ownerId: "uuid" } },
-    tasks: {
-      columns: { projectId: "uuid", title: "bytes", __e2ee_eq_title: "bytes" },
-      relations: { project: { rel: "projects", column: "projectId" } },
-      encryption: {
-        space: "projectId",
-        scope: "projects",
-        columns: { title: "string" },
-        equality: ["title"],
-      },
-    },
-    notes: { columns: { text: "string" } },
-  },
-};
-const app = testApp(file);
-const members =
-  "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)";
-const permissions = {
-  $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json",
-  tables: {
-    projects: {
-      read: members,
-      insert: "$createdBy.account = session.user",
-      update: "ownerId = session.user",
-    },
-    tasks: { read: "allowedTo.read(project)", insert: "allowedTo.read(project)" },
-    notes: { read: "true", insert: "true" },
-  },
-} as never;
-const membersTable = (app as never as Record<string, never>)["__e2ee_members"];
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -63,7 +31,9 @@ function authenticate(request: Request) {
 
 const plainApp = testApp({ tables: { notes: { columns: { text: "string" } } } });
 
-async function serve(served: { app: typeof app; permissions: never } = { app, permissions }) {
+async function serve(
+  served: Pick<CreateJazzOptions, "app" | "permissions"> = { app, permissions },
+) {
   const jazz = await createJazz({ ...served, store: memory(), authenticate }).ready();
   cleanups.push(() => jazz.close());
   const server: Server = createServer((req, res) =>
@@ -142,7 +112,7 @@ async function makeProject(owner: Client, name: string) {
   const self = await owner.db.encryption.members.row({ table: "projects", id }, owner.account);
   const written = await owner.db.transaction((tx) => {
     tx.insert(app.projects, { name, ownerId: owner.account }, { id });
-    tx.insert(membersTable, self as never);
+    tx.insert(app.__e2ee_members, self);
   });
   await written.wait({ tier: "global" });
   return id;
@@ -280,8 +250,8 @@ describe("encryption on the browser-style client, end to end", () => {
 
   it("a plain app is unaffected: no runtime, writes as before, and db.encryption says so", async () => {
     const host = await serve({
-      app: plainApp as never,
-      permissions: { format: 1, tables: { notes: { read: "true", insert: "true" } } } as never,
+      app: plainApp,
+      permissions: { format: 1, tables: { notes: { read: "true", insert: "true" } } },
     });
     const session = await createJazzClient({
       serverUrl: host.serverUrl,

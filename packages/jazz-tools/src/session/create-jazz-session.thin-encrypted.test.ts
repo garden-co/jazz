@@ -23,7 +23,8 @@ import {
   type LocalFirstLoader,
 } from "../runtime/local-first-upgrade.js";
 import type { MutationErrorEvent, WriteResult } from "../runtime/client.js";
-import { testApp } from "../testing/index.js";
+import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
+import fixturePermissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
 import { openBrowserSessionCore, type BrowserJazzSession } from "./create-jazz-session.js";
 
 // A browser session of an app with end-to-end encrypted columns starts on the
@@ -34,52 +35,15 @@ import { openBrowserSessionCore, type BrowserJazzSession } from "./create-jazz-s
 //                                   │
 //                                   └── insert(notes) ──► queued behind it, same order
 
-const app = testApp({
-  format: 1,
-  tables: {
-    projects: { columns: { name: "string", ownerId: "uuid" } },
-    tasks: {
-      columns: { projectId: "uuid", title: "bytes", __e2ee_eq_title: "bytes", note: "string?" },
-      relations: { project: { rel: "projects", column: "projectId" } },
-      encryption: {
-        space: "projectId",
-        scope: "projects",
-        columns: { title: "string" },
-        equality: ["title"],
-      },
-    },
-    // Plain; a comment's insert is allowed only once its task is on the server.
-    comments: {
-      columns: { taskId: "uuid", text: "string" },
-      relations: { task: { rel: "tasks", column: "taskId" } },
-    },
-    notes: { columns: { text: "string" } },
-    // Plain; a reply's insert is allowed only once its note is on the server.
-    replies: {
-      columns: { noteId: "uuid", text: "string" },
-      relations: { note: { rel: "notes", column: "noteId" } },
-    },
-  },
-});
-const members =
-  "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)";
 const permissions = {
-  $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json",
+  ...fixturePermissions,
   tables: {
-    projects: {
-      read: members,
-      insert: "$createdBy.account = session.user",
-      update: "ownerId = session.user",
-    },
+    ...fixturePermissions.tables,
     // Anyone reads a task's row, so an account outside its space sees its
     // plain columns and holds no key for its encrypted one.
-    tasks: { read: "true", insert: "allowedTo.read(project)" },
-    comments: { read: "true", insert: "allowedTo.read(task)" },
-    notes: { read: "true", insert: "true" },
-    replies: { read: "true", insert: "allowedTo.read(note)" },
+    tasks: { ...fixturePermissions.tables.tasks, read: "true" },
   },
-} as never;
-const membersTable = (app as never as Record<string, never>)["__e2ee_members"];
+};
 const tasks = app.tasks as never as {
   select(...columns: string[]): { where(where: object): never };
   where(where: object): never;
@@ -99,7 +63,7 @@ afterEach(async () => {
 async function serve() {
   const dir = await mkdtemp(`${tmpdir()}/thin-encrypted-`);
   const jazz = await createJazz({
-    app: app as never,
+    app,
     permissions,
     store: sqlite({ path: `${dir}/core.sqlite` }),
     // The app's own sign-in (`Authorization: Bearer token-<user>`), and device accounts.
@@ -249,7 +213,7 @@ async function member(host: Host) {
   await (
     await db(first).transaction((tx) => {
       tx.insert(app.projects, { name: "plans", ownerId: account } as never, { id: project });
-      tx.insert(membersTable, self);
+      tx.insert(app.__e2ee_members, self);
     })
   ).wait({ tier: "global" });
   await db(first)
