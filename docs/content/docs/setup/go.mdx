@@ -90,7 +90,7 @@ Keep a device key like a password: `jazz.FileStore` keeps it in a file only its 
 implement `jazz.SecretStore` to keep it in the OS keychain. `db.Session(ctx)` is who is signed in,
 `db.OnSession(ctx)` and `db.OnSyncStatus(ctx)` are channels of their changes, and `db.Refresh(ctx)`
 and `db.SignOut(ctx)` do what they say. On a `DB` from a `Session`, `SignOut` and `Link` fail with
-`KindNotSupported`: use the session's `SignOut` and `LinkDeviceAccount`.
+`jazz.ErrNotSupported`: use the session's `SignOut` and `LinkDeviceAccount`.
 
 Writes are local-first: a write your permissions refuse returns no error. It is never synced, and
 other users never see it.
