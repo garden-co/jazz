@@ -16,7 +16,7 @@ the native runtime; there is no JavaScript SQLite driver option.
 
 Explicit `driver: { type: "memory" }` is rejected by the React Native entrypoint.
 
-This is still an alpha boundary, not a device-support claim. Remote tiers,
+This is still a beta boundary, not a device-support claim. Remote tiers,
 historical/terminal relation reads, branch writes, custom attribution, restore,
 large-value APIs, and JavaScript upstream transport configuration remain
 unavailable from the foreground binding. Platform admission and Android/iOS

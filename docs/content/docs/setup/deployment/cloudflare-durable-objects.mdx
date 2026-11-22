@@ -1,21 +1,15 @@
 ---
-title: Cloudflare Durable Objects (experimental)
+title: Cloudflare Durable Objects
 description: "Learn how to keep your app's data in a Cloudflare Durable Object, with your own backend in front for auth."
 languageTabs: main-backend
 ---
-
-<Callout type="warn" title="Experimental">
-  Running the Jazz core in a Durable Object is new in this release. Try it, and tell us what breaks;
-  keep production data on [your own server](/docs/setup/deployment/own-server) or
-  [Vercel](/docs/setup/deployment/vercel) for now.
-</Callout>
 
 Your app's core (the part of Jazz that stores and syncs its data) runs in one Durable Object, in a
 Cloudflare Worker you deploy. Your own backend sits in front of it: browsers talk only to your
 backend, which signs users in with your auth and reaches the core with a secret only the two of them
 know.
 
-Your backend can run in the same Worker, so the whole app is on Cloudflare
+Your backend can run in the same Worker (experimental), so the whole app is on Cloudflare
 ([below](#run-your-backend-in-the-worker-too)), or anywhere else (Node, Vercel, your own server), where
 it reaches the Worker by its URL ([Connect your backend](#connect-your-backend)).
 
@@ -90,6 +84,12 @@ once (Dashboard → R2 Object Storage), which asks for a payment method even wit
   retried with backoff (logged to the Worker's logs), so an unreachable bucket never loses data.
 
 ## Run your backend in the Worker too
+
+<Callout type="warn" title="Experimental">
+  Running your backend in the Worker with `jazzBackend` is experimental: it may change in any
+  release, without a deprecation period. The core in a Durable Object with `durableObjects()` is
+  [stable](/docs/operating/backups-and-upgrades#what-beta-means). Try it, and tell us what breaks.
+</Callout>
 
 `createJazz` runs in a second Durable Object of the same Worker, next to the core: a Jazz keeps its
 socket to the core open across requests, which a Worker's `fetch` can't. `jazzBackend` makes that
