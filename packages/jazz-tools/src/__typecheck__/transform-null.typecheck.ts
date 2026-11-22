@@ -1,5 +1,5 @@
 // Transforms that return null: an alpha.64 transform on an optional column
-// handled null itself, and `jazz-tools upgrade` moves it unchanged into
+// handled null itself, and alpha.66's `jazz-tools upgrade` moved it unchanged into
 // jazz.computed.ts. Jazz never calls a transform with null, so the branch is
 // dead, but the callbacks must still satisfy the generated AppTransforms.
 import type { TransformImpl } from "../typed-app.js";

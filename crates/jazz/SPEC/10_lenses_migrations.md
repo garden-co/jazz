@@ -824,8 +824,8 @@ Neither file carries a schema hash or bundle id: loaders compute them.
   `jazz.permissions.schema.json`. A file carrying `"format": 1` and/or the
   unversioned URL still loads, as version 1 (another `format` is refused like
   an unknown version). Any `$schema` next to `"format": 1` is accepted: it
-  was only an editor hint then. `jazz-tools upgrade` writes the versioned
-  form; tools that write the files whole write it too. Both unversioned JSON
+  was only an editor hint then. Tools that write the files whole write the
+  versioned form. Both unversioned JSON
   Schemas stay published for editors.
 - Column and table names are identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
 - Object key order is significant only for `columns` (declared order, which
@@ -871,8 +871,10 @@ generate` writes both files from it, and marks each with a top-level
   write an app's files, bindings and migrations, and only from `schema.ts`
   (in the app's directory, `src/` or `src/lib/`). An app with
   `jazz.app.json` but no `schema.ts` is refused by both, with a pointer to
-  `npx jazz-tools upgrade` (which writes `schema.ts` from the files,
-  keeping the schema hashes and bundle id): editing the JSON is not
+  alpha.70's `npx jazz-tools@2.0.0-alpha.70 upgrade` (which writes
+  `schema.ts` from the files, keeping the schema hashes and bundle id) and
+  the upgrade guide: `upgrade` itself was removed in beta.0, and `npx
+  jazz-tools upgrade` now only refuses with that pointer. Editing the JSON is not
   a second authoring path. The standalone `jazz-tools` binary can't read
   TypeScript, so it never writes: its `generate` and `migrations create`
   refuse, pointing to `npx jazz-tools …` (or, without `schema.ts`, to
@@ -971,8 +973,8 @@ Every migration must pass the lens checks a deployment runs (§10.6).
 **TODOs.** A string starting with `TODO:` where the tools write
 placeholders (any value in `migrations`, a computed field's `type`, a
 transform's `stored` or `view`, or the `json` of such a type) is a
-decision `jazz-tools migrations create` or `jazz-tools upgrade` left to the
-author. Every loader refuses a file that has one, listing each by JSON path
+decision `jazz-tools migrations create` (or, before beta.0, `jazz-tools
+upgrade`) left to the author. Every loader refuses a file that has one, listing each by JSON path
 and text, so a half-written migration never deploys. Elsewhere (a column
 default, an enum variant, a JSON Schema's text, a `$comment`) `TODO:` is
 plain text.
@@ -1004,7 +1006,7 @@ follows it.
 
 **Files from alpha.63.** A file's `slices` (schema slicing is gone in
 alpha.65) and a table's `tsOnly` load with a warning that they are ignored.
-`jazz-tools upgrade` removes `slices`; the fields `tsOnly` held are declared
+Remove `slices`; the fields `tsOnly` held are declared
 in `schema.ts` with `s.computed(…)` or `.transform(…)`.
 
 #### `jazz.permissions.json`
@@ -1036,7 +1038,7 @@ as text.
 There are no named definitions: a policy says everything it checks. A
 `defs` key, which files written by hand for alpha.63–65 could hold, is
 refused with a hint to inline each definition or author the app in
-`schema.ts` (`jazz-tools upgrade` does both for an alpha.65 app).
+`schema.ts`.
 
 **Expressions.** SQL-like, with JSON's double quotes left to the file:
 string literals use single quotes, and a name that isn't a plain identifier
