@@ -294,6 +294,8 @@ function renderTableSteps(
   fromTable: WasmSchema[string],
   toTable: WasmSchema[string],
   table: MigrationDiff["migrate"][number],
+  /** The `to` version's encrypted columns of this table. */
+  encrypted: ReadonlySet<string> = new Set(),
 ): string[] {
   const column = (schema: WasmSchema[string], name: string) =>
     schema.columns.find((candidate) => candidate.name === name)!;
@@ -317,6 +319,17 @@ function renderTableSteps(
         break;
       case "add": {
         const descriptor = column(toTable, step.column);
+        if (encrypted.has(step.column)) {
+          // Stored as required bytes. The empty ciphertext is what a cell no
+          // writer sealed holds: the rows stored before the column read it
+          // as never written, null or the declared default. (A required
+          // column without a default is refused before a stub is written.)
+          lines.push(
+            `// Rows stored before ${name} read it as never written: null, or its declared default.`,
+            `${name}: m.add.bytes({ default: new Uint8Array() }),`,
+          );
+          break;
+        }
         lines.push(
           step.needsDefault
             ? `// TODO: Added required column ${name} needs an explicit default.`
@@ -352,6 +365,7 @@ function renderMigrationBody(
   fromSchema: WasmSchema,
   toSchema: WasmSchema,
   diff: MigrationDiff,
+  encrypted: EncryptionEntries = {},
 ): {
   migrateBody?: string;
   renameTablesBody?: string;
@@ -391,7 +405,12 @@ function renderMigrationBody(
   const lines: string[] = [];
   for (const table of diff.migrate) {
     lines.push(`${JSON.stringify(table.table)}: {`);
-    for (const line of renderTableSteps(fromSchema[table.table]!, toSchema[table.table]!, table))
+    for (const line of renderTableSteps(
+      fromSchema[table.table]!,
+      toSchema[table.table]!,
+      table,
+      encryptedColumns(encrypted, table.table),
+    ))
       lines.push(`  ${line}`);
     lines.push("},");
     lines.push("");
@@ -429,9 +448,11 @@ export async function renderMigrationStub(input: {
   toHash: string;
   fromSchema: WasmSchema;
   toSchema: WasmSchema;
+  /** The `to` version's encryption entries, by table. */
+  toEncryption?: EncryptionEntries;
 }): Promise<string> {
   const diff = await migrationDiff(input.fromSchema, input.toSchema);
-  const rendered = renderMigrationBody(input.fromSchema, input.toSchema, diff);
+  const rendered = renderMigrationBody(input.fromSchema, input.toSchema, diff, input.toEncryption);
   const sections: string[] = [];
 
   if (rendered.renameTablesBody) {
@@ -740,6 +761,51 @@ function entriesOf(tables: Record<string, ReadableTable>): EncryptionEntries {
   return out;
 }
 
+/** The encrypted columns of `table` in `entries`. */
+function encryptedColumns(entries: EncryptionEntries, table: string): Set<string> {
+  const entry = entries[table] as { columns?: Record<string, unknown> } | undefined;
+  return new Set(Object.keys(entry?.columns ?? {}));
+}
+
+/**
+ * Refuse a required encrypted column without a default that `to` adds to a
+ * table `from` already has: the rows stored before it would hold nothing it
+ * could read as, and sealing a value for them needs their spaces' keys.
+ * `fromColumns(table)` is the earlier version's columns of `table`, or
+ * undefined when it has no such table.
+ */
+function refuseRequiredEncryptedAdditions(
+  fromColumns: (table: string) => ReadonlySet<string> | undefined,
+  to: EncryptionEntries,
+  version: string,
+): void {
+  const refused: string[] = [];
+  for (const [table, entry] of Object.entries(to)) {
+    const before = fromColumns(table);
+    if (!before) continue;
+    const columns = ((entry as { columns?: Record<string, ReadableJson> }).columns ?? {}) as Record<
+      string,
+      ReadableJson
+    >;
+    for (const [column, declared] of Object.entries(columns)) {
+      if (before.has(column)) continue;
+      const optional =
+        typeof declared === "string"
+          ? declared.endsWith("?")
+          : (declared as { optional?: unknown } | null)?.optional === true;
+      const defaulted = typeof declared === "object" && declared !== null && "default" in declared;
+      if (!optional && !defaulted) refused.push(`${table}.${column}`);
+    }
+  }
+  if (refused.length === 0) return;
+  throw new Error(
+    `${refused.join(", ")}: a new encrypted column on a table that already has rows in version ${version} ` +
+      "must be optional or declare a default. Sealing a value for the rows stored before it needs their " +
+      "spaces' keys, which a migration doesn't hold. Make it optional (those rows read it as null) or give " +
+      "it a default (they read the default), or wait for column conversion.",
+  );
+}
+
 function entriesFile(snapshotFile: string): string {
   return snapshotFile.replace(/\.json$/i, ".encryption.json");
 }
@@ -961,6 +1027,20 @@ export async function loadMigrationHistory(options: {
     }
   }
 
+  for (const entry of files) {
+    const from = versions.get(entry.fromHash);
+    const to = versions.get(entry.toHash);
+    if (!from || !to) continue;
+    refuseRequiredEncryptedAdditions(
+      (table) =>
+        from[table]
+          ? new Set(Object.keys((from[table]!.columns ?? {}) as Record<string, unknown>))
+          : undefined,
+      entriesOf(to),
+      entry.fromHash,
+    );
+  }
+
   const history: Record<string, ReadableVersion> = {};
   const migrations: ReadableMigration[] = [];
   for (const entry of files) {
@@ -1102,6 +1182,14 @@ export async function createMigration(options: {
     baseline.hash === current.hash,
   );
   if (baseline.hash === current.hash) return { changed: false };
+  refuseRequiredEncryptedAdditions(
+    (table) =>
+      baseline.schema[table]
+        ? new Set(baseline.schema[table]!.columns.map((column) => column.name))
+        : undefined,
+    currentEntries,
+    shortSchemaHash(baseline.hash),
+  );
   if (!(await requiresMigration(baseline.schema, current.schema))) {
     return {
       changed: true,
@@ -1118,6 +1206,7 @@ export async function createMigration(options: {
     toHash: current.hash,
     fromSchema: baseline.schema,
     toSchema: current.schema,
+    toEncryption: currentEntries,
   });
   await mkdir(migrationsDir, { recursive: true });
   await writeFile(join(migrationsDir, file), stub);

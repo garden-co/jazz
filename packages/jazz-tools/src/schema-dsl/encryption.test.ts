@@ -213,18 +213,12 @@ describe("later versions of an encrypted app", () => {
     return root;
   }
 
-  /** Write the second version's schema.ts, create its migration and fill in `steps` for its TODOs. */
-  async function secondVersion(root: string, schema: string, steps: Record<string, string> = {}) {
+  /** Write the second version's schema.ts, create its migration (asking nothing) and generate. */
+  async function secondVersion(root: string, schema: string) {
     await writeFile(join(root, "schema.ts"), schema);
     const created = await createAppMigration({ cwd: root, name: "second" });
     expect(created.changed).toBe(true);
-    let stub = await readFile(created.file!, "utf8");
-    for (const [column, step] of Object.entries(steps))
-      stub = stub.replace(
-        new RegExp(` *// TODO: Added required column "${column}".*\\n`),
-        `      ${column}: ${step},\n`,
-      );
-    await writeFile(created.file!, stub);
+    expect(created.todos).toEqual([]);
     return generated(root);
   }
 
@@ -252,15 +246,18 @@ describe("later versions of an encrypted app", () => {
 
   it("generates a second version that adds columns to the encrypted table", async () => {
     const root = await firstVersion();
-    // A new encrypted column is stored as required bytes: rows older than it
-    // hold the empty ciphertext, which reads as never written.
+    // A new encrypted column is stored as required bytes: the stub fills the
+    // rows stored before it with the empty ciphertext, read as never written.
     const files = await secondVersion(
       root,
       chat({
         messages:
           ", editedAt: s.timestamp().optional(), subject: s.string().optional().encrypted()",
       }),
-      { subject: "m.add.bytes({ default: new Uint8Array() })" },
+    );
+    const [stub] = (await readdir(join(root, "migrations"))).filter((file) => file.endsWith(".ts"));
+    expect(await readFile(join(root, "migrations", stub!), "utf8")).toContain(
+      '"subject": m.add.bytes({ default: new Uint8Array() }),',
     );
     const app = JSON.parse(files.app) as {
       tables: Record<string, { encryption?: unknown }>;
@@ -273,6 +270,56 @@ describe("later versions of an encrypted app", () => {
     expect(
       Object.values(app.history).map((version) => version.tables.messages!.encryption),
     ).toEqual([TEXT_ENTRY]);
+  });
+
+  it("fills a new encrypted column with a declared default without asking", async () => {
+    const root = await firstVersion();
+    const files = await secondVersion(
+      root,
+      chat({ messages: ', subject: s.string().default("(no subject)").encrypted()' }),
+    );
+    expect(JSON.parse(files.app).tables.messages.encryption.columns.subject).toEqual({
+      type: "string",
+      default: "(no subject)",
+    });
+  });
+
+  const REQUIRED =
+    /messages\.subject: a new encrypted column on a table that already has rows in version [0-9a-f]{12} must be optional or declare a default\. Sealing a value for the rows stored before it needs their spaces' keys/;
+
+  it("refuses a new required encrypted column without a default on an existing table", async () => {
+    const root = await firstVersion();
+    await writeFile(
+      join(root, "schema.ts"),
+      chat({ messages: ", subject: s.string().encrypted()" }),
+    );
+    await expect(createAppMigration({ cwd: root, name: "second" })).rejects.toThrow(REQUIRED);
+    expect(
+      (await readdir(join(root, "migrations"))).filter((file) => file.endsWith(".ts")),
+    ).toEqual([]);
+  });
+
+  it("refuses at generate a migration that adds one, as an earlier jazz-tools could write", async () => {
+    const root = await firstVersion();
+    // A migration and snapshot for the column with a default, then the
+    // default taken out of both the schema and the snapshot's declarations.
+    await secondVersion(root, chat({ messages: ', subject: s.string().default("").encrypted()' }));
+    await writeFile(
+      join(root, "schema.ts"),
+      chat({ messages: ", subject: s.string().encrypted()" }),
+    );
+    const dir = join(root, "migrations", "snapshots");
+    let edited = 0;
+    for (const file of await readdir(dir)) {
+      if (!file.endsWith(".encryption.json")) continue;
+      const entries = JSON.parse(await readFile(join(dir, file), "utf8"));
+      if (!entries.tables.messages.columns.subject) continue;
+      entries.tables.messages.columns.subject = "string";
+      await writeFile(join(dir, file), JSON.stringify(entries));
+      edited += 1;
+    }
+    expect(edited).toBe(1);
+    await expect(generateApp({ cwd: root })).rejects.toThrow(REQUIRED);
   });
 
   const CONVERSION =
