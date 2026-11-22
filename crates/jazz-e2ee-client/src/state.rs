@@ -109,6 +109,8 @@ pub enum Report {
     /// A space with more member accounts than the design limit
     /// (protocol §3.8), once per space.
     SpaceOverMemberLimit { space: SpaceAddress, members: usize },
+    /// The runtime could not verify whether the space needs rotation before a write.
+    RotationCheckFailed { space: SpaceAddress, reason: String },
     /// A rotation the runtime tried before a write to `space`, which failed
     /// or was refused, with its reason. The write is sealed under the
     /// space's current version all the same (protocol §3.5), which a
@@ -426,22 +428,11 @@ pub(crate) struct KeyState {
     /// The account epoch `rotation_evaluated` was evaluated against: a
     /// verification that finds another one empties it.
     pub(crate) evaluated_epoch: Option<String>,
-    /// Whether this account, as last verified in this run, ever removed a
-    /// device or was reset: only then can a removed device of its own hold
-    /// a version this device writes under. `None` (unknown, which counts as
-    /// yes) from the open of a device that verified its account before
-    /// until this run verifies it; `Some(false)` from the open of one that
-    /// never did.
-    pub(crate) account_removed_devices: Option<bool>,
     /// Per space, whether any of its member accounts removed a device or
     /// was reset, as the last pass over it read them; `true` again when a
     /// member account changed since. A space whose members never did skips
     /// the read before a write: no removed device can hold its versions.
     pub(crate) space_removals: BTreeMap<jazz_e2ee::protocol::records::space::SpaceAddress, bool>,
-    /// Whether this device kept, at open, the floor of another account: it
-    /// shares spaces with other accounts, so a space this run has not read
-    /// yet may have a member that removed a device.
-    pub(crate) knows_other_accounts: bool,
     /// Spaces whose repair the authority refused (this device may not update
     /// the rows it wrote): the natural moments stop repairing them while the
     /// client runs; an explicit call always attempts (protocol §3.2).
@@ -467,38 +458,112 @@ pub(crate) struct KeyState {
 }
 
 impl KeyState {
-    /// Whether a write to `address` under a held key reads the space first
-    /// (protocol §3.5): this run has not evaluated its mark since what it
-    /// depends on last changed, and a removed device may hold its version:
-    /// one of its member accounts removed a device or was reset, or, for a
-    /// space not read yet, this account did (or is not verified yet) or this
-    /// device shares spaces with other accounts.
+    /// Missing evidence about this space requires a read, including on a
+    /// device that first encountered another member during this run.
     pub(crate) fn needs_evaluation(
         &self,
         address: &jazz_e2ee::protocol::records::space::SpaceAddress,
     ) -> bool {
-        if self.rotation_evaluated.contains(address) {
+        if self.rotation_refused.contains(address) || self.rotation_evaluated.contains(address) {
             return false;
         }
-        match self.space_removals.get(address) {
-            Some(removals) => *removals,
-            None => self.account_removed_devices != Some(false) || self.knows_other_accounts,
-        }
+        self.space_removals.get(address).copied().unwrap_or(true)
     }
 }
 
-/// The live subscriptions to the member accounts of the watched spaces
-/// (their roots, public successors and sealing keys), shared with the
-/// hooks: a write that finds an update the runtime has not served yet
-/// reads its space before it seals, instead of trusting an evaluation that
-/// update may have made stale.
+/// The account rows needed by one space's last authenticated pass.
+#[derive(Default, Clone)]
+pub(crate) struct WatchedMembers {
+    pub version: Option<jazz_e2ee::protocol::space::members::CurrentVersion>,
+    pub members: BTreeSet<String>,
+    pub holders: BTreeSet<String>,
+    pub waiting: BTreeSet<String>,
+}
+
+/// A removal delta names only a row ID. Remember the owner of each visible
+/// row so changes can be routed to the accounts or spaces they affect.
+pub(crate) struct WatchedRows<K> {
+    pub stream: jazz::db::SubscriptionStream,
+    pub rows: BTreeMap<RowUuid, K>,
+}
+
+impl<K: Ord + Clone> WatchedRows<K> {
+    pub fn new(stream: jazz::db::SubscriptionStream) -> Self {
+        Self {
+            stream,
+            rows: BTreeMap::new(),
+        }
+    }
+
+    /// The changed owners, and whether this stream must be opened again.
+    pub fn changes(
+        &mut self,
+        owner: impl Fn(&jazz::db::CurrentRow) -> Option<K>,
+    ) -> (BTreeSet<K>, bool) {
+        use jazz::db::SubscriptionEvent;
+        let mut changed = BTreeSet::new();
+        let mut closed = false;
+        while let Some(event) = self.stream.try_next_event() {
+            match event {
+                SubscriptionEvent::Delta {
+                    added,
+                    updated,
+                    removed,
+                    reset,
+                    ..
+                } => {
+                    if reset {
+                        changed.extend(std::mem::take(&mut self.rows).into_values());
+                    }
+                    for row in added.into_iter().chain(updated) {
+                        if let Some(key) = owner(&row) {
+                            changed.insert(key.clone());
+                            changed.extend(self.rows.insert(row.row_uuid(), key));
+                        }
+                    }
+                    for row in removed {
+                        changed.extend(self.rows.remove(&row.row_uuid));
+                    }
+                }
+                SubscriptionEvent::Rejected { .. } | SubscriptionEvent::Closed => {
+                    closed = true;
+                }
+            }
+        }
+        (changed, closed)
+    }
+}
+
+pub(crate) fn row_space(row: &jazz::db::CurrentRow) -> Option<SpaceAddress> {
+    match (row.cell("scopeId"), row.cell("identifier")) {
+        (Some(jazz::records::Value::Uuid(scope)), Some(jazz::records::Value::Uuid(id))) => {
+            Some(SpaceAddress {
+                scope_id: scope.to_string(),
+                identifier: id.to_string(),
+            })
+        }
+        _ => None,
+    }
+}
+pub(crate) struct AccountStream {
+    pub accounts: BTreeSet<String>,
+    pub rows: WatchedRows<String>,
+}
+
 #[derive(Default)]
 pub(crate) struct MemberWatch {
-    pub(crate) streams: Vec<jazz::db::SubscriptionStream>,
-    /// The spaces whose members the streams cover.
-    pub(crate) spaces: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
-    /// An update was found and not yet served by the delivery pass.
-    pub(crate) changed: bool,
+    pub space_streams: Vec<(&'static str, WatchedRows<SpaceAddress>)>,
+    pub covered: BTreeSet<SpaceAddress>,
+    #[cfg(any(test, feature = "testing"))]
+    pub last_check_rows: usize,
+    #[cfg(any(test, feature = "testing"))]
+    pub chain_reads: usize,
+    #[cfg(any(test, feature = "testing"))]
+    pub delivery_mark_checks: usize,
+    pub streams: BTreeMap<&'static str, AccountStream>,
+    pub spaces: BTreeMap<SpaceAddress, WatchedMembers>,
+    pub changed: BTreeSet<SpaceAddress>,
+    pub by_account: BTreeMap<(&'static str, String), BTreeSet<SpaceAddress>>,
 }
 
 /// This device's creations of spaces in this run (protocol §3.2, §5.4).
@@ -572,37 +637,87 @@ pub(crate) struct Shared {
     pub(crate) next_write: std::cell::Cell<u64>,
     /// The watch of the watched spaces' member accounts.
     pub(crate) member_watch: RefCell<MemberWatch>,
-    /// Spaces this runtime wrote to, with the member accounts the last pass
-    /// over each read: those accounts join the member-account watch, so a
-    /// member's device removal is seen while the runtime runs, whether or
-    /// not anything uses the space (protocol §3.5).
-    pub(crate) written: RefCell<BTreeMap<SpaceAddress, BTreeSet<String>>>,
+    /// Writes keep member watches warm for 60 seconds. Open subscriptions
+    /// retain their own interest independently. On the first write after
+    /// expiry the runtime checks the authority before reusing a held key.
+    pub(crate) written: RefCell<BTreeMap<SpaceAddress, web_time::Instant>>,
 }
 
 impl Shared {
-    /// Takes the updates the member-account watch holds. If there were any,
-    /// the watched spaces' marks are stale: each counts as having a member
-    /// with a removal until a pass reads it again, and the delivery pass is
-    /// told.
+    pub(crate) fn recent_writes(&self) -> BTreeSet<SpaceAddress> {
+        let now = self.now();
+        let mut recent = self.written.borrow_mut();
+        recent.retain(|_, last| now.duration_since(*last) < std::time::Duration::from_secs(60));
+        recent.keys().cloned().collect()
+    }
+
+    pub(crate) fn note_write(&self, address: &jazz_e2ee::protocol::records::space::SpaceAddress) {
+        let space = db_address(address);
+        let now = self.now();
+        let last = self.written.borrow_mut().insert(space.clone(), now);
+        if last.is_none_or(|time| now.duration_since(time) >= std::time::Duration::from_secs(60)) {
+            self.member_watch
+                .borrow_mut()
+                .spaces
+                .entry(space)
+                .or_default()
+                .version = None;
+            let mut keys = self.keys.borrow_mut();
+            keys.rotation_evaluated.remove(address);
+            keys.space_removals.insert(address.clone(), true);
+        }
+    }
+
     pub(crate) fn notice_member_changes(&self) {
-        let spaces = {
-            let mut watch = self.member_watch.borrow_mut();
-            let mut found = false;
-            for stream in &mut watch.streams {
-                while stream.try_next_event().is_some() {
-                    found = true;
-                }
+        let mut watch = self.member_watch.borrow_mut();
+        let mut changed = BTreeSet::new();
+        watch.streams.retain(|&table, sub| {
+            let (mut accounts, closed) = sub.rows.changes(|row| match row.cell("accountId") {
+                Some(jazz::records::Value::Uuid(id)) => Some(id.to_string()),
+                _ => None,
+            });
+            if closed {
+                accounts.extend(sub.accounts.iter().cloned());
             }
-            if !found {
-                return;
+            changed.extend(accounts.into_iter().map(|id| (table, id)));
+            !closed
+        });
+        let mut affected = BTreeSet::new();
+        for account in changed {
+            if let Some(spaces) = watch.by_account.get(&account) {
+                affected.extend(spaces.iter().cloned());
             }
-            watch.changed = true;
-            watch.spaces.clone()
-        };
+        }
+        let mut chain_changed = BTreeSet::new();
+        let mut lost_watch = false;
+        for (table, sub) in &mut watch.space_streams {
+            let (spaces, closed) = sub.changes(row_space);
+            lost_watch |= closed;
+            if matches!(
+                *table,
+                crate::account::rows::SPACE_ROOTS | crate::account::rows::SPACE_SUCCESSORS
+            ) {
+                chain_changed.extend(spaces.iter().cloned());
+            }
+            affected.extend(spaces);
+        }
+        if lost_watch {
+            affected.extend(watch.spaces.keys().cloned());
+            chain_changed.extend(watch.spaces.keys().cloned());
+            watch.covered.clear();
+        }
+        for space in chain_changed {
+            if let Some(deps) = watch.spaces.get_mut(&space) {
+                deps.version = None;
+            }
+        }
         let mut keys = self.keys.borrow_mut();
-        for space in spaces {
-            keys.rotation_evaluated.remove(&space);
-            keys.space_removals.insert(space, true);
+        for space in affected {
+            if let Ok(address) = crate::spaces::protocol_address(&space) {
+                keys.rotation_evaluated.remove(&address);
+                keys.space_removals.insert(address, true);
+            }
+            watch.changed.insert(space);
         }
     }
 }

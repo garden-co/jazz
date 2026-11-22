@@ -2000,7 +2000,7 @@ impl Binding {
             (None, None) => WriteIdentity::Database,
         };
         let row = row_uuid(row)?;
-        let cells = decode_cells(cells)?;
+        let mut cells = decode_cells(cells)?;
         let mutation = match mutation.unwrap_or("insert") {
             "insert" => StreamingMutationKind::Insert,
             "update" => StreamingMutationKind::Update,
@@ -2032,13 +2032,12 @@ impl Binding {
         };
         // In a transaction, the row's space is the one the transaction sees.
         let upload = match transaction {
-            Some(id) => self
-                .db
-                .tx_ref(id)
-                .begin_streaming_value_upload_for(&table, row, &cells, &column, &target)?,
-            None => self
-                .db
-                .begin_streaming_value_upload_for(&table, row, &cells, &column, &target)?,
+            Some(id) => self.db.tx_ref(id).begin_streaming_value_upload_for(
+                mutation, &table, row, &mut cells, &column, &target,
+            )?,
+            None => self.db.begin_streaming_value_upload_for(
+                mutation, &table, row, &mut cells, &column, &target,
+            )?,
         };
         Ok(StreamingMutation {
             state: Some(Box::new(StreamingState {

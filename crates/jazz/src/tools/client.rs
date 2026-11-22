@@ -94,6 +94,14 @@ pub trait EncryptionRuntime {
     /// Called after every tick: lets the runtime's loop go on as far as it
     /// can without waiting, and asks for a tick if it owes one.
     fn after_tick(&self);
+    /// Open a reader's upload, preparing the space first when the hooks ask.
+    #[cfg(not(target_family = "wasm"))]
+    fn begin_streaming_upload<'a>(
+        &self,
+        begin: &'a mut dyn FnMut() -> Result<crate::db::StreamingValueUpload>,
+    ) -> futures::future::LocalBoxFuture<'a, Result<crate::db::StreamingValueUpload>> {
+        Box::pin(async move { begin() })
+    }
     /// Called when the client shuts down: ends the loop.
     fn stop(&self);
 }
@@ -1618,10 +1626,42 @@ impl JazzClient {
                 ));
             }
         }
-        let cells = self.core_cells(table, values)?;
-        let write = self
-            .db()?
-            .insert_streaming_value(table, cells, column, reader)
+        let db = self.db()?;
+        let row = db.next_row_id();
+        let mut cells = self.core_cells(table, values)?;
+        let kind = crate::db::StreamingMutationKind::Insert;
+        let mut begin = || {
+            db.begin_streaming_value_upload_for(
+                kind,
+                table,
+                row,
+                &mut cells,
+                column,
+                &WriteTarget::Root,
+            )
+            .map_err(write_error)
+        };
+        let upload = match &self.shared.encryption {
+            Some(runtime) => runtime.begin_streaming_upload(&mut begin).await?,
+            None => begin()?,
+        };
+        let upload = db
+            .feed_streaming_value_from_reader(upload, reader)
+            .await
+            .map_err(write_error)?;
+        let write = db
+            .finish_streaming_value_upload(
+                upload,
+                kind,
+                table,
+                row,
+                cells,
+                column,
+                WriteIdentity::Database,
+                None,
+                None,
+                None,
+            )
             .await
             .map_err(write_error)?;
         Ok((

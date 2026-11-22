@@ -483,6 +483,116 @@ describe("encryption on Node, end to end", () => {
     });
   }, 90_000);
 
+  it("writes with the current key when rotation misses the write deadline, then rotates before the next write", async () => {
+    const shared = structuredClone(permissions);
+    shared.tables.tasks.read = "true";
+    const host = await serve(undefined, shared);
+    const alice = await device(host);
+    const bob = await device(host);
+    const projectId = await makeProject(alice, "plans");
+    await addMember(alice, projectId, bob.account);
+    const insert = (title: string) =>
+      alice.db.insert(app.tasks, { projectId, title }).wait({ tier: "global" });
+    await insert("before");
+    await alice.db.encryption.keys.deliver();
+    const titles = async () =>
+      (await bob.db.all(app.tasks.where({ projectId }), { tier: "remote" })).map(
+        (row) => row.title,
+      );
+    await until(
+      async () => (await titles()).includes("before") || undefined,
+      "Bob to hold the current key",
+    );
+    const member = (await alice.db.all(app.__e2ee_members, { tier: "remote" })).find(
+      (row) => row.accountId === bob.account,
+    )!;
+    await alice.db.delete(app.__e2ee_members, member.id).wait({ tier: "global" });
+    const reports: unknown[] = [];
+    const unsubscribe = alice.db.encryption.onReport((report) => reports.push(report));
+    const native = alice.db.encryption["native"];
+    const call = native.encryptionCall.bind(native);
+    function signal() {
+      let resolve!: () => void;
+      const promise = new Promise<void>((done) => {
+        resolve = done;
+      });
+      return { promise, resolve };
+    }
+    const resume = signal();
+    const finished = signal();
+    const delayed = vi.spyOn(native, "encryptionCall").mockImplementation(async (op, args) => {
+      if (op !== "prepareSpace") return call(op, args);
+      await resume.promise;
+      try {
+        return await call(op, args);
+      } finally {
+        finished.resolve();
+      }
+    });
+    try {
+      await insert("while undecided");
+      await until(
+        async () =>
+          reports.some((report) => (report as { type: string }).type === "rotation-failed") ||
+          undefined,
+        "the undecided rotation report",
+      );
+      expect(await titles()).toContain("while undecided");
+    } finally {
+      resume.resolve();
+      delayed.mockRestore();
+      unsubscribe();
+    }
+    await finished.promise;
+    const successors = (app as unknown as Record<string, never>)["__e2ee_space_successors"];
+    expect(await host.jazz.db.all(successors)).toHaveLength(0);
+    await insert("after rotation");
+    expect(await host.jazz.db.all(successors)).toHaveLength(1);
+    expect(await titles()).not.toContain("after rotation");
+  }, 90_000);
+
+  it("recovers a space from an earlier key when the only current holder is gone", async () => {
+    const shared = structuredClone(permissions);
+    shared.tables.projects.update = "true";
+    const host = await serve(undefined, shared);
+    const alice = await device(host);
+    const bob = await device(host);
+    const carol = await device(host);
+    const id = await makeProject(alice, "plans");
+    const space = { table: "projects", id };
+    await addMember(alice, id, bob.account);
+    await alice.db.insert(app.tasks, { projectId: id, title: "original" }).wait({ tier: "global" });
+    await alice.db.encryption.keys.deliver();
+    await until(async () => {
+      const rows = await bob.db.all(app.tasks.where({ projectId: id }), { tier: "remote" });
+      return rows[0]?.title === "original" ? true : undefined;
+    }, "Bob to acquire the original key");
+    const members = await alice.db.all(app.__e2ee_members, { tier: "remote" });
+    await alice.db
+      .delete(app.__e2ee_members, members.find((row) => row.accountId === bob.account)!.id)
+      .wait({ tier: "global" });
+    await expect(alice.db.encryption.keys.rotate(space)).resolves.toBe(0);
+    const bobRow = await alice.db.encryption.members.row(space, bob.account);
+    const carolRow = await alice.db.encryption.members.row(space, carol.account);
+    await alice.session.close();
+    await host.jazz.db
+      .delete(app.__e2ee_members, members.find((row) => row.accountId === alice.account)!.id)
+      .wait({ tier: "global" });
+    await host.jazz.db.insert(app.__e2ee_members, bobRow).wait({ tier: "global" });
+    await host.jazz.db.insert(app.__e2ee_members, carolRow).wait({ tier: "global" });
+    await expect(bob.db.encryption.keys.rotate(space)).rejects.toMatchObject({
+      code: "rotation-needs-key",
+    });
+    await expect(bob.db.encryption.keys.recoverRotation(space)).resolves.toBe(1);
+    await bob.db
+      .insert(app.tasks, { projectId: id, title: "after recovery" })
+      .wait({ tier: "global" });
+    await until(async () => {
+      const rows = await carol.db.all(app.tasks.where({ projectId: id }), { tier: "remote" });
+      return rows.some((row) => row.title === "after recovery") ? true : undefined;
+    }, "Carol to read Bob's new write with the recovered key");
+  }, 90_000);
+
   it("a removed member cannot open what is written after the rotation", async () => {
     // Tasks are readable to everyone here, so the removed member is handed the
     // ciphertext of the rows written after the rotation: it holds no key for them.
@@ -739,6 +849,97 @@ describe("encryption on Node, end to end", () => {
     const back = await serve({ dir, port });
     expect(back.jazz.appId).toBe(appId);
     expect(await offline.db.encryption.ready({ timeoutMs: 30_000 })).toBe("active");
+  }, 120_000);
+
+  it("a returning device reads its encrypted rows offline, and its live query goes on once the server is back", async () => {
+    const first = await serve();
+    const accounts = memoryStore();
+    const privateStore = memoryPrivateStore();
+    const dataPath = `${await mkdtemp(`${tmpdir()}/e2ee-client-`)}/device`;
+    const online = await device(first, { accounts, privateStore, dataPath });
+    const project = await makeProject(online, "plans");
+    await online.db
+      .insert(app.tasks, { projectId: project, title: "kept" })
+      .wait({ tier: "global" });
+    await online.session.close();
+    const { dir, port, serverUrl, jazz } = first;
+    const appId = jazz.appId;
+    await first.stop();
+    // The same device opens with the server down. It has synced before: it
+    // reads what its store holds with the keys it holds, at once.
+    const offline = await device(
+      { serverUrl, jazz: { appId } as never },
+      { accounts, privateStore, dataPath, wait: false },
+    );
+    const seen: string[][] = [];
+    const errors: unknown[] = [];
+    const stop = offline.db.subscribe(
+      app.tasks.where({ projectId: project }),
+      {
+        onUpdate: (rows) => seen.push(rows.map((row) => row.title).sort()),
+        onError: (error) => errors.push(error),
+      },
+      { tier: "local-first" },
+    );
+    cleanups.push(async () => stop());
+    await expect.poll(() => seen.at(-1), { timeout: 5_000 }).toEqual(["kept"]);
+    expect(errors).toEqual([]);
+    // The server comes back. Another client of the device writes a task: the
+    // same live query, never ended, picks it up.
+    const back = await serve({ dir, port });
+    const other = await device(back, { accounts, privateStore });
+    await other.db
+      .insert(app.tasks, { projectId: project, title: "later" })
+      .wait({ tier: "global" });
+    await expect.poll(() => seen.at(-1), { timeout: 30_000 }).toEqual(["kept", "later"]);
+    expect(errors).toEqual([]);
+    // Its open sockets would hold the restarted server's close.
+    stop();
+    await other.session.close();
+    await offline.session.close();
+  }, 120_000);
+
+  it("a device that never synced answers an encrypted live query only once it has synced", async () => {
+    const first = await serve();
+    const accounts = memoryStore();
+    const privateStore = memoryPrivateStore();
+    const online = await device(first, { accounts, privateStore });
+    const project = await makeProject(online, "plans");
+    await online.db
+      .insert(app.tasks, { projectId: project, title: "kept" })
+      .wait({ tier: "global" });
+    await online.session.close();
+    const { dir, port, serverUrl, jazz } = first;
+    const appId = jazz.appId;
+    await first.stop();
+    // A new store, with the server down: it has never seen the app's
+    // catalogue, so it cannot say what its encrypted rows are. The query
+    // waits and says nothing, rather than answer an empty result.
+    const fresh = await device(
+      { serverUrl, jazz: { appId } as never },
+      { accounts, privateStore, wait: false },
+    );
+    const seen: string[][] = [];
+    const errors: unknown[] = [];
+    const stop = fresh.db.subscribe(
+      app.tasks.where({ projectId: project }),
+      {
+        onUpdate: (rows) => seen.push(rows.map((row) => row.title).sort()),
+        onError: (error) => errors.push(error),
+      },
+      { tier: "local-first" },
+    );
+    cleanups.push(async () => stop());
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(seen).toEqual([]);
+    expect(errors).toEqual([]);
+    // The server comes back: the first sync brings the catalogue and the rows.
+    await serve({ dir, port });
+    await expect.poll(() => seen.at(-1), { timeout: 30_000 }).toEqual(["kept"]);
+    expect(errors).toEqual([]);
+    // Its open socket would hold the restarted server's close.
+    stop();
+    await fresh.session.close();
   }, 120_000);
 
   it("the runtime's loop tries a failed verification again (a store that fails twice)", async () => {

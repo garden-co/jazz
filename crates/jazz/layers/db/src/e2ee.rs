@@ -81,6 +81,18 @@ pub trait E2eeHooks {
     /// column returns `Ok` untouched.
     fn seal_write(&self, write: &mut WriteCells<'_>) -> Result<(), SealError>;
 
+    /// Claim the companion rows prepared with a stream that is now publishing.
+    /// Another write may have published the space root while the source ran.
+    fn claim_stream_companions(
+        &self,
+        _table: &str,
+        _space: Option<&Value>,
+        _root: Option<&str>,
+        _rows: &mut Vec<(String, RowUuid, BTreeMap<String, Value>)>,
+    ) -> Result<(), SealError> {
+        Ok(())
+    }
+
     /// The companion rows `seal_write` staged, as (table, row ID), that
     /// will not be stored: the write failed to stage after sealing, or the
     /// transaction that held them was abandoned or failed to commit. A
@@ -134,8 +146,10 @@ pub struct WriteCells<'a> {
     /// out. During a conversion the hook also writes the target and
     /// clears the source here.
     pub cells: &'a mut BTreeMap<String, Value>,
-    /// The encrypted column already sealed while streaming, omitted from `cells`.
+    /// The column supplied by a stream, omitted while its metadata is sealed.
     pub streamed_column: Option<&'a str>,
+    /// The root the upload uses. Publication checks it and claims a pending creation.
+    pub stream_root: Option<String>,
     /// For updates, upserts and moves of a table with an encryption
     /// entry: the space cell of the row as the write finds it, `None` when
     /// there is no such row (yet).

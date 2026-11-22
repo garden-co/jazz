@@ -982,6 +982,82 @@ fn owned_device(server: &Db, who: AuthorSubject, store: MemoryStore, node: u8) -
     }
 }
 
+/// Bob watches a shared room before he has its key. Once he acquires it
+/// he can evaluate rotations until the authority refuses his first attempt.
+#[test]
+fn only_an_eligible_holder_checks_the_mark_and_watches_public_successors() {
+    within(|| {
+        let server = block_on(Db::open(jazz::db::DbConfig::new(
+            owned_schema(),
+            identity(0),
+        )))
+        .unwrap();
+        server.set_authority().unwrap();
+        let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
+        let bob = owned_device(&server, account(0xb0), MemoryStore::new(), 2);
+        alice.activate(&server);
+        bob.activate(&server);
+        let space = block_on(alice.db.insert(
+            "projects",
+            BTreeMap::from([
+                ("name".to_owned(), text("plans")),
+                (
+                    "ownerId".to_owned(),
+                    Value::Uuid(uuid::Uuid::parse_str(&alice.id()).unwrap()),
+                ),
+            ]),
+            Default::default(),
+        ))
+        .unwrap()
+        .row_uuid()
+        .0;
+        pump(&server, &alice.db);
+        add_member(&server, &alice, space, &alice.id());
+        write_note(&server, &alice, space, SECRET).unwrap();
+        pump(&server, &alice.db);
+        add_member(&server, &alice, space, &bob.id());
+        let address = space_address(&bob, space);
+        let mut watch = block_on(bob.client.watch_spaces(&bob.db)).unwrap();
+        watch.use_space(&address);
+        let sync = |watch: &mut jazz_e2ee_client::SpaceWatch| {
+            for _ in 0..2 {
+                drive(&server, &[&bob.db], bob.client.sync_spaces(&bob.db, watch)).unwrap();
+                pump(&server, &bob.db);
+            }
+        };
+        let watched = || bob.client.watched_member_accounts(&address);
+        let successors = ("__e2ee_public_account_successors", alice.id());
+        sync(&mut watch);
+        assert!(watched().contains(&("__e2ee_account_roots", alice.id())));
+        let before = bob.client.delivery_mark_checks();
+        deliver(&server, &bob, &[], space);
+        sync(&mut watch);
+        assert_eq!(bob.client.delivery_mark_checks(), before, "Bob has no key");
+        assert!(!watched().contains(&successors));
+        assert!(watched().contains(&("__e2ee_account_roots", alice.id())));
+        deliver(&server, &alice, &[&bob], space);
+        sync(&mut watch);
+        assert!(bob.client.delivery_mark_checks() > before);
+        assert!(watched().contains(&successors));
+        assert!(!watched().contains(&("__e2ee_account_keys", alice.id())));
+        let dave = owned_device(&server, account(0xd0), MemoryStore::new(), 3);
+        server_member(&server, &alice, space, &dave.id());
+        sync(&mut watch);
+        let daves_keys = ("__e2ee_account_keys", dave.id());
+        assert!(watched().contains(&daves_keys));
+        dave.activate(&server);
+        sync(&mut watch);
+        assert!(!watched().contains(&daves_keys));
+        drive(&server, &[&bob.db], bob.client.rotate(&bob.db, &address)).unwrap_err();
+        let refused = bob.client.delivery_mark_checks();
+        deliver(&server, &bob, &[], space);
+        sync(&mut watch);
+        assert_eq!(bob.client.delivery_mark_checks(), refused);
+        assert!(!watched().contains(&successors));
+        assert!(watched().contains(&("__e2ee_account_roots", alice.id())));
+    });
+}
+
 /// Contract: a member who may not update the space row is refused when
 /// she creates the space: `space-create-refused`, no root and no key
 /// that writes, and, while the client runs, her encrypted writes fail
@@ -1863,6 +1939,77 @@ fn deliver(server: &Db, holder: &Device, other: &[&Device], space: uuid::Uuid) -
     .unwrap()
 }
 
+/// Alice starts an attachment, rotates the space key, then publishes. Its
+/// body, optional metadata and stream all carry the epoch chosen at begin.
+///
+/// ```text
+/// begin (root epoch) ──► rotate ──► push and finish ──► inspect the stored row
+/// ```
+#[test]
+fn stream_metadata_keeps_the_epoch_chosen_before_pulling() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, _bob, space) = shared_space(&server);
+        let db = &alice.db;
+        let row = jazz::ids::RowUuid(uuid::Uuid::now_v7());
+        let mut cells = note(space, "caption");
+        let mut upload = drive(
+            &server,
+            &[db],
+            alice.client.write(db, async || {
+                db.begin_streaming_value_upload_for(
+                    jazz::db::StreamingMutationKind::Insert,
+                    "notes",
+                    row,
+                    &mut cells,
+                    "attachment",
+                    &jazz::db::WriteTarget::Root,
+                )
+            }),
+        )
+        .unwrap();
+        drive(
+            &server,
+            &[db],
+            alice.client.rotate(db, &space_address(&alice, space)),
+        )
+        .unwrap();
+        assert_eq!(count(&server, "__e2ee_space_successors"), 1);
+        block_on(db.push_streaming_value_upload(&mut upload, b"contents")).unwrap();
+        block_on(db.finish_streaming_value_upload(
+            upload,
+            jazz::db::StreamingMutationKind::Insert,
+            "notes",
+            row,
+            cells,
+            "attachment",
+            Default::default(),
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+        pump(&server, db);
+        let stored = all(&server, Query::from("notes"))
+            .unwrap()
+            .into_iter()
+            .find(|note| note.row_uuid() == row)
+            .unwrap();
+        let root_epoch = all(&server, Query::from(SPACES)).unwrap()[0].cell("epochId");
+        for name in ["attachment", "body", "note", "rank"] {
+            let Some(Value::Bytes(bytes)) = stored.cell(name) else {
+                panic!("missing stored {name}");
+            };
+            let record = jazz_e2ee::records::read_stored_record(&bytes).unwrap();
+            assert_eq!(
+                Some(Value::Uuid(uuid::Uuid::parse_str(record.epoch_id).unwrap())),
+                root_epoch,
+                "{name}"
+            );
+        }
+    });
+}
+
 /// Alice can rotate her new project before its first encrypted write.
 #[test]
 fn explicit_rotation_of_a_space_without_a_key_writes_nothing() {
@@ -2073,6 +2220,48 @@ fn two_holders_racing_write_exactly_one_delivery() {
     });
 }
 
+/// Once Alice has seen the project tombstone she can still write retained
+/// notes where policy allows, without attempting a rotation of the deleted project.
+#[test]
+fn a_deleted_project_skips_automatic_rotation() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        deliver(&server, &alice, &[&bob], space);
+        block_on(
+            alice
+                .db
+                .delete(MEMBERS, member_row(&server, &bob.id()), Default::default()),
+        )
+        .unwrap();
+        pump(&server, &alice.db);
+        let address = space_address(&alice, space);
+        deliver(&server, &alice, &[], space);
+        assert!(alice.client.needs_rotation(&address).unwrap());
+        block_on(
+            alice
+                .db
+                .delete("projects", jazz::ids::RowUuid(space), Default::default()),
+        )
+        .unwrap();
+        pump(&server, &alice.db);
+        let events = reports_of(&alice);
+        write_note(&server, &alice, space, "retained note").unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .all(|report| !matches!(report, Report::RotationFailed { .. }))
+        );
+        assert!(
+            alice.client.needs_rotation(&address).unwrap(),
+            "restoring the row can resume rotation"
+        );
+    });
+}
+
 /// Contract: after bob's member row is deleted, the space needs rotation;
 /// alice's next encrypted write rotates it first (a successor and a delivery
 /// to carol, none to bob), and carol reads what alice writes under the new
@@ -2226,6 +2415,128 @@ fn member_row(server: &Db, account: &str) -> jazz::ids::RowUuid {
         })
         .unwrap()
         .row_uuid()
+}
+
+/// Alice has observed that Bob, who held her project's key, was removed.
+fn observed_removal(server: &Db) -> (Device, uuid::Uuid) {
+    let (alice, bob, space) = shared_space(server);
+    assert_eq!(deliver(server, &alice, &[&bob], space), 1);
+    block_on(server.delete(MEMBERS, member_row(server, &bob.id()), Default::default())).unwrap();
+    pump(server, &alice.db);
+    deliver(server, &alice, &[], space);
+    assert!(
+        alice
+            .client
+            .needs_rotation(&space_address(&alice, space))
+            .unwrap()
+    );
+    (alice, space)
+}
+
+/// Read the ciphertext header at the authority to distinguish the old key
+/// from the successor even though Alice can decrypt both.
+fn note_epoch(server: &Db, note: &jazz::db::WriteHandle) -> Value {
+    let query = Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(note.row_uuid().0))));
+    let rows = all(server, query).unwrap();
+    let Some(Value::Bytes(bytes)) = rows[0].cell("body") else {
+        panic!("expected sealed note")
+    };
+    let epoch = jazz_e2ee::records::read_stored_record(&bytes)
+        .unwrap()
+        .epoch_id;
+    Value::Uuid(epoch.parse().unwrap())
+}
+
+/// Alice writes offline after observing Bob's removal. The stored note uses
+/// the root key and the next online write uses the successor.
+#[test]
+fn an_offline_write_after_an_observed_removal_uses_the_current_key() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, space) = observed_removal(&server);
+        let root = all(&server, Query::from(SPACES)).unwrap()[0]
+            .cell("epochId")
+            .unwrap();
+        alice.client.set_online(false);
+        let offline = block_on(alice.db.insert(
+            "notes",
+            note(space, "offline"),
+            Default::default(),
+        ))
+        .unwrap();
+        assert_eq!(count(&server, "notes"), 1);
+        alice.client.set_online(true);
+        pump(&server, &alice.db);
+        assert_eq!(note_epoch(&server, &offline), root);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+        let online = write_note(&server, &alice, space, "online").unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 1);
+        assert_ne!(note_epoch(&server, &online), root);
+    });
+}
+
+/// Alice's host times out while the authority has yet to answer a rotation
+/// read. Resuming that preparation after the write cannot publish a rotation.
+///
+/// Alice observes Bob's removal → prepare waits → write under old key
+/// → authority answers → no successor → next write rotates first.
+#[test]
+fn a_write_whose_rotation_is_undecided_uses_the_current_key_once() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, space) = observed_removal(&server);
+        let at = space_address(&alice, space);
+        let root = all(&server, Query::from(SPACES)).unwrap()[0]
+            .cell("epochId")
+            .unwrap();
+        let reports = reports_of(&alice);
+        let insert = || {
+            alice
+                .db
+                .insert("notes", note(space, "waiting"), Default::default())
+        };
+        assert!(block_on(insert()).is_err());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let mut prepare = std::pin::pin!(alice.client.prepare_host_write(
+            &alice.db,
+            &at,
+            Some(deadline)
+        ));
+        assert!(
+            prepare
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending()
+        );
+        std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+        assert!(
+            alice
+                .client
+                .retry_with_current_key(&at, "rotation undecided at the write deadline")
+                .unwrap()
+        );
+        let written = block_on(insert()).unwrap();
+        assert!(reports.borrow().iter().any(|report| matches!(report,
+            Report::RotationFailed { space, reason } if space == &at && reason.contains("deadline"))));
+        drive(&server, &[&alice.db], prepare).unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(note_epoch(&server, &written), root);
+        assert_eq!(
+            count(&server, "__e2ee_space_successors"),
+            0,
+            "expired preparation submitted a rotation"
+        );
+        assert!(alice.client.needs_rotation(&at).unwrap());
+        assert!(
+            block_on(insert()).is_err(),
+            "the late preparation left a retry mark"
+        );
+        let next = write_note(&server, &alice, space, "next").unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 1);
+        assert_ne!(note_epoch(&server, &next), root);
+    });
 }
 
 /// Contract: a host binding's writes, which `write` does not wrap, rotate

@@ -21,6 +21,158 @@ fn cell(row: &jazz::db::CurrentRow, column: &str) -> Value {
         .unwrap_or_else(|| panic!("no `{column}` cell"))
 }
 
+fn refuses_invalid_stream_metadata(kind: jazz::db::StreamingMutationKind) {
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (db, _link, _) = online(&client, &server, None);
+    let space = project(&db, "plans");
+    hold_new_space(&client, &db, space);
+    let existing = block_on(db.insert("notes", note(space, SECRET), Default::default()))
+        .unwrap()
+        .row_uuid();
+    let (row, mut cells) = if kind == jazz::db::StreamingMutationKind::Update {
+        (existing, BTreeMap::new())
+    } else {
+        (
+            jazz::ids::RowUuid(uuid::Uuid::now_v7()),
+            note(space, SECRET),
+        )
+    };
+    struct Unread;
+    impl std::io::Read for Unread {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("the source was read before its metadata was accepted");
+        }
+    }
+    for streamed in ["attachment", "title"] {
+        cells.remove(streamed);
+        cells.insert("body".into(), Value::I32(4));
+        let write = |cells| {
+            block_on(db.write_streaming_value_with_id(
+                kind, "notes", row, cells, streamed, Unread, None, None, None, None,
+            ))
+        };
+        let error = write(cells.clone()).unwrap_err();
+        assert!(error.message.contains("plaintext type"), "{error}");
+        if kind != jazz::db::StreamingMutationKind::Update {
+            cells.remove("body");
+            let error = write(cells.clone()).unwrap_err();
+            assert!(error.message.contains("notes.body"), "{error}");
+        }
+    }
+}
+
+/// Alice's insert rejects a mistyped encrypted caption before reading the attachment.
+#[test]
+fn invalid_stream_metadata_leaves_an_insert_source_unread() {
+    refuses_invalid_stream_metadata(jazz::db::StreamingMutationKind::Insert);
+}
+
+/// Alice's update discovers the space from her stored row and rejects a bad caption before reading.
+#[test]
+fn invalid_stream_metadata_leaves_an_update_source_unread() {
+    refuses_invalid_stream_metadata(jazz::db::StreamingMutationKind::Update);
+}
+
+/// Alice's upsert of a new row rejects a bad caption before reading the attachment.
+#[test]
+fn invalid_stream_metadata_leaves_an_upsert_source_unread() {
+    refuses_invalid_stream_metadata(jazz::db::StreamingMutationKind::Upsert);
+}
+
+/// Alice can stream a plain patch without a row at begin. A patch that
+/// supplies encrypted metadata at begin or finish leaves the secret alone.
+#[test]
+fn a_rowless_stream_only_publishes_plain_patches_of_an_encrypted_table() {
+    use jazz::db::StreamingMutationKind::Update;
+
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (db, _link, _) = online(&client, &server, None);
+    let space = project(&db, "plans");
+    hold_new_space(&client, &db, space);
+    let row = block_on(db.insert("notes", note(space, SECRET), Default::default()))
+        .unwrap()
+        .row_uuid();
+    let metadata = BTreeMap::from([("body".to_owned(), text("caption"))]);
+    let error = db
+        .begin_streaming_value_upload("notes", &metadata, "title")
+        .err()
+        .unwrap();
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(error.message.contains("notes.body"));
+
+    let publish = |cells| {
+        let mut upload = db
+            .begin_streaming_value_upload("notes", &BTreeMap::new(), "title")
+            .unwrap();
+        block_on(db.push_streaming_value_upload(&mut upload, b"plain title")).unwrap();
+        block_on(db.finish_streaming_value_upload(
+            upload,
+            Update,
+            "notes",
+            row,
+            cells,
+            "title",
+            Default::default(),
+            None,
+            None,
+            None,
+        ))
+    };
+    publish(BTreeMap::new()).unwrap();
+    assert_eq!(publish(metadata).unwrap_err().code, ErrorCode::Query);
+    pump(&server, &db);
+    let rows = all(&server, Query::from("notes")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), row);
+    assert_eq!(cell(&rows[0], "title"), text("plain title"));
+    assert_eq!(
+        cell(&all(&db, Query::from("notes")).unwrap()[0], "body"),
+        text(SECRET)
+    );
+}
+
+/// Alice has the vault key and supplies its plain label. An insert or upsert
+/// would also create an encrypted null secret, so a rowless stream must refuse
+/// publication when it learns the mutation kind at finish.
+#[test]
+fn a_rowless_stream_cannot_create_an_encrypted_default() {
+    use jazz::db::StreamingMutationKind::{Insert, Upsert};
+
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (db, _link, _) = online(&client, &server, None);
+    let vault = uuid::Uuid::now_v7();
+    let held = new_space_key(&client.device().unwrap(), &address_in(&db, "vaults", vault));
+    block_on(client.keep(held)).unwrap();
+    for kind in [Insert, Upsert] {
+        let cells = BTreeMap::new();
+        let mut upload = db
+            .begin_streaming_value_upload("vaults", &cells, "label")
+            .unwrap();
+        block_on(db.push_streaming_value_upload(&mut upload, b"plain label")).unwrap();
+        let error = block_on(db.finish_streaming_value_upload(
+            upload,
+            kind,
+            "vaults",
+            jazz::ids::RowUuid(vault),
+            cells,
+            "label",
+            Default::default(),
+            None,
+            None,
+            None,
+        ))
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Query);
+        assert!(error.message.contains("encrypted table `vaults`"));
+    }
+    pump(&server, &db);
+    assert!(all(&db, Query::from("vaults")).unwrap().is_empty());
+    assert!(all(&server, Query::from("vaults")).unwrap().is_empty());
+}
+
 /// Contract: alice's encrypted cells of every type (required text with an
 /// equality index, optional text, optional bytes, optional integer, null
 /// included) are stored and uploaded sealed, with a token for the indexed
@@ -903,6 +1055,7 @@ fn a_self_space_upsert_that_creates_its_row_seals_what_it_omits() {
     let (db, _link, _) = online(&client, &server, None);
     let vault = uuid::Uuid::now_v7();
     let held = new_space_key(&client.device().unwrap(), &address_in(&db, "vaults", vault));
+    client.record_fixture_rotation_check(held.address());
     block_on(client.keep(held)).unwrap();
     let label = |text_value: &str| BTreeMap::from([("label".to_owned(), text(text_value))]);
     let row = jazz::ids::RowUuid(vault);
