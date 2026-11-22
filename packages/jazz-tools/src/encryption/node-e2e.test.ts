@@ -348,7 +348,7 @@ describe("encryption on Node, end to end", () => {
     // The only holder is offline when Bob joins, so no delivery can race his rotation.
     await alice.session.close();
     const row = await bob.db.encryption.members.row(space, bob.account);
-    await host.jazz.db.insert(membersTable, row as never).wait({ tier: "global" });
+    await host.jazz.db.insert(app.__e2ee_members, row).wait({ tier: "global" });
     await expect(bob.db.encryption.keys.rotate(space)).rejects.toMatchObject({
       code: "rotation-needs-key",
       message: "This device does not hold the space's current key yet",
