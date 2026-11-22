@@ -100,13 +100,16 @@ Errors match their kind with `errors.Is`: `jazz.ErrPermission`, `jazz.ErrRefused
 
 A `*jazz.DB` is safe for concurrent use. Every call takes a `context.Context`. A cancelled context
 returns at once, but the call keeps running until it ends or the app closes, so a write may still
-apply.
+apply. Nothing is left open by a cancel: a transaction or streaming upload that ctx ends before its
+commit or finish is rolled back, and a cancelled `jazz.Open` returns once the app it was opening is
+closed again, so the next `Open` of that store works.
 
 Before the process exits, call `db.Close()`, or `db.Shutdown(ctx)` to first give queued writes until
 ctx's deadline to reach the server. Either ends calls still waiting for the server with
 `jazz.ErrClosed` (what they sent may still apply), then gives sync up to 2 seconds to end. Closing
 also cancels your token provider's `ctx` and waits for the provider to return, so make it honour
-that `ctx`.
+that `ctx`. `Close` blocks until the app is closed (run it in a goroutine not to wait), except from
+inside your token provider, where it returns at once and the app closes once the provider returns.
 
 The [Reading](/docs/reading/queries) and [Writing](/docs/writing/writing-data) pages have a Go tab
 for each example. `examples/stage-plan/apps/go-cli` in the repository is a complete StagePlan
