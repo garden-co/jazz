@@ -1,5 +1,68 @@
 # jazz-tools
 
+## 2.0.0-beta.0
+
+### Minor Changes
+
+- 66d14ae: **Breaking:** the throwing stubs for the auth APIs alpha.61 removed are gone, as planned: they were kept for one release so a bundler named the right replacement. Importing one of these names now fails at build time ("not exported") instead of throwing `JAZZ_API_REMOVED` when called: `useJazzAuth`, `useJazzSessionOwner`, `useAccountState`, `createAccountState`, `createJazzSessionState`, `accountState`, `createAccountManager`, `AccountManager`, `createDb`, `createJazzApp`, `exportLocalFirstSecret`, `useLocalFirstAuth`, `createUseLocalFirstAuth`, `LocalFirstAuth`, `BrowserAuthSecretStore`, `ExpoAuthSecretStore`, `expoAuthSecretStore`, `JazzSessionProvider`, `JazzSvelteProvider` and `acceptLocalFirstAuth` (backend). What replaced each is listed in [Upgrading from alpha.60](https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha60).
+
+  Errors and docs that named the account manager's `loginWithBackend` or `linkWithBackend` now name the session's `refresh()` and `linkDeviceAccount()`.
+
+### Patch Changes
+
+- 1263401: **Breaking:** the alpha.64 schema, permissions and migrations DSL names, kept since alpha.65 as stubs that threw `JAZZ_API_REMOVED`, are no longer exported. Importing one is now a bundler/TypeScript "not exported" error, and `jazz-tools/permissions` is no longer a package subpath. To convert an alpha.64 or alpha.65 app, run `npx jazz-tools@2.0.0-alpha.70 upgrade` before moving to beta.0 (see [Upgrading from alpha.70 to beta.0](https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0)).
+
+  | Removed                                                                                                                                   | Use instead                                                                                                                                             |
+  | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `defineApp`, `schema.defineApp`                                                                                                           | `s.defineSchema({ … })` in `schema.ts`; runtime code imports `app` from `./jazz.generated`                                                              |
+  | `defineSliceableApp`, `schema.defineSliceableApp`                                                                                         | none: slicing is gone; use `s.defineSchema({ … })`                                                                                                      |
+  | root `defineSchema`                                                                                                                       | `s.defineSchema` (`import { schema as s } from "jazz-tools"`)                                                                                           |
+  | root `table`                                                                                                                              | `s.table(columns, relations)`                                                                                                                           |
+  | `definePermissions`, `schema.definePermissions`, `jazz-tools/permissions` (`definePermissions`, `anyOf`, `allOf`, `createSessionContext`) | the defined schema's own `definePermissions`, `anyOf`, `allOf`, `session` (`const { definePermissions } = schema`), compiled to `jazz.permissions.json` |
+  | root `anyOf`, `allOf`                                                                                                                     | the defined schema's own `anyOf` / `allOf`                                                                                                              |
+  | root `defineMigration`, `renameTableFrom`                                                                                                 | `m.defineMigration`, `m.renameTableFrom` (`import { migration as m } from "jazz-tools"`)                                                                |
+  | `schemaToWasm`                                                                                                                            | none: `jazz.generated.ts` embeds the compiled schema                                                                                                    |
+  | `schema` / `migration` from `jazz-tools/react-native`                                                                                     | none: author `schema.ts` against `jazz-tools`; runtime code imports `./jazz.generated`                                                                  |
+
+- 776ef11: **Breaking:** the alpha.68 rename aliases are removed. Use the names they pointed to:
+
+  | Removed                                          | Use instead                                           |
+  | ------------------------------------------------ | ----------------------------------------------------- |
+  | `db.getLocalFirstIdentityProof(options)`         | `db.getDeviceAccountProof(options)` (same options)    |
+  | type `LocalFirstGuest` from `jazz-tools/backend` | type `DeviceAccountsAnswer` from `jazz-tools/backend` |
+
+- 8ebb505: **Breaking (Rust):** the deprecated `local_first` aliases from alpha.68 are removed. Use the `device_account` names instead:
+
+  - `jazz_types::identity::LOCAL_FIRST_ISSUER` → `DEVICE_ACCOUNT_ISSUER`
+  - `AuthorSubject::LOCAL_FIRST_ISSUER` → `AuthorSubject::DEVICE_ACCOUNT_ISSUER`
+  - `identity::sign_local_first_challenge` → `sign_device_account_challenge`
+  - `identity::verify_local_first_challenge` → `verify_device_account_challenge`
+  - `account_registry::local_first_account_id` → `device_account_id`
+  - `Binding::admit_local_first_session` → `Binding::admit_device_account_session`
+  - `Binding::admitted_local_first_accounts` (testing) → `Binding::admitted_device_accounts`
+  - `jazz_server` `LOCAL_FIRST_JWT_ISSUER` → `DEVICE_ACCOUNT_JWT_ISSUER`
+  - `jazz_server` `admit_local_first_jwt` → `admit_device_account_jwt`
+  - `jazz_server` `LOCAL_FIRST_AUDIENCE_HEADER` → `DEVICE_ACCOUNT_AUDIENCE_HEADER`
+  - `jazz_server` `local_first_audience` → `device_account_audience`
+  - `jazz_server` `local_first_founding_app` → `device_account_founding_app`
+
+  Only the Rust names change. The issuer `urn:jazz:local-first`, the `X-Jazz-Local-First-Audience` header, the `local_first_audience` prelude field, the HTTP error codes and the JS API are unchanged.
+
+- 4f2344f: **Breaking:** the schema-summary endpoint `GET /apps/<appId>/schemas` no longer returns the `hashes` field, deprecated since alpha.54. Read the hashes from `schemas` instead (`schemas[].hash`, next to `schemas[].publishedAt`). `fetchSchemaHashes` still returns `hashes`, now taken from `schemas`. Against a server older than alpha.54, which sends only `hashes`, `fetchSchemaHashes` now returns no schemas. Scripts that call the endpoint directly and read `hashes` need to switch to `schemas`.
+- ebfa3db: **Breaking:** `jazz-tools upgrade` and its alpha.65 → alpha.66 codemods are removed. `npx jazz-tools upgrade` now exits 1 with a pointer to the upgrade guide (https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0); an app still on alpha.65 or older can run `npx jazz-tools@2.0.0-alpha.70 upgrade` first, then follow the guide. The `jazz-tools validate` → "renamed to `generate` in alpha.65" message is gone too: `validate` is now an unknown command. Errors that pointed at `npx jazz-tools upgrade` (an app with `jazz.app.json` but no `schema.ts`, an alpha.64 `schema.ts`, a `permissions.ts` without a `permissions` export) now name `npx jazz-tools@2.0.0-alpha.70 upgrade` and the guide.
+- 2533bd7: **Breaking:** the permission-session hooks deprecated in alpha.66 are removed. `useSession()` (React, React Native, Expo, Vue, Solid) and Svelte's `getSession()` are no longer exported. Read the session's user from the session hook instead:
+
+  | Removed                                    | Use instead                                              |
+  | ------------------------------------------ | -------------------------------------------------------- |
+  | React / React Native / Expo `useSession()` | `useJazzSession().user`                                  |
+  | Vue `useSession()`                         | `useJazzSession().snapshot.value.user`                   |
+  | Solid `useSession()`                       | `useJazzSession().snapshot().user`                       |
+  | Svelte `getSession().current`              | `const session = getJazzSession()`, then `$session.user` |
+
+  On the user, `session.user` is `user.accountId`; `identity` and `claims` keep their names; `session.authMode` is `user.kind` (`"backend"` or `"device"`), with `user === null` for an anonymous reader. The Svelte "used outside a provider" error now reads `getDb must be used within <JazzProvider> or <JazzSvelteClientProvider>`.
+  - jazz-wasm@2.0.0-beta.0
+  - jazz-rn@2.0.0-beta.0
+
 ## 2.0.0-alpha.70
 
 ### Patch Changes
