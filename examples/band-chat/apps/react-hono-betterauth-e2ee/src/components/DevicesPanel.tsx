@@ -22,7 +22,7 @@ import {
   type Failure,
 } from "../lib/device-state";
 import { endOtherSignIns } from "../lib/end-other-sign-ins";
-import { writeLeaveRecord } from "../lib/leave-record";
+import { clearLeaveRecord, writeLeaveRecord } from "../lib/leave-record";
 
 /** How BandChat names itself on the recovery passkey. */
 const APP_NAME = "BandChat";
@@ -206,15 +206,22 @@ function LeaveThisBrowser({ device }: { device: DeviceInfo }) {
     setBusy(true);
     setError(null);
     try {
-      await encryption.devices.requestRemoval();
-      // Kept across reloads: the page signs out once it sees a new device
-      // ID, which exists only after the old keys are erased.
+      // A tab can close before the authority's answer reaches it. Keep the
+      // intent so the next page can sign out after Jazz changes its device ID.
       writeLeaveRecord({ accountId, deviceId: device.id });
+      await encryption.devices.requestRemoval();
       reloadLeaveRecord();
       setConfirming(false);
       void refresh();
     } catch (cause) {
       const failed = failureOf(cause);
+      if (
+        failed.code === "no-other-device" ||
+        failed.code === "device-not-active" ||
+        (failed.code === "database" && failed.message.startsWith("WriteRejected:"))
+      ) {
+        clearLeaveRecord();
+      }
       setError(
         failed.code === "no-other-device"
           ? "This is your only device, so it can't leave: no other device would hold your keys. Nothing was removed, and your messages stay readable here."

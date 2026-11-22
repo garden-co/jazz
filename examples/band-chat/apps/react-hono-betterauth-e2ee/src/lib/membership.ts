@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { PersistedWriteRejectedError, type Db } from "jazz-tools";
 import { app, type E2eeMember } from "../../jazz.generated";
 
@@ -10,22 +10,32 @@ const roomSpace = (roomId: string) => ({ table: "rooms", id: roomId });
  * table (the one membership truth); undefined until they have loaded. A
  * profile or a `roomMembers` row is not needed to be listed.
  */
-export function useRoomMembers(roomId: string): { members: E2eeMember[] | undefined } {
-  const db = useDb();
-  const [filter, setFilter] = useState<{ scopeId: string; identifier: string } | undefined>();
+export function useRoomMembers(roomId: string): {
+  members: E2eeMember[] | undefined;
+  loadFailure: { reason: string; retry: () => void } | undefined;
+} {
+  const [filter, setFilter] = useState<Awaited<ReturnType<Db["encryption"]["members"]["where"]>>>();
+  const [error, setError] = useState<string>();
+  const [attempt, setAttempt] = useState(0);
+  const { data, db } = useAll(filter ? app.__e2ee_members.where(filter) : undefined);
   useEffect(() => {
     let isLive = true;
     setFilter(undefined);
+    setError(undefined);
     db.encryption.members.where(roomSpace(roomId)).then(
       (found) => isLive && setFilter(found),
-      () => undefined,
+      (cause: unknown) =>
+        isLive && setError(cause instanceof Error ? cause.message : String(cause)),
     );
     return () => {
       isLive = false;
     };
-  }, [db, roomId]);
-  const { data } = useAll(filter ? app.__e2ee_members.where(filter) : undefined);
-  return { members: data };
+  }, [attempt, db, roomId]);
+  return {
+    members: data,
+    loadFailure:
+      error === undefined ? undefined : { reason: error, retry: () => setAttempt((n) => n + 1) },
+  };
 }
 
 const ATTEMPTS = 3;

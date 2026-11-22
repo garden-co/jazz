@@ -2,7 +2,8 @@
 // The page's half of leaving a browser: it signs out once it sees a new
 // device ID for the account that asked to leave, and only then.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { within, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { DevicesPanel } from "../src/components/DevicesPanel";
 import { readLeaveRecord, writeLeaveRecord } from "../src/lib/leave-record";
 import { encryptionError, fakeEncryption } from "./fake-encryption";
 
@@ -11,6 +12,7 @@ const ACCOUNT = "account-alice";
 const mocks = vi.hoisted(() => ({
   fake: null as unknown as ReturnType<typeof import("./fake-encryption").fakeEncryption>,
   accountId: "account-alice",
+  showDevices: false,
   authSignOut: vi.fn(async () => ({ data: { success: true }, error: null }) as unknown),
   jazzRefresh: vi.fn(async () => {}),
   lifecycleSignOut: vi.fn(async () => {}),
@@ -30,9 +32,12 @@ vi.mock("../components/theme-provider", () => ({
 vi.mock("../components/sign-in-form", () => ({ SignInForm: () => <p>Sign in</p> }));
 vi.mock("../src/BandChat", () => ({
   BandChat: ({ onSignOut }: { onSignOut: () => void }) => (
-    <button type="button" onClick={onSignOut}>
-      Sign out
-    </button>
+    <>
+      <button type="button" onClick={onSignOut}>
+        Sign out
+      </button>
+      {mocks.showDevices ? <DevicesPanel accountName="Alice" /> : null}
+    </>
   ),
 }));
 vi.mock("../src/lib/auth-client", () => ({
@@ -47,6 +52,7 @@ const { App } = await import("../src/App");
 beforeEach(() => {
   localStorage.clear();
   mocks.accountId = ACCOUNT;
+  mocks.showDevices = false;
   mocks.authSignOut.mockClear();
   mocks.jazzRefresh.mockClear();
   mocks.lifecycleSignOut.mockClear();
@@ -74,6 +80,29 @@ describe("a browser waiting for approval", () => {
 });
 
 describe("finishing leaving this browser", () => {
+  it("signs out after the page closes before it hears back about its removal request", async () => {
+    const fake = (mocks.fake = fakeEncryption());
+    mocks.showDevices = true;
+    fake.handle.devices.requestRemoval.mockReturnValueOnce(new Promise<void>(() => {}));
+    const firstPage = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Leave this browser" }));
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", { name: "Leave this browser" }),
+    );
+    expect(fake.handle.devices.requestRemoval).toHaveBeenCalledOnce();
+    firstPage.unmount();
+
+    // The request reached the other device even though the page missed its answer.
+    mocks.fake = fakeEncryption({
+      deviceId: "device-new",
+      status: "awaiting-approval",
+      devices: [],
+    });
+    render(<App />);
+    await waitFor(() => expect(mocks.authSignOut).toHaveBeenCalledOnce());
+    expect(readLeaveRecord()).toBeNull();
+  });
+
   for (const status of ["reenrolled", "awaiting-approval"] as const) {
     it(`signs out at start-up when the device ID changed (${status}), then drops the record`, async () => {
       writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-old" });

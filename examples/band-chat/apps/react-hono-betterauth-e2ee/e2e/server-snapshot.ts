@@ -66,10 +66,8 @@ async function openSnapshot(path: string) {
     authenticate: async () => null,
   }).ready();
   // Jazz's key-version table is not part of the app's typed bindings.
-  const successors = (app as unknown as Record<string, Parameters<typeof jazz.db.all>[0]>)[
-    "__e2ee_space_successors"
-  ]!;
-  return { jazz, app, successors };
+  const tables = app as unknown as Record<string, Parameters<typeof jazz.db.all>[0]>;
+  return { jazz, app, tables };
 }
 
 /** The server's count of `reader`'s read markers in a room. */
@@ -82,9 +80,18 @@ export function serverMarkerCount(roomId: string, reader: string): Promise<numbe
 
 /** The server's rows of the key-version table for a room. */
 export function serverSuccessors(roomId: string): Promise<Array<Record<string, unknown>>> {
-  return serverRead(async ({ jazz, successors }) =>
-    ((await jazz.db.all(successors)) as Array<Record<string, unknown>>).filter(
+  return serverRead(async ({ jazz, tables }) =>
+    ((await jazz.db.all(tables.__e2ee_space_successors!)) as Array<Record<string, unknown>>).filter(
       (row) => row.identifier === roomId,
     ),
+  );
+}
+
+/** The first key version of a room that has never been rotated. */
+export function serverSpaceRoot(roomId: string): Promise<unknown[]> {
+  return serverRead(async ({ jazz, tables }) =>
+    ((await jazz.db.all(tables.__e2ee_spaces!)) as Array<Record<string, unknown>>)
+      .filter((row) => row.identifier === roomId)
+      .map((row) => row.epochId),
   );
 }

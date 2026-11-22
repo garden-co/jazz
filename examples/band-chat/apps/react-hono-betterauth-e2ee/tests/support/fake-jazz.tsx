@@ -58,7 +58,7 @@ export const fakeApp = new Proxy({} as Record<string, Q>, {
   get: (_target, table: string) => builder({ table }),
 });
 
-type Answer = { data: unknown[]; unreadable?: unknown[] } | undefined;
+type Answer = { data?: unknown[]; unreadable?: unknown[]; error?: Error } | undefined;
 
 export const world = {
   /** What a query returns; undefined = still loading. */
@@ -74,6 +74,8 @@ export function resetWorld() {
   world.account = "alice-account";
   for (const fn of Object.values(db) as unknown[]) if (vi.isMockFunction(fn)) fn.mockClear();
   db.all.mockReset().mockResolvedValue([{ id: "m" }]);
+  db.one.mockReset().mockResolvedValue(null);
+  db.encryption.onReport.mockClear();
   db.encryption.keys.deliver.mockReset().mockResolvedValue({ delivered: 1, failed: 0 });
   db.encryption.keys.rotate.mockReset().mockResolvedValue(1);
   db.encryption.members.where.mockReset().mockImplementation(async (space, accountId) => ({
@@ -100,9 +102,11 @@ export const db = {
   serializableTransaction: vi.fn(async (_run: (tx: unknown) => unknown) => written()),
   /** The plain read of a room's first message: the room has one unless a test empties it. */
   all: vi.fn(async (..._args: unknown[]) => [{ id: "m" }] as unknown[]),
+  one: vi.fn(async (..._args: unknown[]) => null),
   beginTransaction: vi.fn(),
   onMutationError: vi.fn(() => () => undefined),
   encryption: {
+    onReport: vi.fn((_callback: (report: unknown) => void) => () => undefined),
     members: {
       where: vi.fn(async (space: { id: string }, accountId?: string) => ({
         scopeId: "scope",
@@ -125,6 +129,7 @@ export const db = {
 /** The `jazz-tools/react` module as the screens see it. */
 export const reactMock = {
   useDb: () => db,
+  unreadableRows: (_rows: unknown[]) => [] as { code: string }[],
   useAll: (q?: Q) => {
     if (q) world.asked.push(q);
     const answer = q ? world.answer(q) : undefined;
@@ -132,7 +137,7 @@ export const reactMock = {
       data: answer?.data,
       unreadable: answer?.unreadable ?? [],
       isLoading: !answer,
-      error: null,
+      error: answer?.error ?? null,
       db,
     };
   },

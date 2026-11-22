@@ -30,6 +30,7 @@ export function MembersDialog({
   author,
   isCreator,
   members,
+  loadFailure,
   requests,
 }: {
   isOpen: boolean;
@@ -39,6 +40,7 @@ export function MembersDialog({
   isCreator: boolean;
   /** The room's member rows; undefined while they load. */
   members: E2eeMember[] | undefined;
+  loadFailure?: { reason: string; retry: () => void };
   requests: JoinRequest[];
 }) {
   const db = useDb();
@@ -154,7 +156,16 @@ export function MembersDialog({
             })}
           </List>
         ) : null}
-        {members ? (
+        {loadFailure ? (
+          <Banner
+            status="error"
+            title="Could not load members"
+            description={loadFailure.reason}
+            container="section"
+            collapsible={false}
+            endContent={<Button label="Retry" size="sm" onClick={loadFailure.retry} />}
+          />
+        ) : members ? (
           <List header={<SectionTitle>{`${members.length} members`}</SectionTitle>} hasDividers>
             {members.map((member) => {
               const profile = directory.byAuthor.get(member.accountId);

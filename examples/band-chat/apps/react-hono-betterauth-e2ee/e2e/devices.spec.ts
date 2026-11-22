@@ -345,3 +345,43 @@ test("a sole device cannot leave, and its messages stay readable", async ({ brow
   await expect(message(a.page, text)).toBeVisible();
   expect(await a.page.evaluate(() => localStorage.getItem("band-chat:leaving"))).toBeNull();
 });
+
+test("signs out after closing the tab before the removal request returns", async ({ browser }) => {
+  const name = unique("Ada");
+  const a = await newDevice(browser);
+  await signUp(a.page, name);
+  await createRoom(a.page, "Rehearsal");
+  const b = await addApprovedBrowser(browser, a.page, name);
+  const oldId = await deviceIdOf(b.page);
+
+  await a.page.close();
+  // Let the real request reach the authority, but hold its answer at the page.
+  await b.page.evaluate(() => {
+    const db = [...(window.__jazzWindowStorageContexts__ ?? [])].at(-1)
+      ?.db as import("jazz-tools").Db;
+    const devices = db.encryption.devices;
+    const request = devices.requestRemoval.bind(devices);
+    devices.requestRemoval = async () => {
+      await request();
+      window.bandChatRemovalAccepted = true;
+      await new Promise<void>(() => {});
+    };
+  });
+  const panel = await openDevices(b.page);
+  await thisBrowserRow(panel).getByRole("button", { name: "Leave this browser" }).click();
+  await panel.getByRole("alertdialog").getByRole("button", { name: "Leave this browser" }).click();
+  await b.page.waitForFunction(() => window.bandChatRemovalAccepted);
+  await b.page.close();
+
+  const aPage = await reopen(a);
+  await aPage.goto("/");
+  const list = await openDevices(aPage);
+  await expect(list.locator(`[data-device-id="${oldId}"]`)).toHaveCount(0, { timeout: 90_000 });
+  await expect(deviceRows(list)).toHaveCount(1, { timeout: T });
+
+  expect(await hasSession(b)).toBe(true);
+  const bPage = await reopen(b);
+  await bPage.goto("/");
+  await expect(signInHeading(bPage)).toBeVisible({ timeout: 90_000 });
+  expect(await hasSession(b)).toBe(false);
+});
