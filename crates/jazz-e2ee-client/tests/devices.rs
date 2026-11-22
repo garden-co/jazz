@@ -271,6 +271,191 @@ fn a_removed_device_cannot_read_rows_written_after_the_rotation() {
     });
 }
 
+/// What the authority shows of a write made after `removed` was removed:
+/// the epoch its body is sealed under, which must be a successor of the
+/// space's root sealed to the account epoch the removal made, an epoch whose
+/// devices are `remaining` and never `removed`.
+fn assert_sealed_without(
+    server: &Db,
+    writer: &Device,
+    space: uuid::Uuid,
+    removed: &str,
+    remaining: &[String],
+) {
+    let notes = all(server, Query::from("notes")).unwrap();
+    let roots = all(server, Query::from("__e2ee_spaces")).unwrap();
+    assert_eq!(roots.len(), 1);
+    let root_epoch = match roots[0].cell("epochId") {
+        Some(Value::Uuid(id)) => id.to_string(),
+        other => panic!("root epoch: {other:?}"),
+    };
+    // The note written after the removal is the newest one.
+    let newest = notes
+        .iter()
+        .filter(|row| row.cell("projectId") == Some(Value::Uuid(space)))
+        .max_by_key(|row| row.row_uuid())
+        .expect("the later note is on the server");
+    let Some(Value::Bytes(stored)) = newest.cell("body") else {
+        panic!("the body is stored as bytes: {newest:?}");
+    };
+    let sealed = jazz_e2ee::records::read_stored_record(&stored)
+        .unwrap()
+        .epoch_id
+        .to_owned();
+    let successors = all(server, Query::from("__e2ee_space_successors")).unwrap();
+    assert_ne!(
+        sealed,
+        root_epoch,
+        "the write after the removal is sealed under the version the removed device holds \
+         ({} space successors)",
+        successors.len()
+    );
+    let successor = successors
+        .iter()
+        .find(|row| {
+            row.cell("epochId") == Some(Value::Uuid(uuid::Uuid::parse_str(&sealed).unwrap()))
+        })
+        .expect("the write's epoch is a successor of the space");
+    // That version is sealed to the account epoch the removal made.
+    let removals = all(server, Query::from("__e2ee_public_account_successors")).unwrap();
+    let removal = removals
+        .iter()
+        .find(|row| {
+            row.cell("removedDeviceId")
+                == Some(Value::Nullable(Some(Box::new(Value::Uuid(
+                    uuid::Uuid::parse_str(removed).unwrap(),
+                )))))
+                || row.cell("removedDeviceId")
+                    == Some(Value::Uuid(uuid::Uuid::parse_str(removed).unwrap()))
+        })
+        .expect("the removal is an account successor naming the removed device");
+    assert_eq!(successor.cell("authorEpochId"), removal.cell("epochId"));
+    // And that account epoch's devices are the remaining ones only.
+    let devices = drive(server, &[&writer.db], writer.client.devices(&writer.db)).unwrap();
+    let mut active: Vec<String> = devices
+        .iter()
+        .filter(|device| device.status == jazz_e2ee_client::DeviceStatus::Active)
+        .map(|device| device.id.clone())
+        .collect();
+    active.sort();
+    let mut expected = remaining.to_vec();
+    expected.sort();
+    assert_eq!(active, expected);
+    assert!(!active.iter().any(|id| id == removed));
+}
+
+/// Contract: a runtime opened after the removal, on the remover's own
+/// device (an app that signs in again opens a new one), does not seal under
+/// the version the removed device holds, even before it has verified the
+/// account in this run: its first write rotates the space,
+/// to a version sealed to the account epoch the removal made, and the
+/// removed device, which kept what it held, cannot read it.
+#[test]
+fn a_runtime_opened_after_a_removal_rotates_before_its_first_write() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let first_store = memory();
+        let first = device(&server, alice, first_store.clone(), 1, &settings);
+        first.status(&server, &[]);
+        let space = space_with_a_note(&server, &first, &account_id(alice));
+        let second = device(&server, alice, memory(), 2, &settings);
+        second.status(&server, &[&first]);
+        approve(&server, &first, &second);
+        second.status(&server, &[&first]);
+        second.follow_notes(&server);
+        assert_eq!(notes_of(&server, &second, space).len(), 1);
+
+        drive(
+            &server,
+            &[&first.db, &second.db],
+            first.client.remove_device(&first.db, &second.id()),
+        )
+        .unwrap();
+        let first_id = first.id();
+        drop(first);
+        let again = device(&server, alice, first_store, 3, &settings);
+        assert_eq!(again.id(), first_id, "the same device");
+        // It writes before it has verified the account in this run.
+        drive(
+            &server,
+            &[&again.db],
+            again.client.write(&again.db, async || {
+                again
+                    .db
+                    .insert("notes", note(space, "after"), Default::default())
+                    .await
+            }),
+        )
+        .unwrap();
+        pump(&server, &again.db);
+        assert_sealed_without(&server, &again, space, &second.id(), &[first_id]);
+
+        pump(&server, &second.db);
+        let held = all(&second.db, Query::from("notes")).unwrap();
+        assert_eq!(held.len(), 1, "only the old note opens: {held:?}");
+        assert_eq!(held[0].cell("body"), Some(text(SECRET)));
+    });
+}
+
+/// Contract: a device of the account that did not make the removal (it
+/// runs on while another device removes a third) does not seal under the
+/// version the removed device holds: its next write rotates the space.
+#[test]
+fn another_device_of_the_account_rotates_after_a_removal_it_did_not_make() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let alice = account(0xa1);
+        let first = device(&server, alice, memory(), 1, &settings);
+        first.status(&server, &[]);
+        let space = space_with_a_note(&server, &first, &account_id(alice));
+        let second = device(&server, alice, memory(), 2, &settings);
+        second.status(&server, &[&first]);
+        approve(&server, &first, &second);
+        second.status(&server, &[&first]);
+        second.follow_notes(&server);
+        assert_eq!(notes_of(&server, &second, space).len(), 1);
+        let third = device(&server, alice, memory(), 3, &settings);
+        third.status(&server, &[&first]);
+        approve(&server, &first, &third);
+        assert_eq!(third.status(&server, &[&first]), AccountStatus::Active);
+
+        drive(
+            &server,
+            &[&third.db, &first.db, &second.db],
+            third.client.remove_device(&third.db, &second.id()),
+        )
+        .unwrap();
+        pump(&server, &first.db);
+        assert_eq!(first.status(&server, &[&third]), AccountStatus::Active);
+        drive(
+            &server,
+            &[&first.db],
+            first.client.write(&first.db, async || {
+                first
+                    .db
+                    .insert("notes", note(space, "after"), Default::default())
+                    .await
+            }),
+        )
+        .unwrap();
+        pump(&server, &first.db);
+        assert_sealed_without(
+            &server,
+            &first,
+            space,
+            &second.id(),
+            &[first.id(), third.id()],
+        );
+
+        pump(&server, &second.db);
+        let held = all(&second.db, Query::from("notes")).unwrap();
+        assert_eq!(held.len(), 1, "only the old note opens: {held:?}");
+    });
+}
+
 /// Contract: a device's removal request is completed by another device (the
 /// requester never holds the new key), which marks the spaces the requester
 /// could open for rotation; the only device's request is refused with

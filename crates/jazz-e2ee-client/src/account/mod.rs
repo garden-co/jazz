@@ -508,6 +508,18 @@ impl E2eeClient {
         let key = keys.acquire(&device.id, std::slice::from_ref(&device.sealing))?;
         let epoch_keys = keys.epoch_keys(&key)?;
         self.advance_floor(&self.shared.account_id, &floor).await?;
+        {
+            // A new account epoch (a device removed, wherever that was
+            // done) may supersede the epoch a space's current version was
+            // sealed to: each space's mark is evaluated again before this
+            // runtime's next write to it.
+            let mut keys = self.shared.keys.borrow_mut();
+            keys.account_removed_devices = Some(!state.removed.is_empty() || state.generation > 0);
+            if keys.evaluated_epoch.as_deref() != Some(state.epoch_id()) {
+                keys.rotation_evaluated.clear();
+                keys.evaluated_epoch = Some(state.epoch_id().to_owned());
+            }
+        }
         *self.account.borrow_mut() = Some(OwnAccount {
             state,
             key,

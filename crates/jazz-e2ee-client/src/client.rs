@@ -254,6 +254,13 @@ impl E2eeClient {
             documents: Mutex::new(Documents::default()),
         };
         client.load_documents().await?;
+        // A device that never verified its account holds no key of it, so
+        // nothing it writes can need a removal's rotation until it does.
+        // One that did may have missed a removal made elsewhere: unknown
+        // until this run verifies it.
+        let verified_before = client.floor(&client.shared.account_id).await.is_some();
+        client.shared.keys.borrow_mut().account_removed_devices =
+            (!verified_before).then_some(false);
         Ok(client)
     }
 

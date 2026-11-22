@@ -112,6 +112,7 @@ impl E2eeClient {
         let marked = rotation_mark(&chain, &read.ledger, &directory)?.needs_rotation();
         {
             let mut keys = self.shared.keys.borrow_mut();
+            keys.rotation_evaluated.insert(address.clone());
             // Only a device that holds the current version acts on the mark.
             if holds_current && marked && !keys.rotation_refused.contains(address) {
                 keys.rotation_pending.insert(address.clone());
@@ -330,11 +331,13 @@ impl E2eeClient {
         // to the space waits for it instead of sealing under the version the
         // removed member holds.
         self.acquire_full(db, space).await?;
-        self.shared
-            .keys
-            .borrow_mut()
-            .rotation_pending
-            .remove(&address);
+        {
+            let mut keys = self.shared.keys.borrow_mut();
+            keys.rotation_pending.remove(&address);
+            // The new version is sealed to the members' current account
+            // epochs: nothing a removal superseded holds it.
+            keys.rotation_evaluated.insert(address.clone());
+        }
         let mut written = first;
         for batch in rest.chunks(DELIVERY_BATCH) {
             written += self.deliver_batch(db, &address, batch).await?;

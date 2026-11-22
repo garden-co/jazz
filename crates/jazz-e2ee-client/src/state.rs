@@ -410,6 +410,24 @@ pub(crate) struct KeyState {
     /// Spaces the last pass found to need rotation (protocol §3.5): the
     /// next encrypted write rotates them first.
     pub(crate) rotation_pending: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    /// Spaces a pass of this runtime has evaluated the mark of since it
+    /// opened and since this account's current epoch last changed. The mark
+    /// lives only in memory: a removal another runtime made, on this device
+    /// before a restart or on another device, marks a space here only
+    /// through a pass. So the first online write to a space under a key
+    /// other than a creation of this run runs one first, in an account that
+    /// ever removed a device (protocol §3.5).
+    pub(crate) rotation_evaluated: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    /// The account epoch `rotation_evaluated` was evaluated against: a
+    /// verification that finds another one empties it.
+    pub(crate) evaluated_epoch: Option<String>,
+    /// Whether this account, as last verified in this run, ever removed a
+    /// device or was reset: only then can a removed device of its own hold
+    /// a version this device writes under. `None` (unknown, which counts as
+    /// yes) from the open of a device that verified its account before
+    /// until this run verifies it; `Some(false)` from the open of one that
+    /// never did.
+    pub(crate) account_removed_devices: Option<bool>,
     /// Spaces whose repair the authority refused (this device may not update
     /// the rows it wrote): the natural moments stop repairing them while the
     /// client runs; an explicit call always attempts (protocol §3.2).

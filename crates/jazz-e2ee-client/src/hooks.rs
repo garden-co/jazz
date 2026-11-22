@@ -133,7 +133,34 @@ impl Hooks {
             keys.rotation_tried.contains(&mark)
         };
         let removal = !self.shared.member_removals.borrow().is_empty();
-        if keys.online && !tried && (keys.rotation_pending.contains(address) || removal) {
+        // A key of a space whose mark this runtime has not evaluated may be
+        // one a removed device of this account holds (if the account ever
+        // removed one, or is not verified yet in this run): the runtime
+        // reads the space first. Only a creation this run prepared or
+        // staged is new to everyone; a key held `unpublished` from an
+        // earlier run may be the space's accepted root, settled later.
+        let unevaluated = keys.account_removed_devices != Some(false)
+            && !keys.rotation_evaluated.contains(address)
+            && match keys
+                .held
+                .write_key(address, keys.creation_refused.contains(address))
+            {
+                WriteChoice::Key(key) => {
+                    let creations = self.shared.creations.borrow();
+                    let created_here = matches!(key.mark(), KeyMark::Unpublished { .. })
+                        && (creations.staged.contains(key.root_id())
+                            || creations
+                                .prepared
+                                .get(address)
+                                .is_some_and(|root| root.id == key.root_id()));
+                    !created_here
+                }
+                _ => false,
+            };
+        if keys.online
+            && !tried
+            && (keys.rotation_pending.contains(address) || removal || unevaluated)
+        {
             return Err(SealError::NeedsKey {
                 space: db_address(address),
             });

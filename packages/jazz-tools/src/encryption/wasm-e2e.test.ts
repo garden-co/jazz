@@ -9,7 +9,12 @@ import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js"
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { openBrowserSessionCore as createJazzClient } from "../session/create-jazz-session.js";
-import { EncryptionNotDeclaredError, memoryPrivateStore, type PrivateStore } from "./index.js";
+import {
+  EncryptionNotDeclaredError,
+  memoryPrivateStore,
+  unreadableRows,
+  type PrivateStore,
+} from "./index.js";
 
 // End to end on the browser-style client (the WebAssembly runtime, which Node,
 // Deno, Bun and CLIs also use with a bearer) against a real server: the app
@@ -165,6 +170,90 @@ describe("encryption on the browser-style client, end to end", () => {
     expect(
       (await first.db.encryption.devices.list()).filter((d) => d.status === "active"),
     ).toHaveLength(2);
+  }, 120_000);
+
+  it("after a lost device is removed, a new runtime of the remover rotates before its first write, and the removed device cannot read it", async () => {
+    const host = await serve();
+    const firstStore = memoryPrivateStore();
+    const firstAccounts = memoryStore();
+    const first = await client(host, "alice", {
+      privateStore: firstStore,
+      accounts: firstAccounts,
+    });
+    expect(await first.db.encryption.ready({ timeoutMs: 30_000 })).toBe("active");
+    const project = await makeProject(first, "plans");
+    await first.db
+      .insert(app.tasks, { projectId: project, title: "kept" })
+      .wait({ tier: "global" });
+
+    // A second device, approved; it keeps its private store when it goes away.
+    const lostStore = memoryPrivateStore();
+    const lostAccounts = memoryStore();
+    const lost = await client(host, "alice", { privateStore: lostStore, accounts: lostAccounts });
+    expect(await lost.db.encryption.ready({ timeoutMs: 30_000 })).toBe("awaiting-approval");
+    const lostId = await lost.db.encryption.deviceId();
+    const challenged = new Promise<void>((resolve) =>
+      lost.db.encryption.onChallenge(() => resolve()),
+    );
+    await until(async () => {
+      const devices = await first.db.encryption.devices.list();
+      return devices.find((device) => device.id === lostId && device.status === "waiting");
+    }, "the new device to be listed as waiting");
+    const approval = await first.db.encryption.devices.challenge(lostId);
+    await challenged;
+    const code = await lost.db.encryption.devices.answer();
+    await until(() => approval.code(), "the approving device's code");
+    await approval.approve(code);
+    expect(await lost.db.encryption.ready({ timeoutMs: 30_000 })).toBe("active");
+    const tasks = app.tasks.where({ projectId: project });
+    await until(async () => {
+      const rows = await lost.db.all(tasks, { tier: "remote" });
+      return rows[0]?.title === "kept" ? rows : undefined;
+    }, "the second device to read");
+    await lost.session.close();
+
+    // As BandChat does: every sign-in of the user ends, the device is removed,
+    // and the remover signs in again, which opens a new runtime on its store.
+    await host.jazz.revokeUser("alice");
+    await first.db.encryption.devices.remove(lostId);
+    await first.session.close();
+    const reopened = await client(host, "alice", {
+      privateStore: firstStore,
+      accounts: firstAccounts,
+    });
+    const committed = await reopened.db.transaction((tx) => {
+      tx.insert(app.tasks, { projectId: project, title: "after" });
+    });
+    await committed.wait({ tier: "global" });
+    const written = await reopened.db.all(tasks, { tier: "remote" });
+    expect(written.map((row) => row.title).sort()).toEqual(["after", "kept"]);
+    const after = written.find((row) => row.title === "after")!.id;
+
+    // The space rotated, to a version sealed to the account epoch the removal made.
+    const table = (name: string) => (app as unknown as Record<string, never>)[name];
+    const removals = (await host.jazz.db.all(table("__e2ee_public_account_successors"))) as {
+      epochId: string;
+      removedDeviceId: string | null;
+    }[];
+    const removal = removals.find((row) => row.removedDeviceId === lostId);
+    expect(removal).toBeDefined();
+    const successors = (await host.jazz.db.all(table("__e2ee_space_successors"))) as {
+      identifier: string;
+      authorEpochId: string;
+    }[];
+    expect(successors.filter((row) => row.identifier === project)).toMatchObject([
+      { authorEpochId: removal!.epochId },
+    ]);
+
+    // The removed device comes back with the keys it kept: the earlier task
+    // opens, the later one does not.
+    const again = await client(host, "alice", { privateStore: lostStore, accounts: lostAccounts });
+    const seen = await until(async () => {
+      const rows = await again.db.all(tasks, { tier: "remote" });
+      return rows.length + unreadableRows(rows).length >= 2 ? rows : undefined;
+    }, "the removed device to be sent both tasks");
+    expect(seen.map((row) => row.title)).toEqual(["kept"]);
+    expect(unreadableRows(seen).map((row) => row.id)).toEqual([after]);
   }, 120_000);
 
   it("an idle active device completes another device's removal request", async () => {
