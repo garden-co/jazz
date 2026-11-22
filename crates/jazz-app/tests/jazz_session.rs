@@ -921,3 +921,52 @@ async fn close_waits_for_an_abandoned_open_to_let_go_of_its_store() {
     let _ = switching.await.unwrap();
     app.stop().await;
 }
+
+/// Closing doesn't wait for the session's own link, stuck on the backend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_cancels_the_sessions_own_link() {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/jazz", listener.local_addr().unwrap());
+    let (asked, mut linking) = tokio::sync::mpsc::unbounded_channel();
+    // Takes each request and never answers it.
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let asked = asked.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut chunk = [0; 1024];
+                while let Ok(read @ 1..) = stream.read(&mut chunk).await {
+                    head.extend_from_slice(&chunk[..read]);
+                    if String::from_utf8_lossy(&head).contains("/accounts/backend-link") {
+                        let _ = asked.send(());
+                    }
+                }
+            });
+        }
+    });
+    let config = SessionConfig::new(AppId::random())
+        .server(&endpoint)
+        .bearer(|_: TokenReason| async { Ok(Some("token-alice".to_owned())) })
+        .initial(Initial::Device);
+    let session = JazzSession::open(client_files(), config).await.unwrap();
+    let linked = tokio::spawn({
+        let session = session.clone();
+        async move { session.link_device_account().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), linking.recv())
+        .await
+        .expect("the link's request");
+
+    tokio::time::timeout(Duration::from_secs(8), session.close())
+        .await
+        .expect("close doesn't wait for the link")
+        .unwrap();
+    let linked = tokio::time::timeout(Duration::from_secs(5), linked)
+        .await
+        .expect("the link ends with the session")
+        .unwrap();
+    assert!(matches!(linked, Err(Error::Stopped)), "{linked:?}");
+    assert_eq!(session.snapshot().status, SessionStatus::Closed);
+    server.abort();
+}
