@@ -11,7 +11,7 @@ import (
 )
 
 // A main backend that admits a trusted backend client, then can't sync it.
-func openForUserOffline(t *testing.T) (parent, child *DB) {
+func openBackendOffline(t *testing.T, provider TokenProvider) *DB {
 	t.Helper()
 	cfg := offlineConfig(t)
 	permissions, err := os.ReadFile("../../examples/docs/todo-client-go/jazz.permissions.json")
@@ -33,12 +33,22 @@ func openForUserOffline(t *testing.T) (parent, child *DB) {
 	cfg.ServerURL = backend.URL + "/jazz"
 	cfg.Storage, cfg.DataDir = StorageMemory, ""
 	cfg.Permissions = string(permissions)
-	cfg.Auth = Credential(func(context.Context, TokenReason) (string, error) { return "machine", nil })
+	cfg.Auth = Credential(provider)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if parent, err = Open(ctx, cfg); err != nil {
+	db, err := Open(ctx, cfg)
+	if err != nil {
 		t.Fatalf("opening a backend client: %v", err)
 	}
+	return db
+}
+
+func openForUserOffline(t *testing.T) (parent, child *DB) {
+	t.Helper()
+	parent = openBackendOffline(t, func(context.Context, TokenReason) (string, error) { return "machine", nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var err error
 	if child, err = parent.ForUser(ctx, "alice", nil); err != nil {
 		t.Fatalf("ForUser: %v", err)
 	}

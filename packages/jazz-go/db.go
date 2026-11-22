@@ -97,8 +97,12 @@ const (
 
 // DB is an open app. It is safe for concurrent use.
 type DB struct {
+	// mu guards handle and closed, and admitting calls. It is never held
+	// across a call into Jazz: only closing ends some of those.
 	mu       sync.RWMutex
 	handle   uintptr
+	calls    sync.WaitGroup // the calls in flight
+	closed   chan struct{}  // made as closing begins, closed as it ends
 	app      any
 	provider uint64 // the TokenProvider's id, if any
 
@@ -214,30 +218,41 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		go func() {
 			if o := <-done; o.h != 0 {
 				ffi.close(o.h)
+				releaseProvider(o.provider)
 			}
 		}()
 		return nil, ctx.Err()
 	}
 }
 
-// Close closes the app; later calls return ErrClosed.
+// Close closes the app without waiting for its writes to reach the server
+// (Shutdown does). Calls waiting for the server end with ErrClosed, though
+// what they sent may still apply, and later calls return ErrClosed. Close
+// returns once the app is closed: work already running locally finishes
+// first, and sync gets up to 2 seconds to end.
+//
+// Close cancels the TokenProvider's ctx and waits for the provider to
+// return. A provider may call Close itself, but mustn't wait for a Close
+// made on another goroutine.
 func (db *DB) Close() error {
-	db.endStreams()
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.handle != 0 {
-		ffi.close(db.handle)
-		db.handle = 0
-		// The token callback is valid until jazz_close returns.
-		providers.Delete(db.provider)
-	}
-	return nil
+	return db.closeAndFree(0,
+		func(h uintptr) error {
+			// Closing can't fail the caller: the app is closed all the same.
+			if err := callClose(ffi.call, h, "{}"); unknownClose(err) {
+				return err
+			}
+			return nil
+		},
+		func(h uintptr) error {
+			ffi.close(h)
+			return nil
+		})
 }
 
 // call runs jazz_call(method, args) and decodes its result into out.
 // Calls block in Jazz; a cancelled ctx returns at once and the call's
-// result is dropped, but the call itself runs to its end: a write may
-// still apply.
+// result is dropped, but the call itself runs until it ends or the DB
+// closes: a write may still apply.
 func (db *DB) call(ctx context.Context, method string, args map[string]any, out any) error {
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
@@ -252,14 +267,14 @@ func (db *DB) call(ctx context.Context, method string, args map[string]any, out 
 	}
 	done := make(chan result, 1)
 	go func() {
-		db.mu.RLock()
-		defer db.mu.RUnlock()
-		if db.handle == 0 {
-			done <- result{err: &Error{Kind: KindClosed, Message: "closed"}}
+		h, release, err := db.acquire(nil)
+		if err != nil {
+			done <- result{err: err}
 			return
 		}
+		defer release()
 		var cerr uintptr
-		res := ffi.call(db.handle, cstr(method), cstr(string(argsJSON)), &cerr)
+		res := ffi.call(h, cstr(method), cstr(string(argsJSON)), &cerr)
 		var r result
 		r.text, _ = takeString(res)
 		r.err = takeError(cerr)

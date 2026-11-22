@@ -43,6 +43,7 @@ var ffi struct {
 	stringFree  func(s uintptr)
 	generateKey func(err *uintptr) uintptr
 	malloc      func(n uintptr) uintptr
+	threadSelf  func() uintptr
 
 	// Backend-client calls, nil with a libjazz_ffi that predates them.
 	forUser     func(h uintptr, userID, claims *byte, err *uintptr) uintptr
@@ -101,6 +102,7 @@ func bind() error {
 		}
 	}
 	purego.RegisterLibFunc(&ffi.malloc, libc, "malloc")
+	purego.RegisterLibFunc(&ffi.threadSelf, libc, "pthread_self")
 	ffi.subscriptionCallback = purego.NewCallback(onSubscription)
 	ffi.tokenCallback = purego.NewCallback(onToken)
 	return nil

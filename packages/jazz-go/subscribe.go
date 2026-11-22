@@ -158,23 +158,24 @@ func stream[T any](ctx context.Context, db *DB, decode func(event) (v T, last, s
 		delete(db.streams, id)
 		db.streamsMu.Unlock()
 	}
-	db.mu.RLock()
-	if db.handle == 0 {
-		db.mu.RUnlock()
+	_, release, err := db.acquire(func() {
+		db.streamsMu.Lock()
+		defer db.streamsMu.Unlock()
+		if db.streams == nil {
+			db.streams = map[uint64]*openStream{}
+		}
+		db.streams[id] = &openStream{sub: s, end: func() {
+			stop()
+			closeOnce.Do(func() { close(closing) })
+		}}
+	})
+	if err != nil {
 		forget()
-		return nil, &Error{Kind: KindClosed, Message: "closed"}
+		return nil, err
 	}
-	db.streamsMu.Lock()
-	if db.streams == nil {
-		db.streams = map[uint64]*openStream{}
-	}
-	db.streams[id] = &openStream{sub: s, end: func() {
-		stop()
-		closeOnce.Do(func() { close(closing) })
-	}}
-	db.streamsMu.Unlock()
+	// The handle start reads stays valid until release.
 	started, err := start(id)
-	db.mu.RUnlock()
+	release()
 	if err != nil {
 		unregister()
 		forget()

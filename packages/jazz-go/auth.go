@@ -34,7 +34,9 @@ const (
 
 // TokenProvider gets the signed-in user's token: "" when no one is
 // signed in (the app then signs out). An error (a network blip at your
-// auth provider) keeps the session: Jazz asks again later.
+// auth provider) keeps the session: Jazz asks again later. ctx is
+// cancelled when the DB or Session closes, which waits for the provider to
+// return.
 type TokenProvider func(ctx context.Context, reason TokenReason) (string, error)
 
 type tokenAuth struct {
@@ -159,7 +161,18 @@ func onToken(ctx, reason, token uintptr) (status int32) {
 	}
 	c, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	fetching := fetchesOf(uint64(ctx))
+	fetch, ok := fetching.begin(cancel)
+	if !ok {
+		*out = mallocString("the app is closing")
+		return 1
+	}
+	defer fetching.done(fetch)
 	t, err := value.(TokenProvider)(c, TokenReason(goString(reason)))
+	if err == nil && t == "" && fetching.isClosing() {
+		// Cancelled by closing: a failed fetch, not a sign-out.
+		err = context.Canceled
+	}
 	if err != nil {
 		// A failed fetch: the session stays, and Jazz asks again.
 		*out = mallocString(err.Error()) // jazz-ffi frees it
@@ -177,7 +190,7 @@ func openUser(config string, provider TokenProvider) (uintptr, uint64, error) {
 	var cerr uintptr
 	h := ffi.openUser(cstr(config), ffi.tokenCallback, uintptr(id), &cerr)
 	if err := takeError(cerr); err != nil || h == 0 {
-		providers.Delete(id)
+		releaseProvider(id)
 		if err == nil {
 			err = &Error{Kind: KindRefused, Message: "open failed"}
 		}
