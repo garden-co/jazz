@@ -48,8 +48,17 @@ PY
         mkdir -p "$W/ffiart" && cp "$AG_TGZ/libjazz_ffi-linux-x86_64.tar.gz" "$W/ffiart/"
         JAZZ_APP_ID=$APP_ID ./go-rc-check.sh "$REPO" HEAD "$W/ffiart" "$(ag_version)" "$W/gomod" 2>&1 | tee go.log | grep -E "PASS|FAIL" | sed 's/^ *t9gate_test.go:[0-9]*: //; s/^--- PASS: /PASS t9 go /; s/^--- FAIL: /FAIL t9 go /' | grep -E "^(PASS|FAIL) " ;;
     kotlin) local K=$W/kt; rm -rf "$K"; cp -r "$SP/kotlin-cli" "$K"; rm -rf "$K/build" "$K/.gradle"
-        local jar; jar=$(ls "$AG_TGZ"/jazz-kotlin-*.jar 2>/dev/null | grep -v android | head -1)
-        if [ -n "${AG_REGISTRY:-}" ]; then   # Maven Central only: the one declared dependency, nothing else
+        local jar channel=; jar=$(ls "$AG_TGZ"/jazz-kotlin-*.jar 2>/dev/null | grep -v android | head -1)
+        if [ -n "${AG_REGISTRY:-}" ]; then   # what was published, where it was published: never a build from source
+          channel=${AG_KOTLIN_CHANNEL:-}
+          case $channel in
+            central) jar= ;;
+            github-release) jar=$AG_TGZ/jazz-kotlin-$(ag_version).jar
+              [ -f "$jar" ] || { echo "FAIL t9 kotlin: no release jar $(basename "$jar")"; return; } ;;
+            *) echo "FAIL t9 kotlin: unknown channel '$channel'"; return ;;
+          esac
+        fi
+        if [ "$channel" = central ]; then   # Maven Central only: the one declared dependency, nothing else
           echo 'rootProject.name = "stage-plan-kotlin-cli"' > "$K/settings.gradle.kts"
           sed -i "s#implementation(\"tools.jazz:jazz-kotlin\")#implementation(\"tools.jazz:jazz-kotlin:$(ag_version)\")#; /tasks.named<JavaExec>(\"run\")/d" "$K/build.gradle.kts"
         elif [ -n "$jar" ]; then   # the release jar alone, with its declared Maven deps: what an adopter builds against
@@ -73,6 +82,11 @@ PY
         done
         ( cd "$K" && gradle installDist --no-daemon -q --offline ) > kt-build.log 2>&1 \
           || { echo "FAIL t9 kotlin build"; sed -n '/What went wrong/,/^\* Try/p' kt-build.log kt-fetch.log | head -25; tail -4 kt-build.log; return; }
+        if [ -n "$jar" ]; then   # what runs is that jar, and no other jazz-kotlin
+          local lib=$K/build/install/stage-plan-kotlin-cli/lib
+          [ "$(cd "$lib" && echo jazz-kotlin*)" = "$(basename "$jar")" ] && cmp -s "$jar" "$lib/$(basename "$jar")" \
+            && echo "PASS t9 kotlin: runs on $(basename "$jar") alone" || { echo "FAIL t9 kotlin: the install doesn't hold just $(basename "$jar")"; return; }
+        fi
         KT_CLI=$K/build/install/stage-plan-kotlin-cli/bin/stage-plan-kotlin-cli APP_ID=$APP_ID ./run-lang-clients.sh 2>&1 | grep -E "^(PASS|FAIL)" ;;
     swift) [ -f "$AG_TGZ/libjazz_ffi-linux-x86_64.tar.gz" ] || { echo "FAIL t9 swift: no libjazz_ffi-linux-x86_64.tar.gz in the RC inputs"; return; }
         local L=$W/ffi; mkdir -p "$L" && tar xzf "$AG_TGZ/libjazz_ffi-linux-x86_64.tar.gz" -C "$L"
