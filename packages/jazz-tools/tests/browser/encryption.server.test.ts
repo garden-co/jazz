@@ -229,7 +229,7 @@ it.each(["select", "equality"] as const)(
     const self = await db.encryption.members.row({ table: "projects", id: projectId }, account);
     const project = await db.transaction((tx) => {
       tx.insert(app.projects, { name: "plans", ownerId: account }, { id: projectId });
-      tx.insert(membersTable, self as never);
+      tx.insert(app.__e2ee_members, self);
     });
     await project.wait({ tier: "global" });
     const title = `secret-${crypto.randomUUID()}`;
