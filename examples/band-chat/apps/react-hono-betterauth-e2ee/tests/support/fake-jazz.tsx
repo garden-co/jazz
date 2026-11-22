@@ -3,6 +3,38 @@
 // asked for and wrote, with no runtime behind them.
 import { vi } from "vitest";
 
+// What jsdom lacks and the design system's shell and dialogs call.
+if (typeof window !== "undefined") {
+  window.matchMedia ??= ((query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    addListener: () => undefined,
+    removeListener: () => undefined,
+    dispatchEvent: () => false,
+    onchange: null,
+  })) as typeof window.matchMedia;
+  (globalThis as { CSS?: unknown }).CSS ??= {
+    escape: (value: string) => value,
+    supports: () => false,
+  };
+  window.scrollTo = (() => undefined) as typeof window.scrollTo;
+  globalThis.ResizeObserver ??= class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+  const dialog = HTMLDialogElement.prototype;
+  dialog.showModal ??= function (this: HTMLDialogElement) {
+    this.setAttribute("open", "");
+  };
+  dialog.show ??= dialog.showModal;
+  dialog.close ??= function (this: HTMLDialogElement) {
+    this.removeAttribute("open");
+  };
+}
+
 export interface Q {
   table: string;
   filter?: Record<string, unknown>;
