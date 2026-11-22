@@ -237,7 +237,7 @@ export async function admitMember({
   memberAuthor: string;
   memberProfileId: string;
   requestIds: string[];
-}): Promise<{ delivered: number; failed: number }> {
+}): Promise<void> {
   const memberRow = await db.encryption.members.row({ table: "rooms", id: roomId }, memberAuthor);
   const written = await db.transaction((tx) => {
     tx.insert(app.__e2ee_members, memberRow);
@@ -245,7 +245,6 @@ export async function admitMember({
     for (const id of requestIds) tx.delete(app.joinRequests, id);
   });
   await written.wait({ tier: "global" });
-  return db.encryption.keys.deliver();
 }
 ```
 
@@ -253,8 +252,9 @@ Being admitted does not give the person the key. Their devices get it from a dev
 holds it. That device has to be online. Until then the new member sees the room's messages as
 **locked**.
 
-If `deliver()` reports `failed` above zero, BandChat shows "Key not delivered yet" with a Retry
-button. The retry calls `deliver()` again. Jazz also runs a delivery pass by itself when the app
+If `deliver()` fails or reports `failed` above zero, BandChat shows "Key not delivered yet".
+The member is already admitted. The dialog shows the reason when the call returns one.
+The Retry button calls `deliver()` again. Jazz also runs a delivery pass by itself when the app
 starts and when the connection comes back. See [Sharing and keys](/docs/e2ee/sharing-and-keys).
 
 ## List the members
@@ -356,8 +356,10 @@ export async function removeMember({
 
 The real function can also delete a leaver's read markers in the same transaction.
 
-BandChat asks Jazz to rotate the room's key after every removal. A room gets its key from its first
-encrypted write. If the room has no key yet, the call succeeds and returns `0`.
+BandChat asks Jazz to rotate the room's key once the server confirms that member rows were
+removed. A removal count of zero means the editor may be unable to see that member's rows.
+BandChat shows that no member rows were removed. If the room has no key yet, the rotation call
+succeeds and returns `0`. A room gets its key from its first encrypted write.
 
 ```ts
 import type { Db } from "jazz-tools";
@@ -374,7 +376,9 @@ Removal is not instant. Between the removal and the rotation, a message can stil
 the old key. And removal cannot take back what the person could already read. They keep every
 message they opened before.
 
-Any member can leave a room. Only the creator removes someone else.
+Any member can leave a room. Only the creator can remove someone else or renew the key.
+Once the creator's browser learns that a member left, Jazz tries to renew the room's key before
+the creator's next encrypted write.
 
 ## Messages you cannot read yet
 
