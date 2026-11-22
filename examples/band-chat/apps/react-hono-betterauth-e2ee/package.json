@@ -11,7 +11,7 @@
     "build": "jazz-tools generate && vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsrs --noEmit",
-    "test": "vitest run",
+    "test": "vitest run tests",
     "test:e2e": "playwright test"
   },
   "dependencies": {
