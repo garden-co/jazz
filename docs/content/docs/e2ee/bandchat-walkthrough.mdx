@@ -259,29 +259,42 @@ starts and when the connection comes back. See [Sharing and keys](/docs/e2ee/sha
 
 ## List the members
 
-Ask Jazz for a filter. Then pass it to an ordinary query.
+Ask Jazz for a filter. Then pass it to an ordinary query. If the browser opens offline before
+Jazz knows the room table's identity, the filter can fail. BandChat shows the reason and offers
+a Retry button.
 
 ```tsx
 import { useEffect, useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import type { Db } from "jazz-tools";
+import { useAll } from "jazz-tools/react";
 import { app, type E2eeMember } from "./jazz.generated";
 
-export function useRoomMembers(roomId: string): { members: E2eeMember[] | undefined } {
-  const db = useDb();
-  const [filter, setFilter] = useState<{ scopeId: string; identifier: string } | undefined>();
+export function useRoomMembers(roomId: string): {
+  members: E2eeMember[] | undefined;
+  loadFailure: { reason: string; retry: () => void } | undefined;
+} {
+  const [filter, setFilter] = useState<Awaited<ReturnType<Db["encryption"]["members"]["where"]>>>();
+  const [error, setError] = useState<string>();
+  const [attempt, setAttempt] = useState(0);
+  const { data, db } = useAll(filter ? app.__e2ee_members.where(filter) : undefined);
   useEffect(() => {
     let isLive = true;
     setFilter(undefined);
+    setError(undefined);
     db.encryption.members.where({ table: "rooms", id: roomId }).then(
       (found) => isLive && setFilter(found),
-      () => undefined,
+      (cause: unknown) =>
+        isLive && setError(cause instanceof Error ? cause.message : String(cause)),
     );
     return () => {
       isLive = false;
     };
-  }, [db, roomId]);
-  const { data } = useAll(filter ? app.__e2ee_members.where(filter) : undefined);
-  return { members: data };
+  }, [attempt, db, roomId]);
+  return {
+    members: data,
+    loadFailure:
+      error === undefined ? undefined : { reason: error, retry: () => setAttempt((n) => n + 1) },
+  };
 }
 ```
 
@@ -512,12 +525,16 @@ records, so they need no new approval. Changes they had not synced yet may be lo
 The server cannot tell which session belongs to which device. A record like that would be the
 device's own claim, and the server holds no keys to check it. So it ends them all.
 
-If the page reloads between the two steps, the device is still listed. Press the button again. Each
-attempt runs both steps.
+If the server's answer is lost or it cannot finish, some browsers may already be signed out.
+BandChat keeps the device listed until the sign-out step is confirmed. Press the button again to
+run both steps.
 
 The removed device keeps the keys it already holds. It receives no new keys.
 Other room members learn of the removal one sync round trip after it commits.
-During that round trip, their writes may still use the old key.
+Writes can still use the current key during that round trip, while offline
+after learning of the removal, or when an online rotation is refused or
+undecided by the write's deadline. The write goes ahead and the room's key
+rotates at the next opportunity.
 
 ## Sign out, or leave
 
@@ -550,10 +567,11 @@ Otherwise the row shows "Removal pending". The browser stays usable. When anothe
 devices is online, it completes the removal by itself. Then this browser's keys for the account are
 erased, and the browser signs itself out.
 
-How does the page know? When the request is accepted, BandChat records the account and this
-browser's device ID in `localStorage`. A device ID is not a secret. A different ID for the same
-account means the old keys are gone, because the browser enrols again under a new ID. Then the page
-signs out and clears the record. An ordinary sign-out also clears it.
+Before sending the request, BandChat records the account and this browser's device ID in
+`localStorage`. That lets it finish leaving even if the tab closes before the answer arrives.
+A refusal clears the record. A different ID for the same account means the old keys are gone,
+because the browser enrols again under a new ID. Then the page signs out and clears the record.
+An ordinary sign-out also clears it.
 
 If erasing the keys fails, Jazz closes its encryption runtime with an error. BandChat says leaving
 did not finish and that the keys may still be in this browser. It stays signed in. Reloading checks
