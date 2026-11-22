@@ -516,6 +516,10 @@ impl Core {
     /// confirmation or refusal). Its waits on the server end on the
     /// client's thread as this handle closes, so it is as prompt as the
     /// close, which waits for that thread too.
+    ///
+    /// The invariant: whatever `call` awaits is local work, or ends with
+    /// the client's waits (`waits_ended`). Anything else (a wait for a key,
+    /// say) hangs a derived handle's close again.
     fn wait_answer<T>(&self, call: impl Future<Output = jazz_app_support::Result<T>>) -> Result<T> {
         #[cfg(test)]
         before_sending();
