@@ -86,7 +86,7 @@ impl Table {
                     facts.account = Some(Account {
                         id: case.account.clone(),
                         issuer: self.issuer.clone(),
-                        claims: case.claims.clone(),
+                        claims: serde_json::value::to_raw_value(&case.claims).unwrap(),
                     });
                 }
                 Step::Refused(refusal) => {
@@ -153,7 +153,7 @@ fn admits_no_one_before_every_lookup_is_answered() {
     facts.account = Some(Account {
         id: Some("account".to_owned()),
         issuer: table.issuer.clone(),
-        claims: json!({}),
+        claims: serde_json::value::to_raw_value(&json!({})).unwrap(),
     });
     assert_eq!(
         admit(prelude, &facts).unwrap(),
@@ -190,6 +190,39 @@ fn a_hostile_prelude_is_skipped_or_refused() {
             admit(prelude, &facts).unwrap(),
             Step::Refused(Refusal::Missing)
         );
+    }
+}
+
+/// Alice's claims, and a backend client's stated session, reach the core
+/// digit for digit: a policy that compares a claim must see the value
+/// `authenticate` gave.
+#[test]
+fn claims_reach_the_core_digit_for_digit() {
+    let table = table();
+    let claims = r#"{"share":934118.8362146787,"big":123456789012345678901234567890}"#;
+    let mut facts = table.facts();
+    facts.client = Some(BackendClient::None);
+    facts.user = Some(Authenticated {
+        user_id: Some("alice".to_owned()),
+        authenticated_at_ms: AUTHENTICATED_AT_MS,
+    });
+    facts.account = Some(Account {
+        id: Some("account".to_owned()),
+        issuer: table.issuer.clone(),
+        claims: serde_json::value::RawValue::from_string(claims.to_owned()).unwrap(),
+    });
+    let as_alice = br#"{"auth":{"backend_session":{"user_id":"alice"}}}"#;
+    let mut trusted = table.facts();
+    trusted.client = Some(BackendClient::Trusted);
+    let as_backend = format!(
+        r#"{{"auth":{{"backend_secret":"stand-in","backend_session":{{"claims":{claims}}}}}}}"#
+    );
+    for (prelude, facts) in [(&as_alice[..], &facts), (as_backend.as_bytes(), &trusted)] {
+        let Step::Admitted(admitted) = admit(prelude, facts).unwrap() else {
+            panic!("not admitted");
+        };
+        let pinned = pin_bundle(admitted.prelude.as_bytes(), Some("ours")).unwrap();
+        assert!(String::from_utf8(pinned).unwrap().contains(claims));
     }
 }
 

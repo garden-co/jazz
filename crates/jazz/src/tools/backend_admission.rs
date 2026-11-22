@@ -21,14 +21,19 @@
 //! - What reaches the core is built here: `peer_identity`, `requested_link`,
 //!   an `auth` of the backend secret and at most one identity, and the
 //!   audience the backend checked a proof against. Nothing else is copied.
+//!
+//! JSON that is only passed on (claims, a trusted client's session, a
+//! prelude being pinned) keeps its text: parsing it into a [`serde_json::Value`]
+//! would move some numbers, and policies compare claims exactly.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use base64::Engine as _;
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::value::{RawValue, to_raw_value};
 
 use super::identity::{self, DEVICE_ACCOUNT_ISSUER};
 
@@ -110,7 +115,7 @@ pub struct Account {
     /// `None`: they have none. Admission never makes one.
     pub id: Option<String>,
     pub issuer: String,
-    pub claims: Value,
+    pub claims: Box<RawValue>,
 }
 
 /// What [`admit`] answers.
@@ -223,12 +228,11 @@ pub fn admit_json(prelude: &[u8], facts: &str) -> Result<String, AdmitError> {
 /// while there is none. Whatever it stated is replaced. `None` when it is
 /// not a JSON object: such a socket must not open.
 pub fn pin_bundle(prelude: &[u8], bundle: Option<&str>) -> Option<Vec<u8>> {
-    let Ok(Value::Object(mut fields)) = serde_json::from_str(&text_of(prelude)) else {
-        return None;
-    };
+    let mut fields: BTreeMap<String, Box<RawValue>> =
+        serde_json::from_str(&text_of(prelude)).ok()?;
     fields.remove("bundle");
     if let Some(bundle) = bundle {
-        fields.insert("bundle".to_owned(), bundle.into());
+        fields.insert("bundle".to_owned(), to_raw_value(bundle).ok()?);
     }
     serde_json::to_vec(&fields).ok()
 }
@@ -260,20 +264,14 @@ impl Client<'_> {
         {
             return Ok(Step::Refused(Refusal::Missing));
         }
-        let mut auth = Map::new();
+        let mut auth = ForwardedAuth::default();
         if self.states("backend_session") {
             // Forwarded as the client stated it: it has the backend's
-            // authority. Its credential verified, so it is parsed in full.
-            let mut whole: Value = serde_json::from_str(self.text)?;
-            let stated = if self.flat {
-                &mut whole
-            } else {
-                &mut whole["auth"]
+            // authority.
+            let Some(session) = self.stated_session() else {
+                return Ok(Step::Refused(Refusal::Unverified));
             };
-            auth.insert(
-                "backend_session".to_owned(),
-                stated["backend_session"].take(),
-            );
+            auth.backend_session = Some(session);
         }
         self.admitted(
             facts,
@@ -283,6 +281,18 @@ impl Client<'_> {
             Access::Backend,
             false,
         )
+    }
+
+    /// The text of the `backend_session` the client stated.
+    fn stated_session(&self) -> Option<Box<RawValue>> {
+        let top: BTreeMap<String, &RawValue> = serde_json::from_str(self.text).ok()?;
+        let auth: BTreeMap<String, &RawValue> = if self.flat {
+            top
+        } else {
+            serde_json::from_str(top.get("auth")?.get()).ok()?
+        };
+        auth.get("backend_session")
+            .map(|session| (*session).to_owned())
     }
 
     fn device_account(&self, client: BackendClient, facts: &Facts) -> Result<Step, AdmitError> {
@@ -330,7 +340,10 @@ impl Client<'_> {
                 } else {
                     Access::Session
                 };
-                let auth = Map::from_iter([("jwt_token".to_owned(), token.as_str().into())]);
+                let auth = ForwardedAuth {
+                    jwt_token: Some(token),
+                    ..ForwardedAuth::default()
+                };
                 self.admitted(facts, auth, endpoint, Who::DeviceAccount, access, false)
             }
         }
@@ -363,64 +376,125 @@ impl Client<'_> {
             return missing;
         };
         // Built from the host's answers: never the client's claims.
-        let session = json!({
-            "account_id": id,
-            "issuer": account.issuer,
-            "user_id": user,
-            "claims": account.claims,
-            "authMode": "external",
-            "authenticatedAt": authenticated.authenticated_at_ms,
-        });
-        let auth = Map::from_iter([("backend_session".to_owned(), session)]);
+        let session = to_raw_value(&VouchedSession {
+            account_id: id,
+            issuer: &account.issuer,
+            user_id: user,
+            claims: &account.claims,
+            auth_mode: "external",
+            authenticated_at: authenticated.authenticated_at_ms,
+        })?;
+        let auth = ForwardedAuth {
+            backend_session: Some(session),
+            ..ForwardedAuth::default()
+        };
         // A scoped backend client's session ends with its token instead.
         let renewal = client == BackendClient::None
             && matches!(self.top.get(RENEWAL), Some(Stated::Number(asked)) if *asked == 1.0);
         self.admitted(facts, auth, None, Who::User, Access::Backend, renewal)
     }
 
-    fn admitted(
-        &self,
-        facts: &Facts,
-        mut auth: Map<String, Value>,
+    fn admitted<'a>(
+        &'a self,
+        facts: &'a Facts,
+        mut auth: ForwardedAuth<'a>,
         audience: Option<String>,
         who: Who,
         access: Access,
         renewal: bool,
     ) -> Result<Step, AdmitError> {
-        let mut prelude = Map::new();
-        for key in ["peer_identity", "requested_link"] {
-            match self.top.get(key) {
-                None => {}
-                Some(Stated::Text(value)) => {
-                    prelude.insert(key.to_owned(), value.as_str().into());
-                }
-                // No core reads it.
-                Some(_) => return Ok(Step::Refused(Refusal::Unverified)),
-            }
-        }
-        // A core refuses the retired bootstrap. Dropping the field would
-        // open an ordinary session in its place.
+        // What no core takes is refused here: dropping it would admit the
+        // socket in its place.
+        let unverified = Ok(Step::Refused(Refusal::Unverified));
+        let (Ok(peer_identity), Ok(requested_link)) = (
+            self.text_field("peer_identity"),
+            self.text_field("requested_link"),
+        ) else {
+            return unverified;
+        };
+        // A core refuses the retired bootstrap.
         if !matches!(
             self.top.get("bootstrap_catalogue"),
             None | Some(Stated::Bool(false))
         ) {
-            return Ok(Step::Refused(Refusal::Unverified));
+            return unverified;
         }
-        auth.insert(
-            "backend_secret".to_owned(),
-            facts.backend_secret.as_str().into(),
-        );
-        prelude.insert("auth".to_owned(), auth.into());
-        if let Some(audience) = audience {
-            prelude.insert("local_first_audience".to_owned(), audience.into());
+        // A flat prelude's audience is never forwarded, but one no core
+        // takes (not a string, or not a header value) refuses the socket.
+        if self.flat {
+            match self.top.get("local_first_audience") {
+                None | Some(Stated::Null) => {}
+                Some(Stated::Text(stated)) if is_header_value(stated) => {}
+                Some(_) => return unverified,
+            }
         }
+        auth.backend_secret = &facts.backend_secret;
+        let prelude = serde_json::to_string(&Forwarded {
+            peer_identity,
+            requested_link,
+            auth,
+            local_first_audience: audience.as_deref(),
+        })?;
         Ok(Step::Admitted(Admitted {
-            prelude: serde_json::to_string(&prelude)?,
+            prelude,
             who,
             access,
             renewal,
         }))
     }
+
+    /// A top-level field that is a string when stated.
+    fn text_field(&self, key: &str) -> Result<Option<&str>, NotText> {
+        match self.top.get(key) {
+            None => Ok(None),
+            Some(Stated::Text(value)) => Ok(Some(value)),
+            Some(_) => Err(NotText),
+        }
+    }
+}
+
+struct NotText;
+
+/// Everything a core gets of a prelude, bar the bundle: there is no other
+/// field to copy a client's into.
+#[derive(Serialize)]
+struct Forwarded<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer_identity: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_link: Option<&'a str>,
+    auth: ForwardedAuth<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_first_audience: Option<&'a str>,
+}
+
+#[derive(Default, Serialize)]
+struct ForwardedAuth<'a> {
+    backend_secret: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    jwt_token: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend_session: Option<Box<RawValue>>,
+}
+
+/// The session a backend vouches for.
+#[derive(Serialize)]
+struct VouchedSession<'a> {
+    account_id: &'a str,
+    issuer: &'a str,
+    user_id: &'a str,
+    claims: &'a RawValue,
+    #[serde(rename = "authMode")]
+    auth_mode: &'static str,
+    #[serde(rename = "authenticatedAt")]
+    authenticated_at: u64,
+}
+
+/// Whether a core can read `value` as the header it relays an audience in.
+fn is_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte == b'\t' || (byte >= 0x20 && byte != 0x7f))
 }
 
 /// Whether `token` names the device-account issuer, unverified: only such a

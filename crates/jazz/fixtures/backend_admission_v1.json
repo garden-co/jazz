@@ -2622,6 +2622,132 @@
       }
     },
     {
+      "name": "shape: flat audience not a string",
+      "prelude": "{\"peer_identity\":\"p\",\"backend_session\":{\"user_id\":\"alice\"},\"local_first_audience\":1}",
+      "client": "none",
+      "endpoints": [
+        "https://app.example/jazz"
+      ],
+      "deviceAccepted": true,
+      "user": "alice",
+      "claims": {
+        "role": "member"
+      },
+      "account": "0b7f3c1e-2a4d-4f7a-8c1b-5e6d7f8a9b0c",
+      "shipped": {
+        "who": "user",
+        "access": "backend",
+        "renewal": false,
+        "forwarded": {
+          "peer_identity": "p",
+          "auth": {
+            "backend_secret": "core-backend-secret",
+            "backend_session": {
+              "account_id": "0b7f3c1e-2a4d-4f7a-8c1b-5e6d7f8a9b0c",
+              "issuer": "jazz:backend",
+              "user_id": "alice",
+              "claims": {
+                "role": "member"
+              },
+              "authMode": "external",
+              "authenticatedAt": 1800000000000
+            }
+          }
+        },
+        "lookups": [
+          "backendClient",
+          "user",
+          "account"
+        ]
+      },
+      "changed": {
+        "refused": "unverified"
+      }
+    },
+    {
+      "name": "shape: flat audience not a header value",
+      "prelude": "{\"peer_identity\":\"p\",\"backend_session\":{\"user_id\":\"alice\"},\"local_first_audience\":\"a\\nb\"}",
+      "client": "none",
+      "endpoints": [
+        "https://app.example/jazz"
+      ],
+      "deviceAccepted": true,
+      "user": "alice",
+      "claims": {
+        "role": "member"
+      },
+      "account": "0b7f3c1e-2a4d-4f7a-8c1b-5e6d7f8a9b0c",
+      "shipped": {
+        "who": "user",
+        "access": "backend",
+        "renewal": false,
+        "forwarded": {
+          "peer_identity": "p",
+          "auth": {
+            "backend_secret": "core-backend-secret",
+            "backend_session": {
+              "account_id": "0b7f3c1e-2a4d-4f7a-8c1b-5e6d7f8a9b0c",
+              "issuer": "jazz:backend",
+              "user_id": "alice",
+              "claims": {
+                "role": "member"
+              },
+              "authMode": "external",
+              "authenticatedAt": 1800000000000
+            }
+          }
+        },
+        "lookups": [
+          "backendClient",
+          "user",
+          "account"
+        ]
+      },
+      "changed": {
+        "refused": "unverified"
+      }
+    },
+    {
+      "name": "shape: flat audience ignored",
+      "prelude": "{\"peer_identity\":\"p\",\"backend_session\":{\"user_id\":\"alice\"},\"local_first_audience\":\"https://x\"}",
+      "client": "none",
+      "endpoints": [
+        "https://app.example/jazz"
+      ],
+      "deviceAccepted": true,
+      "user": "alice",
+      "claims": {
+        "role": "member"
+      },
+      "account": "0b7f3c1e-2a4d-4f7a-8c1b-5e6d7f8a9b0c",
+      "shipped": {
+        "who": "user",
+        "access": "backend",
+        "renewal": false,
+        "forwarded": {
+          "peer_identity": "p",
+          "auth": {
+            "backend_secret": "core-backend-secret",
+            "backend_session": {
+              "account_id": "0b7f3c1e-2a4d-4f7a-8c1b-5e6d7f8a9b0c",
+              "issuer": "jazz:backend",
+              "user_id": "alice",
+              "claims": {
+                "role": "member"
+              },
+              "authMode": "external",
+              "authenticatedAt": 1800000000000
+            }
+          }
+        },
+        "lookups": [
+          "backendClient",
+          "user",
+          "account"
+        ]
+      }
+    },
+    {
       "name": "shape: bootstrap_catalogue true",
       "prelude": "{\"peer_identity\":\"p\",\"auth\":{\"backend_session\":{\"user_id\":\"alice\"}},\"bootstrap_catalogue\":true}",
       "client": "none",

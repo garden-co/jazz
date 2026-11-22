@@ -1417,7 +1417,8 @@ impl Endpoint {
                             .and_then(|session| session.account_id)
                             .map(|account| account.0.to_string()),
                         issuer: BACKEND_ISSUER.to_owned(),
-                        claims: Value::Object(named.claims.clone()),
+                        claims: serde_json::value::to_raw_value(&named.claims)
+                            .map_err(not_admitted)?,
                     });
                 }
             }
