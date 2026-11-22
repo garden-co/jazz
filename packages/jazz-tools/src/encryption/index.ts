@@ -86,6 +86,13 @@ export type EncryptionReport =
     }
   | { type: "challenged" }
   /**
+   * A rotation Jazz tried before a write to `space` failed or was refused,
+   * for `reason`. The write was sealed under the space's current key all the
+   * same, so a member or device removed since may still read it. Told once
+   * per failed attempt; the next write tries again.
+   */
+  | { type: "rotation-failed"; space: { table: string; id: string }; reason: string }
+  /**
    * Reports Jazz kept for the app while nothing took them, past its limit:
    * `count` older ones were dropped (a challenge never is).
    */

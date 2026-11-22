@@ -109,6 +109,11 @@ pub enum Report {
     /// A space with more member accounts than the design limit
     /// (protocol §3.8), once per space.
     SpaceOverMemberLimit { space: SpaceAddress, members: usize },
+    /// A rotation the runtime tried before a write to `space`, which failed
+    /// or was refused, with its reason. The write is sealed under the
+    /// space's current version all the same (protocol §3.5), which a
+    /// removed member or device may hold. Told once per failed attempt.
+    RotationFailed { space: SpaceAddress, reason: String },
     /// A report ([`Report::Unreadable`], per space or per row) that no
     /// longer holds: the key was obtained, or the space now has a valid
     /// root, or the account is now a member (protocol §4.3). `id` and

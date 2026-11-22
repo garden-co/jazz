@@ -63,3 +63,15 @@ it gets `not-a-member`. A device waiting for approval gets `no-account`, even in
 Rotation is otherwise lazy: the next pass notices that a key is held by an account that is no longer a
 member and rotates. A removed member keeps what they could already read; Jazz's permissions stop them
 reading any row after.
+
+That automatic rotation happens just before a write. If it fails, for example because the writer may
+not update the space's row, the write still goes ahead under the current key, which the removed member
+may hold. The runtime then sends `onReport` a `rotation-failed` report with the space and the
+`reason`, and the next write tries again:
+
+```ts
+db.encryption.onReport((report) => {
+  if (report.type === "rotation-failed")
+    console.warn("key not rotated", report.space, report.reason);
+});
+```

@@ -2842,6 +2842,110 @@ fn a_refused_rotation_never_blocks_the_write() {
     });
 }
 
+/// Contract: a rotation that fails before a write is reported with its
+/// reason, and the write goes on under the current version as before
+/// (protocol §3.5): the app learns that a removed member may still read it.
+///
+/// ```text
+/// alice (owner) removes carol ──► bob's pass: needs rotation
+/// bob ──write──► rotation refused ──► report `RotationFailed` ──► note
+///                                     under the version carol holds
+/// ```
+#[test]
+fn a_failed_rotation_before_a_write_is_reported_with_its_reason() {
+    within(|| {
+        let authority = block_on(Db::open(jazz::db::DbConfig::new(
+            owned_schema(),
+            identity(0),
+        )))
+        .unwrap();
+        authority.set_authority().unwrap();
+        let server = authority;
+        let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let bob = owned_device(&server, account(0xb0), MemoryStore::new(), 2);
+        bob.activate(&server);
+        let carol = owned_device(&server, account(0xc0), MemoryStore::new(), 3);
+        carol.activate(&server);
+        let owner = Value::Uuid(uuid::Uuid::parse_str(&alice.id()).unwrap());
+        let space = block_on(alice.db.insert(
+            "projects",
+            BTreeMap::from([
+                ("name".to_owned(), text("plans")),
+                ("ownerId".to_owned(), owner),
+            ]),
+            Default::default(),
+        ))
+        .unwrap()
+        .row_uuid()
+        .0;
+        pump(&server, &alice.db);
+        for member in [&alice, &bob, &carol] {
+            add_member(&server, &alice, space, &member.id());
+        }
+        alice.follow_notes(&server);
+        bob.follow_notes(&server);
+        carol.follow_notes(&server);
+        write_note(&server, &alice, space, SECRET).unwrap();
+        pump(&server, &alice.db);
+        drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
+        deliver(&server, &alice, &[&bob, &carol], space);
+        pump(&server, &bob.db);
+        pump(&server, &carol.db);
+        drive(
+            &server,
+            &[&bob.db],
+            bob.client.acquire(&bob.db, &space_address(&bob, space)),
+        )
+        .unwrap();
+        assert_eq!(read_notes(&server, &carol, space).unwrap().len(), 1);
+
+        block_on(alice.db.delete(
+            MEMBERS,
+            member_row(&server, &carol.id()),
+            Default::default(),
+        ))
+        .unwrap();
+        pump(&server, &alice.db);
+        pump(&server, &bob.db);
+        deliver(&server, &bob, &[&alice], space);
+        assert!(
+            bob.client
+                .needs_rotation(&space_address(&bob, space))
+                .unwrap()
+        );
+        let events = reports_of(&bob);
+        write_note(&server, &bob, space, "from bob").unwrap();
+        pump(&server, &bob.db);
+
+        let failed: Vec<(jazz::e2ee::SpaceAddress, String)> = events
+            .borrow()
+            .iter()
+            .filter_map(|report| match report {
+                Report::RotationFailed { space, reason } => Some((space.clone(), reason.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            failed.len(),
+            1,
+            "one report for the one failed attempt: {failed:?}"
+        );
+        assert_eq!(failed[0].0, space_address(&bob, space));
+        assert!(
+            failed[0].1.contains("authorization_denied"),
+            "the reason names the refusal: {}",
+            failed[0].1
+        );
+        // What the write does is unchanged: it went through, under the
+        // version carol, removed, still holds.
+        assert_eq!(count(&server, "notes"), 2, "the write went through");
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+        pump(&server, &carol.db);
+        assert_eq!(read_notes(&server, &carol, space).unwrap().len(), 2);
+    });
+}
+
 /// A member row of `space` for `account`, written by the authority.
 fn server_member(server: &Db, by: &Device, space: uuid::Uuid, account: &str) {
     let scope = by.db.table_identity("projects").unwrap().unwrap().0;

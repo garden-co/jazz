@@ -1243,6 +1243,9 @@ fn report_json(report: &Report) -> Value {
         Report::SpaceOverMemberLimit { space: at, members } => {
             json!({ "type": "space-over-member-limit", "space": space(at), "members": members })
         }
+        Report::RotationFailed { space: at, reason } => {
+            json!({ "type": "rotation-failed", "space": space(at), "reason": reason })
+        }
         Report::Withdrawn {
             table,
             id,

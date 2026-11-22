@@ -877,8 +877,13 @@ impl E2eeClient {
         if pending {
             // A rotation that succeeded or was refused clears the mark; one
             // that failed for another reason leaves it for the next write.
-            if online {
-                let _ = self.rotate(db, space).await;
+            // Either way the app is told why: the write goes on under the
+            // current version.
+            if online && let Err(error) = self.rotate(db, space).await {
+                self.shared.flush(vec![Report::RotationFailed {
+                    space: space.clone(),
+                    reason: error.to_string(),
+                }]);
             }
             return Ok(true);
         }
