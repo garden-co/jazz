@@ -18,6 +18,7 @@ import {
 import { app, type Profile } from "../../jazz.generated";
 import { avatarFromFile } from "../lib/attachments";
 import { useObjectUrl } from "../lib/use-object-url";
+import { DevicesPanel } from "./DevicesPanel";
 
 interface ProfileDraft {
   displayName: string;
@@ -155,7 +156,12 @@ export function ProfileDialog({
   return (
     <Dialog isOpen={isOpen} onOpenChange={onOpenChange} purpose="form">
       <DialogHeader title="Your profile" onOpenChange={onOpenChange} />
-      {isOpen ? <ProfileEditor profile={profile} onDone={() => onOpenChange(false)} /> : null}
+      {isOpen ? (
+        <>
+          <ProfileEditor profile={profile} onDone={() => onOpenChange(false)} />
+          <DevicesPanel accountName={profile.displayName} />
+        </>
+      ) : null}
     </Dialog>
   );
 }
