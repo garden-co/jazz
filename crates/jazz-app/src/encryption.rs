@@ -454,14 +454,28 @@ mod plan {
             let preparing = Rc::clone(&runtime);
             let at = space.clone();
             let preparation = tokio::task::spawn_local(async move {
-                polled(&preparing, preparing.prepare_native_space(&at)).await
+                polled(
+                    &preparing,
+                    preparing.prepare_host_write(&at, Some(deadline.into_std())),
+                )
+                .await
             });
             let Ok(result) = tokio::time::timeout_at(deadline, preparation).await else {
-                return Err(error.into());
+                break;
             };
-            let ready = result
-                .map_err(|error| Error::Panicked(error.to_string()))?
-                .map_err(failure)?;
+            let ready = match result.map_err(|error| Error::Panicked(error.to_string()))? {
+                Ok(ready) => ready,
+                Err(reason) => {
+                    if runtime
+                        .client
+                        .retry_with_current_key(&space, &reason)
+                        .map_err(|err| failure(err.to_string()))?
+                    {
+                        return operation().map_err(Into::into);
+                    }
+                    return Err(failure(reason));
+                }
+            };
             if ready {
                 match operation() {
                     Ok(value) => return Ok(value),
@@ -482,9 +496,17 @@ mod plan {
             )
             .await;
             if tokio::time::Instant::now() >= deadline {
-                return Err(error.into());
+                break;
             }
         }
+        if runtime
+            .client
+            .retry_with_current_key(&space, "rotation undecided at the write deadline")
+            .map_err(|err| failure(err.to_string()))?
+        {
+            return operation().map_err(Into::into);
+        }
+        Err(error.into())
     }
 
     #[cfg(test)]

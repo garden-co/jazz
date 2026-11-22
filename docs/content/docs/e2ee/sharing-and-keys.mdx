@@ -60,6 +60,8 @@ writes nothing. If the space already has a key, a member whose device is waiting
 device cannot confirm the space's key state. If the device sees that its account has no membership,
 it gets `not-a-member`. A device waiting for approval gets `no-account`, even in a space with no key yet.
 
+If no online member holds the current key or the key history is broken, ask a person to confirm before calling `db.encryption.keys.recoverRotation(space)` from a device that holds an earlier key.
+
 Rotation is otherwise lazy: the next pass notices that a key is held by an account that is no longer a
 member and rotates. A removed member keeps what they could already read; Jazz's permissions stop them
 reading any row after.

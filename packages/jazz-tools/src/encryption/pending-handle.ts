@@ -43,7 +43,7 @@ const MEMBERS: { [name: string]: readonly string[] | true } = {
   onChallenge: true,
   devices: ["list", "challenge", "answer", "remove", "requestRemoval", "completeRemovals"],
   recovery: ["create", "enable", "restoreFromPasskey", "register", "restore", "list", "retire"],
-  keys: ["deliver", "rotate"],
+  keys: ["deliver", "rotate", "recoverRotation"],
   members: ["row"],
 };
 /** For the test that keeps the table in step with the real class. */

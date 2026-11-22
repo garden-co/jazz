@@ -123,8 +123,14 @@ export interface EncryptionOptions {
   reportIntervalMs?: number;
 }
 
-const toHex = (bytes: Uint8Array) =>
-  Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+/** @internal Takes ownership of the decoded secret passed to the native host. */
+export function takeSecretHex(bytes: Uint8Array): string {
+  try {
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  } finally {
+    bytes.fill(0);
+  }
+}
 
 function failure(error: unknown): EncryptionError {
   const message = error instanceof Error ? error.message : String(error);
@@ -225,7 +231,7 @@ export class Encryption {
         : await this.call<AccountStatus>("ready", {});
     const secret = await this.options.accountSecret?.();
     if (secret !== undefined) {
-      const hex = toHex(parseSecret(secret));
+      const hex = takeSecretHex(parseSecret(secret));
       // `automatic`: a retired root of the account secret is not an error
       // here, so the device still starts.
       if (status === "active")
@@ -391,7 +397,7 @@ export class Recovery {
   ) {}
 
   private async phraseSecret(phrase: string): Promise<string> {
-    return toHex(RecoveryPhrase.toBytes(phrase));
+    return takeSecretHex(RecoveryPhrase.toBytes(phrase));
   }
 
   /**
@@ -401,7 +407,12 @@ export class Recovery {
    */
   create(): string {
     this.refuseForDeviceAccount();
-    return RecoveryPhrase.fromBytes(runtimeRandomBytes(32));
+    const secret = runtimeRandomBytes(32);
+    try {
+      return RecoveryPhrase.fromBytes(secret);
+    } finally {
+      secret.fill(0);
+    }
   }
 
   /**
@@ -424,20 +435,22 @@ export class Recovery {
   }): Promise<{ method: "passkey" } | { method: "phrase"; phrase: string }> {
     this.refuseForDeviceAccount();
     const secret = runtimeRandomBytes(32);
-    const phrase = RecoveryPhrase.fromBytes(secret);
-    let method: "passkey" | "phrase" = "phrase";
-    // First, while the user's click still counts as a gesture.
     try {
-      await new BrowserPasskeyBackup({
-        appName: options.appName,
-        appHostname: options.appHostname,
-      }).backup(formatSecret(secret), `${options.accountName} (encryption recovery key)`);
-      method = "passkey";
-    } catch (error) {
-      if (!(error instanceof PasskeyBackupError)) throw error;
+      let phrase: string | undefined;
+      try {
+        await new BrowserPasskeyBackup({
+          appName: options.appName,
+          appHostname: options.appHostname,
+        }).backup(formatSecret(secret), `${options.accountName} (encryption recovery key)`);
+      } catch (error) {
+        if (!(error instanceof PasskeyBackupError)) throw error;
+        phrase = RecoveryPhrase.fromBytes(secret);
+      }
+      await this.call("recoveryRegister", { secret: takeSecretHex(secret) });
+      return phrase === undefined ? { method: "passkey" } : { method: "phrase", phrase };
+    } finally {
+      secret.fill(0);
     }
-    await this.call("recoveryRegister", { secret: toHex(secret) });
-    return method === "passkey" ? { method } : { method, phrase };
   }
 
   /**
@@ -454,7 +467,7 @@ export class Recovery {
       appName: options.appName,
       appHostname: options.appHostname,
     }).restore();
-    return this.call("recoveryRestore", { secret: toHex(parseSecret(secret)) });
+    return this.call("recoveryRestore", { secret: takeSecretHex(parseSecret(secret)) });
   }
 
   /** Registers the recovery root this phrase gives for the account. */
@@ -533,6 +546,12 @@ export class Keys {
    */
   async rotate(space: SpaceRef): Promise<number> {
     const done = await this.call<{ delivered: number }>("keysRotate", { ...space });
+    return done.delivered;
+  }
+
+  /** After user confirmation, rotate from the newest key this device holds. */
+  async recoverRotation(space: SpaceRef): Promise<number> {
+    const done = await this.call<{ delivered: number }>("keysRecoverRotation", { ...space });
     return done.delivered;
   }
 }

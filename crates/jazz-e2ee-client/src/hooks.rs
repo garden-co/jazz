@@ -220,7 +220,7 @@ fn under_refused_key(keys: &KeyState, address: &SpaceAddress, cell: &[u8]) -> bo
 /// The key a write to `address` seals under, or the reason it cannot yet
 /// (protocol §3.2, §5.1). The key of a root whose staging was `dropped` is
 /// not used: the runtime abandons that creation first.
-fn write_key<'k>(
+pub(crate) fn write_key<'k>(
     keys: &'k KeyState,
     dropped: &BTreeSet<String>,
     address: &SpaceAddress,

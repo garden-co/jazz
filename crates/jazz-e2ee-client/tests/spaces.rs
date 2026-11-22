@@ -2294,6 +2294,128 @@ fn member_row(server: &Db, account: &str) -> jazz::ids::RowUuid {
         .row_uuid()
 }
 
+/// Alice has observed that Bob, who held her project's key, was removed.
+fn observed_removal(server: &Db) -> (Device, uuid::Uuid) {
+    let (alice, bob, space) = shared_space(server);
+    assert_eq!(deliver(server, &alice, &[&bob], space), 1);
+    block_on(server.delete(MEMBERS, member_row(server, &bob.id()), Default::default())).unwrap();
+    pump(server, &alice.db);
+    deliver(server, &alice, &[], space);
+    assert!(
+        alice
+            .client
+            .needs_rotation(&space_address(&alice, space))
+            .unwrap()
+    );
+    (alice, space)
+}
+
+/// Read the ciphertext header at the authority to distinguish the old key
+/// from the successor even though Alice can decrypt both.
+fn note_epoch(server: &Db, note: &jazz::db::WriteHandle) -> Value {
+    let query = Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(note.row_uuid().0))));
+    let rows = all(server, query).unwrap();
+    let Some(Value::Bytes(bytes)) = rows[0].cell("body") else {
+        panic!("expected sealed note")
+    };
+    let epoch = jazz_e2ee::records::read_stored_record(&bytes)
+        .unwrap()
+        .epoch_id;
+    Value::Uuid(epoch.parse().unwrap())
+}
+
+/// Alice writes offline after observing Bob's removal. The stored note uses
+/// the root key and the next online write uses the successor.
+#[test]
+fn an_offline_write_after_an_observed_removal_uses_the_current_key() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, space) = observed_removal(&server);
+        let root = all(&server, Query::from(SPACES)).unwrap()[0]
+            .cell("epochId")
+            .unwrap();
+        alice.client.set_online(false);
+        let offline = block_on(alice.db.insert(
+            "notes",
+            note(space, "offline"),
+            Default::default(),
+        ))
+        .unwrap();
+        assert_eq!(count(&server, "notes"), 1);
+        alice.client.set_online(true);
+        pump(&server, &alice.db);
+        assert_eq!(note_epoch(&server, &offline), root);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+        let online = write_note(&server, &alice, space, "online").unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 1);
+        assert_ne!(note_epoch(&server, &online), root);
+    });
+}
+
+/// Alice's host times out while the authority has yet to answer a rotation
+/// read. Resuming that preparation after the write cannot publish a rotation.
+///
+/// Alice observes Bob's removal → prepare waits → write under old key
+/// → authority answers → no successor → next write rotates first.
+#[test]
+fn a_write_whose_rotation_is_undecided_uses_the_current_key_once() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, space) = observed_removal(&server);
+        let at = space_address(&alice, space);
+        let root = all(&server, Query::from(SPACES)).unwrap()[0]
+            .cell("epochId")
+            .unwrap();
+        let reports = reports_of(&alice);
+        let insert = || {
+            alice
+                .db
+                .insert("notes", note(space, "waiting"), Default::default())
+        };
+        assert!(block_on(insert()).is_err());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let mut prepare = std::pin::pin!(alice.client.prepare_host_write(
+            &alice.db,
+            &at,
+            Some(deadline)
+        ));
+        assert!(
+            prepare
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending()
+        );
+        std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+        assert!(
+            alice
+                .client
+                .retry_with_current_key(&at, "rotation undecided at the write deadline")
+                .unwrap()
+        );
+        let written = block_on(insert()).unwrap();
+        assert!(reports.borrow().iter().any(|report| matches!(report,
+            Report::RotationFailed { space, reason } if space == &at && reason.contains("deadline"))));
+        drive(&server, &[&alice.db], prepare).unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(note_epoch(&server, &written), root);
+        assert_eq!(
+            count(&server, "__e2ee_space_successors"),
+            0,
+            "expired preparation submitted a rotation"
+        );
+        assert!(alice.client.needs_rotation(&at).unwrap());
+        assert!(
+            block_on(insert()).is_err(),
+            "the late preparation left a retry mark"
+        );
+        let next = write_note(&server, &alice, space, "next").unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 1);
+        assert_ne!(note_epoch(&server, &next), root);
+    });
+}
+
 /// Contract: a host binding's writes, which `write` does not wrap, rotate
 /// the space after every removal of the run, as wrapped writes do: the
 /// first removal's rotation does not keep the second one's from happening.
