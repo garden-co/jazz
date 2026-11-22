@@ -5,6 +5,7 @@ import {
   createJazzSessionOwner,
   SESSION_VIEW_ACKNOWLEDGE_TIMEOUT_MS,
   replaceJazzSessionClient,
+  signOutPendingAccount,
   switchJazzSessionUser,
 } from "./state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
@@ -196,6 +197,38 @@ describe("Jazz session lifecycle", () => {
       client: clients[0],
       error: failure,
     });
+    await session.close();
+  });
+  it("records a sign-out before closing, and marks the account when it can't finish", async () => {
+    const old = handle("old");
+    const order: string[] = [];
+    const signOutRequested = vi.fn(async () => {
+      order.push("recorded");
+    });
+    const accounts = new AccountManager({ createLocalFirst: () => old, logout: vi.fn() }, old, {
+      selectionChanged: () => {},
+      settle: async () => {},
+      signOutRequested,
+    });
+    const failure = new GracefulShutdownSyncError(new Error("sync failed"));
+    const client = {
+      shutdown: vi.fn(async () => {
+        order.push("shutdown");
+        throw failure;
+      }),
+    };
+    const session = await createJazzSessionOwner({ accounts, openClient: async () => client });
+    expect(signOutPendingAccount(session)).toBeUndefined();
+    await expect(session.logout()).rejects.toBe(failure);
+    expect(order).toEqual(["recorded", "shutdown"]);
+    expect(signOutRequested).toHaveBeenCalledWith(old);
+    // Still usable here, so the app may retry, but signed out on this device.
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: old, error: failure });
+    expect(signOutPendingAccount(session)).toBe(old);
+    client.shutdown.mockImplementation(async () => {});
+    await session.logout();
+    expect(session.getSnapshot().status).toBe("signed-out");
+    expect(signOutPendingAccount(session)).toBeUndefined();
     await session.close();
   });
   it("signs out past writes the server refused for a sign-in it no longer accepts", async () => {

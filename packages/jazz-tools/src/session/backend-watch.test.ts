@@ -1,3 +1,4 @@
+import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle, type AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
@@ -1186,6 +1187,7 @@ async function guestSetup(options: {
   loginWithBackend?: () => Promise<AccountHandle>;
   linkGuest?: boolean;
   initial?: AccountHandle;
+  shutdown?: () => Promise<void>;
 }) {
   let backend: { user: AccountHandle; hasAccount: boolean } | null = null;
   let focus: (() => void) | undefined;
@@ -1206,7 +1208,7 @@ async function guestSetup(options: {
     ),
     openClient: async (account) => {
       opened.push(account.identity.subject);
-      return { shutdown: async () => {} };
+      return { shutdown: options.shutdown ?? (async () => {}) };
     },
   });
   const probe = vi.fn(async () =>
@@ -1407,6 +1409,28 @@ it("with linkGuest off, signs a user with no account in to their own on the app'
   await settle();
   expect(t.subject()).toBe("alice");
   expect(t.linkWithBackend).not.toHaveBeenCalled();
+  await t.close();
+});
+
+it("never links a guest whose sign-out couldn't finish; the user signs in to their own", async () => {
+  let offline = true;
+  const t = await guestSetup({
+    linkWithBackend: async () => user("alice"),
+    loginWithBackend: async () => user("alice"),
+    shutdown: async () => {
+      if (offline) throw new GracefulShutdownSyncError(new Error("sync failed"));
+    },
+  });
+  await expect(t.session.logout()).rejects.toThrow();
+  expect(t.subject()).toBe("guest");
+  offline = false;
+  // Someone signs up on this device next.
+  t.backendNames(user("alice"));
+  t.focus();
+  await settle();
+  expect(t.linkWithBackend).not.toHaveBeenCalled();
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  expect(t.subject()).toBe("alice");
   await t.close();
 });
 
