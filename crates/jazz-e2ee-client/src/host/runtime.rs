@@ -151,6 +151,10 @@ pub struct Encryption {
     /// delivery pass again once caught up.
     reconnected: Cell<bool>,
     status: Cell<Option<AccountStatus>>,
+    /// Whether the client knows the catalogue identities, so it can open
+    /// the encrypted rows its store holds with the keys it holds (loaded
+    /// before the loop starts), with or without the server.
+    readable: Cell<bool>,
     native: Option<NativeReadiness>,
     last_error: RefCell<Option<String>>,
     /// What the loop is doing or waiting on, for a call that waits on it.
@@ -359,6 +363,7 @@ impl Encryption {
             spaces,
             reconnected: Cell::new(false),
             status: Cell::new(None),
+            readable: Cell::new(false),
             native,
             last_error: RefCell::default(),
             stage: Cell::new("starting"),
@@ -445,10 +450,12 @@ impl Encryption {
         })
     }
 
-    /// The loop's last account status and error, as JSON.
+    /// The loop's last account status and error, and whether the client
+    /// can read encrypted rows yet (`readable`), as JSON.
     pub fn state(&self) -> Value {
         json!({
             "status": self.status.get().map(status_name),
+            "readable": self.readable.get(),
             "error": self.last_error.borrow().clone(),
             "stage": self.stage.get(),
         })
@@ -535,9 +542,20 @@ impl Encryption {
     }
 
     /// Prepares a native write for which the device is still missing a key.
-    pub async fn prepare_native_space(&self, space: &SpaceAddress) -> Result<bool, String> {
+    pub async fn prepare_host_write(
+        &self,
+        space: &SpaceAddress,
+        deadline: Option<web_time::Instant>,
+    ) -> Result<bool, String> {
         let _turn = self.gate.enter().await;
-        match self.client.prepare_space(&self.db, space).await {
+        let outcome = self
+            .client
+            .prepare_host_write(&self.db, space, deadline)
+            .await;
+        if self.native.is_none() {
+            return outcome.map_err(describe);
+        }
+        match outcome {
             Err(ClientError::NoAccount) => match &self.native {
                 Some(native) => match &*native.result.borrow() {
                     Verification::Pending
@@ -616,8 +634,7 @@ impl Encryption {
     async fn run(&self, op: &str, args: &Value) -> Result<Value, String> {
         // The delivery pass belongs to the loop, which takes its turn itself.
         let _turn = match op {
-            "keysDeliver" => None,
-            "prepareSpace" if self.native.is_some() => None,
+            "keysDeliver" | "prepareSpace" | "retryWithCurrentKey" => None,
             _ => Some(self.gate.enter().await),
         };
         let (client, db) = (&self.client, &*self.db);
@@ -791,34 +808,56 @@ impl Encryption {
                     }
                 }
             }
-            "prepareSpace" => {
+            "prepareSpace" | "retryWithCurrentKey" => {
                 let space = SpaceAddress {
                     scope_id: text("scopeId")?,
                     identifier: text("identifier")?,
                 };
-                if self.native.is_some() {
-                    json!(self.prepare_native_space(&space).await?)
+                if op == "retryWithCurrentKey" {
+                    json!(
+                        client
+                            .retry_with_current_key(&space, &text("failure")?)
+                            .map_err(describe)?
+                    )
                 } else {
-                    json!(client.prepare_space(db, &space).await.map_err(describe)?)
+                    let deadline = if let Some(value) = args.get("deadline") {
+                        // NAPI passes JavaScript numbers above u32::MAX as
+                        // floats, including integer Unix timestamps in ms.
+                        let millis = value.as_f64().ok_or("expected deadline in milliseconds")?;
+                        let now = web_time::SystemTime::now()
+                            .duration_since(web_time::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        Some(
+                            web_time::Instant::now()
+                                + Duration::from_millis(millis as u64)
+                                    .saturating_sub(now)
+                                    .min(Duration::from_secs(10)),
+                        )
+                    } else {
+                        None
+                    };
+                    json!(self.prepare_host_write(&space, deadline).await?)
                 }
             }
             "spaceRow" => {
                 let space = self.space_address(&text("table")?, &text("id")?)?;
                 json!({ "scopeId": space.scope_id, "identifier": space.identifier })
             }
-            "keysRotate" => {
+            "keysRotate" | "keysRecoverRotation" => {
                 let space = self.space_address(&text("table")?, &text("id")?)?;
-                let delivered = client
-                    .rotate(db, &space)
-                    .await
-                    .map_err(|error| match error {
-                        ClientError::NoAccount
-                            if self.status.get() == Some(AccountStatus::AwaitingApproval) =>
-                        {
-                            "no-account: This device is waiting for approval".to_owned()
-                        }
-                        other => describe(other),
-                    })?;
+                let delivered = if op == "keysRecoverRotation" {
+                    client.recover_rotation(db, &space).await
+                } else {
+                    client.rotate(db, &space).await
+                }
+                .map_err(|error| match error {
+                    ClientError::NoAccount
+                        if self.status.get() == Some(AccountStatus::AwaitingApproval) =>
+                    {
+                        "no-account: This device is waiting for approval".to_owned()
+                    }
+                    other => describe(other),
+                })?;
                 json!({ "delivered": delivered })
             }
             other => return Err(format!("unknown encryption operation `{other}`")),
@@ -837,7 +876,10 @@ async fn main_loop(this: Rc<Encryption>) {
         .set("waiting for the app's table identities from the server");
     loop {
         match client.prepare(&db) {
-            Ok(true) => break,
+            Ok(true) => {
+                this.readable.set(true);
+                break;
+            }
             Err(error) => {
                 if let Some(native) = &this.native {
                     if !native_may_retry(&error) {
@@ -1242,6 +1284,9 @@ fn report_json(report: &Report) -> Value {
         }),
         Report::SpaceOverMemberLimit { space: at, members } => {
             json!({ "type": "space-over-member-limit", "space": space(at), "members": members })
+        }
+        Report::RotationCheckFailed { space: at, reason } => {
+            json!({ "type": "rotation-check-failed", "space": space(at), "reason": reason })
         }
         Report::RotationFailed { space: at, reason } => {
             json!({ "type": "rotation-failed", "space": space(at), "reason": reason })

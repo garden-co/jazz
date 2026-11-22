@@ -154,6 +154,7 @@ fn held_keys_and_rows_survive_a_restart_offline() {
 
     let client = open_client(store());
     let db = client_db(&client, Some(&path));
+    client.set_online(false);
     assert!(client.prepare(&db).unwrap(), "identities are known offline");
     block_on(db.insert("notes", note(space, "offline"), Default::default())).unwrap();
     let mut bodies: Vec<Value> = all(
@@ -209,6 +210,7 @@ fn a_damaged_held_key_record_is_skipped_and_reported() {
     assert_eq!(*heard.borrow(), std::slice::from_ref(&name));
     assert_eq!(skipped(&client), std::slice::from_ref(&name));
     let (db, _link, _) = online(&client, &server, None);
+    client.record_fixture_rotation_check(&address(&db, intact));
     block_on(db.insert("notes", note(intact, "fine"), Default::default())).unwrap();
     let refused = block_on(db.insert("notes", note(damaged, "no key"), Default::default()));
     assert!(refused.is_err());

@@ -213,7 +213,7 @@ pub fn e2ee_system_tables_v1() -> Schema {
                     req("signature", Bytes),
                 ]),
                 &[],
-                by_space,
+                &[&["scopeId", "identifier", "predecessor"]],
             ),
         ),
         (

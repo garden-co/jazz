@@ -49,6 +49,8 @@ import {
   markTrustedReservedSession,
 } from "../client-session.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
+import { relayWorkerLink } from "../default-runtime-source.js";
+import { CONNECTED } from "../sync-status.js";
 
 type NativeDbForTest = ReturnType<
   NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[0]>["openMemory"]
@@ -8774,5 +8776,40 @@ describe("NativeRuntimeAdapter waitForPendingWrites cancellation", () => {
     await expect(wait).rejects.toThrow("gave up");
     await expect(cancelled).resolves.toBeUndefined();
     await runtime.close();
+  });
+});
+
+describe("a tab's encryption follows its worker's server link", () => {
+  it("goes offline when the connection that replaced the worker's fails before relaying a link", async () => {
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({ tick: () => undefined }),
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const encryptionSetOnline = vi.fn();
+    runtime.attachEncryption(
+      { encryptionSetOnline, encryptionSpaces: () => "{}" } as never,
+      { stop: () => undefined },
+      () => ({}) as never,
+    );
+    const online = () => encryptionSetOnline.mock.calls.at(-1)?.[0];
+    try {
+      const first = relayWorkerLink(runtime, undefined, () => undefined);
+      first.onRemoteLinkChange?.("connected" as never, CONNECTED);
+      expect(online()).toBe(true);
+      // A new connection to the worker replaces the first, then fails
+      // before it relayed anything: the tab can no longer reach the server.
+      const replacement = relayWorkerLink(runtime, undefined, () => undefined);
+      replacement.onFailure(new Error("the worker went away"));
+      expect(online()).toBe(false);
+      // The first connection failing late changes nothing more.
+      first.onFailure(new Error("the old connection closed"));
+      expect(online()).toBe(false);
+    } finally {
+      await runtime.close();
+    }
   });
 });

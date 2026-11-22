@@ -298,6 +298,19 @@ mod plan {
             TICKED.with(|ticked| ticked.notify_waiters());
         }
 
+        #[cfg(not(target_family = "wasm"))]
+        fn begin_streaming_upload<'a>(
+            &self,
+            begin: &'a mut dyn FnMut() -> jazz::tools::Result<jazz::db::StreamingValueUpload>,
+        ) -> futures_util::future::LocalBoxFuture<
+            'a,
+            jazz::tools::Result<jazz::db::StreamingValueUpload>,
+        > {
+            Box::pin(retry_after_key(begin, |error| {
+                jazz::tools::JazzError::Write(error.to_string())
+            }))
+        }
+
         fn stop(&self) {
             self.0.stop();
             DEVICE.with(|device| device.borrow_mut().take());
@@ -429,9 +442,10 @@ mod plan {
     /// (the device's own space, or a member's delivery waited for) and tries
     /// again within [`KEY_WAIT`]. The failed write stored nothing, so trying
     /// again repeats nothing.
-    pub(crate) async fn retry_after_key<T>(
+    pub(crate) async fn retry_after_key<T, E: From<jazz::tools::JazzError>>(
         mut operation: impl FnMut() -> std::result::Result<T, jazz::tools::JazzError>,
-    ) -> Result<T> {
+        preparation_error: impl Fn(Error) -> E,
+    ) -> Result<T, E> {
         let first = match operation() {
             Err(error) => error,
             Ok(value) => return Ok(value),
@@ -454,14 +468,30 @@ mod plan {
             let preparing = Rc::clone(&runtime);
             let at = space.clone();
             let preparation = tokio::task::spawn_local(async move {
-                polled(&preparing, preparing.prepare_native_space(&at)).await
+                polled(
+                    &preparing,
+                    preparing.prepare_host_write(&at, Some(deadline.into_std())),
+                )
+                .await
             });
             let Ok(result) = tokio::time::timeout_at(deadline, preparation).await else {
-                return Err(error.into());
+                break;
             };
-            let ready = result
-                .map_err(|error| Error::Panicked(error.to_string()))?
-                .map_err(failure)?;
+            let ready = match result
+                .map_err(|error| preparation_error(Error::Panicked(error.to_string())))?
+            {
+                Ok(ready) => ready,
+                Err(reason) => {
+                    if runtime
+                        .client
+                        .retry_with_current_key(&space, &reason)
+                        .map_err(|err| preparation_error(failure(err.to_string())))?
+                    {
+                        return operation().map_err(Into::into);
+                    }
+                    return Err(preparation_error(failure(reason)));
+                }
+            };
             if ready {
                 match operation() {
                     Ok(value) => return Ok(value),
@@ -482,9 +512,17 @@ mod plan {
             )
             .await;
             if tokio::time::Instant::now() >= deadline {
-                return Err(error.into());
+                break;
             }
         }
+        if runtime
+            .client
+            .retry_with_current_key(&space, "rotation undecided at the write deadline")
+            .map_err(|err| preparation_error(failure(err.to_string())))?
+        {
+            return operation().map_err(Into::into);
+        }
+        Err(error.into())
     }
 
     #[cfg(test)]
@@ -673,7 +711,7 @@ pub async fn with_key_wait<T>(
 ) -> Result<T> {
     #[cfg(feature = "e2ee-client")]
     {
-        plan::retry_after_key(operation).await
+        plan::retry_after_key(operation, std::convert::identity).await
     }
     #[cfg(not(feature = "e2ee-client"))]
     {

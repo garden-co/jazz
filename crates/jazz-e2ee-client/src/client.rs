@@ -256,23 +256,6 @@ impl E2eeClient {
             documents: Mutex::new(Documents::default()),
         };
         client.load_documents().await?;
-        // A device that never verified its account holds no key of it, so
-        // nothing it writes can need a removal's rotation until it does.
-        // One that did may have missed a removal made elsewhere: unknown
-        // until this run verifies it.
-        let verified_before = client.floor(&client.shared.account_id).await.is_some();
-        let knows_other_accounts = client
-            .documents
-            .lock()
-            .await
-            .floors
-            .keys()
-            .any(|account| *account != client.shared.account_id);
-        {
-            let mut keys = client.shared.keys.borrow_mut();
-            keys.account_removed_devices = (!verified_before).then_some(false);
-            keys.knows_other_accounts = knows_other_accounts;
-        }
         Ok(client)
     }
 
@@ -532,6 +515,59 @@ impl E2eeClient {
     #[doc(hidden)]
     pub fn pending_member_removals(&self) -> usize {
         self.shared.member_removals.borrow().len()
+    }
+
+    /// Content-only test fixtures create accepted roots in memory without
+    /// an authority ledger. Record the check made by their fixture setup.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn record_fixture_rotation_check(
+        &self,
+        address: &jazz_e2ee::protocol::records::space::SpaceAddress,
+    ) {
+        self.shared.note_write(address);
+        self.shared
+            .keys
+            .borrow_mut()
+            .rotation_evaluated
+            .insert(address.clone());
+    }
+
+    /// The table and account pairs covered by live account streams for this
+    /// space. Exposed to tests because an unnecessary subscription has no
+    /// observable effect on decrypted rows.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn watched_member_accounts(
+        &self,
+        space: &jazz::e2ee::SpaceAddress,
+    ) -> Vec<(&'static str, String)> {
+        let watch = self.shared.member_watch.borrow();
+        watch
+            .by_account
+            .iter()
+            .filter(|((table, account), spaces)| {
+                spaces.contains(space)
+                    && watch
+                        .streams
+                        .get(table)
+                        .is_some_and(|sub| sub.accounts.contains(account))
+            })
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn write_check_reads(&self) -> (usize, usize) {
+        let watch = self.shared.member_watch.borrow();
+        (watch.last_check_rows, watch.chain_reads)
+    }
+
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn delivery_mark_checks(&self) -> usize {
+        self.shared.member_watch.borrow().delivery_mark_checks
     }
 
     /// Holds the settle back-off's clock still, or moves it on by `by` when
@@ -831,6 +867,8 @@ impl E2eeClient {
             };
         }
         *self.shared.creations.borrow_mut() = Default::default();
+        *self.shared.member_watch.borrow_mut() = Default::default();
+        self.shared.written.borrow_mut().clear();
         // What belongs to the device and account that are gone: versions its
         // reads found missing.
         self.shared.missing.borrow_mut().clear();

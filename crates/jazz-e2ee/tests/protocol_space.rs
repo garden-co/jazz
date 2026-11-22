@@ -31,7 +31,8 @@ use jazz_e2ee::protocol::records::space::{SpaceAddress, SpaceDelivery};
 use jazz_e2ee::protocol::space::build::{self, Author};
 use jazz_e2ee::protocol::space::chain::select_root;
 use jazz_e2ee::protocol::space::members::{
-    self, DELIVERY_BATCH, EnvelopeSource, lacking, rotation_mark, rotation_recipients,
+    self, DELIVERY_BATCH, EnvelopeSource, ReplayedSpaceChain, lacking, rotation_mark,
+    rotation_recipients,
 };
 use jazz_e2ee::protocol::space::{
     AccountDirectory, BrokenHistory, InvalidSpaceRoot, KeyCheck, Recipient, SpaceChain, SpaceKeys,
@@ -75,6 +76,88 @@ fn mark_of(world: &World) -> members::RotationMark {
     let read = world.read();
     let chain = read.chain(world).unwrap();
     rotation_mark(&chain, &read.space, &read.directory(world)).unwrap()
+}
+
+/// Alice checks only the envelopes of the replayed version. Bob's device
+/// removal and subsequent membership removal agree with a full pass.
+#[test]
+fn checking_current_envelopes_agrees_with_the_full_mark() {
+    let mut world = space(22, &[ALICE, BOB]);
+    let phone = world.approve_device(BOB);
+    let epoch = world.current();
+    world.deliver(ALICE, BOB, &epoch);
+    let check = |world: &World| {
+        let read = world.read();
+        let replay = ReplayedSpaceChain::replay(&read.space, &read.directory(world))
+            .unwrap()
+            .unwrap();
+        let version = members::CurrentVersion::from_chain(&replay).unwrap();
+        let current: Vec<_> = read
+            .space
+            .deliveries
+            .iter()
+            .filter(|d| d.row.key_epoch_id == version.epoch())
+            .cloned()
+            .collect();
+        let mark = version
+            .rotation_mark(
+                &read.space.address,
+                read.space.through,
+                &read.space.members,
+                &current,
+                &read.directory(world),
+            )
+            .unwrap();
+        assert_eq!(mark, mark_of(world));
+    };
+    check(&world);
+    world.remove_device(BOB, &phone.id);
+    check(&world);
+    world.rotate(ALICE);
+    check(&world);
+    world.remove_member(BOB);
+    check(&world);
+}
+
+/// The mark check rejects a damaged signature, an absent recipient history,
+/// and envelopes from another version of Alice's space.
+#[test]
+fn a_current_version_check_rejects_inconsistent_evidence() {
+    let mut world = space(32, &[ALICE, BOB]);
+    let epoch = world.current();
+    world.deliver(ALICE, BOB, &epoch);
+    let mut read = world.read();
+    let chain = ReplayedSpaceChain::replay(&read.space, &read.directory(&world))
+        .unwrap()
+        .unwrap();
+    let valid = members::CurrentVersion::from_chain(&chain).unwrap();
+    let mut damaged = read.space.clone();
+    damaged.roots[0].row.signature[0] ^= 1;
+    assert!(
+        ReplayedSpaceChain::replay(&damaged, &read.directory(&world))
+            .unwrap()
+            .is_none()
+    );
+    let check = |version: &members::CurrentVersion, read: &Read| {
+        version.rotation_mark(
+            &read.space.address,
+            read.space.through,
+            &read.space.members,
+            &read.space.deliveries,
+            &read.directory(&world),
+        )
+    };
+    read.ledgers.retain(|a| a.account_id != BOB);
+    assert_eq!(
+        check(&valid, &read),
+        Err(ProtocolError::InconsistentEvidence)
+    );
+    let mut read = world.read();
+    read.space.deliveries[0].row.key_epoch_id = read.space.address.identifier.clone();
+    assert_eq!(
+        check(&valid, &read),
+        Err(ProtocolError::InconsistentEvidence)
+    );
 }
 
 /// A new member receives the current version from a holder (§3.4).

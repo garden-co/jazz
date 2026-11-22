@@ -1053,15 +1053,41 @@ impl Db {
         row: RowUuid,
         cells: BTreeMap<String, Value>,
         column: &str,
-        mut reader: R,
+        reader: R,
         identity: Option<AuthorSubject>,
         now_ms: Option<u64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
         let target = view_target(head.clone(), base.clone());
-        let mut upload =
-            self.begin_streaming_value_upload_for(table, row, &cells, column, &target)?;
+        let mut cells = cells;
+        let upload = self
+            .begin_streaming_value_upload_for(mutation, table, row, &mut cells, column, &target)?;
+        let upload = self
+            .feed_streaming_value_from_reader(upload, reader)
+            .await?;
+        self.finish_streaming_value_upload(
+            upload,
+            mutation,
+            table,
+            row,
+            cells,
+            column,
+            identity.map_or(WriteIdentity::Database, WriteIdentity::Session),
+            now_ms,
+            head,
+            base,
+        )
+        .await
+    }
+
+    /// Feed an open upload from a one-shot reader. The caller can prepare
+    /// the encryption key and retry opening before passing the reader here.
+    pub async fn feed_streaming_value_from_reader<R: std::io::Read>(
+        &self,
+        mut upload: StreamingValueUpload,
+        mut reader: R,
+    ) -> Result<StreamingValueUpload, Error> {
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
             match reader.read(&mut buffer) {
@@ -1079,19 +1105,7 @@ impl Db {
                 }
             }
         }
-        self.finish_streaming_value_upload(
-            upload,
-            mutation,
-            table,
-            row,
-            cells,
-            column,
-            identity.map_or(WriteIdentity::Database, WriteIdentity::Session),
-            now_ms,
-            head,
-            base,
-        )
-        .await
+        Ok(upload)
     }
 
     /// Begin a resumable upload of one large value, for hosts that feed it
@@ -1106,42 +1120,54 @@ impl Db {
     ) -> Result<StreamingValueUpload, Error> {
         self.inner().require_mutation_admission()?;
         whole_only(&self.inner(), table, column)?;
+        #[cfg(feature = "e2ee-client")]
+        self.inner().check_rowless_stream(table, cells, None)?;
         self.begin_upload(table, cells, column)
     }
 
     /// [`Self::begin_streaming_value_upload`] of the value of `column` of
     /// row `row`, whose write goes to `target`. With encryption hooks, the
     /// value of an encrypted column is sealed as it streams: the hooks
-    /// check the column and choose the key here, before any source byte is
-    /// read, and a missing key refuses the call (protocol §5.5).
+    /// choose the key and seal sibling cells before any source byte is read
+    /// (protocol §5.5). For an encrypted table the upload takes the metadata
+    /// from `cells`. Pass the remaining map to finish.
     pub fn begin_streaming_value_upload_for(
         &self,
+        mutation: StreamingMutationKind,
         table: &str,
         row: RowUuid,
-        cells: &BTreeMap<String, Value>,
+        cells: &mut BTreeMap<String, Value>,
         column: &str,
         target: &WriteTarget,
     ) -> Result<StreamingValueUpload, Error> {
+        self.begin_row_upload(None, mutation, table, row, cells, column, target)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_row_upload(
+        &self,
+        transaction: Option<OpenTransactionId>,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        cells: &mut BTreeMap<String, Value>,
+        column: &str,
+        target: &WriteTarget,
+    ) -> Result<StreamingValueUpload, Error> {
+        self.inner.staging().require_mutation_admission()?;
+        let mut upload = self.begin_upload(table, cells, column)?;
         #[cfg(feature = "e2ee-client")]
         {
-            self.inner().require_mutation_admission()?;
-            let sealer = self
-                .inner()
-                .stream_sealer(table, row, cells, column, target)?;
-            if let Some((sealer, space)) = sealer {
-                let mut upload = self.begin_upload(table, cells, column)?;
-                upload.sealer = Some(sealer);
-                upload.sealed_for = Some(SealedFor {
-                    row,
-                    target: target.clone(),
-                    space,
-                });
-                return Ok(upload);
+            let mut prepare =
+                |inner: &Inner| inner.prepare_stream(&mut upload, mutation, row, cells, target);
+            match transaction {
+                Some(id) => self.in_overlay(id, None, |inner, _| prepare(inner))?,
+                None => prepare(&self.inner())?,
             }
         }
         #[cfg(not(feature = "e2ee-client"))]
-        let _ = (row, target);
-        self.begin_streaming_value_upload(table, cells, column)
+        let _ = (transaction, mutation, row, target, &mut upload);
+        Ok(upload)
     }
 
     fn begin_upload(
@@ -1309,9 +1335,15 @@ impl Db {
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
         let target = view_target(head.clone(), base.clone());
-        if let Some(value) =
-            self.seal_streaming_upload(&mut upload, table, row, &mut cells, column, &target)?
-        {
+        if let Some(value) = self.seal_streaming_upload(
+            &mut upload,
+            mutation,
+            table,
+            row,
+            &mut cells,
+            column,
+            &target,
+        )? {
             self.inner().derived.push(value);
         }
         // The value was sealed as it streamed: this write, and no other,
@@ -1320,11 +1352,7 @@ impl Db {
         #[cfg(feature = "e2ee-client")]
         let sealed_for = upload.sealed_for.take();
         #[cfg(feature = "e2ee-client")]
-        let streamed = sealed_for.as_ref().map(|sealed| StreamedSeal {
-            column,
-            row: sealed.row,
-            space: sealed.space.as_ref(),
-        });
+        let streamed = sealed_for.as_ref();
         #[cfg(not(feature = "e2ee-client"))]
         let streamed = None;
         let op = match mutation {
@@ -1380,9 +1408,11 @@ impl Db {
     /// Finish `upload`'s value and set it as `column` of `cells`: inline when
     /// it fits, else the chunked descriptor, returned for the write to trust.
     /// A failed upload is ended here.
+    #[allow(clippy::too_many_arguments)]
     fn seal_streaming_upload(
         &self,
         upload: &mut StreamingValueUpload,
+        mutation: StreamingMutationKind,
         table: &str,
         row: RowUuid,
         cells: &mut BTreeMap<String, Value>,
@@ -1403,7 +1433,12 @@ impl Db {
         // space; the write's staging, which sees its transaction's own
         // writes, checks the space it is sealed in (`Inner::seal_op`).
         #[cfg(feature = "e2ee-client")]
-        if let Some(sealed) = &upload.sealed_for {
+        if let Some(sealed) = &mut upload.sealed_for {
+            if mutation != sealed.mutation {
+                return Err(rejected(
+                    "a sealed streaming upload must finish with its original mutation kind",
+                ));
+            }
             let named = self.inner().named_space(table, row, cells);
             if sealed.row != row
                 || sealed.target != *target
@@ -1411,9 +1446,18 @@ impl Db {
             {
                 return Err(sealed_elsewhere());
             }
+            if cells.iter().any(|(k, v)| sealed.cells.get(k) != Some(v)) {
+                return Err(rejected(
+                    "a sealed streaming upload takes its metadata at begin",
+                ));
+            }
+            *cells = std::mem::take(&mut sealed.cells);
+        } else {
+            self.inner()
+                .check_rowless_stream(table, cells, Some(mutation))?;
         }
         #[cfg(not(feature = "e2ee-client"))]
-        let _ = (row, target);
+        let _ = (mutation, row, target);
         if cells.contains_key(column) {
             return Err(rejected(
                 "the streamed column is also set in the other cells",
@@ -1554,8 +1598,8 @@ pub struct StreamingValueUpload {
     owner: std::rc::Weak<Store>,
     schema: SchemaViewId,
     schema_instance: std::rc::Weak<Schema>,
-    table: String,
-    column: String,
+    pub(super) table: String,
+    pub(super) column: String,
     _lease: UploadLease,
     kind: lv::LargeValueKind,
     initialized: bool,
@@ -1563,26 +1607,17 @@ pub struct StreamingValueUpload {
     emitted: Rc<RefCell<Vec<lv::StagedChunk>>>,
     /// Seals an encrypted column's value as it streams.
     #[cfg(feature = "e2ee-client")]
-    sealer: Option<Box<dyn crate::e2ee::StreamSealer>>,
+    pub(super) sealer: Option<Box<dyn crate::e2ee::StreamSealer>>,
     /// The row, target and space the value was sealed for as it streamed:
     /// only a write of that row, to that target, in that space publishes
     /// it, and leaves it to the hooks as it is.
     #[cfg(feature = "e2ee-client")]
-    sealed_for: Option<SealedFor>,
+    pub(super) sealed_for: Option<SealedFor>,
     #[cfg(feature = "e2ee-client")]
     header_written: bool,
 }
 
-/// The one column of a write whose value was sealed as it streamed, with
-/// the row and space it was sealed for: the write's staging refuses any
-/// other, and leaves that column as it is.
-#[derive(Clone, Copy)]
-#[cfg_attr(not(feature = "e2ee-client"), allow(dead_code))]
-pub(crate) struct StreamedSeal<'a> {
-    pub(crate) column: &'a str,
-    pub(crate) row: RowUuid,
-    pub(crate) space: Option<&'a Value>,
-}
+pub(crate) type StreamedSeal<'a> = &'a SealedFor;
 
 /// The refusal of a sealed stream published anywhere but where it was
 /// sealed for: there it would never open, and nothing would seal it again.
@@ -1595,11 +1630,16 @@ pub(crate) fn sealed_elsewhere() -> Error {
 
 /// What a sealed stream was sealed for (see
 /// [`Db::begin_streaming_value_upload_for`]).
-#[cfg(feature = "e2ee-client")]
-struct SealedFor {
-    row: RowUuid,
-    target: WriteTarget,
-    space: Option<Value>,
+#[cfg_attr(not(feature = "e2ee-client"), allow(dead_code))]
+pub(crate) struct SealedFor {
+    pub(super) row: RowUuid,
+    pub(super) mutation: StreamingMutationKind,
+    pub(super) target: WriteTarget,
+    pub(super) space: Option<Value>,
+    pub(super) existed: bool,
+    pub(super) root: Option<String>,
+    pub(super) cells: BTreeMap<String, Value>,
+    pub(super) companions: Vec<(String, RowUuid, BTreeMap<String, Value>)>,
 }
 
 /// Drop schedules cleanup on the next maintenance tick without borrowing the
@@ -1953,32 +1993,15 @@ impl TxRef<'_> {
     /// streamed into a row the transaction inserted.
     pub fn begin_streaming_value_upload_for(
         &self,
+        mutation: StreamingMutationKind,
         table: &str,
         row: RowUuid,
-        cells: &BTreeMap<String, Value>,
+        cells: &mut BTreeMap<String, Value>,
         column: &str,
         target: &WriteTarget,
     ) -> Result<StreamingValueUpload, Error> {
-        #[cfg(feature = "e2ee-client")]
-        {
-            self.db.inner.staging().require_mutation_admission()?;
-            let sealer = self.db.in_overlay(self.id, None, |inner, _| {
-                inner.stream_sealer(table, row, cells, column, target)
-            })?;
-            if let Some((sealer, space)) = sealer {
-                let mut upload = self.db.begin_upload(table, cells, column)?;
-                upload.sealer = Some(sealer);
-                upload.sealed_for = Some(SealedFor {
-                    row,
-                    target: target.clone(),
-                    space,
-                });
-                return Ok(upload);
-            }
-        }
-        #[cfg(not(feature = "e2ee-client"))]
-        let _ = (row, target);
-        self.db.begin_streaming_value_upload(table, cells, column)
+        self.db
+            .begin_row_upload(Some(self.id), mutation, table, row, cells, column, target)
     }
 
     /// [`Db::finish_streaming_value_upload`] staged in an open batch. The
@@ -2007,6 +2030,7 @@ impl TxRef<'_> {
         }
         let large = self.db.seal_streaming_upload(
             &mut upload,
+            mutation,
             table,
             row,
             &mut cells,
@@ -2057,11 +2081,7 @@ impl TxRef<'_> {
         #[cfg(feature = "e2ee-client")]
         let sealed_for = upload.sealed_for.take();
         #[cfg(feature = "e2ee-client")]
-        let streamed = sealed_for.as_ref().map(|sealed| StreamedSeal {
-            column,
-            row: sealed.row,
-            space: sealed.space.as_ref(),
-        });
+        let streamed = sealed_for.as_ref();
         #[cfg(not(feature = "e2ee-client"))]
         let streamed = None;
         self.db.stage_streamed(self.id, op, edits, streamed)?;

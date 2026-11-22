@@ -515,7 +515,6 @@ impl E2eeClient {
             // runtime's next write to it.
             let mut keys = self.shared.keys.borrow_mut();
             let removals = !state.removed.is_empty() || state.generation > 0;
-            keys.account_removed_devices = Some(removals);
             if keys.evaluated_epoch.as_deref() != Some(state.epoch_id()) {
                 keys.rotation_evaluated.clear();
                 keys.evaluated_epoch = Some(state.epoch_id().to_owned());
