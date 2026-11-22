@@ -343,18 +343,13 @@ export async function removeMember({
 
 The real function can also delete a leaver's read markers in the same transaction.
 
-This is the second step. A room gets its key from its first encrypted write. A room with no message
-has nothing to rotate, and Jazz refuses the call. So BandChat checks first:
+BandChat asks Jazz to rotate the room's key after every removal. A room gets its key from its first
+encrypted write. If the room has no key yet, the call succeeds and returns `0`.
 
 ```ts
 import type { Db } from "jazz-tools";
-import { app } from "./jazz.generated";
 
-export async function renewRoomKey(db: Db, roomId: string): Promise<number> {
-  const any = await db.all(app.messages.where({ roomId }).select("id").limit(1), {
-    tier: "remote",
-  });
-  if (any.length === 0) return 0;
+export function renewRoomKey(db: Db, roomId: string): Promise<number> {
   return db.encryption.keys.rotate({ table: "rooms", id: roomId });
 }
 ```
@@ -520,7 +515,9 @@ device's own claim, and the server holds no keys to check it. So it ends them al
 If the page reloads between the two steps, the device is still listed. Press the button again. Each
 attempt runs both steps.
 
-The removed device gets no later keys. It keeps what it already holds.
+The removed device keeps the keys it already holds. It receives no new keys.
+Other room members learn of the removal one sync round trip after it commits.
+During that round trip, their writes may still use the old key.
 
 ## Sign out, or leave
 
