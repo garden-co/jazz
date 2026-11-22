@@ -7,7 +7,8 @@
 //!
 //! A [`Jazz`] is one user's: the session replaces it when someone signs in
 //! or out, or the user changes. One kept from before fails with
-//! [`Error::Replaced`], and its subscriptions end.
+//! [`Error::Replaced`] ([`Error::Stopped`] once the session closes), and
+//! its subscriptions end.
 //!
 //! Every operation runs on the session's own runtime, whatever the
 //! caller's executor (a foreign thread through jazz-ffi, `block_on`).
@@ -866,8 +867,9 @@ impl JazzSession {
         });
     }
 
-    /// Closes the signed-in user's client: calls on it fail with
-    /// [`Error::Replaced`] from now on.
+    /// Closes the signed-in user's client: calls on it fail from now on,
+    /// with [`Error::Replaced`] while the session goes on, and with
+    /// [`Error::Stopped`] once it closes.
     async fn close_current(&self) {
         let old = {
             let mut current = self.lock();
