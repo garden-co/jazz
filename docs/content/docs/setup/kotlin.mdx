@@ -53,7 +53,8 @@ dependencies {
 
 The jar has `libjazz_ffi` for Linux (x86-64, arm64), macOS (arm64, x86-64) and Windows (x86-64)
 inside, which JNA loads from it. With Maven, add the jar with `mvn install:install-file` and
-declare the same dependencies, with `-jvm` after the two kotlinx artifact IDs.
+declare the same dependencies, with `-jvm` after the two kotlinx artifact IDs, plus
+`org.jetbrains.kotlin:kotlin-stdlib:2.2.21` (without it, Maven picks kotlinx's older one).
 
 On Android, download the AAR into your app module's `libs/` (run this in `app/`), and check it the
 same way:
