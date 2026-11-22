@@ -307,8 +307,9 @@ impl Jazz {
     /// waiting at most `timeout` ([`CLOSE_TIMEOUT`] as TypeScript's
     /// `close()`; `close({ timeoutMs })`). With [`crate::Storage::Memory`],
     /// writes that still have not arrived are lost, and this fails with
-    /// [`Error::Unsynced`] saying how many; `Duration::ZERO` closes at once
-    /// and accepts that. A persistent store keeps them for the next open.
+    /// [`Error::Unsynced`] saying how many; `Duration::ZERO` doesn't wait
+    /// for them and accepts that. A persistent store keeps them for the
+    /// next open.
     ///
     /// Calls waiting on the server go on while it waits for the writes,
     /// then fail with [`Error::Stopped`] as [`Jazz::shutdown`] says: `close`

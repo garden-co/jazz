@@ -653,15 +653,25 @@ async fn retry_after_a_link_whose_reopen_failed_signs_the_user_in() {
 async fn closing_cancels_the_operation_under_way() {
     let app = App::start().await;
     let token = bearer(Some("token-alice"));
+    /// Says when the provider's future is dropped.
+    struct Fetch(tokio::sync::mpsc::UnboundedSender<()>);
+    impl Drop for Fetch {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
     let (entered, mut stalled) = tokio::sync::mpsc::unbounded_channel();
+    let (dropped, mut abandoned) = tokio::sync::mpsc::unbounded_channel();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let provider = {
         let (token, release) = (token.clone(), release.clone());
         move |reason: TokenReason| {
             let value = token.lock().unwrap().clone();
             let (entered, release) = (entered.clone(), release.clone());
+            let dropped = dropped.clone();
             async move {
                 if reason == TokenReason::Connect && value.as_deref() == Some("token-bob") {
+                    let _fetch = Fetch(dropped);
                     let _ = entered.send(());
                     let _ = release.acquire().await;
                 }
@@ -700,6 +710,11 @@ async fn closing_cancels_the_operation_under_way() {
     }
     let closed = session.snapshot();
     assert_eq!(closed.status, SessionStatus::Closed);
+    // Nor does the opening go on on its own thread, holding the store and
+    // the app's provider.
+    tokio::time::timeout(Duration::from_secs(5), abandoned.recv())
+        .await
+        .expect("the abandoned open stops waiting for its token");
     release.add_permits(8);
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(session.snapshot(), closed, "installed a client after close");

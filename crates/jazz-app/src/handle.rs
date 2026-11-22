@@ -654,7 +654,7 @@ fn run(
     link: Link,
     store: Option<crate::lifecycle::StoreDir>,
     mut commands: mpsc::UnboundedReceiver<Command>,
-    ready: oneshot::Sender<Result<Opened>>,
+    mut ready: oneshot::Sender<Result<Opened>>,
     stopper: mpsc::WeakUnboundedSender<Command>,
 ) {
     let client_serverless = config.server_url.is_none();
@@ -677,15 +677,21 @@ fn run(
         // it (`settle`), before the runtime goes.
         let endpoint_connector =
             Arc::new(jazz_native_transport::HttpStreamFallbackConnector::new());
-        let (client, opened) = match connect(
-            files,
-            config,
-            link,
-            stopper,
-            Arc::clone(&endpoint_connector),
-        )
-        .await
-        {
+        let connected = tokio::select! {
+            biased;
+            connected = connect(
+                files,
+                config,
+                link,
+                stopper,
+                Arc::clone(&endpoint_connector),
+            ) => connected,
+            // Nobody waits for the open any more (its session closed): it
+            // asks the provider and the network nothing further, and lets
+            // go of the store.
+            () = ready.closed() => return None,
+        };
+        let (client, opened) = match connected {
             Ok(opened) => opened,
             Err(error) => {
                 let _ = ready.send(Err(error));
