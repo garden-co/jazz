@@ -58,6 +58,3 @@ export {
   type InspectHook,
   type InspectorOptions,
 } from "./create-jazz.js";
-
-// Removed in alpha.61: stubs that throw, naming the replacement (one release).
-export { acceptLocalFirstAuth } from "../removed-api.js";

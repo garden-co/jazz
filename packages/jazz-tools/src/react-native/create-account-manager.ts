@@ -24,7 +24,7 @@ export interface AccountManagerConfig {
   /**
    * The app's own token for its backend (an app has no cookie to send), read
    * whenever it is needed: sent as `Authorization: Bearer` when signing in
-   * through the backend (`loginWithBackend`) and on the device's sync
+   * through the backend (the session's `refresh()` and `linkDeviceAccount()`) and on the device's sync
    * connection, where the backend's `authenticate` reads who the user is.
    */
   bearer?: AppBearer;
