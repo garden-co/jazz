@@ -5,12 +5,12 @@
 # hand and commit), `generate`, `generate --check`, smoke. t1's smoke data becomes fixture-data-<minor> (older stores stay).
 # Then commit the changed files. t4's app lives in t4/ and is rebased by its own README.
 . "$(dirname "$0")/lib.sh"
-V=$1; MINOR=${V##*alpha.}; cd "$AG/bed"
+V=$1; case $V in *-alpha.*) MINOR=${V##*alpha.};; *-beta.*) MINOR=beta-${V##*beta.};; *) MINOR=$V;; esac; cd "$AG/bed"
 bump() { node -e '
   const fs = require("fs"), v = process.argv[1], p = JSON.parse(fs.readFileSync("package.json"));
   for (const n of ["jazz-tools", "jazz-wasm", "jazz-napi"]) if (p.dependencies?.[n]) p.dependencies[n] = v;
   fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n");' "$V"
-  [ -f pnpm-workspace.yaml ] && sed -i -E "s/2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?/$V/g" pnpm-workspace.yaml; }
+  [ -f pnpm-workspace.yaml ] && sed -i -E "s/2\.0\.0-(alpha|beta)\.[0-9]+(-rc\.[0-9]+)?/$V/g" pnpm-workspace.yaml; }
 for a in t1-migrations:8601 t3-permissions:8603 t6-import-style:8606; do d=${a%%:*}; p=${a##*:}
   ( cd "$d" && bump && rm -rf node_modules pnpm-lock.yaml && pnpm install > /dev/null 2>&1 && npx jazz-tools generate && npx jazz-tools generate --check ) || { echo "FAIL $d on $V"; exit 1; }
   ./_common/run-smoke.sh "$d" "$p" | grep -E "^(FAIL|SMOKE|SERVER)"; done

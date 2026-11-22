@@ -19,7 +19,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
-const rcVersion = /^2\.0\.0-alpha\.[0-9]+(\.[0-9]+)?-rc\.[0-9]+$/;
+const rcVersion = /^2\.0\.0-(alpha|beta)\.[0-9]+(\.[0-9]+)?-rc\.[0-9]+$/;
 const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 const writeJson = (path, value) => writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 const subdirs = (dir) =>
@@ -42,7 +42,7 @@ export function packageDirs(base = root) {
 
 export function stamp(version, base = root) {
   if (!rcVersion.test(version))
-    throw new Error(`version must look like 2.0.0-alpha.N-rc.M, got ${JSON.stringify(version)}`);
+    throw new Error(`version must look like 2.0.0-alpha.N-rc.M or 2.0.0-beta.N-rc.M, got ${JSON.stringify(version)}`);
   for (const dir of packageDirs(base)) {
     const path = join(dir, "package.json");
     const pkg = readJson(path);
