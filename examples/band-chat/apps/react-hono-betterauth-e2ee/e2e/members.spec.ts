@@ -267,29 +267,33 @@ test("an active new member attempts no read marker until the room key arrives", 
   await deviceIdOf(b.page);
   await watchMarkerWrites(b.page);
 
-  // Admission's delivery call happens after its transaction is accepted.
-  // Hold that call while Bob's active device reads the newly visible room.
+  // Admission's delivery call happens after the authority accepted the
+  // transaction. Hold outgoing sync then, including automatic deliveries.
+  let deliveryHeld = false;
+  await a.page.exposeFunction("holdBandChatSync", () => {
+    a.wire.pauseOutgoing();
+    deliveryHeld = true;
+  });
   await a.page.evaluate(() => {
     const db = [...(window.__jazzWindowStorageContexts__ ?? [])].at(-1)
       ?.db as import("jazz-tools").Db;
     const keys = db.encryption.keys;
     const deliver = keys.deliver.bind(keys);
     keys.deliver = async () => {
-      await new Promise<void>((release) => {
-        window.releaseBandChatDelivery = release;
-      });
+      await window.holdBandChatSync();
       return deliver();
     };
   });
   await admit(a.page, bob);
-  await a.page.waitForFunction(() => typeof window.releaseBandChatDelivery === "function");
+  await expect.poll(() => deliveryHeld, { timeout: T }).toBe(true);
   await expect(lockedBanner(b.page)).toBeVisible({ timeout: T });
   await expect(waitingBanner(b.page)).toHaveCount(0);
   const bobId = await myAccountId(b.page);
   expect(await serverMarkerCount(roomId, bobId)).toBe(0);
   expect(await b.page.evaluate(() => window.bandChatMarkerWrites)).toEqual([]);
 
-  await a.page.evaluate(() => window.releaseBandChatDelivery!());
+  await expect(message(b.page, text)).toHaveCount(0);
+  a.wire.resumeOutgoing();
   await expect(message(b.page, text)).toBeVisible({ timeout: T });
   await until(
     "the read marker after the key arrived",
