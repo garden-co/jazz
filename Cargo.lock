@@ -2050,6 +2050,7 @@ dependencies = [
  "jazz-native-transport",
  "jazz-server",
  "jazz-text",
+ "libc",
  "postcard",
  "reqwest",
  "rusqlite",
