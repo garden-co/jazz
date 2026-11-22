@@ -458,6 +458,7 @@ pub fn new_space_key(device: &LocalDevice, address: &SpaceAddress) -> HeldSpace 
 pub fn hold_new_space(client: &E2eeClient, db: &Db, space: uuid::Uuid) -> String {
     let held = new_space_key(&client.device().unwrap(), &address(db, space));
     let root_id = held.root_id().to_owned();
+    client.record_fixture_rotation_check(held.address());
     block_on(client.keep(held)).unwrap();
     root_id
 }

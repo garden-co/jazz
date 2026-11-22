@@ -803,13 +803,58 @@ fn a_write_checks_the_same_number_of_rows_after_many_rotations() {
                 .explain_query_plan(&shared.server.prepare_query(&probe).unwrap(), None)
                 .unwrap();
             assert!(
-                plan.contains("SEARCH") && plan.contains("predecessor=?"),
+                plan.contains("SEARCH")
+                    && plan.rsplit_once(" AND ").is_some_and(|(_, last)| last
+                        .starts_with("predecessor~")
+                        && last.ends_with("=?)")),
                 "{plan}"
             );
             counts.push(shared.alice.client.write_check_reads().0);
         }
         assert!(counts[0] > 0);
         assert_eq!(counts[0], counts[1]);
+    });
+}
+
+/// Alice's new device acquires her shared room on its first run. Its first
+/// write checks recipients even though it opened with no stored history for Bob.
+#[test]
+fn a_first_session_checks_a_newly_shared_room_before_writing() {
+    within(|| {
+        let shared = SharedSpace::new();
+        let address = space_address(&shared.alice, shared.space);
+        shared.bob_removes_his_second_device();
+        // The new writer here is Alice's second device. She joins the room
+        // on her first run, when Bob's removal has already happened.
+        let writer = device(&shared.server, account(0xa1), memory(), 5, &shared.settings);
+        writer.status(&shared.server, &[&shared.alice]);
+        approve(&shared.server, &shared.alice, &writer);
+        assert_eq!(
+            writer.status(&shared.server, &[&shared.alice]),
+            AccountStatus::Active
+        );
+        drive(
+            &shared.server,
+            &[&writer.db],
+            writer.client.acquire(&writer.db, &address),
+        )
+        .unwrap();
+        drive(
+            &shared.server,
+            &[&writer.db],
+            writer.client.write(&writer.db, async || {
+                writer
+                    .db
+                    .insert(
+                        "notes",
+                        note(shared.space, "first write"),
+                        Default::default(),
+                    )
+                    .await
+            }),
+        )
+        .unwrap();
+        assert_eq!(count(&shared.server, "__e2ee_space_successors"), 1);
     });
 }
 
@@ -872,7 +917,10 @@ fn a_rotation_check_reports_storage_failure_even_when_rotation_succeeds() {
         });
         store.failing.set(true);
         shared.alice_writes("after the check");
-        assert_eq!(&*reports.borrow(), &["the disk is full"]);
+        assert_eq!(
+            &*reports.borrow(),
+            &["the private store failed: the disk is full"]
+        );
         assert_eq!(count(&shared.server, "__e2ee_space_successors"), 1);
     });
 }

@@ -428,22 +428,11 @@ pub(crate) struct KeyState {
     /// The account epoch `rotation_evaluated` was evaluated against: a
     /// verification that finds another one empties it.
     pub(crate) evaluated_epoch: Option<String>,
-    /// Whether this account, as last verified in this run, ever removed a
-    /// device or was reset: only then can a removed device of its own hold
-    /// a version this device writes under. `None` (unknown, which counts as
-    /// yes) from the open of a device that verified its account before
-    /// until this run verifies it; `Some(false)` from the open of one that
-    /// never did.
-    pub(crate) account_removed_devices: Option<bool>,
     /// Per space, whether any of its member accounts removed a device or
     /// was reset, as the last pass over it read them; `true` again when a
     /// member account changed since. A space whose members never did skips
     /// the read before a write: no removed device can hold its versions.
     pub(crate) space_removals: BTreeMap<jazz_e2ee::protocol::records::space::SpaceAddress, bool>,
-    /// Whether this device kept, at open, the floor of another account: it
-    /// shares spaces with other accounts, so a space this run has not read
-    /// yet may have a member that removed a device.
-    pub(crate) knows_other_accounts: bool,
     /// Spaces whose repair the authority refused (this device may not update
     /// the rows it wrote): the natural moments stop repairing them while the
     /// client runs; an explicit call always attempts (protocol §3.2).
@@ -469,12 +458,8 @@ pub(crate) struct KeyState {
 }
 
 impl KeyState {
-    /// Whether a write to `address` under a held key reads the space first
-    /// (protocol §3.5): this run has not evaluated its mark since what it
-    /// depends on last changed, and a removed device may hold its version:
-    /// one of its member accounts removed a device or was reset, or, for a
-    /// space not read yet, this account did (or is not verified yet) or this
-    /// device shares spaces with other accounts.
+    /// Missing evidence about this space requires a read, including on a
+    /// device that first encountered another member during this run.
     pub(crate) fn needs_evaluation(
         &self,
         address: &jazz_e2ee::protocol::records::space::SpaceAddress,
@@ -482,10 +467,7 @@ impl KeyState {
         if self.rotation_refused.contains(address) || self.rotation_evaluated.contains(address) {
             return false;
         }
-        match self.space_removals.get(address) {
-            Some(removals) => *removals,
-            None => self.account_removed_devices != Some(false) || self.knows_other_accounts,
-        }
+        self.space_removals.get(address).copied().unwrap_or(true)
     }
 }
 

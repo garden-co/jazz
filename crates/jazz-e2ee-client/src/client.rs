@@ -256,23 +256,6 @@ impl E2eeClient {
             documents: Mutex::new(Documents::default()),
         };
         client.load_documents().await?;
-        // A device that never verified its account holds no key of it, so
-        // nothing it writes can need a removal's rotation until it does.
-        // One that did may have missed a removal made elsewhere: unknown
-        // until this run verifies it.
-        let verified_before = client.floor(&client.shared.account_id).await.is_some();
-        let knows_other_accounts = client
-            .documents
-            .lock()
-            .await
-            .floors
-            .keys()
-            .any(|account| *account != client.shared.account_id);
-        {
-            let mut keys = client.shared.keys.borrow_mut();
-            keys.account_removed_devices = (!verified_before).then_some(false);
-            keys.knows_other_accounts = knows_other_accounts;
-        }
         Ok(client)
     }
 
@@ -532,6 +515,22 @@ impl E2eeClient {
     #[doc(hidden)]
     pub fn pending_member_removals(&self) -> usize {
         self.shared.member_removals.borrow().len()
+    }
+
+    /// Content-only test fixtures create accepted roots in memory without
+    /// an authority ledger. Record the check made by their fixture setup.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn record_fixture_rotation_check(
+        &self,
+        address: &jazz_e2ee::protocol::records::space::SpaceAddress,
+    ) {
+        self.shared.note_write(address);
+        self.shared
+            .keys
+            .borrow_mut()
+            .rotation_evaluated
+            .insert(address.clone());
     }
 
     /// The table and account pairs covered by live account streams for this
