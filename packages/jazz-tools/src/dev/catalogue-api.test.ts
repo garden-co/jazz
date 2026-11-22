@@ -94,7 +94,12 @@ describe("catalogue-api", () => {
       status: 200,
       statusText: "OK",
       json: async () => ({
-        hashes: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        schemas: [
+          {
+            hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            publishedAt: null,
+          },
+        ],
       }),
     });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
@@ -107,7 +112,12 @@ describe("catalogue-api", () => {
     expect(result.hashes).toEqual([
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     ]);
-    expect(result.schemas).toEqual([]);
+    expect(result.schemas).toEqual([
+      {
+        hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        publishedAt: null,
+      },
+    ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:1625/apps/app-123/schemas");
     expect(fetchMock.mock.calls[0]![1]).toMatchObject({
@@ -124,7 +134,6 @@ describe("catalogue-api", () => {
       status: 200,
       statusText: "OK",
       json: async () => ({
-        hashes: ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
         schemas: [
           {
             hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -149,6 +158,25 @@ describe("catalogue-api", () => {
         publishedAt: 1_744_011_200_000,
       },
     ]);
+  });
+
+  it("reads schema hashes only from `schemas`, ignoring a removed `hashes` field", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        hashes: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchSchemaHashes("http://localhost:1625/", {
+      appId: "app-123",
+      adminSecret: "admin-secret",
+    });
+
+    expect(result).toEqual({ hashes: [], schemas: [] });
   });
 
   it("fetches the requested schema hash when provided", async () => {
