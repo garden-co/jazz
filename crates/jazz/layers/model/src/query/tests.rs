@@ -1873,6 +1873,118 @@ mod tests {
             assert!(serde_json::from_str::<Predicate>(r#"{"Removed":null}"#).is_err());
         }
 
+        /// `Predicate::Search` (SPEC 20.4) is postcard tag 15 (0x0f): 13 and
+        /// 14 are held for jazz#5983's `StartsWith`/`EndsWith`. Every other
+        /// predicate keeps its tag, and each op's JSON and postcard bytes
+        /// are pinned here.
+        #[test]
+        fn search_predicate_encodings_are_pinned() {
+            for (op, json, bytes) in [
+                (
+                    IndexOp::Match {
+                        text: "garden".into(),
+                        mode: MatchMode::Any,
+                    },
+                    r#"{"Search":{"index":"s","op":{"Match":{"text":"garden","mode":"Any"}},"decl":null}}"#,
+                    "0f0173000667617264656e0000",
+                ),
+                (
+                    IndexOp::Match {
+                        text: "garden".into(),
+                        mode: MatchMode::All,
+                    },
+                    r#"{"Search":{"index":"s","op":{"Match":{"text":"garden","mode":"All"}},"decl":null}}"#,
+                    "0f0173000667617264656e0100",
+                ),
+                (
+                    IndexOp::Nearest {
+                        vector: vec![1.0, -0.5],
+                        k: 3,
+                    },
+                    r#"{"Search":{"index":"s","op":{"Nearest":{"vector":[1.0,-0.5],"k":3}},"decl":null}}"#,
+                    "0f017301020000803f000000bf0300",
+                ),
+                (
+                    IndexOp::WithinRadius {
+                        lat: 52.5,
+                        lng: 13.4,
+                        meters: 500.0,
+                    },
+                    r#"{"Search":{"index":"s","op":{"WithinRadius":{"lat":52.5,"lng":13.4,"meters":500.0}},"decl":null}}"#,
+                    "0f0173020000000000404a40cdcccccccccc2a400000000000407f4000",
+                ),
+                (
+                    IndexOp::WithinBox {
+                        south: -20.0,
+                        west: 170.0,
+                        north: -10.0,
+                        east: -170.0,
+                    },
+                    r#"{"Search":{"index":"s","op":{"WithinBox":{"south":-20.0,"west":170.0,"north":-10.0,"east":-170.0}},"decl":null}}"#,
+                    "0f01730300000000000034c0000000000040654000000000000024c000000000004065c000",
+                ),
+            ] {
+                let predicate = Predicate::Search(IndexSearch {
+                    index: "s".into(),
+                    op,
+                    decl: None,
+                });
+                assert_eq!(serde_json::to_string(&predicate).unwrap(), json);
+                assert_eq!(
+                    hex::encode(postcard::to_allocvec(&predicate).unwrap()),
+                    bytes
+                );
+                assert_eq!(serde_json::from_str::<Predicate>(json).unwrap(), predicate);
+                assert_eq!(
+                    postcard::from_bytes::<Predicate>(&hex::decode(bytes).unwrap()).unwrap(),
+                    predicate
+                );
+            }
+        }
+
+        /// A search names the declaration it was written against: the
+        /// SHA-256 of its `jazz-ix-decl/1` bytes, after the op (SPEC 20.4).
+        #[test]
+        fn a_searchs_declaration_hash_is_pinned() {
+            let predicate = Predicate::Search(IndexSearch {
+                index: "s".into(),
+                op: IndexOp::Match {
+                    text: "g".into(),
+                    mode: MatchMode::All,
+                },
+                decl: Some([7; 32]),
+            });
+            assert_eq!(
+                hex::encode(postcard::to_allocvec(&predicate).unwrap()),
+                format!("0f01730001670101{}", "07".repeat(32))
+            );
+        }
+
+        /// A match mode is `Any` or `All`; any other is refused on decode.
+        #[test]
+        fn unknown_match_modes_are_refused() {
+            assert!(
+                postcard::from_bytes::<Predicate>(&hex::decode("0f0173000667617264656e02").unwrap())
+                    .is_err()
+            );
+            // Tags 13 and 14 hold jazz#5983's slots: nothing decodes there.
+            for tag in ["0d", "0e"] {
+                assert!(
+                    postcard::from_bytes::<Predicate>(
+                        &hex::decode(format!("{tag}0173000667617264656e00")).unwrap()
+                    )
+                    .is_err(),
+                    "{tag}"
+                );
+            }
+            assert!(
+                serde_json::from_str::<Predicate>(
+                    r#"{"Search":{"index":"s","op":{"Match":{"text":"g","mode":"Most"}},"decl":null}}"#
+                )
+                .is_err()
+            );
+        }
+
         #[test]
         fn predicate_decode_errors_are_pinned() {
             for (json, error) in [

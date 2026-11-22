@@ -209,6 +209,16 @@ mod shared_sqlite;
 mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
+#[path = "../specialised_index_admission.rs"]
+mod specialised_index_admission;
+#[path = "../specialised_index_builds.rs"]
+mod specialised_index_builds;
+#[path = "../specialised_index_kinds.rs"]
+mod specialised_index_kinds;
+#[path = "../specialised_index_policies.rs"]
+mod specialised_index_policies;
+#[path = "../specialised_indexes.rs"]
+mod specialised_indexes;
 #[path = "../staged_transaction_cancellation.rs"]
 mod staged_transaction_cancellation;
 #[path = "../storage_corpus.rs"]
@@ -294,5 +304,9 @@ mod write_check_evidence;
 #[path = "../write_receipt_owner.rs"]
 mod write_receipt_owner;
 
+#[path = "../point_columns.rs"]
+mod point_columns;
 #[path = "../transaction_read_prefix.rs"]
 mod transaction_read_prefix;
+#[path = "../vector_columns.rs"]
+mod vector_columns;

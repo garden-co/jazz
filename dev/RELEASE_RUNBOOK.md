@@ -239,7 +239,7 @@ The published crates are exactly the dependency closure of `jazz-app-support`,
 `node dev/scripts/publish-crates.mjs --list` prints them in publish order:
 
 ```
-jazz-ruzstd  jazz-compression  jazz-text  jazz-types
+jazz-ruzstd  jazz-compression  jazz-index  jazz-text  jazz-types
 jazz-model  jazz-protocol  jazz-db  jazz-core  jazz-native-transport  jazz-app-support
 jazz-codegen  jazz-ffi  jazz-otel  jazz-server  jazz-tools  jazz-wasm-tracing
 ```
@@ -298,9 +298,18 @@ crates are published with a short-lived token the first time:
    crates.io. Also add the `garden-co` owners team to each crate (`cargo
    owner --add github:garden-co:<team> <crate>`), so they aren't owned by one
    person only.
-5. From then on every crate publishes through OIDC. A crate added to the
-   closure later needs steps 2 to 4 for that crate alone. Until then, the
-   workflow fails for it with a message naming the missing token.
+
+**`jazz-index`** (the specialised index kinds, SPEC 20) joins the published
+crates with the release that ships specialised indexes: `jazz-db` depends on
+it, so it publishes before `jazz-text` and everything after. It is new on
+crates.io then, so that release needs the bootstrap above for it alone:
+before the run, a `CRATES_IO_BOOTSTRAP_TOKEN` scoped `publish-new` to the
+crate `jazz-index` (1-day expiry); afterwards, its trusted publisher
+(`garden-co/jazz`, `publish-jazz-crates-alpha.yml`, environment `publish`),
+the `garden-co` owners team, and the token deleted and revoked. The run's
+preflight stops before publishing anything if the token is missing. 5. From then on every crate publishes through OIDC. A crate added to the
+closure later needs steps 2 to 4 for that crate alone. Until then, the
+workflow fails for it with a message naming the missing token.
 
 ## Kotlin
 

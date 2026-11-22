@@ -358,6 +358,7 @@ fn every_definition_shape_reads_back_equal_after_a_reopen() {
         policies: TablePolicies::default(),
         branch_by: vec!["branch".into()],
         history: Default::default(),
+        specialised_indexes: Vec::new(),
     };
     let people = TableSchemaBuilder::new("people").column("name", ColumnType::Text);
     let mut schema = SchemaBuilder::new().table(people).build();

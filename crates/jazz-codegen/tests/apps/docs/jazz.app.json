@@ -1,0 +1,20 @@
+{
+  "$schema": "https://jazz.tools/schemas/jazz.app.schema.json",
+  "format": 1,
+  "tables": {
+    "docs": {
+      "columns": {
+        "title": "string",
+        "embedding": { "vector": 4 },
+        "draftEmbedding": { "vector": 2, "optional": true },
+        "seed": { "vector": 2, "default": [0.5, -1] },
+        "location": "point"
+      },
+      "indexes": [
+        { "name": "place", "geo": "location" },
+        { "name": "search", "text": { "title": 1 }, "analyzer": "jazz-text/1:en", "prefix": true },
+        { "name": "similar", "vector": "embedding", "metric": "cosine" }
+      ]
+    }
+  }
+}

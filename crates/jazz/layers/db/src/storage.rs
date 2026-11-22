@@ -283,12 +283,23 @@ impl Storage {
                 let mut f = Some(f);
                 let mut value = None;
                 let mut chose_keep = false;
+                let mut undrained = None;
                 let scoped = managed.scope(&mut || {
                     let f = f.take().expect("a scope's body runs once");
-                    let (out, keep) = match f(self) {
+                    let (out, mut keep) = match f(self) {
                         Scoped::Keep(out) => (out, true),
                         Scoped::Undo(out) => (out, false),
                     };
+                    // As `end_savepoint` does on native SQLite: the outermost
+                    // scope's rows reach the specialised indexes before it
+                    // commits, or it does not commit (SPEC 20.3, `INV-IX-2`).
+                    if keep
+                        && crate::values::is_outermost(self)
+                        && let Err(error) = crate::ix::drain(self)
+                    {
+                        undrained = Some(error);
+                        keep = false;
+                    }
                     value = Some(out);
                     chose_keep = keep;
                     keep
@@ -300,6 +311,9 @@ impl Storage {
                     crate::values::note_rollback(self.key());
                 }
                 scoped.map_err(crate::values::storage)?;
+                if let Some(error) = undrained {
+                    return Err(error);
+                }
                 // The commit hook vetoed it: as on native SQLite, where the
                 // commit then fails.
                 if chose_keep && !kept {

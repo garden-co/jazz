@@ -2401,6 +2401,11 @@ enum Phase {
     /// Refused: by the upstream (`Refused`), or by this store, which
     /// refused the link itself (see [`Inner::refuse_upstream`]).
     Refused { error: Error },
+    /// Never asked: the link cannot carry it (an index search, to an
+    /// upstream without `FEATURE_SPECIALISED_INDEXES`, SPEC 20.4). A
+    /// local-first read is served by this store, unconfirmed; a relay
+    /// passes `error` on to a session's `Remote` one.
+    Unsupported { error: Error },
 }
 
 /// A live read's state on one upstream connection, tagged with that
@@ -2505,6 +2510,22 @@ impl LinkRead {
             _ => None,
         }
     }
+
+    /// `connection` cannot carry it.
+    fn unsupported(&mut self, connection: u64, error: Error) -> bool {
+        if !self.current(connection) {
+            return false;
+        }
+        self.phase = Phase::Unsupported { error };
+        true
+    }
+
+    fn unsupport(&self) -> Option<&Error> {
+        match &self.phase {
+            Phase::Unsupported { error } => Some(error),
+            _ => None,
+        }
+    }
 }
 
 /// What a live read's subscribers observe of it, shared with them (a
@@ -2522,6 +2543,8 @@ pub(crate) struct ReadSignal {
     confirmed: StdCell<Option<bool>>,
     /// Why the current connection refused it, if it did.
     refused: RefCell<Option<Error>>,
+    /// Whether the current connection cannot carry it.
+    unsupported: StdCell<bool>,
 }
 
 impl ReadSignal {
@@ -2543,6 +2566,10 @@ impl ReadSignal {
 
     pub(crate) fn refusal(&self) -> Option<Error> {
         self.refused.borrow().clone()
+    }
+
+    pub(crate) fn unsupported(&self) -> bool {
+        self.unsupported.get()
     }
 }
 
@@ -2591,6 +2618,7 @@ impl LiveRead {
         self.signal.answered.set(self.link.answer());
         self.signal.confirmed.set(self.confirmed);
         *self.signal.refused.borrow_mut() = self.link.refusal().cloned();
+        self.signal.unsupported.set(self.link.unsupport().is_some());
     }
 
     /// Its `Read` goes out again on `connection`, or the link it was on
@@ -2612,6 +2640,12 @@ impl LiveRead {
 
     fn refused(&mut self, connection: u64, error: Error) {
         if self.link.refused(connection, error) {
+            self.publish();
+        }
+    }
+
+    fn unsupported(&mut self, connection: u64, error: Error) {
+        if self.link.unsupported(connection, error) {
             self.publish();
         }
     }
@@ -3036,6 +3070,12 @@ impl Gate {
 
     pub(crate) fn open(&self) -> bool {
         if self.signal.answered() {
+            return true;
+        }
+        // No answer will come on this link: a local-first read opens on
+        // this store's rows.
+        // (A `Remote` search is refused where it opens, SPEC 20.4.)
+        if self.signal.unsupported() {
             return true;
         }
         let link = self.hint.get();
@@ -6959,6 +6999,7 @@ impl Inner {
                 crate::large::install_fetched(&self.conn, &self.chunks, &request, node.bytes)?;
             }
         }
+        crate::ix::chunks_arrived(&self.conn)?;
         let parked = self
             .sessions
             .iter()
@@ -8169,6 +8210,7 @@ impl Inner {
             .map(|&(seq, _)| (Pos::at(seq), None))
             .collect();
         cut.unsettled = !read.settled_only;
+        cut.derived = true;
         Cow::Owned(ReadSpec {
             cut: Some(cut),
             ..read.clone()
@@ -8214,6 +8256,13 @@ impl Inner {
         let mut versions = Vec::new();
         let mut sent = Vec::new();
         let mut sent_schemas = Vec::new();
+        // A peer without the SPEC 20 bit cannot decode a version with a
+        // vector or point column or a specialised index: such versions (and
+        // their lens cells) are not sent it (SPEC 20.4).
+        let specialised = self.sessions[index].transport.features()
+            & crate::wire::FEATURE_SPECIALISED_INDEXES
+            != 0;
+        let mut withheld = BTreeSet::new();
         for (version, names) in self.names.in_order() {
             let digest = crate::names::names_digest(names);
             let bytes = *version.as_bytes();
@@ -8234,6 +8283,10 @@ impl Inner {
                     None => continue,
                 }
             };
+            if !specialised && jazz.uses_specialised_features() {
+                withheld.insert(bytes);
+                continue;
+            }
             sent_schemas.push((jazz.clone(), names.clone()));
             versions.push(CatalogueVersion {
                 schema: CatalogueSchema::Known(crate::protocol::SchemaVersion {
@@ -8262,6 +8315,7 @@ impl Inner {
             .names
             .cells()
             .iter()
+            .filter(|cell| !withheld.contains(cell.since.as_bytes()))
             .map(|cell| {
                 let (source, default) = match &cell.rule {
                     crate::names::LensCellRule::Copy(source) => (Some(source.clone()), Cell::Null),
@@ -9050,6 +9104,11 @@ impl Db {
         if history_source_table(&query.table).is_some() || query.flat_join.is_some() {
             return Ok(None);
         }
+        // An index search reads current rows only (SPEC 20.4): it has no
+        // settled view to judge an answer's listing by.
+        if crate::ix::search_of(query).is_some() {
+            return Ok(None);
+        }
         // Only which rows the view holds matters: ids, not values (whose
         // large chunks may not be here yet), nor included rows.
         let mut query = remote_query(query).into_owned();
@@ -9609,6 +9668,17 @@ impl Db {
         self.inner
             .borrow_mut()
             .release_remote(query, binding, include_deleted, view, reach);
+    }
+
+    /// Whether this replica's current upstream link offered optional
+    /// wire `feature`; `None` without a link.
+    pub(crate) fn upstream_supports(
+        &self,
+        feature: jazz_protocol::wire::WireFeatures,
+    ) -> Option<bool> {
+        let inner = self.inner.borrow();
+        let transport = inner.client.as_ref()?.transport.as_ref()?;
+        Some(transport.features() & feature != 0)
     }
 
     pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
@@ -11224,6 +11294,31 @@ impl Db {
             .position(|m| matches!(m, SyncMessage::Read { .. }))
             .unwrap_or(out.len());
         let mut reads = out.split_off(first_read);
+        // An upstream that did not offer index search cannot decode a
+        // query using it (SPEC 20.4): such a read is never sent. It is not
+        // answered either: a local-first one reads this store, unconfirmed,
+        // and a `Remote` one fails.
+        let searchable = client
+            .transport
+            .as_ref()
+            .is_some_and(|t| t.features() & jazz_protocol::wire::FEATURE_SPECIALISED_INDEXES != 0);
+        if !searchable {
+            reads.retain(|message| {
+                let SyncMessage::Read { id, query, .. } = message else {
+                    return true;
+                };
+                let Some(search) = crate::ix::search_of(query) else {
+                    return true;
+                };
+                let error = crate::ix::unsupported_upstream(&query.table, &search.index);
+                if let Some(slot) = client.answers.get_mut(id) {
+                    *slot = Some(Err(error));
+                } else if let Some(live) = client.reads.get_mut(id).and_then(ActiveRead::live_mut) {
+                    live.unsupported(client.connection, error);
+                }
+                false
+            });
+        }
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
             .into_iter()
             .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
@@ -11859,7 +11954,7 @@ impl Inner {
                 .get(&settle.key)
                 .and_then(|read| client.reads.get(read))
                 .and_then(ActiveRead::live)
-                .and_then(|live| live.link.refusal().cloned());
+                .and_then(|live| live.link.refusal().or(live.link.unsupport()).cloned());
             match refusal {
                 Some(error) if !settle.refused => {
                     settle.refused = true;

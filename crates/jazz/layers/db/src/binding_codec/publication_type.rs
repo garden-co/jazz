@@ -188,6 +188,19 @@ pub(super) fn read_type(
                     .with_registry_id(registry_id),
             ))
         }
+        // `ValueType::Vector(dimensions)`: its derived serde form, the
+        // dimensions as a postcard u32 (SPEC 20.1).
+        19 => {
+            let dimensions: u32 = take(input)?;
+            if !(1..=crate::records::VECTOR_MAX_DIMENSIONS).contains(&dimensions) {
+                return Err(format!(
+                    "vector dimensions {dimensions} are outside 1..=4096"
+                ));
+            }
+            ValueType::Vector(dimensions)
+        }
+        // `ValueType::Point`: a unit variant, no payload (SPEC 20.1).
+        20 => ValueType::Point,
         _ => return Err("unknown binding value type".to_owned()),
     })
 }

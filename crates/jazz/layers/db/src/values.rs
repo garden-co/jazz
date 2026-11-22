@@ -93,6 +93,7 @@ fn undo_key(conn: &Storage) -> usize {
 /// it, and a later connection may get its handle's address.
 pub(crate) fn forget_tag_undo(conn: &Storage) {
     TAG_UNDO.with(|undo| undo.borrow_mut().remove(&undo_key(conn)));
+    crate::ix::forget(conn);
     ROLLBACKS.with(|rollbacks| rollbacks.borrow_mut().remove(&undo_key(conn)));
 }
 
@@ -182,6 +183,16 @@ pub(crate) fn close_tag_undo(conn: &Storage, kept: bool, all: bool) {
 /// rolls a whole transaction back by itself after some errors (a full disk,
 /// an I/O error); then the savepoint is gone and there is nothing to undo.
 pub(crate) fn end_savepoint(conn: &Storage, name: &str, keep: bool) -> Result<(), Error> {
+    // The outermost savepoint commits: the specialised indexes take in
+    // every row it changed first (SPEC 20.3, `INV-IX-2`). If they cannot,
+    // nothing commits.
+    if keep
+        && is_outermost(conn)
+        && let Err(error) = crate::ix::drain(conn)
+    {
+        end_savepoint(conn, name, false)?;
+        return Err(error);
+    }
     let sql = if keep {
         format!("RELEASE {name}")
     } else {
@@ -214,6 +225,17 @@ pub(crate) fn end_savepoint(conn: &Storage, name: &str, keep: bool) -> Result<()
             }
         }
     }
+}
+
+/// Whether `conn`'s innermost open scope (a savepoint of
+/// [`begin_savepoint`], or a managed store's callback scope) is its
+/// outermost: closing it commits.
+pub(crate) fn is_outermost(conn: &Storage) -> bool {
+    TAG_UNDO.with(|undo| {
+        undo.borrow()
+            .get(&undo_key(conn))
+            .is_some_and(|frames| frames.len() == 1)
+    }) && !conn.is_autocommit()
 }
 
 /// One SQLite value, as bound or read. Text holds raw bytes, which SQLite
@@ -460,6 +482,14 @@ pub(crate) fn from_sql(
         }
         (ValueType::Bytes, ValueRef::Blob(_) | ValueRef::Integer(_)) => {
             return Ok(Some(Value::Bytes(chunks.materialize(cell)?)));
+        }
+        // A vector cell is its `f32le/1` bytes inline, never a large value.
+        (ValueType::Vector(_), ValueRef::Blob(bytes)) => {
+            return Ok(Some(Value::Bytes(bytes.to_vec())));
+        }
+        // A point cell is its 16 `point-f64le/1` bytes inline.
+        (ValueType::Point, ValueRef::Blob(bytes)) => {
+            return Ok(Some(Value::Bytes(bytes.to_vec())));
         }
         // An author record, read as a JSON array of its fields (see
         // `compile::column_sql`).

@@ -7687,6 +7687,7 @@ mod tests {
                 policies: public_table_policies(),
                 branch_by: Vec::new(),
                 history: Default::default(),
+                specialised_indexes: Vec::new(),
             },
         )]);
         let state = ServerBuilder::new(AppId::random())

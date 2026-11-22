@@ -49,6 +49,19 @@ const everyKind = {
         flag: "boolean",
         at: "timestamp",
         blob: "bytes",
+        place: "point",
+        maybePlace: "point?",
+        homePlace: {
+          type: "point",
+          default: [13.405, 52.52],
+        },
+        embedding: {
+          vector: 3,
+        },
+        maybeEmbedding: {
+          vector: 2,
+          optional: true,
+        },
         ownerId: "uuid",
         reviewerId: "uuid?",
         coOwnerIds: {

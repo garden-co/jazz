@@ -76,6 +76,14 @@ export type NativeCoreErrorReason =
   | "predecessor_rejected"
   | "schema_version_not_deployed"
   | "identity_mismatch"
+  | "index_server_only"
+  | "index_search_unsupported_upstream"
+  | "index_building"
+  | "vector_search_unbounded"
+  | "vector_candidates_over_cap"
+  | "index_declaration_mismatch"
+  | "search_query_too_long"
+  | "search_too_broad"
   | "schema_version_unsupported";
 
 /** Every reason this build knows; a test checks it against the engine's `Reason::ALL`. */
@@ -92,6 +100,14 @@ export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCore
   "predecessor_rejected",
   "schema_version_not_deployed",
   "identity_mismatch",
+  "index_server_only",
+  "index_search_unsupported_upstream",
+  "index_building",
+  "vector_search_unbounded",
+  "vector_candidates_over_cap",
+  "index_declaration_mismatch",
+  "search_query_too_long",
+  "search_too_broad",
   "schema_version_unsupported",
 ]);
 

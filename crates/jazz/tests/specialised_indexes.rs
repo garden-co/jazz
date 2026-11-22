@@ -1,0 +1,1522 @@
+//! Specialised indexes (SPEC 20): the framework every kind shares. A
+//! search returns the rows its index and every other clause match, best
+//! first; the index follows every write that reaches the current table, on
+//! every node, in the same transaction; declarations build, rebuild and
+//! drop with the schema; and the shapes the framework refuses fail with
+//! typed errors.
+//!
+//! The kinds here are the tiny test kinds of `jazz_db::ix::test_kind`
+//! (`jazz::use_test_kinds`): `words` implements text indexes (lowercased
+//! whitespace words, score = weighted occurrences) on the SQL path and
+//! `near` implements vector indexes (squared L2 over `f32le` bytes) on the
+//! Rust-scored path. The real kinds' own tests live with them.
+
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
+
+use jazz::db::{
+    Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, ReadOpts, Reason, SubscriptionEvent,
+    SyncMessage, Transport, TransportError, block_on,
+};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::query::{IndexOp, MatchMode, OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
+use jazz::schema::JazzSchema;
+use jazz::tools::{
+    ColumnType, PolicyExpr, SchemaBuilder, TableSchemaBuilder, Value as PublicValue, VectorMetric,
+};
+
+use crate::common::{allow_all_policies, compile_schema};
+
+/// How the `notes` table declares its indexes.
+#[derive(Clone, Copy)]
+enum Indexes {
+    None,
+    /// `search` over title (weight 2) and body (1), `similar` over
+    /// `embedding`.
+    Both,
+    /// `search` over the title only.
+    TitleOnly,
+}
+
+/// `notes(title, body?, project, embedding)`, `project` B-tree indexed.
+/// `inserts` restricts which rows the authority admits (`project` =
+/// "open"), for rejected writes.
+fn schema_with(indexes: Indexes, restrict_inserts: bool) -> JazzSchema {
+    let mut policies = allow_all_policies();
+    if restrict_inserts {
+        policies = policies.with_insert(PolicyExpr::eq_literal(
+            "project",
+            PublicValue::Text("open".into()),
+        ));
+    }
+    let mut table = TableSchemaBuilder::new("notes")
+        .column("title", ColumnType::Text)
+        .nullable_column("body", ColumnType::Text)
+        .column("project", ColumnType::Text)
+        .column("embedding", ColumnType::Vector { dimensions: 2 })
+        .index_only(["project"])
+        .policies(policies);
+    table = match indexes {
+        Indexes::None => table,
+        Indexes::Both => table
+            .text_index(
+                "search",
+                [("title", 2), ("body", 1)],
+                "jazz-text/1:en",
+                false,
+            )
+            .vector_index("similar", "embedding", VectorMetric::L2),
+        Indexes::TitleOnly => table.text_index("search", [("title", 1)], "jazz-text/1:en", false),
+    };
+    compile_schema(&SchemaBuilder::new().table(table).build())
+}
+
+fn schema() -> JazzSchema {
+    schema_with(Indexes::Both, false)
+}
+
+fn config(node: u8, schema: JazzSchema, author: AuthorSubject) -> DbConfig {
+    DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author,
+        },
+    )
+}
+
+/// An authority in a store file, which a deployment can reopen under a
+/// newer schema (a running store never switches schema).
+fn authority_at(path: &std::path::Path, schema: JazzSchema) -> Db {
+    jazz::use_test_kinds(true);
+    let db = block_on(Db::open_at(
+        config(0, schema, AuthorSubject::SYSTEM),
+        path,
+        jazz::db::FileOptions::default(),
+    ))
+    .unwrap();
+    db.set_authority();
+    db
+}
+
+fn open(node: u8, schema: JazzSchema) -> Db {
+    open_as(node, schema, AuthorSubject::SYSTEM)
+}
+
+fn open_as(node: u8, schema: JazzSchema, author: AuthorSubject) -> Db {
+    jazz::use_test_kinds(true);
+    block_on(Db::open(config(node, schema, author))).unwrap()
+}
+
+fn authority(schema: JazzSchema) -> Db {
+    let db = open(0, schema);
+    db.set_authority();
+    db
+}
+
+fn client(node: u8, schema: JazzSchema) -> Db {
+    let db = open_as(node, schema, alice());
+    db.become_replica();
+    db
+}
+
+struct Pipe {
+    out: Rc<RefCell<VecDeque<SyncMessage>>>,
+    inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+}
+
+impl Transport for Pipe {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.out.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+fn link(client: &Db, server: &Db) -> jazz::db::Upstream {
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let link = block_on(client.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up,
+            }),
+            alice(),
+        )
+        .unwrap();
+    link
+}
+
+/// The author every client writes as: not the system, so the authority's
+/// policies apply to her writes.
+fn alice() -> AuthorSubject {
+    AuthorSubject::for_test_bytes([0xa1; 16])
+}
+
+fn pump(server: &Db, clients: &[&Db]) {
+    for _ in 0..8 {
+        for client in clients {
+            block_on(client.tick()).unwrap();
+        }
+        block_on(server.tick()).unwrap();
+    }
+}
+
+fn row(n: u8) -> RowUuid {
+    RowUuid::from_bytes([n; 16])
+}
+
+fn f32le(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+fn note(
+    title: &str,
+    body: Option<&str>,
+    project: &str,
+    embedding: &[f32],
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("title".to_owned(), Value::String(title.to_owned())),
+        (
+            "body".to_owned(),
+            Value::Nullable(body.map(|b| Box::new(Value::String(b.to_owned())))),
+        ),
+        ("project".to_owned(), Value::String(project.to_owned())),
+        ("embedding".to_owned(), Value::Bytes(f32le(embedding))),
+    ])
+}
+
+fn insert(db: &Db, id: u8, cells: BTreeMap<String, Value>) {
+    block_on(db.insert(
+        "notes",
+        cells,
+        InsertOptions {
+            row_id: Some(row(id)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+}
+
+fn update(db: &Db, id: u8, column: &str, value: Value) {
+    block_on(db.update(
+        "notes",
+        row(id),
+        BTreeMap::from([(column.to_owned(), value)]),
+        Default::default(),
+    ))
+    .unwrap();
+}
+
+fn text(words: &str) -> IndexOp {
+    IndexOp::Match {
+        text: words.into(),
+        mode: MatchMode::All,
+    }
+}
+
+fn nearest(vector: &[f32], k: u32) -> IndexOp {
+    IndexOp::Nearest {
+        vector: vector.to_vec(),
+        k,
+    }
+}
+
+/// The ids (by their first byte) `query` reads, in order.
+fn ids(db: &Db, query: &Query) -> Vec<u8> {
+    try_ids(db, query).unwrap()
+}
+
+fn try_ids(db: &Db, query: &Query) -> Result<Vec<u8>, jazz::db::Error> {
+    let prepared = db.prepare_query(query)?;
+    Ok(block_on(db.all(&prepared, ReadOpts::default()))?
+        .iter()
+        .map(|row| row.row_uuid().0.as_bytes()[0])
+        .collect())
+}
+
+fn search(words: &str) -> Query {
+    Query::from("notes").search("search", text(words))
+}
+
+/// Three notes on the authority; alice searches them.
+fn seeded() -> Db {
+    let db = authority(schema());
+    insert(
+        &db,
+        1,
+        note(
+            "Garden plans",
+            Some("tomatoes and garden beans"),
+            "home",
+            &[0.0, 0.0],
+        ),
+    );
+    insert(&db, 2, note("Tomato soup", None, "kitchen", &[1.0, 0.0]));
+    insert(
+        &db,
+        3,
+        note("Garden tools", Some("a rake"), "home", &[5.0, 5.0]),
+    );
+    db
+}
+
+/// A search returns the rows matching every query word in some field,
+/// best first by score (title words weigh twice), ties by id; it composes
+/// with filters, explicit orders, limits and offsets like any filter.
+#[test]
+fn a_search_returns_matching_rows_best_first_and_composes_with_the_query() {
+    let db = seeded();
+    // Row 1 has "garden" in its title (2) and its body (1): 3. Row 3 only
+    // in its title: 2.
+    assert_eq!(ids(&db, &search("garden")), [1, 3]);
+    assert_eq!(ids(&db, &search("GARDEN tools")), [3]);
+    assert_eq!(ids(&db, &search("garden soup")), Vec::<u8>::new());
+    assert_eq!(
+        ids(
+            &db,
+            &search("garden").filter(eq(col("project"), lit(Value::String("home".into()))))
+        ),
+        [1, 3]
+    );
+    assert_eq!(ids(&db, &search("garden").limit(1)), [1]);
+    assert_eq!(ids(&db, &search("garden").offset(1)), [3]);
+    assert_eq!(
+        ids(
+            &db,
+            &search("garden").order_by("$score", OrderDirection::Desc)
+        ),
+        [3, 1]
+    );
+    assert_eq!(
+        ids(
+            &db,
+            &search("garden").order_by("title", OrderDirection::Asc)
+        ),
+        [1, 3]
+    );
+}
+
+/// Every local write reaches the index in its own transaction: inserts,
+/// updates of an indexed column, deletes and restores. An update of a
+/// column no index reads leaves the index alone (it is not queued).
+#[test]
+fn local_writes_reach_the_index_in_their_transaction() {
+    let db = seeded();
+    update(&db, 2, "title", Value::String("Garden soup".into()));
+    // Row 1 scores 3, rows 2 and 3 score 2 each.
+    assert_eq!(ids(&db, &search("garden")), [1, 2, 3]);
+    update(&db, 1, "body", Value::Nullable(None));
+    // Row 1 now scores 2 like rows 2 and 3: ties order by id.
+    assert_eq!(ids(&db, &search("garden")), [1, 2, 3]);
+    update(&db, 3, "project", Value::String("work".into()));
+    assert_eq!(ids(&db, &search("garden")), [1, 2, 3]);
+    block_on(db.delete("notes", row(2), Default::default())).unwrap();
+    assert_eq!(ids(&db, &search("garden")), [1, 3]);
+    block_on(db.restore("notes", row(2), None, Default::default())).unwrap();
+    assert_eq!(ids(&db, &search("garden")), [1, 2, 3]);
+    // Several writes in one transaction are indexed when it commits.
+    block_on(async {
+        let tx = db.mergeable_tx().await?;
+        tx.update(
+            "notes",
+            row(1),
+            BTreeMap::from([("title".to_owned(), Value::String("Shed".into()))]),
+            Default::default(),
+        )
+        .await?;
+        tx.update(
+            "notes",
+            row(3),
+            BTreeMap::from([("title".to_owned(), Value::String("Shed tools".into()))]),
+            Default::default(),
+        )
+        .await?;
+        tx.commit().await
+    })
+    .unwrap();
+    assert_eq!(ids(&db, &search("shed")), [1, 3]);
+    assert_eq!(ids(&db, &search("garden")), [2]);
+}
+
+/// Rows a client receives from the authority are indexed on arrival, and
+/// its own pending writes as it makes them; a write the authority rejects
+/// leaves the client's index when the pending version is removed.
+///
+/// ```
+/// server ──row 1, row 2──► bob (indexed on arrival)
+/// bob ──insert row 4 (project "closed")──► server ──✗ insert policy
+///          bob searches row 4 while pending, not after its removal
+/// ```
+#[test]
+fn synced_versions_and_removed_pending_writes_reach_a_clients_index() {
+    let server = authority(schema_with(Indexes::Both, true));
+    insert(&server, 1, note("Garden plans", None, "open", &[0.0, 0.0]));
+    insert(&server, 2, note("Tomato soup", None, "open", &[1.0, 0.0]));
+    let bob = client(1, schema());
+    let _link = link(&bob, &server);
+    let all = bob.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &search("garden")), [1]);
+
+    // The server's update arrives as a synced version.
+    update(&server, 2, "title", Value::String("Garden soup".into()));
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &search("garden")), [1, 2]);
+
+    insert(&bob, 4, note("Garden secrets", None, "closed", &[2.0, 2.0]));
+    assert_eq!(
+        ids(&bob, &search("secrets")),
+        [4],
+        "pending, searchable at once"
+    );
+    pump(&server, &[&bob]);
+    assert_eq!(
+        ids(&bob, &Query::from("notes")),
+        [1, 2],
+        "the rejected row is gone"
+    );
+    assert_eq!(
+        ids(&bob, &search("secrets")),
+        Vec::<u8>::new(),
+        "the rejected write left the index with its row"
+    );
+    assert_eq!(ids(&server, &search("garden")), [1, 2]);
+}
+
+/// A schema that adds an index builds it over the rows already stored, in
+/// bounded batches; one that changes it rebuilds it; one that drops it
+/// drops its shadow tables. Until a build finishes, the authority refuses
+/// searches with a retryable `index_building` error.
+#[test]
+fn declarations_build_rebuild_and_drop_with_the_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jazz.sqlite");
+    let db = authority_at(&path, schema_with(Indexes::None, false));
+    for n in 0..1200u32 {
+        let id = RowUuid::from_bytes({
+            let mut b = [0u8; 16];
+            b[..4].copy_from_slice(&n.to_be_bytes());
+            b
+        });
+        let title = if n % 100 == 7 { "garden" } else { "other" };
+        block_on(db.insert(
+            "notes",
+            note(title, None, "home", &[0.0, 0.0]),
+            InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let db = crate::common::reinstall(
+        db,
+        &path,
+        config(
+            0,
+            schema_with(Indexes::TitleOnly, false),
+            AuthorSubject::SYSTEM,
+        ),
+        vec![],
+    );
+    let error = try_ids(&db, &search("garden")).expect_err("still building");
+    assert_eq!(error.code, ErrorCode::Backpressure);
+    assert_eq!(error.reason, Some(Reason::IndexBuilding));
+    // Each tick builds one batch; 1200 rows take three.
+    for _ in 0..3 {
+        block_on(db.tick()).unwrap();
+    }
+    let count = |db: &Db, words: &str| try_ids(db, &search(words)).map(|ids| ids.len());
+    assert_eq!(count(&db, "garden").unwrap(), 12);
+
+    // Weighting the field anew is a new declaration: rebuilt.
+    let db = crate::common::reinstall(
+        db,
+        &path,
+        config(0, schema_with(Indexes::Both, false), AuthorSubject::SYSTEM),
+        vec![],
+    );
+    for _ in 0..3 {
+        block_on(db.tick()).unwrap();
+    }
+    assert_eq!(count(&db, "garden").unwrap(), 12);
+
+    let db = crate::common::reinstall(
+        db,
+        &path,
+        config(0, schema_with(Indexes::None, false), AuthorSubject::SYSTEM),
+        vec![],
+    );
+    block_on(db.tick()).unwrap();
+    let error = try_ids(&db, &search("garden")).expect_err("no index any more");
+    assert!(
+        error.message.contains("no specialised index `search`"),
+        "{error}"
+    );
+}
+
+/// A search is a top-level filter, at most one per query; the index must
+/// exist and be of the op's kind; `$score` orders searches only.
+#[test]
+fn misplaced_or_mismatched_searches_are_refused_by_name() {
+    let db = seeded();
+    let refused = |query: Query| try_ids(&db, &query).expect_err("refused").to_string();
+    assert!(
+        refused(Query::from("notes").search("nope", text("x")))
+            .contains("table notes has no specialised index `nope`")
+    );
+    assert!(
+        refused(Query::from("notes").search("similar", text("x")))
+            .contains("index notes.similar is a vector index; `match` searches a text index")
+    );
+    assert!(
+        refused(search("a").search("search", text("b")))
+            .contains("a query can search only one index")
+    );
+    assert!(
+        refused(Query::from("notes").order_by("$score", OrderDirection::Asc))
+            .contains("ordering by $score needs an index search")
+    );
+    let nested = Query::from("notes").filter(jazz::query::Predicate::Not(Box::new(
+        jazz::query::Predicate::Search(jazz::query::IndexSearch {
+            index: "search".into(),
+            op: text("garden"),
+            decl: None,
+        }),
+    )));
+    assert!(refused(nested).contains("valid only as a top-level filter"));
+    assert!(
+        refused(Query::from("notes").search("similar", nearest(&[0.0, 0.0], 0)))
+            .contains("k 0 is outside 1..1000")
+    );
+    assert!(
+        refused(Query::from("notes").search("similar", nearest(&[f32::NAN, 0.0], 3)))
+            .contains("non-finite value at 0")
+    );
+}
+
+/// A vector search scores in Rust the rows the query's other clauses and
+/// policy match (filter-first) and keeps the `k` best by (score, id). On
+/// the authority those clauses must narrow the table through a B-tree
+/// index; an unfiltered search is refused rather than scanning the table.
+#[test]
+fn vector_searches_are_filter_first_and_bounded_on_the_authority() {
+    let db = seeded();
+    insert(&db, 4, note("Far", None, "home", &[9.0, 9.0]));
+    let home =
+        || Query::from("notes").filter(eq(col("project"), lit(Value::String("home".into()))));
+    assert_eq!(
+        ids(&db, &home().search("similar", nearest(&[4.0, 4.0], 2))),
+        [3, 1]
+    );
+    assert_eq!(
+        ids(&db, &home().search("similar", nearest(&[4.0, 4.0], 10))),
+        [3, 1, 4],
+        "squared distances 2, 32 and 50"
+    );
+    let error = try_ids(
+        &db,
+        &Query::from("notes").search("similar", nearest(&[0.0, 0.0], 2)),
+    )
+    .expect_err("unfiltered on the authority");
+    assert_eq!(error.reason, Some(Reason::VectorSearchUnbounded));
+    // A filter narrows only through a declared index: `title` has none.
+    let by_title = Query::from("notes")
+        .filter(eq(col("title"), lit(Value::String("Far".into()))))
+        .search("similar", nearest(&[0.0, 0.0], 2));
+    let error = try_ids(&db, &by_title).expect_err("not narrowed");
+    assert_eq!(error.reason, Some(Reason::VectorSearchUnbounded));
+
+    // A client scores the rows it holds.
+    let alice = open(2, schema());
+    insert(&alice, 1, note("a", None, "home", &[0.0, 0.0]));
+    insert(&alice, 2, note("b", None, "kitchen", &[1.0, 0.0]));
+    insert(&alice, 3, note("c", None, "home", &[1.0, 0.0]));
+    assert_eq!(
+        ids(
+            &alice,
+            &Query::from("notes").search("similar", nearest(&[1.0, 0.0], 2))
+        ),
+        [2, 3],
+        "equal scores order by id"
+    );
+}
+
+/// No index is server-only yet (SPEC 20.9): results a client cannot
+/// recompute need a design of their own, so the declaration is refused.
+#[test]
+fn a_server_only_index_is_refused_where_it_is_declared() {
+    let mut schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("notes")
+                .column("title", ColumnType::Text)
+                .policies(allow_all_policies())
+                .text_index("search", [("title", 1)], "jazz-text/1:en", false),
+        )
+        .build();
+    for table in schema.values_mut() {
+        table.specialised_indexes[0].server_only = true;
+    }
+    let error = jazz::schema::JazzSchema::new(&schema).expect_err("refused");
+    assert!(
+        error
+            .to_string()
+            .contains("serverOnly indexes are not supported yet"),
+        "{error}"
+    );
+}
+
+/// A subscription with a search updates exactly as the query re-run
+/// would: a row that starts matching joins it in score order, one that
+/// stops matching leaves it.
+#[test]
+fn a_live_search_follows_its_rows() {
+    let db = seeded();
+    let prepared = db.prepare_query(&search("garden")).unwrap();
+    let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.tick()).unwrap();
+    let seen = |stream: &mut jazz::db::SubscriptionStream| {
+        let mut added = Vec::new();
+        let mut removed = Vec::new();
+        while let Some(event) = stream.try_next_event() {
+            match event {
+                SubscriptionEvent::Delta {
+                    added: a,
+                    removed: r,
+                    ..
+                } => {
+                    added.extend(a.iter().map(|row| row.row_uuid().0.as_bytes()[0]));
+                    removed.extend(r.iter().map(|row| row.row_uuid.0.as_bytes()[0]));
+                }
+                SubscriptionEvent::Rejected { reason, .. } => panic!("{reason}"),
+                SubscriptionEvent::Closed => {}
+            }
+        }
+        (added, removed)
+    };
+    assert_eq!(seen(&mut stream), (vec![1, 3], vec![]));
+    update(&db, 2, "title", Value::String("Garden soup".into()));
+    block_on(db.tick()).unwrap();
+    assert_eq!(seen(&mut stream), (vec![2], vec![]));
+    update(&db, 1, "title", Value::String("Plans".into()));
+    update(&db, 1, "body", Value::Nullable(None));
+    block_on(db.tick()).unwrap();
+    assert_eq!(seen(&mut stream), (vec![], vec![1]));
+    assert_eq!(ids(&db, &search("garden")), [2, 3]);
+}
+
+/// A transport that says whether its upstream offered index search.
+struct Gated {
+    inner: Box<dyn Transport>,
+    search: bool,
+}
+
+impl Transport for Gated {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn features(&self) -> jazz::wire::WireFeatures {
+        let all = jazz::wire::current_wire_features();
+        if self.search {
+            all
+        } else {
+            all & !jazz::wire::FEATURE_SPECIALISED_INDEXES
+        }
+    }
+}
+
+/// A query with a search goes upstream only to an upstream that offered
+/// `FEATURE_SPECIALISED_INDEXES` (an older server could not decode it): at
+/// `Remote` tier it is refused, typed; otherwise the replica answers it
+/// alone. Queries without a search sync as before.
+///
+/// ```
+/// bob ──Read(search)──✗ (no FEATURE_SPECIALISED_INDEXES) server
+///  └── Remote: index_search_unsupported_upstream; LocalFirst: local rows
+/// ```
+#[test]
+fn a_search_goes_upstream_only_to_an_upstream_that_offered_it() {
+    let server = authority(schema());
+    insert(&server, 1, note("Garden plans", None, "home", &[0.0, 0.0]));
+    let bob = client(1, schema());
+    let (up, down) = jazz::db::duplex();
+    let _link = block_on(bob.connect_upstream(Box::new(Gated {
+        inner: up,
+        search: false,
+    })));
+    server.accept_subscriber(down, alice()).unwrap();
+    let all = bob.prepare_query(&Query::from("notes")).unwrap();
+    let _all = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(
+        ids(&bob, &search("garden")),
+        [1],
+        "the plain query synced the row"
+    );
+
+    let remote = ReadOpts {
+        tier: jazz::db::ReadTier::Remote,
+        ..ReadOpts::default()
+    };
+    let prepared = bob.prepare_query(&search("garden")).unwrap();
+    let Err(error) = block_on(bob.subscribe(&prepared, remote)) else {
+        panic!("a Remote search over this link is refused");
+    };
+    assert_eq!(error.reason, Some(Reason::IndexSearchUnsupportedUpstream));
+    assert!(
+        error
+            .message
+            .contains("the server does not support index search"),
+        "{error}"
+    );
+
+    let mut local = block_on(bob.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    let mut rows = Vec::new();
+    while let Some(event) = local.try_next_event() {
+        match event {
+            SubscriptionEvent::Delta { added, .. } => {
+                rows.extend(added.iter().map(|row| row.row_uuid().0.as_bytes()[0]))
+            }
+            SubscriptionEvent::Rejected { reason, .. } => panic!("{reason}"),
+            SubscriptionEvent::Closed => {}
+        }
+    }
+    assert_eq!(rows, [1], "answered by the replica");
+}
+
+/// The server end of a link whose client did or did not offer
+/// `FEATURE_SPECIALISED_INDEXES`, recording the catalogue versions sent.
+struct Downstream {
+    inner: Box<dyn Transport>,
+    specialised: bool,
+    versions: Rc<RefCell<Vec<jazz::ids::SchemaVersionId>>>,
+}
+
+impl Transport for Downstream {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        let catalogue = match &message {
+            SyncMessage::Welcome { catalogue, .. } | SyncMessage::Catalogue(catalogue) => {
+                Some(catalogue)
+            }
+            _ => None,
+        };
+        if let Some(catalogue) = catalogue {
+            self.versions
+                .borrow_mut()
+                .extend(catalogue.versions.iter().map(|v| v.schema.id()));
+        }
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn features(&self) -> jazz::wire::WireFeatures {
+        let all = jazz::wire::current_wire_features();
+        if self.specialised {
+            all
+        } else {
+            all & !jazz::wire::FEATURE_SPECIALISED_INDEXES
+        }
+    }
+}
+
+/// A peer without `FEATURE_SPECIALISED_INDEXES` could not decode a schema
+/// version that declares a specialised index (or has a vector or point
+/// column): an older client would fail the whole catalogue and lose the
+/// link. The authority does not send it such a version; it sends it the
+/// others, and rows sync as before. A peer with the bit gets them all.
+///
+/// ```
+/// server: v1 (plain), v2 = v1 + text index
+///   ──Welcome[v1]────► bob   (no bit)   row 1 syncs
+///   ──Welcome[v1,v2]─► carol (the bit)
+/// ```
+#[test]
+fn an_index_only_version_is_not_sent_to_a_peer_without_the_bit() {
+    let plain = || {
+        TableSchemaBuilder::new("notes")
+            .column("title", ColumnType::Text)
+            .policies(allow_all_policies())
+    };
+    let v1 = compile_schema(&SchemaBuilder::new().table(plain()).build());
+    let v2 = compile_schema(
+        &SchemaBuilder::new()
+            .table(plain().text_index("search", [("title", 1)], "jazz-text/1:en", false))
+            .build(),
+    );
+    assert!(!v1.uses_specialised_features());
+    assert!(v2.uses_specialised_features());
+    let server = authority(v1.clone());
+    block_on(server.admit_schema_with_lenses(v2.clone(), &[])).unwrap();
+    insert(
+        &server,
+        1,
+        BTreeMap::from([("title".to_owned(), Value::String("Garden".into()))]),
+    );
+
+    let sent_to = |node: u8, specialised: bool| {
+        let replica = client(node, v1.clone());
+        let versions = Rc::new(RefCell::new(Vec::new()));
+        let (up, down) = jazz::db::duplex();
+        let link = block_on(replica.connect_upstream(up));
+        server
+            .accept_subscriber(
+                Box::new(Downstream {
+                    inner: down,
+                    specialised,
+                    versions: versions.clone(),
+                }),
+                alice(),
+            )
+            .unwrap();
+        let all = replica.prepare_query(&Query::from("notes")).unwrap();
+        let sub = block_on(replica.subscribe(&all, ReadOpts::default())).unwrap();
+        pump(&server, &[&replica]);
+        let rows = ids(&replica, &Query::from("notes")).len();
+        let versions = versions.borrow().clone();
+        drop((sub, link));
+        (versions, rows)
+    };
+
+    let (bob, bob_rows) = sent_to(1, false);
+    assert!(!bob.contains(&v2.version_id()), "{bob:?}");
+    assert_eq!(bob_rows, 1, "the link stayed up and the row synced");
+    let (carol, carol_rows) = sent_to(2, true);
+    assert!(carol.contains(&v2.version_id()), "{carol:?}");
+    assert_eq!(carol_rows, 1);
+}
+
+/// The optional features v2.0.0-beta.0 knows, as that release numbers them
+/// (literal on purpose: this build's constants must never redefine them).
+/// A native beta.0 link offers [`BETA_0_NATIVE`]; the hosts add the rest.
+const BETA_0_ALL: jazz::wire::WireFeatures = (1 << 3)
+    | (1 << 4)
+    | (1 << 7)
+    | (1 << 8)
+    | (1 << 9)
+    | (1 << 10)
+    | (1 << 11)
+    | (1 << 12)
+    | (1 << 13)
+    | (1 << 14)
+    | (1 << 15);
+
+/// What beta.0's `current_wire_features()` returns, with zstd compiled in.
+const BETA_0_NATIVE: jazz::wire::WireFeatures =
+    (1 << 4) | (1 << 7) | (1 << 9) | (1 << 12) | (1 << 13) | (1 << 15);
+
+/// A link to a peer that offered exactly `features`, recording what this
+/// side sent it: catalogue versions, and whether any read held a search.
+struct Offering {
+    inner: Box<dyn Transport>,
+    features: jazz::wire::WireFeatures,
+    versions: Rc<RefCell<Vec<jazz::ids::SchemaVersionId>>>,
+    searches: Rc<RefCell<usize>>,
+}
+
+impl Transport for Offering {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        match &message {
+            SyncMessage::Welcome { catalogue, .. } | SyncMessage::Catalogue(catalogue) => self
+                .versions
+                .borrow_mut()
+                .extend(catalogue.versions.iter().map(|v| v.schema.id())),
+            SyncMessage::Read { query, .. } => {
+                let searches = query
+                    .filters
+                    .iter()
+                    .filter(|predicate| matches!(predicate, jazz::query::Predicate::Search(_)))
+                    .count();
+                *self.searches.borrow_mut() += searches;
+            }
+            _ => {}
+        }
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+
+    fn features(&self) -> jazz::wire::WireFeatures {
+        self.features
+    }
+}
+
+/// On managed storage (a Durable Object's SQL, whose only transactions are
+/// callback scopes) a write reaches its indexes as its scope commits
+/// (`INV-IX-2`), as on native SQLite: nothing is left queued for a later
+/// read to drain, and a restarted object searches the same.
+#[test]
+fn writes_on_managed_storage_reach_the_index_as_their_scope_commits() {
+    use jazz::storage::{Storage, managed_emulation::EmulatedObjectSql};
+    jazz::use_test_kinds(true);
+    let sql = EmulatedObjectSql::open_in_memory().unwrap();
+    let open_object = || {
+        let db = block_on(Db::open_storage(
+            config(0, schema(), AuthorSubject::SYSTEM),
+            Storage::from_backend(sql.clone()),
+        ))
+        .unwrap();
+        db.set_authority();
+        db
+    };
+    let db = open_object();
+    // The indexes exist from the store's first look at them.
+    let _ = try_ids(&db, &search("garden"));
+    block_on(db.tick()).unwrap();
+    let queued = || -> i64 {
+        Storage::from_backend(sql.clone())
+            .query_row("SELECT count(*) FROM _jazz_ix_dirty", [], |r| r.get(0))
+            .unwrap()
+    };
+    insert(&db, 1, note("Garden plans", None, "home", &[0.0, 0.0]));
+    assert_eq!(queued(), 0, "the insert's scope drained what it queued");
+    update(&db, 1, "title", Value::String("Shed plans".into()));
+    assert_eq!(queued(), 0, "the update's scope drained what it queued");
+    assert_eq!(ids(&db, &search("shed")), [1]);
+    assert_eq!(ids(&db, &search("garden")), Vec::<u8>::new());
+    drop(db);
+    assert_eq!(ids(&open_object(), &search("shed")), [1], "after a restart");
+}
+
+/// A local-first search opened before a link is up learns on it that the
+/// upstream cannot search: it shows this store's rows, and is never sent,
+/// nor reported as settled by that upstream.
+#[test]
+fn a_search_opened_before_an_older_upstream_connects_is_never_confirmed_by_it() {
+    let server = authority(schema());
+    let bob = client(1, schema());
+    insert(&bob, 1, note("Garden plans", None, "home", &[0.0, 0.0]));
+    let prepared = bob.prepare_query(&search("garden")).unwrap();
+    let mut local = block_on(bob.subscribe(&prepared, ReadOpts::default())).unwrap();
+
+    let (up, down) = jazz::db::duplex();
+    let searches = Rc::new(RefCell::new(0));
+    let _link = block_on(bob.connect_upstream(Box::new(Offering {
+        inner: up,
+        features: BETA_0_NATIVE,
+        versions: Rc::default(),
+        searches: searches.clone(),
+    })));
+    server.accept_subscriber(down, alice()).unwrap();
+    pump(&server, &[&bob]);
+
+    let mut shown = Vec::new();
+    while let Some(event) = local.try_next_event() {
+        match event {
+            SubscriptionEvent::Delta { added, settled, .. } => {
+                assert!(!settled, "nothing upstream confirmed a local-only search");
+                shown.extend(added.iter().map(|row| row.row_uuid().0.as_bytes()[0]));
+            }
+            SubscriptionEvent::Rejected { reason, .. } => panic!("{reason}"),
+            SubscriptionEvent::Closed => {}
+        }
+    }
+    assert_eq!(shown, [1]);
+    assert_eq!(*searches.borrow(), 0, "no search crossed the link");
+}
+
+/// A peer offering exactly what beta.0 offers, up to every bit that release
+/// defines, gets no SPEC 20 schema version (index-only, vector or point)
+/// and is sent no search: no bit of beta.0's means SPEC 20.
+///
+/// ```
+/// server (plain, + index, + vector, + point) ──Welcome[plain]──► beta.0 client
+/// client ──Read(notes)──► beta.0 server      ──Read(search)──✗
+/// ```
+#[test]
+fn a_beta_0_peer_gets_no_spec_20_schema_version_and_no_search() {
+    for features in [BETA_0_NATIVE, BETA_0_ALL] {
+        assert_eq!(features & jazz::wire::FEATURE_SPECIALISED_INDEXES, 0);
+
+        let table = || {
+            TableSchemaBuilder::new("notes")
+                .column("title", ColumnType::Text)
+                .policies(allow_all_policies())
+        };
+        let other = |name: &str, ty: ColumnType| {
+            TableSchemaBuilder::new(name)
+                .column("value", ty)
+                .policies(allow_all_policies())
+        };
+        let plain = compile_schema(&SchemaBuilder::new().table(table()).build());
+        let indexed = || table().text_index("search", [("title", 1)], "jazz-text/1:en", false);
+        let newer = [
+            compile_schema(&SchemaBuilder::new().table(indexed()).build()),
+            compile_schema(
+                &SchemaBuilder::new()
+                    .table(table())
+                    .table(other("vectors", ColumnType::Vector { dimensions: 2 }))
+                    .build(),
+            ),
+            compile_schema(
+                &SchemaBuilder::new()
+                    .table(table())
+                    .table(other("points", ColumnType::Point))
+                    .build(),
+            ),
+        ];
+
+        let server = authority(plain.clone());
+        for version in &newer {
+            block_on(server.admit_schema_with_lenses(version.clone(), &[])).unwrap();
+        }
+        let old_client = client(1, plain);
+        let (up, down) = jazz::db::duplex();
+        let versions = Rc::new(RefCell::new(Vec::new()));
+        let _link = block_on(old_client.connect_upstream(up));
+        server
+            .accept_subscriber(
+                Box::new(Offering {
+                    inner: down,
+                    features,
+                    versions: versions.clone(),
+                    searches: Rc::default(),
+                }),
+                alice(),
+            )
+            .unwrap();
+        pump(&server, &[&old_client]);
+        for version in &newer {
+            assert!(
+                !versions.borrow().contains(&version.version_id()),
+                "{features:#x}: sent {:?}",
+                version.version_id()
+            );
+        }
+
+        // The other way: this build's client of a beta.0 server.
+        let searching = compile_schema(&SchemaBuilder::new().table(indexed()).build());
+        let old_server = authority(searching.clone());
+        let new_client = client(2, searching);
+        let (up, down) = jazz::db::duplex();
+        let searches = Rc::new(RefCell::new(0));
+        let _link = block_on(new_client.connect_upstream(Box::new(Offering {
+            inner: up,
+            features,
+            versions: Rc::default(),
+            searches: searches.clone(),
+        })));
+        old_server.accept_subscriber(down, alice()).unwrap();
+        let prepared = new_client.prepare_query(&search("garden")).unwrap();
+        let _local = block_on(new_client.subscribe(&prepared, ReadOpts::default())).unwrap();
+        pump(&old_server, &[&new_client]);
+        let remote = ReadOpts {
+            tier: jazz::db::ReadTier::Remote,
+            ..ReadOpts::default()
+        };
+        let Err(error) = block_on(new_client.subscribe(&prepared, remote)) else {
+            panic!("{features:#x}: a Remote search of a beta.0 server is refused");
+        };
+        assert_eq!(error.reason, Some(Reason::IndexSearchUnsupportedUpstream));
+        assert_eq!(
+            *searches.borrow(),
+            0,
+            "{features:#x}: a search crossed the link"
+        );
+    }
+}
+
+/// A row whose large value reaches a replica before its chunks is indexed
+/// without that value at first and again once the chunks arrive, so the
+/// replica's search ends up equal to the authority's (`INV-IX-1`).
+///
+/// ```
+/// server ──row 1 (body chunked)──► bob   search "zebra": not yet
+/// server ──chunks──► bob                 search "zebra": [1], as server
+/// ```
+#[test]
+fn a_replica_indexes_a_large_value_once_its_chunks_arrive() {
+    let server = authority(schema());
+    let mut body = String::from("zebra crossing ");
+    while body.len() <= jazz::large_values::INLINE_VALUE_MAX_BYTES * 4 {
+        body.push_str("lorem ipsum dolor sit amet ");
+    }
+    insert(&server, 1, note("Plans", Some(&body), "home", &[0.0, 0.0]));
+    assert_eq!(ids(&server, &search("zebra")), [1]);
+    let bob = client(1, schema());
+    let _link = link(&bob, &server);
+    let all = bob.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &search("zebra")), ids(&server, &search("zebra")));
+    assert_eq!(ids(&bob, &search("plans")), [1]);
+}
+
+/// A live text search applies a changed row by re-checking it alone and
+/// splicing it in by `(score, id)` (SPEC 20.8): unchanged rows keep their
+/// scores and places, the changed row moves to where its new score puts
+/// it, and the window is the one the query re-run reads (`INV-IX-6`).
+/// A live nearest search re-runs instead: its `k` caps the rows it reads.
+#[test]
+fn a_live_text_search_splices_a_changed_row_by_its_score() {
+    let db = seeded();
+    insert(
+        &db,
+        4,
+        note("Garden", Some("garden garden"), "home", &[0.0, 0.0]),
+    );
+    // Scores: row 4 = 2 + 2, row 1 = 2 + 1, row 3 = 2.
+    assert_eq!(ids(&db, &search("garden")), [4, 1, 3]);
+    let prepared = db.prepare_query(&search("garden").limit(2)).unwrap();
+    let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.tick()).unwrap();
+    while stream.try_next_event().is_some() {}
+    let before = db.fanout_stats();
+    // Row 3 gains "garden" in its body: 2 + 1 + 1 = 4, tied with row 4,
+    // which it follows by id.
+    update(
+        &db,
+        3,
+        "body",
+        Value::Nullable(Some(Box::new(Value::String("garden garden".into())))),
+    );
+    block_on(db.tick()).unwrap();
+    let after = db.fanout_stats();
+    assert!(after.rechecked > before.rechecked, "{before:?} → {after:?}");
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Delta {
+            added: a,
+            removed: r,
+            ..
+        } = event
+        {
+            added.extend(a.iter().map(|row| row.row_uuid().0.as_bytes()[0]));
+            removed.extend(r.iter().map(|row| row.row_uuid.0.as_bytes()[0]));
+        }
+    }
+    assert_eq!((added, removed), (vec![3], vec![1]));
+    assert_eq!(ids(&db, &search("garden").limit(2)), [3, 4]);
+}
+
+/// A rebase reaches the index: bob's pending edit of one field replays
+/// over the authority's concurrent edit of another, and his index follows
+/// the rebased row, as the authority's follows the merged one.
+///
+/// ```
+/// server: body := "garden beans"      bob (pending): title := "Shed"
+///        ──synced version──► bob rebases: title "Shed", body "garden beans"
+/// ```
+#[test]
+fn a_rebased_pending_write_reaches_the_index() {
+    let server = authority(schema());
+    insert(&server, 1, note("Plans", None, "open", &[0.0, 0.0]));
+    let bob = client(1, schema());
+    let _link = link(&bob, &server);
+    let all = bob.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    update(&bob, 1, "title", Value::String("Shed".into()));
+    update(
+        &server,
+        1,
+        "body",
+        Value::Nullable(Some(Box::new(Value::String("garden beans".into())))),
+    );
+    // Bob's tick receives the server's version before his upload settles.
+    block_on(server.tick()).unwrap();
+    block_on(bob.tick()).unwrap();
+    assert_eq!(ids(&bob, &search("shed garden")), [1]);
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &search("shed garden")), [1]);
+    assert_eq!(ids(&server, &search("shed garden")), [1]);
+    assert_eq!(ids(&bob, &search("plans")), Vec::<u8>::new());
+}
+
+/// An eviction reaches the index: when bob loses read access to a row,
+/// the authority evicts it from his replica, and his search stops
+/// returning it in the same transaction that drops the row.
+#[test]
+fn an_evicted_row_leaves_the_replicas_index() {
+    let read_open = |restrict: bool| {
+        let mut policies = allow_all_policies();
+        if restrict {
+            policies = policies.with_select(PolicyExpr::eq_literal(
+                "project",
+                PublicValue::Text("open".into()),
+            ));
+        }
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("title", ColumnType::Text)
+                        .nullable_column("body", ColumnType::Text)
+                        .column("project", ColumnType::Text)
+                        .column("embedding", ColumnType::Vector { dimensions: 2 })
+                        .index_only(["project"])
+                        .policies(policies)
+                        .text_index(
+                            "search",
+                            [("title", 2), ("body", 1)],
+                            "jazz-text/1:en",
+                            false,
+                        )
+                        .vector_index("similar", "embedding", VectorMetric::L2),
+                )
+                .build(),
+        )
+    };
+    let server = authority(read_open(true));
+    insert(&server, 1, note("Garden plans", None, "open", &[0.0, 0.0]));
+    insert(&server, 2, note("Garden tools", None, "open", &[0.0, 0.0]));
+    let bob = client(1, read_open(true));
+    let _link = link(&bob, &server);
+    let all = bob.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &search("garden")), [1, 2]);
+    update(&server, 1, "project", Value::String("secret".into()));
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &Query::from("notes")), [2], "evicted");
+    assert_eq!(ids(&bob, &search("garden")), [2]);
+}
+
+fn search_any(words: &str) -> Query {
+    Query::from("notes").search(
+        "search",
+        IndexOp::Match {
+            text: words.into(),
+            mode: MatchMode::Any,
+        },
+    )
+}
+
+/// A text search's mode says how many of its terms a row needs: `Any`
+/// (the default) at least one, `All` every one. Either way a row ranks by
+/// the summed impacts of the terms it holds, so a row holding more of them
+/// ranks higher.
+#[test]
+fn a_text_search_matches_any_or_all_of_its_terms() {
+    let db = seeded();
+    // Row 1: "garden" 2 + 1 = 3; row 2: "soup" 2; row 3: "garden" 2.
+    assert_eq!(ids(&db, &search_any("garden soup")), [1, 2, 3]);
+    assert_eq!(ids(&db, &search("garden soup")), Vec::<u8>::new());
+    // Row 3 holds both terms: 2 + 2 = 4, above row 1's 3.
+    assert_eq!(ids(&db, &search_any("garden tools")), [3, 1]);
+    assert_eq!(ids(&db, &search("garden tools")), [3]);
+    assert_eq!(
+        IndexOp::Match {
+            text: String::new(),
+            mode: Default::default()
+        },
+        IndexOp::Match {
+            text: String::new(),
+            mode: MatchMode::Any
+        },
+        "Any is the default"
+    );
+}
+
+/// A live `Any` search re-checks a row that gains a second query term and
+/// moves it up by its new score, as the query re-run would order it.
+#[test]
+fn a_live_any_search_moves_a_row_up_when_it_gains_a_term() {
+    let db = seeded();
+    let prepared = db.prepare_query(&search_any("garden soup")).unwrap();
+    let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.tick()).unwrap();
+    while stream.try_next_event().is_some() {}
+    let before = db.fanout_stats();
+    // Row 3 gains "soup" in its body: 2 + 1 = 3, tied with row 1 (by id).
+    update(
+        &db,
+        3,
+        "body",
+        Value::Nullable(Some(Box::new(Value::String("soup".into())))),
+    );
+    // And row 2 gains "garden": 2 + 1 = 3 too, ahead of row 3 by id.
+    update(
+        &db,
+        2,
+        "body",
+        Value::Nullable(Some(Box::new(Value::String("garden".into())))),
+    );
+    block_on(db.tick()).unwrap();
+    assert!(db.fanout_stats().rechecked > before.rechecked);
+    let mut updated = Vec::new();
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Delta { updated: u, .. } = event {
+            updated.extend(u.iter().map(|row| row.row_uuid().0.as_bytes()[0]));
+        }
+    }
+    updated.sort();
+    assert_eq!(updated, [2, 3]);
+    assert_eq!(ids(&db, &search_any("garden soup")), [1, 2, 3]);
+    // Row 3 gains "garden" twice more: 2 + 1 + 2 = 5, first.
+    update(
+        &db,
+        3,
+        "body",
+        Value::Nullable(Some(Box::new(Value::String("soup garden garden".into())))),
+    );
+    block_on(db.tick()).unwrap();
+    assert_eq!(ids(&db, &search_any("garden soup")), [3, 1, 2]);
+}
+
+/// Links `bob` to `server` over an in-process link, which offers every
+/// feature of this build (index search included).
+fn search_link(bob: &Db, server: &Db) -> jazz::db::Upstream {
+    let (up, down) = jazz::db::duplex();
+    let link = block_on(bob.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    link
+}
+
+/// The message the authority refuses `bob`'s subscription of `query`
+/// with, if it does.
+fn remote_refusal(server: &Db, bob: &Db, query: &Query) -> Option<String> {
+    let prepared = bob.prepare_query(query).unwrap();
+    let mut stream = block_on(bob.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(server, &[bob]);
+    let mut refusal = None;
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Rejected { message, .. } = event {
+            refusal = Some(message);
+        }
+    }
+    refusal
+}
+
+/// A search names the declaration it was written against (SPEC 20.4). Bob's
+/// app declares `search` over title (2) and body (1); the authority has
+/// moved on to a version declaring it over the title alone. Bob's search of
+/// his own replica uses his declaration; sent to the authority, it is
+/// refused (`index_declaration_mismatch`), never scored under the
+/// authority's other declaration.
+///
+/// ```
+/// bob (v1: title 2, body 1) ──Read(search, decl v1)──► server (v2: title 1)
+///                                                       └─✗ declaration differs
+/// ```
+#[test]
+fn a_search_under_another_declaration_of_its_index_is_refused() {
+    let v1 = schema_with(Indexes::Both, false);
+    let v2 = schema_with(Indexes::TitleOnly, false);
+    let server = authority(v2);
+    block_on(server.admit_schema_with_lenses(v1.clone(), &[])).unwrap();
+    insert(
+        &server,
+        1,
+        note("Garden plans", Some("beans"), "home", &[0.0, 0.0]),
+    );
+    let bob = client(1, v1);
+    let _link = search_link(&bob, &server);
+    let all = bob.prepare_query(&Query::from("notes")).unwrap();
+    let _all = block_on(bob.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(ids(&bob, &search("beans")), [1], "his own declaration");
+
+    let refusal = remote_refusal(&server, &bob, &search("garden"));
+    assert!(
+        refusal
+            .as_deref()
+            .is_some_and(|m| m.contains("index `notes.search` changed")),
+        "{refusal:?}"
+    );
+}
+
+/// A declaration is hashed with its columns' stored names (SPEC 20.4): a
+/// migration that only renames an indexed column changes no declaration,
+/// so a client still on the old name searches the authority as before.
+///
+/// ```
+/// bob (v1: search over title) ──Read(search)──► server (v2: title → heading)
+///                                               └─ same stored column: answered
+/// ```
+#[test]
+fn a_rename_only_migration_keeps_the_declaration() {
+    let with = |column: &str| {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column(column, ColumnType::Text)
+                        .policies(allow_all_policies())
+                        .text_index("search", [(column, 1)], "jazz-text/1:en", false),
+                )
+                .build(),
+        )
+    };
+    let (v1, v2) = (with("title"), with("heading"));
+    let rename = jazz::protocol::MigrationLens::new(
+        v1.version_id(),
+        v2.version_id(),
+        vec![jazz::protocol::TableLens {
+            source_table: "notes".into(),
+            target_table: "notes".into(),
+            ops: vec![jazz::protocol::LensOp::RenameColumn {
+                from: "title".into(),
+                to: "heading".into(),
+            }],
+        }],
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jazz.sqlite");
+    let server = authority_at(&path, v1.clone());
+    let server = crate::common::reinstall(
+        server,
+        &path,
+        config(0, v2, AuthorSubject::SYSTEM),
+        vec![rename],
+    );
+    block_on(server.insert(
+        "notes",
+        BTreeMap::from([("heading".to_owned(), Value::String("Garden plans".into()))]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(ids(&server, &search("garden")), [1]);
+
+    let bob = client(1, v1);
+    let _link = search_link(&bob, &server);
+    assert_eq!(remote_refusal(&server, &bob, &search("garden")), None);
+    assert_eq!(ids(&bob, &search("garden")), [1], "answered and synced");
+}
+
+/// An index the authority's schema dropped is as unknown to it as one
+/// never declared, whatever an older client's schema still says.
+#[test]
+fn a_search_through_an_index_the_authority_dropped_is_unknown() {
+    let v1 = schema_with(Indexes::Both, false);
+    let server = authority(schema_with(Indexes::None, false));
+    block_on(server.admit_schema_with_lenses(v1.clone(), &[])).unwrap();
+    insert(&server, 1, note("Garden plans", None, "home", &[0.0, 0.0]));
+    let bob = client(1, v1);
+    let _link = search_link(&bob, &server);
+    let refusal = remote_refusal(&server, &bob, &search("garden"));
+    assert!(
+        refusal
+            .as_deref()
+            .is_some_and(|m| m.contains("table notes has no specialised index `search`")),
+        "{refusal:?}"
+    );
+}
+
+/// A search reads the current rows, as its index holds them (SPEC 20.4):
+/// a `Remote` read of settled rows, or a read as of a snapshot, would score
+/// content the cut does not show, so it is refused. A local-first live
+/// search, whose replica may read it cut back to what its upstream settled,
+/// reads the current rows instead.
+#[test]
+fn a_search_at_remote_tier_is_refused_and_local_first_reads_current_rows() {
+    let server = authority(schema());
+    insert(&server, 1, note("Garden plans", None, "home", &[0.0, 0.0]));
+    let bob = client(1, schema());
+    let _link = search_link(&bob, &server);
+    let remote = ReadOpts {
+        tier: jazz::db::ReadTier::Remote,
+        ..ReadOpts::default()
+    };
+    let error = try_ids_with(&bob, &search("garden"), remote).expect_err("refused");
+    assert!(
+        error
+            .message
+            .contains("index search at Remote tier or as of a cut"),
+        "{error}"
+    );
+    let prepared = bob.prepare_query(&search("garden")).unwrap();
+    let mut stream = block_on(bob.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    // Another writer's edit lands while bob's own read is not yet settled
+    // past it: the search still reads the current rows.
+    update(&server, 1, "title", Value::String("Garden tools".into()));
+    pump(&server, &[&bob]);
+    let mut rejected = None;
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Rejected { message, .. } = event {
+            rejected = Some(message);
+        }
+    }
+    assert_eq!(rejected, None);
+    assert_eq!(ids(&bob, &search("tools")), [1]);
+}
+
+fn try_ids_with(db: &Db, query: &Query, opts: ReadOpts) -> Result<Vec<u8>, jazz::db::Error> {
+    let prepared = db.prepare_query(query)?;
+    Ok(block_on(db.all(&prepared, opts))?
+        .iter()
+        .map(|row| row.row_uuid().0.as_bytes()[0])
+        .collect())
+}
+
+/// A live nearest search rechecks a changed row alone (SPEC 20.8): a row
+/// that now beats the window's last enters and the k-th leaves, without a
+/// re-run; a window member that gets worse re-runs the search, which finds
+/// the row that takes its place.
+#[test]
+fn a_live_nearest_search_splices_a_closer_row_and_reruns_when_one_drifts() {
+    // A store answering its own queries scores its rows unfiltered.
+    let db = open(3, schema());
+    insert(&db, 1, note("a", None, "home", &[0.0, 0.0]));
+    insert(&db, 2, note("b", None, "home", &[1.0, 0.0]));
+    insert(&db, 3, note("c", None, "home", &[5.0, 5.0]));
+    let query = Query::from("notes").search("similar", nearest(&[0.0, 0.0], 2));
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    block_on(db.tick()).unwrap();
+    let delta = |stream: &mut jazz::db::SubscriptionStream| {
+        let (mut added, mut removed) = (Vec::new(), Vec::new());
+        while let Some(event) = stream.try_next_event() {
+            if let SubscriptionEvent::Delta {
+                added: a,
+                removed: r,
+                ..
+            } = event
+            {
+                added.extend(a.iter().map(|row| row.row_uuid().0.as_bytes()[0]));
+                removed.extend(r.iter().map(|row| row.row_uuid.0.as_bytes()[0]));
+            }
+        }
+        (added, removed)
+    };
+    assert_eq!(delta(&mut stream).0, [1, 2]);
+
+    let before = db.fanout_stats();
+    update(&db, 3, "embedding", Value::Bytes(f32le(&[0.1, 0.0])));
+    block_on(db.tick()).unwrap();
+    let after = db.fanout_stats();
+    assert!(after.rechecked > before.rechecked, "{before:?} → {after:?}");
+    assert_eq!(after.reran, before.reran, "spliced, not re-run");
+    assert_eq!(delta(&mut stream), (vec![3], vec![2]));
+    assert_eq!(ids(&db, &query), [1, 3]);
+
+    let before = db.fanout_stats();
+    update(&db, 1, "embedding", Value::Bytes(f32le(&[9.0, 9.0])));
+    block_on(db.tick()).unwrap();
+    assert!(
+        db.fanout_stats().reran > before.reran,
+        "a member drifted: re-run"
+    );
+    assert_eq!(delta(&mut stream), (vec![2], vec![1]));
+    assert_eq!(ids(&db, &query), [3, 2]);
+}

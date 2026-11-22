@@ -2144,6 +2144,7 @@ version = "2.0.0-beta.0"
 dependencies = [
  "bytes",
  "futures",
+ "jazz-index",
  "jazz-model",
  "jazz-protocol",
  "jazz-text",
@@ -2314,6 +2315,13 @@ dependencies = [
  "tokio-tungstenite",
  "uniffi",
  "uuid",
+]
+
+[[package]]
+name = "jazz-index"
+version = "2.0.0-beta.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

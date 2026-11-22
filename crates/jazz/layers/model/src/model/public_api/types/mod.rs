@@ -3,6 +3,7 @@ mod branch;
 mod policy;
 mod row;
 mod schema;
+mod specialised_index;
 mod value;
 
 // Re-export all public items from sub-modules
@@ -10,6 +11,7 @@ pub use branch::*;
 pub use policy::*;
 pub use row::*;
 pub use schema::*;
+pub use specialised_index::*;
 pub use value::*;
 
 // Import PolicyExpr for use by schema module

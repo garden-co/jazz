@@ -10,6 +10,7 @@ import {
   FEATURE_HEARTBEAT,
   FEATURE_TYPED_ERROR_REASON,
   FEATURE_PAYLOAD_ZSTD,
+  FEATURE_SPECIALISED_INDEXES,
   HANDSHAKE_TIMEOUT_MS,
   HEARTBEAT_SILENCE_MS,
   MAX_WIRE_PROTOCOL_VERSION,
@@ -94,6 +95,14 @@ describe("admitted websocket policy claims", () => {
 });
 
 describe("websocket frame carrier", () => {
+  it("offers SPEC 20 as bit 16, which no released peer offers", () => {
+    expect(FEATURE_SPECIALISED_INDEXES).toBe(1 << 16);
+    expect(CLIENT_WIRE_FEATURES & FEATURE_SPECIALISED_INDEXES).toBe(FEATURE_SPECIALISED_INDEXES);
+    // Every bit v2.0.0-beta.0 defines, as that release numbers them.
+    const beta0 = [3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15].reduce((bits, n) => bits | (1 << n), 0);
+    expect(beta0 & FEATURE_SPECIALISED_INDEXES).toBe(0);
+  });
+
   it("types close listeners with close event details", () => {
     type CloseListener = Parameters<BrowserWebSocket["addEventListener"]>[1];
 

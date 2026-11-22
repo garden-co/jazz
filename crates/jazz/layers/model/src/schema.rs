@@ -159,6 +159,36 @@ impl JazzSchema {
         &self.public_schema
     }
 
+    /// Whether this version uses what SPEC 20 added: a vector or point
+    /// column (anywhere in a column's type) or a specialised index. A peer
+    /// without `FEATURE_SPECIALISED_INDEXES` cannot decode such a version,
+    /// so it is not sent one (SPEC 20.4).
+    pub fn uses_specialised_features(&self) -> bool {
+        fn uses(value_type: &jazz_types::records::ValueType) -> bool {
+            use jazz_types::records::ValueType;
+            match value_type {
+                ValueType::Vector(_) | ValueType::Point => true,
+                ValueType::Tuple(members) => members.iter().any(uses),
+                ValueType::Array(inner) | ValueType::Nullable(inner) => uses(inner),
+                ValueType::Record(descriptor) => descriptor
+                    .fields()
+                    .iter()
+                    .any(|field| uses(&field.value_type)),
+                ValueType::Enum(schema) => schema.cases.iter().any(|case| {
+                    case.payload
+                        .fields()
+                        .iter()
+                        .any(|field| uses(&field.value_type))
+                }),
+                _ => false,
+            }
+        }
+        self.runtime.tables.iter().any(|table| {
+            !table.specialised_indexes.is_empty()
+                || table.columns.iter().any(|column| uses(&column.column_type))
+        })
+    }
+
     /// Return the compiled application tables used by the runtime.
     pub fn tables(&self) -> &[TableSchema] {
         &self.runtime.tables
@@ -510,6 +540,7 @@ impl RuntimeSchema {
             table.merge_strategies.clear();
             table.composite_indexes.clear();
             table.history = HistoryRetention::Full;
+            table.specialised_indexes.clear();
         }
         let mut bytes = b"jazz-schema-compatibility".to_vec();
         bytes.extend(canonical_schema_bytes(&schema));
@@ -877,6 +908,12 @@ pub struct TableSchema {
     /// stored, so not of the compatibility id.
     #[serde(default)]
     pub history: HistoryRetention,
+    /// Text, vector and geo indexes (SPEC 20.1), in name order. Part of
+    /// the version id (a domain of its own, see
+    /// [`SCHEMA_ID_DOMAIN_SPECIALISED_INDEXES`]), not of the compatibility
+    /// id: they change neither how rows are stored nor how they sync.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub specialised_indexes: Vec<crate::model::public_schema::SpecialisedIndex>,
 }
 
 impl TableSchema {
@@ -896,6 +933,7 @@ impl TableSchema {
             composite_indexes: BTreeSet::new(),
             merge_strategies: BTreeMap::new(),
             history: HistoryRetention::Full,
+            specialised_indexes: Vec::new(),
         }
     }
 
@@ -1577,7 +1615,41 @@ const SCHEMA_ID_DOMAIN_V3_ENUM_VARIANTS: &str = "jazz-schema-v3-enum-variants";
 /// schema with full-history tables only keeps its id.
 const SCHEMA_ID_DOMAIN_LATEST_ONLY: &str = "jazz-schema-latest-only-tables";
 
+/// Domain tag used exactly when some table declares a specialised index
+/// (SPEC 20.1): a `u64` count and, per such table in name order, its
+/// length-prefixed name, a `u64` index count and each index's
+/// length-prefixed `jazz-ix-decl/1` bytes in name order, then the encoding
+/// the schema would have without them. Every schema without specialised
+/// indexes keeps its id.
+const SCHEMA_ID_DOMAIN_SPECIALISED_INDEXES: &str = "jazz-schema-specialised-indexes";
+
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
+    let mut indexed = schema
+        .tables
+        .iter()
+        .filter(|table| !table.specialised_indexes.is_empty())
+        .collect::<Vec<_>>();
+    if indexed.is_empty() {
+        return latest_only_schema_bytes(schema);
+    }
+    indexed.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut bytes = Vec::new();
+    put_str(&mut bytes, SCHEMA_ID_DOMAIN_SPECIALISED_INDEXES);
+    put_u64(&mut bytes, indexed.len() as u64);
+    for table in indexed {
+        put_str(&mut bytes, &table.name);
+        let mut indexes = table.specialised_indexes.iter().collect::<Vec<_>>();
+        indexes.sort_by(|left, right| left.name.cmp(&right.name));
+        put_u64(&mut bytes, indexes.len() as u64);
+        for index in indexes {
+            put_bytes(&mut bytes, &index.canonical_bytes());
+        }
+    }
+    bytes.extend(latest_only_schema_bytes(schema));
+    bytes
+}
+
+fn latest_only_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
     let mut latest = schema
         .tables
         .iter()
@@ -1750,6 +1822,11 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &StorageColumnType) {
                 }
             }
         }
+        StorageColumnType::Vector(dimensions) => {
+            bytes.push(17);
+            bytes.extend_from_slice(&dimensions.to_le_bytes());
+        }
+        StorageColumnType::Point => bytes.push(18),
         _ => {
             panic!("raw stored-scalar backing types cannot appear in a Jazz schema")
         }

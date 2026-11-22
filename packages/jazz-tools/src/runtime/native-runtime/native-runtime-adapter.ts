@@ -140,6 +140,8 @@ import {
   writeDescriptor,
 } from "./native-row-codec.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
+import { assertVectorBytes } from "../vector.js";
+import { assertPointBytes } from "../point.js";
 import {
   isPermissionIntrospectionColumn,
   isProvenanceMagicColumn,
@@ -6032,6 +6034,15 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   schema_version_not_deployed: "write_rejected",
   // A refused subscriber, never a write's fate.
   identity_mismatch: "write_rejected",
+  // Search refusals (SPEC 20.11), never a write's fate.
+  index_server_only: "write_rejected",
+  index_search_unsupported_upstream: "write_rejected",
+  index_building: "write_rejected",
+  vector_search_unbounded: "write_rejected",
+  vector_candidates_over_cap: "write_rejected",
+  index_declaration_mismatch: "write_rejected",
+  search_query_too_long: "write_rejected",
+  search_too_broad: "write_rejected",
   // A skipped catalogue version, never a write's fate.
   schema_version_unsupported: "write_rejected",
 };
@@ -7332,6 +7343,14 @@ function decodeBytes(
     case "Bytea":
       if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Bytea", value: bytes.subarray(1).slice() };
+    case "Vector":
+      // The payload is the `f32le/1` bytes themselves, carried as Bytea.
+      assertVectorBytes(bytes, type.dimensions, fieldName);
+      return { type: "Bytea", value: bytes.slice() };
+    case "Point":
+      // The payload is the 16 `point-f64le/1` bytes, carried as Bytea.
+      assertPointBytes(bytes, fieldName);
+      return { type: "Bytea", value: bytes.slice() };
     case "Array":
       return {
         type: "Array",

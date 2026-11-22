@@ -35,6 +35,7 @@ managed-storage-emulation = ["testing"]
 
 [dependencies]
 jazz-text.workspace = true
+jazz-index.workspace = true
 jazz-types.workspace = true
 jazz-model.workspace = true
 jazz-protocol.workspace = true

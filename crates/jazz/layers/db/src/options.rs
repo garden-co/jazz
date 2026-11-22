@@ -518,6 +518,22 @@ pub enum Reason {
     /// A store configured as one user was asked to serve a session of
     /// another identity (code `Protocol`): relays serve one identity.
     IdentityMismatch,
+    /// A search through a server-only index on a client, offline or below `Remote` tier (code `Query`, SPEC 20.9).
+    IndexServerOnly,
+    /// A `Remote` search whose upstream did not offer `FEATURE_SPECIALISED_INDEXES` (code `Query`, SPEC 20.4).
+    IndexSearchUnsupportedUpstream,
+    /// A search through an index the authority is still building; retry later (code `Backpressure`, SPEC 20.3).
+    IndexBuilding,
+    /// A vector search on the authority whose other clauses do not narrow the table through an index (code `Query`, SPEC 20.5).
+    VectorSearchUnbounded,
+    /// A Rust-scored search with more than `VECTOR_EXACT_MAX` candidate rows (code `Query`, SPEC 20.5).
+    VectorCandidatesOverCap,
+    /// A search written against another declaration of the index than the one the node maintains (code `Query`, SPEC 20.4).
+    IndexDeclarationMismatch,
+    /// A text search whose query is over 1 KiB or 32 terms (code `Query`, SPEC 20.12).
+    SearchQueryTooLong,
+    /// A text search whose prefix stands for more than 1 000 terms or that would read more than 200 000 postings (code `Query`, SPEC 20.12).
+    SearchTooBroad,
     /// An upstream's catalogue named a schema version this build cannot read
     /// (a column type or other variant it does not know): the version is
     /// skipped and the store keeps syncing the versions it knows (code
@@ -527,7 +543,7 @@ pub enum Reason {
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 13] = [
+    pub const ALL: [Reason; 21] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -540,6 +556,14 @@ impl Reason {
         Reason::PredecessorRejected,
         Reason::SchemaVersionNotDeployed,
         Reason::IdentityMismatch,
+        Reason::IndexServerOnly,
+        Reason::IndexSearchUnsupportedUpstream,
+        Reason::IndexBuilding,
+        Reason::VectorSearchUnbounded,
+        Reason::VectorCandidatesOverCap,
+        Reason::IndexDeclarationMismatch,
+        Reason::SearchQueryTooLong,
+        Reason::SearchTooBroad,
         Reason::SchemaVersionUnsupported,
     ];
 
@@ -563,6 +587,14 @@ impl Reason {
             Reason::PredecessorRejected => "predecessor_rejected",
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
             Reason::IdentityMismatch => "identity_mismatch",
+            Reason::IndexServerOnly => "index_server_only",
+            Reason::IndexSearchUnsupportedUpstream => "index_search_unsupported_upstream",
+            Reason::IndexBuilding => "index_building",
+            Reason::VectorSearchUnbounded => "vector_search_unbounded",
+            Reason::VectorCandidatesOverCap => "vector_candidates_over_cap",
+            Reason::IndexDeclarationMismatch => "index_declaration_mismatch",
+            Reason::SearchQueryTooLong => "search_query_too_long",
+            Reason::SearchTooBroad => "search_too_broad",
             Reason::SchemaVersionUnsupported => "schema_version_unsupported",
         }
     }

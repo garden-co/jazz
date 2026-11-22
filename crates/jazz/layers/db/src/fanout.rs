@@ -1216,8 +1216,15 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
+        let planned = match crate::ix::search_of(&prepared.query) {
+            None => None,
+            Some(search) => {
+                Some(self.plan_search(prepared, policy.as_ref(), &claims, read, search)?)
+            }
+        };
         let compiled = self
             .read_ctx(prepared, policy.as_ref(), &claims, read)
+            .with_search(planned)
             .compile_query(&prepared.query, read.include_deleted)?;
         self.refuse_latest_only_cut(&compiled, read)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
@@ -1361,7 +1368,15 @@ impl Inner {
                         stored_canon(governing.column(&column), value, &self.kept_variants)?;
                     Some((governing.stored_name(&column).to_owned(), value))
                 });
+            // A text search's caps count every readable row holding its
+            // words, whatever the query's other filters say: a write outside
+            // the filter's key still has to wake it, or a later write would
+            // decide when it is refused (SPEC 20.7). The key the read policy
+            // pins stays: rows outside it are not readable.
+            let counts_past_filters = crate::ix::search_of(query)
+                .is_some_and(|search| matches!(search.op, crate::query::IndexOp::Match { .. }));
             root_key(query, &prepared.binding)
+                .filter(|_| !counts_past_filters)
                 // Only an application column is in a changed row's image;
                 // a key on anything else (`$createdBy.identity.subject`,
                 // `id`) would never be hit.
@@ -2287,7 +2302,7 @@ impl Inner {
         }) {
             return Some(Err(Error::new(ErrorCode::Query, "re-check failed (test)")));
         }
-        let order = group.prepared.query.order_by.clone();
+        let order = effective_order(&group.prepared.query);
         let projected = group.projected;
         if group.keys.len() != group.rows.len() {
             if !projected {
@@ -2308,7 +2323,13 @@ impl Inner {
         // The same query narrowed to the changed ids, as a root filter, so
         // SQLite seeks them by primary key instead of sorting the view.
         let ids_as_values: Vec<Value> = ids.iter().map(|id| Value::Uuid(id.0)).collect();
-        let kept = if read.view.is_none() && read.cut.is_none() {
+        // A search's statement is planned anew each time (SPEC 20.8): it
+        // binds what planning read (the changed rows' scores, the caps'
+        // admission), which no stamp of schema and sessions covers.
+        let kept = if read.view.is_none()
+            && read.cut.is_none()
+            && crate::ix::search_of(&group.prepared.query).is_none()
+        {
             self.root_plan(
                 &mut group.root_plans,
                 &group.prepared,
@@ -2350,6 +2371,10 @@ impl Inner {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
+        // (After the narrowed plan, which drained the index's queue.)
+        if let Err(error) = self.admit_recheck(&group.prepared, group.identity, &read) {
+            return Some(Err(error));
+        }
         // Relations of the changed roots only; the others' are unchanged.
         let fresh = match self.nest_relations_kept(
             &group.prepared,
@@ -2374,7 +2399,11 @@ impl Inner {
             .filter(|(_, row)| ids.contains(&row.id))
             .map(|(i, row)| (row.id, (i, row.clone(), group.keys[i].clone())))
             .collect();
-        let limit = group.prepared.query.limit;
+        // A nearest search's window holds its `k` best at most.
+        let limit = match nearest_k(&group.prepared.query) {
+            Some(k) => Some(group.prepared.query.limit.map_or(k, |limit| limit.min(k))),
+            None => group.prepared.query.limit,
+        };
         let page_ids_before: Vec<RowUuid> = if limit.is_some() {
             group.rows.iter().map(|row| row.id).collect()
         } else {
@@ -2577,34 +2606,73 @@ impl Inner {
         if !table.branch_by.is_empty() {
             return None;
         }
-        let mut columns = String::new();
-        for by in order {
-            match crate::compile::column_sql(table, "t", &by.column) {
-                Ok(sql) => {
-                    let sql = table
-                        .column(&by.column)
-                        .and_then(|column| column.rank_sql(&sql))
-                        .unwrap_or(sql);
-                    columns.push_str(&format!(", {sql}"));
-                }
-                Err(error) => return Some(Err(error)),
-            }
-        }
-        let sql = format!(
-            "SELECT t.id{columns} FROM {} AS t WHERE t.id IN (SELECT unhex(value) FROM json_each(?1))",
-            quote(&table.stored)
-        );
         let ids = crate::compile::json_ids(rows.iter().map(|row| row.id.0.as_bytes().as_slice()));
+        let (sql, params) = match crate::ix::search_of(&group.prepared.query) {
+            // A search's keys read its score (SPEC 20.8), which depends on
+            // the row alone.
+            Some(search) => {
+                let (_, claims) = self.read_sessions(&group.prepared, group.identity);
+                // Each row's score depends on the row alone: plan the search
+                // over just these rows, so a nearest search scores them and
+                // no other (SPEC 20.8).
+                let mut narrowed = group.prepared.clone();
+                narrowed.query.filters.push(crate::query::Predicate::In(
+                    crate::query::Operand::Column("id".to_owned()),
+                    rows.iter()
+                        .map(|row| crate::query::Operand::Literal(Value::Uuid(row.id.0)))
+                        .collect(),
+                ));
+                let planned = match self.plan_search(&narrowed, None, &claims, &group.read, search)
+                {
+                    Ok(planned) => planned,
+                    Err(error) => return Some(Err(error)),
+                };
+                match self
+                    .read_ctx(&group.prepared, None, &claims, &group.read)
+                    .with_search(Some(planned))
+                    .compile_sort_keys(&group.prepared.query, order, ids)
+                {
+                    Ok(compiled) => compiled,
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+            None => {
+                let mut columns = String::new();
+                for by in order {
+                    match crate::compile::column_sql(table, "t", &by.column) {
+                        Ok(sql) => {
+                            let sql = table
+                                .column(&by.column)
+                                .and_then(|column| column.rank_sql(&sql))
+                                .unwrap_or(sql);
+                            columns.push_str(&format!(", {sql}"));
+                        }
+                        Err(error) => return Some(Err(error)),
+                    }
+                }
+                (
+                    format!(
+                        "SELECT t.id{columns} FROM {} AS t WHERE t.id IN (SELECT unhex(value) FROM json_each(?1))",
+                        quote(&table.stored)
+                    ),
+                    vec![ids],
+                )
+            }
+        };
         let read = || -> rusqlite::Result<HashMap<Vec<u8>, Vec<Sql>>> {
             let mut statement = self.conn.prepare_cached(&sql)?;
-            let found = statement.query_map([&ids], |r| {
-                let id: Vec<u8> = r.get(0)?;
-                let values = (1..=order.len())
-                    .map(|i| r.get::<_, Sql>(i))
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok((id, values))
-            })?;
-            found.collect()
+            let found = statement
+                .query_map(crate::storage::params_from_iter(params.iter()), |r| {
+                    let id: Vec<u8> = r.get(0)?;
+                    let values = (1..=order.len())
+                        .map(|i| r.get::<_, Sql>(i))
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok((id, values))
+                })?
+                .collect();
+            #[cfg(any(test, feature = "testing"))]
+            super::count_vm_steps(&statement);
+            found
         };
         let mut found = match read() {
             Ok(found) => found,
@@ -3087,7 +3155,7 @@ impl Inner {
         if !group.recheck || group.projected {
             return;
         }
-        let order = group.prepared.query.order_by.clone();
+        let order = effective_order(&group.prepared.query);
         if let Some(Ok(keys)) = self.sort_keys(group, &order, false, &group.rows) {
             group.keys = keys;
         }
@@ -3770,7 +3838,19 @@ pub fn set_fanout_oracle_for_test(on: bool) {
 /// relations again, and what a write elsewhere does to the others' is
 /// the correlation watches' to find (see [`Group::rechecks`]).
 fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
-    !is_history_table(&query.table)
+    // A search is rechecked like any filter, its changed rows scored alone
+    // and spliced in by (score, id) (SPEC 20.8). A nearest search's `k` is
+    // its window's limit: a row that beats the window's last enters and the
+    // k-th leaves; a member that gets worse or leaves a full window re-runs.
+    // Its window is in score order only, so another order re-runs.
+    !crate::ix::search_of(query).is_some_and(|search| {
+        matches!(search.op, crate::query::IndexOp::Nearest { .. })
+            && !query.order_by.is_empty()
+            && query
+                .order_by
+                .iter()
+                .any(|by| by.column != crate::query::SCORE_COLUMN)
+    }) && !is_history_table(&query.table)
         && query.relation.is_none()
         && query.offset == 0
         && query.aggregate.is_none()
@@ -3904,9 +3984,30 @@ pub(crate) fn view_masks<'t>(
     out
 }
 
-/// Whether every order column of a query is among its shown columns.
+/// A nearest search's `k`.
+fn nearest_k(query: &Query) -> Option<usize> {
+    match &crate::ix::search_of(query)?.op {
+        crate::query::IndexOp::Nearest { k, .. } => Some(*k as usize),
+        _ => None,
+    }
+}
+
+/// A query's order as its SQL applies it: a search without an explicit
+/// order orders by `$score` (SPEC 20.4).
+pub(crate) fn effective_order(query: &Query) -> Vec<crate::query::OrderBy> {
+    if query.order_by.is_empty() && crate::ix::search_of(query).is_some() {
+        return vec![crate::query::OrderBy {
+            column: crate::query::SCORE_COLUMN.to_owned(),
+            direction: crate::query::OrderDirection::Asc,
+        }];
+    }
+    query.order_by.clone()
+}
+
+/// Whether every order column of a query is among its shown columns
+/// (`$score` never is).
 fn order_projected(query: &Query, compiled: &Compiled) -> bool {
-    query.order_by.iter().all(|key| {
+    effective_order(query).iter().all(|key| {
         key.column == "id"
             || compiled
                 .projection

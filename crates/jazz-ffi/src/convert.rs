@@ -124,6 +124,37 @@ pub(crate) fn to_value(
                 .map(|(at, item)| to_value(item, element, false, &format!("{path}[{at}]")))
                 .collect::<Result<_>>()?,
         ),
+        // A vector is an array of exactly `dimensions` numbers, each rounded
+        // to binary32 and stored as `f32le/1` (SPEC 20.1).
+        ColumnType::Vector { dimensions } => {
+            let items = json
+                .as_array()
+                .ok_or_else(|| wrong("an array of numbers"))?;
+            if items.len() != *dimensions as usize {
+                return Err(wrong(&format!("an array of {dimensions} numbers")));
+            }
+            let mut bytes = Vec::with_capacity(items.len() * 4);
+            for item in items {
+                let value = item
+                    .as_f64()
+                    .map(|x| x as f32)
+                    .filter(|x| x.is_finite())
+                    .ok_or_else(|| wrong("finite numbers within float32 range"))?;
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            Value::Bytea(bytes)
+        }
+        // A point is `[lng, lat]` in degrees, stored as `point-f64le/1`.
+        ColumnType::Point => {
+            let pair = json
+                .as_array()
+                .filter(|items| items.len() == 2)
+                .and_then(|items| Some((items[0].as_f64()?, items[1].as_f64()?)))
+                .ok_or_else(|| wrong("[lng, lat], two numbers"))?;
+            let bytes = jazz_app_support::jazz::records::encode_point_f64le(pair.0, pair.1)
+                .map_err(|_| wrong("[lng, lat] with lng in -180..180 and lat in -90..90"))?;
+            Value::Bytea(bytes.to_vec())
+        }
         ColumnType::TransactionId | ColumnType::Row { .. } => {
             return Err(unsupported(format!(
                 "writing a column of type {column_type:?} ({path})"
@@ -164,7 +195,26 @@ pub(crate) fn to_json(value: Value, column_type: Option<&ColumnType>) -> Json {
         Value::TransactionId(bytes) => {
             Json::String(bytes.iter().map(|b| format!("{b:02x}")).collect())
         }
-        Value::Bytea(bytes) => Json::String(BASE64.encode(bytes)),
+        Value::Bytea(bytes) => match column_type {
+            // A vector reads back as its numbers (SPEC 20.1).
+            Some(ColumnType::Vector { .. }) => Json::Array(
+                bytes
+                    .chunks_exact(4)
+                    .map(|chunk| {
+                        let x = f32::from_le_bytes(chunk.try_into().expect("four bytes"));
+                        Number::from_f64(f64::from(x)).map_or(Json::Null, Json::Number)
+                    })
+                    .collect(),
+            ),
+            // A point reads back as `[lng, lat]`.
+            Some(ColumnType::Point) => {
+                match jazz_app_support::jazz::records::decode_point_f64le(&bytes) {
+                    Ok([lng, lat]) => json!([lng, lat]),
+                    Err(_) => Json::String(BASE64.encode(bytes)),
+                }
+            }
+            _ => Json::String(BASE64.encode(bytes)),
+        },
         Value::Array(values) => {
             let element = column_type.and_then(ColumnType::element_type);
             Json::Array(
@@ -1029,5 +1079,33 @@ mod tests {
             );
         }
         assert_eq!(to_json(Value::Double(0.5), None), json!(0.5));
+    }
+
+    /// A vector column takes and gives its numbers as a JSON array, stored
+    /// as `f32le/1` bytes; a wrong length or a non-finite number is refused.
+    #[test]
+    fn vectors_cross_as_arrays_of_numbers() {
+        let vector = ColumnType::Vector { dimensions: 2 };
+        let value = to_value(&json!([0.5, -1]), &vector, false, "e").unwrap();
+        assert_eq!(
+            value,
+            Value::Bytea([0.5f32.to_le_bytes(), (-1f32).to_le_bytes()].concat())
+        );
+        assert_eq!(to_json(value, Some(&vector)), json!([0.5, -1.0]));
+        assert!(to_value(&json!([1]), &vector, false, "e").is_err());
+        assert!(to_value(&json!([1, 1e39]), &vector, false, "e").is_err());
+        assert!(to_value(&json!("AAAA"), &vector, false, "e").is_err());
+    }
+
+    /// A point column takes and gives `[lng, lat]`; out of range is refused.
+    #[test]
+    fn points_cross_as_lng_lat_pairs() {
+        let value = to_value(&json!([13.4, 52.5]), &ColumnType::Point, false, "p").unwrap();
+        assert_eq!(
+            to_json(value, Some(&ColumnType::Point)),
+            json!([13.4, 52.5])
+        );
+        assert!(to_value(&json!([13.4, 95.0]), &ColumnType::Point, false, "p").is_err());
+        assert!(to_value(&json!([13.4]), &ColumnType::Point, false, "p").is_err());
     }
 }

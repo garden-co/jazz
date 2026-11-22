@@ -312,6 +312,27 @@ fn refuse_shared_column_changes(
                     .join(", ")
             )));
         }
+        // SPEC 20.1: no lens converts to, from or between vector types (a
+        // vector's dimensions are its type), so say so rather than "not yet".
+        if matches!(source.column_type, ColumnType::Vector { .. })
+            || matches!(column.column_type, ColumnType::Vector { .. })
+        {
+            return Err(CodegenError::unsupported(format!(
+                "Changing the type of column `{name}` to or from a vector, or its dimensions, \
+                 is not supported: no migration converts vectors (embeddings from another model \
+                 are not comparable). {KEEP_VALUES_ADVICE}"
+            )));
+        }
+        // SPEC 20.1: no lens converts to or from a point (which of two
+        // columns is the latitude is not something a migration can guess).
+        if matches!(source.column_type, ColumnType::Point)
+            != matches!(column.column_type, ColumnType::Point)
+        {
+            return Err(CodegenError::unsupported(format!(
+                "Changing the type of column `{name}` to or from a point is not supported: no \
+                 migration converts points. {KEEP_VALUES_ADVICE}"
+            )));
+        }
         let what = if matches!(
             (&source.column_type, &column.column_type),
             (ColumnType::Json { .. }, ColumnType::Json { .. })
@@ -656,7 +677,16 @@ fn unchanged_rows_changes(from: &TableSchema, to: &TableSchema) -> Vec<&'static 
         .iter()
         .filter_map(|c| column(from, &c.name).map(|s| (s, c.clone())))
         .collect();
-    if from.indexed_columns != to.indexed_columns || from.composite_indexes != to.composite_indexes
+    let specialised = |t: &TableSchema| {
+        let mut indexes = t.specialised_indexes.clone();
+        indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        indexes
+    };
+    // Specialised indexes (SPEC 20.1) are derived state too: adding,
+    // changing or dropping one is an index-only change.
+    if from.indexed_columns != to.indexed_columns
+        || from.composite_indexes != to.composite_indexes
+        || specialised(from) != specialised(to)
     {
         changes.push("indexes");
     }
