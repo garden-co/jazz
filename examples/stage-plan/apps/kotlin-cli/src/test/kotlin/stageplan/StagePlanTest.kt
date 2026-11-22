@@ -395,15 +395,19 @@ class StagePlanTest {
         val dir = kotlin.io.path.createTempDirectory("jazz-held-process").toFile()
         val auth = tools.jazz.JazzAuth.Bearer { "token-user-other" }
         val lock = java.io.File(dir, "jazz.lock")
-        val holder = ProcessBuilder("flock", "--exclusive", lock.path, "sh", "-c", "echo held; exec sleep 60").start()
+        // One process holds it, this test's own child: the shell opens the file,
+        // flock locks that open file and exits, and sleep inherits it. It is
+        // killed with SIGKILL, as a killed app would be: a host that ignores
+        // SIGTERM passes that on to its children, which then never exit.
+        val holder = ProcessBuilder(
+            "sh", "-c", "exec 9>>\"$1\" && flock --exclusive 9 && echo held && exec sleep 60", "sh", lock.path,
+        ).start()
         try {
             assertEquals("held", holder.inputStream.bufferedReader().readLine())
             kotlin.test.assertFailsWith<tools.jazz.JazzException.Refused> { openAsUser(endpoint, appId, auth, dir.path) }
         } finally {
-            // Its children have the lock too: gone before the store is opened.
-            val processes = holder.descendants().toList() + holder.toHandle()
-            processes.forEach { it.destroy() }
-            processes.forEach { it.onExit().get(30, java.util.concurrent.TimeUnit.SECONDS) }
+            holder.destroyForcibly()
+            kotlin.test.assertTrue(holder.waitFor(30, java.util.concurrent.TimeUnit.SECONDS), "the lock's holder didn't exit")
         }
         openAsUser(endpoint, appId, auth, dir.path).use { jazz ->
             kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(jazz.session.value)
