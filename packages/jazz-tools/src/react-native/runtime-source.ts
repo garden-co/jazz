@@ -175,7 +175,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
             claims: selected.claims,
             authMode:
               metadata.issuer === "urn:jazz:local-first"
-                ? "local-first"
+                ? "device-account"
                 : metadata.issuer === "urn:jazz:anonymous"
                   ? "anonymous"
                   : "external",
@@ -275,6 +275,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         setTrustedReservedSession(appContext, getTrustedReservedSession(context.config));
         return JazzRuntimeClient.connectWithRuntime(runtime, appContext, {
           onAuthFailure: context.onAuthFailure,
+          onAuthRestored: context.onAuthRestored,
         });
       } catch (error) {
         this.lifecycleForeground = null;
@@ -364,7 +365,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
     const payload = parseJwtPayload(token);
     const session =
       payload?.iss === "urn:jazz:local-first"
-        ? internalSessionFromVerifiedReservedJwtPayload(payload, "local-first")
+        ? internalSessionFromVerifiedReservedJwtPayload(payload, "device-account")
         : payload && internalSessionFromJwtPayload(payload);
     if (!session) throw new Error("Invalid account refresh token");
     this.foregroundFactory!.refreshAccountSession!(

@@ -800,6 +800,37 @@ fn upload_status_has_pinned_bytes_and_answers() {
     fixture.close(foreground);
 }
 
+fn pending_upload_rows(fixture: &Fixture, foreground: u64, table: &str) -> Vec<[u8; 16]> {
+    match fixture.execute(
+        foreground,
+        ForegroundDbCommandRequest::PendingUploadRows {
+            table: table.to_owned(),
+        },
+    ) {
+        ForegroundDbCommandResponse::PendingUploadRows { rows } => rows,
+        response => panic!("PendingUploadRows: {response:?}"),
+    }
+}
+
+#[test]
+fn pending_upload_rows_has_pinned_bytes() {
+    // Appended command and answer: existing ordinals stay fixed.
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::PendingUploadRows {
+            table: "t".to_owned()
+        })
+        .unwrap(),
+        vec![41, 1, b't']
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::PendingUploadRows {
+            rows: vec![[0xab; 16]]
+        })
+        .unwrap(),
+        [vec![32, 1], vec![0xab; 16]].concat()
+    );
+}
+
 fn upload_status(fixture: &Fixture, foreground: u64) -> serde_json::Value {
     let ForegroundDbCommandResponse::UploadStatus { status_json } =
         fixture.execute(foreground, ForegroundDbCommandRequest::UploadStatus)
@@ -816,10 +847,19 @@ fn upload_status_counts_a_write_held_by_both_stores_once() {
     let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x12);
     let foreground = fixture.open(&capability);
     fixture.insert_todo(foreground, [0xa1; 16], "local only");
-    // Before any tick the commit is the foreground's alone.
+    // Before any tick the commit is the foreground's alone: an answer read
+    // from the relay's store only would call it sent.
+    assert_eq!(
+        pending_upload_rows(&fixture, foreground, "todos"),
+        [[0xa1; 16]]
+    );
     assert_eq!(upload_status(&fixture, foreground)["pending"], 1);
     fixture.tick(foreground);
-    // Now the relay store holds it too: one write, not two.
+    // Now both stores hold it: one write, not two.
+    assert_eq!(
+        pending_upload_rows(&fixture, foreground, "todos"),
+        [[0xa1; 16]]
+    );
     assert_eq!(
         upload_status(&fixture, foreground)["pending"],
         1,
@@ -860,10 +900,81 @@ fn pending_uploads_count_a_write_the_store_recovered_after_a_restart() {
     assert_eq!(status["pending"], 1, "the recovered commit is counted");
     assert!(status["oldestPendingAt"].as_u64().is_some_and(|at| at > 0));
     assert_eq!(
+        pending_upload_rows(&second, foreground, "todos"),
+        [[0xa2; 16]],
+        "the recovered commit still names its row"
+    );
+    assert_eq!(
         second.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount),
         ForegroundDbCommandResponse::PendingUploadCount { count: 1 },
         "the count older hosts read agrees"
     );
+    second.close(foreground);
+}
+
+/// ```text
+/// process 1: foreground ──insert(t1)──► relay store ──✗ no server
+/// process 2: a new foreground; then the server connects and accepts t1
+///   before: pending 1, rows [t1]
+///   after:  pending 0, rows [], and the revision moved (the only signal a
+///           foreground gets: no session of its own waits for t1)
+/// ```
+#[test]
+fn a_recovered_row_leaves_the_pending_set_when_the_server_accepts_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("alice.sqlite");
+    let (server, head) = {
+        let bundle = renamed_label_bundle();
+        server_with_history(&bundle)
+    };
+    let bundle = renamed_label_bundle();
+    {
+        let first = Fixture::new();
+        let capability = first.admit_app(&path, "alice", 0x14, &head, Some(&bundle));
+        let foreground = first.open(&capability);
+        first.insert_todo(foreground, [0xa3; 16], "written offline");
+        let other = first.open(&capability);
+        first.wait_for_row(other, (RowUuid::from_bytes([0xa3; 16]), "written offline"));
+        first.close(foreground);
+        first.close(other);
+    }
+    let second = Fixture::new();
+    let capability = second.admit_app(&path, "alice", 0x14, &head, Some(&bundle));
+    let foreground = second.open(&capability);
+    second.tick(foreground);
+    let before = upload_status(&second, foreground);
+    assert_eq!(before["pending"], 1, "the recovered commit is counted");
+    assert_eq!(
+        second.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount),
+        ForegroundDbCommandResponse::PendingUploadCount { count: 1 },
+        "the count older hosts read agrees"
+    );
+    assert_eq!(
+        pending_upload_rows(&second, foreground, "todos"),
+        [[0xa3; 16]]
+    );
+
+    let relay = second.open_relay(&capability);
+    let upstream = server
+        .accept_subscriber(Fixture::author(0x14), Default::default())
+        .unwrap();
+    for _ in 0..200 {
+        second.carry(relay, &upstream);
+        second.tick(foreground);
+        if upload_status(&second, foreground)["pending"] == 0 {
+            break;
+        }
+    }
+    let after = upload_status(&second, foreground);
+    assert_eq!(
+        after["pending"], 0,
+        "the server accepted the recovered commit"
+    );
+    assert!(
+        pending_upload_rows(&second, foreground, "todos").is_empty(),
+        "an accepted row is not pending"
+    );
+    assert_ne!(after["pendingRevision"], before["pendingRevision"]);
     second.close(foreground);
 }
 
@@ -1548,7 +1659,18 @@ fn a_store_is_rebuilt_once_per_schema_version() {
     let _alice = first
         .attach_client(identity(0x02), BTreeMap::new())
         .unwrap();
+    let revision = |relay: &NativeRelay| {
+        relay
+            .run(|worker| Ok(worker.persistent_pending_revision()))
+            .unwrap()
+    };
+    let before = revision(&first);
     assert_eq!(carry(&first), 2, "refused, rebuilt once, refused again");
+    assert!(
+        revision(&first) > before,
+        "the rebuilt store continues the pending revision, so a status read \
+         across the rebuild is never taken for an unchanged one"
+    );
     assert!(first.upstream_refusal().unwrap().is_some());
     drop(first);
 
@@ -1566,4 +1688,71 @@ fn a_store_is_rebuilt_once_per_schema_version() {
         Some("store_opened_without_migrations"),
         "the refusal is reported for the app"
     );
+}
+
+/// A foreground that stops draining its subscription holds a bounded relay
+/// buffer: past it, events wait in the core, which coalesces the backlog
+/// past its limit (5 rows here) into one reset. Each drain returns at most
+/// the buffer's worth, refilling from the core, and the foreground ends
+/// with every row.
+#[test]
+fn a_subscription_that_is_not_drained_buffers_a_bounded_number_of_events() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("buffer.sqlite"), "alice", 0x31);
+    let alice = fixture.open(&capability);
+    let ForegroundDbCommandResponse::Subscribed { subscription } = fixture.execute(
+        alice,
+        ForegroundDbCommandRequest::Subscribe {
+            query: todos_query(),
+            options_json: r#"{"backlog_rows":5}"#.into(),
+        },
+    ) else {
+        panic!("subscription opens");
+    };
+    for n in 0..40u8 {
+        fixture.insert_todo(alice, [0x40 + n; 16], &format!("todo {n}"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut resets = 0;
+    for _ in 0..100 {
+        let ForegroundDbCommandResponse::SubscriptionEvents { events } = fixture.execute(
+            alice,
+            ForegroundDbCommandRequest::DrainSubscription { subscription },
+        ) else {
+            panic!("drain answers events");
+        };
+        assert!(
+            events.len() <= crate::relay::FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS,
+            "a drain returned {} events",
+            events.len()
+        );
+        for event in events {
+            let (ForegroundSubscriptionEvent::Delta { delta, reset, .. }
+            | ForegroundSubscriptionEvent::StructuredDelta { delta, reset, .. }) = event
+            else {
+                panic!("unexpected event: {event:?}");
+            };
+            if reset {
+                resets += 1;
+                seen.clear();
+            }
+            let (added, _) = decode_subscription_delta_rows(&delta).unwrap();
+            seen.extend(
+                added
+                    .into_iter()
+                    .flat_map(|batch| batch.rows)
+                    .map(|row| row.row_id),
+            );
+        }
+        if seen.len() == 40 {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 40, "every row reaches the foreground");
+    assert!(
+        resets >= 2,
+        "the opening, then the coalesced backlog: {resets} resets"
+    );
+    fixture.close(alice);
 }

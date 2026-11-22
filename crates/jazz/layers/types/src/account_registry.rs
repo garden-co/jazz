@@ -20,10 +20,10 @@ pub struct Principal {
 }
 
 impl Principal {
-    /// Check the principal names a valid identity; `allow_local_first`
-    /// admits local-first principals (a UUID subject).
-    pub fn validate(&self, allow_local_first: bool) -> Result<(), AccountError> {
-        if allow_local_first && self.issuer == crate::identity::LOCAL_FIRST_ISSUER {
+    /// Check the principal names a valid identity; `allow_device_accounts`
+    /// admits device-account principals (a UUID subject).
+    pub fn validate(&self, allow_device_accounts: bool) -> Result<(), AccountError> {
+        if allow_device_accounts && self.issuer == crate::identity::DEVICE_ACCOUNT_ISSUER {
             if uuid::Uuid::parse_str(&self.subject).is_ok() {
                 return Ok(());
             }
@@ -52,9 +52,9 @@ impl AccountId {
 }
 
 /// Deterministic founding account, scoped to the application's registry.
-/// `subject` must be the identity derived from a verified local-first key.
+/// `subject` must be the identity derived from a verified device-account key.
 /// This does not authenticate a caller or admit an arbitrary claimed subject.
-pub fn local_first_account_id(app: Uuid, subject: &str) -> AccountId {
+pub fn device_account_id(app: Uuid, subject: &str) -> AccountId {
     let mut name = b"jazz-account-founder-v1\0".to_vec();
     name.extend_from_slice(subject.as_bytes());
     AccountId(Uuid::new_v5(&app, &name))
@@ -106,9 +106,11 @@ pub enum AccountError {
 /// neither is trusted from the request body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountCommand {
-    /// Register a verified local-first founding identity deterministically.
-    FoundLocalFirst {
-        /// Verified local-first principal derived from its signing key.
+    /// Register a verified device-account founding identity deterministically.
+    // Serialized under its original name: commands are wire and may be persisted.
+    #[serde(rename = "FoundLocalFirst")]
+    FoundDeviceAccount {
+        /// Verified device-account principal derived from its signing key.
         principal: Principal,
         /// Application namespace selected by the serving authority.
         app: Uuid,
@@ -210,12 +212,12 @@ pub fn apply<S: AccountState>(
     command: &AccountCommand,
 ) -> Result<AccountCommandResult, S::Error> {
     match command {
-        AccountCommand::FoundLocalFirst { principal, app } => {
+        AccountCommand::FoundDeviceAccount { principal, app } => {
             principal.validate(true)?;
-            if principal.issuer != crate::identity::LOCAL_FIRST_ISSUER {
+            if principal.issuer != crate::identity::DEVICE_ACCOUNT_ISSUER {
                 return Err(AccountError::InvalidPrincipal.into());
             }
-            let account = local_first_account_id(*app, &principal.subject);
+            let account = device_account_id(*app, &principal.subject);
             if let Some(existing) = state.assignment(principal)? {
                 if existing.account != account {
                     return Err(AccountError::AlreadyAssigned.into());
@@ -504,6 +506,29 @@ mod tests {
     }
 
     #[test]
+    fn found_device_account_keeps_its_wire_name() {
+        let command = AccountCommand::FoundDeviceAccount {
+            principal: principal("alice"),
+            app: Uuid::from_u128(1),
+        };
+        let json = serde_json::to_value(&command).unwrap();
+        assert!(json.get("FoundLocalFirst").is_some(), "{json}");
+        assert_eq!(
+            serde_json::from_value::<AccountCommand>(json).unwrap(),
+            command
+        );
+    }
+
+    #[test]
+    fn device_account_id_derivation_is_pinned() {
+        let subject = "00000000-0000-0000-0000-000000000002";
+        assert_eq!(
+            device_account_id(Uuid::from_u128(1), subject),
+            AccountId(Uuid::parse_str("f80f48bc-b7b7-523f-8267-6fe2082572bf").unwrap())
+        );
+    }
+
+    #[test]
     fn competing_claims_have_one_winner_and_revocation_never_frees_assignment() {
         let mut registry = AccountRegistry::default();
         let alice = principal("alice");
@@ -611,17 +636,17 @@ mod founding_tests {
     fn founding_identity_matches_portable_handle_fixture_and_cannot_reregister() {
         let app = crate::app_id::AppId::from_name("account-fixture");
         let principal = Principal {
-            issuer: crate::identity::LOCAL_FIRST_ISSUER.into(),
+            issuer: crate::identity::DEVICE_ACCOUNT_ISSUER.into(),
             subject: "00000000-0000-4000-8000-000000000001".into(),
         };
         assert_eq!(
-            local_first_account_id(*app.uuid(), &principal.subject)
+            device_account_id(*app.uuid(), &principal.subject)
                 .0
                 .to_string(),
             "30f0ec9a-0a5a-5940-b329-274194a6e24b"
         );
         let mut registry = AccountRegistry::default();
-        let command = AccountCommand::FoundLocalFirst {
+        let command = AccountCommand::FoundDeviceAccount {
             principal: principal.clone(),
             app: *app.uuid(),
         };

@@ -6,6 +6,8 @@ import {
   linkFailureOf,
   offlineLink,
   sameSyncStatus,
+  samePendingUploadRows,
+  sameUploadStatus,
   syncStatus,
   type UpstreamLinkStatus,
   uploadStatusFromCount,
@@ -101,6 +103,7 @@ describe("syncStatus", () => {
       oldestPendingAt: 1_000,
       rejected: 3,
       lastRejection: { code: "permission_denied", message: "no", at: 2_000 },
+      pendingRevision: 0,
     };
     const status = syncStatus(CONNECTED, uploads);
     expect(status).toMatchObject({
@@ -141,5 +144,22 @@ describe("syncStatus", () => {
     expect(linkFailureOf(offlineLink("stopped"), undefined)?.kind).toBe("stopped");
     expect(linkFailureOf(offlineLink("disconnected"), "x")).toBeNull();
     expect(linkFailureOf(CONNECTED, "x")).toBeNull();
+  });
+});
+
+describe("pending upload revision", () => {
+  it("tells apart two statuses that differ only in which writes are pending", () => {
+    // One write settled as another joined: same count, same oldest time.
+    const before = { ...uploadStatusFromCount(1), oldestPendingAt: 5, pendingRevision: 1 };
+    const after = { ...before, pendingRevision: 3 };
+    expect(sameUploadStatus(before, after)).toBe(false);
+    expect(sameUploadStatus(after, { ...after })).toBe(true);
+  });
+
+  it("compares pending rows by content, and unknown only with unknown", () => {
+    expect(samePendingUploadRows(["a", "b"], ["a", "b"])).toBe(true);
+    expect(samePendingUploadRows(["a"], ["b"])).toBe(false);
+    expect(samePendingUploadRows([], null)).toBe(false);
+    expect(samePendingUploadRows(null, null)).toBe(true);
   });
 });

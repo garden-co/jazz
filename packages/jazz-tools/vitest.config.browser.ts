@@ -29,6 +29,7 @@ import {
   jazzAppSignUp,
   jazzAppRequest,
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   stopJazzServerByUrl,
   jazzServerTransportControlCommands,
 } from "./tests/browser/testing-server-node.js";
@@ -145,6 +146,7 @@ export default defineConfig({
     __JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__: JSON.stringify(realisticBrowserLimitOverrides),
   },
   plugins: [
+    jazzBrowserServerLifecycle,
     workerFaultBundle.plugin,
     ...(sealedWasmPackage || correctnessSnapshot
       ? [
@@ -309,7 +311,6 @@ export default defineConfig({
       ...(excludeRealisticBrowserBench ? [REALISTIC_BROWSER_BENCH_TEST] : []),
       ...unnamedStorageQuotaTests,
     ],
-    globalSetup: ["tests/browser/global-setup.ts"],
     testTimeout: 30000,
   },
 });

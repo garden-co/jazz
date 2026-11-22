@@ -98,9 +98,10 @@ impl Range {
         }
     }
 
-    /// The range of the UTF-8 byte offsets `range` (`str` indices, ordered)
-    /// of `text`, the value at `version`. Offsets inside a code point or
-    /// past the end are refused. The range is the same as
+    /// The range of the UTF-8 byte offsets `range` (`str` indices; a reversed
+    /// range is put in order, as [`Range::capture`] does) of `text`, the
+    /// value at `version`. Offsets inside a code point or past the end are
+    /// refused. The range is the same as
     /// [`Range::capture`]'s: its `start` and `end` hints still count UTF-16
     /// code units, so hosts that count those resolve it too.
     pub fn capture_utf8(

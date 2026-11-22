@@ -123,14 +123,16 @@ fn post(server: &Db, n: u32) {
     bytes[12..].copy_from_slice(&n.to_be_bytes());
     let cells: BTreeMap<String, Value> =
         [("body".to_owned(), Value::String(format!("m{n}")))].into();
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "messages",
-            RowUuid::from_bytes(bytes),
-            AuthorSubject::SYSTEM,
-            cells,
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "messages",
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes(bytes)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
 }
 
 #[test]

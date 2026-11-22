@@ -1,42 +1,28 @@
 import { SessionKey } from "./session-key.js";
-import { warnSessionHookDeprecated } from "../session/deprecated-session-hook.js";
 import {
-  computed,
   defineComponent,
-  h,
   inject,
-  onBeforeUpdate,
-  onMounted,
   onUnmounted,
   provide,
   shallowRef,
   triggerRef,
   watch,
-  type ComputedRef,
   type InjectionKey,
   type PropType,
   type ShallowRef,
 } from "vue";
-import type { PublicSession } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
-import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
-import { serializeClientConfig } from "../runtime/client-config-key.js";
-import { openJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
+import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import {
   refuseAutoAttachDevTools,
   type NoAutoAttachDevTools,
 } from "../runtime/removed-provider-props.js";
-import { assertNoClassicProviderProps } from "../classic-api.js";
 import { toError } from "../runtime/util.js";
 
 export type JazzClientContextValue = CreatedJazzClient;
 
 export interface JazzClientProviderProps extends NoAutoAttachDevTools {
   client: CreatedJazzClient | Promise<CreatedJazzClient>;
-}
-
-export interface LegacyJazzProviderProps extends NoAutoAttachDevTools {
-  config: DbConfig;
 }
 
 const JazzContextKey: InjectionKey<ShallowRef<JazzClientContextValue | null>> = Symbol("jazz");
@@ -125,132 +111,6 @@ export const JazzClientProvider = defineComponent({
 });
 
 /**
- * Creates a Jazz client from a reactive config and makes it available to child components.
- * Clients created by this provider are shut down when the config changes or the provider unmounts.
- */
-export const LegacyJazzProvider = defineComponent({
-  name: "JazzProvider",
-  props: {
-    config: {
-      type: Object as PropType<LegacyJazzProviderProps["config"]>,
-      required: true,
-    },
-  },
-  setup(props, { slots, attrs }) {
-    refuseAutoAttachDevTools("JazzProvider", attrs);
-    assertNoClassicProviderProps("JazzProvider", attrs);
-    onBeforeUpdate(() => {
-      refuseAutoAttachDevTools("JazzProvider", attrs);
-      assertNoClassicProviderProps("JazzProvider", attrs);
-    });
-    const clientRef = shallowRef<CreatedJazzClient | null>(null);
-    const errorRef = shallowRef<Error | null>(null);
-    let activeClient: CreatedJazzClient | null = null;
-    let lifecycle = Promise.resolve();
-    let runId = 0;
-    let stopConfigWatch: (() => void) | null = null;
-    const noConfigKey = Symbol("no config key");
-    let lastRequestedConfigKey: string | typeof noConfigKey = noConfigKey;
-
-    const queueConfigRequest = (createClient: () => Promise<CreatedJazzClient>) => {
-      const activeRunId = ++runId;
-      clientRef.value = null;
-      errorRef.value = null;
-
-      lifecycle = lifecycle
-        .then(async () => {
-          if (activeClient) {
-            const previousClient = activeClient;
-            activeClient = null;
-            await previousClient.shutdown();
-          }
-          if (activeRunId !== runId) return;
-          assertNoClassicProviderProps("JazzProvider", attrs);
-
-          const client = await createClient();
-          if (activeRunId !== runId) {
-            await client.shutdown();
-            return;
-          }
-          try {
-            assertNoClassicProviderProps("JazzProvider", attrs);
-          } catch (reason) {
-            await client.shutdown();
-            throw reason;
-          }
-
-          activeClient = client;
-          clientRef.value = client;
-        })
-        .catch((reason) => {
-          if (activeRunId === runId) {
-            // Failed requests may be retried with an equivalent config. Stale
-            // failures must preserve the identity of a newer pending request.
-            lastRequestedConfigKey = noConfigKey;
-            errorRef.value = toError(reason);
-          }
-        });
-    };
-
-    // A config-owned client touches browser-only storage.  Do not begin creating
-    // it during SSR: rendering the fallback on the server must be side-effect
-    // free, and the same fallback is rendered for the initial client pass.
-    onMounted(() => {
-      stopConfigWatch = watch(
-        () => props.config,
-        (config) => {
-          const configSnapshot = { ...config } as DbConfig;
-          let configKey: string;
-          try {
-            configKey = serializeClientConfig(configSnapshot);
-          } catch (reason) {
-            lastRequestedConfigKey = noConfigKey;
-            queueConfigRequest(async () => {
-              throw reason;
-            });
-            return;
-          }
-
-          if (configKey === lastRequestedConfigKey) return;
-          // Record the request before changing lifecycle state so a re-entrant
-          // watcher observes this request as the latest one.
-          lastRequestedConfigKey = configKey;
-          queueConfigRequest(() => openJazzClient(configSnapshot));
-        },
-        { deep: true, immediate: true },
-      );
-    });
-
-    onUnmounted(() => {
-      stopConfigWatch?.();
-      stopConfigWatch = null;
-      runId += 1;
-      clientRef.value = null;
-      const shuttingDown = lifecycle.then(async () => {
-        if (activeClient) {
-          const client = activeClient;
-          activeClient = null;
-          await client.shutdown();
-        }
-      });
-      shuttingDown.catch(() => {});
-      lifecycle = shuttingDown;
-    });
-
-    return () => {
-      if (errorRef.value) throw errorRef.value;
-      if (!clientRef.value) return slots.fallback?.() ?? null;
-
-      return h(
-        JazzClientProvider,
-        { client: clientRef.value },
-        { default: slots.default, fallback: slots.fallback },
-      );
-    };
-  },
-});
-
-/**
  * Get the current Jazz client, including the backing {@link Db}, session snapshot,
  * and shutdown helper.
  */
@@ -274,25 +134,6 @@ export function injectOptionalJazzClient(): ShallowRef<JazzClientContextValue | 
  */
 export function useDb(): Db {
   return useJazzClient().db;
-}
-
-/**
- * Subscribe to the current Jazz {@link PublicSession}.
- * Returns a {@link ComputedRef} whose `.value` updates automatically as the user
- * logs in or out — use it in templates or computed properties.
- *
- * @deprecated Use `useJazzSession().snapshot.value.user`: the same user, with
- * `user` as `accountId`. Warns once in development; removed in a later alpha.
- */
-export function useSession(): ComputedRef<PublicSession | null> {
-  warnSessionHookDeprecated("useSession()", "useJazzSession().snapshot.value.user");
-  const ctx = inject(JazzContextKey, null);
-  if (!ctx) {
-    throw new Error(
-      "Jazz Vue composables must be used within <JazzProvider> or <JazzClientProvider>",
-    );
-  }
-  return computed(() => ctx.value?.session ?? null);
 }
 
 export { JazzProvider, type JazzProviderProps } from "./session.js";

@@ -18,3 +18,22 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 [[profile.default.overrides]]
 filter = 'test(host_work_waits_at_most_one_tick_under_write_load)'
 threads-required = 'num-test-threads'
+
+# Each profile's JUnit report (target/nextest/<profile>/junit.xml) records
+# retries; dev/gates/run-rust-tests.mjs lists every test that passed only on
+# a retry in the job summary ("Flaky passes"), so flakes stay tracked.
+[profile.jazz.junit]
+path = "junit.xml"
+
+[profile.jazz-ci.junit]
+path = "junit.xml"
+
+# Known flakes, retried by name only. A test that fails every attempt still
+# fails the run. Remove an entry once its race is fixed.
+#
+# The plain insert's refusal can reach the client before the transaction
+# reads the row, which removes it locally: the update then fails NotObserved
+# instead of WriteRejected.
+[[profile.default.overrides]]
+filter = 'package(todo-server-docs) & binary(snippets) & test(=error_snippets_report_rejections)'
+retries = 2

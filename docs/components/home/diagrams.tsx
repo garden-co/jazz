@@ -319,7 +319,7 @@ const deploymentScenarios: Record<DeploymentScenario, Platform> = {
   },
   cloudflare: {
     label:
-      "On Cloudflare, coming soon: everything stays in your Cloudflare account: Jazz shards in Durable Objects with their own SQLite, auto-scaling and hibernating, Jazz large value chunks in R2, and the Jazz core in your backend's Workers, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
+      "On Cloudflare, everything stays in your Cloudflare account: Jazz shards in Durable Objects with their own SQLite, auto-scaling and hibernating, Jazz large value chunks in R2, and the Jazz core in your backend's Workers, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
     runtime: ["(CF Workers)"],
     shard: { title: ["Durable", "Object"], small: true, inner: ["Jazz", "shard"], count: 6 },
     store: "R2",
@@ -342,7 +342,7 @@ const deploymentScenarios: Record<DeploymentScenario, Platform> = {
 
 export const deploymentScenarioNames: Record<DeploymentScenario, string> = {
   vercel: "Vercel",
-  cloudflare: "Cloudflare (coming soon)",
+  cloudflare: "Cloudflare",
   aws: "AWS",
   server: "Server",
 };

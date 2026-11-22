@@ -2,7 +2,7 @@
  * Jazz permission-DSL tests for auth-simple-chat.
  *
  * Signs test users in through the app's backend with a role claim (admin /
- * member), or as a local-first guest, and asserts allow/deny outcomes for
+ * member), or as a guest on a device account, and asserts allow/deny outcomes for
  * posting to ANNOUNCEMENTS_CHAT_ID vs CHAT_ID.
  *
  * NOT covered by `pnpm test`: the runtime auth server's sign-in/sign-up
@@ -51,7 +51,7 @@ afterEach(async () => {
   }
 });
 
-/** A client signed in with `role`, or a local-first guest without one. */
+/** A client signed in with `role`, or a guest on a device account without one. */
 async function makeClient(role?: Role): Promise<JazzClient> {
   let serverUrl = server.serverUrl;
   let account;

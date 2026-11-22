@@ -101,7 +101,7 @@ share data. `driver: { type: "memory" }` keeps it in memory only, and it is
 gone when the tab closes. `await db.deleteClientStorage()` clears the current one; see
 [Resetting browser storage](/docs/setup/auth/backend#resetting-browser-storage).
 
-An app upgraded from alpha.59 that had local-first guests passes its old app ID as `scope`
+An app upgraded from alpha.59 that had guests on device accounts passes its old app ID as `scope`
 (`createJazzClient({ scope: "<your alpha.59 app ID>" })`), so those guests keep their accounts. New
 apps leave it out. See [Upgrading from alpha.59](/docs/operating/backups-and-upgrades#self-hosted-alpha59-servers).
 
@@ -135,12 +135,12 @@ if (navigator.storage?.persist) {
 }
 ```
 
-Check `navigator.storage.persisted()` on subsequent loads to see whether the grant is still in effect. Pair this with the [backup and restore](/docs/setup/auth/local-first#backing-up-and-restoring-the-key) flow so the device account key can be recovered if storage is ever cleared.
+Check `navigator.storage.persisted()` on subsequent loads to see whether the grant is still in effect. Pair this with the [backup and restore](/docs/setup/auth/device-accounts#backing-up-and-restoring-the-key) flow so the device account key can be recovered if storage is ever cleared.
 
 ## Offline and guests
 
 Reads and writes keep working offline and sync when the connection returns. A signed-out visitor
-can also start as a guest on a [device account](/docs/setup/auth/local-first)
+can also start as a guest on a [device account](/docs/setup/auth/device-accounts)
 (`initial: "device"`): an account whose key is created on the device, which works offline and keeps
 its data when the visitor signs up later.
 

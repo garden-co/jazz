@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { defineConfig } from "vitest/config";
-import react from "@vitejs/plugin-react-swc";
+import react from "@vitejs/plugin-react";
 
 const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
 if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)

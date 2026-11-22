@@ -763,7 +763,7 @@ export async function loadMigrationHistory(options: {
 
   // Derive what no snapshot holds, walking migrations until nothing changes.
   const failures = new Map<string, string>();
-  for (let progress = true; progress; ) {
+  for (let progress = true; progress;) {
     progress = false;
     for (const entry of files) {
       for (const [known, unknown, direction] of [

@@ -60,29 +60,41 @@ describe("DbConfig auth validation", () => {
   });
 });
 
-describe("getLocalFirstIdentityProof", () => {
-  it("returns a token for a local-first session", async () => {
+describe("getDeviceAccountProof", () => {
+  it("returns a token for a device account session", async () => {
     const { createDb } = await import("./testing/create-internal-db.js");
     const db = await createDb({
       appId: "test-app",
       secret: SECRET,
     });
 
-    const token = db.getLocalFirstIdentityProof({ audience: "test-audience" });
+    const token = db.getDeviceAccountProof({ audience: "test-audience" });
     expect(token).toBeTypeOf("string");
     expect(token!.split(".")).toHaveLength(3);
     await db.shutdown();
   });
 
-  it("returns null for a non-local-first session", async () => {
+  it("returns null for a session that is not a device account", async () => {
     const { createDb } = await import("./testing/create-internal-db.js");
     const db = await createDb({
       appId: "test-app",
       jwtToken: "dummy-jwt",
     });
 
-    const token = db.getLocalFirstIdentityProof({ audience: "test-audience" });
+    const token = db.getDeviceAccountProof({ audience: "test-audience" });
     expect(token).toBeNull();
+    await db.shutdown();
+  });
+
+  it("no longer has getLocalFirstIdentityProof (removed in beta.0)", async () => {
+    const { createDb } = await import("./testing/create-internal-db.js");
+    const db = await createDb({
+      appId: "test-app",
+      secret: SECRET,
+    });
+
+    expect("getLocalFirstIdentityProof" in db).toBe(false);
+    expect(db.getDeviceAccountProof({ audience: "test-audience" })).toBeTypeOf("string");
     await db.shutdown();
   });
 

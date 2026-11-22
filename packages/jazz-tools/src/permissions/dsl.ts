@@ -50,10 +50,15 @@ import {
   type RelationTarget,
   type Row,
   type Session,
+  type SessionAuthMode,
   type AnyClaims,
   type ValueHandle as Value,
   type Rel,
   type ColumnHandle,
+  type Inherits,
+  type InheritsIn,
+  type NestedPolicy,
+  type PermissionError,
 } from "./types.js";
 
 // ============================================================================
@@ -161,7 +166,8 @@ function makeSession(): Session<AnyClaims> {
 // Policy helpers
 // ============================================================================
 
-type PolicyOf<A extends readonly unknown[]> = Policy<ConditionsIn<A[number]>>;
+type PolicyOf<A extends readonly unknown[]> = Policy<ConditionsIn<A[number]>> &
+  InheritsIn<A[number]>;
 
 /** Any of the policies holds. */
 export function anyOf<const A extends readonly PolicyInput[]>(...items: A): PolicyOf<A> {
@@ -171,12 +177,33 @@ export function anyOf<const A extends readonly PolicyInput[]>(...items: A): Poli
 export function allOf<const A extends readonly PolicyInput[]>(...items: A): PolicyOf<A> {
   return node({ k: "and", items }) as unknown as PolicyOf<A>;
 }
-/** The policy doesn't hold. */
-export function not<const A extends PolicyInput>(item: A): Policy<ConditionsIn<A>> {
+/** The policy doesn't hold. Not of `allowedTo`, which is not supported yet. */
+export function not<const A extends PolicyInput>(
+  item: A & NotOfInherits<A>,
+): Policy<ConditionsIn<A>> {
   return node({ k: "not", item }) as unknown as Policy<ConditionsIn<A>>;
 }
 
+/** A refusal for `not` of a policy that inherits with `allowedTo`, else `unknown`. */
+type NotOfInherits<A> =
+  InheritsIn<A> extends Inherits
+    ? PermissionError<"`not allowedTo…` is not supported yet: write the rule without negating inheritance">
+    : unknown;
+
 type Comparable = Value<any, any> | string | number | boolean | bigint | Date | Uint8Array | null;
+
+/**
+ * What a value compared with `left` may be: `session.authMode` only compares
+ * with its own values, so the pre-rename `"local-first"` is a type error.
+ */
+type ComparableWith<L> =
+  L extends Value<infer V, any>
+    ? string extends V
+      ? Comparable
+      : [V] extends [SessionAuthMode]
+        ? SessionAuthMode | Value<any, any> | null
+        : Comparable
+    : Comparable;
 
 function comparison(name: "ne" | "gt" | "gte" | "lt" | "lte" | "eq") {
   return (...args: unknown[]): unknown => {
@@ -192,13 +219,13 @@ function comparison(name: "ne" | "gt" | "gte" | "lt" | "lte" | "eq") {
 /** One-argument comparison helpers are a condition's value (`{ n: gt(3) }`); two-argument ones a policy (`gt(session.claims.level, 3)`). */
 export interface CompareHelper<Op extends string> {
   <const X>(operand: X): CompareOp<X>;
-  (left: Value<any, any>, right: Comparable): Policy;
+  <L extends Value<any, any>>(left: L, right: ComparableWith<L>): Policy;
   readonly __op?: Op;
 }
 /** `eq(a, b)`: equal (`=`); `eq(v)` is just `v`. */
 export interface EqHelper {
   <const X>(operand: X): X;
-  (left: Value<any, any>, right: Comparable): Policy;
+  <L extends Value<any, any>>(left: L, right: ComparableWith<L>): Policy;
 }
 
 export const eq = /*#__PURE__*/ comparison("eq") as EqHelper;
@@ -218,7 +245,10 @@ export function contains(...args: unknown[]): unknown {
 
 /** `{ teamId: isIn(session.claims.teams) }`: the column is one of a session list; `isIn(a, list)` as a policy. */
 export function isIn(list: Value<any, any>): InOp;
-export function isIn(left: Value<any, any>, list: Value<any, any> | readonly Comparable[]): Policy;
+export function isIn<L extends Value<any, any>>(
+  left: L,
+  list: Value<any, any> | readonly ComparableWith<L>[],
+): Policy;
 export function isIn(...args: unknown[]): unknown {
   if (args.length === 1) return op({ op: "in", operand: args[0] });
   return node({ k: "compare", left: args[0], op: "in", right: args[1] });
@@ -291,11 +321,15 @@ export interface ExistsPolicy<S, T extends keyof S> extends Policy {
   ): ExistsPolicy<S, RelationTarget<S, T, R> & keyof S>;
 }
 
+/**
+ * What `exists.<t>(…)` takes: condition objects and policies, but no
+ * `allowedTo` (not supported inside an `exists` yet).
+ */
 type ExistsCondition<S, T extends keyof S> =
   | Conditions<S, T>
-  | Policy<Conditions<S, T>>
+  | NestedPolicy<Conditions<S, T>>
   | boolean
-  | ((row: Row<S, T>) => Conditions<S, T> | Policy<any> | boolean);
+  | ((row: Row<S, T>) => Conditions<S, T> | NestedPolicy | boolean);
 
 /** `exists.<table>(conditions…)`: some row of the table meets them; `exists(query)` for any relation. */
 export type Exists<S> = {
@@ -340,13 +374,21 @@ function makeExists<S>(tables: readonly string[]): Exists<S> {
 
 /** What `allowedTo.<op>` inherits through: a relation, a reference column of the row, or `schema.tables.t.col`. */
 export type AllowedTarget = Rel<any> | ColumnHandle<string, "uuid" | "array", string>;
+/**
+ * `allowedTo.<op>(target)`: the rows `target` leads to allow `op`. A rule
+ * takes it (alone or in `anyOf` / `allOf`); an `exists` and `not` don't yet:
+ * repeat the other table's rule there instead.
+ */
 export interface AllowedTo {
   /** The rows `target` leads to may be read. */
-  read(target: AllowedTarget, options?: { maxDepth?: number }): Policy;
-  insert(target: AllowedTarget, options?: { maxDepth?: number }): Policy;
-  update(target: AllowedTarget, options?: { maxDepth?: number }): Policy;
-  delete(target: AllowedTarget, options?: { maxDepth?: number }): Policy;
+  read(target: AllowedTarget, options?: { maxDepth?: number }): AllowedPolicy;
+  insert(target: AllowedTarget, options?: { maxDepth?: number }): AllowedPolicy;
+  update(target: AllowedTarget, options?: { maxDepth?: number }): AllowedPolicy;
+  delete(target: AllowedTarget, options?: { maxDepth?: number }): AllowedPolicy;
 }
+
+/** What `allowedTo.<op>(…)` gives: a policy for a rule, not for inside an `exists`. */
+export type AllowedPolicy = Policy & Inherits;
 
 function makeAllowedTo(): AllowedTo {
   const make =
@@ -357,11 +399,13 @@ function makeAllowedTo(): AllowedTo {
         throw new PermissionsDslError(
           `allowedTo.${operation}(…) takes a relation (row.chat), a reference column (row.chatId) or schema.tables.<t>.<column>`,
         );
+      const at = userFrame(new Error());
       return node({
         k: "allowed",
         op: operation,
         target: data,
         ...(options?.maxDepth === undefined ? {} : { maxDepth: options.maxDepth }),
+        ...(at === undefined ? {} : { at }),
       });
     };
   return Object.freeze({
@@ -436,7 +480,8 @@ export function compilePermissions(
   const fault = (path: string, error: unknown): never => {
     if (error instanceof PermissionsError) throw error;
     const reason = error instanceof Error ? error.message : String(error);
-    throw new PermissionsError(path, reason, userFrame(error) ?? callSite);
+    const at = error instanceof PermissionsDslError ? error.location : undefined;
+    throw new PermissionsError(path, reason, at ?? userFrame(error) ?? callSite);
   };
   if (!rules || typeof rules !== "object" || Array.isArray(rules))
     fault(

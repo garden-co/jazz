@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareRuntimeAdmission } from "./runtime-admission.js";
+import { compareBuildLineage, compareRuntimeAdmission } from "./runtime-admission.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 const tasks = {
@@ -30,11 +30,13 @@ describe("compareRuntimeAdmission", () => {
     );
   });
 
-  it("refuses another schema, whoever is signed in", () => {
+  it("makes a tab of another build (another schema) wait for the store, whoever is signed in", () => {
     const other = { schemaHash: "older-deploy" };
-    expect(compareRuntimeAdmission(fingerprint(), fingerprint(other), tasks)).toBe("incompatible");
+    expect(compareRuntimeAdmission(fingerprint(), fingerprint(other), tasks)).toBe(
+      "held-by-another-build",
+    );
     expect(compareRuntimeAdmission(fingerprint(), fingerprint({ ...other, ...user }), tasks)).toBe(
-      "incompatible",
+      "held-by-another-build",
     );
   });
 
@@ -43,6 +45,17 @@ describe("compareRuntimeAdmission", () => {
       compareRuntimeAdmission(fingerprint(), fingerprint({ workerUrl: "other.js" }), tasks),
     ).toBe("incompatible");
     expect(compareRuntimeAdmission(fingerprint(), "not json", tasks)).toBe("incompatible");
+  });
+
+  it("refuses another configuration that also has another schema, rather than wait for it", () => {
+    // Waiting would never end: no reload of the other tab makes this one fit.
+    expect(
+      compareRuntimeAdmission(
+        fingerprint(),
+        fingerprint({ schemaHash: "older-deploy", workerUrl: "other.js" }),
+        tasks,
+      ),
+    ).toBe("incompatible");
   });
 
   // #5139: a Db that hasn't read or written opens the store with no schema,
@@ -65,5 +78,26 @@ describe("compareRuntimeAdmission", () => {
         {},
       ),
     ).toBe("incompatible");
+  });
+});
+
+describe("compareBuildLineage", () => {
+  const lineage = (...hashes: string[]) => ({
+    schemas: hashes.map((hash) => ({ hash, schema: {} })),
+    migrations: [],
+  });
+
+  it("orders a build whose schema history extends the other's after it", () => {
+    expect(compareBuildLineage(lineage("v1"), lineage("v1", "v2"))).toBe("newer");
+    expect(compareBuildLineage(lineage("v1", "v2"), lineage("v1"))).toBe("older");
+    expect(compareBuildLineage(lineage("v1"), lineage("v1", "v2", "v3"))).toBe("newer");
+  });
+
+  it("can't order builds of the same history, unrelated histories, or a build that ships none", () => {
+    expect(compareBuildLineage(lineage("v1", "v2"), lineage("v1", "v2"))).toBe("unknown");
+    // A rollback, or a preview build of another branch.
+    expect(compareBuildLineage(lineage("v1", "v2"), lineage("v1", "v3"))).toBe("unknown");
+    expect(compareBuildLineage(undefined, lineage("v1", "v2"))).toBe("unknown");
+    expect(compareBuildLineage(lineage("v1"), undefined)).toBe("unknown");
   });
 });

@@ -1,5 +1,5 @@
 {
-  "//": "Unicode property names a browser accepts in `\\p{…}` with the `u` flag (ECMA-262 tables, as Node 22.12 / Unicode 16, the oldest Node Jazz supports, accepts them). The browser JSON Schema validator emits a native `\\p{name}` as JS `\\p{name}` or `\\p{Script=name}`; `regex.rs` refuses names outside this list. Regenerate with `generate-js-unicode-properties.mjs` next to this file.",
+  "//": "Unicode property names a browser accepts in `\\p{…}` with the `u` flag (ECMA-262 tables, as Node 22.12 / Unicode 16, the Node version used to generate this table, accepts them). The browser JSON Schema validator emits a native `\\p{name}` as JS `\\p{name}` or `\\p{Script=name}`; `regex.rs` refuses names outside this list. Regenerate with `generate-js-unicode-properties.mjs` next to this file.",
   "binary": [
     "AHex",
     "ASCII",

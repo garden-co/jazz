@@ -73,7 +73,9 @@ const pr = {
   head: { ref: "changeset-release/release", sha: "preview" },
 };
 test("release triggers and cache trust retain development and release separation", () => {
-  assert.deepEqual(publisher.on.push.branches, ["release"]);
+  // Retired as a publisher: no trigger on release; release-publish.yml publishes.
+  assert.equal(publisher.on.push, undefined);
+  assert.deepEqual(publisher.on.workflow_dispatch.inputs.mode.options, ["dry-run"]);
   const changesets = workflow("changesets-release-pr");
   assert.deepEqual(changesets.on.push.branches, ["release"]);
   assert.match(changesets.jobs["release-pr"].if, /refs\/heads\/release/);
@@ -84,45 +86,31 @@ test("release triggers and cache trust retain development and release separation
   );
   const dispatch = changesets.jobs["release-pr"].steps.at(-1).run;
   assert.match(dispatch, /gh workflow run ci.yml/);
-  assert.match(dispatch, /gh workflow run preview-jazz-tools-alpha-release.yml/);
+  // The release preview runs inside the release candidate gate, on the
+  // artifacts release-artifacts.yml builds for this head.
+  assert.match(dispatch, /gh workflow run release-artifacts.yml/);
+  assert.match(dispatch, /gh workflow run release-candidate.yml[^\n]*-f dry-run=true/);
+  assert.equal(
+    workflow("release-candidate").jobs.preview.uses,
+    "./.github/workflows/preview-jazz-tools-alpha-release.yml",
+  );
   assert.match(dispatch, /CURRENT_SHA.*!=.*RELEASE_SHA/);
   assert.match(dispatch, /PR_SHA.*!=.*RELEASE_SHA/);
   assert.deepEqual(workflow("ci").on.push.branches, ["main", "release", "merge-group/**"]);
   assert.match(JSON.stringify(workflow("ci")), /OWNER.*MEMBER.*COLLABORATOR/);
   assert.equal(JSON.parse(readFileSync(join(root, ".changeset/config.json"))).baseBranch, "main");
 });
-test("publisher requires the exact merged release version PR and fails closed for manual publication", async () => {
-  assert.equal((await runGate({ prs: [pr] })).outputs.should_run, "true");
-  for (const options of [
-    {},
-    { prs: [{ ...pr, merge_commit_sha: "old" }] },
-    { prs: [{ ...pr, head: { ...pr.head, ref: "changeset-release/main" } }] },
-    { ref: "refs/heads/main", prs: [pr] },
-    { event: "workflow_dispatch", prs: [pr] },
-  ])
-    assert.equal((await runGate(options)).outputs.should_run, "false");
-  const manual = {
-    event: "workflow_dispatch",
-    prs: [pr],
-    expectedSha: "candidate",
-    expectedVersion: "1.0.0-alpha.55",
-  };
-  assert.equal((await runGate(manual)).outputs.should_run, "true");
-  assert.equal(
-    (await runGate({ ...manual, expectedVersion: "wrong" })).outputs.should_run,
-    "false",
-  );
-  assert.equal(
-    (await runGate({ event: "workflow_dispatch", ref: "refs/heads/feature", mode: "dry-run" }))
-      .outputs.should_run,
-    "true",
-  );
-  // Prove the wrong-branch assertion detects removal of the actual workflow guard.
-  const mutated = gate.replace('ref !== "refs/heads/release"', "false");
-  assert.equal(
-    (await runGate({ ref: "refs/heads/main", prs: [pr], script: mutated })).outputs.should_run,
-    "true",
-  );
+test("the retired publisher only dry-runs: any other mode fails closed", async () => {
+  for (const options of [{}, { mode: "publish" }, { mode: "publish", prs: [pr] }]) {
+    const { outputs, failures } = await runGate(options);
+    assert.equal(outputs.should_run, "false");
+    assert.ok(failures.length > 0);
+  }
+  for (const ref of ["refs/heads/release", "refs/heads/feature"])
+    assert.equal(
+      (await runGate({ event: "workflow_dispatch", ref, mode: "dry-run" })).outputs.should_run,
+      "true",
+    );
 });
 test("Changesets prerelease consumption survives release cut, fix, version and merge back", () => {
   const dir = mkdtempSync(join(tmpdir(), "jazz-release-cycle-"));
@@ -220,7 +208,7 @@ test("release refresh dispatches required CI and refuses a moved branch", () => 
     });
   assert.match(
     run(script, "candidate"),
-    /DISPATCH ci.yml[\s\S]*DISPATCH preview-jazz-tools-alpha-release.yml/,
+    /DISPATCH ci.yml[\s\S]*DISPATCH release-artifacts.yml[\s\S]*DISPATCH release-candidate.yml/,
   );
   assert.throws(
     () => run(script, "moved"),
@@ -231,4 +219,14 @@ test("release refresh dispatches required CI and refuses a moved branch", () => 
     "if false; then",
   );
   assert.match(run(mutation, "moved"), /DISPATCH ci.yml/);
+});
+
+test("a called publish dry run ignores the caller's dispatch inputs", () => {
+  // Called from release-candidate.yml, github.event is the gate's dispatch:
+  // its `version` (an rc version) is never a version override here.
+  const source = readFileSync(join(root, ".github/workflows/publish-jazz-tools-alpha.yml"), "utf8");
+  const uses = source.match(/EXPECTED_VERSION="[^"]*"/g) ?? [];
+  assert.ok(uses.length >= 2);
+  for (const use of uses) assert.equal(use, 'EXPECTED_VERSION=""');
+  assert.doesNotMatch(source, /github\.event\.inputs\.version/);
 });

@@ -238,12 +238,15 @@ impl Core {
             .and_then(Json::as_u64)
             .unwrap_or(1);
         let has_server = config.server_url.is_some();
+        // Before opening, so an app whose relations don't resolve opens
+        // nothing.
+        let relations = convert::Relations::read(&app_text)?;
         let jazz = block_on(Jazz::open(files, config))?;
         let schema = block_on(jazz.with_client(|client| async move { Ok(client.schema()?) }))?;
         Ok(Self::with(
             jazz,
             Arc::new(schema),
-            convert::Relations::read(&app_text),
+            relations,
             has_server,
             contract,
             None,
@@ -1558,6 +1561,13 @@ pub(crate) fn spawn_watch(
                             // Sent by the close (an error: the watch was
                             // dropped first, nothing to say).
                             if result.is_ok() {
+                                // The states published before the close
+                                // (a sign-out's `signedOut`) come first: the
+                                // close is only the last word.
+                                use futures_util::FutureExt as _;
+                                while let Some(Some(state)) = stream.next().now_or_never() {
+                                    listener(Some(state));
+                                }
                                 listener(None);
                             }
                             return;
@@ -1927,6 +1937,44 @@ fn config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A state published just before the app closes (a sign-out's
+    /// `signedOut`, then `end_watches`) reaches the listener before the last
+    /// `closed`, even when the watch's thread sees the close first.
+    #[test]
+    fn a_watch_delivers_the_states_published_before_its_close() {
+        let closers: Arc<Mutex<Vec<tokio::sync::oneshot::Sender<()>>>> = Arc::default();
+        let closed_flag = AtomicBool::new(false);
+        // First poll: the app closes (as end_watches does), and the state
+        // is ready only on the next poll: the close is seen first.
+        let mut polled = false;
+        let close_all = closers.clone();
+        let mut item = Some("signedOut".to_owned());
+        let stream = futures_util::stream::poll_fn(move |cx| {
+            if !polled {
+                polled = true;
+                for close in std::mem::take(&mut *close_all.lock().unwrap()) {
+                    let _ = close.send(());
+                }
+                cx.waker().wake_by_ref();
+                return std::task::Poll::Pending;
+            }
+            match item.take() {
+                Some(state) => std::task::Poll::Ready(Some(state)),
+                None => std::task::Poll::Pending,
+            }
+        });
+        let (sender, states) = mpsc::channel();
+        let listener = Box::new(move |state: Option<String>| {
+            let _ = sender.send(state);
+        });
+        let _watch = spawn_watch(Box::pin(stream), listener, &closers, &closed_flag).unwrap();
+        let seen: Vec<_> =
+            std::iter::from_fn(|| states.recv_timeout(std::time::Duration::from_secs(5)).ok())
+                .take(2)
+                .collect();
+        assert_eq!(seen, [Some("signedOut".to_owned()), None]);
+    }
 
     fn open_transactions(core: &Core) -> usize {
         block_on(

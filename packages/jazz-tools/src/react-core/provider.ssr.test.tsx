@@ -55,7 +55,7 @@ beforeEach(() => {
 describe("JazzDbProvider client acquisition lifecycle", () => {
   it("renders its fallback on the server without acquiring or retaining a client", () => {
     const openJazzClient = vi.fn(async () =>
-      makeFakeClient({ authMode: "local-first", userId: "server", claims: {} }),
+      makeFakeClient({ authMode: "device-account", userId: "server", claims: {} }),
     );
 
     const html = renderToStaticMarkup(
@@ -90,7 +90,7 @@ describe("JazzDbProvider client acquisition lifecycle", () => {
       account: makeFakeAccount(),
     };
     const openJazzClient = vi.fn(async () =>
-      makeFakeClient({ authMode: "local-first", userId: "browser", claims: {} }),
+      makeFakeClient({ authMode: "device-account", userId: "browser", claims: {} }),
     );
     const initialKey = createClientConfigKey("react", initialConfig, [openJazzClient]);
     const replacementKey = createClientConfigKey("react", replacementConfig, [openJazzClient]);
@@ -166,7 +166,7 @@ describe("JazzDbProvider client acquisition lifecycle", () => {
       resolveRelease = resolve;
     });
     const openJazzClient = vi.fn(async () =>
-      makeFakeClient({ authMode: "local-first", userId: "browser", claims: {} }),
+      makeFakeClient({ authMode: "device-account", userId: "browser", claims: {} }),
     );
     const initialKey = createClientConfigKey("react", initialConfig, [openJazzClient]);
 
