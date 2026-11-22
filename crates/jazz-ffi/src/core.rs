@@ -1123,8 +1123,9 @@ impl Core {
     /// The end user's session as JSON (`{ "status": "signedIn", "user": … }`
     /// and so on); `None` for a local app or a backend.
     pub fn session_state(&self) -> Result<Option<String>> {
-        Ok(self
-            .open_jazz()?
+        let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("session")?;
+        Ok(jazz
             .session()
             .map(|session| serde_json::to_string(&session.state()).unwrap_or_default()))
     }
@@ -1136,8 +1137,9 @@ impl Core {
 
     /// Asks the token provider for a fresh token and reconnects with it.
     pub fn refresh(&self) -> Result<()> {
-        let session = self
-            .open_jazz()?
+        let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("refresh")?;
+        let session = jazz
             .session()
             .cloned()
             .ok_or_else(|| refused("refresh is for an end user's app (\"auth\")"))?;
@@ -1149,8 +1151,9 @@ impl Core {
     /// own sign-in (`bearer`, a token from it): the session becomes that
     /// user's, on the device's account. Returns the user as JSON.
     pub fn link(&self, bearer: &str) -> Result<String> {
-        let session = self
-            .open_jazz()?
+        let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("link")?;
+        let session = jazz
             .session()
             .cloned()
             .ok_or_else(|| refused("link is for an end user's app (\"auth\")"))?;
@@ -1167,6 +1170,7 @@ impl Core {
     /// Signs the end user out and closes the app.
     pub fn sign_out(&self) -> Result<()> {
         let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("signOut")?;
         if jazz.session().is_none() {
             return Err(refused("sign out is for an end user's app (\"auth\")"));
         }
@@ -1237,6 +1241,7 @@ impl Core {
                     .map(|error| serde_json::to_string(&error).unwrap_or_default()),
             ),
             "session" => {
+                jazz.refuse_for_user("watching the session")?;
                 let session = jazz
                     .session()
                     .ok_or_else(|| refused("watching the session is for an end user's app"))?;
