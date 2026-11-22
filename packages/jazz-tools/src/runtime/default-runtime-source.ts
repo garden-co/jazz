@@ -577,14 +577,17 @@ export function browserWorkerTransportAuth(config: DbConfig): Record<string, unk
  * The callbacks of one connection to the shared worker, also telling the
  * tab's runtime the worker's server link: a tab has no link of its own, and
  * its encryption is online only while the worker is connected. A connection
- * that fails takes its link with it.
+ * that fails takes its link with it, as does one that replaced it.
+ *
+ * @internal Exported for tests.
  */
-function relayWorkerLink(
+export function relayWorkerLink(
   runtime: NativeRuntimeAdapter,
   onRemoteLinkChange: BrowserWorkerConnectionContext["onRemoteLinkChange"],
   onFailure: BrowserWorkerConnectionContext["onFailure"],
 ): Pick<BrowserWorkerConnectionContext, "onRemoteLinkChange" | "onFailure"> {
   const connection = {};
+  runtime.noteWorkerConnection(connection);
   return {
     onRemoteLinkChange: (state, link) => {
       if (link) runtime.noteWorkerLink(connection, link);

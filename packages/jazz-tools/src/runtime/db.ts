@@ -5016,10 +5016,14 @@ export class Db {
     if (app && !isThinDb(this)) {
       this.encryptedQueries ??= new EncryptedGuard(resolveSchemaSource(app));
       if (this.encryptedQueries.queryTouches(wasmQuery)) {
-        // A returning device opens local-first directly. Its encrypted subscriptions
-        // need the catalogue just as subscriptions moved from the thin client do.
+        // Opened before the client knows the catalogue identities, the query
+        // would answer without its encrypted rows and stay so. It waits for
+        // them and for the keys this device holds, which a returning device
+        // has in its own store: it reads offline. It does not wait for the
+        // account's verification, which needs the server; a device that never
+        // synced waits for its first sync however long that takes.
         encryptionReady = this.encryptedReadsReady ??= this.encryption
-          .ready({ timeoutMs: LOCAL_FIRST_WAIT_MS })
+          .readable()
           .catch((error: unknown) => {
             this.encryptedReadsReady = undefined;
             throw error;

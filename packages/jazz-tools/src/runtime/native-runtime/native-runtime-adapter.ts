@@ -1184,6 +1184,8 @@ export class NativeRuntimeAdapter implements Runtime {
    * would take the tab's own `local-only` status for the server's.
    */
   private workerLink: { from: object; link: LinkStatus } | null = null;
+  /** The worker connection made last: the one this tab follows now. */
+  private latestWorker: object | null = null;
 
   static fromDb(
     db: NativeDb,
@@ -1893,6 +1895,15 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
+   * A connection `from` to the shared worker was made: it replaces the one
+   * before it, which may still hold the link it last relayed.
+   */
+  noteWorkerConnection(from: object): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.noteWorkerConnection(from);
+    this.latestWorker = from;
+  }
+
+  /**
    * The server link of the worker this tab follows, from a link fate the
    * worker connection `from` received. The tab's encryption is online
    * only while it is connected.
@@ -1905,11 +1916,13 @@ export class NativeRuntimeAdapter implements Runtime {
 
   /**
    * The worker connection `from` failed: until another relays the
-   * worker's link, this tab cannot reach the server.
+   * worker's link, this tab cannot reach the server. That holds when it is
+   * the connection that relayed the link, and when it is the one that
+   * replaced it: the link relayed before belongs to a connection gone.
    */
   forgetWorkerLink(from: object): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.forgetWorkerLink(from);
-    if (this.workerLink?.from !== from) return;
+    if (this.workerLink?.from !== from && this.latestWorker !== from) return;
     this.workerLink = { from, link: offlineLink("stopped") };
     this.signalEncryptionOnline();
   }

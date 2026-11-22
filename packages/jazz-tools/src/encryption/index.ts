@@ -105,7 +105,10 @@ export type EncryptionReport =
 export interface EncryptionNative {
   encryptionCall(op: string, args?: Record<string, unknown> | null): Promise<string>;
   takeEncryptionReports(): string[];
-  /** The loop's account status and last error, as JSON text. */
+  /**
+   * The loop's account status, last error and stage, and whether the client
+   * can read encrypted rows yet (`readable`), as JSON text.
+   */
   encryptionState(): string;
 }
 
@@ -190,6 +193,26 @@ export class Encryption {
     const timeoutMs = options.timeoutMs ?? 30_000;
     if (this.options.nativeReadiness) return this.call("ready", { timeoutMs });
     return this.verify(Date.now() + timeoutMs);
+  }
+
+  /**
+   * @internal Resolves once this client can open the encrypted rows its
+   * store holds: it knows the app's catalogue identities (synced once, then
+   * kept with the store) and has loaded the keys it holds. A device that
+   * synced before is readable at once, with or without the server; one that
+   * never synced waits, without a deadline, for its first sync. Unlike
+   * {@link ready} it does not wait for the account's verification, which
+   * needs the server. Rejects only when the runtime can no longer answer.
+   */
+  async readable(): Promise<void> {
+    for (;;) {
+      const state = JSON.parse(this.native.encryptionState()) as { readable?: boolean };
+      if (state.readable) return;
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 50);
+        (timer as { unref?: () => void }).unref?.();
+      });
+    }
   }
 
   /** The loop's verification, once it has one (see {@link ready}). */

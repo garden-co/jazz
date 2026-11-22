@@ -151,6 +151,10 @@ pub struct Encryption {
     /// delivery pass again once caught up.
     reconnected: Cell<bool>,
     status: Cell<Option<AccountStatus>>,
+    /// Whether the client knows the catalogue identities, so it can open
+    /// the encrypted rows its store holds with the keys it holds (loaded
+    /// before the loop starts), with or without the server.
+    readable: Cell<bool>,
     native: Option<NativeReadiness>,
     last_error: RefCell<Option<String>>,
     /// What the loop is doing or waiting on, for a call that waits on it.
@@ -359,6 +363,7 @@ impl Encryption {
             spaces,
             reconnected: Cell::new(false),
             status: Cell::new(None),
+            readable: Cell::new(false),
             native,
             last_error: RefCell::default(),
             stage: Cell::new("starting"),
@@ -445,10 +450,12 @@ impl Encryption {
         })
     }
 
-    /// The loop's last account status and error, as JSON.
+    /// The loop's last account status and error, and whether the client
+    /// can read encrypted rows yet (`readable`), as JSON.
     pub fn state(&self) -> Value {
         json!({
             "status": self.status.get().map(status_name),
+            "readable": self.readable.get(),
             "error": self.last_error.borrow().clone(),
             "stage": self.stage.get(),
         })
@@ -869,7 +876,10 @@ async fn main_loop(this: Rc<Encryption>) {
         .set("waiting for the app's table identities from the server");
     loop {
         match client.prepare(&db) {
-            Ok(true) => break,
+            Ok(true) => {
+                this.readable.set(true);
+                break;
+            }
             Err(error) => {
                 if let Some(native) = &this.native {
                     if !native_may_retry(&error) {
