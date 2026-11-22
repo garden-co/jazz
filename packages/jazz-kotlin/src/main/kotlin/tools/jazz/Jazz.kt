@@ -203,6 +203,11 @@ public class Jazz internal constructor(
         decodeStored(table, stored)
     }
 
+    /** The signature before `tier`, for code compiled against it. */
+    @Deprecated("Binary compatibility", level = DeprecationLevel.HIDDEN)
+    public suspend fun <Row : Any, Insert : Any, P : Patch> upsert(table: Table<Row, Insert, P>, id: String, row: Insert): Row =
+        upsert(table, id, row, null)
+
     /**
      * Inserts [row] with [column]'s value streamed from [data] (e.g. a file:
      * `jazz.insertStreaming(Files, NewFile(name = "a.mov"), Files.content, file.inputStream().chunks())`).

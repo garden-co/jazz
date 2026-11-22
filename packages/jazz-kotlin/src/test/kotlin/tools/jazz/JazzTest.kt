@@ -268,6 +268,18 @@ class JazzTest {
     }
 
     @Test
+    fun upsert_keeps_the_jvm_signature_from_before_it_took_a_tier() {
+        // Code compiled against it calls it by this exact descriptor.
+        Jazz::class.java.getMethod(
+            "upsert",
+            Table::class.java,
+            String::class.java,
+            Any::class.java,
+            kotlin.coroutines.Continuation::class.java,
+        )
+    }
+
+    @Test
     fun upsert_passes_its_tier(): Unit = runBlocking {
         val tiers = ArrayList<String?>()
         val native = object : Native by FakeNative() {
