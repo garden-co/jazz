@@ -110,12 +110,6 @@ function parsedPolicies(text: string): unknown {
   );
 }
 
-const EMPTY_PERMISSIONS = (app: string) =>
-  JSON.stringify({
-    format: 1,
-    tables: Object.fromEntries(Object.keys(JSON.parse(app).tables).map((t) => [t, {}])),
-  });
-
 let scratch = 0;
 
 describe("printed TS compiles to the same engine policies", () => {
@@ -159,11 +153,9 @@ describe("printed TS compiles to the same engine policies", () => {
         expect(await engine(c.app, compiled.permissions)).toEqual(
           await engine(c.app, c.permissions),
         );
-        // The tables: the same current schema.
+        // The same current schema, loaded with its policies so deploy can validate space reads.
         const original = (await engine(c.app, c.permissions)).current;
-        expect((await engine(compiled.app, EMPTY_PERMISSIONS(compiled.app))).current).toBe(
-          original,
-        );
+        expect((await engine(compiled.app, compiled.permissions)).current).toBe(original);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

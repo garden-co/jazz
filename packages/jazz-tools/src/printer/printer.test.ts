@@ -3,6 +3,7 @@ import { join } from "node:path";
 import * as prettier from "prettier";
 import { describe, expect, it } from "vitest";
 import { readablePermissions } from "../permissions/dsl.js";
+import * as s from "../schema-builders.js";
 import { readableSchema } from "../schema-dsl/define-schema.js";
 import {
   permissions as encryptedPermissions,
@@ -180,6 +181,45 @@ describe("the permissions printer", () => {
       out.code.replace("export const permissions", "const permissions") + "\nreturn permissions;",
     )(encryptedSchema);
     expect(readablePermissions(printed)).toEqual(original);
+  });
+
+  it("round-trips isMember from a plain table to a space defined by another table", () => {
+    const room = { rel: "rooms", column: "roomId" };
+    const original = app({
+      canvases: { columns: { roomId: "uuid" }, relations: { room } },
+      messages: {
+        columns: { roomId: "uuid", text: "bytes", __e2ee_eq_text: "bytes" },
+        relations: { room },
+        encryption: {
+          scope: "rooms",
+          space: "roomId",
+          columns: { text: "string?" },
+          equality: ["text"],
+        },
+      },
+      rooms: { columns: { name: "string" } },
+    });
+    const permissions: PermissionsJson = {
+      format: 1,
+      tables: {
+        canvases: {
+          read: "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.roomId, accountId = session.user)",
+        },
+        messages: {},
+        rooms: {},
+      },
+    };
+
+    const out = printSchemaTs(original, permissions);
+    expect(out.unsupported).toEqual([]);
+    expect(out.files["schema.ts"]).toContain('isMember("rooms", canvas.roomId)');
+    const printed: { schema: unknown; permissions: unknown } = new Function(
+      "s",
+      out.files["schema.ts"]!.replace(/^import .*$/m, "").replaceAll("export const", "const") +
+        "\nreturn { schema, permissions };",
+    )(s);
+    expect(readablePermissions(printed.permissions)?.tables).toEqual(permissions.tables);
+    expect({ format: 1, ...readableSchema(printed.schema) }).toEqual(original);
   });
 
   it("reports table_id outside the members rule by JSON path", () => {

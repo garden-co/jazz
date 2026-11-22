@@ -22,6 +22,12 @@ export type RelationJson =
 export interface TableJson {
   columns: Record<string, ColumnJson>;
   relations?: Record<string, RelationJson>;
+  encryption?: {
+    space: string;
+    scope: string;
+    columns: Record<string, ColumnJson>;
+    equality?: string[];
+  };
   indexes?: (string | string[])[];
   branchBy?: string[];
   history?: "latest";

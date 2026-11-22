@@ -25,11 +25,22 @@ export function printTables(
 }
 
 export function printTable(table: TableJson, options: TablesPrintOptions): string {
-  const columns = Object.entries(table.columns).map(([name, column]) => {
-    const comment =
-      typeof column === "object" && column.$comment ? lineComment(column.$comment) : "";
-    return `${comment}${propKey(name)}: ${printColumn(column, { ...options, path: `${options.path}.columns.${name}` })},`;
-  });
+  const encryption = options.relations === false ? undefined : table.encryption;
+  const encryptedColumns = encryption?.columns ?? {};
+  const equality = new Set(encryption?.equality);
+  const tokenColumns = new Set([...equality].map((name) => `__e2ee_eq_${name}`));
+  const columns = Object.entries(table.columns)
+    .filter(([name]) => !tokenColumns.has(name))
+    .map(([name, stored]) => {
+      const plaintext = Object.hasOwn(encryptedColumns, name) ? encryptedColumns[name] : undefined;
+      const column = plaintext ?? stored;
+      const comment =
+        typeof stored === "object" && stored.$comment ? lineComment(stored.$comment) : "";
+      const builder = printColumn(column, { ...options, path: `${options.path}.columns.${name}` });
+      const encryptionOptions = equality.has(name) ? "{ equality: true }" : "";
+      const suffix = plaintext ? `.encrypted(${encryptionOptions})` : "";
+      return `${comment}${propKey(name)}: ${builder}${suffix},`;
+    });
   const fields: string[] = [];
   if (options.relations !== false) {
     for (const [name, rel] of Object.entries(table.relations ?? {})) {
@@ -55,9 +66,28 @@ export function printTable(table: TableJson, options: TablesPrintOptions): strin
     : columns.some((c) => c.includes("//"))
       ? `{\n${columns.join("\n")}\n}`
       : `{ ${columns.join(" ").replace(/,$/, "")} }`;
-  let text = fields.length
-    ? `s.table(${columnsText}, {\n${fields.join("\n")}\n})`
-    : `s.table(${columnsText})`;
+  let space: string | undefined;
+  if (encryption) {
+    space =
+      encryption.space === "id"
+        ? "id"
+        : Object.entries(table.relations ?? {}).find(
+            ([, rel]) =>
+              "rel" in rel && rel.rel === encryption.scope && rel.column === encryption.space,
+          )?.[0];
+    if (space === undefined) {
+      options.unsupported.push({
+        path: `${options.path}.encryption.space`,
+        text: encryption.space,
+        reason: `the space column needs a forward relation to ${encryption.scope}`,
+      });
+    }
+  }
+  const fieldsText = fields.length ? `{\n${fields.join("\n")}\n}` : "{}";
+  const args = [columnsText];
+  if (fields.length || space !== undefined) args.push(fieldsText);
+  if (space !== undefined) args.push(`{ space: ${JSON.stringify(space)} }`);
+  let text = `s.table(${args.join(", ")})`;
   const singles = (table.indexes ?? []).filter((i): i is string => typeof i === "string");
   if (singles.length) text += `.indexOnly(${JSON.stringify(singles)})`;
   for (const composite of (table.indexes ?? []).filter((i): i is string[] => Array.isArray(i))) {
