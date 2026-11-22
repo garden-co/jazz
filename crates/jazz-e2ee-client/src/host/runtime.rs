@@ -316,7 +316,20 @@ async fn build_client(
     let client = Rc::new(client);
     let reports = Rc::new(RefCell::new(ReportQueue::default()));
     let sink = Rc::clone(&reports);
-    client.on_report(move |report| sink.borrow_mut().push(report_json(report)));
+    let shared = Rc::downgrade(&client.shared);
+    client.on_report(move |report| {
+        sink.borrow_mut().push(report_json(report, |scope| {
+            shared
+                .upgrade()?
+                .keys
+                .borrow()
+                .catalogue
+                .as_ref()?
+                .table_names
+                .get(scope)
+                .cloned()
+        }));
+    });
     Ok(Built {
         spaces,
         client,
@@ -1238,8 +1251,14 @@ fn secret(hex: &str) -> Result<RecoverySecret, String> {
 }
 
 /// A report as the JS events carry it.
-fn report_json(report: &Report) -> Value {
-    let space = |space: &SpaceAddress| json!({ "table": space.scope_id, "id": space.identifier });
+fn report_json(report: &Report, table_name: impl Fn(&str) -> Option<String>) -> Value {
+    let space = |at: &SpaceAddress| {
+        let mut value = json!({ "scopeId": at.scope_id, "id": at.identifier });
+        if let Some(table) = table_name(&at.scope_id) {
+            value["table"] = Value::String(table);
+        }
+        value
+    };
     match report {
         Report::Unreadable(unreadable) => json!({
             "type": "unreadable",
@@ -1592,6 +1611,23 @@ mod tests {
         assert!(described.starts_with("protocol: "), "{described}");
     }
 
+    /// A report on an obsolete scope still identifies the space after its table went away.
+    #[test]
+    fn a_report_preserves_an_unknown_scope() {
+        let at = SpaceAddress {
+            scope_id: uuid::Uuid::new_v4().to_string(),
+            identifier: uuid::Uuid::new_v4().to_string(),
+        };
+        let report = Report::RotationFailed {
+            space: at.clone(),
+            reason: "offline".into(),
+        };
+        assert_eq!(
+            report_json(&report, |_| None)["space"],
+            json!({ "scopeId": at.scope_id, "id": at.identifier })
+        );
+    }
+
     /// Contract: reports reach JS as JSON with a stable `type`, and the
     /// unreadable ones carry the protocol's code names.
     #[test]
@@ -1603,7 +1639,7 @@ mod tests {
             code: jazz::e2ee::UnreadableCode::KeyPending,
             space: None,
         });
-        let json = report_json(&report);
+        let json = report_json(&report, |_| None);
         assert_eq!(json["type"], "unreadable");
         assert_eq!(json["code"], "key-pending");
         assert_eq!(json["column"], "body");

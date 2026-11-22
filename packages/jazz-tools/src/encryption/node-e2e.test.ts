@@ -177,6 +177,46 @@ async function until<T>(read: () => Promise<T | undefined>, what: string, ms = 2
 }
 
 describe("encryption on Node, end to end", () => {
+  it("names the project table when a member's lazy rotation is refused", async () => {
+    const host = await serve();
+    const alice = await device(host);
+    const bob = await device(host);
+    const carol = await device(host);
+    const projectId = await makeProject(alice, "plans");
+    await addMember(alice, projectId, bob.account);
+    await addMember(alice, projectId, carol.account);
+    await alice.db.insert(app.tasks, { projectId, title: "before" }).wait({ tier: "global" });
+    await alice.db.encryption.keys.deliver();
+    for (const member of [bob, carol]) {
+      await until(
+        async () =>
+          (await member.db.all(app.tasks.where({ projectId }), { tier: "remote" })).length ||
+          undefined,
+        "the delivery",
+      );
+    }
+    const member = (await alice.db.all(app.__e2ee_members, { tier: "remote" })).find(
+      (row) => row.identifier === projectId && row.accountId === carol.account,
+    )!;
+    await alice.db.delete(app.__e2ee_members, member.id).wait({ tier: "global" });
+    await bob.db.encryption.keys.deliver();
+    const reports: unknown[] = [];
+    const stop = bob.db.encryption.onReport((report) => reports.push(report));
+    try {
+      await bob.db.insert(app.tasks, { projectId, title: "after" }).wait({ tier: "global" });
+      await expect
+        .poll(() => reports, { timeout: 15_000 })
+        .toContainEqual(
+          expect.objectContaining({
+            type: "rotation-failed",
+            space: { table: "projects", id: projectId, scopeId: member.scopeId },
+          }),
+        );
+    } finally {
+      stop();
+    }
+  }, 90_000);
+
   it.each(["new", "existing"] as const)(
     "streams encrypted bytes when the project key is %s",
     async (key) => {
