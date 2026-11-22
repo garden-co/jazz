@@ -115,6 +115,12 @@ export function defineSchema<const S extends Record<string, DefinedTable<any, an
   }
   checkRelations(tables);
   const app = readableApp(tables);
+  // The space tables: what `isMember` accepts, each encryption entry's scope.
+  const spaces = new Set<string>();
+  for (const table of Object.values(app.tables)) {
+    const encryption = table.encryption as { scope: string } | undefined;
+    if (encryption) spaces.add(encryption.scope);
+  }
   const handles: Record<string, unknown> = {};
   for (const [name, table] of Object.entries(tables)) {
     const view: Record<string | symbol, unknown> = Object.create(table) as Record<string, unknown>;
@@ -129,7 +135,7 @@ export function defineSchema<const S extends Record<string, DefinedTable<any, an
   }
   const schemaMeta: SchemaMeta = meta;
   return Object.freeze({
-    ...permissionTools(schemaMeta),
+    ...permissionTools(schemaMeta, spaces),
     tables: Object.freeze(handles),
     [SCHEMA_BRAND]: { app },
   }) as unknown as Schema<S, unknown extends C ? AnyClaims : TypedClaims<C>>;

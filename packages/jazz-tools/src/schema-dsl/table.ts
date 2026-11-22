@@ -3,7 +3,12 @@
  * it. A table is only a description: `defineSchema` turns the tables into
  * `jazz.app.json`'s readable form (`readable-app.ts`).
  */
-import type { AnyColumnDefinition, ColumnBuilderSqlType, ComputedColumn } from "../dsl.js";
+import type {
+  AnyColumnDefinition,
+  AnyTypedColumnBuilder,
+  ColumnBuilderSqlType,
+  ComputedColumn,
+} from "../dsl.js";
 import { isComputedColumn } from "../dsl.js";
 import {
   assertRelationshipDeclaration,
@@ -33,6 +38,30 @@ interface TableOptions<TColumns> {
   readonly branchColumns?: readonly (keyof TColumns & string)[];
   readonly compositeIndexes?: readonly (readonly string[])[];
   readonly historyRetention?: "latest";
+  readonly space?: string;
+}
+
+/** The forward relations over a single `uuid` column: the ones that can name a row's space. */
+type SpaceRelations<C, R> = {
+  [K in keyof R & string]: R[K] extends ForwardRelationship<string, infer Col>
+    ? Col extends keyof C
+      ? C[Col] extends AnyTypedColumnBuilder
+        ? ColumnBuilderSqlType<C[Col]> extends "UUID"
+          ? K
+          : never
+        : never
+      : never
+    : never;
+}[keyof R & string];
+
+/**
+ * A table's encryption options (`s.table(columns, relations, { space })`).
+ * `space` names the space whose key encrypts the row's encrypted columns
+ * and whose members may read it: `"id"` when each row is its own space, or
+ * a forward relation over a `uuid` column, whose target row is the space.
+ */
+export interface TableEncryptionOptions<C = TableDefinition, R = Relationships> {
+  readonly space: "id" | SpaceRelations<C, R>;
 }
 
 /** A table: its columns (computed fields included), its relations and its options. */
@@ -45,6 +74,8 @@ export class DefinedTable<
   public readonly branchColumns?: readonly (keyof TColumns & string)[];
   public readonly compositeIndexes?: readonly (readonly string[])[];
   public readonly historyRetention?: "latest";
+  /** The relation whose target row is this table's space, or `"id"`; see `TableEncryptionOptions`. */
+  public readonly space?: string;
 
   constructor(
     public readonly columns: TColumns,
@@ -60,6 +91,7 @@ export class DefinedTable<
       branchColumns: this.branchColumns,
       compositeIndexes: this.compositeIndexes,
       historyRetention: this.historyRetention,
+      space: this.space,
     };
   }
 
@@ -194,7 +226,8 @@ type ValidateComputed<C> = {
 
 /**
  * Define a table: its columns (`s.string()`, …, and `s.computed(...)`
- * fields) and its relations (`s.rel`, `s.reverse`).
+ * fields), its relations (`s.rel`, `s.reverse`) and, for a table in
+ * encrypted spaces, its `space` (see `TableEncryptionOptions`).
  *
  * @example
  * ```ts
@@ -210,6 +243,7 @@ export function defineTable<
 >(
   columns: TColumns & ValidateComputed<TColumns>,
   relations?: TRelations & ValidateRelations<TColumns, TRelations>,
+  encryption?: TableEncryptionOptions<TColumns, TRelations>,
 ): DefinedTable<TColumns, TRelations> {
   if (!columns || typeof columns !== "object" || Array.isArray(columns))
     throw new Error("s.table(columns, relations) requires an object of columns.");
@@ -259,7 +293,22 @@ export function defineTable<
         `Relation "${name}" requires a uuid or uuid-array column; "${relation.column}" is not one.`,
       );
   }
-  return new DefinedTable(columns as TColumns, rels as TRelations);
+  if (encryption === undefined) return new DefinedTable(columns as TColumns, rels as TRelations);
+  if (
+    !encryption ||
+    typeof encryption !== "object" ||
+    Array.isArray(encryption) ||
+    Object.keys(encryption).some((key) => key !== "space")
+  )
+    throw new Error(
+      's.table(columns, relations, options): options are { space: "id" | "<relation>" }.',
+    );
+  const space = (encryption as { space?: unknown }).space;
+  if (typeof space !== "string" || !space)
+    throw new Error(
+      's.table(columns, relations, { space }): `space` is "id" or the name of a forward relation.',
+    );
+  return new DefinedTable(columns as TColumns, rels as TRelations, { space });
 }
 
 export function isDefinedTable(value: unknown): value is DefinedTable {

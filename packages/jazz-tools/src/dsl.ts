@@ -100,7 +100,14 @@ interface ColumnBuilder {
   _sqlType: SqlType;
   _references: string | undefined;
   _transform?: ColumnTransform;
+  _encryption?: ColumnEncryption;
   _allowExternalProvenanceName?: true;
+}
+
+/** How a column is encrypted: `.encrypted({ equality })`. */
+export interface ColumnEncryption {
+  /** Whether rows can be found by this column's value, through equality tokens. */
+  readonly equality: boolean;
 }
 
 type MergeStrategyColumnType = {
@@ -172,6 +179,17 @@ export type TypedColumnBuilder<
    * Make the column nullable
    */
   optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value, Init>;
+  /**
+   * Encrypt the column's values on the device, under the key of the row's
+   * space (the table's `space` option). The server stores ciphertext and
+   * cannot read, filter or sort by the value; code reads and writes the
+   * plaintext type. With `equality: true`, rows can also be found by an
+   * exact value, through tokens that reveal which rows share a value.
+   * An encrypted column takes no merge strategy and no transform.
+   */
+  encrypted(options?: {
+    equality?: boolean;
+  }): ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Init>;
   /**
    * The column holds ids of `table`'s rows, for a reference no forward
    * relation names (a forward relation's column references its table
@@ -491,6 +509,22 @@ abstract class BaseColumnBuilder implements ColumnBuilder {
     if (view._transform || view._sqlType === undefined)
       throw new Error(`.transform("${name}", view): view must be a plain column type.`);
     this._transform = { name, view };
+    return this;
+  }
+
+  _encryption?: ColumnEncryption;
+
+  encrypted(options: { equality?: boolean } = {}): this {
+    if (typeof options !== "object" || options === null || Array.isArray(options))
+      throw new Error(".encrypted(options) takes { equality?: boolean }.");
+    for (const key of Object.keys(options))
+      if (key !== "equality")
+        throw new Error(
+          `.encrypted(options): unknown option "${key}"; it takes { equality?: boolean }.`,
+        );
+    if (options.equality !== undefined && typeof options.equality !== "boolean")
+      throw new Error(".encrypted({ equality }) takes true or false.");
+    this._encryption = { equality: options.equality === true };
     return this;
   }
 

@@ -1,0 +1,5 @@
+---
+"jazz-tools": patch
+---
+
+Declare end-to-end encryption in `schema.ts`. `.encrypted()` seals a column on the device (`.encrypted({ equality: true })` also lets rows be found by its exact value), a table's third argument names its space (`s.table(columns, relations, { space: "project" })`, or `{ space: "id" }` for a table whose rows are their own spaces), and `isMember(table, id)` in the permissions writes the members rule a space table's read rule must be. `jazz-tools generate` writes the same `jazz.app.json` as the hand-written declaration: the column stored as `bytes`, its equality token column, and the table's `encryption` entry with the plaintext type. It refuses, naming the table, a space that isn't `"id"` or a relation over one `uuid` column, encrypted columns without a space, and a merge strategy on an encrypted column. Apps without encryption generate the same files as before.

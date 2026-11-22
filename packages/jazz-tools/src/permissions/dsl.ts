@@ -9,6 +9,7 @@ import {
   HANDLE,
   isMagicColumn,
   json,
+  literal,
   newScope,
   node,
   op,
@@ -20,6 +21,7 @@ import {
   type PolicyJson,
   type SchemaMeta,
   type Scope,
+  type TableMeta,
 } from "./compile.js";
 import {
   makeFrom,
@@ -59,6 +61,7 @@ import {
   type InheritsIn,
   type NestedPolicy,
   type PermissionError,
+  type IsMember,
 } from "./types.js";
 
 // ============================================================================
@@ -417,6 +420,79 @@ function makeAllowedTo(): AllowedTo {
 }
 
 // ============================================================================
+// isMember
+// ============================================================================
+
+/** Jazz's members table: one row per account and space it may read (protocol §1.3). */
+const MEMBERS_TABLE = "__e2ee_members";
+const MEMBERS_META: TableMeta = {
+  columns: new Map(
+    ["scopeId", "identifier", "accountId"].map((column) => [
+      column,
+      { sqlType: "UUID", nullable: false },
+    ]),
+  ),
+  relations: {},
+};
+
+/**
+ * The schema's tables plus the members table, which `isMember` renders an
+ * `exists` over. Rules see the members table only through `isMember`.
+ */
+function withMembersTable(meta: SchemaMeta, spaces: ReadonlySet<string>): SchemaMeta {
+  if (spaces.size === 0) return meta;
+  return new Map([...meta, [MEMBERS_TABLE, MEMBERS_META]]);
+}
+
+/**
+ * `isMember(table, id)`: the session's account holds a member row for the
+ * space `id` of `table`. It renders exactly the members rule deploy looks
+ * for, `exists __e2ee_members(scopeId = table_id('<table>'), identifier =
+ * this.<column>, accountId = session.user)`, so a space table's read rule
+ * can't be a near miss of it.
+ */
+function makeIsMember(meta: SchemaMeta, spaces: ReadonlySet<string>): IsMember<any> {
+  return ((table: string, id: unknown) => {
+    const at = userFrame(new Error());
+    const fail = (reason: string): never => {
+      throw new PermissionsDslError(`isMember("${table}", …): ${reason}`, at);
+    };
+    if (!spaces.has(table))
+      fail(
+        `${table} is not a space table of this schema. A table is one when it declares ` +
+          `{ space: "id" } or another table's space relation leads to it.`,
+      );
+    const column = handleOf(id);
+    const usage =
+      `the id is the checked row's \`row.id\` (on ${table} itself) or a column of the row ` +
+      `whose forward relation leads to ${table}`;
+    if (!column || column.k !== "column") return fail(usage);
+    const leads =
+      column.column === "id"
+        ? column.scope.table === table
+        : Object.values(meta.get(column.scope.table)?.relations ?? {}).some(
+            (relation) =>
+              relation.kind === "forward" &&
+              relation.column === column.column &&
+              relation.table === table,
+          );
+    if (!leads) fail(`${column.scope.table}.${column.column} doesn't lead to ${table}; ${usage}`);
+    return node({
+      k: "exists",
+      table: MEMBERS_TABLE,
+      conditions: [
+        {
+          scopeId: handle({ k: "text", text: `table_id(${literal(table)})` }),
+          identifier: id,
+          accountId: handle({ k: "session", path: ["user"] }),
+        },
+      ],
+      hops: [],
+    });
+  }) as unknown as IsMember<any>;
+}
+
+// ============================================================================
 // definePermissions
 // ============================================================================
 
@@ -450,6 +526,7 @@ export class PermissionsError extends Error {
 }
 
 function compileRule(
+  /** The tables a rule can render: the schema's, and the members table when it has spaces. */
   meta: SchemaMeta,
   table: string,
   rule: unknown,
@@ -475,7 +552,9 @@ export function compilePermissions(
   meta: SchemaMeta,
   rules: Record<string, unknown>,
   callSite?: string,
+  spaces: ReadonlySet<string> = new Set(),
 ): ReadablePermissionsFile {
+  const rendered = withMembersTable(meta, spaces);
   const tables: ReadablePermissionsFile["tables"] = {};
   const fault = (path: string, error: unknown): never => {
     if (error instanceof PermissionsError) throw error;
@@ -523,12 +602,12 @@ export function compilePermissions(
         let old: PolicyJson | undefined;
         let next: PolicyJson | undefined;
         try {
-          old = compileRule(meta, table, tableRules.updateIf, false);
+          old = compileRule(rendered, table, tableRules.updateIf, false);
         } catch (error) {
           fault(`${path}.updateIf`, error);
         }
         try {
-          next = compileRule(meta, table, tableRules.updateTo, true);
+          next = compileRule(rendered, table, tableRules.updateTo, true);
         } catch (error) {
           fault(`${path}.updateTo`, error);
         }
@@ -537,7 +616,7 @@ export function compilePermissions(
       }
       if (!has(key)) continue;
       try {
-        out[key] = compileRule(meta, table, tableRules[key], false);
+        out[key] = compileRule(rendered, table, tableRules[key], false);
       } catch (error) {
         fault(`${path}.${key}`, error);
       }
@@ -564,10 +643,13 @@ export interface DefinePermissions<S> {
   ): Permissions<S>;
 }
 
-function makeDefinePermissions<S>(meta: SchemaMeta): DefinePermissions<S> {
+function makeDefinePermissions<S>(
+  meta: SchemaMeta,
+  spaces: ReadonlySet<string>,
+): DefinePermissions<S> {
   return ((rules: Record<string, unknown>) => {
     const callSite = userFrame(new Error());
-    const readable = compilePermissions(meta, rules, callSite);
+    const readable = compilePermissions(meta, rules, callSite, spaces);
     return Object.freeze({ [READABLE_PERMISSIONS]: readable });
   }) as DefinePermissions<S>;
 }
@@ -581,6 +663,13 @@ export interface PermissionTools<S, Claims = AnyClaims> {
   definePermissions: DefinePermissions<S>;
   exists: Exists<S>;
   allowedTo: AllowedTo;
+  /**
+   * `isMember(table, id)`: the session's account is a member of the space
+   * `id` of `table`, a space table of the schema. Write a space table's
+   * read rule as `isMember("rooms", room.id)`, and a table in its spaces
+   * as `isMember("rooms", message.roomId)`.
+   */
+  isMember: IsMember<S>;
   session: Session<Claims>;
   anyOf: typeof anyOf;
   allOf: typeof allOf;
@@ -606,12 +695,20 @@ export interface PermissionTools<S, Claims = AnyClaims> {
   is: typeof is;
 }
 
-export function permissionTools<S, Claims>(meta: SchemaMeta): PermissionTools<S, Claims> {
+/**
+ * The permission tools of a schema whose tables are `meta`; `spaces` are its
+ * space tables (each encryption entry's scope), which `isMember` accepts.
+ */
+export function permissionTools<S, Claims>(
+  meta: SchemaMeta,
+  spaces: ReadonlySet<string> = new Set(),
+): PermissionTools<S, Claims> {
   const tables = [...meta.keys()];
   return {
-    definePermissions: makeDefinePermissions<S>(meta),
+    definePermissions: makeDefinePermissions<S>(meta, spaces),
     exists: makeExists<S>(tables),
     allowedTo: makeAllowedTo(),
+    isMember: makeIsMember(meta, spaces) as IsMember<S>,
     session: makeSession() as unknown as Session<Claims>,
     anyOf,
     allOf,

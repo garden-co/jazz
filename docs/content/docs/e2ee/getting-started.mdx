@@ -11,49 +11,59 @@ content unreadable to anyone outside Jazz's permissions.
 
 ## Declare the encrypted columns
 
-Encryption is declared in `jazz.app.json`. A table names the column that holds its **space** (the row
-whose members share one key), the table of those spaces, and the columns to seal:
+Encryption is declared in `schema.ts`. Mark each column to seal with `.encrypted()`, and give its table
+a **space**: the row whose members share one key. `{ space: "project" }` names the relation that
+leads to it; a table whose rows are their own spaces says `{ space: "id" }`.
 
-```json
-{
-  "tables": {
-    "projects": {
-      "columns": {
-        "name": "string",
-        "ownerId": "uuid"
-      }
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  projects: s.table({ name: s.string(), ownerId: s.uuid() }),
+  tasks: s.table(
+    {
+      projectId: s.uuid(),
+      title: s.string().encrypted({ equality: true }),
+      notes: s.string().optional().encrypted(),
     },
-    "tasks": {
-      "columns": {
-        "projectId": "uuid",
-        "title": "bytes",
-        "__e2ee_eq_title": "bytes"
-      },
-      "relations": {
-        "project": {
-          "rel": "projects",
-          "column": "projectId"
-        }
-      },
-      "encryption": {
-        "space": "projectId",
-        "scope": "projects",
-        "columns": {
-          "title": "string"
-        },
-        "equality": ["title"]
-      }
-    }
-  }
-}
+    { project: s.rel("projects", "projectId") },
+    { space: "project" },
+  ),
+});
+
+const { definePermissions, isMember, session } = schema;
+
+export const permissions = definePermissions({
+  projects: {
+    read: (project) => isMember("projects", project.id),
+    insert: { "$createdBy.account": session.user },
+    update: { ownerId: session.user },
+  },
+  tasks: {
+    read: (task) => isMember("projects", task.projectId),
+    insert: (task) => isMember("projects", task.projectId),
+  },
+});
 ```
 
-Each encrypted column is stored as `bytes`. Your code never sees that: the generated types and the
-values you write and read are the plaintext type (`title` is a string). `equality` lists the columns you
-may filter by equality; each needs a token column (`__e2ee_eq_title`) beside it.
+`npx jazz-tools generate` writes the declaration into `jazz.app.json`, where each encrypted column is
+stored as `bytes`. Your code never sees that: the generated types and the values you write and read are
+the plaintext type (`title` is a string, `notes` a string or `null`). `equality: true` lets you filter
+by a column's exact value, through tokens that show the server which rows share a value; the other
+encrypted columns can't be filtered.
+
+Your permissions decide who is a member of a space: members are the rows of the `__e2ee_members` table,
+and `isMember(table, id)` holds when the signed-in account has a member row for that space. A space
+table's read rule must be `isMember` of its own `id`, alone (as `projects` has above) or in `allOf` with
+further conditions, or deploy refuses the app. See [Sharing and keys](/docs/e2ee/sharing-and-keys).
+
+`generate` refuses, naming the table, what deploy would refuse: a `space` that is not `"id"` or a
+relation over one `uuid` column, an encrypted column without a space, and a merge strategy on an
+encrypted column (the server can't merge ciphertext, so its writes are last-writer-wins). A space's
+`id` and its relation's column stay plain, because the server routes rows by them.
 
 Members are rows of `app.__e2ee_members`. Use `db.encryption.members.row` to add an account with an insert,
-`where` to list members and `remove` to remove an account. Your permissions govern these operations. See [Sharing and keys](/docs/e2ee/sharing-and-keys).
+`where` to list members and `remove` to remove an account. Your permissions govern these operations.
 
 ## Give each device a private store
 
