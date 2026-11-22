@@ -218,7 +218,11 @@ describe("encryption on Node, end to end", () => {
   }, 90_000);
 
   it("lists a device's published removal request", async () => {
-    const alice = await device(await serve());
+    const host = await serve();
+    const first = await device(host);
+    const alice = await device(host, { key: first.session.exportDeviceKey() });
+    // The other active device can complete the request when it comes back.
+    await first.session.close();
     const mine = async () => (await alice.db.encryption.devices.list()).find((d) => d.isThisDevice);
     expect((await mine())?.removalRequested).toBe(false);
     await alice.db.encryption.devices.requestRemoval();
