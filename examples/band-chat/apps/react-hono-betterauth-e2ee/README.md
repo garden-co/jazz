@@ -137,7 +137,9 @@ changes they had not synced yet may be lost. The screen says so before you
 confirm. If the page goes away between the steps, the device is still
 listed: press the button again, and both steps run again.
 
-The removed device gets no later keys. It keeps what it already holds.
+The removed device keeps the keys it already holds. It receives no new keys.
+Other room members learn of the removal one sync round trip after it commits.
+During that round trip, their writes may still use the old key.
 
 ## Signing out, and leaving a browser
 
