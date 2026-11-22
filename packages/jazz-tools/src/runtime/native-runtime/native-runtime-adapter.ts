@@ -2,7 +2,7 @@ import { createOpenTransactionId } from "../client.js";
 import type { ClientMigrations } from "../client-migrations.js";
 import type { Encryption, EncryptionNative } from "../../encryption/index.js";
 import { servePrivateStore, type PrivateStore } from "../../encryption/private-store.js";
-import { retryAfterKey } from "../../encryption/key-retry.js";
+import { KEY_WAIT_MS, retryAfterKey } from "../../encryption/key-retry.js";
 import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
 import { SpaceUse, type SubscriptionSpaceUse } from "../../encryption/space-use.js";
 import { withUnreadable, type UnreadableRow } from "../../encryption/unreadable.js";
@@ -1185,6 +1185,8 @@ export class NativeRuntimeAdapter implements Runtime {
    * would take the tab's own `local-only` status for the server's.
    */
   private workerLink: { from: object; link: LinkStatus } | null = null;
+  /** The worker connection made last: the one this tab follows now. */
+  private latestWorker: object | null = null;
 
   static fromDb(
     db: NativeDb,
@@ -1250,8 +1252,15 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!state) return operation();
     return retryAfterKey(
       operation,
-      async (space) =>
-        JSON.parse(await state.native.encryptionCall("prepareSpace", space)) as boolean,
+      async (space, deadline) =>
+        JSON.parse(
+          await state.native.encryptionCall("prepareSpace", { ...space, deadline }),
+        ) as boolean,
+      undefined,
+      async (space, failure) =>
+        JSON.parse(
+          await state.native.encryptionCall("retryWithCurrentKey", { ...space, failure }),
+        ) as boolean,
     );
   }
 
@@ -1893,6 +1902,15 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
+   * A connection `from` to the shared worker was made: it replaces the one
+   * before it, which may still hold the link it last relayed.
+   */
+  noteWorkerConnection(from: object): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.noteWorkerConnection(from);
+    this.latestWorker = from;
+  }
+
+  /**
    * The server link of the worker this tab follows, from a link fate the
    * worker connection `from` received. The tab's encryption is online
    * only while it is connected.
@@ -1905,11 +1923,13 @@ export class NativeRuntimeAdapter implements Runtime {
 
   /**
    * The worker connection `from` failed: until another relays the
-   * worker's link, this tab cannot reach the server.
+   * worker's link, this tab cannot reach the server. That holds when it is
+   * the connection that relayed the link, and when it is the one that
+   * replaced it: the link relayed before belongs to a connection gone.
    */
   forgetWorkerLink(from: object): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.forgetWorkerLink(from);
-    if (this.workerLink?.from !== from) return;
+    if (this.workerLink?.from !== from && this.latestWorker !== from) return;
     this.workerLink = { from, link: offlineLink("stopped") };
     this.signalEncryptionOnline();
   }
@@ -2327,7 +2347,12 @@ export class NativeRuntimeAdapter implements Runtime {
       releaseAdmission = resolve;
     });
     owner.pendingStreamingMutations.add(admission);
+    const endAdmission = () => {
+      releaseAdmission();
+      owner.pendingStreamingMutations.delete(admission);
+    };
     let opened: NativeStreamingMutation | undefined;
+    let publicationOwnsUpload = false;
     try {
       // Only opening the upload can be replayed: the caller owns a one-shot source.
       const opening = this.retryAfterKey(() => {
@@ -2383,32 +2408,49 @@ export class NativeRuntimeAdapter implements Runtime {
         }
       }
       if (pendingHighSurrogate) await pushBounded(encoder.encode(pendingHighSurrogate));
-      const previousFinalization = owner.streamingFinalization;
-      let releaseFinalization!: () => void;
-      const finalization = new Promise<void>((resolve) => {
-        releaseFinalization = resolve;
+      const previous = owner.streamingFinalization;
+      let timer: ReturnType<typeof setTimeout>;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error("Streaming publication timed out");
+          error.name = "TimeoutError";
+          reject(error);
+        }, KEY_WAIT_MS);
       });
-      owner.streamingFinalization = previousFinalization.then(() => finalization);
-      await previousFinalization;
-      let receipt: MutationResult;
-      try {
-        if (tx) {
-          await upload.finishInTransaction!();
-          tx.hasStagedMutations = true;
-          receipt = { kind: "staged", openTransactionId: tx.id };
-        } else {
-          receipt = this.finishMutation(await upload.finish());
+      const publish = async (): Promise<StreamingInsertResult> => {
+        try {
+          await Promise.race([previous, deadline]);
+          let receipt: MutationResult;
+          if (tx) {
+            await upload.finishInTransaction!();
+            tx.hasStagedMutations = true;
+            receipt = { kind: "staged", openTransactionId: tx.id };
+          } else {
+            receipt = this.finishMutation(await upload.finish());
+          }
+          return { id: formatUuid(rowId), ...receipt };
+        } catch (error) {
+          await upload.abort();
+          throw error;
+        } finally {
+          endAdmission();
         }
+      };
+      publicationOwnsUpload = true;
+      const publication = publish();
+      // A queued timeout cannot pass its predecessor. A native finish already
+      // in flight keeps its turn and foreground lease until native settlement.
+      owner.streamingFinalization = Promise.allSettled([previous, publication]).then(() => {});
+      try {
+        return await Promise.race([publication, deadline]);
       } finally {
-        releaseFinalization();
+        clearTimeout(timer!);
       }
-      return { id: formatUuid(rowId), ...receipt };
     } catch (error) {
-      await opened?.abort();
+      if (!publicationOwnsUpload) await opened?.abort();
       throw error;
     } finally {
-      releaseAdmission();
-      owner.pendingStreamingMutations.delete(admission);
+      if (!publicationOwnsUpload) endAdmission();
     }
   }
 

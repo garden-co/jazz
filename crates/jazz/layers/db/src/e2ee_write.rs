@@ -3,15 +3,14 @@
 
 use std::collections::BTreeMap;
 
-use super::large_ops::{StreamedSeal, sealed_elsewhere};
+use super::large_ops::{SealedFor, StreamedSeal, sealed_elsewhere};
 use super::{
-    BatchKind, Db, Inner, InsertOptions, LargeEdits, Located, StagedOp, Target, TxRef,
-    UpdateOptions, WriteHandle, WriteTarget, column_from_sql, quote, rejected, storage,
+    BatchKind, Db, Inner, InsertOptions, LargeEdits, Located, StagedOp, StreamingMutationKind,
+    StreamingValueUpload, Target, TxRef, UpdateOptions, WriteHandle, WriteTarget, column_from_sql,
+    quote, rejected, storage,
 };
 use crate::db::Pos;
-use crate::e2ee::{
-    E2eeHooks, E2eeRefusal, SealError, StreamSealer, StreamTarget, WriteCells, WriteKind,
-};
+use crate::e2ee::{E2eeHooks, E2eeRefusal, SealError, StreamTarget, WriteCells, WriteKind};
 use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode};
 use crate::records::Value;
@@ -220,13 +219,30 @@ impl TxRef<'_> {
     }
 }
 
+fn seal_error(error: SealError) -> Error {
+    match error {
+        SealError::NeedsKey { space } => E2eeRefusal::NeedsKey { space }.error(),
+        SealError::SpacePending { space } => E2eeRefusal::SpacePending { space }.error(),
+        SealError::Refused(error) => error,
+    }
+}
+
+impl From<StreamingMutationKind> for WriteKind {
+    fn from(kind: StreamingMutationKind) -> Self {
+        match kind {
+            StreamingMutationKind::Insert => Self::Insert,
+            StreamingMutationKind::Update => Self::Update,
+            StreamingMutationKind::Upsert => Self::Upsert,
+        }
+    }
+}
+
 impl Inner {
     /// Seal `op`, a write this database authors, before anything stores or
     /// chunks it. Returns the internal rows the write needs, as inserts to
     /// apply before it in the same transaction. `kind` overrides the kind
-    /// `op` implies (a move between spaces). `streamed` names the one column
-    /// of this write whose value was sealed as it streamed: it is stored as
-    /// it is. A branch move carries sealed cells as they are.
+    /// `op` implies (a move between spaces). A streamed write already holds
+    /// its sealed cells. Check its space and claim any root it needs here.
     pub(crate) fn seal_op(
         &self,
         op: &mut StagedOp,
@@ -281,40 +297,41 @@ impl Inner {
             Some((target, deleted)) => self.stored_space(&*hooks, &table, row, &target, deleted)?,
             None => None,
         };
-        // A value sealed as it streamed is stored as it is, and only in the
-        // row and space it was sealed for, as this write finds them: its
-        // transaction's own writes included.
+        let mut companions = Vec::new();
         if let Some(seal) = streamed {
-            let space = self
-                .named_space(&table, row, cells)
-                .or_else(|| stored_space.clone());
-            if seal.row != row || space.as_ref() != seal.space {
+            let space = stored_space
+                .clone()
+                .or_else(|| self.named_space(&table, row, cells));
+            if seal.row != row || space != seal.space {
                 return Err(sealed_elsewhere());
             }
-        }
-        let streamed = streamed.and_then(|seal| cells.remove_entry(seal.column));
-        let mut companions = Vec::new();
-        let sealed = hooks.seal_write(&mut WriteCells {
-            table: &table,
-            row,
-            kind,
-            cells,
-            streamed_column: streamed.as_ref().map(|(name, _)| name.as_str()),
-            stored_space: stored_space.as_ref(),
-            companion_rows: &mut companions,
-        });
-        if let Some((column, value)) = streamed {
-            cells.insert(column, value);
-        }
-        match sealed {
-            Ok(()) => {}
-            Err(SealError::NeedsKey { space }) => {
-                return Err(E2eeRefusal::NeedsKey { space }.error());
+            if kind == WriteKind::Upsert && stored_space.is_some() != seal.existed {
+                return Err(rejected(
+                    "the row of a streamed upsert appeared or disappeared during the upload",
+                ));
             }
-            Err(SealError::SpacePending { space }) => {
-                return Err(E2eeRefusal::SpacePending { space }.error());
-            }
-            Err(SealError::Refused(error)) => return Err(error),
+            companions.clone_from(&seal.companions);
+            hooks
+                .claim_stream_companions(
+                    &table,
+                    space.as_ref(),
+                    seal.root.as_deref(),
+                    &mut companions,
+                )
+                .map_err(seal_error)?;
+        } else {
+            hooks
+                .seal_write(&mut WriteCells {
+                    table: &table,
+                    row,
+                    kind,
+                    cells,
+                    streamed_column: None,
+                    stream_root: None,
+                    stored_space: stored_space.as_ref(),
+                    companion_rows: &mut companions,
+                })
+                .map_err(seal_error)?;
         }
         Ok(companions
             .into_iter()
@@ -400,63 +417,102 @@ impl Inner {
         Ok(())
     }
 
-    /// The sealer of a streamed value of `column` of row `row` of `table`,
-    /// written to `target`, when the column is encrypted: the hooks check
-    /// the column and choose the key before any source byte is read
-    /// (protocol §5.5). `None` for a column the hooks leave alone.
-    pub(crate) fn stream_sealer(
+    pub(super) fn check_rowless_stream(
         &self,
         table: &str,
-        row: RowUuid,
         cells: &BTreeMap<String, Value>,
-        column: &str,
-        target: &WriteTarget,
-    ) -> Result<Option<(Box<dyn StreamSealer>, Option<Value>)>, Error> {
-        let Some(hooks) = self.e2ee.clone() else {
-            return Ok(None);
+        mutation: Option<StreamingMutationKind>,
+    ) -> Result<(), Error> {
+        let Some(entry) = self
+            .e2ee
+            .as_ref()
+            .and_then(|hooks| hooks.declarations().tables.get(table))
+        else {
+            return Ok(());
         };
-        let encrypted = hooks
-            .declarations()
-            .tables
-            .get(table)
-            .is_some_and(|entry| entry.columns.contains_key(column));
-        if !encrypted {
-            return Ok(None);
+        if let Some(column) = cells.keys().find(|name| entry.columns.contains_key(*name)) {
+            return Err(Error::new(
+                ErrorCode::Query,
+                format!(
+                    "Writing encrypted column `{table}.{column}` in a rowless upload is not supported. Begin the upload with its row and mutation kind."
+                ),
+            ));
         }
-        let space = self.stream_space(table, row, cells, target)?;
-        let sealer = hooks.seal_stream(&StreamTarget {
-            table,
-            row,
-            column,
-            space: space.as_ref(),
-        });
-        match sealer {
-            Ok(sealer) => Ok(Some((sealer, space))),
-            Err(SealError::NeedsKey { space }) => Err(E2eeRefusal::NeedsKey { space }.error()),
-            Err(SealError::SpacePending { space }) => {
-                Err(E2eeRefusal::SpacePending { space }.error())
-            }
-            Err(SealError::Refused(error)) => Err(error),
+        if matches!(
+            mutation,
+            Some(StreamingMutationKind::Insert | StreamingMutationKind::Upsert)
+        ) {
+            return Err(Error::new(
+                ErrorCode::Query,
+                format!(
+                    "Inserting or upserting into encrypted table `{table}` in a rowless upload is not supported. Begin the upload with its row and mutation kind."
+                ),
+            ));
         }
+        Ok(())
     }
 
-    /// The space of a streamed value's row: the one the write names
-    /// ([`Inner::named_space`]), or the stored row's as a write to `target`
-    /// finds it.
-    pub(crate) fn stream_space(
+    /// Prepare the row's encrypted metadata and its stream together, while the
+    /// same store overlay and key are current and before the source can run.
+    pub(super) fn prepare_stream(
         &self,
-        table: &str,
+        upload: &mut StreamingValueUpload,
+        mutation: StreamingMutationKind,
         row: RowUuid,
-        cells: &BTreeMap<String, Value>,
+        cells: &mut BTreeMap<String, Value>,
         target: &WriteTarget,
-    ) -> Result<Option<Value>, Error> {
-        if let Some(space) = self.named_space(table, row, cells) {
-            return Ok(Some(space));
-        }
-        let Some(hooks) = self.e2ee.clone() else {
-            return Ok(None);
+    ) -> Result<(), Error> {
+        let Some(hooks) = &self.e2ee else {
+            return Ok(());
         };
-        self.stored_space(&*hooks, table, row, &Target::of(target, self)?, false)
+        let table = &upload.table;
+        let column = &upload.column;
+        let Some(entry) = hooks.declarations().tables.get(table) else {
+            return Ok(());
+        };
+        let stored = match mutation {
+            StreamingMutationKind::Insert => None,
+            _ => self.stored_space(&**hooks, table, row, &Target::of(target, self)?, false)?,
+        };
+        let space = self
+            .named_space(table, row, cells)
+            .or_else(|| stored.clone());
+        if entry.columns.contains_key(column) {
+            upload.sealer = Some(
+                hooks
+                    .seal_stream(&StreamTarget {
+                        table,
+                        row,
+                        column,
+                        space: space.as_ref(),
+                    })
+                    .map_err(seal_error)?,
+            );
+        }
+        let mut companions = Vec::new();
+        let mut metadata = WriteCells {
+            table,
+            row,
+            kind: mutation.into(),
+            cells,
+            streamed_column: Some(column),
+            stream_root: None,
+            stored_space: stored.as_ref(),
+            companion_rows: &mut companions,
+        };
+        hooks.seal_write(&mut metadata).map_err(seal_error)?;
+        let root = metadata.stream_root;
+        upload.sealed_for = Some(SealedFor {
+            row,
+            mutation,
+            target: target.clone(),
+            space,
+            existed: stored.is_some(),
+            cells: std::mem::take(cells),
+            companions,
+            root,
+        });
+        Ok(())
     }
 
     /// The space a write of `row` names: the row itself, for a table whose

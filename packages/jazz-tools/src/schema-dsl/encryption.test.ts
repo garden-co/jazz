@@ -438,3 +438,131 @@ messages: s.table(
     }
   });
 });
+
+describe("encryption on column builders that don't store a whole column", () => {
+  it.each([
+    ["array element", "s.array(s.string().encrypted())", "encrypt the whole array column"],
+    [
+      "nested array element",
+      "s.array(s.array(s.string().encrypted()).optional()).encrypted()",
+      "encrypt the whole array column",
+    ],
+    [
+      "array element with a default",
+      's.array(s.string().encrypted().default("untitled"))',
+      "encrypt the whole array column",
+    ],
+    [
+      "array element referencing a table",
+      's.array(s.uuid().references("notes").encrypted())',
+      "encrypt the whole array column",
+    ],
+    [
+      "transform view",
+      's.string().transform("asTitle", s.string().encrypted())',
+      "use a stored column without a transform",
+    ],
+    [
+      "array element of a transform view",
+      's.string().transform("asTitles", s.array(s.string().encrypted()))',
+      "use a stored column without a transform",
+    ],
+    ["JSON schema", "s.json(s.string().encrypted())", "encrypt the whole JSON column"],
+    [
+      "property in a JSON schema",
+      's.json({ type: "object", properties: { title: s.string().encrypted() } })',
+      "encrypt the whole JSON column",
+    ],
+    ["computed field", 's.computed(s.string().encrypted(), ["title"])', "encrypt a stored column"],
+    [
+      "array element of a computed field",
+      's.computed(s.array(s.string().encrypted()), ["title"])',
+      "encrypt a stored column",
+    ],
+  ])("refuses encryption on a %s during generate", async (_case, expression, guidance) => {
+    const root = await project(`
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  notes: s.table({ title: s.string(), details: ${expression} }, {}, { space: "id" }),
+});
+`);
+    await expect(generateApp({ cwd: root })).rejects.toThrow(
+      new RegExp(`notes\\.details:.*${guidance}`),
+    );
+    expect(existsSync(join(root, "jazz.app.json"))).toBe(false);
+  });
+
+  it("encrypts a whole array column and preserves its optional default", async () => {
+    const root = await project(`
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  notes: s.table(
+    { titles: s.array(s.string()).encrypted().optional().default(["untitled"]) },
+    {},
+    { space: "id" },
+  ),
+});
+export const permissions = schema.definePermissions({
+  notes: { read: (note) => schema.isMember("notes", note.id) },
+});
+`);
+    const files = await generated(root);
+    const table = JSON.parse(files.app).tables.notes;
+    expect(table.columns.titles).toBe("bytes");
+    expect(table.encryption.columns.titles).toEqual({
+      array: "string",
+      optional: true,
+      default: ["untitled"],
+    });
+  });
+});
+
+describe("encryption declarations in migrations", () => {
+  it.each([
+    ["add array operation", "add", "m.add.array({ of: s.string().encrypted(), default: null })"],
+    [
+      "drop array operation",
+      "drop",
+      "m.drop.array({ of: s.array(s.string().encrypted()), backwardsDefault: null })",
+    ],
+    ["add JSON operation", "add", "m.add.json({ schema: s.string().encrypted(), default: null })"],
+    [
+      "drop JSON operation",
+      "drop",
+      "m.drop.json({ schema: { items: s.string().encrypted() }, backwardsDefault: null })",
+    ],
+    ["source witness", "drop", "s.array(s.array(s.string())).optional().encrypted()"],
+    ["target witness", "add", "s.array(s.string().encrypted()).optional()"],
+  ])(
+    "refuses encryption on a migration %s during generate",
+    async (where, direction, expression) => {
+      const withoutArray = chat();
+      const withLabels = chat({
+        messages: where.includes("JSON")
+          ? ", labels: s.json().optional()"
+          : direction === "add"
+            ? ", labels: s.array(s.string()).optional()"
+            : ", labels: s.array(s.array(s.string())).optional()",
+      });
+      const root = await project(direction === "add" ? withoutArray : withLabels);
+      const original = await generated(root);
+      await writeFile(join(root, "schema.ts"), direction === "add" ? withLabels : withoutArray);
+      const created = await createAppMigration({ cwd: root, name: direction });
+      expect(created.todos).toEqual([]);
+      const path = created.file!;
+      const stub = await readFile(path, "utf8");
+      const edited = where.endsWith("operation")
+        ? stub.replace(new RegExp(`m\\.${direction}\\.(?:array|json)\\(.*\\)`), expression)
+        : stub.replace(/"labels": s\.array\(.*\)\.optional\(\)/, `"labels": ${expression}`);
+      expect(edited).not.toBe(stub);
+      await writeFile(path, edited);
+
+      await expect(generateApp({ cwd: root })).rejects.toThrow(
+        /messages\.labels:.*encryption.*schema\.ts/,
+      );
+      expect(await readFile(join(root, "jazz.app.json"), "utf8")).toBe(original.app);
+    },
+  );
+});

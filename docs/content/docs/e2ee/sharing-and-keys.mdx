@@ -86,9 +86,15 @@ writes nothing. If the space already has a key, a member whose device is waiting
 device cannot confirm the space's key state. If the device sees that its account has no membership,
 it gets `not-a-member`. A device waiting for approval gets `no-account`, even in a space with no key yet.
 
+If no online member holds the current key or the key history is broken, ask a person to confirm before calling `db.encryption.keys.recoverRotation(space)` from a device that holds an earlier key.
+
 Without an explicit rotation, the next pass notices that a key is held by an account that is no
 longer a member and rotates, once the device has observed the removal. A removed member keeps what
 they could already read; Jazz's permissions stop them reading any row after.
+
+Before reusing a space key, Jazz checks whether it needs rotation. If account verification or the
+check fails, `onReport` receives `rotation-check-failed` with the space and the original reason.
+Jazz marks the space for rotation. The app receives the original failure even if rotation succeeds.
 
 That automatic rotation happens just before a write. If it fails, for example because the writer may
 not update the space's row, the write still goes ahead under the current key, which the removed member
@@ -97,6 +103,8 @@ may hold. The runtime then sends `onReport` a `rotation-failed` report with the 
 
 ```ts
 db.encryption.onReport((report) => {
+  if (report.type === "rotation-check-failed")
+    console.warn("rotation check failed", report.space, report.reason);
   if (report.type === "rotation-failed")
     console.warn("key not rotated", report.space, report.reason);
 });

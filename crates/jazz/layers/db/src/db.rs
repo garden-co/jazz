@@ -4122,9 +4122,8 @@ impl Db {
         self.write_op_streamed(op, who, None)
     }
 
-    /// [`Db::write_op`] of a write whose `streamed` column holds a value the
-    /// encryption hooks sealed as it streamed: they seal the write's other
-    /// cells and leave that one as it is.
+    /// [`Db::write_op`] for a row whose stream and encrypted siblings have
+    /// already been sealed. Check their space before publishing the write.
     pub(crate) fn write_op_streamed(
         &self,
         mut op: StagedOp,

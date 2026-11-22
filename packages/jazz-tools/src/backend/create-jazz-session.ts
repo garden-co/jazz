@@ -581,6 +581,11 @@ export async function openJazzSession(
             env: config.env,
             driver: { type: config.driver.type },
             account,
+            // Which live queries read encrypted columns, so that they wait
+            // until this client can open them.
+            ...(encryption && config.encryption
+              ? { encryption: { app: config.app, store: config.encryption.store } }
+              : {}),
           },
           source,
         );

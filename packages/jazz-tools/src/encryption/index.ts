@@ -89,6 +89,8 @@ export type EncryptionReport =
       space: { table: string; id: string } | null;
     }
   | { type: "challenged" }
+  /** Account verification or the space rotation check failed before a write. */
+  | { type: "rotation-check-failed"; space: { table: string; id: string }; reason: string }
   /**
    * A rotation Jazz tried before a write to `space` failed or was refused,
    * for `reason`. The write was sealed under the space's current key all the
@@ -107,7 +109,10 @@ export type EncryptionReport =
 export interface EncryptionNative {
   encryptionCall(op: string, args?: Record<string, unknown> | null): Promise<string>;
   takeEncryptionReports(): string[];
-  /** The loop's account status and last error, as JSON text. */
+  /**
+   * The loop's account status, last error and stage, and whether the client
+   * can read encrypted rows yet (`readable`), as JSON text.
+   */
   encryptionState(): string;
 }
 
@@ -127,8 +132,14 @@ export interface EncryptionOptions {
   reportIntervalMs?: number;
 }
 
-const toHex = (bytes: Uint8Array) =>
-  Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+/** @internal Takes ownership of the decoded secret passed to the native host. */
+export function takeSecretHex(bytes: Uint8Array): string {
+  try {
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  } finally {
+    bytes.fill(0);
+  }
+}
 
 function failure(error: unknown, operation?: string): EncryptionError {
   const message = error instanceof Error ? error.message : String(error);
@@ -191,6 +202,26 @@ export class Encryption {
     return this.verify(Date.now() + timeoutMs);
   }
 
+  /**
+   * @internal Resolves once this client can open the encrypted rows its
+   * store holds: it knows the app's catalogue identities (synced once, then
+   * kept with the store) and has loaded the keys it holds. A device that
+   * synced before is readable at once, with or without the server; one that
+   * never synced waits, without a deadline, for its first sync. Unlike
+   * {@link ready} it does not wait for the account's verification, which
+   * needs the server. Rejects only when the runtime can no longer answer.
+   */
+  async readable(): Promise<void> {
+    for (;;) {
+      const state = JSON.parse(this.native.encryptionState()) as { readable?: boolean };
+      if (state.readable) return;
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 50);
+        (timer as { unref?: () => void }).unref?.();
+      });
+    }
+  }
+
   /** The loop's verification, once it has one (see {@link ready}). */
   private async verified(deadline: number): Promise<AccountStatus> {
     for (;;) {
@@ -232,7 +263,7 @@ export class Encryption {
         : await this.call<AccountStatus>("ready", {});
     const secret = await this.options.accountSecret?.();
     if (secret !== undefined) {
-      const hex = toHex(parseSecret(secret));
+      const hex = takeSecretHex(parseSecret(secret));
       // `automatic`: a retired root of the account secret is not an error
       // here, so the device still starts.
       if (status === "active")
@@ -398,7 +429,7 @@ export class Recovery {
   ) {}
 
   private async phraseSecret(phrase: string): Promise<string> {
-    return toHex(RecoveryPhrase.toBytes(phrase));
+    return takeSecretHex(RecoveryPhrase.toBytes(phrase));
   }
 
   /**
@@ -408,7 +439,12 @@ export class Recovery {
    */
   create(): string {
     this.refuseForDeviceAccount();
-    return RecoveryPhrase.fromBytes(runtimeRandomBytes(32));
+    const secret = runtimeRandomBytes(32);
+    try {
+      return RecoveryPhrase.fromBytes(secret);
+    } finally {
+      secret.fill(0);
+    }
   }
 
   /**
@@ -431,20 +467,22 @@ export class Recovery {
   }): Promise<{ method: "passkey" } | { method: "phrase"; phrase: string }> {
     this.refuseForDeviceAccount();
     const secret = runtimeRandomBytes(32);
-    const phrase = RecoveryPhrase.fromBytes(secret);
-    let method: "passkey" | "phrase" = "phrase";
-    // First, while the user's click still counts as a gesture.
     try {
-      await new BrowserPasskeyBackup({
-        appName: options.appName,
-        appHostname: options.appHostname,
-      }).backup(formatSecret(secret), `${options.accountName} (encryption recovery key)`);
-      method = "passkey";
-    } catch (error) {
-      if (!(error instanceof PasskeyBackupError)) throw error;
+      let phrase: string | undefined;
+      try {
+        await new BrowserPasskeyBackup({
+          appName: options.appName,
+          appHostname: options.appHostname,
+        }).backup(formatSecret(secret), `${options.accountName} (encryption recovery key)`);
+      } catch (error) {
+        if (!(error instanceof PasskeyBackupError)) throw error;
+        phrase = RecoveryPhrase.fromBytes(secret);
+      }
+      await this.call("recoveryRegister", { secret: takeSecretHex(secret) });
+      return phrase === undefined ? { method: "passkey" } : { method: "phrase", phrase };
+    } finally {
+      secret.fill(0);
     }
-    await this.call("recoveryRegister", { secret: toHex(secret) });
-    return method === "passkey" ? { method } : { method, phrase };
   }
 
   /**
@@ -461,7 +499,7 @@ export class Recovery {
       appName: options.appName,
       appHostname: options.appHostname,
     }).restore();
-    return this.call("recoveryRestore", { secret: toHex(parseSecret(secret)) });
+    return this.call("recoveryRestore", { secret: takeSecretHex(parseSecret(secret)) });
   }
 
   /** Registers the recovery root this phrase gives for the account. */
@@ -540,6 +578,12 @@ export class Keys {
    */
   async rotate(space: SpaceRef): Promise<number> {
     const done = await this.call<{ delivered: number }>("keysRotate", { ...space });
+    return done.delivered;
+  }
+
+  /** After user confirmation, rotate from the newest key this device holds. */
+  async recoverRotation(space: SpaceRef): Promise<number> {
+    const done = await this.call<{ delivered: number }>("keysRecoverRotation", { ...space });
     return done.delivered;
   }
 }

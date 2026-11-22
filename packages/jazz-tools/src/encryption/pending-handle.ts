@@ -36,6 +36,7 @@ const LISTENERS = new Set(["onReport", "onUnreadable", "onChallenge"]);
 const MEMBERS: { [name: string]: readonly string[] | true } = {
   deviceId: true,
   ready: true,
+  readable: true,
   start: true,
   stop: true,
   onReport: true,
@@ -43,7 +44,7 @@ const MEMBERS: { [name: string]: readonly string[] | true } = {
   onChallenge: true,
   devices: ["list", "challenge", "answer", "remove", "requestRemoval", "completeRemovals"],
   recovery: ["create", "enable", "restoreFromPasskey", "register", "restore", "list", "retire"],
-  keys: ["deliver", "rotate"],
+  keys: ["deliver", "rotate", "recoverRotation"],
   members: ["row", "where", "remove"],
 };
 /** For the test that keeps the table in step with the real class. */
