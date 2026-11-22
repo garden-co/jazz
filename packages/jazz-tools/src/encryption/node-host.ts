@@ -119,6 +119,7 @@ export function keylessEncryption(
     recovery,
     deviceId: reject,
     ready: reject,
+    readable: reject,
     start: refuse,
     stop: refuse,
     onReport: refuse,
