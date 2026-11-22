@@ -331,6 +331,40 @@ describe("the schema printer", () => {
     expect(schema).toContain('.history("latest")');
   });
 
+  it("reports app-wide encryption settings and conversion fields instead of dropping them", () => {
+    const rooms = { columns: { name: "bytes", nameText: "string?" } };
+    const encryption = {
+      space: "id",
+      scope: "rooms",
+      columns: { name: { type: "string", from: "nameText" } },
+      backfill: ["name"],
+    };
+    const out = printSchemaTs(
+      {
+        ...app({ rooms: { ...rooms, encryption } as AppJson["tables"][string] }),
+        encryption: { allowAccountReset: true },
+      } as AppJson,
+      { format: 1, tables: { rooms: {} } },
+    );
+    expect(out.unsupported).toEqual([
+      {
+        path: "tables.rooms.encryption.backfill",
+        text: '["name"]',
+        reason: "Printing an encryption entry's backfill is not supported yet",
+      },
+      {
+        path: "tables.rooms.encryption.columns.name.from",
+        text: '"nameText"',
+        reason: "Printing an encrypted column's conversion field from is not supported yet",
+      },
+      {
+        path: "encryption",
+        text: '{"allowAccountReset":true}',
+        reason: "Printing app-wide encryption settings is not supported yet",
+      },
+    ]);
+  });
+
   it("prints a migration stub per migration and a snapshot per version", async () => {
     const dir = join(REPO, "crates", "jazz", "fixtures", "app-artifact", "shared-todos");
     let n = 0;

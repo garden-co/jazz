@@ -29,6 +29,7 @@ export function printTable(table: TableJson, options: TablesPrintOptions): strin
   const encryptedColumns = encryption?.columns ?? {};
   const equality = new Set(encryption?.equality);
   const tokenColumns = new Set([...equality].map((name) => `__e2ee_eq_${name}`));
+  if (encryption) refuseUnprintedEncryption(encryption, options);
   const columns = Object.entries(table.columns)
     .filter(([name]) => !tokenColumns.has(name))
     .map(([name, stored]) => {
@@ -98,6 +99,38 @@ export function printTable(table: TableJson, options: TablesPrintOptions): strin
   }
   if (table.history) text += `.history(${JSON.stringify(table.history)})`;
   return text;
+}
+
+/** What an encryption entry holds that `s.table` and `.encrypted()` can print. */
+const PRINTED_ENTRY_KEYS = new Set(["space", "scope", "columns", "equality"]);
+/** The conversion fields of an encrypted column, which `.encrypted()` can't declare yet. */
+const CONVERSION_FIELDS = ["sealedType", "from", "to", "convert", "reverse"];
+
+/** Report what a table's encryption entry holds that the TS DSL can't declare yet. */
+function refuseUnprintedEncryption(
+  encryption: NonNullable<TableJson["encryption"]>,
+  options: TablesPrintOptions,
+): void {
+  const at = `${options.path}.encryption`;
+  for (const [key, value] of Object.entries(encryption)) {
+    if (PRINTED_ENTRY_KEYS.has(key)) continue;
+    options.unsupported.push({
+      path: `${at}.${key}`,
+      text: JSON.stringify(value),
+      reason: `Printing an encryption entry's ${key} is not supported yet`,
+    });
+  }
+  for (const [name, column] of Object.entries(encryption.columns)) {
+    if (typeof column !== "object") continue;
+    for (const field of CONVERSION_FIELDS) {
+      if (!Object.hasOwn(column, field)) continue;
+      options.unsupported.push({
+        path: `${at}.columns.${name}.${field}`,
+        text: JSON.stringify((column as Record<string, unknown>)[field]),
+        reason: `Printing an encrypted column's conversion field ${field} is not supported yet`,
+      });
+    }
+  }
 }
 
 const SCALARS = new Set([

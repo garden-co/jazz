@@ -4,6 +4,7 @@ import { structuralBigInt } from "../runtime/structural-values.js";
 import { isDefinedMigration, witnessColumns, type DefinedMigration } from "../migrations.js";
 import { isDefinedTable } from "../schema-dsl/table.js";
 import {
+  EQUALITY_PREFIX,
   readableColumn,
   type ReadableJson,
   type ReadableTable,
@@ -319,6 +320,20 @@ function renderTableSteps(
         break;
       case "add": {
         const descriptor = column(toTable, step.column);
+        const indexed = step.column.startsWith(EQUALITY_PREFIX)
+          ? step.column.slice(EQUALITY_PREFIX.length)
+          : undefined;
+        if (indexed !== undefined && encrypted.has(indexed)) {
+          // Its token column would be empty in the rows stored before it,
+          // so finding them by its value needs their tokens written first.
+          throw new Error(
+            `${table.table}.${indexed}: finding rows by an encrypted column's value ` +
+              "(.encrypted({ equality: true })) on a table that already has rows isn't supported yet. " +
+              "The rows stored before it have no equality tokens, and writing theirs needs their " +
+              "spaces' keys, which a migration doesn't hold. Declare it without equality, or put it " +
+              "on a new table.",
+          );
+        }
         if (encrypted.has(step.column)) {
           // Stored as required bytes. The empty ciphertext is what a cell no
           // writer sealed holds: the rows stored before the column read it
