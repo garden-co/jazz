@@ -42,7 +42,8 @@ export function emailOf(name: string): string {
  */
 export class Wire {
   readonly chunks: Buffer[] = [];
-  private openTunnels = 0;
+  private readonly tunnels = new Set<Duplex>();
+  private outgoingPaused = false;
   private server: Server | undefined;
 
   /** Starts this browser's proxy; resolves with its address. */
@@ -93,7 +94,7 @@ export class Wire {
     const upstream = connect(Number(port), host!, () => {
       client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length) upstream.write(head);
-      this.openTunnels++;
+      this.tunnels.add(client);
       const outgoing = new FrameReader((payload) => this.chunks.push(payload));
       const incoming = new FrameReader((payload) => this.chunks.push(payload));
       client.on("data", (chunk: Buffer) => {
@@ -108,7 +109,7 @@ export class Wire {
       const closed = () => {
         if (!open) return;
         open = false;
-        this.openTunnels--;
+        this.tunnels.delete(client);
         client.destroy();
         upstream.destroy();
       };
@@ -116,6 +117,7 @@ export class Wire {
       upstream.on("close", closed);
       client.on("error", closed);
       upstream.on("error", closed);
+      if (this.outgoingPaused) client.pause();
     });
     upstream.on("error", () => client.destroy());
   }
@@ -132,9 +134,20 @@ export class Wire {
     return this.saw(id) || this.chunks.some((chunk) => chunk.includes(bytes));
   }
 
+  /** Hold this browser's outgoing sync without interrupting incoming data. */
+  pauseOutgoing(): void {
+    this.outgoingPaused = true;
+    for (const tunnel of this.tunnels) tunnel.pause();
+  }
+
+  resumeOutgoing(): void {
+    this.outgoingPaused = false;
+    for (const tunnel of this.tunnels) tunnel.resume();
+  }
+
   /** Open sync connections (tunnels) of this browser. */
   openSockets(): number {
-    return this.openTunnels;
+    return this.tunnels.size;
   }
 }
 
@@ -529,7 +542,7 @@ export async function pageStorage(page: Page): Promise<string> {
 declare global {
   interface Window {
     bandChatMarkerWrites?: string[];
-    releaseBandChatDelivery?: () => void;
+    holdBandChatSync: () => Promise<void>;
     bandChatRemovalAccepted?: boolean;
   }
 }
