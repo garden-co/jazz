@@ -381,7 +381,6 @@ jobs:
           test -f packages/jazz-tools/dist/index.d.ts
           test -f packages/jazz-tools/dist/backend/index.js
           test -f packages/jazz-tools/dist/react/index.js
-          test -f packages/jazz-tools/dist/permissions/index.js
 
       - name: Verify staged jazz-rn relay artifacts
         env: &release-artifact-source-revision-env
