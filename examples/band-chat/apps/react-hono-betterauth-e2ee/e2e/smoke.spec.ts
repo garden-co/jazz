@@ -27,8 +27,12 @@ test("a new member signs up, opens a room and their message survives a reload", 
   const message = `Soundcheck at six (${run})`;
   await page.getByRole("textbox", { name: "Message input" }).fill(message);
   await page.getByRole("button", { name: "Send", exact: true }).click();
-  await expect(page.getByText(message)).toBeVisible({ timeout: TIMEOUT });
+  await expect(page.locator("[data-message-id]").getByText(message, { exact: true })).toBeVisible({
+    timeout: TIMEOUT,
+  });
 
   await page.reload();
-  await expect(page.getByText(message)).toBeVisible({ timeout: TIMEOUT });
+  await expect(page.locator("[data-message-id]").getByText(message, { exact: true })).toBeVisible({
+    timeout: TIMEOUT,
+  });
 });
