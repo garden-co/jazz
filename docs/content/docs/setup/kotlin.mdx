@@ -35,6 +35,17 @@ With `use {}`, run the whole block in `withContext(Dispatchers.IO)`.
 
 </Callout>
 
+<Callout
+  type="warn"
+  title="Known issue: withTimeout doesn't interrupt a call that waits for the server"
+>
+  In every release up to and including 2.0.0-beta.0, `withTimeout` and cancellation don't interrupt
+  a call that waits for the server (a write or commit at `Global`, `waitForSync` at `Global`, or a
+  `Remote` read): it returns only when the server answers or the app closes. If you then see a
+  timeout, don't retry a write: it may have been accepted. To show sync state without waiting, write
+  at the default tier and watch `syncStatus`.
+</Callout>
+
 ## Install
 
 `jazz-kotlin` is on Maven Central, at the same version as every Jazz package. On the JVM, depend on
