@@ -10,7 +10,6 @@ const shaPattern = /^[a-f0-9]{40}$/;
 // PR's merge ref and restore caches from the PR's own scope, which its author
 // controls (#supply-chain, 2026-11-19). A PR's Inspector goes to a preview
 // deployment; merge it to stage it for production.
-const publishPath = ".github/workflows/publish-jazz-tools-alpha.yml";
 // Not preview-jazz-tools-alpha-release.yml: its runs on changeset-release/*
 // restore caches from that branch's scope, and it can still be dispatched there.
 // release-artifacts.yml builds its run's head_sha, on `release` or
@@ -30,15 +29,14 @@ export function inspectorRunSource(run, repository) {
   }
   const releaseEvent = run.event === "push" || run.event === "workflow_dispatch";
   const approved =
-    (run.path === publishPath && releaseEvent && run.head_branch === "release") ||
-    (run.path === releaseArtifactsPath &&
-      releaseEvent &&
-      (run.head_branch === "release" || /^changeset-release\/.+/.test(run.head_branch ?? "")));
+    run.path === releaseArtifactsPath &&
+    releaseEvent &&
+    (run.head_branch === "release" || /^changeset-release\/.+/.test(run.head_branch ?? ""));
   if (!approved)
     throw new Error(
       "Inspector artifact run has an unapproved producer workflow, event or source branch",
     );
-  // Both release producers build their event ref, so run.head_sha.
+  // release-artifacts.yml builds its event ref, so run.head_sha.
   return run.head_sha;
 }
 
