@@ -15,6 +15,7 @@ mod aggregate_ordering;
 mod array_columns;
 #[path = "../authorization_scope_reentry.rs"]
 mod authorization_scope_reentry;
+#[cfg(feature = "backend-admission")]
 #[path = "../backend_admission.rs"]
 mod backend_admission;
 #[path = "../binding_host.rs"]

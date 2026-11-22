@@ -8,6 +8,7 @@ pub(crate) use crate::model::public_api;
 pub use crate::model::public_schema_convert;
 pub use crate::model::{metadata, policy_claims, public_schema, transaction};
 pub use crate::{app_id, identity};
+#[cfg(feature = "backend-admission")]
 #[doc(hidden)]
 pub mod backend_admission;
 #[doc(hidden)]

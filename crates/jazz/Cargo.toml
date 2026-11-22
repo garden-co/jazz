@@ -31,7 +31,12 @@ sql-trace = ["jazz-db/sql-trace"]
 durable-object-limits = ["jazz-db/durable-object-limits"]
 # See jazz-db's `managed-storage-emulation`.
 managed-storage-emulation = ["testing", "jazz-db/managed-storage-emulation"]
+# How an app's backend admits its clients' sockets
+# (`tools::backend_admission`). Only backends take it: `raw_value` grows every
+# user of serde_json, and browsers must not pay for it.
+backend-admission = ["serde_json/raw_value"]
 testing = [
+  "backend-admission",
   "runtime",
   "jazz-types/testing",
   "jazz-model/testing",
@@ -58,7 +63,7 @@ bytes = "1"
 jazz-compression.workspace = true
 postcard = { version = "1.1.3", features = ["alloc"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = { version = "1.0.145", features = ["raw_value"] }
+serde_json = "1.0.145"
 thiserror = "2.0.17"
 uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
 web-time = "1.1"
