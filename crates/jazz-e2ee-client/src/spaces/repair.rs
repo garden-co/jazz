@@ -114,6 +114,13 @@ impl E2eeClient {
             if !ready || !self.shared.keys.borrow().online {
                 return Ok(written);
             }
+            // A rewrite seals like any write: a space whose mark this runtime
+            // has not evaluated is read first, and rotated if a removed device
+            // may hold its version (protocol §3.5).
+            let unevaluated = self.shared.keys.borrow().needs_evaluation(&address);
+            if unevaluated {
+                self.make_ready(db, space, None).await?;
+            }
             let found = self.repairable_rows(db, space).await?;
             if found.is_empty() {
                 return Ok(written);

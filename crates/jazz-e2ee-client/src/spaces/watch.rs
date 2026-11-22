@@ -33,9 +33,9 @@ pub struct SpaceWatch {
     epochs: BTreeSet<String>,
     shared: Vec<SubscriptionStream>,
     /// The member accounts of the watched spaces whose roots, public
-    /// successors and sealing keys the account watch covers.
+    /// successors and sealing keys the account watch covers; its streams are
+    /// the runtime's, shared with the hooks (`Shared::member_watch`).
     accounts: BTreeSet<String>,
-    account_streams: Vec<SubscriptionStream>,
     /// How many open app subscriptions use each space.
     uses: std::collections::BTreeMap<SpaceAddress, usize>,
 }
@@ -231,6 +231,18 @@ impl E2eeClient {
                 }
             }
         }
+        // The spaces this runtime wrote to join the member-account watch
+        // only, with the members their last pass read: a change of theirs
+        // makes the next write read the space again (protocol §3.5).
+        let written = self.shared.written.borrow().clone();
+        for members in written.values() {
+            accounts.extend(members.iter().cloned());
+        }
+        self.shared.member_watch.borrow_mut().spaces = interest
+            .iter()
+            .chain(written.keys())
+            .filter_map(|space| protocol_address(space).ok())
+            .collect();
         if accounts == watch.accounts {
             return Ok(());
         }
@@ -242,7 +254,7 @@ impl E2eeClient {
                     .await?,
             );
         }
-        watch.account_streams = streams;
+        self.shared.member_watch.borrow_mut().streams = streams;
         watch.accounts = accounts;
         Ok(())
     }
@@ -270,7 +282,6 @@ impl E2eeClient {
             epochs: BTreeSet::new(),
             shared: Vec::new(),
             accounts: BTreeSet::new(),
-            account_streams: Vec::new(),
             uses: Default::default(),
         })
     }
@@ -439,11 +450,13 @@ impl E2eeClient {
         // Member rows this client deleted: their spaces' passes run now, so
         // a removal marks its space for rotation (protocol §3.5).
         self.serve_removals(db).await?;
+        self.shared.notice_member_changes();
+        let members_changed = std::mem::take(&mut self.shared.member_watch.borrow_mut().changed);
         let changed = joined
             | !committed.is_empty()
             | SpaceWatch::drained(&mut watch.own)
             | SpaceWatch::drained(&mut watch.shared)
-            | SpaceWatch::drained(&mut watch.account_streams);
+            | members_changed;
         if !changed {
             return Ok(Vec::new());
         }

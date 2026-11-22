@@ -514,10 +514,16 @@ impl E2eeClient {
             // sealed to: each space's mark is evaluated again before this
             // runtime's next write to it.
             let mut keys = self.shared.keys.borrow_mut();
-            keys.account_removed_devices = Some(!state.removed.is_empty() || state.generation > 0);
+            let removals = !state.removed.is_empty() || state.generation > 0;
+            keys.account_removed_devices = Some(removals);
             if keys.evaluated_epoch.as_deref() != Some(state.epoch_id()) {
                 keys.rotation_evaluated.clear();
                 keys.evaluated_epoch = Some(state.epoch_id().to_owned());
+                // A removal of this account's own makes every space one
+                // with a member that removed a device.
+                if removals {
+                    keys.space_removals.clear();
+                }
             }
         }
         *self.account.borrow_mut() = Some(OwnAccount {

@@ -238,6 +238,8 @@ impl E2eeClient {
             collectors: Default::default(),
             current_write: Default::default(),
             next_write: Default::default(),
+            member_watch: Default::default(),
+            written: Default::default(),
         });
         let client = Self {
             hooks: Rc::new(Hooks {
@@ -259,8 +261,18 @@ impl E2eeClient {
         // One that did may have missed a removal made elsewhere: unknown
         // until this run verifies it.
         let verified_before = client.floor(&client.shared.account_id).await.is_some();
-        client.shared.keys.borrow_mut().account_removed_devices =
-            (!verified_before).then_some(false);
+        let knows_other_accounts = client
+            .documents
+            .lock()
+            .await
+            .floors
+            .keys()
+            .any(|account| *account != client.shared.account_id);
+        {
+            let mut keys = client.shared.keys.borrow_mut();
+            keys.account_removed_devices = (!verified_before).then_some(false);
+            keys.knows_other_accounts = knows_other_accounts;
+        }
         Ok(client)
     }
 

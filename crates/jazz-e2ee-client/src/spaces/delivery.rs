@@ -110,9 +110,25 @@ impl E2eeClient {
             }
         }
         let marked = rotation_mark(&chain, &read.ledger, &directory)?.needs_rotation();
+        // Whether any member account removed a device or was reset: only
+        // then can a later write need this read again. A member whose state
+        // does not replay counts as one that did.
+        let removals =
+            read.ledger
+                .member_accounts()
+                .iter()
+                .any(|account| match directory.current(account) {
+                    Ok(Some(state)) => !state.removed.is_empty() || state.generation > 0,
+                    Ok(None) => false,
+                    Err(_) => true,
+                });
+        if let Some(members) = self.shared.written.borrow_mut().get_mut(space) {
+            *members = read.ledger.member_accounts().into_iter().collect();
+        }
         {
             let mut keys = self.shared.keys.borrow_mut();
             keys.rotation_evaluated.insert(address.clone());
+            keys.space_removals.insert(address.clone(), removals);
             // Only a device that holds the current version acts on the mark.
             if holds_current && marked && !keys.rotation_refused.contains(address) {
                 keys.rotation_pending.insert(address.clone());

@@ -428,6 +428,15 @@ pub(crate) struct KeyState {
     /// until this run verifies it; `Some(false)` from the open of one that
     /// never did.
     pub(crate) account_removed_devices: Option<bool>,
+    /// Per space, whether any of its member accounts removed a device or
+    /// was reset, as the last pass over it read them; `true` again when a
+    /// member account changed since. A space whose members never did skips
+    /// the read before a write: no removed device can hold its versions.
+    pub(crate) space_removals: BTreeMap<jazz_e2ee::protocol::records::space::SpaceAddress, bool>,
+    /// Whether this device kept, at open, the floor of another account: it
+    /// shares spaces with other accounts, so a space this run has not read
+    /// yet may have a member that removed a device.
+    pub(crate) knows_other_accounts: bool,
     /// Spaces whose repair the authority refused (this device may not update
     /// the rows it wrote): the natural moments stop repairing them while the
     /// client runs; an explicit call always attempts (protocol §3.2).
@@ -450,6 +459,41 @@ pub(crate) struct KeyState {
     pub(crate) rotation_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
     /// Set once the store is wiped: nothing more is sealed or opened.
     pub(crate) closed: bool,
+}
+
+impl KeyState {
+    /// Whether a write to `address` under a held key reads the space first
+    /// (protocol §3.5): this run has not evaluated its mark since what it
+    /// depends on last changed, and a removed device may hold its version:
+    /// one of its member accounts removed a device or was reset, or, for a
+    /// space not read yet, this account did (or is not verified yet) or this
+    /// device shares spaces with other accounts.
+    pub(crate) fn needs_evaluation(
+        &self,
+        address: &jazz_e2ee::protocol::records::space::SpaceAddress,
+    ) -> bool {
+        if self.rotation_evaluated.contains(address) {
+            return false;
+        }
+        match self.space_removals.get(address) {
+            Some(removals) => *removals,
+            None => self.account_removed_devices != Some(false) || self.knows_other_accounts,
+        }
+    }
+}
+
+/// The live subscriptions to the member accounts of the watched spaces
+/// (their roots, public successors and sealing keys), shared with the
+/// hooks: a write that finds an update the runtime has not served yet
+/// reads its space before it seals, instead of trusting an evaluation that
+/// update may have made stale.
+#[derive(Default)]
+pub(crate) struct MemberWatch {
+    pub(crate) streams: Vec<jazz::db::SubscriptionStream>,
+    /// The spaces whose members the streams cover.
+    pub(crate) spaces: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    /// An update was found and not yet served by the delivery pass.
+    pub(crate) changed: bool,
 }
 
 /// This device's creations of spaces in this run (protocol §3.2, §5.4).
@@ -521,6 +565,41 @@ pub(crate) struct Shared {
     pub(crate) current_write: std::cell::Cell<Option<u64>>,
     /// The number the next [`crate::E2eeClient::write`] call takes.
     pub(crate) next_write: std::cell::Cell<u64>,
+    /// The watch of the watched spaces' member accounts.
+    pub(crate) member_watch: RefCell<MemberWatch>,
+    /// Spaces this runtime wrote to, with the member accounts the last pass
+    /// over each read: those accounts join the member-account watch, so a
+    /// member's device removal is seen while the runtime runs, whether or
+    /// not anything uses the space (protocol §3.5).
+    pub(crate) written: RefCell<BTreeMap<SpaceAddress, BTreeSet<String>>>,
+}
+
+impl Shared {
+    /// Takes the updates the member-account watch holds. If there were any,
+    /// the watched spaces' marks are stale: each counts as having a member
+    /// with a removal until a pass reads it again, and the delivery pass is
+    /// told.
+    pub(crate) fn notice_member_changes(&self) {
+        let spaces = {
+            let mut watch = self.member_watch.borrow_mut();
+            let mut found = false;
+            for stream in &mut watch.streams {
+                while stream.try_next_event().is_some() {
+                    found = true;
+                }
+            }
+            if !found {
+                return;
+            }
+            watch.changed = true;
+            watch.spaces.clone()
+        };
+        let mut keys = self.keys.borrow_mut();
+        for space in spaces {
+            keys.rotation_evaluated.remove(&space);
+            keys.space_removals.insert(space, true);
+        }
+    }
 }
 
 /// Queues `missing`, at most `cap` entries. A full queue drops its oldest

@@ -122,6 +122,14 @@ impl Hooks {
 
     /// Ask the binding to serve pending removals and rotate before choosing the write key.
     fn check_rotation(&self, address: &SpaceAddress) -> Result<(), SealError> {
+        // The space joins the watch of its member accounts, and an update
+        // of theirs the runtime has not served yet is taken now.
+        self.shared
+            .written
+            .borrow_mut()
+            .entry(db_address(address))
+            .or_default();
+        self.shared.notice_member_changes();
         let mut keys = self.shared.keys.borrow_mut();
         let call = self.shared.current_write.get();
         let mark = (call, address.clone());
@@ -134,13 +142,11 @@ impl Hooks {
         };
         let removal = !self.shared.member_removals.borrow().is_empty();
         // A key of a space whose mark this runtime has not evaluated may be
-        // one a removed device of this account holds (if the account ever
-        // removed one, or is not verified yet in this run): the runtime
-        // reads the space first. Only a creation this run prepared or
-        // staged is new to everyone; a key held `unpublished` from an
+        // one a removed device holds (see `KeyState::needs_evaluation`): the
+        // runtime reads the space first. Only a creation this run prepared
+        // or staged is new to everyone; a key held `unpublished` from an
         // earlier run may be the space's accepted root, settled later.
-        let unevaluated = keys.account_removed_devices != Some(false)
-            && !keys.rotation_evaluated.contains(address)
+        let unevaluated = keys.needs_evaluation(address)
             && match keys
                 .held
                 .write_key(address, keys.creation_refused.contains(address))

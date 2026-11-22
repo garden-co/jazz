@@ -825,16 +825,20 @@ impl E2eeClient {
     ) -> Result<bool, ClientError> {
         let address = protocol_address(space)?;
         let online = self.shared.keys.borrow().online;
-        // A space whose mark this runtime has not evaluated, in an account
-        // that ever removed a device, is read first, with the account
-        // verified, by one pass over that space: the mark of a removal made
-        // elsewhere (another device, or this one before the runtime opened)
-        // is known only once a pass has read it. A pass that fails marks the
-        // space (fail closed), as after a removal.
-        let unevaluated = |keys: &crate::state::KeyState| {
-            keys.account_removed_devices != Some(false)
-                && !keys.rotation_evaluated.contains(&address)
-        };
+        // A space whose mark this runtime has not evaluated, where a removed
+        // device may hold its version (see `KeyState::needs_evaluation`), is
+        // read first, with the account verified, by one pass over that
+        // space: the mark of a removal made elsewhere (another device or
+        // account, or this device before the runtime opened) is known only
+        // once a pass has read it. A pass that fails marks the space (fail
+        // closed), as after a removal.
+        self.shared
+            .written
+            .borrow_mut()
+            .entry(space.clone())
+            .or_default();
+        self.shared.notice_member_changes();
+        let unevaluated = |keys: &crate::state::KeyState| keys.needs_evaluation(&address);
         if online && unevaluated(&self.shared.keys.borrow()) {
             self.shared
                 .keys
@@ -845,7 +849,7 @@ impl E2eeClient {
             if unverified {
                 let _ = self.ensure_account(db).await;
             }
-            // The verification may show an account that never removed one.
+            // The verification may show that no removed device can hold it.
             let still = unevaluated(&self.shared.keys.borrow());
             if still && self.deliver_pass(db, space).await.is_err() {
                 let mut keys = self.shared.keys.borrow_mut();

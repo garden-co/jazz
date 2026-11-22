@@ -456,6 +456,278 @@ fn another_device_of_the_account_rotates_after_a_removal_it_did_not_make() {
     });
 }
 
+/// Alice's space with bob as a member who holds its key on two devices,
+/// the second of which has read alice's note; alice's runtime runs its
+/// space watch as the host does, one sync per turn.
+struct SharedSpace {
+    server: Db,
+    settings: EncryptionSettings,
+    alice_store: Rc<dyn jazz_e2ee_client::PrivateStore>,
+    alice: Device,
+    bob_first: Device,
+    bob_second: Device,
+    space: uuid::Uuid,
+    watch: jazz_e2ee_client::SpaceWatch,
+}
+
+impl SharedSpace {
+    fn new() -> Self {
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, None);
+        let (alice_id, bob_id) = (account(0xa1), account(0xb0));
+        let alice_store = memory();
+        let alice = device(&server, alice_id, alice_store.clone(), 1, &settings);
+        assert_eq!(alice.status(&server, &[]), AccountStatus::Active);
+        let watch = drive(&server, &[&alice.db], alice.client.watch_spaces(&alice.db)).unwrap();
+        let space = space_with_a_note(&server, &alice, &account_id(alice_id));
+        let bob_first = device(&server, bob_id, memory(), 2, &settings);
+        assert_eq!(bob_first.status(&server, &[]), AccountStatus::Active);
+        let bob_second = device(&server, bob_id, memory(), 3, &settings);
+        bob_second.status(&server, &[&bob_first]);
+        approve(&server, &bob_first, &bob_second);
+        assert_eq!(
+            bob_second.status(&server, &[&bob_first]),
+            AccountStatus::Active
+        );
+        let scope = alice.db.table_identity("projects").unwrap().unwrap().0;
+        let member = std::collections::BTreeMap::from([
+            ("scopeId".to_owned(), Value::Uuid(scope)),
+            ("identifier".to_owned(), Value::Uuid(space)),
+            (
+                "accountId".to_owned(),
+                Value::Uuid(uuid::Uuid::parse_str(&account_id(bob_id)).unwrap()),
+            ),
+        ]);
+        block_on(
+            alice
+                .db
+                .insert("__e2ee_members", member, Default::default()),
+        )
+        .unwrap();
+        pump(&server, &alice.db);
+        let address = space_address(&alice, space);
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.deliver_space(&alice.db, &address),
+        )
+        .unwrap();
+        bob_second.follow_notes(&server);
+        assert_eq!(notes_of(&server, &bob_second, space).len(), 1);
+        let mut shared = Self {
+            server,
+            settings,
+            alice_store,
+            alice,
+            bob_first,
+            bob_second,
+            space,
+            watch,
+        };
+        shared.turns();
+        shared
+    }
+
+    /// Turns of alice's runtime: a watch sync, then what the server sends.
+    fn turns(&mut self) {
+        for _ in 0..3 {
+            drive(
+                &self.server,
+                &[&self.alice.db],
+                self.alice
+                    .client
+                    .sync_spaces(&self.alice.db, &mut self.watch),
+            )
+            .unwrap();
+            pump(&self.server, &self.alice.db);
+        }
+    }
+
+    fn bob_removes_his_second_device(&self) {
+        drive(
+            &self.server,
+            &[&self.bob_first.db, &self.bob_second.db],
+            self.bob_first
+                .client
+                .remove_device(&self.bob_first.db, &self.bob_second.id()),
+        )
+        .unwrap();
+    }
+
+    fn alice_writes(&self, body: &str) {
+        drive(
+            &self.server,
+            &[&self.alice.db],
+            self.alice.client.write(&self.alice.db, async || {
+                self.alice
+                    .db
+                    .insert("notes", note(self.space, body), Default::default())
+                    .await
+            }),
+        )
+        .unwrap();
+        pump(&self.server, &self.alice.db);
+    }
+
+    /// The newest note is sealed under a successor of the root, sealed to
+    /// bob's account epoch after the removal; bob's removed device opens
+    /// only the first note.
+    fn assert_removed_device_left_out(&self) {
+        let roots = all(&self.server, Query::from("__e2ee_spaces")).unwrap();
+        let root_epoch = roots[0].cell("epochId");
+        let notes = all(&self.server, Query::from("notes")).unwrap();
+        let newest = notes.iter().max_by_key(|row| row.row_uuid()).unwrap();
+        let Some(Value::Bytes(stored)) = newest.cell("body") else {
+            panic!("the body is stored as bytes: {newest:?}");
+        };
+        let sealed = jazz_e2ee::records::read_stored_record(&stored)
+            .unwrap()
+            .epoch_id
+            .to_owned();
+        let sealed = Some(Value::Uuid(uuid::Uuid::parse_str(&sealed).unwrap()));
+        pump(&self.server, &self.bob_second.db);
+        let held = all(&self.bob_second.db, Query::from("notes")).unwrap();
+        assert_ne!(
+            sealed,
+            root_epoch,
+            "alice's write after bob's device removal is sealed under the version it holds \
+             ({} space successors; the removed device opens {} notes)",
+            count(&self.server, "__e2ee_space_successors"),
+            held.len()
+        );
+        let successors = all(&self.server, Query::from("__e2ee_space_successors")).unwrap();
+        assert!(
+            successors.iter().any(|row| row.cell("epochId") == sealed),
+            "the write's epoch is a successor of the space"
+        );
+        let removal = all(
+            &self.server,
+            Query::from("__e2ee_public_account_successors"),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|row| row.cell("action") == Some(text("remove-device")))
+        .expect("bob's removal");
+        let deliveries = all(&self.server, Query::from("__e2ee_space_deliveries")).unwrap();
+        assert!(
+            deliveries.iter().any(|row| row.cell("keyEpochId") == sealed
+                && row.cell("recipientAccountEpochId") == removal.cell("epochId")),
+            "the new version reaches bob at the account epoch the removal made"
+        );
+        assert_eq!(held.len(), 1, "only the old note opens: {held:?}");
+    }
+}
+
+/// Contract: a member's removed device cannot read what another member
+/// writes after the removal: bob removes his second device while alice's
+/// runtime runs on; alice's runtime watches the member accounts of a space
+/// it wrote to, so its next write rotates the space first.
+#[test]
+fn a_members_removed_device_cannot_read_what_another_member_writes_after() {
+    within(|| {
+        let mut shared = SharedSpace::new();
+        shared.bob_removes_his_second_device();
+        shared.turns();
+        shared.alice_writes("after");
+        shared.assert_removed_device_left_out();
+    });
+}
+
+/// Contract: a space whose member accounts never removed a device or were
+/// reset is not read again before a write when only this account's epoch
+/// changes without a removal (a recovery root retired): its pass recorded
+/// that no removed device can hold its version. A runtime that shares spaces
+/// with other accounts otherwise reads a space before its first write to it.
+#[test]
+fn a_space_whose_members_never_removed_a_device_skips_the_read() {
+    within(|| {
+        let shared = SharedSpace::new();
+        let SharedSpace {
+            server,
+            settings,
+            alice_store,
+            alice,
+            space,
+            ..
+        } = shared;
+        drop(alice);
+        // A new runtime of alice's device, which kept bob's floor: a space it
+        // has not read yet is read before its first write.
+        let alice = device(&server, account(0xa1), alice_store, 4, &settings);
+        assert_eq!(alice.status(&server, &[]), AccountStatus::Active);
+        let unread = block_on(
+            alice
+                .db
+                .insert("notes", note(space, "unread"), Default::default()),
+        );
+        assert!(
+            matches!(
+                unread.as_ref().map_err(jazz::e2ee::E2eeRefusal::of),
+                Err(Some(jazz::e2ee::E2eeRefusal::NeedsKey { .. }))
+            ),
+            "a space not read in this run is read first: {unread:?}"
+        );
+        let address = space_address(&alice, space);
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.deliver_space(&alice.db, &address),
+        )
+        .unwrap();
+
+        let secret = jazz_e2ee::protocol::derive::RecoverySecret::from_bytes([5; 32]);
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.register_recovery(&alice.db, &secret),
+        )
+        .unwrap();
+        alice.status(&server, &[]);
+        let root = alice
+            .client
+            .with_account(|account| account.state.recovery_roots[0].row.id.clone())
+            .unwrap();
+        let before = alice
+            .client
+            .with_account(|account| account.state.epoch_id().to_owned())
+            .unwrap();
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.retire_recovery_root(&alice.db, &root),
+        )
+        .unwrap();
+        let after = alice
+            .client
+            .with_account(|account| account.state.epoch_id().to_owned())
+            .unwrap();
+        assert_ne!(before, after, "the retirement made a new account epoch");
+        // A write no runtime call wraps seals at once: no read was needed.
+        block_on(
+            alice
+                .db
+                .insert("notes", note(space, "plain"), Default::default()),
+        )
+        .unwrap();
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+    });
+}
+
+/// Contract: a write that races the watch update waits for the pass: the
+/// update of bob's account has reached alice's database but her runtime
+/// has not served it yet when she writes; the write finds it, reads the
+/// space and rotates, instead of trusting the evaluation it made before.
+#[test]
+fn a_write_racing_a_members_device_removal_reads_the_space_first() {
+    within(|| {
+        let shared = SharedSpace::new();
+        shared.bob_removes_his_second_device();
+        pump(&shared.server, &shared.alice.db);
+        shared.alice_writes("after");
+        shared.assert_removed_device_left_out();
+    });
+}
+
 /// Contract: a device's removal request is completed by another device (the
 /// requester never holds the new key), which marks the spaces the requester
 /// could open for rotation; the only device's request is refused with
