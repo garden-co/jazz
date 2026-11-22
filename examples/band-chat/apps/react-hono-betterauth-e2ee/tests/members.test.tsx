@@ -132,14 +132,26 @@ describe("removal", () => {
     expect(db.encryption.keys.rotate).toHaveBeenCalledWith({ table: "rooms", id: "room" });
   });
 
-  it("renews nothing, with no notice, when the room has no message and so no key yet", async () => {
+  it("renews the key after every removal, also in a room with no message yet", async () => {
     db.serializableTransaction.mockImplementation(async () => ({ wait: async () => 1 }));
     db.all.mockResolvedValue([]);
+    db.encryption.keys.rotate.mockResolvedValueOnce(0);
     open([member("1", "alice-account"), member("2", "bob-account")]);
     await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Remove" })));
-    await waitFor(() => expect(db.serializableTransaction).toHaveBeenCalled());
-    expect(db.encryption.keys.rotate).not.toHaveBeenCalled();
+    await waitFor(() => expect(db.encryption.keys.rotate).toHaveBeenCalledTimes(1));
+    expect(db.encryption.keys.rotate).toHaveBeenCalledWith({ table: "rooms", id: "room" });
     expect(screen.queryByText(/key is not renewed yet/)).toBeNull();
+  });
+
+  it("says the key is not renewed on any rotation failure, also one that names a code", async () => {
+    db.serializableTransaction.mockImplementation(async () => ({ wait: async () => 1 }));
+    db.encryption.keys.rotate.mockRejectedValueOnce(
+      Object.assign(new Error("E2EE operation refused"), { code: "rotation-needs-key" }),
+    );
+    open([member("1", "alice-account"), member("2", "bob-account")]);
+    await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Remove" })));
+    expect(await screen.findByText(/key is not renewed yet/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 
   it("does not renew the key when the removal is refused", async () => {

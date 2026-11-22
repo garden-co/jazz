@@ -110,15 +110,11 @@ export async function admitMember({
 }
 
 /**
- * Renews the room's key after a removal. A room holds a key once something
- * encrypted was written in it: with no message there is nothing to renew (the
- * key made at its next write excludes the removed member), and Jazz refuses
- * the call. Resolves with the deliveries written, or 0 when nothing was due.
+ * Renews the room's key after a removal, so the removed member reads nothing
+ * written later. Called after every removal: a room with no key yet (nothing
+ * encrypted written) has nothing to renew, and Jazz answers 0. Resolves with
+ * the deliveries written; any failure is the caller's to show, with a retry.
  */
-export async function renewRoomKey(db: Db, roomId: string): Promise<number> {
-  const any = await db.all(app.messages.where({ roomId }).select("id").limit(1), {
-    tier: "remote",
-  });
-  if (any.length === 0) return 0;
+export function renewRoomKey(db: Db, roomId: string): Promise<number> {
   return db.encryption.keys.rotate(roomSpace(roomId));
 }

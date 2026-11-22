@@ -55,12 +55,10 @@ describe("membership writes", () => {
     expect(await renewRoomKey(alice.db, roomId)).toBeGreaterThanOrEqual(0);
   }, 90_000);
 
-  it("renews nothing, and does not fail, for a room with no message yet", async () => {
+  it("renews the key of a room with no message yet without failing: there is nothing to renew", async () => {
     const host = await serve();
     const alice = await device(host);
     const roomId = await createRoom(alice, "Empty");
-    // Jazz refuses to rotate a key that does not exist yet.
-    await expect(alice.db.encryption.keys.rotate(space(roomId))).rejects.toThrow();
     expect(await renewRoomKey(alice.db, roomId)).toBe(0);
   }, 60_000);
 
