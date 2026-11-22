@@ -8,7 +8,7 @@
 
 ## iOS gate (2026-11-22)
 
-[Run 44983562472](https://github.com/garden-co/jazz/actions/runs/44983562472) at `d5152181`: GitHub's `macos-15` (arm64, Xcode 16.4), Rust 1.93.1, Kotlin 2.2.21, Gradle 8.14.3. `.github/workflows/kmp-spike-ios.yml` is temporary and on this branch only (remove it before anything here goes to main); it runs `ci/ios-gate.sh`.
+[Run 44984900281](https://github.com/garden-co/jazz/actions/runs/44984900281) at `52df88af`: GitHub's `macos-15` (arm64, Xcode 16.4), Rust 1.93.1, Kotlin 2.2.21, Gradle 8.14.3. It ran as a temporary workflow on this branch, since removed. `ci/ios-check.yml` is that job as it passed (not enabled); it runs `ci/ios-gate.sh`.
 
 | criterion | result |
 |---|---|
@@ -23,7 +23,7 @@
 | the whole stripped Kotlin executable | 24.3 MB | 10.1 MB |
 | `libjazz_ffi.a`, what a klib carries per target | 83.6 MB | 26.5 MB |
 
-The job took 16 minutes, 10 of them building Rust for two targets without a cache.
+The job took 14–16 minutes, 8–10 of them building Rust for two targets without a cache.
 
 **Not covered by the gate:** a physical device, persistent storage on iOS (the tests use memory storage), sign-in and sync, an app consuming the published klib, linking from JazzFFI.xcframework, and `iosX64`. Apps need a deployment target of iOS 16.0 or later, as the XCFramework does.
 
@@ -230,4 +230,5 @@ A KMP framework exports to Swift with an Objective-C-flavoured API: `suspend` fu
 ## Next steps
 
 - Phase 1, once scheduled; the C ABI's close before phase 3.
-- Remove `.github/workflows/kmp-spike-ios.yml` before any of this branch is proposed for main.
+- Phase 1 is new work off main; this branch stays for reference.
+- Turn `ci/ios-check.yml` into the real iOS CI job when the iOS target is added.

@@ -1,9 +1,12 @@
-# TEMPORARY, only on kotlin/kmp-spike: never merge it to main.
+# NOT ENABLED: kept outside .github/workflows, as the starting point for
+# jazz-kotlin's real iOS CI job.
 #
-# The iOS gate for jazz-kotlin on Kotlin Multiplatform
-# (packages/jazz-kotlin-kmp/SPIKE.md). Linux can't run cinterop for Apple
-# targets, so this builds, links and tests them on GitHub's standard macOS
-# runner. No secrets, no caches, nothing published.
+# Exactly the job that passed at 52df88af92cf58cdfd8ab5150128b24a75e40692:
+# https://github.com/garden-co/jazz/actions/runs/44984900281 (about 14-16
+# minutes uncached). It runs ios-gate.sh next to it: klibs, an unsigned
+# device link, the tests on the simulator, and the linked size. A real job
+# needs its own name and triggers (below are the spike branch's), and would
+# want a Rust cache, as swift-mirror.yml has.
 name: KMP spike iOS gate
 
 on:
