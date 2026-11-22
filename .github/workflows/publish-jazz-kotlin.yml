@@ -26,6 +26,7 @@ on:
       - dev/scripts/kotlin-release-natives.sh
       - dev/scripts/kotlin-toolchain.sh
       - dev/scripts/test-kotlin-android.sh
+      - dev/scripts/kotlin-android-sdk.sh
       - packages/jazz-kotlin/build.gradle.kts
       - packages/jazz-kotlin/settings.gradle.kts
       - packages/jazz-kotlin-android/build.gradle.kts

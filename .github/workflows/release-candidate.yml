@@ -14,6 +14,8 @@ run-name: ${{ inputs.probe-tag != '' && format('Cloud RC probe only, {0}', input
 #     when publishing; from the files in a dry run);
 #   - Examples E2E (examples-e2e.yml) on the artifacts' packages;
 #   - React Native device acceptance (rn-device-acceptance.yml);
+#   - the Kotlin AAR that ships, on an Android emulator
+#     (dev/scripts/test-kotlin-android-emulator.sh);
 #   - the release preview (preview-jazz-tools-alpha-release.yml, publish's
 #     dry run) on the artifacts' packages.
 # Checks that used to run here and now run in release-artifacts.yml, on the
@@ -138,9 +140,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ needs.resolve.outputs.sha }}
-          # What the gates read; the rest (Swift, Maven, languages) is
+          # What the gates read; the rest (Swift, languages) is
           # checked by artifacts-complete.
-          REQUIRED_ARTIFACTS: pkg-jazz-tools,pkg-jazz-wasm,pkg-jazz-napi,pkg-jazz-rn,pkg-create-jazz,inspector-prebuilt,jazz-tools-linux-x64,jazz-tools-linux-arm64
+          REQUIRED_ARTIFACTS: jazz-kotlin-maven,pkg-jazz-tools,pkg-jazz-wasm,pkg-jazz-napi,pkg-jazz-rn,pkg-create-jazz,inspector-prebuilt,jazz-tools-linux-x64,jazz-tools-linux-arm64
         run: node dev/scripts/await-release-artifacts.mjs
 
   # RN device acceptance needs only these, which a release-artifacts run has
@@ -320,6 +322,54 @@ jobs:
     with:
       artifacts_run_id: ${{ needs.artifacts.outputs.run_id }}
       manifest_checked_by_caller: true
+
+  # The AAR and POM that ship (release-maven's files, as the Maven job
+  # uploaded them), in a minified app on an emulator, against this commit's
+  # release server and the test relay.
+  kotlin-android-smoke:
+    name: Kotlin Android emulator smoke
+    needs: [resolve, artifacts]
+    if: "!cancelled() && needs.artifacts.result == 'success'"
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      # Rust only for the test relay; no cache an untrusted ref could write.
+      - uses: ./.github/actions/setup-build
+        with:
+          restore-caches: "false"
+          setup-node: "false"
+          rust-cache: "false"
+      - name: Grant the runner user access to KVM
+        run: sudo setfacl -m "u:${USER}:rw" /dev/kvm
+      - name: Download the built AAR and server
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.artifacts.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          fetch() {
+            for attempt in 1 2 3 4 5; do
+              if gh run download "${RUN_ID}" -R "${GITHUB_REPOSITORY}" -n "$1" -D "$2"; then return 0; fi
+              echo "::warning::download of $1 failed (attempt ${attempt}); retrying"
+              sleep $((attempt * 5))
+            done
+            echo "::error::could not download $1 from run ${RUN_ID}"
+            return 1
+          }
+          fetch jazz-kotlin-maven "${RUNNER_TEMP}/maven"
+          fetch jazz-tools-linux-x64 "${RUNNER_TEMP}/server"
+          chmod +x "${RUNNER_TEMP}/server/jazz-tools-linux-x64"
+      - name: Run the AAR on an emulator
+        run: |
+          JAZZ_TOOLS="${RUNNER_TEMP}/server/jazz-tools-linux-x64" \
+            bash dev/scripts/test-kotlin-android-emulator.sh "${RUNNER_TEMP}/maven"
 
   preview:
     name: Release preview
@@ -568,6 +618,7 @@ jobs:
         examples-e2e,
         rn-device-acceptance,
         rn-device-acceptance-built,
+        kotlin-android-smoke,
         preview,
         adopter-verdict,
       ]
@@ -580,6 +631,7 @@ jobs:
       ((needs.rn-device-acceptance.result == 'success' && needs.rn-device-acceptance-built.result == 'skipped') ||
        (needs.rn-device-acceptance.result == 'skipped' && needs.rn-device-acceptance-built.result == 'success')) &&
       needs.preview.result == 'success' &&
+      needs.kotlin-android-smoke.result == 'success' &&
       (needs.adopter-verdict.outputs.status == 'PASS' || needs.adopter-verdict.outputs.status == 'NEEDS_REVIEW')
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -878,6 +930,7 @@ jobs:
         examples-e2e,
         rn-device-acceptance,
         rn-device-acceptance-built,
+        kotlin-android-smoke,
         preview,
         rc-tarballs,
         smoke,
