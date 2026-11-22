@@ -99,6 +99,27 @@ describe("admission", () => {
     expect(db.encryption.keys.deliver).toHaveBeenCalledTimes(2);
   });
 
+  it("reports rejected key delivery after admission and retries only the delivery", async () => {
+    const wait = vi.fn(async () => undefined);
+    db.transaction.mockImplementation(async (run) => {
+      run(tx({}).handle);
+      return { wait };
+    });
+    db.encryption.keys.deliver.mockRejectedValueOnce(new Error("Connection lost"));
+    open([member("1", "alice-account")], [request]);
+
+    await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Admit" })));
+    expect(await screen.findByText("Key not delivered yet")).toBeTruthy();
+    expect(screen.getByText(/They are admitted.*Connection lost/)).toBeTruthy();
+    expect(screen.queryByText(/Admission refused/)).toBeNull();
+    expect(wait).toHaveBeenCalledTimes(1);
+
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry" })));
+    expect(screen.queryByText("Key not delivered yet")).toBeNull();
+    expect(db.encryption.keys.deliver).toHaveBeenCalledTimes(2);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
   it("shows a refused admission and keeps the request to try again", async () => {
     open([member("1", "alice-account")], [request]);
     db.transaction.mockImplementation(async () => ({
@@ -152,6 +173,18 @@ describe("removal", () => {
     await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Remove" })));
     expect(await screen.findByText(/key is not renewed yet/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+
+  it("shows when the removal found no visible member rows", async () => {
+    db.serializableTransaction.mockImplementation(async () => ({ wait: async () => 0 }));
+    open([member("1", "alice-account"), member("2", "bob-account")]);
+    await act(async () => fireEvent.click(await screen.findByRole("button", { name: "Remove" })));
+    expect(
+      await screen.findByText(
+        "No member rows were removed. You may not be able to see that member's rows.",
+      ),
+    ).toBeTruthy();
+    expect(db.encryption.keys.rotate).not.toHaveBeenCalled();
   });
 
   it("does not renew the key when the removal is refused", async () => {

@@ -28,14 +28,14 @@ describe("membership writes", () => {
       .insert(app.joinRequests, { roomId, requester: bob.account, profileId: bob.profile.id })
       .wait({ tier: "global" });
 
-    const delivery = await admitMember({
+    await admitMember({
       db: alice.db,
       roomId,
       memberAuthor: bob.account,
       memberProfileId: bob.profile.id,
       requestIds: [request.id],
     });
-    expect(delivery.failed).toBe(0);
+    expect((await alice.db.encryption.keys.deliver()).failed).toBe(0);
     expect((await memberRowsOf(host, alice, roomId)).map((row) => row.accountId).sort()).toEqual(
       [alice.account, bob.account].sort(),
     );
