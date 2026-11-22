@@ -606,6 +606,45 @@ async fn first_launches_at_once_keep_one_key() {
     app.stop().await;
 }
 
+/// A key another first launch keeps while this one looks is that key, not
+/// an error. (Exporting signed out only looks: cheap enough to race.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_kept_while_looking_is_found() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("device.key");
+    let session = JazzSession::open(
+        client_files(),
+        app.guest(dir.path()).initial(Initial::SignedOut),
+    )
+    .await
+    .unwrap();
+    let key = jazz_app_support::DeviceKey::generate().unwrap().to_string();
+    for round in 0..3000 {
+        let _ = std::fs::remove_file(&path);
+        let whole = dir.path().join("whole.tmp");
+        std::fs::write(&whole, &key).unwrap();
+        std::thread::scope(|scope| {
+            let keeper = scope.spawn(|| std::fs::rename(&whole, &path).unwrap());
+            loop {
+                match session.export_device_key() {
+                    Ok(found) => {
+                        assert!(found == key, "round {round}: another key");
+                        break;
+                    }
+                    Err(error) => assert!(
+                        !error.to_string().contains("device key at"),
+                        "round {round}: {error}"
+                    ),
+                }
+            }
+            keeper.join().unwrap();
+        });
+    }
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
 /// Every operation works from any executor: they run on the session's own
 /// runtime (as jazz-ffi calls them, with `block_on` on a host thread).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

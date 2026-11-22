@@ -893,13 +893,20 @@ impl JazzSession {
         let Some(path) = self.key_path() else {
             return Ok(current.kept.clone());
         };
-        match std::fs::read_to_string(&path) {
-            Ok(text) => text.parse().map(Some),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && is_absent(&path) => {
-                Ok(None)
+        let text = match std::fs::read_to_string(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if is_absent(&path) {
+                    return Ok(None);
+                }
+                // There now: kept meanwhile (another first launch), or a
+                // link to nowhere, which fails again.
+                std::fs::read_to_string(&path)
             }
-            Err(error) => Err(key_file_error(&path, error)),
-        }
+            read => read,
+        };
+        text.map_err(|error| key_file_error(&path, error))?
+            .parse()
+            .map(Some)
     }
 
     /// A new key, kept where none was: of first launches at once, the first
@@ -908,7 +915,8 @@ impl JazzSession {
         if let Some(path) = self.key_path() {
             match DeviceKey::load_or_create(&path) {
                 Ok(key) => return Ok(key),
-                Err(error) if !is_absent(&path) => return Err(error),
+                // There now: another's, kept meanwhile, or what can't be read.
+                Err(_) if !is_absent(&path) => return DeviceKey::load_or_create(&path),
                 // Still none: where there are no hard links to create it
                 // with (Android, jazz#6256), it is written as any other.
                 Err(_) => {}
