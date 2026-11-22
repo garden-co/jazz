@@ -1600,14 +1600,13 @@ test("the jazz-tools npm package ships no native CLI binary", () => {
   assert.doesNotMatch(packageBuild, /jazz-tools-darwin-/);
   for (const arch of ["x64", "arm64"])
     assert.match(packageBuild, new RegExp(`output: jazz-tools-linux-${arch}\\n`));
-  const publish = fs.readFileSync(
-    path.join(root, ".github/workflows/publish-jazz-tools-alpha.yml"),
-    "utf8",
-  );
+  // release-publish.yml attaches them, with their SHA256SUMS, to the draft.
+  const publish = fs.readFileSync(path.join(root, ".github/workflows/release-publish.yml"), "utf8");
   assert.match(
     publish,
-    /gh release upload "\$\{TAG\}" dist\/jazz-tools-linux-x64 dist\/jazz-tools-linux-arm64 dist\/SHA256SUMS/,
+    /cp art\/release-server\/jazz-tools-linux-x64 art\/release-server\/jazz-tools-linux-arm64 art\/release-server\/SHA256SUMS assets\//,
   );
+  assert.match(publish, /gh release upload "\$\{TAG\}" assets\/\* --clobber/);
   const launcher = fs.readFileSync(
     path.join(root, "packages/jazz-tools/bin/jazz-tools.js"),
     "utf8",

@@ -149,10 +149,7 @@ const releasePr = fs.readFileSync(
   path.join(root, ".github/workflows/changesets-release-pr.yml"),
   "utf8",
 );
-const publish = fs.readFileSync(
-  path.join(root, ".github/workflows/publish-jazz-tools-alpha.yml"),
-  "utf8",
-);
+const publish = fs.readFileSync(path.join(root, ".github/workflows/release-publish.yml"), "utf8");
 
 function job(source, name) {
   const start = source.indexOf(`\n  ${name}:\n`);
@@ -171,20 +168,18 @@ test("the release PR workflow dispatches every release test workflow on the rele
   }
 });
 
-test("npm publication needs the release test gate in publish mode", () => {
-  const gate = job(publish, "release-test-gate");
-  assert.match(gate, /needs: \[release-push-gate\]/);
-  assert.match(gate, /release-test-gate\.mjs/);
-  assert.match(gate, /core\.setFailed/);
-
-  const publishNpm = job(publish, "publish-npm");
-  assert.match(publishNpm, /- release-test-gate\n/);
-  assert.ok(
-    publishNpm.includes(
-      "needs.release-test-gate.result == 'success' ||\n        (inputs.mode || github.event.inputs.mode || 'publish') == 'dry-run'",
-    ),
-    "publish-npm must require the release test gate outside dry runs",
+test("publication needs the release test gate in publish mode", () => {
+  // release-publish.yml: the resolve job, before anything can be approved.
+  const resolve = job(publish, "resolve");
+  assert.match(
+    resolve,
+    /name: Require a tested release commit\n\s+id: gate\n\s+if: inputs\.mode == 'publish'/,
   );
+  assert.match(resolve, /release-test-gate\.mjs/);
+  assert.match(resolve, /if \(!ok\) core\.setFailed/);
+  // Every publishing leg waits for resolve (through ready).
+  for (const leg of ["npm", "crates", "maven", "go", "swift"])
+    assert.match(job(publish, leg), /needs: \[resolve, ready/);
 });
 
 test("a successful release candidate gate on the head stands for RN device acceptance and Examples E2E", async () => {

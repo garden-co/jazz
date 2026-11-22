@@ -125,28 +125,27 @@ describe("release config", () => {
     }
   });
 
-  it("establishes the exact source tag before publishing any package", () => {
+  it("tags the exact source commit before publishing the GitHub release", () => {
+    // release-publish.yml publishes every registry; its finalize job pins
+    // v<version> to the published commit, refusing a tag that points
+    // elsewhere, before the draft goes public.
     const workflow = parseYaml(
-      fs.readFileSync(
-        path.join(repoRoot, ".github", "workflows", "publish-jazz-tools-alpha.yml"),
-        "utf8",
-      ),
+      fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release-publish.yml"), "utf8"),
     ) as {
       jobs: {
-        "publish-npm": {
+        finalize: {
           steps: Array<{ name?: string; run?: string }>;
         };
       };
     };
-    const steps = workflow.jobs["publish-npm"].steps;
-    const sourceTagIndex = steps.findIndex((step) => step.name === "Ensure release source tag");
-    const firstPublishIndex = steps.findIndex((step) => step.name?.startsWith("Publish "));
+    const steps = workflow.jobs.finalize.steps;
+    const tagIndex = steps.findIndex((step) => step.name?.startsWith("Tag v"));
+    const publishIndex = steps.findIndex((step) => step.name === "Publish the draft as Latest");
 
-    expect(sourceTagIndex).toBeGreaterThan(-1);
-    expect(firstPublishIndex).toBeGreaterThan(-1);
-    expect(sourceTagIndex).toBeLessThan(firstPublishIndex);
-    expect(steps[sourceTagIndex]?.run).toContain("EXISTING_TAG_TARGET");
-    expect(steps[sourceTagIndex]?.run).toContain("SOURCE_COMMIT");
-    expect(steps[sourceTagIndex]?.run).toContain('git push origin "refs/tags/${TAG}"');
+    expect(tagIndex).toBeGreaterThan(-1);
+    expect(publishIndex).toBeGreaterThan(-1);
+    expect(tagIndex).toBeLessThan(publishIndex);
+    expect(steps[tagIndex]?.run).toContain('[ "${existing}" = "${SHA}" ]');
+    expect(steps[tagIndex]?.run).toContain('git push origin "${SHA}:refs/tags/${TAG}"');
   });
 });
