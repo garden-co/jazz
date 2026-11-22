@@ -2,7 +2,7 @@ import { createOpenTransactionId } from "../client.js";
 import type { ClientMigrations } from "../client-migrations.js";
 import type { Encryption, EncryptionNative } from "../../encryption/index.js";
 import { servePrivateStore, type PrivateStore } from "../../encryption/private-store.js";
-import { retryAfterKey } from "../../encryption/key-retry.js";
+import { KEY_WAIT_MS, retryAfterKey } from "../../encryption/key-retry.js";
 import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
 import { SpaceUse, type SubscriptionSpaceUse } from "../../encryption/space-use.js";
 import { withUnreadable, type UnreadableRow } from "../../encryption/unreadable.js";
@@ -2320,7 +2320,12 @@ export class NativeRuntimeAdapter implements Runtime {
       releaseAdmission = resolve;
     });
     owner.pendingStreamingMutations.add(admission);
+    const endAdmission = () => {
+      releaseAdmission();
+      owner.pendingStreamingMutations.delete(admission);
+    };
     let opened: NativeStreamingMutation | undefined;
+    let publicationOwnsUpload = false;
     try {
       // Only opening the upload can be replayed: the caller owns a one-shot source.
       const opening = this.retryAfterKey(() => {
@@ -2376,32 +2381,49 @@ export class NativeRuntimeAdapter implements Runtime {
         }
       }
       if (pendingHighSurrogate) await pushBounded(encoder.encode(pendingHighSurrogate));
-      const previousFinalization = owner.streamingFinalization;
-      let releaseFinalization!: () => void;
-      const finalization = new Promise<void>((resolve) => {
-        releaseFinalization = resolve;
+      const previous = owner.streamingFinalization;
+      let timer: ReturnType<typeof setTimeout>;
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error("Streaming publication timed out");
+          error.name = "TimeoutError";
+          reject(error);
+        }, KEY_WAIT_MS);
       });
-      owner.streamingFinalization = previousFinalization.then(() => finalization);
-      await previousFinalization;
-      let receipt: MutationResult;
-      try {
-        if (tx) {
-          await upload.finishInTransaction!();
-          tx.hasStagedMutations = true;
-          receipt = { kind: "staged", openTransactionId: tx.id };
-        } else {
-          receipt = this.finishMutation(await upload.finish());
+      const publish = async (): Promise<StreamingInsertResult> => {
+        try {
+          await Promise.race([previous, deadline]);
+          let receipt: MutationResult;
+          if (tx) {
+            await upload.finishInTransaction!();
+            tx.hasStagedMutations = true;
+            receipt = { kind: "staged", openTransactionId: tx.id };
+          } else {
+            receipt = this.finishMutation(await upload.finish());
+          }
+          return { id: formatUuid(rowId), ...receipt };
+        } catch (error) {
+          await upload.abort();
+          throw error;
+        } finally {
+          endAdmission();
         }
+      };
+      publicationOwnsUpload = true;
+      const publication = publish();
+      // A queued timeout cannot pass its predecessor. A native finish already
+      // in flight keeps its turn and foreground lease until native settlement.
+      owner.streamingFinalization = Promise.allSettled([previous, publication]).then(() => {});
+      try {
+        return await Promise.race([publication, deadline]);
       } finally {
-        releaseFinalization();
+        clearTimeout(timer!);
       }
-      return { id: formatUuid(rowId), ...receipt };
     } catch (error) {
-      await opened?.abort();
+      if (!publicationOwnsUpload) await opened?.abort();
       throw error;
     } finally {
-      releaseAdmission();
-      owner.pendingStreamingMutations.delete(admission);
+      if (!publicationOwnsUpload) endAdmission();
     }
   }
 
