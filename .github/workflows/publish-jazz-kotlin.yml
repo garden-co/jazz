@@ -23,6 +23,7 @@ on:
     paths:
       - .github/workflows/publish-jazz-kotlin.yml
       - dev/scripts/publish-kotlin.sh
+      - dev/scripts/check-kotlin-sources-jar.sh
       - dev/scripts/kotlin-release-natives.sh
       - dev/scripts/kotlin-toolchain.sh
       - dev/scripts/test-kotlin-android.sh

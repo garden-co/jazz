@@ -14,8 +14,25 @@ The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). It
 
 ## Install
 
-`jazz-kotlin` is on Maven Central, at the same version as every Jazz package. On the JVM, depend on
-`tools.jazz:jazz-kotlin`:
+From `2.0.0-beta.1`, `jazz-kotlin` isn't published to Maven Central. Until it's in a Maven
+repository of our own, install it from its [GitHub release](https://github.com/garden-co/jazz/releases).
+The versions already on Maven Central stay there. The jar and the AAR come without a POM, so your
+build also lists their dependencies.
+
+On the JVM, download the jar into `libs/` beside your `build.gradle.kts`, and check it against the
+release's `SHA256SUMS-languages` (on macOS, use `shasum -a 256 -c -` in place of `sha256sum -c -`):
+
+```bash title="JVM"
+VERSION=2.0.0-beta.1
+RELEASE="https://github.com/garden-co/jazz/releases/download/v$VERSION"
+FILE="jazz-kotlin-$VERSION.jar"
+mkdir -p libs &&
+  curl -fL -o "libs/$FILE" "$RELEASE/$FILE" &&
+  curl -fL -o libs/SHA256SUMS-languages "$RELEASE/SHA256SUMS-languages" &&
+  (cd libs && grep " $FILE\$" SHA256SUMS-languages | sha256sum -c -)
+```
+
+Go on only if that prints `OK`. Then depend on the jar:
 
 ```kotlin title="build.gradle.kts"
 plugins {
@@ -24,26 +41,46 @@ plugins {
     application
 }
 
-repositories { mavenCentral() }
+repositories { mavenCentral() } // for the dependencies
 
 dependencies {
-    implementation("tools.jazz:jazz-kotlin:2.0.0-alpha.66")
+    implementation(files("libs/jazz-kotlin-2.0.0-beta.1.jar"))
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation("net.java.dev.jna:jna:5.17.0")
 }
 ```
 
 The jar has `libjazz_ffi` for Linux (x86-64, arm64), macOS (arm64, x86-64) and Windows (x86-64)
-inside, which JNA loads from it. It brings `kotlinx-serialization-json`,
-`kotlinx-coroutines-core` and JNA with it.
+inside, which JNA loads from it. With Maven, add the jar with `mvn install:install-file` and
+declare the same dependencies, with `-jvm` after the two kotlinx artifact IDs.
 
-On Android, depend on `tools.jazz:jazz-kotlin-android` instead:
+On Android, download the AAR into your app module's `libs/` (run this in `app/`), and check it the
+same way:
+
+```bash title="Android"
+VERSION=2.0.0-beta.1
+RELEASE="https://github.com/garden-co/jazz/releases/download/v$VERSION"
+FILE="jazz-kotlin-android-$VERSION.aar"
+mkdir -p libs &&
+  curl -fL -o "libs/$FILE" "$RELEASE/$FILE" &&
+  curl -fL -o libs/SHA256SUMS-languages "$RELEASE/SHA256SUMS-languages" &&
+  (cd libs && grep " $FILE\$" SHA256SUMS-languages | sha256sum -c -)
+```
+
+Then depend on the AAR, with JNA's Android build (`@aar`) in place of its jar:
 
 ```kotlin title="app/build.gradle.kts"
 dependencies {
-    implementation("tools.jazz:jazz-kotlin-android:2.0.0-alpha.66")
+    implementation(files("libs/jazz-kotlin-android-2.0.0-beta.1.aar"))
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation("net.java.dev.jna:jna:5.17.0@aar")
 }
 ```
 
-Its AAR has `libjazz_ffi` for arm64-v8a, armeabi-v7a and x86_64, and brings JNA's Android build.
+Its AAR has `libjazz_ffi` for arm64-v8a, armeabi-v7a and x86_64. Depend on it from your app
+module: the Android Gradle plugin refuses a local AAR in a module that builds an AAR itself.
 Apply `kotlin("plugin.serialization")` for the generated bindings, and keep `tools.jazz.**`,
 `uniffi.jazz_ffi.**` and `com.sun.jna.**` if you minify.
 
@@ -123,6 +160,14 @@ or as a user your backend signs in, with their bearer token:
 `Jazz` is safe to use from any coroutine: its calls are main-safe `suspend` functions, and the
 native core syncs on a thread of its own. Call `jazz.close()` (it's `AutoCloseable`) when you're
 done; closing ends open `watch`es and subscriptions with `JazzException.Closed`.
+
+One `Jazz` at a time has a persistent `dataDir` open. Opening it again, in this process or another
+(a widget, a service in a process of its own), throws `JazzException.Refused`: the store has one
+writer, so share that `Jazz`, or use another directory. On Android, keep it somewhere that outlives
+a screen, such as your `Application`. Opening right after `close()` waits for it to finish.
+
+`jazz.deleteClientStorage()` closes the app and deletes its local store. Once it is closed,
+`jazz.session` reads `SignedOut`.
 
 Writes are local-first: a write the server's permissions refuse doesn't fail the call, it rolls
 back once the server answers. Write at `WriteTier.Global` (or call `waitForSync`) to see the
