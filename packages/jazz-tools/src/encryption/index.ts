@@ -122,7 +122,10 @@ const toHex = (bytes: Uint8Array) =>
 function failure(error: unknown): EncryptionError {
   const message = error instanceof Error ? error.message : String(error);
   const match = /^([a-z-]+): ([\s\S]*)$/.exec(message);
-  return match ? new EncryptionError(match[1]!, match[2]!) : new EncryptionError("error", message);
+  if (!match) return new EncryptionError("error", message);
+  const [, code, detail] = match;
+  // For a protocol refusal, the runtime gives its reason in the code.
+  return new EncryptionError(code!, detail === "E2EE operation refused" ? message : detail!);
 }
 
 /** The handle an app uses; see the docs. */

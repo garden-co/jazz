@@ -78,3 +78,15 @@ it.each([
     message: message.slice(code.length + 2),
   });
 });
+
+it("keeps the runtime's reason in the message of a refused operation", async () => {
+  const { encryption } = awaitingDevice(async () => {
+    throw new Error("device-not-active: E2EE operation refused");
+  });
+
+  await expect(encryption.ready()).rejects.toMatchObject({
+    name: "EncryptionError",
+    code: "device-not-active",
+    message: expect.stringContaining("device-not-active"),
+  });
+});
