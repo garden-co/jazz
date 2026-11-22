@@ -60,6 +60,8 @@ export type ValueKind =
   | "bigint"
   | "timestamp"
   | "bytes"
+  | "point"
+  | "vector"
   | "json"
   | "enum"
   | "array";
@@ -79,11 +81,15 @@ type LiteralOfKind<K> = K extends "string" | "uuid" | "enum"
           ? Date | number
           : K extends "bytes"
             ? Uint8Array
-            : K extends "array"
-              ? readonly unknown[]
-              : K extends "json"
-                ? unknown
-                : never;
+            : K extends "point"
+              ? readonly [lng: number, lat: number]
+              : K extends "vector"
+                ? Float32Array | readonly number[]
+                : K extends "array"
+                  ? readonly unknown[]
+                  : K extends "json"
+                    ? unknown
+                    : never;
 
 /**
  * Any value of kind `K` (`"uuid"`, `"string"`, …), for helper parameters: a
@@ -188,13 +194,17 @@ export type KindOf<Sql> = Sql extends "TEXT"
               ? "timestamp"
               : Sql extends "BYTEA"
                 ? "bytes"
-                : Sql extends { kind: "ENUM" }
-                  ? "enum"
-                  : Sql extends { kind: "JSON" }
-                    ? "json"
-                    : Sql extends { kind: "ARRAY" }
-                      ? "array"
-                      : string;
+                : Sql extends "POINT"
+                  ? "point"
+                  : Sql extends { kind: "VECTOR" }
+                    ? "vector"
+                    : Sql extends { kind: "ENUM" }
+                      ? "enum"
+                      : Sql extends { kind: "JSON" }
+                        ? "json"
+                        : Sql extends { kind: "ARRAY" }
+                          ? "array"
+                          : string;
 
 /** A literal for a column of value type `V` and kind `K`. */
 export type LiteralFor<V, K> = K extends "timestamp"

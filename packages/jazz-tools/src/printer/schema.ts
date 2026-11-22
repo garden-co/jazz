@@ -1,5 +1,5 @@
 /** `jazz.app.json` tables → `.64` builders (`s.table(…)`) for `s.defineSchema({…})`. */
-import type { AppJson, ColumnJson, ColumnObject, TableJson } from "./app-json.js";
+import type { AppJson, ColumnJson, ColumnObject, IndexJson, TableJson } from "./app-json.js";
 import { jsLiteral, propKey } from "./names.js";
 import type { Unsupported } from "./permissions.js";
 
@@ -63,11 +63,36 @@ export function printTable(table: TableJson, options: TablesPrintOptions): strin
   for (const composite of (table.indexes ?? []).filter((i): i is string[] => Array.isArray(i))) {
     text += `.compositeIndex(${JSON.stringify(composite)})`;
   }
+  for (const index of (table.indexes ?? []).filter(
+    (i): i is IndexJson => typeof i === "object" && !Array.isArray(i),
+  )) {
+    text += printIndex(index, options);
+  }
   if (table.branchBy?.length) {
     text += `.branchBy(${JSON.stringify(table.branchBy.length === 1 ? table.branchBy[0] : table.branchBy)})`;
   }
   if (table.history) text += `.history(${JSON.stringify(table.history)})`;
   return text;
+}
+
+/** A text, vector or geo index: `.textIndex(…)`, `.vectorIndex(…)`, `.geoIndex(…)`. */
+function printIndex(index: IndexJson, options: TablesPrintOptions): string {
+  const path = `${options.path}.indexes.${index.name}`;
+  const refuse = (text: string, reason: string) => options.unsupported.push({ path, text, reason });
+  if (index.serverOnly) refuse("serverOnly", "a serverOnly index, which is not supported yet");
+  if (index.$comment) refuse(index.$comment, "a comment on an index");
+  const name = JSON.stringify(index.name);
+  if ("text" in index) {
+    const how = { analyzer: index.analyzer, ...(index.prefix ? { prefix: true } : {}) };
+    return `.textIndex(${name}, ${jsLiteral(index.text)}, ${jsLiteral(how)})`;
+  }
+  if ("vector" in index) {
+    if (index.ann !== undefined && index.ann !== "exact")
+      refuse(index.ann, "a vector index other than exact");
+    const how = { metric: index.metric };
+    return `.vectorIndex(${name}, ${JSON.stringify(index.vector)}, ${jsLiteral(how)})`;
+  }
+  return `.geoIndex(${name}, ${JSON.stringify(index.geo)})`;
 }
 
 const SCALARS = new Set([
@@ -79,6 +104,7 @@ const SCALARS = new Set([
   "timestamp",
   "uuid",
   "bytes",
+  "point",
 ]);
 
 export function printColumn(column: ColumnJson, options: TablesPrintOptions): string {
@@ -122,6 +148,7 @@ function baseColumn(column: ColumnObject, options: TablesPrintOptions): string {
   if (column.json !== undefined)
     return column.json === true ? "s.json()" : `s.json(${jsLiteral(column.json)})`;
   if (column.array !== undefined) return `s.array(${printColumn(column.array, options)})`;
+  if (column.vector !== undefined) return `s.vector(${column.vector})`;
   options.unsupported.push({
     path: options.path,
     text: JSON.stringify(column),
@@ -134,6 +161,9 @@ function baseColumn(column: ColumnObject, options: TablesPrintOptions): string {
 export function printDefault(column: ColumnJson, value: unknown): string {
   const type = typeof column === "string" ? column.replace(/\?$/, "") : column.type;
   if (type === "bigint" && typeof value === "string") return `${value}n`;
+  // A point's or vector's -0 is a value of its own; JSON.stringify drops its sign.
+  if (Array.isArray(value) && value.some((x) => Object.is(x, -0)))
+    return `[${value.map((x) => (Object.is(x, -0) ? "-0" : jsLiteral(x))).join(", ")}]`;
   return jsLiteral(value);
 }
 

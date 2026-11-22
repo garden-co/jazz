@@ -11,6 +11,7 @@ import {
   type Relationships,
 } from "../relationships.js";
 import { assertUserTableColumnNameAllowed, type NoExplicitIdColumn } from "../magic-columns.js";
+import type { VectorSqlType } from "../schema.js";
 
 export type TableDefinition = Record<string, AnyColumnDefinition> & NoExplicitIdColumn;
 
@@ -28,10 +29,48 @@ const PROVENANCE_INDEX_COLUMNS = ["$createdAt", "$updatedAt"] as const;
 type ProvenanceIndexColumn = (typeof PROVENANCE_INDEX_COLUMNS)[number];
 type CompositeIndexColumn<C> = StoredColumnKeys<C> | ProvenanceIndexColumn;
 
+/** The stored columns whose type is `Sql`. */
+type ColumnsTyped<C, Sql> = {
+  [K in StoredColumnKeys<C>]: C[K] extends AnyColumnDefinition
+    ? ColumnBuilderSqlType<C[K]> extends Sql
+      ? K
+      : never
+    : never;
+}[StoredColumnKeys<C>];
+
+/**
+ * A text index field: its weight (1 to 15), or that and its reference
+ * length in words (32 unless given, about 256 suits long text).
+ */
+export type TextIndexField = number | { readonly weight: number; readonly length?: number };
+
+/** How a text index reads text. */
+export interface TextIndexOptions {
+  /** How text becomes words: English with stemming, or words as written. */
+  readonly analyzer: "jazz-text/1:en" | "jazz-text/1:simple";
+  /** Whether a query's last word also matches as a prefix. */
+  readonly prefix?: boolean;
+}
+
+/** How a vector index compares. */
+export interface VectorIndexOptions {
+  readonly metric: "cosine" | "l2" | "dot";
+}
+
+/** A specialised index as `jazz.app.json`'s `indexes` lists it (SPEC 20.1). */
+export type SpecialisedIndex =
+  | ({
+      readonly name: string;
+      readonly text: Readonly<Record<string, TextIndexField>>;
+    } & TextIndexOptions)
+  | ({ readonly name: string; readonly vector: string } & VectorIndexOptions)
+  | { readonly name: string; readonly geo: string };
+
 interface TableOptions<TColumns> {
   readonly indexedColumns?: readonly (keyof TColumns & string)[];
   readonly branchColumns?: readonly (keyof TColumns & string)[];
   readonly compositeIndexes?: readonly (readonly string[])[];
+  readonly specialisedIndexes?: readonly SpecialisedIndex[];
   readonly historyRetention?: "latest";
 }
 
@@ -44,6 +83,7 @@ export class DefinedTable<
   public readonly indexedColumns?: readonly (keyof TColumns & string)[];
   public readonly branchColumns?: readonly (keyof TColumns & string)[];
   public readonly compositeIndexes?: readonly (readonly string[])[];
+  public readonly specialisedIndexes?: readonly SpecialisedIndex[];
   public readonly historyRetention?: "latest";
 
   constructor(
@@ -59,6 +99,7 @@ export class DefinedTable<
       indexedColumns: this.indexedColumns,
       branchColumns: this.branchColumns,
       compositeIndexes: this.compositeIndexes,
+      specialisedIndexes: this.specialisedIndexes,
       historyRetention: this.historyRetention,
     };
   }
@@ -110,6 +151,68 @@ export class DefinedTable<
       ...this.options(),
       compositeIndexes: [...(this.compositeIndexes ?? []), [...columns]],
     });
+  }
+
+  private withIndex(
+    method: string,
+    index: SpecialisedIndex,
+    columns: readonly string[],
+  ): DefinedTable<TColumns, TRelations> {
+    for (const column of columns) this.storedColumn(method, column);
+    if ((this.specialisedIndexes ?? []).some((existing) => existing.name === index.name))
+      throw new Error(`table.${method}(...) declares a second index named "${index.name}".`);
+    return new DefinedTable(this.columns, this.relations, {
+      ...this.options(),
+      specialisedIndexes: [...(this.specialisedIndexes ?? []), index],
+    });
+  }
+
+  /**
+   * Word search over string columns, each with a weight, searched by `name`.
+   *
+   * @example
+   * ```ts
+   * .textIndex("search", { title: 4, body: { weight: 1, length: 256 } }, { analyzer: "jazz-text/1:en" })
+   * ```
+   */
+  textIndex(
+    name: string,
+    fields: { readonly [K in ColumnsTyped<TColumns, "TEXT">]?: TextIndexField },
+    options: TextIndexOptions,
+  ): DefinedTable<TColumns, TRelations> {
+    const text = { ...(fields as Record<string, TextIndexField>) };
+    return this.withIndex("textIndex", { name, text, ...options }, Object.keys(text));
+  }
+
+  /**
+   * Nearest-neighbour search over a vector column, searched by `name`.
+   *
+   * @example
+   * ```ts
+   * .vectorIndex("similar", "embedding", { metric: "cosine" })
+   * ```
+   */
+  vectorIndex(
+    name: string,
+    column: ColumnsTyped<TColumns, VectorSqlType>,
+    options: VectorIndexOptions,
+  ): DefinedTable<TColumns, TRelations> {
+    return this.withIndex("vectorIndex", { name, vector: column, ...options }, [column]);
+  }
+
+  /**
+   * Radius and box search over a point column, searched by `name`.
+   *
+   * @example
+   * ```ts
+   * .geoIndex("near", "location")
+   * ```
+   */
+  geoIndex(
+    name: string,
+    column: ColumnsTyped<TColumns, "POINT">,
+  ): DefinedTable<TColumns, TRelations> {
+    return this.withIndex("geoIndex", { name, geo: column }, [column]);
   }
 
   /** Branch rows by these columns' values. */
