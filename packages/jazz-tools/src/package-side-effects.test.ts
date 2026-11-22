@@ -100,8 +100,6 @@ const REVIEWED_CALLS = new Set([
   "dsl.ts: DropBuilder",
   "permissions/dsl.ts: comparison",
   "permissions/dsl.ts: TYPED",
-  "upgrade/index.ts: join",
-  "upgrade/project.ts: join",
   "dev/inspector-overlay/loader.ts: HostBinding",
   "inspect/mcp.ts: WHERE_OPERATORS.join",
   "local-first-auth/identity.ts: utf8",

@@ -47,9 +47,13 @@ const SERVER_REMOVED =
   "`createJazz({ store: sqlite({ path }) })` serves sync from your own server. " +
   "Jazz Cloud is deprecated for new apps.";
 
-export const VALIDATE_RENAMED =
-  "`jazz-tools validate` was renamed to `jazz-tools generate` in alpha.65: it writes jazz.app.json, " +
-  "jazz.permissions.json and jazz.generated.ts from the app's TS. Use `jazz-tools generate --check` in CI.";
+const UPGRADE_GUIDE_URL =
+  "https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0";
+
+const UPGRADE_REMOVED =
+  "`jazz-tools upgrade` was removed in 2.0.0-beta.0. To convert an alpha.65 (or older) app, " +
+  "run `npx jazz-tools@2.0.0-alpha.70 upgrade`, then follow the upgrade guide: " +
+  UPGRADE_GUIDE_URL;
 
 const CREATE_REMOVED = "`jazz-tools create` was removed. Start a project with `npm create jazz`.";
 
@@ -431,9 +435,6 @@ function printHelp(): void {
   );
   console.log("  migrations graph      Visualize the full migration graph");
   console.log(
-    "  upgrade               Convert an alpha.65 app to alpha.66's schema.ts (or write it from a JSON-only app's files)",
-  );
-  console.log(
     "  schema compile        Print the compiled schema jazz.generated.ts embeds, as JSON",
   );
   console.log("  login | logout | whoami (deprecated)");
@@ -478,8 +479,8 @@ if (isMainModule()) {
   const command = args[0] ?? "";
   // Cloud commands (login, apps, ...) have their own help.
   const cloudCommand = isCloudCommand(command);
-  // Cloud commands and `inspect` have their own help.
-  const ownHelp = cloudCommand || command === "inspect";
+  // Cloud commands and `inspect` have their own help; `upgrade` only refuses.
+  const ownHelp = cloudCommand || command === "inspect" || command === "upgrade";
   if (!ownHelp && args.some((arg) => arg === "--help" || arg === "-h")) {
     printHelp();
     process.exit(0);
@@ -531,26 +532,11 @@ if (isMainModule()) {
   } else if (command === "generate") {
     exitOnError(Promise.resolve().then(() => generate(parseArgs(args).options)));
   } else if (command === "upgrade") {
-    const commandArgs = args.slice(1);
-    const dryRun = commandArgs.includes("--dry-run");
-    exitOnError(
-      import("./upgrade/index.js").then(async ({ upgradeProject, formatReport }) => {
-        const report = await upgradeProject({
-          dir: resolve(process.cwd(), getFlagValue(commandArgs, "--dir") ?? "."),
-          dryRun,
-          skipTypecheck: commandArgs.includes("--skip-typecheck"),
-          schemaDir: getFlagValue(commandArgs, "--schema-dir"),
-        });
-        console.log(formatReport(report, dryRun));
-        if (report.typeErrors.length > 0) process.exitCode = 1;
-      }),
-    );
+    console.error(UPGRADE_REMOVED);
+    process.exit(1);
   } else if (command === "print-ts") {
     // Hidden: the examples' TS from their JSON (src/printer/cli.ts).
     exitOnError(import("./printer/cli.js").then(({ runPrintTs }) => runPrintTs(args.slice(1))));
-  } else if (command === "validate") {
-    console.error(VALIDATE_RENAMED);
-    process.exit(1);
   } else if (command === "store") {
     const [subcommand, path, ...rest] = args.slice(1);
     const usage =

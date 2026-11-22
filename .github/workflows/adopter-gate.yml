@@ -39,7 +39,7 @@ on:
         }
       previous_version:
         {
-          description: "Previous release for sizes and the upgrade diff (default: npm latest)",
+          description: "Previous release for sizes (default: npm latest)",
           required: false,
           type: string,
         }
@@ -81,7 +81,6 @@ jobs:
     outputs:
       rc_ref: ${{ steps.ref.outputs.rc_ref }}
       expect_sha: ${{ steps.ref.outputs.expect_sha }}
-      upgrade_changed: ${{ steps.diff.outputs.upgrade_changed }}
       previous: ${{ steps.prev.outputs.previous }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -114,16 +113,6 @@ jobs:
           echo "rc_ref=$expect" >> "$GITHUB_OUTPUT"
       - id: prev
         run: echo "previous=${{ inputs.previous_version }}" | sed "s/=$/=$(npm view jazz-tools dist-tags.latest)/" >> "$GITHUB_OUTPUT"
-      - id: diff
-        name: Did the upgrade codemod change since the previous release?
-        env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          # The compare API lists at most 300 files: at the cap, or on any error, assume it changed (run the refusals).
-          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/compare/v${{ steps.prev.outputs.previous }}...${{ steps.ref.outputs.rc_ref }}?per_page=100" -q '.files[].filename' 2>/dev/null) || files=
-          n=$(printf '%s\n' "$files" | grep -c . || true)
-          if [ -n "$files" ] && [ "$n" -lt 300 ] && ! printf '%s\n' "$files" | grep -q '^packages/jazz-tools/src/upgrade/'; then
-            echo "upgrade_changed=false" >> "$GITHUB_OUTPUT"; else echo "upgrade_changed=true" >> "$GITHUB_OUTPUT"; fi
-          echo "compared $n files since v${{ steps.prev.outputs.previous }}"
 
   checks:
     needs: inputs
@@ -274,40 +263,6 @@ jobs:
             include-hidden-files: true,
           }
 
-  refusals:
-    needs: inputs
-    if: needs.inputs.outputs.upgrade_changed == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with: { sparse-checkout: "dev/adopter-gate\n.github/actions" }
-      - name: Fetch the RC files this job needs
-        env:
-          {
-            GH_TOKEN: "${{ github.token }}",
-            AG_EXPECT_SHA: "${{ needs.inputs.outputs.expect_sha }}",
-            AG_NEED: "npm",
-          }
-        run: |
-          if [ -n "${{ inputs.artifacts_run_id }}" ]; then
-            $AG/fetch-rc.sh --run "${{ inputs.artifacts_run_id }}" --npm-run "${{ inputs.rc_npm_run_id || inputs.artifacts_run_id }}"
-          else $AG/fetch-rc.sh "${{ inputs.rc_tag }}" "${{ inputs.language_run_id }}"; fi
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with: { node-version-file: .nvmrc }
-      - name: pnpm (retried)
-        run: for i in 1 2 3; do npm install --global "pnpm@$PNPM_VERSION" > /dev/null && exit 0; sleep $((i * 5)); done; exit 1
-      - run: $AG/refusals.sh
-      - if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          {
-            name: results-refusals,
-            path: dev/adopter-gate/.results,
-            retention-days: 14,
-            include-hidden-files: true,
-          }
-
   # One long-lived Vercel eval project, one core: never two runs at once, never cancelled midway. The missing-region
   # check is t4-noregion in `checks` (no secrets), off this critical path.
   t4:
@@ -387,7 +342,7 @@ jobs:
           }
 
   verdict:
-    needs: [inputs, checks, t9-swift, refusals, t4]
+    needs: [inputs, checks, t9-swift, t4]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 8
@@ -432,7 +387,6 @@ jobs:
         run: |
           expected=bed-t1,bed-t3,bed-t5,bed-t6,fixtures,t10,sizes,t4-noregion,t9-ts,t9-rust,t9-go,t9-kotlin,t9-swift,t4
           [ -n "${{ inputs.artifacts_run_id }}" ] && expected=$expected,provenance
-          [ "${{ needs.inputs.outputs.upgrade_changed }}" = true ] && expected=$expected,refusals
           node $AG/verdict.mjs results "$expected"
       - if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

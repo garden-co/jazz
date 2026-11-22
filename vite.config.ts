@@ -11,7 +11,6 @@ const sharedIgnores = [
   ".cache/android-device-acceptance/**",
   // Adopter-gate test apps: copies of adopter projects as each release generated them; they must stay byte for byte.
   "dev/adopter-gate/bed/**",
-  "dev/adopter-gate/refusals/**",
   "dev/adopter-gate/t10/**",
   "dev/adopter-gate/t4/app*/**",
 ];
