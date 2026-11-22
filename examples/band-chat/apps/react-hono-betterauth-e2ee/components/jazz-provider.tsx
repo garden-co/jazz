@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { JazzProvider as Jazz, useJazzSession } from "jazz-tools/react";
 import { Banner, Button, Center, Spinner } from "@astryxdesign/core";
 import { app } from "../jazz.generated";
@@ -30,7 +31,7 @@ export function JazzProvider({ children }: React.PropsWithChildren) {
       // `app` tells Jazz which columns are encrypted before the first query.
       config={{ serverUrl: "/jazz", client: loadLocalFirst, encryption: { app } }}
       loading={<LoadingScreen label="Connecting BandChat…" />}
-      signedOut={<LoadingScreen label="Signing in…" />}
+      signedOut={<SignedOutScreen />}
       error={(state) => (
         <StatusScreen>
           <Banner
@@ -46,6 +47,38 @@ export function JazzProvider({ children }: React.PropsWithChildren) {
       {children}
     </Jazz>
   );
+}
+
+/**
+ * Jazz is signed out while the page still believes it is signed in: the
+ * server ended this sign-in (another of the user's browsers removed a lost
+ * device), or Jazz is between two sign-ins. Ask Better Auth again. With no
+ * session the app shows the sign-in form; with one, Jazz signs in again on
+ * its cookie.
+ */
+export function SignedOutScreen({ retryMs = 3000 }: { retryMs?: number }) {
+  const { refetch } = authClient.useSession();
+  const { refresh } = useJazzSession();
+  useEffect(() => {
+    let stopped = false;
+    const check = async () => {
+      const answer = await authClient.getSession().catch(() => null);
+      // No answer (offline, a failed request): try again later.
+      if (stopped || !answer || answer.error) return;
+      const { data } = answer;
+      // Updates the session the app reads: no session renders the sign-in form.
+      if (data === null) await refetch();
+      else await refresh().catch(() => {});
+    };
+    void check();
+    // Until one of the two happens (a request can fail while offline).
+    const timer = setInterval(() => void check(), retryMs);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [refetch, refresh, retryMs]);
+  return <LoadingScreen label="Signing in…" />;
 }
 
 function StatusScreen({ children }: React.PropsWithChildren) {
