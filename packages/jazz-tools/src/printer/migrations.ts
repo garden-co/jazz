@@ -249,6 +249,7 @@ function printTypedOp(
       ? `${fn}.json({ ${def} })`
       : `${fn}.json({ ${def}, schema: ${jsLiteral(type.json)} })`;
   }
+  if (type.vector !== undefined) return `${fn}.vector(${type.vector}, { ${def} })`;
   if (type.array !== undefined) {
     const of = printColumn(type.array, { relations: false, path, unsupported });
     return `${fn}.array({ of: ${of}, ${def} })`;

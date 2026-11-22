@@ -7,6 +7,7 @@ export interface ColumnObject {
   enum?: string[];
   json?: unknown;
   array?: ColumnJson;
+  vector?: number;
   optional?: boolean;
   default?: unknown;
   merge?: string;
@@ -19,10 +20,30 @@ export type RelationJson =
   | { rel: string; column: string; $comment?: string }
   | { reverse: string; relation: string; $comment?: string };
 
+/** A text, vector or geo index (SPEC 20.1). */
+export type IndexJson =
+  | {
+      name: string;
+      text: Record<string, number | { weight: number; length?: number }>;
+      analyzer: string;
+      prefix?: boolean;
+      serverOnly?: boolean;
+      $comment?: string;
+    }
+  | {
+      name: string;
+      vector: string;
+      metric: string;
+      ann?: string;
+      serverOnly?: boolean;
+      $comment?: string;
+    }
+  | { name: string; geo: string; serverOnly?: boolean; $comment?: string };
+
 export interface TableJson {
   columns: Record<string, ColumnJson>;
   relations?: Record<string, RelationJson>;
-  indexes?: (string | string[])[];
+  indexes?: (string | string[] | IndexJson)[];
   branchBy?: string[];
   history?: "latest";
   computed?: Record<string, { type: string; from: string[] }>;
@@ -82,5 +103,6 @@ export function columnKind(column: ColumnJson | undefined): string | undefined {
   if (column.enum) return "enum";
   if (column.json !== undefined) return "json";
   if (column.array !== undefined) return "array";
+  if (column.vector !== undefined) return "vector";
   return undefined;
 }

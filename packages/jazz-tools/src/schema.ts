@@ -9,7 +9,9 @@ export type ScalarSqlType =
   | "REAL"
   | "TIMESTAMP"
   | "UUID"
-  | "BYTEA";
+  | "BYTEA"
+  /** A WGS84 point, `[lng, lat]` (SPEC 20.1). */
+  | "POINT";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | { [key: string]: JsonValue } | JsonValue[];
@@ -40,7 +42,17 @@ export interface JsonSqlType<Output = JsonValue> {
    */
   __output?: Output;
 }
-export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType | JsonSqlType<unknown>;
+/** `dimensions` 32-bit floats, for nearest-neighbour search (SPEC 20.1). */
+export interface VectorSqlType {
+  kind: "VECTOR";
+  dimensions: number;
+}
+export type SqlType =
+  | ScalarSqlType
+  | ArraySqlType
+  | EnumSqlType
+  | JsonSqlType<unknown>
+  | VectorSqlType;
 /**
  * How concurrent writes to a column combine. `counter` sums integer changes,
  * `g-set` unions arrays, and `text`, `markdown` and `html` merge concurrent
@@ -65,7 +77,9 @@ type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"
               ? string
               : T extends "BYTEA"
                 ? Uint8Array
-                : never;
+                : T extends "POINT"
+                  ? readonly [lng: number, lat: number]
+                  : never;
 
 export type TSTypeFromSqlType<T extends SqlType> = SqlTypeValue<T, false>;
 
@@ -82,9 +96,13 @@ type SqlTypeValue<T extends SqlType, Init extends boolean> = T extends ScalarSql
         : T["cases"] extends readonly EnumCaseSqlType[]
           ? EnumValueFromCases<T["cases"], Init>
           : never
-      : T extends JsonSqlType<infer Output>
-        ? Output
-        : never;
+      : T extends VectorSqlType
+        ? Init extends true
+          ? Float32Array | readonly number[]
+          : Float32Array
+        : T extends JsonSqlType<infer Output>
+          ? Output
+          : never;
 
 export interface Column {
   name: string;

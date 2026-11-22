@@ -28,6 +28,8 @@ export const bigint = schemaColumns.bigint;
 export const timestamp = schemaColumns.timestamp;
 export const float = schemaColumns.float;
 export const bytes = schemaColumns.bytes;
+export const point = schemaColumns.point;
+export const vector = schemaColumns.vector;
 export const json = schemaColumns.json;
 const enumColumn = schemaColumns.enum;
 export { enumColumn as enum };

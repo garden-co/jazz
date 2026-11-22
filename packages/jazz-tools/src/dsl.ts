@@ -21,6 +21,7 @@ import type {
   ScalarSqlType,
   TSTypeFromSqlType,
   TSInitFromSqlType,
+  VectorSqlType,
 } from "./schema.js";
 import {
   assertUserColumnNameAllowed,
@@ -325,6 +326,18 @@ export type BytesColumn<
   Value = Uint8Array,
   Init = Value,
 > = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value, Init>;
+export type PointColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+  Value = readonly [lng: number, lat: number],
+  Init = Value,
+> = TypedColumnBuilder<"POINT", Optional, undefined, HasDefault, Value, Init>;
+export type VectorColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+  Value = Float32Array,
+  Init = Float32Array | readonly number[],
+> = TypedColumnBuilder<VectorSqlType, Optional, undefined, HasDefault, Value, Init>;
 export type JsonColumn<
   Output = JsonValue,
   Optional extends boolean = false,
@@ -416,19 +429,23 @@ export type ColumnAlias<
                 ? FloatColumn<Optional, HasDefault, Value, Init>
                 : Sql extends "BYTEA"
                   ? BytesColumn<Optional, HasDefault, Value, Init>
-                  : Sql extends JsonSqlType<infer Output>
-                    ? JsonColumn<Output, Optional, HasDefault, Value, Init>
-                    : Sql extends {
-                          kind: "ENUM";
-                          variants: infer Variants extends readonly string[];
-                        }
-                      ? EnumColumn<Variants, Optional, HasDefault, Value, Init>
-                      : Sql extends {
-                            kind: "ENUM";
-                            cases: infer Cases extends readonly EnumCaseSqlType[];
-                          }
-                        ? EnumCasesColumn<Cases, Optional, HasDefault, Value, Init>
-                        : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value, Init>;
+                  : Sql extends "POINT"
+                    ? PointColumn<Optional, HasDefault, Value, Init>
+                    : Sql extends VectorSqlType
+                      ? VectorColumn<Optional, HasDefault, Value, Init>
+                      : Sql extends JsonSqlType<infer Output>
+                        ? JsonColumn<Output, Optional, HasDefault, Value, Init>
+                        : Sql extends {
+                              kind: "ENUM";
+                              variants: infer Variants extends readonly string[];
+                            }
+                          ? EnumColumn<Variants, Optional, HasDefault, Value, Init>
+                          : Sql extends {
+                                kind: "ENUM";
+                                cases: infer Cases extends readonly EnumCaseSqlType[];
+                              }
+                            ? EnumCasesColumn<Cases, Optional, HasDefault, Value, Init>
+                            : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value, Init>;
 
 function normalizeColumnMergeStrategy(
   strategy: ColumnMergeStrategyName,
@@ -528,6 +545,22 @@ class ScalarBuilder extends BaseColumnBuilder {
   constructor(public _sqlType: ScalarSqlType) {
     super();
   }
+}
+
+class VectorBuilder extends BaseColumnBuilder {
+  public _sqlType: VectorSqlType;
+
+  constructor(dimensions: number) {
+    super();
+    this._sqlType = vectorSqlType(dimensions);
+  }
+}
+
+function vectorSqlType(dimensions: number): VectorSqlType {
+  // How many a vector may have is the schema compiler's to check.
+  if (!Number.isInteger(dimensions))
+    throw new Error("s.vector(dimensions) requires a whole number of dimensions.");
+  return { kind: "VECTOR", dimensions };
 }
 
 class EnumBuilder extends BaseColumnBuilder {
@@ -649,6 +682,19 @@ class AddBuilder {
     return { _type: "add", sqlType: "BYTEA", default: opts.default };
   }
 
+  point<const TDefault extends readonly [lng: number, lat: number] | null>(opts: {
+    default: TDefault;
+  }): AddOp<"POINT", TDefault> {
+    return { _type: "add", sqlType: "POINT", default: opts.default };
+  }
+
+  vector<const TDefault extends Float32Array | readonly number[] | null>(
+    dimensions: number,
+    opts: { default: TDefault },
+  ): AddOp<VectorSqlType, TDefault> {
+    return { _type: "add", sqlType: vectorSqlType(dimensions), default: opts.default };
+  }
+
   /** A plain `s.uuid()` column; for a reference to a table, use {@link AddBuilder.ref}. */
   uuid<const TDefault extends string | null>(opts: { default: TDefault }): AddOp<"UUID", TDefault> {
     return { _type: "add", sqlType: "UUID", default: opts.default };
@@ -756,6 +802,23 @@ class DropBuilder {
     return { _type: "drop", sqlType: "BYTEA", backwardsDefault: opts.backwardsDefault };
   }
 
+  point<const TBackwardsDefault extends readonly [lng: number, lat: number] | null>(opts: {
+    backwardsDefault: TBackwardsDefault;
+  }): DropOp<"POINT", TBackwardsDefault> {
+    return { _type: "drop", sqlType: "POINT", backwardsDefault: opts.backwardsDefault };
+  }
+
+  vector<const TBackwardsDefault extends Float32Array | readonly number[] | null>(
+    dimensions: number,
+    opts: { backwardsDefault: TBackwardsDefault },
+  ): DropOp<VectorSqlType, TBackwardsDefault> {
+    return {
+      _type: "drop",
+      sqlType: vectorSqlType(dimensions),
+      backwardsDefault: opts.backwardsDefault,
+    };
+  }
+
   /** A plain `s.uuid()` column; for a reference to a table, use {@link DropBuilder.ref}. */
   uuid<const TBackwardsDefault extends string | null>(opts: {
     backwardsDefault: TBackwardsDefault;
@@ -831,6 +894,10 @@ export const schemaColumns = {
   timestamp: () => new ScalarBuilder("TIMESTAMP") as unknown as TimestampColumn,
   float: () => new ScalarBuilder("REAL") as unknown as FloatColumn,
   bytes: () => new ScalarBuilder("BYTEA") as unknown as BytesColumn,
+  /** A WGS84 point, `[lng, lat]` in degrees (GeoJSON's order); searched through a `geoIndex`. */
+  point: () => new ScalarBuilder("POINT") as unknown as PointColumn,
+  /** `dimensions` 32-bit floats (an embedding); searched through a `vectorIndex`. */
+  vector: (dimensions: number) => new VectorBuilder(dimensions) as unknown as VectorColumn,
   json: jsonColumn as unknown as {
     (): JsonColumn;
     <Schema extends StandardJSONSchemaV1<unknown, unknown>>(

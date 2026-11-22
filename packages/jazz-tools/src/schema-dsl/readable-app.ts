@@ -6,7 +6,7 @@
 import type { AnyColumnDefinition } from "../dsl.js";
 import { isComputedColumn } from "../dsl.js";
 import type { Column, SqlType } from "../schema.js";
-import type { DefinedTable } from "./table.js";
+import type { DefinedTable, SpecialisedIndex } from "./table.js";
 
 export type ReadableJson =
   | string
@@ -40,6 +40,7 @@ const SCALAR_NAMES: Record<string, string> = {
   TIMESTAMP: "timestamp",
   UUID: "uuid",
   BYTEA: "bytes",
+  POINT: "point",
 };
 
 /** A column type without options: a type string, or `{enum}` / `{json}` / `{array}`. */
@@ -57,7 +58,21 @@ export function readableType(sqlType: SqlType): ReadableJson {
       return { json: sqlType.schema ? (sqlType.schema as ReadableJson) : true };
     case "ARRAY":
       return { array: readableType(sqlType.element) };
+    case "VECTOR":
+      return { vector: sqlType.dimensions };
   }
+}
+
+/**
+ * A vector's or point's numbers. Their values compare bit for bit, and a
+ * number in JSON loses the sign of zero, so a default can't hold -0.
+ */
+function readableNumbers(values: ArrayLike<number>, type: "vector" | "point"): ReadableJson {
+  return Array.from(values, (value) => {
+    if (Object.is(value, -0))
+      throw new Error(`a ${type} default holding -0 is not supported yet; use 0`);
+    return value;
+  });
 }
 
 function base64(bytes: Uint8Array): string {
@@ -73,6 +88,13 @@ export function readableValue(value: unknown, sqlType: SqlType): ReadableJson {
   if (typeof value === "bigint") return value.toString();
   if (value instanceof Uint8Array) return base64(value);
   if (sqlType === "BIGINT" && typeof value === "number") return String(value);
+  if (sqlType === "POINT" && Array.isArray(value)) return readableNumbers(value, "point");
+  if (
+    typeof sqlType === "object" &&
+    sqlType.kind === "VECTOR" &&
+    (value instanceof Float32Array || Array.isArray(value))
+  )
+    return readableNumbers(value, "vector");
   if (Array.isArray(value)) {
     const element =
       typeof sqlType === "object" && sqlType.kind === "ARRAY" ? sqlType.element : sqlType;
@@ -98,6 +120,13 @@ export function readableColumn(
   const head: { [key: string]: ReadableJson } =
     typeof type === "string" ? { type } : { ...(type as { [key: string]: ReadableJson }) };
   return { ...head, ...(column.nullable ? { optional: true } : {}), ...options };
+}
+
+/** A text, vector or geo index as `indexes` lists it, without what wasn't given. */
+function readableIndex(index: SpecialisedIndex): ReadableJson {
+  return Object.fromEntries(
+    Object.entries(index).filter(([, value]) => value !== undefined),
+  ) as ReadableJson;
 }
 
 /** The readable form of every table, by name, plus the transforms they use. */
@@ -165,6 +194,7 @@ export function readableApp(tables: Record<string, DefinedTable>): ReadableApp {
     const indexes: ReadableJson[] = [
       ...(table.indexedColumns ?? []),
       ...(table.compositeIndexes ?? []).map((index) => [...index]),
+      ...(table.specialisedIndexes ?? []).map((index) => readableIndex(index)),
     ];
     if (indexes.length > 0) entry.indexes = indexes;
     if (table.branchColumns?.length) entry.branchBy = [...table.branchColumns];

@@ -1,6 +1,8 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { bytesToPoint } from "../runtime/point.js";
 import { structuralBigInt } from "../runtime/structural-values.js";
+import { bytesToVector } from "../runtime/vector.js";
 import { isDefinedMigration, witnessColumns, type DefinedMigration } from "../migrations.js";
 import { isDefinedTable } from "../schema-dsl/table.js";
 import {
@@ -91,13 +93,9 @@ function baseBuilderExpression(columnType: WasmColumnType): string {
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
     case "Vector":
-      throw new Error(
-        "Migration stub generation does not support vector columns: declare them in jazz.app.json.",
-      );
+      return `s.vector(${columnType.dimensions})`;
     case "Point":
-      throw new Error(
-        "Migration stub generation does not support point columns: declare them in jazz.app.json.",
-      );
+      return "s.point()";
   }
 }
 
@@ -135,13 +133,24 @@ function defaultExpression(value: Value): string {
   }
 }
 
+/** A stored default as its column's TS value: vectors and points are stored as bytes. */
+function columnDefaultExpression(value: Value, columnType: WasmColumnType): string {
+  if (value.type === "Bytea" && (columnType.type === "Vector" || columnType.type === "Point")) {
+    const bytes = new Uint8Array(value.value);
+    const numbers =
+      columnType.type === "Vector" ? Array.from(bytesToVector(bytes)) : [...bytesToPoint(bytes)];
+    return `[${numbers.map((x) => (Object.is(x, -0) ? "-0" : String(x))).join(", ")}]`;
+  }
+  return defaultExpression(value);
+}
+
 function builderExpressionForColumn(column: ColumnDescriptor): string {
   const base = baseBuilderExpression(column.column_type);
   const optional = column.nullable ? `${base}.optional()` : base;
   const withOptional =
     column.default === undefined
       ? optional
-      : `${optional}.default(${defaultExpression(column.default)})`;
+      : `${optional}.default(${columnDefaultExpression(column.default, column.column_type)})`;
   if (column.merge_strategy === "Counter") {
     return `${withOptional}.merge("counter")`;
   }
@@ -252,13 +261,9 @@ function renderColumnOperationExpression(
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
     case "Vector":
-      throw new Error(
-        "Migration stub generation does not support vector columns: declare them in jazz.app.json.",
-      );
+      return `${m}.vector(${columnType.dimensions}, { ${defaultEntry} })`;
     case "Point":
-      throw new Error(
-        "Migration stub generation does not support point columns: declare them in jazz.app.json.",
-      );
+      return `${m}.point({ ${defaultEntry} })`;
   }
 }
 
@@ -314,7 +319,9 @@ function renderTableSteps(
   const column = (schema: WasmSchema[string], name: string) =>
     schema.columns.find((candidate) => candidate.name === name)!;
   const fill = (descriptor: ColumnDescriptor) =>
-    descriptor.default === undefined ? "null" : defaultExpression(descriptor.default);
+    descriptor.default === undefined
+      ? "null"
+      : columnDefaultExpression(descriptor.default, descriptor.column_type);
   const lines: string[] = [];
   for (const step of table.steps) {
     const name = JSON.stringify(step.column);
