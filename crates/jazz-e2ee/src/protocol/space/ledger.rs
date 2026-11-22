@@ -32,14 +32,10 @@ use super::super::signing;
 /// them, and its roots, successors and deliveries (R12, R14). Rows naming
 /// another address are ignored by replay.
 ///
-/// A read is of one of two kinds, fixed when it is made and not changed
-/// afterwards: a read of the **whole space** (every member row and every
-/// delivery of the address), or a read filtered for **one account** (the
-/// roots and successors, with that account's own member rows and the
-/// deliveries addressed to it, R12, R14). Replaying the chain and acquiring
-/// keys accept either; who holds or lacks a version, the needs-rotation
-/// mark and a rotation's recipients need the whole space and refuse a
-/// one-account read as [`ProtocolError::InconsistentEvidence`].
+/// The read covers every delivery or only named epochs, and may also be
+/// filtered for one account. A decision about all recipients of a version
+/// requires all members and all deliveries for that epoch. Decisions about
+/// the whole space require an unfiltered read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceLedger {
     pub address: SpaceAddress,
@@ -56,6 +52,10 @@ pub struct SpaceLedger {
 enum ReadKind {
     WholeSpace,
     OneAccount(String),
+    Epochs {
+        account: Option<String>,
+        epochs: BTreeSet<String>,
+    },
 }
 
 impl SpaceLedger {
@@ -89,12 +89,40 @@ impl SpaceLedger {
         )
     }
 
+    /// Restrict a read to deliveries of these epochs. Restrictions compose:
+    /// taking a subset preserves its account filter and cannot widen coverage.
+    pub fn for_epochs(mut self, mut epochs: BTreeSet<String>) -> Self {
+        let account = self.filtered_for().map(str::to_owned);
+        if let ReadKind::Epochs {
+            epochs: previous, ..
+        } = &self.kind
+        {
+            epochs.retain(|id| previous.contains(id));
+        }
+        self.deliveries
+            .retain(|delivery| epochs.contains(&delivery.row.key_epoch_id));
+        self.kind = ReadKind::Epochs { account, epochs };
+        self
+    }
+
+    pub(crate) fn require_epoch(&self, epoch: &str) -> ProtocolResult<()> {
+        match &self.kind {
+            ReadKind::WholeSpace => Ok(()),
+            ReadKind::Epochs {
+                account: None,
+                epochs,
+            } if epochs.contains(epoch) => Ok(()),
+            _ => Err(ProtocolError::InconsistentEvidence),
+        }
+    }
+
     /// The account a one-account read was filtered for; `None` for a read
     /// of the whole space.
     pub fn filtered_for(&self) -> Option<&str> {
         match &self.kind {
             ReadKind::WholeSpace => None,
             ReadKind::OneAccount(account_id) => Some(account_id),
+            ReadKind::Epochs { account, .. } => account.as_deref(),
         }
     }
 
@@ -103,12 +131,23 @@ impl SpaceLedger {
     pub(crate) fn require_whole_space(&self) -> ProtocolResult<()> {
         match self.kind {
             ReadKind::WholeSpace => Ok(()),
-            ReadKind::OneAccount(_) => Err(ProtocolError::InconsistentEvidence),
+            _ => Err(ProtocolError::InconsistentEvidence),
         }
     }
 
     /// Every row is at or before the cut and no table repeats a row ID.
     pub fn check(&self) -> ProtocolResult<()> {
+        if let ReadKind::Epochs { account, epochs } = &self.kind
+            && self.deliveries.iter().any(|d| {
+                !epochs.contains(&d.row.key_epoch_id)
+                    || !self.names(&d.row.scope_id, &d.row.identifier)
+                    || account
+                        .as_ref()
+                        .is_some_and(|id| id != &d.row.recipient_account_id)
+            })
+        {
+            return Err(ProtocolError::InconsistentEvidence);
+        }
         check_read(&self.members, self.through)?;
         check_read(&self.roots, self.through)?;
         check_read(&self.successors, self.through)?;
