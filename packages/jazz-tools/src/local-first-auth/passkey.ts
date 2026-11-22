@@ -95,6 +95,8 @@ export class BrowserPasskeyBackup {
       });
     } catch (err) {
       throw new PasskeyBackupError("create-failed", err);
+    } finally {
+      secretBytes.fill(0);
     }
   }
 

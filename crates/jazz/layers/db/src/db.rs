@@ -2755,6 +2755,37 @@ impl Db {
             .map(GlobalPhysicalTableId))
     }
 
+    /// The logical names in this handle's schema, keyed by stable table identity.
+    /// None until the authority's catalogue for this version has been observed.
+    pub fn table_names_by_identity(
+        &self,
+    ) -> Result<Option<BTreeMap<GlobalPhysicalTableId, String>>, Error> {
+        let inner = self.inner();
+        let Some(namespace) = inner.namespace()? else {
+            return Ok(None);
+        };
+        if !inner.names_confirmed(&inner.schema.jazz.version_id()) {
+            return Ok(None);
+        }
+        Ok(Some(
+            inner
+                .schema
+                .tables
+                .iter()
+                .map(|(name, table)| {
+                    (
+                        GlobalPhysicalTableId(crate::names::identity(
+                            namespace,
+                            &table.stored,
+                            None,
+                        )),
+                        name.clone(),
+                    )
+                })
+                .collect(),
+        ))
+    }
+
     /// The identity of column `column` of table `table` of this handle's
     /// schema, as [`Db::table_identity`]. A column dropped and added again
     /// keeps its identity only with the type it had; with another one it is

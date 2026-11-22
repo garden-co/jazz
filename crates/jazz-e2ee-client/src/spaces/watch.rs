@@ -224,11 +224,12 @@ impl E2eeClient {
     /// space watches keep current.
     async fn refresh_accounts(&self, db: &Db, watch: &mut SpaceWatch) -> Result<(), ClientError> {
         let mut active = self.shared.recent_writes();
-        active.extend(watch.uses.keys().cloned());
         self.shared.notice_member_changes();
         let mut by_account = BTreeMap::<_, BTreeSet<_>>::new();
         {
             let mut members = self.shared.member_watch.borrow_mut();
+            members.subscribed = watch.uses.keys().cloned().collect();
+            active.extend(members.subscribed.iter().cloned());
             let mut keys = self.shared.keys.borrow_mut();
             members.spaces.retain(|space, _| {
                 let keep = active.contains(space);

@@ -6,6 +6,17 @@ import kotlin.test.assertEquals
 
 class EncryptionTest {
     @Test
+    fun the_device_list_keeps_each_removal_request() = runTest {
+        val native = object : Native by FakeNative() {
+            override fun encryptionCall(op: String, argsJson: String): String {
+                assertEquals("devices", op)
+                return """[{"id":"a","status":"active","removalRequested":false},{"id":"b","status":"active","removalRequested":true}]"""
+            }
+        }
+        assertEquals(listOf(false, true), Encryption(native) { it() }.devices().map { it.removalRequested })
+    }
+
+    @Test
     fun delivery_reports_failed_spaces_even_when_nothing_was_delivered() = runTest {
         var result = """{"delivered":0,"failed":3}"""
         val native = object : Native by FakeNative() {

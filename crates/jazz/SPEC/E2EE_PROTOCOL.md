@@ -2256,13 +2256,17 @@ sees more than 1,000 member accounts in a space emits a
 and keeps working; the costs below then grow beyond what the first release
 is designed for.
 
-**What a device watches.** Only spaces in active use are watched: when the
-app has an open subscription on an encrypted table, the spaces of its rows
-join a shared set, counted per subscription, and leave it when the last
-subscription using them closes. The runtime cannot see a subscription open
-or close, so the binding that opens it tells the runtime. Per space in the
-set: the
-space's member rows (at most 1,000), its roots and successors (one per
+**What a device watches.** A device watches a space while an open
+subscription uses it or for 60 seconds after its most recent encrypted
+write to that space. The binding tells the runtime when a subscription
+opens or closes. Closing the last subscription releases its interest in
+the space; a recent write keeps the watch active for the rest of its
+60-second window. This lets successive writes observe membership and device
+changes without keeping watches on every space the device has ever written.
+Once both kinds of interest expire, the next write checks the authority
+for changes that require rotation before reusing a held key.
+
+For each watched space the device watches the space's member rows (at most 1,000), its roots and successors (one per
 version), the deliveries of the versions concerned (the current
 version, and skipped versions it holds, §3.4), and the public account roots
 of its member accounts (one per generation), since who lacks a version

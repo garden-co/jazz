@@ -182,9 +182,9 @@ impl E2eeClient {
         tx: OpenTransactionId,
         address: &ProtocolAddress,
     ) -> Result<Attempt, ClientError> {
-        let read = self.read_space(db, tx, address).await?;
+        let mut read = self.read_space(db, tx, address).await?;
         let records = {
-            let chain = self.replay_space(&read).await?.chain;
+            let chain = self.replay_space(&mut read).await?.chain;
             if chain.is_some() {
                 return Ok(Attempt::Existing);
             }
@@ -366,26 +366,31 @@ impl E2eeClient {
         if !self.shared.keys.borrow().online {
             return Ok(CreationFate::Undecided);
         }
+        let id = uuid_cell(root_id).ok_or(ProtocolError::InconsistentEvidence)?;
+        let query = Query::from(rows::SPACE_ROOTS).filter(eq(col("id"), lit(id)));
+        let skipped = std::cell::Cell::new(0);
         let tx = OpenTransactionId::new();
         db.begin_serializable(tx).await?;
-        let read = self.read_space(db, tx, address).await;
+        let read = self
+            .read_rows::<jazz_e2ee::protocol::records::space::SpaceRoot>(db, tx, &skipped, query)
+            .await;
         let _ = db.abandon_transaction_handle(tx);
-        let read = match read {
-            Ok(read) => read,
-            Err(ClientError::Database(error)) if error.code == ErrorCode::NotObserved => {
-                return Ok(CreationFate::Undecided);
+        match read {
+            Ok((roots, _))
+                if roots.iter().any(|root| {
+                    root.row.scope_id == address.scope_id
+                        && root.row.identifier == address.identifier
+                }) =>
+            {
+                Ok(CreationFate::Accepted)
             }
-            Err(error) => return Err(error),
-        };
-        Ok(
-            if read.ledger.roots.iter().any(|root| root.row.id == root_id) {
-                CreationFate::Accepted
-            } else if read.skipped > 0 {
-                CreationFate::Undecided
-            } else {
-                CreationFate::NotAccepted
-            },
-        )
+            Ok(_) if skipped.get() > 0 => Ok(CreationFate::Undecided),
+            Ok(_) => Ok(CreationFate::NotAccepted),
+            Err(ClientError::Database(error)) if error.code == ErrorCode::NotObserved => {
+                Ok(CreationFate::Undecided)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// What became of the transaction that carries the root `root_id`

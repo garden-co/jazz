@@ -6,6 +6,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -145,7 +146,12 @@ internal class PrivateStoreBridge(private val store: PrivateStore) {
 }
 
 /** A device of the account: active (`status` `active`), or waiting for approval (`waiting`). */
-public data class Device(val id: String, val status: String)
+public data class Device(
+    val id: String,
+    val status: String,
+    /** Whether this device has published a request to be removed. */
+    val removalRequested: Boolean = false,
+)
 
 /** The deliveries written and the spaces whose delivery failed in one pass. */
 @Serializable
@@ -203,7 +209,11 @@ public class Encryption internal constructor(
     public suspend fun devices(): List<Device> =
         (call("devices") as? JsonArray).orEmpty().map {
             val device = it.jsonObject
-            Device(device["id"]!!.jsonPrimitive.content, device["status"]!!.jsonPrimitive.content)
+            Device(
+                device["id"]!!.jsonPrimitive.content,
+                device["status"]!!.jsonPrimitive.content,
+                device["removalRequested"]!!.jsonPrimitive.boolean,
+            )
         }
 
     /**
