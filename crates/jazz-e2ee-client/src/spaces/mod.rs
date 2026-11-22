@@ -1215,7 +1215,26 @@ impl E2eeClient {
                     reason: error.to_string(),
                 }]);
             }
-            return Ok(true);
+            // Only a device that holds the current version can write under
+            // it. One that holds no key (a device awaiting approval, or a
+            // member waiting for a delivery) gets one as any write does,
+            // below: told to try again now, it would fail the same way.
+            let holds_current = {
+                let keys = self.shared.keys.borrow();
+                crate::hooks::write_key(
+                    &keys,
+                    &self.shared.creations.borrow().dropped,
+                    &address,
+                    keys.creation_refused.contains(&address),
+                )
+                .is_ok()
+            };
+            if holds_current {
+                return Ok(true);
+            }
+            if !online {
+                return Ok(false);
+            }
         }
         if ready {
             return Ok(true);
