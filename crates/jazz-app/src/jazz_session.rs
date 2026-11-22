@@ -109,6 +109,8 @@ impl From<&Error> for SessionError {
             Error::Panicked(_) => "panicked",
             Error::StoreHeld(_) => "storeHeld",
             Error::Stopped => "stopped",
+            Error::Interrupted { .. } => "interrupted",
+            Error::StillQueued { .. } => "stillQueued",
             Error::BundleMismatch { .. } => "bundleMismatch",
             Error::WriteRejected { .. } => "writeRejected",
             Error::Jazz(_) => "jazz",

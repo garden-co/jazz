@@ -96,8 +96,8 @@ pub struct JazzClient {
     /// ([`JazzClient::on_branch`]); `None` is the root branch.
     branch: Option<BranchScope>,
     /// Ends this client's (and its scoped clones') waits on the server
-    /// once true: [`JazzClient::ending_waits_with`].
-    waits_end: Option<watch::Receiver<bool>>,
+    /// once any reads true: [`JazzClient::ending_waits_with`].
+    waits_end: Vec<watch::Receiver<bool>>,
     shared: Rc<Shared>,
 }
 
@@ -1048,7 +1048,7 @@ impl JazzClient {
         Ok(Self {
             write_context: None,
             branch: None,
-            waits_end: None,
+            waits_end: Vec::new(),
             shared,
         })
     }
@@ -2589,10 +2589,11 @@ impl JazzClient {
 
     /// This client with its waits on the server also ended once `ends`
     /// reads true, as [`JazzClient::end_waits`] ends all: for a handle
-    /// that closes while the client lives on. Not public API.
+    /// that closes while the client lives on, or a call its caller
+    /// cancelled. Adds to the signals it has already. Not public API.
     #[doc(hidden)]
     pub fn ending_waits_with(mut self, ends: watch::Receiver<bool>) -> Self {
-        self.waits_end = Some(ends);
+        self.waits_end.push(ends);
         self
     }
 
@@ -2602,13 +2603,19 @@ impl JazzClient {
     pub async fn waits_ended(&self) {
         let mut all = self.shared.waits_ended.subscribe();
         let scoped = async {
-            let ended = match self.waits_end.clone() {
-                Some(mut ends) => ends.wait_for(|ended| *ended).await.is_ok(),
-                None => false,
-            };
-            if !ended {
+            // A signal whose sender went without ending anything never ends.
+            let ends = self.waits_end.iter().cloned().map(|mut ends| {
+                Box::pin(async move {
+                    if ends.wait_for(|ended| *ended).await.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                })
+            });
+            let ends: Vec<_> = ends.collect();
+            if ends.is_empty() {
                 std::future::pending::<()>().await;
             }
+            futures::future::select_all(ends).await;
         };
         tokio::select! {
             _ = all.wait_for(|ended| *ended) => {}
@@ -2620,8 +2627,7 @@ impl JazzClient {
     /// public API.
     #[doc(hidden)]
     pub fn waits_are_over(&self) -> bool {
-        *self.shared.waits_ended.borrow()
-            || self.waits_end.as_ref().is_some_and(|ends| *ends.borrow())
+        *self.shared.waits_ended.borrow() || self.waits_end.iter().any(|ends| *ends.borrow())
     }
 
     /// A wait on the server. The answer wins over the end of waiting: it
