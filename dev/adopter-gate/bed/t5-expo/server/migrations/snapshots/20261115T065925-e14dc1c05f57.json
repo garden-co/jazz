@@ -1,0 +1,28 @@
+{
+  "notes": {
+    "columns": [
+      {
+        "name": "text",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "owner_id",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false
+      },
+      {
+        "name": "photo",
+        "column_type": {
+          "type": "Bytea"
+        },
+        "nullable": true
+      }
+    ],
+    "relations": {}
+  }
+}

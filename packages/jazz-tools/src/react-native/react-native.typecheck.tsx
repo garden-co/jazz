@@ -9,7 +9,7 @@ import {
   useAllSuspense,
   useDb,
   useJazzClient,
-  useSession,
+  useJazzSession,
   type JazzClient,
 } from "./index.js";
 import type { OpenJazzClientConfig } from "./create-jazz-client.js";
@@ -50,16 +50,15 @@ async function clientFactory(): Promise<JazzClient> {
 function Hooks({ children }: { children: ReactNode }) {
   const db = useDb();
   const client = useJazzClient();
-  const session = useSession();
+  const { user } = useJazzSession();
   const todos = useAll(app.todos);
   const suspenseTodos = useAllSuspense(app.todos);
 
   db satisfies Db;
   client satisfies { db: Db; shutdown(): Promise<void> };
-  session satisfies ReturnType<typeof useSession>;
-  if (session) {
-    session.user satisfies string | null;
-    session.identity.subject satisfies string;
+  if (user) {
+    user.accountId satisfies string;
+    user.identity.subject satisfies string;
   }
   todos satisfies ReturnType<typeof useAll<typeof app.todos._rowType>>;
   suspenseTodos.data satisfies Array<{ id: string; title: string; done?: boolean | null }>;

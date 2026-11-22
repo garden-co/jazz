@@ -25,6 +25,25 @@ cargo build -p jazz-ffi
 cargo build -p jazz-tools --bin jazz-tools
 # The tests' stand-in for a TS main backend's /jazz (jazz#5754).
 cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay
+
+# JAZZ_GO_TS_MAIN_BACKEND: unset runs everything below except the
+# TypeScript-main-backend suite; "1" runs everything and that suite;
+# "only" runs just that suite (CI's test-go-ts-backend job, beside test-go,
+# so the NAPI/WASM build it needs doesn't delay the rest).
+ts_main_backend_suite() {
+  (cd examples/stage-plan/apps/go-cli && JAZZ_MAIN_BACKEND=ts CGO_ENABLED=1 go test -race -v -count=1 ./...)
+}
+case "${JAZZ_GO_TS_MAIN_BACKEND:-}" in
+  "" | 1) ;;
+  only)
+    ts_main_backend_suite
+    exit 0
+    ;;
+  *)
+    echo "JAZZ_GO_TS_MAIN_BACKEND must be unset, 1 or only" >&2
+    exit 64
+    ;;
+esac
 cargo test -p jazz-codegen --test golden the_stage_plan_go_example_commits_current_bindings
 (cd examples/stage-plan/apps/go-cli && ../../../../target/debug/jazz-tools generate --check)
 # The docs' Go snippets, on the docs todo app (and its required-references recipe).
@@ -58,7 +77,7 @@ done
 
 # The same suite with StagePlan's main backend in TypeScript (createJazz,
 # go-cli/ts-main) as the server, and Go backend clients of it: needs the
-# repository's jazz-tools build (the go partition makes it).
+# repository's jazz-tools build (the go-ts-backend partition makes it).
 if [ "${JAZZ_GO_TS_MAIN_BACKEND:-}" = "1" ]; then
-  (cd examples/stage-plan/apps/go-cli && JAZZ_MAIN_BACKEND=ts CGO_ENABLED=1 go test -race -v -count=1 ./...)
+  ts_main_backend_suite
 fi

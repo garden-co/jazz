@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "node ../../packages/jazz-tools/dist/cli.js generate && vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "jazz-tools": "workspace:*"

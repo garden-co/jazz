@@ -296,6 +296,11 @@ final class StagePlanTests: XCTestCase {
         let task = try await chief.addTask("Load in", to: show)
         try await chief.jazz.waitForSync(.global)
         let stranger = try await relay.user("00000000-0000-4000-8000-0000000000dd")
+        // Advice is the server's, and opening doesn't wait for it: without a
+        // link the answer is unknown (nil).
+        try await within(seconds: 15) {
+            for try await status in stranger.jazz.syncChanges where status.link == .connected { break }
+        }
         let newTask = JazzApp.NewTask(showId: show.id, title: "Sneaky", status: .todo, rank: 2)
         let chiefMay = try await chief.jazz.canInsert(newTask)
         let strangerMay = try await stranger.jazz.canInsert(newTask)

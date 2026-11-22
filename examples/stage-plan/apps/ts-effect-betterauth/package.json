@@ -9,7 +9,7 @@
     "dev:vite": "wait-on --timeout 30000 http-get://127.0.0.1:3001/health && vite",
     "build": "jazz-tools generate && vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsrs --noEmit",
     "test:e2e": "playwright test"
   },
   "dependencies": {

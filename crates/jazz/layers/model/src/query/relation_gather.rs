@@ -315,6 +315,8 @@ fn relation_gather_predicates_in_scope(predicates: &[&RelationPredicate], scope:
             RelationPredicate::Not(child) => in_scope(child, scope),
             RelationPredicate::Cmp { left, .. }
             | RelationPredicate::Contains { left, .. }
+            | RelationPredicate::StartsWith { left, .. }
+            | RelationPredicate::EndsWith { left, .. }
             | RelationPredicate::In { left, .. } => relation_gather_in_scope(left, scope),
             RelationPredicate::IsNull { column } | RelationPredicate::IsNotNull { column } => {
                 relation_gather_in_scope(column, scope)
@@ -339,9 +341,10 @@ fn relation_predicate_reads_frontier(predicate: &RelationPredicate) -> bool {
         }
         RelationPredicate::Not(child) => relation_predicate_reads_frontier(child),
         RelationPredicate::Removed(removed) => match *removed {},
-        RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
-            reads(right)
-        }
+        RelationPredicate::Cmp { right, .. }
+        | RelationPredicate::Contains { right, .. }
+        | RelationPredicate::StartsWith { right, .. }
+        | RelationPredicate::EndsWith { right, .. } => reads(right),
         RelationPredicate::In { values, .. } => values.iter().any(reads),
         RelationPredicate::IsNull { .. }
         | RelationPredicate::IsNotNull { .. }

@@ -52,10 +52,28 @@ export JAZZ_TOOLS_BIN="$root/target/debug/jazz-tools"
 export JAZZ_TEST_RELAY_BIN="$root/target/debug/jazz-app-test-relay"
 export CI="${CI:-1}"
 
+# Each package's tests run in seconds (StagePlan's, the slowest, in about
+# 15 s), so they run under a watchdog after building: a hung test fails the
+# step within minutes instead of holding the job to its 45-minute timeout.
+# Output is line-buffered so the last "Test Case ... started" line names it.
+swift_test() {
+  (
+    cd "$1"
+    swift build --build-tests
+    status=0
+    timeout --kill-after=30s "${JAZZ_SWIFT_TEST_TIMEOUT:-300}" \
+      stdbuf -oL -eL swift test --skip-build || status=$?
+    if [[ $status -eq 124 || $status -eq 137 ]]; then
+      echo "::error title=Swift tests hung::$1: swift test ran over ${JAZZ_SWIFT_TEST_TIMEOUT:-300}s; the last test started above is the one that hung" >&2
+    fi
+    exit $status
+  )
+}
+
 # The root Package.swift is the Jazz Swift package.
-(cd "$root" && swift test)
-(cd "$example" && swift test)
-(cd "$docs_example" && swift test)
+swift_test "$root"
+swift_test "$example"
+swift_test "$docs_example"
 
 # The CLI as an end user: a sync server, and in front of it the app's
 # endpoint (the test relay standing in for the TypeScript backend's

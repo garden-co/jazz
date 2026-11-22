@@ -14,7 +14,7 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 public sealed interface JazzAuth {
     /**
-     * A local-first device account: [key] is the device's secret
+     * A device account: [key] is the device's secret
      * (`jazz-auth-v1:…`, from [generateDeviceKey] once, then kept in the
      * platform's keychain). Signing up is opening with a new key.
      */

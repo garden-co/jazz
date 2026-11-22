@@ -33,7 +33,7 @@ describe("BigLabel roles on the Jazz server", () => {
         user_id: actor,
         account_id: accounts[actor],
         claims: {},
-        authMode: "local-first",
+        authMode: "device-account",
       });
     const admin = as("admin");
     const editor = as("editor");

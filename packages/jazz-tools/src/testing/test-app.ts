@@ -157,13 +157,13 @@ type FieldsOf<T> = T extends object ? { [K in keyof T & string]: T[K] } : {};
 
 type InsertFields<TFields, TValue extends Record<keyof TFields, unknown>> = Flat<
   {
-    -readonly [K in keyof TFields as OptionalOnInsert<TFields[K]> extends true
-      ? never
-      : K]: TValue[K];
+    -readonly [
+      K in keyof TFields as OptionalOnInsert<TFields[K]> extends true ? never : K
+    ]: TValue[K];
   } & {
-    -readonly [K in keyof TFields as OptionalOnInsert<TFields[K]> extends true
-      ? K
-      : never]?: TValue[K];
+    -readonly [
+      K in keyof TFields as OptionalOnInsert<TFields[K]> extends true ? K : never
+    ]?: TValue[K];
   }
 >;
 
@@ -265,11 +265,13 @@ type Widened<S> = S extends string
       : false;
 
 type TransformedColumns<TTable> = {
-  -readonly [K in keyof ColumnsOfSpec<TTable> as ColumnsOfSpec<TTable>[K] extends {
-    readonly transform: string;
-  }
-    ? K
-    : never]: ColumnsOfSpec<TTable>[K] extends { readonly transform: infer N } ? N : never;
+  -readonly [
+    K in keyof ColumnsOfSpec<TTable> as ColumnsOfSpec<TTable>[K] extends {
+      readonly transform: string;
+    }
+      ? K
+      : never
+  ]: ColumnsOfSpec<TTable>[K] extends { readonly transform: infer N } ? N : never;
 };
 
 /**

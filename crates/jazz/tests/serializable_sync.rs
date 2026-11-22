@@ -578,14 +578,16 @@ fn racing_seat_bookings_never_double_book() {
             ("show".to_owned(), Value::String("s".to_owned())),
             ("holder".to_owned(), Value::String(String::new())),
         ]);
-        net.core
-            .seed_settled_mergeable_for_bootstrap(
-                "seats",
-                RowUuid::from_bytes([0x90 + seat; 16]),
-                AuthorSubject::SYSTEM,
-                cells,
-            )
-            .unwrap();
+        jazz::db::block_on(net.core.insert(
+            "seats",
+            cells,
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([0x90 + seat; 16])),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     }
     let free = Query::from("seats").filter(eq(col("holder"), lit(Value::String(String::new()))));
     let mut booked = 0;

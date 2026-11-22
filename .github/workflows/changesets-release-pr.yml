@@ -31,22 +31,23 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
 
-      - name: Guard alpha prerelease mode
+      - name: Guard prerelease mode (alpha or beta)
+        id: pre
         run: |
           test -f .changeset/pre.json
-          node -e 'const fs=require("fs");const pre=JSON.parse(fs.readFileSync(".changeset/pre.json","utf8"));if(pre.mode!=="pre"||pre.tag!=="alpha"){throw new Error(`Expected .changeset/pre.json mode=pre tag=alpha, got mode=${pre.mode} tag=${pre.tag}`);}console.log("Changesets prerelease mode: alpha");'
+          node -e 'const fs=require("fs");const pre=JSON.parse(fs.readFileSync(".changeset/pre.json","utf8"));if(pre.mode!=="pre"||!["alpha","beta"].includes(pre.tag)){throw new Error(`Expected .changeset/pre.json mode=pre tag=alpha|beta, got mode=${pre.mode} tag=${pre.tag}`);}console.log(`Changesets prerelease mode: ${pre.tag}`);fs.appendFileSync(process.env.GITHUB_OUTPUT,`tag=${pre.tag}\n`);'
 
       - name: Create or update release PR
         id: changesets
         uses: changesets/action@63a615b9cd06ba9a3e6d13796c7fbcb080a60a0b # v1
         with:
           version: pnpm release:version
-          title: "Version Packages (alpha)"
-          commit: "Version Packages (alpha)"
+          title: "Version Packages (${{ steps.pre.outputs.tag }})"
+          commit: "Version Packages (${{ steps.pre.outputs.tag }})"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Trigger release CI, preview and release test workflows
+      - name: Trigger release CI, release artifacts and the release candidate gate
         if: steps.changesets.outputs.hasChangesets == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -75,14 +76,17 @@ jobs:
           # Dispatch explicitly so protected release receives CI on this head.
           gh workflow run ci.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
           assert_release_head
-          gh workflow run preview-jazz-tools-alpha-release.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
+          # Build every release artifact of this head once
+          # (release-artifacts.yml), then gate it: the release candidate gate's
+          # dry run verifies those artifacts with the release test tier (RN
+          # device acceptance, Examples E2E) and the release preview, in
+          # parallel. publish-jazz-tools-alpha.yml refuses to publish unless
+          # CI and that tier passed on this head (see
+          # dev/scripts/release-test-gate.mjs, which counts a successful gate
+          # run for the tier). Bot-created PR events stop at
+          # action_required, so dispatch them.
+          gh workflow run release-artifacts.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}" -f ref="${RELEASE_SHA}"
           assert_release_head
-          # The release test tier. publish-jazz-tools-alpha.yml refuses to
-          # publish unless each of these passed on this head (see
-          # dev/scripts/release-test-gate.mjs). Their pull_request runs on a
-          # bot-created PR stop at action_required, so dispatch them too.
-          gh workflow run rn-device-acceptance.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
+          gh workflow run release-candidate.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}" -f dry-run=true
           assert_release_head
-          gh workflow run examples-e2e.yml --repo "${REPO}" --ref "${RELEASE_BRANCH}"
-          assert_release_head
-          echo "Dispatched release CI, preview, RN device acceptance and examples E2E for ${RELEASE_BRANCH} at ${RELEASE_SHA} (PR #${PR_NUMBER})."
+          echo "Dispatched release CI, release artifacts and the release candidate gate for ${RELEASE_BRANCH} at ${RELEASE_SHA} (PR #${PR_NUMBER})."

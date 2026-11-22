@@ -4,7 +4,7 @@
  * Mounts small Vue components inside a JazzClientProvider against a Jazz client
  * connected to the app's backend (Jazz in the test server, see jazz.server.ts), then
  * exercises the schema through the public composables (useDb, useAll,
- * useSession).
+ * useJazzSession).
  *
  * ## Isolation
  *
@@ -22,7 +22,7 @@ import {
   JazzClientProvider,
   createJazzClient,
   useAll,
-  useSession,
+  useJazzSession,
 } from "jazz-tools/vue";
 import { app } from "../../jazz.generated.js";
 import { SCOPE, SERVER_URL } from "./test-constants.js";
@@ -251,12 +251,14 @@ describe("world-tour Jazz + Vue integration", () => {
     );
   });
 
-  it("useSession exposes the JazzProvider's session to descendants", async () => {
+  it("useJazzSession exposes the JazzProvider's session to descendants", async () => {
     const SessionProbe = defineComponent({
       setup() {
-        const session = useSession();
-        return () =>
-          h("p", { id: "session" }, session.value ? `id:${session.value.user}` : "anonymous");
+        const { snapshot } = useJazzSession();
+        return () => {
+          const user = snapshot.value.user;
+          return h("p", { id: "session" }, user ? `id:${user.accountId}` : "anonymous");
+        };
       },
     });
 
@@ -274,7 +276,7 @@ describe("world-tour Jazz + Vue integration", () => {
     const s = scope("inserter");
     const Inserter = defineComponent({
       setup() {
-        const session = useSession();
+        const { snapshot } = useJazzSession();
         const { data: venues, db } = useAll(s.queries.venues);
         function add() {
           db.insert(
@@ -285,7 +287,7 @@ describe("world-tour Jazz + Vue integration", () => {
               country: "UK",
               lat: 51.4659,
               lng: -0.1149,
-              ownerId: session.value!.user,
+              ownerId: snapshot.value.user!.accountId,
             }),
           );
         }

@@ -4,3 +4,5 @@
 /.pkg-transaction.json
 /.pkg-transaction.json.*
 .jazz-correctness-test-artifacts.json
+/durable-object/pkg/
+/backend/pkg/

@@ -124,6 +124,13 @@ export class BrowserWorkerTransportPump {
     this.flushWaiters.clear();
   }
 
+  /** Apply every frame received so far, and pump what they produce: before the worker closes this peer. */
+  async settleInbound(): Promise<void> {
+    if (this.closed) return;
+    await this.inboundRouting;
+    await this.flush();
+  }
+
   async flush(): Promise<void> {
     if (this.closed) return;
     this.schedule();

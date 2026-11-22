@@ -109,7 +109,10 @@ export async function resolveAccountRuntimeConfig(config: AccountDbConfig): Prom
   if (account.identity.issuer === "urn:jazz:local-first") {
     setTrustedReservedSession(
       resolved,
-      internalSessionFromVerifiedReservedJwtPayload(parseJwtPayload(jwtToken) ?? {}, "local-first"),
+      internalSessionFromVerifiedReservedJwtPayload(
+        parseJwtPayload(jwtToken) ?? {},
+        "device-account",
+      ),
     );
   }
   admitAccountConfig(resolved, account);
@@ -212,7 +215,7 @@ export async function createAccountDbWithRuntimeSource(
     // The refresh cycle below renews every refusal a new token can fix. A
     // user the backend signed in is held too, as a browser's cookie renews:
     // createJazzClient's backend watch reconnects or signs them in again.
-    // With createAccountManager and createDb alone, nothing does, and Global
+    // An account opened without a session has nothing that does, and Global
     // waits outlast the refusal until the app reconnects.
     const releaseRenewal = holdCredentialRenewal(opened);
     const stopAuth = opened.onOwnAuthChanged((state) => {

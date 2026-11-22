@@ -15,7 +15,7 @@ describe("DirectConnectionManager explicit offline state", () => {
       issuer: "urn:jazz:local-first",
       user_id: "alice",
       claims: {},
-      authMode: "local-first",
+      authMode: "device-account",
     };
     setTrustedReservedSession(config, session);
     let runtimeConfig: object | undefined;
@@ -27,7 +27,8 @@ describe("DirectConnectionManager explicit offline state", () => {
           return { onMutationError() {} };
         },
       },
-      isShuttingDown: false,
+      phase: "open",
+      draining: false,
       markUnauthenticated() {},
       clearAuthError() {},
       onMutationError() {},
@@ -95,7 +96,8 @@ describe("DirectConnectionManager lazy transport observation", () => {
         nativeConnection: { configured: () => true },
         createClient: () => ({ onMutationError() {}, getRuntime: () => runtime }),
       },
-      isShuttingDown: false,
+      phase: "open",
+      draining: false,
       markUnauthenticated() {},
       clearAuthError() {},
       onMutationError() {},

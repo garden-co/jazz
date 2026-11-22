@@ -20,9 +20,9 @@ pub struct AuthAdmissionConfig {
     pub jwt_verifier: Option<JwtVerifierConfig>,
     /// Issuer that external JWTs must contain.
     pub expected_issuer: Option<String>,
-    /// Whether local-first JWT auth is allowed by configuration.
-    pub allow_local_first_auth: bool,
-    /// App id/audience that external and local-first JWTs must target.
+    /// Whether device-account JWT auth is allowed by configuration.
+    pub allow_device_accounts: bool,
+    /// App id/audience that external and device-account JWTs must target.
     pub expected_audience: Option<String>,
     /// Fallback subject used when no explicit auth is required.
     pub anonymous_subject: String,
@@ -34,7 +34,7 @@ impl Default for AuthAdmissionConfig {
             static_bearer_token: None,
             jwt_verifier: None,
             expected_issuer: None,
-            allow_local_first_auth: false,
+            allow_device_accounts: false,
             expected_audience: None,
             anonymous_subject: "anonymous".to_owned(),
         }
@@ -178,8 +178,8 @@ pub enum AdmissionSource {
     FirstFrameHandshake,
     /// No credential was required; anonymous subject was used.
     Anonymous,
-    /// Signed local-first JWT admitted by explicit local-first policy.
-    LocalFirstJwt,
+    /// Signed device-account JWT admitted by explicit device-account policy.
+    DeviceAccountJwt,
 }
 
 /// Auth/session admission errors.
@@ -308,23 +308,23 @@ pub fn admit_bearer_jwt(
     })
 }
 
-/// Issuer required for local-first admission tokens.
-pub const LOCAL_FIRST_JWT_ISSUER: &str = AuthorSubject::LOCAL_FIRST_ISSUER;
+/// Issuer required for device-account admission tokens.
+pub const DEVICE_ACCOUNT_JWT_ISSUER: &str = AuthorSubject::DEVICE_ACCOUNT_ISSUER;
 /// Reserved issuer for subjects admitted by the process-local static bearer gate.
 pub const STATIC_BEARER_ISSUER: &str = AuthorSubject::STATIC_BEARER_ISSUER;
 /// Reserved issuer for sessions admitted without an external credential.
 pub const ANONYMOUS_ISSUER: &str = AuthorSubject::ANONYMOUS_ISSUER;
 
-/// Admit a signed local-first JWT.
+/// Admit a signed device-account JWT.
 ///
 /// This intentionally uses the configured JWT verifier and does not accept
 /// unsigned tokens. When the server has a configured app id/audience, both the
 /// JWT `aud` and local-first `appId` claims must match it.
-pub fn admit_local_first_jwt(
+pub fn admit_device_account_jwt(
     config: &AuthAdmissionConfig,
     bearer: Option<&str>,
 ) -> Result<AdmittedSession, AuthAdmissionError> {
-    if !config.allow_local_first_auth {
+    if !config.allow_device_accounts {
         return Err(AuthAdmissionError::InvalidBearer);
     }
     let verifier = config
@@ -337,7 +337,7 @@ pub fn admit_local_first_jwt(
     validation.required_spec_claims.insert("exp".to_owned());
     validation.required_spec_claims.insert("iss".to_owned());
     validation.required_spec_claims.insert("sub".to_owned());
-    validation.set_issuer(&[LOCAL_FIRST_JWT_ISSUER]);
+    validation.set_issuer(&[DEVICE_ACCOUNT_JWT_ISSUER]);
     if let Some(expected_audience) = config.expected_audience.as_deref() {
         validation.required_spec_claims.insert("aud".to_owned());
         validation.set_audience(&[expected_audience]);
@@ -365,40 +365,25 @@ pub fn admit_local_first_jwt(
         }
     }
     let subject = decoded.claims.sub;
-    let author = AuthorSubject::reserved(LOCAL_FIRST_JWT_ISSUER, &subject)?;
+    let author = AuthorSubject::reserved(DEVICE_ACCOUNT_JWT_ISSUER, &subject)?;
     let provider_claims = jwt_json_claims_to_policy_claims(decoded.claims.extra)?;
     let claims = admitted_session_claims(
-        LOCAL_FIRST_JWT_ISSUER,
+        DEVICE_ACCOUNT_JWT_ISSUER,
         &subject,
         author,
         provider_claims.clone(),
     );
     Ok(AdmittedSession {
-        issuer: LOCAL_FIRST_JWT_ISSUER.to_owned(),
+        issuer: DEVICE_ACCOUNT_JWT_ISSUER.to_owned(),
         author,
         subject,
         claims,
         provider_claims,
-        source: AdmissionSource::LocalFirstJwt,
+        source: AdmissionSource::DeviceAccountJwt,
     })
 }
 
-/// Inject the trusted session vocabulary once after provider claims are
-/// admitted. Provider `sub` maps to the documented raw `user_id`; `user` is
-/// the distinct reserved canonical `[iss,sub]` logical identity.
-pub fn admitted_session_claims(
-    issuer: &str,
-    subject: &str,
-    author: AuthorSubject,
-    claims: BTreeMap<String, Value>,
-) -> BTreeMap<String, Value> {
-    let (author_issuer, author_subject) = author.principal_parts();
-    debug_assert_eq!(
-        (author_issuer, author_subject),
-        (issuer.to_owned(), subject.to_owned())
-    );
-    jazz::model::policy_claims::canonical_policy_binding_claims(&author, claims)
-}
+pub use crate::portable::session::admitted_session_claims;
 
 fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdmissionError> {
     match &verifier.key {
@@ -423,31 +408,12 @@ fn jwt_error(error: jsonwebtoken::errors::Error) -> AuthAdmissionError {
     AuthAdmissionError::InvalidJwt(error.to_string())
 }
 
-/// Convert flat verified JWT metadata into scalar policy values. RFC 7519
-/// registered transport/security fields are excluded because admission supplies
-/// verified identity separately. Objects retain their nested fields for
-/// policy evaluation.
+/// Convert flat verified JWT metadata into scalar policy values
+/// ([`crate::portable::session::policy_claims`]).
 pub fn jwt_json_claims_to_policy_claims(
     extra: BTreeMap<String, serde_json::Value>,
 ) -> Result<BTreeMap<String, Value>, AuthAdmissionError> {
-    let mut claims = BTreeMap::new();
-    for (name, value) in extra {
-        if matches!(
-            name.as_str(),
-            "sub" | "exp" | "nbf" | "iat" | "iss" | "aud" | "jti"
-        ) {
-            continue;
-        }
-        if let Some(value) = jazz::model::policy_claims::json_value_to_policy_claim(
-            value,
-            jazz::model::policy_claims::NumericClaimOrigin::ExactJson,
-        )
-        .map_err(AuthAdmissionError::InvalidJwt)?
-        {
-            claims.insert(name, value);
-        }
-    }
-    Ok(claims)
+    crate::portable::session::policy_claims(extra).map_err(AuthAdmissionError::InvalidJwt)
 }
 
 /// Bind an exact issuer/subject pair into the logical Jazz author identity.
@@ -519,7 +485,7 @@ mod tests {
         );
         for issuer in [
             AuthorSubject::SYSTEM_ISSUER,
-            LOCAL_FIRST_JWT_ISSUER,
+            DEVICE_ACCOUNT_JWT_ISSUER,
             STATIC_BEARER_ISSUER,
             ANONYMOUS_ISSUER,
         ] {
@@ -558,7 +524,7 @@ mod tests {
     fn signed_external_jwt_rejects_reserved_issuers_during_resolution() {
         for issuer in [
             AuthorSubject::SYSTEM_ISSUER,
-            LOCAL_FIRST_JWT_ISSUER,
+            DEVICE_ACCOUNT_JWT_ISSUER,
             STATIC_BEARER_ISSUER,
             ANONYMOUS_ISSUER,
         ] {

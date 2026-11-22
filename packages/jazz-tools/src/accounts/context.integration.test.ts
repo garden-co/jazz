@@ -4,7 +4,7 @@ import { createDb } from "../runtime/default-create-db.js";
 import { getDbInternalSession } from "../runtime/db-internal-session.js";
 import { mapAuthReason, type AuthFailureReason } from "../runtime/auth-state.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { createAccountManager } from "./create-account-manager.js";
+import { createTestAccountManager } from "../runtime/testing/account-fixtures.js";
 import { createAccountManagerWithMinter } from "./account-manager-core.js";
 import { mintLocalFirstTokenInJs } from "../thin/index.js";
 
@@ -87,7 +87,7 @@ describe("account context authority", () => {
         });
       }
       expect(db.getAuthState()).toMatchObject({
-        authMode: "local-first",
+        authMode: "device-account",
         session: { identity: config.account.identity },
       });
     } finally {
@@ -218,7 +218,7 @@ describe("account context authority", () => {
     vi.stubGlobal("document", {});
     const appId = "backend-signed-in-no-renewal";
     let stored: string | null = null;
-    const accounts = await createAccountManager({
+    const accounts = await createTestAccountManager({
       appId,
       serverUrl: "http://127.0.0.1:1",
       store: {

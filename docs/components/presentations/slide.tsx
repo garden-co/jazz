@@ -175,19 +175,19 @@ export function Slide({ children, className, slug }: SlideProps) {
           list-style: none;
           padding-left: 0;
         }
-        
+
         .presentation-slide :global(ol) {
           counter-reset: slide-item;
           list-style: none;
           padding-left: 0;
         }
-        
+
         .presentation-slide :global(ol > li) {
           counter-increment: slide-item;
           padding-left: 2.2em;
           position: relative;
         }
-        
+
         .presentation-slide :global(ol > li::before) {
           content: counter(slide-item) ".";
           left: 0;
@@ -198,12 +198,12 @@ export function Slide({ children, className, slug }: SlideProps) {
           text-align: right;
           top: 0;
         }
-        
+
         .presentation-slide :global(ul > li) {
           padding-left: 1.4em;
           position: relative;
         }
-        
+
         .presentation-slide :global(ul > li::before) {
           content: "—";
           left: 0;

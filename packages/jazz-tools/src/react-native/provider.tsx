@@ -1,11 +1,7 @@
 import { View, Text, Pressable } from "react-native";
 import type { PublicSession } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
-import {
-  useDb as useCoreDb,
-  useJazzClient as useCoreJazzClient,
-  useSession,
-} from "../react-core/provider.js";
+import { useDb as useCoreDb, useJazzClient as useCoreJazzClient } from "../react-core/provider.js";
 import {
   JazzSessionProvider,
   type JazzSessionSourceProps,
@@ -46,7 +42,6 @@ export function useDb(): Db {
   return useCoreDb<Db>();
 }
 
-export { useSession };
 export type { JazzClientContextValue };
 
 /** @internal The provider shared by React Native and Expo, with native default views. */
@@ -73,13 +68,10 @@ export function NativeJazzProvider<Config>(
       }
       error={
         error === undefined
-          ? (state) => (
+          ? ({ retry }) => (
               <View accessibilityRole="alert">
                 <Text>Jazz couldn’t start. Please try again.</Text>
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => void state.retry().catch(() => {})}
-                >
+                <Pressable accessibilityRole="button" onPress={() => void retry()}>
                   <Text>Try again</Text>
                 </Pressable>
               </View>

@@ -856,7 +856,7 @@ column write.
   purpose-built durable stream (what stream startups' core loop is). This
   measures jazz's _generality tax_ directly.
 - **pragmatic baseline**: a SQLite WAL table (one row per event, `(stream,
-seq)` pk) with a notify/poll tailer.
+  seq)` pk) with a notify/poll tailer.
 - **storage anchors**: zstd (levels 3 and 19) of the concatenated payloads —
   the bytes floor for any encoding.
 - external systems (Kafka/Redpanda/NATS JetStream) are deliberately _not_ in

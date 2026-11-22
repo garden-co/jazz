@@ -9,12 +9,12 @@
     "backend": "tsx server.ts",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "build": "jazz-tools generate && tsc --noEmit",
+    "build": "jazz-tools generate && tsrs --noEmit",
     "prebuild": "expo prebuild --clean",
     "verify:expo": "pnpm verify:expo:android && pnpm verify:expo:ios",
     "verify:expo:android": "CI=1 expo prebuild --platform android --clean --no-install",
     "verify:expo:ios": "CI=1 expo prebuild --platform ios --clean --no-install",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "expo": "^54.0.0",

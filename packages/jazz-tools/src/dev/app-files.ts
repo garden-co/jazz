@@ -53,7 +53,7 @@ export async function readAppProject(cwd: string): Promise<AppProject> {
     const legacy = APP_ROOTS.map((root) => join(cwd, root, "schema.ts")).find(existsSync);
     throw new Error(
       legacy
-        ? `${relative(cwd, legacy) || legacy} is an alpha.64 schema: jazz.app.json is now the app's schema. Run \`npx jazz-tools upgrade\` to convert the app.`
+        ? `${relative(cwd, legacy) || legacy} is an alpha.64 schema: jazz.app.json is now the app's schema. Convert the app with \`npx jazz-tools@2.0.0-alpha.70 upgrade\`: see https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0.`
         : `No ${APP_FILE} in ${cwd} (looked in ${APP_ROOTS.join(", ")}). See ${APP_FILES_DOCS}.`,
     );
   }

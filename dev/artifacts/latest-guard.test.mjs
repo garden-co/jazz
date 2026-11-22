@@ -12,7 +12,20 @@ test("publishing to latest moves off Classic and older alphas but never back", (
   assert.equal(wouldMoveLatestBack("2.0.0-alpha.62", version), true);
   assert.throws(
     () => wouldMoveLatestBack("2.0.0-alpha.60", "2.0.0-alpha.61-rc.1"),
-    /2\.0\.0-alpha\.N/,
+    /2\.0\.0-alpha\.N or 2\.0\.0-beta\.N/,
+  );
+});
+
+test("alpha moves to beta, never beta back to alpha", () => {
+  assert.equal(wouldMoveLatestBack("2.0.0-alpha.70", "2.0.0-beta.0"), false);
+  assert.equal(wouldMoveLatestBack("2.0.0-beta.0", "2.0.0-beta.1"), false);
+  assert.equal(wouldMoveLatestBack("2.0.0-beta.1", "2.0.0-beta.0"), true);
+  assert.equal(wouldMoveLatestBack("2.0.0-beta.0", "2.0.0-alpha.71"), true);
+  assert.equal(wouldMoveLatestBack("2.0.0", "2.0.0-beta.3"), true);
+  assert.equal(wouldMoveLatestBack("0.20.19", "2.0.0-beta.0"), false);
+  assert.throws(
+    () => wouldMoveLatestBack("2.0.0-alpha.70", "2.0.0-beta.0-rc.0"),
+    /2\.0\.0-beta\.N/,
   );
 });
 

@@ -75,6 +75,7 @@ fn pinned_reason(reason: Reason) -> &'static str {
         Reason::PredecessorRejected => "predecessor_rejected",
         Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
         Reason::IdentityMismatch => "identity_mismatch",
+        Reason::SchemaVersionUnsupported => "schema_version_unsupported",
     }
 }
 

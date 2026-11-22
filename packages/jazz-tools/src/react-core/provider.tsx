@@ -17,7 +17,6 @@ import type { PublicSession } from "../runtime/context.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { trackPromise } from "../subscriptions-orchestrator.js";
 import { SessionContext } from "./session-context.js";
-import { warnSessionHookDeprecated } from "../session/deprecated-session-hook.js";
 
 type CoreJazzDb = {
   getAuthState(): AuthState;
@@ -223,17 +222,4 @@ export function useJazzClient(): CoreJazzClient {
  */
 export function useDb<TDb = unknown>(): TDb {
   return useJazzClient().db as TDb;
-}
-
-/**
- * Get the current Jazz {@link PublicSession}, including the canonical user,
- * immutable provider claims, and auth mode.
- *
- * @deprecated Use `useJazzSession().user`: the same user, with `user` as
- * `accountId`. Warns once in development; removed in a later alpha.
- */
-export function useSession(): PublicSession | null {
-  warnSessionHookDeprecated("useSession()", "useJazzSession().user");
-  const session = useJazzClient().session;
-  return session ?? null;
 }

@@ -192,7 +192,7 @@ same operations.
 
 ## Guests who sign up
 
-An app can start every visitor as a guest: a [device account](/docs/setup/auth/local-first)
+An app can start every visitor as a guest: a [device account](/docs/setup/auth/device-accounts)
 (`initial: "device"`), whose key lives on the device. Its backend lets device accounts sync by
 returning `acceptDeviceAccounts(request)` from `authenticate` for signed-out requests; they are
 refused otherwise:
@@ -215,7 +215,7 @@ if (session.getSnapshot().user?.kind === "device") await session.linkDeviceAccou
 else await session.refresh();
 ```
 
-Without a device account signed in, `linkDeviceAccount()` rejects (`local_first_account_required`);
+Without a device account signed in, `linkDeviceAccount()` rejects (`device_account_required`);
 `refresh()` signs the new user in instead.
 
 The guest proves itself with its device account's key; your backend checks that the user

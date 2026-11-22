@@ -108,6 +108,49 @@ it("reports the link and pending uploads through a disconnect", async () => {
   }
 }, 60_000);
 
+it("names the rows of writes the server has not decided yet", async () => {
+  const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { inMemory: true },
+  });
+  let db: Db | undefined;
+  try {
+    db = await createDb(await localAccountConfig(server.appId, server.url));
+    await db.insert(app.notes, { title: "online" }).wait({ tier: "global" });
+    expect(db.getPendingUploadRows(app.notes)).toEqual([]);
+
+    const seen: (readonly string[] | null)[] = [];
+    const unsubscribe = db.onPendingUploadRowsChange(app.notes, (ids) => seen.push(ids));
+
+    await db.disconnect();
+    const one = db.insert(app.notes, { title: "offline one" });
+    const two = db.insert(app.notes, { title: "offline two" });
+    await Promise.all([one.wait({ tier: "local" }), two.wait({ tier: "local" })]);
+    const offline = [one.value.id, two.value.id].sort();
+    expect(db.getPendingUploadRows(app.notes)).toEqual(offline);
+    // An unchanged answer is the same array, as useSyncExternalStore needs.
+    expect(db.getPendingUploadRows(app.notes)).toBe(db.getPendingUploadRows(app.notes));
+
+    await db.reconnect();
+    await db.waitForSync();
+    await statusWhere(db, (status) => status.synced);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(db.getPendingUploadRows(app.notes)).toEqual([]);
+    unsubscribe();
+
+    expect(seen).toContainEqual(offline);
+    expect(seen.at(-1)).toEqual([]);
+    for (let index = 1; index < seen.length; index += 1) {
+      expect(seen[index]).not.toEqual(seen[index - 1]);
+    }
+  } finally {
+    await db?.shutdown();
+    await server.stop();
+  }
+}, 60_000);
+
 it("says since when a write waits, what the server rejected, and when the link failed", async () => {
   const permissions = {
     format: 1,

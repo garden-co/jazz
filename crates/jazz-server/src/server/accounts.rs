@@ -29,6 +29,9 @@ enum Request {
         Principal,
         oneshot::Sender<Result<Option<u64>, RegistryError>>,
     ),
+    BackendSigningKey(
+        oneshot::Sender<Result<crate::portable::backend_signing_key::Key, RegistryError>>,
+    ),
     Close(mpsc::Sender<Result<(), String>>),
 }
 
@@ -139,6 +142,11 @@ impl AccountRegistryOwner {
                         Request::SessionsRevokedBefore(principal, response) => {
                             let _ = response.send(registry.sessions_revoked_before(&principal));
                         }
+                        Request::BackendSigningKey(response) => {
+                            // On this one thread, so concurrent first
+                            // requests keep one key between them.
+                            let _ = response.send(registry.backend_signing_key());
+                        }
                         Request::Close(response) => {
                             drop(registry);
                             let _ = response.send(Ok(()));
@@ -217,6 +225,17 @@ impl AccountRegistryOwner {
         let (reply, response) = oneshot::channel();
         self.sender
             .send(Request::SessionsRevokedBefore(principal, reply))
+            .map_err(|_| unavailable())?;
+        response.await.map_err(|_| unavailable())?
+    }
+
+    /// The app's backend signing key kept in the store, made on first use.
+    pub(crate) async fn backend_signing_key(
+        &self,
+    ) -> Result<crate::portable::backend_signing_key::Key, RegistryError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(Request::BackendSigningKey(reply))
             .map_err(|_| unavailable())?;
         response.await.map_err(|_| unavailable())?
     }
