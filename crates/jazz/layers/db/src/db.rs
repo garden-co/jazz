@@ -7945,24 +7945,18 @@ impl Inner {
     /// A written cell must be of its column's type: writes from any replica
     /// land here, so the store never holds a value its schema does not
     /// describe. A nullable column also takes the bare value; a large
-    /// value's contents are checked where its reference is bound.
-    fn check_cell(
+    /// value's reference is checked where it is bound. Return the bare value.
+    fn check_cell<'a>(
         column: &crate::values::Column,
-        value: &Value,
+        value: &'a Value,
         cells: Cells,
-    ) -> Result<(), Error> {
+    ) -> Result<&'a Value, Error> {
         let mut bare = value;
         while let Value::Nullable(Some(inner)) = bare {
             bare = inner;
         }
-        if let Value::Large(large) = bare {
-            if !crate::large::large_capable(column) || large.kind != crate::large::kind(column) {
-                return Err(rejected(format!(
-                    "`{}` does not hold {:?} large values",
-                    column.name, large.kind
-                )));
-            }
-            return Ok(());
+        if matches!(bare, Value::Large(_)) {
+            return Ok(bare);
         }
         let ty = match (&column.ty, value) {
             (ValueType::Nullable(inner), value) if !matches!(value, Value::Nullable(_)) => inner,
@@ -7977,7 +7971,7 @@ impl Inner {
         {
             json.check(value, &column.name).map_err(rejected)?;
         }
-        Ok(())
+        Ok(bare)
     }
 
     /// A cell for stored column `column` of stored table `table` written
@@ -8041,7 +8035,7 @@ impl Inner {
         value: &Value,
         cells: Cells,
     ) -> Result<Sql, Error> {
-        Self::check_cell(column, value, cells)?;
+        let inner = Self::check_cell(column, value, cells)?;
         if column.is_enum() {
             // Every variant a version declares has a tag; a write's are
             // checked against them, but a lens or merge may still carry a
@@ -8055,10 +8049,6 @@ impl Inner {
             return column
                 .cell_sql(value)?
                 .ok_or_else(|| unsupported("storing NaN"));
-        }
-        let mut inner = value;
-        while let Value::Nullable(Some(value)) = inner {
-            inner = value;
         }
         let logical = match inner {
             Value::String(text) => text.as_bytes(),
@@ -8098,6 +8088,19 @@ impl Inner {
         Ok(())
     }
 
+    fn check_large_kind(
+        column: &crate::values::Column,
+        large: &jazz_types::large_values::LargeValueRef,
+    ) -> Result<(), Error> {
+        if !crate::large::large_capable(column) || large.kind != crate::large::kind(column) {
+            return Err(rejected(format!(
+                "`{}` does not hold {:?} large values",
+                column.name, large.kind
+            )));
+        }
+        Ok(())
+    }
+
     /// A chunked value written by reference: an edit's consolidated tree
     /// (stored now, inside the write's transaction), or a tree whose nodes
     /// this store already holds. An authored JSON value is checked whole,
@@ -8109,6 +8112,7 @@ impl Inner {
         large: &jazz_types::large_values::LargeValueRef,
         cells: Cells,
     ) -> Result<Sql, Error> {
+        Self::check_large_kind(column, large)?;
         let mut complete = true;
         if let Some(prepared) = self
             .pending_nodes

@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 
 use super::large_ops::{SealedFor, StreamedSeal, sealed_elsewhere};
 use super::{
-    BatchKind, Db, Inner, InsertOptions, LargeEdits, Located, StagedOp, StreamingMutationKind,
-    StreamingValueUpload, Target, TxRef, UpdateOptions, WriteHandle, WriteTarget, column_from_sql,
-    quote, rejected, storage,
+    BatchKind, Cells, Db, Inner, InsertOptions, LargeEdits, Located, StagedOp,
+    StreamingMutationKind, StreamingValueUpload, Target, TxRef, UpdateOptions, WriteHandle,
+    WriteTarget, column_from_sql, quote, rejected, storage,
 };
 use crate::db::Pos;
 use crate::e2ee::{E2eeHooks, E2eeRefusal, SealError, StreamTarget, WriteCells, WriteKind};
@@ -413,6 +413,37 @@ impl Inner {
                     "reading or writing part of encrypted column `{table}.{column}` is not supported yet"
                 ),
             ));
+        }
+        Ok(())
+    }
+
+    /// Plain siblings of an encrypted row are checked before the source runs.
+    /// The hooks check encrypted siblings against their declared plaintext types.
+    pub(super) fn validate_stream_siblings(
+        &self,
+        table: &str,
+        cells: &BTreeMap<String, Value>,
+    ) -> Result<(), Error> {
+        let Some(entry) = self
+            .e2ee
+            .as_ref()
+            .and_then(|hooks| hooks.declarations().tables.get(table))
+        else {
+            return Ok(());
+        };
+        if entry.columns.is_empty() {
+            return Ok(());
+        }
+        let schema = self.schema.table(table)?;
+        self.validate_cells(schema, cells)?;
+        for (name, value) in cells {
+            if entry.columns.contains_key(name) {
+                continue;
+            }
+            let column = schema.column(name).expect("validated above");
+            if let Value::Large(large) = Self::check_cell(column, value, Cells::Authored)? {
+                Self::check_large_kind(column, large)?;
+            }
         }
         Ok(())
     }

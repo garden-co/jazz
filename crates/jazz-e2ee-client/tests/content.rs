@@ -44,6 +44,29 @@ fn invalid_plain_stream_sibling_leaves_the_attachment_unread() {
     assert!(error.message.contains("title"), "{error}");
 }
 
+/// Rowless begin checks the kinds of plain siblings on an encrypted table.
+#[test]
+fn invalid_plain_stream_sibling_is_rejected_at_rowless_begin() {
+    use jazz::large_values::{LargeValueKind, prepare};
+
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (db, _link, _) = online(&client, &server, None);
+    let bytes = prepare(LargeValueKind::Bytes, b"some bytes").unwrap();
+    for value in [Value::I32(4), Value::Large(Box::new(bytes.value_ref))] {
+        let error = db
+            .begin_streaming_value_upload(
+                "notes",
+                &BTreeMap::from([("projectId".into(), value)]),
+                "title",
+            )
+            .err()
+            .expect("a plain sibling must match its column");
+        assert_eq!(error.code, ErrorCode::WriteRejected);
+        assert!(error.message.contains("projectId"), "{error}");
+    }
+}
+
 fn refuses_invalid_stream_metadata(kind: jazz::db::StreamingMutationKind) {
     let server = authority();
     let client = open_client(Rc::new(MemoryStore::new()));
