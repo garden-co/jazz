@@ -1,0 +1,155 @@
+# Native-client lifecycle acceptance on a candidate's shipped artifacts (dev/lifecycle-acceptance/README.md).
+# Until it is on main it runs on pushes to its own branch, with the candidates in candidates.json.
+name: Lifecycle acceptance
+
+on:
+  push:
+    branches: [eval/lifecycle-acceptance]
+  workflow_dispatch:
+    inputs:
+      sha:
+        { description: "The candidate's full commit sha", required: true, type: string }
+      run:
+        { description: "Its release-artifacts run id", required: true, type: string }
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: lifecycle-acceptance-${{ github.ref }}-${{ inputs.sha }}
+  cancel-in-progress: true
+
+env:
+  LA: suite/dev/lifecycle-acceptance
+
+jobs:
+  candidates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    outputs:
+      list: ${{ steps.list.outputs.list }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { sparse-checkout: dev/lifecycle-acceptance, persist-credentials: false }
+      - id: list
+        env:
+          SHA: ${{ inputs.sha }}
+          RUN: ${{ inputs.run }}
+        run: node dev/lifecycle-acceptance/candidates.mjs >> "$GITHUB_OUTPUT"
+
+  client:
+    name: ${{ matrix.candidate.name }} / ${{ matrix.lang.name }}
+    needs: candidates
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: ${{ fromJSON(needs.candidates.outputs.list) }}
+        lang:
+          - { name: rust, runner: blacksmith-16vcpu-ubuntu-2404, artifacts: "release-server,release-npm", source: true }
+          - { name: go, runner: blacksmith-4vcpu-ubuntu-2404, artifacts: "release-server,release-npm,release-languages", source: true }
+          - { name: kotlin, runner: ubuntu-24.04, artifacts: "release-server,release-npm,release-maven" }
+          - {
+              name: swift,
+              runner: ubuntu-24.04,
+              image: "swift:6.0-noble",
+              artifacts: "release-server,release-npm,release-languages,release-swift-mirror",
+            }
+    runs-on: ${{ matrix.lang.runner }}
+    container: ${{ matrix.lang.image }}
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # runner.temp is the host's path inside a container: use the shell's.
+      - name: Work outside the checkouts
+        run: echo "LA_WORK=$RUNNER_TEMP/jazz-lifecycle" >> "$GITHUB_ENV"
+      - name: Tools the Swift image lacks
+        if: matrix.lang.name == 'swift'
+        run: |
+          set -euo pipefail
+          if ! command -v curl >/dev/null || ! command -v git >/dev/null; then
+            sed -i 's#http://archive.ubuntu.com/ubuntu#http://azure.archive.ubuntu.com/ubuntu#g; s#http://security.ubuntu.com/ubuntu#http://azure.archive.ubuntu.com/ubuntu#g' /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
+            apt-get update -qq -o Acquire::Retries=3
+            apt-get install -y -qq --no-install-recommends -o Acquire::Retries=3 curl git ca-certificates >/dev/null
+          fi
+          curl -sSfL --retry 5 --retry-all-errors -o /tmp/gh.tgz https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_linux_amd64.tar.gz
+          echo "4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d  /tmp/gh.tgz" | sha256sum -c
+          tar xzf /tmp/gh.tgz -C /tmp
+          install /tmp/gh_2.103.3_linux_amd64/bin/gh /usr/local/bin/gh
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          path: suite
+          persist-credentials: false
+          sparse-checkout: |
+            dev/lifecycle-acceptance
+            dev/adopter-gate/t9
+      # What isn't in release-artifacts (the crates, the Go module's source), at the candidate's commit.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: matrix.lang.source
+        with:
+          ref: ${{ matrix.candidate.sha }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with: { node-version: "24.13" }
+      - name: Go
+        if: matrix.lang.name == 'go'
+        run: |
+          set -euo pipefail
+          curl -sSfL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/go.tgz" https://go.dev/dl/go1.23.4.linux-amd64.tar.gz
+          echo "6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971  $RUNNER_TEMP/go.tgz" | sha256sum -c
+          tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/go.tgz"
+          echo "$RUNNER_TEMP/go/bin" >> "$GITHUB_PATH"
+      - name: JDK 17 and Gradle 8.14.3
+        if: matrix.lang.name == 'kotlin'
+        run: |
+          set -euo pipefail
+          curl -sSfL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/gradle.zip" https://services.gradle.org/distributions/gradle-8.14.3-bin.zip
+          echo "bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531  $RUNNER_TEMP/gradle.zip" | sha256sum -c
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle"
+          echo "$RUNNER_TEMP/gradle/gradle-8.14.3/bin" >> "$GITHUB_PATH"
+          echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+      - name: Fetch the candidate's artifacts, fail closed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ matrix.candidate.sha }}
+          RUN: ${{ matrix.candidate.run }}
+          ARTIFACTS: ${{ matrix.lang.artifacts }}
+        run: node "$LA/fetch.mjs" "$SHA" "$RUN" "$ARTIFACTS"
+      - name: Build the external consumer
+        env:
+          LANG_NAME: ${{ matrix.lang.name }}
+        run: LA_SOURCE="$GITHUB_WORKSPACE/candidate" node "$LA/build.mjs" "$LANG_NAME"
+      - name: Lifecycle suite
+        env:
+          LANG_NAME: ${{ matrix.lang.name }}
+          CANDIDATE: ${{ matrix.candidate.name }}
+        run: node "$LA/suite/run.mjs" --lang "$LANG_NAME" --name "$CANDIDATE" --out "$GITHUB_WORKSPACE/results"
+      # Only the results: never a store, a key or a token.
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lifecycle-${{ matrix.candidate.name }}-${{ matrix.lang.name }}
+          path: results/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  verdict:
+    name: verdict
+    needs: [candidates, client]
+    if: always() && needs.candidates.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with: { sparse-checkout: dev/lifecycle-acceptance, persist-credentials: false }
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with: { path: results, pattern: "lifecycle-*", merge-multiple: true }
+        continue-on-error: true
+      - name: PASS / FAIL / NOT_COVERED per rule and language
+        env:
+          CANDIDATES: ${{ needs.candidates.outputs.list }}
+        run: node dev/lifecycle-acceptance/verdict.mjs results
