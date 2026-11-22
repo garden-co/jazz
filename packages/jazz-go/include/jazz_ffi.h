@@ -145,7 +145,10 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *                still apply.
  *              - Local work already started finishes (30 s is its
  *                backstop), and stream sessions get up to 2 s to end: so
- *                timeoutMs 0 is not instant.
+ *                timeoutMs 0 is not instant. Nor is that a hard limit:
+ *                work can't be interrupted while it runs, and closing also
+ *                waits for the store to close and for a host name lookup in
+ *                progress. Don't close on a UI thread.
  *              - On a jazz_for_user or jazz_session_jazz handle only that
  *                handle closes: its waits end at once, what it began is
  *                rolled back, and its client lives on.
@@ -267,8 +270,8 @@ JazzHandle *jazz_for_user(const JazzHandle *handle, const char *user_id,
  * storage, where they are lost), or another failure. The handle is closed
  * and freed either way; after a "close" it only frees. timeout_ms 0 waits
  * for no writes, but is not instant: local work already started finishes,
- * and stream sessions get up to 2 s to end. The token callback keeps
- * answering while it drains.
+ * and stream sessions get up to 2 s to end (no hard limit: see "close").
+ * The token callback keeps answering while it drains.
  */
 int jazz_close_within(JazzHandle *handle, uint64_t timeout_ms, char **err);
 
