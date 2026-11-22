@@ -564,6 +564,12 @@ impl E2eeClient {
         (watch.last_check_rows, watch.chain_reads)
     }
 
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn delivery_mark_checks(&self) -> usize {
+        self.shared.member_watch.borrow().delivery_mark_checks
+    }
+
     /// Holds the settle back-off's clock still, or moves it on by `by` when
     /// already held (tests: a wait is stepped, never slept).
     #[doc(hidden)]

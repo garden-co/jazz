@@ -31,7 +31,8 @@ use jazz_e2ee::protocol::records::space::{SpaceAddress, SpaceDelivery};
 use jazz_e2ee::protocol::space::build::{self, Author};
 use jazz_e2ee::protocol::space::chain::select_root;
 use jazz_e2ee::protocol::space::members::{
-    self, DELIVERY_BATCH, EnvelopeSource, lacking, rotation_mark, rotation_recipients,
+    self, DELIVERY_BATCH, EnvelopeSource, ReplayedSpaceChain, lacking, rotation_mark,
+    rotation_recipients,
 };
 use jazz_e2ee::protocol::space::{
     AccountDirectory, BrokenHistory, InvalidSpaceRoot, KeyCheck, Recipient, SpaceChain, SpaceKeys,
@@ -87,7 +88,10 @@ fn checking_current_envelopes_agrees_with_the_full_mark() {
     world.deliver(ALICE, BOB, &epoch);
     let check = |world: &World| {
         let read = world.read();
-        let version = members::CurrentVersion::from_chain(&read.chain(world).unwrap()).unwrap();
+        let replay = ReplayedSpaceChain::replay(&read.space, &read.directory(world))
+            .unwrap()
+            .unwrap();
+        let version = members::CurrentVersion::from_chain(&replay).unwrap();
         let current: Vec<_> = read
             .space
             .deliveries
@@ -123,10 +127,17 @@ fn a_current_version_check_rejects_inconsistent_evidence() {
     let epoch = world.current();
     world.deliver(ALICE, BOB, &epoch);
     let mut read = world.read();
-    let mut chain = read.chain(&world).unwrap();
+    let chain = ReplayedSpaceChain::replay(&read.space, &read.directory(&world))
+        .unwrap()
+        .unwrap();
     let valid = members::CurrentVersion::from_chain(&chain).unwrap();
-    chain.root.row.signature[0] ^= 1;
-    let damaged = members::CurrentVersion::from_chain(&chain).unwrap();
+    let mut damaged = read.space.clone();
+    damaged.roots[0].row.signature[0] ^= 1;
+    assert!(
+        ReplayedSpaceChain::replay(&damaged, &read.directory(&world))
+            .unwrap()
+            .is_none()
+    );
     let check = |version: &members::CurrentVersion, read: &Read| {
         version.rotation_mark(
             &read.space.address,
@@ -136,10 +147,6 @@ fn a_current_version_check_rejects_inconsistent_evidence() {
             &read.directory(&world),
         )
     };
-    assert_eq!(
-        check(&damaged, &read),
-        Err(ProtocolError::InconsistentEvidence)
-    );
     read.ledgers.retain(|a| a.account_id != BOB);
     assert_eq!(
         check(&valid, &read),

@@ -858,6 +858,87 @@ fn a_first_session_checks_a_newly_shared_room_before_writing() {
     });
 }
 
+/// Alice's second device signs a competing successor of the original root.
+/// When it arrives after two rotations, a probe for children of the tip
+/// cannot see it. The chain watch makes Alice replay before writing.
+#[test]
+fn a_competing_successor_of_an_earlier_version_requires_a_fresh_chain_read() {
+    within(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("server.sqlite");
+        let snapshot = dir.path().join("snapshot.sqlite");
+        let settings = EncryptionSettings::default();
+        let server = secure_authority_with(&settings, Some(&live));
+        let who = account(0xa1);
+        let alice = device(&server, who, memory(), 1, &settings);
+        alice.status(&server, &[]);
+        let space = space_with_a_note(&server, &alice, &account_id(who));
+        let second_store = memory();
+        let second = device(&server, who, second_store.clone(), 2, &settings);
+        second.status(&server, &[&alice]);
+        approve(&server, &alice, &second);
+        assert_eq!(second.status(&server, &[&alice]), AccountStatus::Active);
+        drop(second);
+        copy_database(&live, &snapshot);
+        let address = space_address(&alice, space);
+        for _ in 0..2 {
+            drive(
+                &server,
+                &[&alice.db],
+                alice.client.rotate(&alice.db, &address),
+            )
+            .unwrap();
+        }
+        let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
+        watch.use_space(&address);
+        for _ in 0..3 {
+            drive(
+                &server,
+                &[&alice.db],
+                alice.client.sync_spaces(&alice.db, &mut watch),
+            )
+            .unwrap();
+            pump(&server, &alice.db);
+        }
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.deliver_space(&alice.db, &address),
+        )
+        .unwrap();
+        let before = alice.client.write_check_reads().1;
+        let fork = secure_authority_with(&settings, Some(&snapshot));
+        let second = device(&fork, who, second_store, 3, &settings);
+        assert_eq!(second.status(&fork, &[]), AccountStatus::Active);
+        drive(
+            &fork,
+            &[&second.db],
+            second.client.rotate(&second.db, &address),
+        )
+        .unwrap();
+        let table = "__e2ee_space_successors";
+        let candidate = all(&fork, Query::from(table)).unwrap().remove(0);
+        let cells = candidate
+            .cells()
+            .filter_map(|(name, value)| value.map(|v| (name.to_owned(), v.clone())))
+            .collect();
+        block_on(server.upsert(table, candidate.row_uuid(), cells, Default::default())).unwrap();
+        pump(&server, &alice.db);
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.write(&alice.db, async || {
+                alice
+                    .db
+                    .insert("notes", note(space, "after the fork"), Default::default())
+                    .await
+            }),
+        )
+        .unwrap();
+        assert_eq!(alice.client.write_check_reads().1, before + 1);
+    });
+}
+
 /// A change to Bob's account invalidates only Alice's shared room. Her
 /// personal room still accepts a synchronous write with its evaluated key.
 #[test]

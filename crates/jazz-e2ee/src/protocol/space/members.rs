@@ -361,6 +361,28 @@ pub fn rotation_mark(
     mark_envelopes(&chain.versions[depth].epoch_id, &members, found, accounts)
 }
 
+/// An immutable replay for callers that retain the current version for a
+/// later rotation check. Only replay can construct it.
+#[derive(Debug)]
+pub struct ReplayedSpaceChain(SpaceChain);
+
+impl ReplayedSpaceChain {
+    pub fn replay(
+        ledger: &SpaceLedger,
+        accounts: &AccountDirectory<'_>,
+    ) -> ProtocolResult<Option<Self>> {
+        Ok(SpaceChain::replay(ledger, accounts)?.map(Self))
+    }
+}
+
+impl std::ops::Deref for ReplayedSpaceChain {
+    type Target = SpaceChain;
+
+    fn deref(&self) -> &SpaceChain {
+        &self.0
+    }
+}
+
 /// The current version's own envelope, copied from the result of chain
 /// replay. Only the runtime observing the chain can establish freshness.
 /// An observed change of root or successor requires a fresh acquisition.
@@ -375,7 +397,17 @@ pub struct CurrentVersion {
 }
 
 impl CurrentVersion {
-    pub fn from_chain(chain: &SpaceChain) -> ProtocolResult<Self> {
+    /// A caller can inspect the replay but cannot certify an edited copy.
+    ///
+    /// ```compile_fail
+    /// use jazz_e2ee::protocol::space::members::{CurrentVersion, ReplayedSpaceChain};
+    /// fn edit(replay: &ReplayedSpaceChain) {
+    ///     let mut chain = (**replay).clone();
+    ///     chain.versions.pop();
+    ///     let _ = CurrentVersion::from_chain(&chain);
+    /// }
+    /// ```
+    pub fn from_chain(chain: &ReplayedSpaceChain) -> ProtocolResult<Self> {
         let version = chain.current()?;
         let (account, epoch) = version.writer(&chain.root.row);
         let (source, id) = match &version.successor {

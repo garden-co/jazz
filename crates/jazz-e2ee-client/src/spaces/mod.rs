@@ -22,7 +22,8 @@ use jazz_e2ee::protocol::account::{AccountFloor, PublicAccountLedger};
 use jazz_e2ee::protocol::content::{HeldSpace, KeyMark, MissingKey};
 use jazz_e2ee::protocol::error::UnsupportedCapability;
 use jazz_e2ee::protocol::records::space::SpaceAddress as ProtocolAddress;
-use jazz_e2ee::protocol::space::{AccountDirectory, SpaceChain, SpaceLedger, acquire};
+use jazz_e2ee::protocol::space::members::{CurrentVersion, ReplayedSpaceChain};
+use jazz_e2ee::protocol::space::{AccountDirectory, SpaceLedger, acquire};
 use jazz_e2ee::protocol::{Position, ProtocolError};
 
 use crate::account::rows::{self, uuid_cell};
@@ -66,7 +67,7 @@ pub enum SpaceKeyState {
 
 /// What replaying a space read gave.
 pub(crate) struct Replayed {
-    pub(crate) chain: Option<SpaceChain>,
+    pub(crate) chain: Option<ReplayedSpaceChain>,
     pub(crate) held: Option<HeldSpace>,
     pub(crate) member: bool,
     pub(crate) acquisition: Option<jazz_e2ee::protocol::space::Acquisition>,
@@ -75,7 +76,7 @@ pub(crate) struct Replayed {
 /// What one acquisition found.
 pub(crate) struct Acquired {
     pub(crate) state: SpaceKeyState,
-    pub(crate) chain: Option<SpaceChain>,
+    pub(crate) chain: Option<ReplayedSpaceChain>,
     pub(crate) member: bool,
 }
 
@@ -221,7 +222,7 @@ impl E2eeClient {
         db: &Db,
         tx: OpenTransactionId,
         address: &ProtocolAddress,
-        version: &jazz_e2ee::protocol::space::members::CurrentVersion,
+        version: &CurrentVersion,
     ) -> Result<bool, ClientError> {
         let skipped = Cell::new(0);
         let by_id = |table: &str, id: &str| -> Result<Query, ClientError> {
@@ -312,7 +313,7 @@ impl E2eeClient {
                     if !acquired.member || acquired.state != SpaceKeyState::Held {
                         return Ok(false);
                     }
-                    jazz_e2ee::protocol::space::members::CurrentVersion::from_chain(&chain)?
+                    CurrentVersion::from_chain(&chain)?
                 }
             };
             let skipped = Cell::new(0);
@@ -468,7 +469,7 @@ impl E2eeClient {
         let replayed = {
             let account = self.account.borrow();
             let account = account.as_ref().ok_or(ClientError::NoAccount)?;
-            match SpaceChain::replay(&read.ledger, &directory)? {
+            match ReplayedSpaceChain::replay(&read.ledger, &directory)? {
                 None => Replayed {
                     chain: None,
                     held: None,
@@ -838,7 +839,7 @@ impl E2eeClient {
             let settled = self.shared.keys.borrow_mut().held.settle_missing(
                 &address,
                 &entry.epoch_id,
-                acquired.chain.as_ref(),
+                acquired.chain.as_deref(),
                 acquired.member,
             )?;
             let unreadable = |code, row: bool| {

@@ -126,6 +126,10 @@ impl E2eeClient {
                 deps.version =
                     Some(jazz_e2ee::protocol::space::members::CurrentVersion::from_chain(&chain)?);
             }
+            #[cfg(any(test, feature = "testing"))]
+            {
+                self.shared.member_watch.borrow_mut().delivery_mark_checks += 1;
+            }
             let marked = rotation_mark(&chain, &read.ledger, &directory)?.needs_rotation();
             deps.holders = jazz_e2ee::protocol::space::members::holders(
                 &chain,

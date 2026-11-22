@@ -558,6 +558,8 @@ pub(crate) struct MemberWatch {
     pub last_check_rows: usize,
     #[cfg(any(test, feature = "testing"))]
     pub chain_reads: usize,
+    #[cfg(any(test, feature = "testing"))]
+    pub delivery_mark_checks: usize,
     pub streams: BTreeMap<&'static str, AccountStream>,
     pub spaces: BTreeMap<SpaceAddress, WatchedMembers>,
     pub changed: BTreeSet<SpaceAddress>,
