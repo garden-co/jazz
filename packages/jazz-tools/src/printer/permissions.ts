@@ -99,6 +99,7 @@ const PLACEHOLDER_RE = /(\d+)/g;
 
 const TOOL_ORDER = [
   "exists",
+  "isMember",
   "allowedTo",
   "session",
   "anyOf",
@@ -774,6 +775,37 @@ class Printer {
         nested: true,
       });
     }
+    if (
+      ast.table === "__e2ee_members" &&
+      !ast.alias &&
+      !ast.hops.length &&
+      ast.conditions.length === 3
+    ) {
+      // Match the three equalities in the order emitted by isMember.
+      const [scopeId, identifier, accountId] = ast.conditions.map((condition, i) =>
+        condition.kind === "cmp" &&
+        condition.op === "=" &&
+        condition.left.kind === "column" &&
+        condition.left.qual.kind === "none" &&
+        condition.left.name === ["scopeId", "identifier", "accountId"][i]
+          ? condition.right
+          : undefined,
+      );
+      if (
+        scopeId?.kind === "tableId" &&
+        identifier?.kind === "column" &&
+        identifier.qual.kind === "this" &&
+        accountId?.kind === "session" &&
+        accountId.path.length === 1 &&
+        accountId.path[0] === "user"
+      ) {
+        return {
+          text: this.fn("isMember", `${JSON.stringify(scopeId.table)}, ${PLACEHOLDER(0)}`),
+          args: [this.columnArg(ctx, identifier.name)],
+          occ: [],
+        };
+      }
+    }
     const inner: Scope = { table: ast.table, alias: ast.alias, inExists: true };
     /** The checked row's column that `c` compares `col` of `t` with. */
     const outerOf = (c: Ast | undefined, col: string): string | undefined => {
@@ -1305,6 +1337,8 @@ class Printer {
         return lit(this.sessionText(op.path));
       case "typed":
         return lit(this.typed(op.value));
+      case "tableId":
+        throw new Unprintable("", "Printing table_id outside isMember is not supported yet");
       case "column": {
         if (!scope.inExists || scope.nested) return undefined;
         if (this.isInnerColumn(op, scope)) return undefined;

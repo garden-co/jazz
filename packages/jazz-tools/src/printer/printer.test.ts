@@ -2,6 +2,12 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as prettier from "prettier";
 import { describe, expect, it } from "vitest";
+import { readablePermissions } from "../permissions/dsl.js";
+import { readableSchema } from "../schema-dsl/define-schema.js";
+import {
+  permissions as encryptedPermissions,
+  schema as encryptedSchema,
+} from "./__fixtures__/encrypted-permissions.js";
 import type { AppJson, PermissionsJson } from "./app-json.js";
 import { parseExpr } from "./expr.js";
 import { formatTs, layout, printPermissions, printSchemaTs } from "./index.js";
@@ -158,6 +164,34 @@ describe("the permissions printer", () => {
     );
     expect(out.code).toContain("read: { kind: ANNOUNCEMENTS, role: editors },");
     expect(out.constantsUsed.sort()).toEqual(["ANNOUNCEMENTS", "editors"]);
+  });
+
+  it("round-trips isMember against the encrypted schema", () => {
+    const original = readablePermissions(encryptedPermissions)!;
+    const out = print(
+      JSON.parse(JSON.stringify({ format: 1, ...readableSchema(encryptedSchema)! })),
+      original.tables as PermissionsJson["tables"],
+    );
+    expect(out.unsupported).toEqual([]);
+    expect(out.code).toContain('isMember("rooms", room.id)');
+    expect(out.code).toContain('isMember("rooms", message.roomId)');
+    const printed: unknown = new Function(
+      "schema",
+      out.code.replace("export const permissions", "const permissions") + "\nreturn permissions;",
+    )(encryptedSchema);
+    expect(readablePermissions(printed)).toEqual(original);
+  });
+
+  it("reports table_id outside the members rule by JSON path", () => {
+    const comparison = "ownerId = table_id('users')";
+    const nearMiss =
+      "exists __e2ee_members(scopeId = table_id('todos'), identifier = this.id, accountId = session.user, id = this.id)";
+    const out = print(todos, { todos: { read: comparison, insert: nearMiss } });
+    const reason = "Printing table_id outside isMember is not supported yet";
+    expect(out.unsupported).toEqual([
+      { path: "tables.todos.read", text: comparison, reason },
+      { path: "tables.todos.insert", text: nearMiss, reason },
+    ]);
   });
 
   it("prints the relation IR", () => {
