@@ -1456,6 +1456,14 @@ pub fn take_vm_steps_for_test() -> u64 {
     VM_STEPS.with(|cell| cell.replace(0))
 }
 
+/// Count what `statement` ran since it last did into
+/// [`take_vm_steps_for_test`].
+#[cfg(any(test, feature = "testing"))]
+pub(crate) fn count_vm_steps(statement: &crate::storage::Statement<'_>) {
+    let steps = statement.reset_status(rusqlite::StatementStatus::VmStep) as u64;
+    VM_STEPS.with(|cell| cell.set(cell.get() + steps));
+}
+
 /// The application tables a store holds, by their stored columns.
 fn stored_schema(
     conn: &Storage,
@@ -5360,6 +5368,9 @@ impl Inner {
             let score = scorer.score(row.get_ref(2).map_err(storage)?)?;
             scored.push((score, id, rid));
         }
+        drop(rows);
+        #[cfg(any(test, feature = "testing"))]
+        count_vm_steps(&statement);
         Ok(crate::ix::Planned::Bound(crate::ix::top_k(
             scored,
             scorer.k(),
@@ -5380,7 +5391,7 @@ impl Inner {
         search: &crate::query::IndexSearch,
         limit: usize,
     ) -> Result<(Box<dyn crate::ix::Scorer>, String, Vec<Sql>), Error> {
-        let scorer = match index.kind.plan(&index.prefix, &search.op, &mut |_| {
+        let scorer = match index.kind.plan(&index.prefix, &search.op, None, &mut |_| {
             unreachable!("a Rust-scored kind binds nothing")
         })? {
             crate::ix::Candidates::Scored(scorer) => scorer,

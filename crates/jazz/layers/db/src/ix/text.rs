@@ -202,6 +202,7 @@ impl Kind for Text {
         &self,
         prefix: &str,
         op: &IndexOp,
+        only: Option<&str>,
         bind: &mut dyn FnMut(Sql) -> String,
     ) -> Result<Candidates, Error> {
         let IndexOp::Match { mode, .. } = op else {
@@ -220,9 +221,14 @@ impl Kind for Text {
         // better: the score is their negated sum, so every kind's score is
         // smaller-better.
         let scored = sources(&terms, &query, bind);
+        // Inside the grouping: SQLite doesn't push a join on `rid` into it,
+        // and would group every posting of the terms first.
+        let of_rows = only
+            .map(|rids| format!(" AND p.rid IN ({rids})"))
+            .unwrap_or_default();
         let score = format!(
             "SELECT m.rid AS rid, -sum(m.impact) AS score FROM (SELECT DISTINCT p.rid AS rid, \
-             p.tid AS tid, p.impact AS impact FROM ({scored}) AS q JOIN {post} AS p ON p.tid = q.tid) \
+             p.tid AS tid, p.impact AS impact FROM ({scored}) AS q JOIN {post} AS p ON p.tid = q.tid{of_rows}) \
              AS m GROUP BY m.rid"
         );
         // `Any` needs one slot, which every scored row has; `All` every slot.
@@ -233,7 +239,7 @@ impl Kind for Text {
                 let n = bind(Sql::Integer(slots as i64));
                 format!(
                     "SELECT s.rid AS rid, s.score AS score FROM ({score}) AS s WHERE s.rid IN \
-                     (SELECT p.rid FROM ({matched}) AS q JOIN {post} AS p ON p.tid = q.tid \
+                     (SELECT p.rid FROM ({matched}) AS q JOIN {post} AS p ON p.tid = q.tid{of_rows} \
                      GROUP BY p.rid HAVING count(DISTINCT q.slot) >= {n})"
                 )
             }

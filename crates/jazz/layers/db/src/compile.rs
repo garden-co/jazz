@@ -1051,7 +1051,16 @@ impl<'a> Ctx<'a> {
             .find(|table| table.name == query.table)
             .ok_or_else(|| query_error(format!("unknown table {}", query.table)))?;
         crate::query::validate_search(declared, search).map_err(query_error)?;
-        let cte = self.search_cte()?;
+        // A query of rows picked by id scores those alone.
+        let only = match pinned_ids(query) {
+            Some(ids) => {
+                let root = self.table(&query.table)?;
+                let ids = self.bind(ids);
+                Some(rids_of(root, &ids))
+            }
+            None => None,
+        };
+        let cte = self.search_cte(only.as_deref())?;
         let (table, projection, wheres) = self.root_rows(query, include_deleted)?;
         let alias = "t";
         self.searching = true;
@@ -1104,7 +1113,7 @@ impl<'a> Ctx<'a> {
 
     /// The body of `ix(rid, score)` for the planned search (see
     /// [`crate::ix::Planned`]).
-    fn search_cte(&mut self) -> Result<String, Error> {
+    fn search_cte(&mut self, only: Option<&str>) -> Result<String, Error> {
         // Without a plan this is a validation-only compile (as
         // `Db::prepare_query` runs): an empty candidate relation.
         let planned = self.search.take();
@@ -1116,7 +1125,7 @@ impl<'a> Ctx<'a> {
                     let mut binds = Vec::new();
                     let first = self.params.len();
                     let mut next = first;
-                    let candidates = index.kind.plan(&prefix, &op, &mut |value| {
+                    let candidates = index.kind.plan(&prefix, &op, only, &mut |value| {
                         binds.push(value);
                         next += 1;
                         format!("?{next}")
@@ -1153,8 +1162,9 @@ impl<'a> Ctx<'a> {
         order: &[crate::query::OrderBy],
         ids: Sql,
     ) -> Result<(String, Vec<Sql>), Error> {
-        let cte = self.search_cte()?;
         let table = self.table(&query.table)?;
+        let ids = self.bind(ids);
+        let cte = self.search_cte(Some(&rids_of(table, &ids)))?;
         let mut columns = String::new();
         for by in order {
             if by.column == crate::query::SCORE_COLUMN {
@@ -1168,7 +1178,6 @@ impl<'a> Ctx<'a> {
                 .unwrap_or(sql);
             columns.push_str(&format!(", {sql}"));
         }
-        let ids = self.bind(ids);
         let sql = format!(
             "WITH ix(rid, score) AS ({cte}) SELECT t.id{columns} FROM {} AS t \
              JOIN ix ON ix.rid = t.rid WHERE t.id IN (SELECT unhex(value) FROM json_each({ids}))",
@@ -3458,6 +3467,33 @@ impl Clone for RelScope<'_> {
             key: self.key,
         }
     }
+}
+
+/// The ids `query` pins its root rows to by one of its filters (`id = x`
+/// or `id IN (..)`, literals), as a live search's re-check does.
+fn pinned_ids(query: &Query) -> Option<Sql> {
+    let is_id = |operand: &Operand| matches!(operand, Operand::Column(column) if column == "id");
+    let uuid = |operand: &Operand| match operand {
+        Operand::Literal(Value::Uuid(id)) => Some(*id),
+        _ => None,
+    };
+    // The last such filter: a re-check appends its own to the query's.
+    let ids: Vec<uuid::Uuid> = query.filters.iter().rev().find_map(|filter| match filter {
+        Predicate::Eq(left, right) if is_id(left) => uuid(right).map(|id| vec![id]),
+        Predicate::Eq(left, right) if is_id(right) => uuid(left).map(|id| vec![id]),
+        Predicate::In(left, options) if is_id(left) => options.iter().map(uuid).collect(),
+        _ => None,
+    })?;
+    Some(json_ids(ids.iter().map(|id| id.as_bytes().as_slice())))
+}
+
+/// The statement listing the rids of `table`'s rows whose ids the JSON
+/// array bound at `ids` names.
+fn rids_of(table: &Table, ids: &str) -> String {
+    format!(
+        "SELECT ix_o.rid FROM {} AS ix_o WHERE ix_o.id IN (SELECT unhex(value) FROM json_each({ids}))",
+        quote(&table.stored)
+    )
 }
 
 /// Whether `query`'s root rows are picked by id (`id = x`, `id IN (..)`), as

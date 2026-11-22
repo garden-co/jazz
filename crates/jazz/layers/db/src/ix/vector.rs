@@ -87,6 +87,7 @@ impl Kind for Vector {
         &self,
         _prefix: &str,
         op: &IndexOp,
+        _only: Option<&str>,
         _bind: &mut dyn FnMut(Sql) -> String,
     ) -> Result<Candidates, Error> {
         let IndexOp::Nearest { vector: query, k } = op else {

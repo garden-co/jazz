@@ -148,11 +148,15 @@ pub(crate) trait Kind {
     }
     /// Plan `op` (already checked against the declaration by query
     /// validation): its candidate relation. `bind` binds a parameter and
-    /// returns its placeholder.
+    /// returns its placeholder. `only`, when the query pins its rows by id
+    /// (a live search's re-check does), is a statement listing their rids:
+    /// a kind whose relation would otherwise read every match first reads
+    /// those rows' shadow rows alone (SPEC 20.8, `INV-IX-4`).
     fn plan(
         &self,
         prefix: &str,
         op: &IndexOp,
+        only: Option<&str>,
         bind: &mut dyn FnMut(Sql) -> String,
     ) -> Result<Candidates, Error>;
 }

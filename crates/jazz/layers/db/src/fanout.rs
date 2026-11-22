@@ -2661,15 +2661,18 @@ impl Inner {
         };
         let read = || -> rusqlite::Result<HashMap<Vec<u8>, Vec<Sql>>> {
             let mut statement = self.conn.prepare_cached(&sql)?;
-            let found =
-                statement.query_map(crate::storage::params_from_iter(params.iter()), |r| {
+            let found = statement
+                .query_map(crate::storage::params_from_iter(params.iter()), |r| {
                     let id: Vec<u8> = r.get(0)?;
                     let values = (1..=order.len())
                         .map(|i| r.get::<_, Sql>(i))
                         .collect::<rusqlite::Result<Vec<_>>>()?;
                     Ok((id, values))
-                })?;
-            found.collect()
+                })?
+                .collect();
+            #[cfg(any(test, feature = "testing"))]
+            super::count_vm_steps(&statement);
+            found
         };
         let mut found = match read() {
             Ok(found) => found,

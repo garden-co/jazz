@@ -878,3 +878,128 @@ fn vector_and_point_refusals_reach_policies_relations_and_aggregates() {
         }
     }
 }
+
+/// A live search's re-check reads the changed row's shadow rows and no
+/// others (SPEC 20.8, `INV-IX-4`), so its statements' work is the same
+/// however many unchanged rows match: in every kind, and for text in both
+/// modes and with a prefix.
+///
+/// ```
+/// alice subscribes ──► n matching places
+/// bob edits one ─────► re-check: 1 row, whatever n is
+/// ```
+#[test]
+fn a_live_recheck_reads_only_the_changed_row() {
+    let any = |words: &str, mode| IndexOp::Match {
+        text: words.into(),
+        mode,
+    };
+    let cases = [
+        ("text any", "search", any("garden", MatchMode::Any)),
+        ("text all", "search", any("garden plans", MatchMode::All)),
+        ("text prefix", "search", any("garden pla", MatchMode::All)),
+        (
+            "geo radius",
+            "near",
+            IndexOp::WithinRadius {
+                lat: 52.52,
+                lng: 13.405,
+                meters: 100_000.0,
+            },
+        ),
+        (
+            "geo box",
+            "near",
+            IndexOp::WithinBox {
+                south: 50.0,
+                west: 10.0,
+                north: 55.0,
+                east: 16.0,
+            },
+        ),
+        (
+            "vector",
+            "similar",
+            IndexOp::Nearest {
+                vector: vec![1.0, 0.0, 0.0],
+                k: 5,
+            },
+        ),
+    ];
+    let holding = |n: u32| {
+        let db = open();
+        block_on(async {
+            let tx = db.mergeable_tx().await?;
+            for i in 0..n {
+                let mut id = [0; 16];
+                id[..4].copy_from_slice(&i.to_be_bytes());
+                tx.insert(
+                    "places",
+                    BTreeMap::from([
+                        ("name".to_owned(), Value::String("garden plans".into())),
+                        (
+                            "location".to_owned(),
+                            Value::Bytes(
+                                jazz::records::encode_point_f64le(13.405, 52.52)
+                                    .unwrap()
+                                    .to_vec(),
+                            ),
+                        ),
+                        ("embedding".to_owned(), Value::Bytes(f32le([1.0, 0.0, 0.0]))),
+                    ]),
+                    InsertOptions {
+                        row_id: Some(RowUuid::from_bytes(id)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            tx.commit().await
+        })
+        .unwrap();
+        block_on(db.tick()).unwrap();
+        db
+    };
+    let (few, many) = (holding(32), holding(1024));
+    let mut over = Vec::new();
+    for (case, index, op) in cases {
+        for limit in [None, Some(5)] {
+            let work = |db: &Db| {
+                let mut query = Query::from("places").search(index, op.clone());
+                if let Some(limit) = limit {
+                    query = query.limit(limit);
+                }
+                let prepared = db.prepare_query(&query).unwrap();
+                let mut live = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+                block_on(db.tick()).unwrap();
+                while live.try_next_event().is_some() {}
+                jazz::db::take_vm_steps_for_test();
+                // The first row by id, so in every window; a new value each
+                // time, so every case has a change to deliver.
+                block_on(db.update(
+                    "places",
+                    RowUuid::from_bytes([0; 16]),
+                    BTreeMap::from([(
+                        "about".to_owned(),
+                        Value::Nullable(Some(Box::new(Value::String(format!("{case} {limit:?}"))))),
+                    )]),
+                    Default::default(),
+                ))
+                .unwrap();
+                block_on(db.tick()).unwrap();
+                let steps = jazz::db::take_vm_steps_for_test();
+                assert!(live.try_next_event().is_some(), "{case}: no delta");
+                steps
+            };
+            let (small, large) = (work(&few), work(&many));
+            assert!(small > 0, "{case}: nothing counted");
+            if large > small * 2 {
+                over.push(format!("{case} limit {limit:?}: {small} steps, {large}"));
+            }
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "one changed row's re-check grows with the matches (32, 1024): {over:#?}"
+    );
+}

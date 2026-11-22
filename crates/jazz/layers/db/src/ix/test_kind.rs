@@ -109,6 +109,7 @@ impl Kind for Words {
         &self,
         prefix: &str,
         op: &IndexOp,
+        _only: Option<&str>,
         bind: &mut dyn FnMut(Sql) -> String,
     ) -> Result<Candidates, Error> {
         let IndexOp::Match { text, mode } = op else {
@@ -177,6 +178,7 @@ impl Kind for Near {
         &self,
         _prefix: &str,
         op: &IndexOp,
+        _only: Option<&str>,
         _bind: &mut dyn FnMut(Sql) -> String,
     ) -> Result<Candidates, Error> {
         let IndexOp::Nearest { vector, k } = op else {

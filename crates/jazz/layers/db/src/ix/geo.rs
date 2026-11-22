@@ -72,6 +72,7 @@ impl Kind for Geo {
         &self,
         prefix: &str,
         op: &IndexOp,
+        _only: Option<&str>,
         bind: &mut dyn FnMut(Sql) -> String,
     ) -> Result<Candidates, Error> {
         let table = quote(&shadow(prefix, "geo"));
