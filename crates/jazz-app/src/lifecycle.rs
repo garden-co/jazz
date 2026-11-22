@@ -268,6 +268,59 @@ enum Lock {
     Exclusive,
 }
 
+/// Takes `kind` of lock on `file` without waiting; `false` when another
+/// holder's conflicts.
+#[cfg(not(target_os = "android"))]
+fn try_lock(file: &File, kind: Lock) -> std::io::Result<bool> {
+    let locked = match kind {
+        Lock::Shared => file.try_lock_shared(),
+        Lock::Exclusive => file.try_lock(),
+    };
+    match locked {
+        Ok(()) => Ok(true),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+#[cfg(target_os = "android")]
+use flock::try_lock;
+
+/// The same lock on Android. std implements `File::try_lock` with flock(2)
+/// on Linux, but leaves Android out of its list of targets (as of Rust
+/// 1.93): there it always fails "not supported", though bionic has flock.
+/// Remove this once the pinned toolchain's std implements file locks for
+/// Android.
+#[cfg(any(target_os = "android", all(test, target_os = "linux")))]
+mod flock {
+    use std::io::{Error, ErrorKind, Result};
+    use std::os::fd::AsRawFd;
+
+    use super::{File, Lock};
+
+    /// Locked, a conflicting holder (`false`) or an error: std's three
+    /// outcomes. Closing the file releases the lock, as with std's.
+    pub(super) fn try_lock(file: &File, kind: Lock) -> Result<bool> {
+        let operation = match kind {
+            Lock::Shared => libc::LOCK_SH,
+            Lock::Exclusive => libc::LOCK_EX,
+        } | libc::LOCK_NB;
+        loop {
+            // SAFETY: `file` is borrowed for the call, so its descriptor is
+            // open, and flock takes no pointers.
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+                return Ok(true);
+            }
+            let error = Error::last_os_error();
+            match error.kind() {
+                ErrorKind::Interrupted => {}
+                ErrorKind::WouldBlock => return Ok(false),
+                _ => return Err(error),
+            }
+        }
+    }
+}
+
 /// Locks `dir`'s [`LOCK_FILE`], creating it if needed; `None` when
 /// another holder's lock conflicts. A delete removes the file while it
 /// holds it exclusively, so a lock taken on a file that was meanwhile
@@ -277,14 +330,8 @@ fn lock_store(dir: &Path, kind: Lock) -> Result<Option<File>> {
     let path = dir.join(LOCK_FILE);
     loop {
         let lock = File::create(&path).map_err(io)?;
-        let locked = match kind {
-            Lock::Shared => lock.try_lock_shared(),
-            Lock::Exclusive => lock.try_lock(),
-        };
-        match locked {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
-            Err(std::fs::TryLockError::Error(error)) => return Err(io(error)),
+        if !try_lock(&lock, kind).map_err(io)? {
+            return Ok(None);
         }
         if still_named(&lock, &path)? {
             return Ok(Some(lock));
@@ -449,6 +496,35 @@ mod tests {
         let fresh = lock_store(dir.path(), Lock::Exclusive).unwrap().unwrap();
         assert!(!still_named(&lock, &path).unwrap());
         assert!(still_named(&fresh, &path).unwrap());
+    }
+
+    /// Android's lock is the one std takes on Linux: the two see each
+    /// other, shared beside shared and exclusive alone.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn androids_flock_is_stds_lock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        let take = |by_flock: bool, kind| {
+            let file = File::create(&path).unwrap();
+            let locked = if by_flock {
+                flock::try_lock(&file, kind).unwrap()
+            } else {
+                try_lock(&file, kind).unwrap()
+            };
+            locked.then_some(file)
+        };
+        for flock_first in [true, false] {
+            let held = take(flock_first, Lock::Shared).expect("a shared lock");
+            assert!(take(!flock_first, Lock::Shared).is_some());
+            assert!(take(!flock_first, Lock::Exclusive).is_none());
+            drop(held);
+
+            let held = take(flock_first, Lock::Exclusive).expect("an exclusive lock");
+            assert!(take(!flock_first, Lock::Shared).is_none());
+            assert!(take(!flock_first, Lock::Exclusive).is_none());
+            drop(held);
+        }
     }
 
     /// Deletes and opens racing on one directory never hold its lock at
