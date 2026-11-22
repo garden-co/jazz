@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createCliFixtures } from "../../tests/cli/fixtures.js";
@@ -180,6 +180,134 @@ export const permissions = definePermissions({
     });
     // The schema is unchanged since: nothing to create.
     expect((await createAppMigration({ cwd: root, name: "again" })).changed).toBe(false);
+  });
+});
+
+/** A room-chat schema.ts: `rooms` plain, `messages` in the rooms' spaces with `text` encrypted. */
+function chat(options: { rooms?: string; messages?: string; text?: string } = {}): string {
+  return `
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  rooms: s.table({ name: s.string()${options.rooms ?? ""} }),
+  messages: s.table(
+    { roomId: s.uuid(), text: ${options.text ?? "s.string().encrypted()"}${options.messages ?? ""} },
+    { room: s.rel("rooms", "roomId") },
+    { space: "room" },
+  ),
+});
+
+const { definePermissions, isMember } = schema;
+export const permissions = definePermissions({
+  rooms: { read: (room) => isMember("rooms", room.id) },
+  messages: { read: (message) => isMember("rooms", message.roomId) },
+});
+`;
+}
+
+describe("later versions of an encrypted app", () => {
+  async function firstVersion(): Promise<string> {
+    const root = await project(chat());
+    await createAppMigration({ cwd: root, name: "init" });
+    await generated(root);
+    return root;
+  }
+
+  /** Write the second version's schema.ts, create its migration and fill in `steps` for its TODOs. */
+  async function secondVersion(root: string, schema: string, steps: Record<string, string> = {}) {
+    await writeFile(join(root, "schema.ts"), schema);
+    const created = await createAppMigration({ cwd: root, name: "second" });
+    expect(created.changed).toBe(true);
+    let stub = await readFile(created.file!, "utf8");
+    for (const [column, step] of Object.entries(steps))
+      stub = stub.replace(
+        new RegExp(` *// TODO: Added required column "${column}".*\\n`),
+        `      ${column}: ${step},\n`,
+      );
+    await writeFile(created.file!, stub);
+    return generated(root);
+  }
+
+  const TEXT_ENTRY = { space: "roomId", scope: "rooms", columns: { text: "string" } };
+
+  it("keeps the first version's declarations beside its snapshot, and in the history", async () => {
+    const root = await firstVersion();
+    const snapshots = await readdir(join(root, "migrations", "snapshots"));
+    const sidecar = snapshots.find((file) => file.endsWith(".encryption.json"))!;
+    expect(snapshots.sort()).toEqual(
+      [sidecar, sidecar.replace(".encryption.json", ".json")].sort(),
+    );
+    expect(
+      JSON.parse(await readFile(join(root, "migrations", "snapshots", sidecar), "utf8")),
+    ).toEqual({ tables: { messages: TEXT_ENTRY } });
+
+    const files = await secondVersion(root, chat({ rooms: ", topic: s.string().optional()" }));
+    const app = JSON.parse(files.app) as {
+      history: Record<string, { tables: Record<string, { encryption?: unknown }> }>;
+    };
+    expect(
+      Object.values(app.history).map((version) => version.tables.messages!.encryption),
+    ).toEqual([TEXT_ENTRY]);
+  });
+
+  it("generates a second version that adds columns to the encrypted table", async () => {
+    const root = await firstVersion();
+    // A new encrypted column is stored as required bytes: rows older than it
+    // hold the empty ciphertext, which reads as never written.
+    const files = await secondVersion(
+      root,
+      chat({
+        messages:
+          ", editedAt: s.timestamp().optional(), subject: s.string().optional().encrypted()",
+      }),
+      { subject: "m.add.bytes({ default: new Uint8Array() })" },
+    );
+    const app = JSON.parse(files.app) as {
+      tables: Record<string, { encryption?: unknown }>;
+      history: Record<string, { tables: Record<string, { encryption?: unknown }> }>;
+    };
+    expect(app.tables.messages!.encryption).toEqual({
+      ...TEXT_ENTRY,
+      columns: { subject: "string?", text: "string" },
+    });
+    expect(
+      Object.values(app.history).map((version) => version.tables.messages!.encryption),
+    ).toEqual([TEXT_ENTRY]);
+  });
+
+  const CONVERSION =
+    /messages\.text: its plaintext type changed from "string" to "int"\. Changing an encrypted column's plaintext type is a conversion, which isn't supported yet/;
+
+  it("refuses an encrypted column's new plaintext type, which stores the same bytes", async () => {
+    const root = await firstVersion();
+    await writeFile(join(root, "schema.ts"), chat({ text: "s.int().encrypted()" }));
+    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(CONVERSION);
+    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(
+      /which stores the same columns/,
+    );
+    await expect(generateApp({ cwd: root })).rejects.toThrow(CONVERSION);
+  });
+
+  it("refuses a new plaintext type beside another change", async () => {
+    const root = await firstVersion();
+    await writeFile(
+      join(root, "schema.ts"),
+      chat({ text: "s.int().encrypted()", rooms: ", topic: s.string().optional()" }),
+    );
+    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(CONVERSION);
+  });
+
+  it("names the version whose declarations are missing", async () => {
+    const root = await firstVersion();
+    const dir = join(root, "migrations", "snapshots");
+    const sidecar = (await readdir(dir)).find((file) => file.endsWith(".encryption.json"))!;
+    await rm(join(dir, sidecar));
+    await writeFile(join(root, "schema.ts"), chat({ rooms: ", topic: s.string().optional()" }));
+    await expect(createAppMigration({ cwd: root, name: "second" })).rejects.toThrow(
+      new RegExp(
+        `version [0-9a-f]{12} declares encryption .*migrations/snapshots/${sidecar.replace(".", "\\.")}, which holds its encryption declarations, is missing`,
+      ),
+    );
   });
 });
 

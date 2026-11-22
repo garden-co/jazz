@@ -721,6 +721,141 @@ export async function listSnapshots(migrationsDir: string): Promise<SnapshotEntr
   return out;
 }
 
+// ============================================================================
+// Encryption declarations beside snapshots
+// ============================================================================
+
+/**
+ * A version's encryption entries, by table: each table's `encryption` as
+ * `jazz.app.json` writes it. A snapshot holds what is stored (an encrypted
+ * column is `bytes`), so the entries of a version that declares encryption
+ * are kept beside its snapshot, in `<snapshot>.encryption.json`.
+ */
+type EncryptionEntries = Record<string, ReadableJson>;
+
+function entriesOf(tables: Record<string, ReadableTable>): EncryptionEntries {
+  const out: EncryptionEntries = {};
+  for (const [name, table] of Object.entries(tables))
+    if (table.encryption !== undefined) out[name] = table.encryption;
+  return out;
+}
+
+function entriesFile(snapshotFile: string): string {
+  return snapshotFile.replace(/\.json$/i, ".encryption.json");
+}
+
+function entriesText(entries: EncryptionEntries): string {
+  return `${JSON.stringify({ tables: entries }, null, 2)}\n`;
+}
+
+/**
+ * The encryption entries of `snapshot`'s version: none for a version without
+ * Jazz's system tables, else its `.encryption.json`, which must be there.
+ */
+async function snapshotEntries(
+  migrationsDir: string,
+  snapshot: SnapshotEntry,
+): Promise<EncryptionEntries> {
+  const file = entriesFile(snapshot.file);
+  let text: string;
+  try {
+    text = await readFile(join(migrationsDir, "snapshots", file), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!Object.keys(snapshot.schema).some((table) => table.startsWith("__e2ee_"))) return {};
+    throw new Error(
+      `migrations/snapshots/${snapshot.file}: version ${shortSchemaHash(snapshot.hash)} declares encryption ` +
+        `(it has Jazz's system tables), but migrations/snapshots/${file}, which holds its encryption ` +
+        "declarations, is missing. Restore it from version control.",
+    );
+  }
+  const parsed = JSON.parse(text) as { tables?: EncryptionEntries };
+  if (!parsed || typeof parsed.tables !== "object" || parsed.tables === null)
+    throw new Error(
+      `migrations/snapshots/${file}: expected { "tables": { <table>: <encryption> } }.`,
+    );
+  return parsed.tables;
+}
+
+/** `tables` with each table's encryption entry from `entries`. */
+function withEntries(
+  tables: Record<string, ReadableTable>,
+  entries: EncryptionEntries,
+  version: string,
+): Record<string, ReadableTable> {
+  const out = { ...tables };
+  for (const [name, entry] of Object.entries(entries)) {
+    if (!out[name])
+      throw new Error(
+        `version ${version}: its encryption declarations name table ${name}, which the version doesn't have.`,
+      );
+    out[name] = { ...out[name], encryption: entry };
+  }
+  return out;
+}
+
+/** JSON with object keys sorted, and an entry's `equality` list sorted: a declaration's identity. */
+function canonical(value: unknown, key?: string): string {
+  if (Array.isArray(value))
+    return `[${(key === "equality" ? [...value].sort() : value).map((item) => canonical(item)).join(",")}]`;
+  if (value && typeof value === "object")
+    return `{${Object.keys(value)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k], k)}`)
+      .join(",")}}`;
+  return JSON.stringify(value);
+}
+
+/**
+ * How `current`'s encryption declarations change `previous`'s in ways no
+ * version can express yet: an encrypted column's plaintext type (or its
+ * default, or whether it is optional), or a table's space. When the stored
+ * schema is the same (`sameStorage`), any change at all, since it would
+ * otherwise reuse the version's hash unnoticed.
+ */
+function encryptionChanges(
+  previous: EncryptionEntries,
+  current: EncryptionEntries,
+  sameStorage: boolean,
+): string[] {
+  const changes: string[] = [];
+  const shown = (entry: unknown, column: string) =>
+    JSON.stringify((entry as { columns?: Record<string, unknown> }).columns?.[column]);
+  for (const table of [...new Set([...Object.keys(previous), ...Object.keys(current)])].sort()) {
+    const before = previous[table] as Record<string, unknown> | undefined;
+    const after = current[table] as Record<string, unknown> | undefined;
+    if (before && after) {
+      if (before.space !== after.space || before.scope !== after.scope)
+        changes.push(
+          `${table}: its space changed (${before.scope} through ${before.space} to ${after.scope} through ${after.space})`,
+        );
+      const columns = (entry: Record<string, unknown>) =>
+        (entry.columns ?? {}) as Record<string, unknown>;
+      for (const column of Object.keys(columns(before)))
+        if (
+          column in columns(after) &&
+          canonical(columns(before)[column]) !== canonical(columns(after)[column])
+        )
+          changes.push(
+            `${table}.${column}: its plaintext type changed from ${shown(before, column)} to ${shown(after, column)}`,
+          );
+    }
+    if (sameStorage && changes.length === 0 && canonical(before) !== canonical(after))
+      changes.push(`${table}: its encryption declaration changed`);
+  }
+  return changes;
+}
+
+function refuseEncryptionChanges(changes: string[], version: string, sameStorage: boolean): void {
+  if (changes.length === 0) return;
+  throw new Error(
+    `The schema's encryption declarations differ from version ${version}'s` +
+      (sameStorage ? ", which stores the same columns" : "") +
+      `: ${changes.join("; ")}. Changing an encrypted column's plaintext type is a conversion, ` +
+      "which isn't supported yet: keep the declaration, or add a new column for the new type.",
+  );
+}
+
 export interface MigrationHistory {
   /** Earlier versions, oldest first, by short hash: `jazz.app.json`'s `history`. */
   history: Record<string, ReadableVersion>;
@@ -745,13 +880,40 @@ export async function loadMigrationHistory(options: {
 }): Promise<MigrationHistory> {
   const current = await snapshotFromVersion(options.currentTables);
   const currentShort = shortSchemaHash(current.hash);
+  const currentEntries = entriesOf(options.currentTables);
+  const snapshots = await listSnapshots(options.migrationsDir);
+  // The current version's snapshot must declare what schema.ts declares:
+  // the hash doesn't cover a plaintext type.
+  const currentSnapshot = snapshots.filter((snapshot) => snapshot.hash === current.hash).at(-1);
+  if (currentSnapshot)
+    refuseEncryptionChanges(
+      encryptionChanges(
+        await snapshotEntries(options.migrationsDir, currentSnapshot),
+        currentEntries,
+        true,
+      ),
+      currentShort,
+      true,
+    );
   const files = await loadMigrationFiles(options.migrationsDir, options.loadModule);
   if (files.length === 0) return { history: {}, migrations: [], current: current.hash };
 
   const versions = new Map<string, Record<string, ReadableTable>>();
-  versions.set(currentShort, (await snapshotToVersion(current.schema)).tables);
-  for (const snapshot of await listSnapshots(options.migrationsDir))
-    versions.set(shortSchemaHash(snapshot.hash), (await snapshotToVersion(snapshot.schema)).tables);
+  versions.set(
+    currentShort,
+    withEntries((await snapshotToVersion(current.schema)).tables, currentEntries, currentShort),
+  );
+  for (const snapshot of snapshots) {
+    const short = shortSchemaHash(snapshot.hash);
+    versions.set(
+      short,
+      withEntries(
+        (await snapshotToVersion(snapshot.schema)).tables,
+        await snapshotEntries(options.migrationsDir, snapshot),
+        short,
+      ),
+    );
+  }
 
   // Derive what no snapshot holds, walking migrations until nothing changes.
   const failures = new Map<string, string>();
@@ -763,6 +925,21 @@ export async function loadMigrationHistory(options: {
         [entry.fromHash, entry.toHash, "forward"],
       ] as const) {
         if (versions.has(unknown) || !versions.has(known)) continue;
+        // A witness table holds what is stored, not an encryption declaration.
+        const witness = (
+          direction === "backward" ? entry.migration.from : entry.migration.to
+        ) as Record<string, unknown>;
+        const encrypted = Object.keys(witness).find(
+          (table) => versions.get(known)![table]?.encryption !== undefined,
+        );
+        if (encrypted) {
+          failures.set(
+            unknown,
+            `${entry.file}: ${encrypted} declares encryption, which a version can't be derived through; ` +
+              `keep the version's snapshot and its .encryption.json`,
+          );
+          continue;
+        }
         const derived = deriveVersion(versions.get(known)!, entry.migration, direction);
         let hash: string;
         try {
@@ -881,6 +1058,7 @@ export async function createMigration(options: {
 }): Promise<CreateMigrationResult> {
   const { migrationsDir } = options;
   const current = await snapshotFromVersion(options.currentTables);
+  const currentEntries = entriesOf(options.currentTables);
   const snapshots = await listSnapshots(migrationsDir);
   const timestamped = snapshots
     .filter((entry) => entry.timestamp)
@@ -903,12 +1081,26 @@ export async function createMigration(options: {
   const writeSnapshot = async () => {
     await mkdir(join(migrationsDir, "snapshots"), { recursive: true });
     await writeFile(join(migrationsDir, "snapshots", snapshotFile), snapshotText(current.schema));
+    if (Object.keys(currentEntries).length > 0)
+      await writeFile(
+        join(migrationsDir, "snapshots", entriesFile(snapshotFile)),
+        entriesText(currentEntries),
+      );
     return `snapshots/${snapshotFile}`;
   };
 
   if (!baseline) {
     return { changed: true, initial: true, toHash: current.hash, snapshot: await writeSnapshot() };
   }
+  refuseEncryptionChanges(
+    encryptionChanges(
+      await snapshotEntries(migrationsDir, baseline),
+      currentEntries,
+      baseline.hash === current.hash,
+    ),
+    shortSchemaHash(baseline.hash),
+    baseline.hash === current.hash,
+  );
   if (baseline.hash === current.hash) return { changed: false };
   if (!(await requiresMigration(baseline.schema, current.schema))) {
     return {
