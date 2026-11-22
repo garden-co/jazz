@@ -49,4 +49,4 @@ Needs Node, pnpm 11, sqlite3 and `ss`, plus cargo, Go, JDK 17 with Gradle, or Sw
 - Kill processes by port or PID, never with `pkill -f`. A pattern can match the shell running it.
 - The TS client derives its app id from `serverUrl`. The t9 backend serves the id derived from `http://127.0.0.1:8780/jazz`.
 - User tokens and `backendClients` workload tokens come from different issuers (8791 and 8790). A user token from a workload issuer never reaches `authenticate`, so that user is silently signed out.
-- Synthetic data only. No keys or tokens in this directory.
+- Synthetic data only. No keys or tokens in this directory. `rebase-bed.sh` drops a fixture store's `inspect-token-secret` and refuses one with a backend signing key.
