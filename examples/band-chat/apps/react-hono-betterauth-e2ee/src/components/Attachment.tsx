@@ -36,7 +36,7 @@ function useNearViewport<T extends Element>() {
 /** One message's attachment bytes, queried only once `isEnabled` turns true. */
 function useAttachmentBytes(messageId: string, isEnabled: boolean): Uint8Array | undefined {
   const { data } = useAll(
-    isEnabled ? app.messages.where({ id: messageId }).select("attachment") : undefined,
+    isEnabled ? app.messages.where({ id: messageId }).select("roomId", "attachment") : undefined,
   );
   return data?.[0]?.attachment ?? undefined;
 }
@@ -95,7 +95,9 @@ function FileAttachment({ message }: { message: MessageSummary }) {
   async function download() {
     setLoading(true);
     try {
-      const row = await db.one(app.messages.where({ id: message.id }).select("attachment"));
+      const row = await db.one(
+        app.messages.where({ id: message.id }).select("roomId", "attachment"),
+      );
       if (row?.attachment) downloadBytes(row.attachment, name, message.attachmentType);
     } finally {
       setLoading(false);

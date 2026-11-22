@@ -1,7 +1,7 @@
 # BandChat, end-to-end encrypted (Vite React + Hono + Better Auth)
 
 [`../react-hono-betterauth`](../react-hono-betterauth) with message text,
-attachment names and read markers end-to-end encrypted: each room is an
+attachment names and bytes, and read markers end-to-end encrypted: each room is an
 encrypted space, and only its members hold its key. The server stores and
 relays those columns as ciphertext.
 

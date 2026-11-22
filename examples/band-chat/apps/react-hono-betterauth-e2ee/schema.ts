@@ -58,8 +58,8 @@ export const schema = s.defineSchema({
     { room: s.rel("rooms", "roomId") },
     { space: "room" },
   ),
-  // The text and the attachment's name are sealed with the room's key. Who
-  // wrote when, the attachment's bytes, type and size, and sketches stay
+  // The text, the attachment's bytes and its name are sealed with the room's
+  // key. Who wrote when, the attachment's type and size, and sketches stay
   // plain.
   messages: s
     .table(
@@ -67,7 +67,7 @@ export const schema = s.defineSchema({
         roomId: s.uuid(),
         senderId: s.uuid(),
         text: s.string().encrypted(),
-        attachment: s.bytes().optional(),
+        attachment: s.bytes().optional().encrypted(),
         attachmentName: s.string().optional().encrypted(),
         attachmentType: s.string().optional(),
         attachmentSize: s.int().optional(),

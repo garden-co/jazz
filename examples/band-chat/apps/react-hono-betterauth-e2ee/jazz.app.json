@@ -2,7 +2,7 @@
   "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
   "$generated": {
     "by": "jazz-tools generate from schema.ts — edit the TypeScript, not this file",
-    "sha256": "e42495c2fb8b6753ac195d47000305cda34b4d2140c47e3159030b8670c29b07"
+    "sha256": "31110b9dad163ba4b8f325e3b30fb0a3c1b469c9a42f4ed87d4ad9bd0762330c"
   },
   "tables": {
     "better_auth_account": {
@@ -81,7 +81,7 @@
         "roomId": "uuid",
         "senderId": "uuid",
         "text": "bytes",
-        "attachment": "bytes?",
+        "attachment": "bytes",
         "attachmentName": "bytes",
         "attachmentType": "string?",
         "attachmentSize": "int?",
@@ -97,7 +97,7 @@
       "encryption": {
         "space": "roomId",
         "scope": "rooms",
-        "columns": { "attachmentName": "string?", "text": "string" }
+        "columns": { "attachment": "bytes?", "attachmentName": "string?", "text": "string" }
       }
     },
     "profiles": {

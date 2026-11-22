@@ -12,6 +12,7 @@
       "scope": "rooms",
       "columns": {
         "text": "string",
+        "attachment": "bytes?",
         "attachmentName": "string?"
       }
     }
