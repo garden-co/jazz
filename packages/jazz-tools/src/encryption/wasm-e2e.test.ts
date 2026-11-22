@@ -167,6 +167,27 @@ describe("encryption on the browser-style client, end to end", () => {
     ).toHaveLength(2);
   }, 120_000);
 
+  it("an idle active device completes another device's removal request", async () => {
+    const host = await serve();
+    const first = (await client(host, "alice")).db.encryption;
+    expect(await first.ready()).toBe("active");
+    const phrase = first.recovery.create();
+    await first.recovery.register(phrase);
+
+    // No further calls on the first device. Its account watch drives the removal.
+    const second = (await client(host, "alice")).db.encryption;
+    expect(await second.ready()).toBe("awaiting-approval");
+    expect(await second.recovery.restore(phrase)).toBe("active");
+    const oldId = await second.deviceId();
+    await second.devices.requestRemoval();
+
+    await until(
+      async () => ((await second.deviceId()) !== oldId ? true : undefined),
+      "a new device ID",
+    );
+    await expect(second.devices.list()).rejects.toMatchObject({ code: "device-not-active" });
+  }, 90_000);
+
   it("a new device with no other device recovers with the phrase", async () => {
     const host = await serve();
     const { first, project } = await firstDevice(host, "alice");
