@@ -148,7 +148,7 @@ class JazzTest {
         val jazz = open(fake)
         assertEquals(true, jazz.subscribe(Items.query()).first().reset)
         withTimeout(5_000) { while (fake.subs.isNotEmpty()) delay(10) }
-        jazz.close()
+        jazz.closeAndWait()
         assertTrue(fake.closed)
     }
 

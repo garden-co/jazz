@@ -88,6 +88,10 @@ public class Jazz internal constructor(
     private val implementations: Any? = null,
     /** Where blocking native calls run ([JazzConfig.dispatcher]). */
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /** The persistent store's directory, canonical, so a reopen waits for this app's teardown. */
+    private val store: String? = null,
+    /** Set by [close]; also stops the bearer provider being asked. */
+    private val closedFlag: java.util.concurrent.atomic.AtomicBoolean = java.util.concurrent.atomic.AtomicBoolean(false),
 ) : AutoCloseable {
     public companion object {
         /** How [open] reaches jazz-ffi; replace it to open through something else. */
@@ -99,9 +103,31 @@ public class Jazz internal constructor(
                 openReflectively("tools.jazz.UniffiNative", configJson, tokens)
         }
 
+        /**
+         * Teardowns still running, by store directory: [close] returns before
+         * the native core has let go of the store, and an open of the same
+         * directory waits for that instead of sharing the store with it.
+         */
+        private val teardowns = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<Unit>>()
+
         /** Opens the app [app] (the text of its `jazz.app.json`), as generated bindings' `open` does. */
-        public suspend fun open(app: String, config: JazzConfig, implementations: Any? = null): Jazz =
-            startHandle(config.dispatcher, giveBack = { it.close() }) {
+        public suspend fun open(app: String, config: JazzConfig, implementations: Any? = null): Jazz {
+            val store = if (config.storage == Storage.Persistent) config.dataDir?.let { java.io.File(it).canonicalPath } else null
+            // A previous app on this directory may still be tearing down.
+            store?.let { dir ->
+                teardowns[dir]?.let { teardown ->
+                    try {
+                        teardown.await()
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (_: Throwable) {
+                        // Its shutdown failed: the store is let go of all the same.
+                    }
+                }
+            }
+            val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+            // Given back already off the caller's thread: close it there, not in the background.
+            return startHandle(config.dispatcher, giveBack = { it.startClose(inline = true) }) {
                 if (config.serverUrl != null && config.auth == null) {
                     throw JazzException.Refused(
                         "connecting to ${config.serverUrl} needs JazzConfig.auth (a device account, or your backend's sign-in). " +
@@ -112,12 +138,15 @@ public class Jazz internal constructor(
                 val native = when (val auth = config.auth) {
                     // The native core asks on a thread of its own: blocking there is fine.
                     is JazzAuth.Bearer -> opener.openWithTokens(json) { reason ->
+                        // Once closed, the provider isn't asked any more: a failed fetch, never a sign-out.
+                        if (closed.get()) throw JazzException.Closed()
                         runBlocking { auth.token(TokenReason.of(reason)) }
                     }
                     else -> opener.open(json)
                 }
-                Jazz(native, implementations, config.dispatcher)
+                Jazz(native, implementations, config.dispatcher, store, closed)
             }
+        }
     }
 
     /**
@@ -138,6 +167,7 @@ public class Jazz internal constructor(
     private val watches = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
 
     private fun <T> stateFlow(sync: Boolean, initial: T, parse: (String) -> T): MutableStateFlow<T> {
+        checkOpen()
         val flow = MutableStateFlow(initial)
         watches += native.watch(sync) { json ->
             // A closing app ends each watch with {"kind":"closed"}: not a state.
@@ -168,6 +198,7 @@ public class Jazz internal constructor(
      */
     public val mutationErrors: Flow<MutationError> get() = callbackFlow {
         val cancel = startHandle(dispatcher, giveBack = { it() }) {
+            checkOpen()
             native.watchMutationErrors { json ->
                 // The app closing ends the watch: the Flow completes.
                 if (isClosedNotice(json)) close() else trySend(MutationError.parse(json))
@@ -248,7 +279,7 @@ public class Jazz internal constructor(
         row: String?,
         data: Flow<ByteArray>,
     ): Row {
-        val upload = startHandle(dispatcher, giveBack = { it.abort() }) { native.beginUpload(table.tableName, column.name, kind, id, row) }
+        val upload = startHandle(dispatcher, giveBack = { it.abort() }) { checkOpen(); native.beginUpload(table.tableName, column.name, kind, id, row) }
         try {
             data.collect { chunk -> io { upload.push(chunk) } }
             return decodeStored(table, io { upload.finish() })
@@ -373,7 +404,7 @@ public class Jazz internal constructor(
         serializable: Boolean = false,
         block: suspend (Transaction) -> T,
     ): T {
-        val native = startHandle(dispatcher, giveBack = { it.rollback() }) { if (serializable) native.begin() else native.beginMergeable() }
+        val native = startHandle(dispatcher, giveBack = { it.rollback() }) { checkOpen(); if (serializable) native.begin() else native.beginMergeable() }
         val tx = Transaction(native)
         val result = try {
             block(tx)
@@ -543,20 +574,66 @@ public class Jazz internal constructor(
         tier: ReadTier?,
         onDelta: (String) -> Unit,
         onError: (kind: String, message: String) -> Unit,
-    ): () -> Unit =
-        if (tier == null) native.subscribe(query, onDelta, onError) else native.subscribeAt(query, tier.wire, onDelta, onError)
+    ): () -> Unit {
+        checkOpen()
+        return if (tier == null) native.subscribe(query, onDelta, onError) else native.subscribeAt(query, tier.wire, onDelta, onError)
+    }
 
     private fun <Row : Any> decode(query: Query<Row>, row: JsonObject): Row =
         jazzJson.decodeFromJsonElement(query.rowSerializer, prepareRow(query.source, query.includes, row, implementations))
 
+    /** The background teardown [close] started, once started. */
+    private val closing = java.util.concurrent.atomic.AtomicReference<kotlinx.coroutines.CompletableDeferred<Unit>?>(null)
+
     /**
-     * Closes the app: open subscriptions (and `watch`es) end with
-     * [JazzException.Closed], and so do later calls. Closing again does
-     * nothing, so `use {}` and an explicit `close()` mix.
+     * Closes the app, and returns at once, so it's safe on Android's main
+     * thread and at the end of `use {}`. From when it returns, new calls
+     * throw [JazzException.Closed], open subscriptions (and `watch`es) end
+     * with it, the session reads `SignedOut`, and a [JazzAuth.Bearer]
+     * provider isn't asked again. Calls already running end with
+     * [JazzException.Closed] as the native core shuts down, which finishes
+     * in the background (it may still wait for local work, or a DNS lookup,
+     * in progress): [closeAndWait] waits for that, and opening the same
+     * `dataDir` waits for it by itself. Closing again does nothing, so
+     * `use {}` and an explicit `close()` mix.
      */
     override fun close() {
-        native.close()
+        startClose()
+    }
+
+    /**
+     * [close], then waits until the native core has shut down and let go of
+     * the store, and throws what that shutdown threw. Cancelling the wait
+     * doesn't stop the shutdown.
+     */
+    public suspend fun closeAndWait() {
+        startClose().await()
+    }
+
+    private fun startClose(inline: Boolean = false): kotlinx.coroutines.CompletableDeferred<Unit> {
+        val mine = kotlinx.coroutines.CompletableDeferred<Unit>()
+        if (!closing.compareAndSet(null, mine)) return closing.get()!!
+        closedFlag.set(true)
+        store?.let { teardowns[it] = mine }
         endWatches()
+        val shutDown = {
+            try {
+                native.close()
+                mine.complete(Unit)
+            } catch (e: Throwable) {
+                mine.completeExceptionally(e)
+            } finally {
+                store?.let { teardowns.remove(it, mine) }
+            }
+        }
+        // Not a daemon thread: a JVM program that ends right after close()
+        // still lets the store shut down cleanly.
+        if (inline) shutDown() else Thread({ shutDown() }, "jazz-close").apply { isDaemon = false }.start()
+        return mine
+    }
+
+    private fun checkOpen() {
+        if (closedFlag.get()) throw JazzException.Closed()
     }
 
     /** The app closed: stop watching, and an end user's session reads as signed out. */
@@ -566,5 +643,8 @@ public class Jazz internal constructor(
         sessionFlow?.let { flow -> if (flow.value != null) flow.value = SessionState.SignedOut }
     }
 
-    private suspend fun <T> io(block: () -> T): T = withContext(dispatcher) { block() }
+    private suspend fun <T> io(block: () -> T): T {
+        checkOpen()
+        return withContext(dispatcher) { block() }
+    }
 }
