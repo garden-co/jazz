@@ -299,9 +299,9 @@ impl Inner {
         };
         let mut companions = Vec::new();
         if let Some(seal) = streamed {
-            let space = stored_space
-                .clone()
-                .or_else(|| self.named_space(&table, row, cells));
+            let space = self
+                .stream_space(&table, row, cells, stored_space.as_ref())
+                .map_err(|_| sealed_elsewhere())?;
             if seal.row != row || space != seal.space {
                 return Err(sealed_elsewhere());
             }
@@ -474,9 +474,7 @@ impl Inner {
             StreamingMutationKind::Insert => None,
             _ => self.stored_space(&**hooks, table, row, &Target::of(target, self)?, false)?,
         };
-        let space = self
-            .named_space(table, row, cells)
-            .or_else(|| stored.clone());
+        let space = self.stream_space(table, row, cells, stored.as_ref())?;
         if entry.columns.contains_key(column) {
             upload.sealer = Some(
                 hooks
@@ -513,6 +511,24 @@ impl Inner {
             root,
         });
         Ok(())
+    }
+
+    fn stream_space(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        stored: Option<&Value>,
+    ) -> Result<Option<Value>, Error> {
+        let named = self.named_space(table, row, cells);
+        if let (Some(stored), Some(named)) = (stored, &named)
+            && stored != named
+        {
+            return Err(rejected(
+                "an encrypted row cannot change its space through a streamed write",
+            ));
+        }
+        Ok(stored.cloned().or(named))
     }
 
     /// The space a write of `row` names: the row itself, for a table whose

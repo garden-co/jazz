@@ -7945,7 +7945,7 @@ impl Inner {
     /// A written cell must be of its column's type: writes from any replica
     /// land here, so the store never holds a value its schema does not
     /// describe. A nullable column also takes the bare value; a large
-    /// value's reference is checked where it is bound.
+    /// value's contents are checked where its reference is bound.
     fn check_cell(
         column: &crate::values::Column,
         value: &Value,
@@ -7955,7 +7955,13 @@ impl Inner {
         while let Value::Nullable(Some(inner)) = bare {
             bare = inner;
         }
-        if matches!(bare, Value::Large(_)) {
+        if let Value::Large(large) = bare {
+            if !crate::large::large_capable(column) || large.kind != crate::large::kind(column) {
+                return Err(rejected(format!(
+                    "`{}` does not hold {:?} large values",
+                    column.name, large.kind
+                )));
+            }
             return Ok(());
         }
         let ty = match (&column.ty, value) {
@@ -8103,12 +8109,6 @@ impl Inner {
         large: &jazz_types::large_values::LargeValueRef,
         cells: Cells,
     ) -> Result<Sql, Error> {
-        if !crate::large::large_capable(column) || large.kind != crate::large::kind(column) {
-            return Err(rejected(format!(
-                "`{}` does not hold {:?} large values",
-                column.name, large.kind
-            )));
-        }
         let mut complete = true;
         if let Some(prepared) = self
             .pending_nodes

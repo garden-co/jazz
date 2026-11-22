@@ -1176,13 +1176,34 @@ impl Db {
         cells: &BTreeMap<String, Value>,
         column: &str,
     ) -> Result<StreamingValueUpload, Error> {
-        let col = streaming_column(&self.inner(), table, column)?;
+        let inner = self.inner();
+        let col = streaming_column(&inner, table, column)?;
         if cells.contains_key(column) {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
                 format!("{table}.{column} is streamed, so the other cells cannot also set it"),
             ));
         }
+        let schema = inner.schema.table(table)?;
+        inner.validate_cells(schema, cells)?;
+        #[cfg(feature = "e2ee-client")]
+        let encrypted = inner
+            .e2ee
+            .as_ref()
+            .and_then(|hooks| hooks.declarations().tables.get(table));
+        for (name, value) in cells {
+            // prepare_stream checks an encrypted sibling against its plaintext type.
+            #[cfg(feature = "e2ee-client")]
+            if encrypted.is_some_and(|entry| entry.columns.contains_key(name)) {
+                continue;
+            }
+            Inner::check_cell(
+                schema.column(name).expect("validated above"),
+                value,
+                Cells::Authored,
+            )?;
+        }
+        drop(inner);
         let kind = crate::large::kind(&col);
         let emitted = Rc::new(RefCell::new(Vec::new()));
         let stage = Rc::clone(&emitted);

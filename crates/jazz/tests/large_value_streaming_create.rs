@@ -91,6 +91,53 @@ impl Read for FailingReader {
 }
 
 #[test]
+fn invalid_plain_stream_sibling_is_rejected_at_rowless_begin() {
+    use jazz::large_values::{LargeValueKind, prepare};
+
+    let db = open_db();
+    let bytes = prepare(LargeValueKind::Bytes, b"some bytes").unwrap();
+    for value in [Value::I32(4), Value::Large(Box::new(bytes.value_ref))] {
+        let error = db
+            .begin_streaming_value_upload(
+                "todos",
+                &BTreeMap::from([("title".into(), value)]),
+                "payload",
+            )
+            .err()
+            .expect("rowless begin must reject a sibling with the wrong type or large-value kind");
+        assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected);
+        assert!(error.message.contains("title"), "{error}");
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn invalid_plain_stream_sibling_leaves_the_rust_client_reader_unread() {
+    use jazz::tools::{AppContext, JazzClient, Value as ClientValue};
+
+    struct Unread;
+    impl Read for Unread {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("the client read the attachment before checking the title")
+        }
+    }
+
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("notes")
+                .column("title", ColumnType::Text)
+                .column("attachment", ColumnType::Bytea)
+                .policies(allow_all_policies()),
+        )
+        .build();
+    let client = jazz::block_on(JazzClient::connect(AppContext::test(schema))).unwrap();
+    let cells = std::collections::HashMap::from([("title".into(), ClientValue::Integer(4))]);
+    let error = jazz::block_on(client.insert_streaming_value("notes", cells, "attachment", Unread))
+        .unwrap_err();
+    assert!(error.to_string().contains("title"), "{error}");
+}
+
+#[test]
 fn streaming_create_publishes_one_ordinary_logical_row() {
     let db = open_db();
     let text = format!("{}streamed-tail-🙂", "x".repeat(INLINE_VALUE_MAX_BYTES * 3));

@@ -21,6 +21,29 @@ fn cell(row: &jazz::db::CurrentRow, column: &str) -> Value {
         .unwrap_or_else(|| panic!("no `{column}` cell"))
 }
 
+struct Unread;
+impl std::io::Read for Unread {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        panic!("the source was read before its metadata was accepted");
+    }
+}
+
+/// A mistyped plain title alongside an encrypted body leaves the attachment source unread.
+#[test]
+fn invalid_plain_stream_sibling_leaves_the_attachment_unread() {
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (db, _link, _) = online(&client, &server, None);
+    let space = project(&db, "plans");
+    hold_new_space(&client, &db, space);
+    let mut cells = note(space, SECRET);
+    cells.insert("title".into(), Value::I32(4));
+    let error =
+        block_on(db.insert_streaming_value("notes", cells, "attachment", Unread)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(error.message.contains("title"), "{error}");
+}
+
 fn refuses_invalid_stream_metadata(kind: jazz::db::StreamingMutationKind) {
     let server = authority();
     let client = open_client(Rc::new(MemoryStore::new()));
@@ -38,12 +61,6 @@ fn refuses_invalid_stream_metadata(kind: jazz::db::StreamingMutationKind) {
             note(space, SECRET),
         )
     };
-    struct Unread;
-    impl std::io::Read for Unread {
-        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-            panic!("the source was read before its metadata was accepted");
-        }
-    }
     for streamed in ["attachment", "title"] {
         cells.remove(streamed);
         cells.insert("body".into(), Value::I32(4));
