@@ -1055,6 +1055,7 @@ fn a_self_space_upsert_that_creates_its_row_seals_what_it_omits() {
     let (db, _link, _) = online(&client, &server, None);
     let vault = uuid::Uuid::now_v7();
     let held = new_space_key(&client.device().unwrap(), &address_in(&db, "vaults", vault));
+    client.record_fixture_rotation_check(held.address());
     block_on(client.keep(held)).unwrap();
     let label = |text_value: &str| BTreeMap::from([("label".to_owned(), text(text_value))]);
     let row = jazz::ids::RowUuid(vault);

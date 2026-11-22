@@ -85,6 +85,8 @@ export type EncryptionReport =
       space: { table: string; id: string } | null;
     }
   | { type: "challenged" }
+  /** Account verification or the space rotation check failed before a write. */
+  | { type: "rotation-check-failed"; space: { table: string; id: string }; reason: string }
   /**
    * A rotation Jazz tried before a write to `space` failed or was refused,
    * for `reason`. The write was sealed under the space's current key all the

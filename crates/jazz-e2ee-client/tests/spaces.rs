@@ -982,6 +982,82 @@ fn owned_device(server: &Db, who: AuthorSubject, store: MemoryStore, node: u8) -
     }
 }
 
+/// Bob watches a shared room before he has its key. Once he acquires it
+/// he can evaluate rotations until the authority refuses his first attempt.
+#[test]
+fn only_an_eligible_holder_checks_the_mark_and_watches_public_successors() {
+    within(|| {
+        let server = block_on(Db::open(jazz::db::DbConfig::new(
+            owned_schema(),
+            identity(0),
+        )))
+        .unwrap();
+        server.set_authority().unwrap();
+        let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
+        let bob = owned_device(&server, account(0xb0), MemoryStore::new(), 2);
+        alice.activate(&server);
+        bob.activate(&server);
+        let space = block_on(alice.db.insert(
+            "projects",
+            BTreeMap::from([
+                ("name".to_owned(), text("plans")),
+                (
+                    "ownerId".to_owned(),
+                    Value::Uuid(uuid::Uuid::parse_str(&alice.id()).unwrap()),
+                ),
+            ]),
+            Default::default(),
+        ))
+        .unwrap()
+        .row_uuid()
+        .0;
+        pump(&server, &alice.db);
+        add_member(&server, &alice, space, &alice.id());
+        write_note(&server, &alice, space, SECRET).unwrap();
+        pump(&server, &alice.db);
+        add_member(&server, &alice, space, &bob.id());
+        let address = space_address(&bob, space);
+        let mut watch = block_on(bob.client.watch_spaces(&bob.db)).unwrap();
+        watch.use_space(&address);
+        let sync = |watch: &mut jazz_e2ee_client::SpaceWatch| {
+            for _ in 0..2 {
+                drive(&server, &[&bob.db], bob.client.sync_spaces(&bob.db, watch)).unwrap();
+                pump(&server, &bob.db);
+            }
+        };
+        let watched = || bob.client.watched_member_accounts(&address);
+        let successors = ("__e2ee_public_account_successors", alice.id());
+        sync(&mut watch);
+        assert!(watched().contains(&("__e2ee_account_roots", alice.id())));
+        let before = bob.client.delivery_mark_checks();
+        deliver(&server, &bob, &[], space);
+        sync(&mut watch);
+        assert_eq!(bob.client.delivery_mark_checks(), before, "Bob has no key");
+        assert!(!watched().contains(&successors));
+        assert!(watched().contains(&("__e2ee_account_roots", alice.id())));
+        deliver(&server, &alice, &[&bob], space);
+        sync(&mut watch);
+        assert!(bob.client.delivery_mark_checks() > before);
+        assert!(watched().contains(&successors));
+        assert!(!watched().contains(&("__e2ee_account_keys", alice.id())));
+        let dave = owned_device(&server, account(0xd0), MemoryStore::new(), 3);
+        server_member(&server, &alice, space, &dave.id());
+        sync(&mut watch);
+        let daves_keys = ("__e2ee_account_keys", dave.id());
+        assert!(watched().contains(&daves_keys));
+        dave.activate(&server);
+        sync(&mut watch);
+        assert!(!watched().contains(&daves_keys));
+        drive(&server, &[&bob.db], bob.client.rotate(&bob.db, &address)).unwrap_err();
+        let refused = bob.client.delivery_mark_checks();
+        deliver(&server, &bob, &[], space);
+        sync(&mut watch);
+        assert_eq!(bob.client.delivery_mark_checks(), refused);
+        assert!(!watched().contains(&successors));
+        assert!(watched().contains(&("__e2ee_account_roots", alice.id())));
+    });
+}
+
 /// Contract: a member who may not update the space row is refused when
 /// she creates the space: `space-create-refused`, no root and no key
 /// that writes, and, while the client runs, her encrypted writes fail
@@ -2136,6 +2212,48 @@ fn two_holders_racing_write_exactly_one_delivery() {
         );
         assert_eq!(a.unwrap() + b.unwrap(), 1);
         assert_eq!(count(&server, "__e2ee_space_deliveries"), 2);
+    });
+}
+
+/// Once Alice has seen the project tombstone she can still write retained
+/// notes where policy allows, without attempting a rotation of the deleted project.
+#[test]
+fn a_deleted_project_skips_automatic_rotation() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        deliver(&server, &alice, &[&bob], space);
+        block_on(
+            alice
+                .db
+                .delete(MEMBERS, member_row(&server, &bob.id()), Default::default()),
+        )
+        .unwrap();
+        pump(&server, &alice.db);
+        let address = space_address(&alice, space);
+        deliver(&server, &alice, &[], space);
+        assert!(alice.client.needs_rotation(&address).unwrap());
+        block_on(
+            alice
+                .db
+                .delete("projects", jazz::ids::RowUuid(space), Default::default()),
+        )
+        .unwrap();
+        pump(&server, &alice.db);
+        let events = reports_of(&alice);
+        write_note(&server, &alice, space, "retained note").unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .all(|report| !matches!(report, Report::RotationFailed { .. }))
+        );
+        assert!(
+            alice.client.needs_rotation(&address).unwrap(),
+            "restoring the row can resume rotation"
+        );
     });
 }
 
