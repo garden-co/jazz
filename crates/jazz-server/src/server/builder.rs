@@ -187,6 +187,13 @@ impl ServerBuilder {
         // backend needs only that one secret; backend access through it gets
         // the backend secret, or an internal one when none is configured.
         use crate::middleware::workload::{BackendCredential, InternalSecrets, WorkloadVerifier};
+        // The backend signing key derives from a configured admin secret,
+        // which outlives this process; a workload's secrets are random per
+        // process, so that core keeps a generated key instead.
+        let backend_signing_secret = match &auth_config.trusted_workload {
+            Some(_) => None,
+            None => auth_config.admin_secret.clone(),
+        };
         let (backend_credential, workload_secrets) = match (
             auth_config.trusted_workload.clone(),
             auth_config.admin_secret.clone(),
@@ -282,6 +289,7 @@ impl ServerBuilder {
             auth_config,
             backend_credential,
             workload_secrets,
+            backend_signing_secret,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             websocket_admissions: Arc::new(crate::server::routes::WebSocketAdmissionState::new(
                 self.max_websocket_connections_per_user,

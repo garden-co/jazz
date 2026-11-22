@@ -33,6 +33,9 @@ import {
   type BrowserWorkerInitOptions,
   type BrowserWorkerLinkFate,
   BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
+  BROWSER_STORE_HELD_BY_ANOTHER_BUILD,
+  BROWSER_STORE_OPEN_WITH_NEWER_BUILD,
+  NEWER_BUILD_HANDOFF_MS,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
 // Worker failures cross a MessagePort boundary, so retain enough WASM frames to
 // identify the Rust call site before serializing them for the owning tab.
@@ -46,7 +49,7 @@ import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.js";
 import { toError } from "../runtime/util.js";
 import { sameLinkStatus } from "../runtime/sync-status.js";
-import { compareRuntimeAdmission } from "./runtime-admission.js";
+import { compareBuildLineage, compareRuntimeAdmission } from "./runtime-admission.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -115,6 +118,8 @@ type RuntimeContext = {
   runtime: NativeRuntimeAdapter | null;
   initialize: Promise<void>;
   closing: Promise<void> | null;
+  /** Handing the store to a newer build of the app (see `handOffToNewerBuild`). */
+  newerBuildHandoff: Promise<void> | null;
   idleReleaseTimer: ReturnType<typeof setTimeout> | null;
   pageStore: IndexedDbPageStore | null;
   disposePageStoreInvalidation: (() => void) | null;
@@ -1087,14 +1092,39 @@ async function connectTab(
     if (context && !workerTelemetryCompatible(context.options, message.options)) {
       throw new Error("incompatible persistent browser telemetry configuration");
     }
-    const admission = context
+    let admission = context
       ? compareRuntimeAdmission(context.fingerprint, message.fingerprint, message.options.schema)
       : "admit";
+    // A store being handed to a newer build takes no more tabs of the build
+    // it leaves: they're older than the one waiting for it.
+    if (context?.newerBuildHandoff && admission === "admit") {
+      throw new Error(BROWSER_STORE_OPEN_WITH_NEWER_BUILD);
+    }
+    if (context && admission === "held-by-another-build") {
+      const order = compareBuildLineage(context.options.migrations, message.options.migrations);
+      if (order === "older") throw new Error(BROWSER_STORE_OPEN_WITH_NEWER_BUILD);
+      if (order === "newer") {
+        // A newer build takes the store: the older build's tabs let go (or
+        // are closed), and this tab opens it with its own schema.
+        await handOffToNewerBuild(context);
+        assertAdmission();
+        context = contexts.get(key);
+        admission = context
+          ? compareRuntimeAdmission(
+              context.fingerprint,
+              message.fingerprint,
+              message.options.schema,
+            )
+          : "admit";
+      }
+    }
     if (admission !== "admit") {
       throw new Error(
         admission === "held-by-another-sign-in"
           ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
-          : "incompatible persistent browser configuration",
+          : admission === "held-by-another-build"
+            ? BROWSER_STORE_HELD_BY_ANOTHER_BUILD
+            : "incompatible persistent browser configuration",
       );
     }
     // Only an admitted tab keeps an idle context: a refused one must not
@@ -1186,6 +1216,7 @@ function createContext(
     storageFailure: null,
     initialize: Promise.resolve(),
     closing: null,
+    newerBuildHandoff: null,
     idleReleaseTimer: null,
   };
   const initializeContext = contextInitializationTail.then(() => initialize(context));
@@ -1262,6 +1293,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
           // End users see a browser's console: plan and SQL go to debug.
           consoleDetail: "summary",
         },
+        subscriptionBacklogRows: options.subscriptionBacklogRows,
       },
     );
     context.runtime = runtime;
@@ -2306,6 +2338,53 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
   // Web Lock must nevertheless be released so a successor can claim the new
   // physical epoch.
   await releasePhysicalDatabaseOwner(context.options.dbName).catch(() => undefined);
+}
+
+/**
+ * Hand `context`'s store to a newer build of the app: tell its tabs (each
+ * makes its writes durable, closes with `releaseContext` and reloads), wait
+ * for them to go for at most `NEWER_BUILD_HANDOFF_MS`, close the ones that
+ * haven't (a frozen or unresponsive tab: what it hadn't sent is lost), and
+ * release the context. Every newer tab asking meanwhile shares one handoff.
+ */
+/** How long a forced handoff waits for the closed tabs' received frames to be applied. */
+const FORCED_CLOSE_SETTLE_MS = 1_000;
+
+async function handOffToNewerBuild(context: RuntimeContext): Promise<void> {
+  context.newerBuildHandoff ??= (async () => {
+    broadcast(context, { type: "newer-build-waiting" });
+    const deadline = Date.now() + NEWER_BUILD_HANDOFF_MS;
+    const stillOpen = () => contexts.get(context.key) === context;
+    while (
+      stillOpen() &&
+      (context.peers.size > 0 || context.pendingAdmissionTasks > 0) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (!stillOpen()) return;
+    // Apply what the tabs still here already sent (bounded: their own
+    // durability is theirs), as a closing tab's flush would have, then tell
+    // them (those that can hear it) before closing them, a task later: a port
+    // closed in the same task can drop the message. Frames still on their
+    // way are lost, as a crashed tab's are.
+    await Promise.race([
+      Promise.all([...context.peers.values()].map((peer) => peer.pump?.settleInbound())),
+      new Promise((resolve) => setTimeout(resolve, FORCED_CLOSE_SETTLE_MS)),
+    ]).catch(() => undefined);
+    if (!stillOpen()) return;
+    broadcast(context, { type: "closed-for-newer-build" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (!stillOpen()) return;
+    closeContextPeers(context);
+    // Returns early while another tab is mid-admission to this context: it
+    // stays, and the newer tab's admission is refused as held by another
+    // build, so it waits and tries again.
+    await releaseIdleContext(context);
+  })().finally(() => {
+    context.newerBuildHandoff = null;
+  });
+  await context.newerBuildHandoff;
 }
 
 async function releaseIdleContext(context: RuntimeContext): Promise<void> {

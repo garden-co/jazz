@@ -167,7 +167,7 @@ struct PendingPrivateSession {
 struct PrivateRelaySocketSession {
     server_url: String,
     app_id: String,
-    /// What the socket presents: a local-first account's own token, or, for
+    /// What the socket presents: a device account's own token, or, for
     /// a user signed in through the app's backend, the app's own bearer.
     bearer: String,
     /// Set for a user signed in through the app's backend: the session the
@@ -539,6 +539,12 @@ pub enum ForegroundDbCommandRequest {
     /// store that syncs everything again. Writes the server had not confirmed
     /// are dropped, and counted in the answer.
     DeleteStore,
+    /// Ids of `table`'s rows with a write the server has neither accepted
+    /// nor refused yet: the foreground's own and the ones the scope's store
+    /// recovered after a restart (append-only, as above).
+    PendingUploadRows {
+        table: String,
+    },
 }
 
 /// One refusal of a scope's credential by its upstream. Every refusal gets a
@@ -756,6 +762,10 @@ pub enum ForegroundDbCommandResponse {
     /// the server had not confirmed were dropped with the store.
     StoreDeleted {
         pending_uploads: u64,
+    },
+    /// Answer to [`ForegroundDbCommandRequest::PendingUploadRows`], sorted.
+    PendingUploadRows {
+        rows: Vec<[u8; 16]>,
     },
 }
 
@@ -3224,6 +3234,46 @@ mod tests {
     use super::*;
 
     mod host;
+
+    /// jazz#3595: a bearer travels in plaintext only to this machine (an
+    /// emulator's host included); every other host, a LAN address or a
+    /// `.local` name too, needs TLS and is refused with its own status, so
+    /// the app says why instead of a generic lifecycle failure. Pinned so a
+    /// change to the rule is a deliberate one. A unit test: the rule is this
+    /// pure function, and the C-ABI admission test in `account_session`
+    /// covers the refusal reaching the host.
+    #[test]
+    fn plaintext_sessions_reach_only_this_machine() {
+        for allowed in [
+            "http://localhost:4200",
+            "http://LOCALHOST:4200",
+            "http://127.0.0.1:4200",
+            "http://[::1]:4200",
+            "http://10.0.2.2:4200",
+            "http://10.0.3.2:4200",
+            "https://192.168.1.20:4200",
+            "https://dev-machine.local",
+        ] {
+            assert!(
+                validate_private_session_endpoint(allowed).is_ok(),
+                "{allowed}"
+            );
+        }
+        for refused in [
+            "http://192.168.1.20:4200",
+            "http://10.0.0.5:4200",
+            "http://172.16.0.9",
+            "http://[fd00::1]:4200",
+            "http://dev-machine.local:4200",
+            "http://edge.example",
+        ] {
+            assert_eq!(
+                validate_private_session_endpoint(refused).err(),
+                Some(JazzNativeRelayStatus::RemotePlaintextEndpoint),
+                "{refused}"
+            );
+        }
+    }
     mod snapshot_capture_codec;
     mod socket_worker;
 

@@ -979,3 +979,45 @@ async fn an_index_only_deployment_pins_both_bundles_across_a_restart() {
     assert_eq!(pins(&server, bundles).await, vec![Ok(()), Ok(())]);
     server.shutdown().await;
 }
+
+/// Alice deploys into Bob's SQLite file. A real-store name collision rejects
+/// her deployment without installing a runtime; a corrected schema then works.
+/// alice -> deploy notes -> collision -> deploy messages -> reopen
+#[tokio::test]
+async fn first_deployment_checks_the_real_store_and_can_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = rusqlite::Connection::open(dir.path().join("jazz.sqlite")).unwrap();
+    other
+        .execute_batch("CREATE TABLE notes (value TEXT); INSERT INTO notes VALUES ('bob')")
+        .unwrap();
+    let server = builder(Some(dir.path())).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let base = schema(&[]);
+    let (status, _) = http(
+        &router,
+        "POST",
+        "/bundles",
+        request(&base, &[&base], vec![]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(server.state.runtime().is_none());
+    assert_eq!(
+        other
+            .query_row("SELECT value FROM notes", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "bob"
+    );
+    let corrected = SchemaBuilder::new()
+        .table(TableSchema::builder("messages").column("title", ColumnType::Text))
+        .build();
+    deploy_ok(&router, request(&corrected, &[&corrected], vec![])).await;
+    assert!(server.state.runtime().is_some());
+    server.shutdown().await;
+    let reopened = builder(Some(dir.path())).build().await.unwrap();
+    let router = create_router(reopened.state.clone());
+    let response = deploy_ok(&router, request(&corrected, &[&corrected], vec![])).await;
+    assert_eq!(response["changed"], false);
+    assert!(reopened.state.runtime().is_some());
+    reopened.shutdown().await;
+}

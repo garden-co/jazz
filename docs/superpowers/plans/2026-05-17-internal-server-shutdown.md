@@ -1270,7 +1270,7 @@ Expected: PASS.
 Run:
 
 ```bash
-pnpm exec lefthook run pre-commit
+git hook run pre-commit
 ```
 
 Expected: PASS or only documented skips for unrelated file types.

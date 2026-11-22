@@ -234,14 +234,16 @@ impl Net {
                     ("show".to_owned(), Value::String("s".to_owned())),
                     ("holder".to_owned(), Value::String(String::new())),
                 ]);
-                self.core
-                    .seed_settled_mergeable_for_bootstrap(
-                        "seats",
-                        row,
-                        AuthorSubject::SYSTEM,
-                        cells,
-                    )
-                    .unwrap();
+                jazz::db::block_on(self.core.insert(
+                    "seats",
+                    cells,
+                    jazz::db::InsertOptions {
+                        row_id: Some(row),
+                        identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                        ..Default::default()
+                    },
+                ))
+                .unwrap();
                 row
             })
             .collect()

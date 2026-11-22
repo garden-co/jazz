@@ -123,35 +123,41 @@ fn setup_reading(replicas: u8, query: Query) -> (Db, Vec<Db>, Vec<Box<dyn std::a
     set_follow_memo_oracle_for_test(true);
     let server = open(0);
     for (n, name) in [(1, "ada"), (2, "bob"), (3, "cy")] {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "users",
-                id(1, n),
-                AuthorSubject::SYSTEM,
-                cells(&[("name", text(name))]),
-            )
-            .unwrap();
-    }
-    server
-        .seed_settled_mergeable_for_bootstrap(
+        jazz::db::block_on(server.insert(
             "users",
-            id(1, 4),
-            AuthorSubject::SYSTEM,
-            cells(&[("name", text("dee")), ("referrer", Value::Uuid(id(1, 3).0))]),
-        )
+            cells(&[("name", text(name))]),
+            jazz::db::InsertOptions {
+                row_id: Some(id(1, n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
         .unwrap();
+    }
+    jazz::db::block_on(server.insert(
+        "users",
+        cells(&[("name", text("dee")), ("referrer", Value::Uuid(id(1, 3).0))]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(1, 4)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     for (n, sender) in [(1, 1), (2, 2)] {
-        server
-            .seed_settled_mergeable_for_bootstrap(
-                "messages",
-                id(2, n),
-                AuthorSubject::SYSTEM,
-                cells(&[
-                    ("senderId", Value::Uuid(id(1, sender).0)),
-                    ("body", text(&format!("m{n}"))),
-                ]),
-            )
-            .unwrap();
+        jazz::db::block_on(server.insert(
+            "messages",
+            cells(&[
+                ("senderId", Value::Uuid(id(1, sender).0)),
+                ("body", text(&format!("m{n}"))),
+            ]),
+            jazz::db::InsertOptions {
+                row_id: Some(id(2, n)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
     }
     let connect = |node: u8| {
         let client = open(node);

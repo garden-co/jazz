@@ -260,7 +260,8 @@ fn one_commit_may_hold_the_same_large_value_twice() {
     let alice = open(1, user(1));
     connect(&server, &alice, user(1));
     let body = text(41, LARGE);
-    block_on(alice.transaction(async |tx| {
+    block_on(async {
+        let tx = alice.mergeable_tx().await?;
         for n in [1, 2] {
             tx.insert(
                 "docs",
@@ -275,8 +276,8 @@ fn one_commit_may_hold_the_same_large_value_twice() {
             )
             .await?;
         }
-        Ok(())
-    }))
+        tx.commit().await
+    })
     .unwrap();
     pump(&server, &[&alice]);
     for n in [1, 2] {
@@ -1195,10 +1196,15 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
     // The deferred pulls are answered over the next ticks: every span's
     // nodes arrive.
     let mut all: BTreeSet<[u8; 32]> = hashes.into_iter().collect();
+    assert_eq!(server.next_chunk_pull_tick_ms(), Some(0));
     for _ in 0..8 {
+        if server.next_chunk_pull_tick_ms().is_none() {
+            break;
+        }
         block_on(server.tick()).unwrap();
         all.extend(answered(&down).1);
     }
+    assert_eq!(server.next_chunk_pull_tick_ms(), None);
     let mut whole = BTreeSet::new();
     up.borrow_mut().push_back(SyncMessage::ChunkRequests {
         pulls: vec![pull(0)],

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { TRUSTED_CACHE_GUARD } from "../release-publish/producer-run.mjs";
 import {
   inspectorRunSource,
   inspectorBranchRefPath,
@@ -16,9 +17,9 @@ function run(overrides = {}) {
     status: "completed",
     conclusion: "success",
     head_repository: { full_name: repository },
-    path: ".github/workflows/preview-jazz-tools-alpha-release.yml",
-    event: "workflow_dispatch",
-    head_branch: "changeset-release/release",
+    path: ".github/workflows/release-artifacts.yml",
+    event: "push",
+    head_branch: "release",
     head_sha: artifactSha,
     ...overrides,
   };
@@ -36,15 +37,14 @@ function handoff(overrides = {}) {
   };
 }
 
-test("accepts the successful release-preview dispatch metadata shape and identical merge tree", () => {
-  // Same caller/event/ref shape as release recovery run 35027952996, with synthetic identities.
+test("accepts a release-artifacts run on release with an identical tree", () => {
   assert.equal(verifyInspectorHandoff(handoff()), artifactSha);
 });
 for (const [path, event, head_branch] of [
-  ["preview-build.yml", "pull_request", "feature/synthetic"],
-  ["preview-jazz-tools-alpha-release.yml", "push", "changeset-release/release"],
-  ["publish-jazz-tools-alpha.yml", "push", "release"],
-  ["publish-jazz-tools-alpha.yml", "workflow_dispatch", "release"],
+  ["release-artifacts.yml", "workflow_dispatch", "release"],
+  ["release-artifacts.yml", "push", "release"],
+  ["release-artifacts.yml", "workflow_dispatch", "changeset-release/release"],
+  ["release-artifacts.yml", "push", "changeset-release/release"],
 ]) {
   test(`accepts approved caller ${path} on ${event}`, () => {
     assert.equal(
@@ -60,10 +60,26 @@ for (const [name, changes] of [
   ["another successful same-repository workflow", { path: ".github/workflows/unrelated.yml" }],
   ["unapproved reusable builder as caller", { path: ".github/workflows/build-jazz-packages.yml" }],
   [
-    "preview workflow on wrong event",
+    "a pull request's preview build (PR-controlled cache scope, unreviewed code)",
+    {
+      path: ".github/workflows/preview-build.yml",
+      event: "pull_request",
+      head_branch: "feature/synthetic",
+    },
+  ],
+  [
+    "preview workflow on another event",
     { path: ".github/workflows/preview-build.yml", event: "workflow_dispatch" },
   ],
-  ["release preview on arbitrary branch", { head_branch: "feature/arbitrary" }],
+  [
+    "release artifacts from a pull request",
+    {
+      path: ".github/workflows/release-artifacts.yml",
+      event: "pull_request",
+      head_branch: "release",
+    },
+  ],
+  ["release artifacts on an arbitrary branch", { head_branch: "feature/arbitrary" }],
   [
     "publisher on arbitrary branch",
     { path: ".github/workflows/publish-jazz-tools-alpha.yml", head_branch: "feature/arbitrary" },
@@ -75,6 +91,38 @@ for (const [name, changes] of [
       head_branch: "release",
       event: "pull_request_target",
     },
+  ],
+  [
+    "release artifacts pushed on another branch",
+    { path: ".github/workflows/release-artifacts.yml", event: "push", head_branch: "main" },
+  ],
+  [
+    "release preview dispatched on the Version Packages branch (cache scope)",
+    {
+      path: ".github/workflows/preview-jazz-tools-alpha-release.yml",
+      event: "workflow_dispatch",
+      head_branch: "changeset-release/release",
+    },
+  ],
+  [
+    "release preview pushed on the Version Packages branch (cache scope)",
+    {
+      path: ".github/workflows/preview-jazz-tools-alpha-release.yml",
+      event: "push",
+      head_branch: "changeset-release/release",
+    },
+  ],
+  [
+    "the retired publisher, on release",
+    {
+      path: ".github/workflows/publish-jazz-tools-alpha.yml",
+      event: "push",
+      head_branch: "release",
+    },
+  ],
+  [
+    "release artifacts dispatched on main",
+    { path: ".github/workflows/release-artifacts.yml", head_branch: "main" },
   ],
   ["unsuccessful producer", { conclusion: "failure" }],
   ["unfinished producer", { status: "in_progress" }],
@@ -168,4 +216,77 @@ test("rejects an unapproved producer before querying commits or branch", () => {
     /unapproved producer/,
   );
   assert.equal(requests, 1);
+});
+
+test("a changeset-release release-artifacts run needs the guard in the deployed tree", () => {
+  const vpRun = run({ event: "workflow_dispatch", head_branch: "changeset-release/release" });
+  const guardedWorkflow = `name: x\nenv:\n  ${TRUSTED_CACHE_GUARD}\njobs: {}\n`;
+  assert.equal(
+    verifyInspectorHandoff(
+      handoff({
+        run: vpRun,
+        deploymentReleaseArtifactsWorkflow: guardedWorkflow,
+        deploymentHasTrustedCacheTest: true,
+      }),
+    ),
+    artifactSha,
+  );
+  // The guard without its contract test in the deployed tree: refused.
+  assert.throws(
+    () =>
+      verifyInspectorHandoff(
+        handoff({ run: vpRun, deploymentReleaseArtifactsWorkflow: guardedWorkflow }),
+      ),
+    /contract test/,
+  );
+  assert.throws(
+    () =>
+      verifyInspectorHandoff(
+        handoff({ run: vpRun, deploymentReleaseArtifactsWorkflow: "env:\n  X: y\n" }),
+      ),
+    /trusted-cache guard/,
+  );
+  // A release run needs no guard.
+  assert.equal(verifyInspectorHandoff(handoff()), artifactSha);
+});
+
+test("GitHub orchestration reads release-artifacts.yml at the deployed commit for a changeset-release run", () => {
+  const vpRun = run({ event: "workflow_dispatch", head_branch: "changeset-release/release" });
+  for (const [workflow, ok] of [
+    [`env:\n  ${TRUSTED_CACHE_GUARD}\n`, true],
+    ["env:\n  X: y\n", false],
+  ]) {
+    const paths = [];
+    const responses = [
+      vpRun,
+      handoff().artifactCommit,
+      handoff().deploymentCommit,
+      handoff().branchRef,
+      { content: Buffer.from(workflow).toString("base64"), encoding: "base64" },
+      { content: "", encoding: "base64" },
+    ];
+    const verify = () =>
+      verifyInspectorRunFromGitHub(
+        {
+          GITHUB_REPOSITORY: repository,
+          SOURCE_BRANCH: "release",
+          SOURCE_SHA: deploySha,
+          ARTIFACT_RUN_ID: "123",
+        },
+        (path) => {
+          paths.push(path);
+          return responses.shift();
+        },
+      );
+    if (ok) assert.equal(verify(), artifactSha);
+    else assert.throws(verify, /trusted-cache guard/);
+    assert.equal(
+      paths[4],
+      `repos/${repository}/contents/.github/workflows/release-artifacts.yml?ref=${deploySha}`,
+    );
+    assert.equal(
+      paths[5],
+      `repos/${repository}/contents/dev/gates/test/release-artifacts-trusted-caches.test.mjs?ref=${deploySha}`,
+    );
+  }
 });

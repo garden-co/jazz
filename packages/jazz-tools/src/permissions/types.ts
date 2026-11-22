@@ -25,6 +25,7 @@ declare const oldBrand: unique symbol;
 declare const policyBrand: unique symbol;
 declare const relBrand: unique symbol;
 declare const opBrand: unique symbol;
+declare const inheritsBrand: unique symbol;
 
 /**
  * A value a condition can compare with: a column of a row, a session value
@@ -103,6 +104,29 @@ export type Uuid = Value<"uuid">;
 export interface Policy<X = never> {
   readonly [policyBrand]: { readonly conditions: X };
 }
+
+/**
+ * What `allowedTo.<op>(…)` gives, and `anyOf` / `allOf` of it: a policy a
+ * rule takes, but neither one inside an `exists` (its conditions, a hop's,
+ * a relation's `.where`) nor one under `not`, where inheritance is not
+ * supported yet.
+ */
+export interface Inherits {
+  readonly [inheritsBrand]: true;
+}
+
+/** A policy an `exists` takes in its conditions: any but one inheriting with `allowedTo`. */
+export type NestedPolicy<X = any> = Policy<X> & { readonly [inheritsBrand]?: never };
+
+/**
+ * `Inherits` when any of the inputs `I` (a union) inherits, else `unknown`.
+ * An `any` input (a helper's untyped value) counts as not inheriting.
+ */
+export type InheritsIn<I> = 0 extends 1 & I
+  ? unknown
+  : [Extract<I, Inherits>] extends [never]
+    ? unknown
+    : Inherits;
 
 /** A comparison helper's value for a condition object: `{ joinCode: ne(null) }`. */
 export interface CompareOp<X = unknown> {
@@ -429,6 +453,9 @@ export interface ClaimsMarker<C> {
   readonly __claims?: C;
 }
 
+/** The values of `session.authMode`. */
+export type SessionAuthMode = "external" | "device-account" | "anonymous";
+
 /** The session's values. */
 export interface Session<Claims = AnyClaims> {
   /**
@@ -441,8 +468,12 @@ export interface Session<Claims = AnyClaims> {
     readonly subject: ValueHandle<string, any>;
     readonly issuer: ValueHandle<string, any>;
   };
-  /** How the session authenticated. */
-  readonly authMode: ValueHandle<string, any>;
+  /**
+   * How the session authenticated: `"external"`, `"device-account"` or
+   * `"anonymous"`. Device accounts were `"local-first"` before 2026-11;
+   * comparing with that is refused.
+   */
+  readonly authMode: ValueHandle<SessionAuthMode, any>;
   /** The provider's claims, `session.claims.<path>`. */
   readonly claims: Claims;
 }

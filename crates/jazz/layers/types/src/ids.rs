@@ -543,8 +543,8 @@ impl AuthorSubject {
     pub const SYSTEM_SUBJECT: &'static str = "system";
     /// Portable canonical representation of the internal authority identity.
     pub const SYSTEM_CANONICAL: &'static str = r#"["urn:jazz:system","system"]"#;
-    /// Reserved issuer for self-signed local-first JWTs.
-    pub const LOCAL_FIRST_ISSUER: &'static str = "urn:jazz:local-first";
+    /// Reserved issuer for self-signed device-account JWTs (value unchanged).
+    pub const DEVICE_ACCOUNT_ISSUER: &'static str = "urn:jazz:local-first";
     /// Reserved issuer for process-local static bearer sessions.
     pub const STATIC_BEARER_ISSUER: &'static str = "urn:jazz:static-bearer";
     /// Reserved issuer for sessions without an external credential.
@@ -571,7 +571,7 @@ impl AuthorSubject {
         }
         if !matches!(
             issuer,
-            Self::LOCAL_FIRST_ISSUER | Self::STATIC_BEARER_ISSUER | Self::ANONYMOUS_ISSUER
+            Self::DEVICE_ACCOUNT_ISSUER | Self::STATIC_BEARER_ISSUER | Self::ANONYMOUS_ISSUER
         ) {
             return Err(AuthorSubjectError::ReservedIssuer(issuer.to_owned()));
         }
@@ -595,7 +595,7 @@ impl AuthorSubject {
         matches!(
             issuer,
             Self::SYSTEM_ISSUER
-                | Self::LOCAL_FIRST_ISSUER
+                | Self::DEVICE_ACCOUNT_ISSUER
                 | Self::STATIC_BEARER_ISSUER
                 | Self::ANONYMOUS_ISSUER
         )
@@ -1235,7 +1235,7 @@ mod tests {
     fn row_author_round_trips_admitted_local_first_identity() {
         let account =
             crate::account_registry::AccountId(uuid::uuid!("22222222-3333-4444-8555-666666666666"));
-        let session = AuthorSubject::reserved(AuthorSubject::LOCAL_FIRST_ISSUER, "key-subject")
+        let session = AuthorSubject::reserved(AuthorSubject::DEVICE_ACCOUNT_ISSUER, "key-subject")
             .unwrap()
             .with_account(account);
         let author = RowAuthor::from_session(
@@ -1312,7 +1312,7 @@ mod tests {
         );
         for issuer in [
             AuthorSubject::SYSTEM_ISSUER,
-            AuthorSubject::LOCAL_FIRST_ISSUER,
+            AuthorSubject::DEVICE_ACCOUNT_ISSUER,
             AuthorSubject::STATIC_BEARER_ISSUER,
             AuthorSubject::ANONYMOUS_ISSUER,
         ] {
@@ -1335,7 +1335,7 @@ mod tests {
 
         for issuer in [
             AuthorSubject::SYSTEM_ISSUER,
-            AuthorSubject::LOCAL_FIRST_ISSUER,
+            AuthorSubject::DEVICE_ACCOUNT_ISSUER,
             AuthorSubject::STATIC_BEARER_ISSUER,
             AuthorSubject::ANONYMOUS_ISSUER,
         ] {

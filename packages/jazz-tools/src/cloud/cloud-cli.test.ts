@@ -646,19 +646,43 @@ describe("jazz-tools apps", () => {
     expect(cloud.requests.some((request) => request.method === "POST")).toBe(false);
   });
 
-  it("changes the local-first auth setting", async () => {
-    cloud.apiResponses.set("PATCH /api/v1/apps/app-1/auth", {
-      status: 202,
-      body: { appId: "app-1", desiredVersion: 5, auth: { allowLocalFirstAuth: false } },
-    });
+  it.each(["--allow-device-accounts", "--allow-local-first-auth"])(
+    "changes whether the app allows device accounts with %s",
+    async (name) => {
+      cloud.apiResponses.set("PATCH /api/v1/apps/app-1/auth", {
+        status: 202,
+        body: { appId: "app-1", desiredVersion: 5, auth: { allowLocalFirstAuth: false } },
+      });
+      const run = io();
+      const code = await runCloudCommand(
+        ["apps", "auth", "set", "app-1", name, "false", "--json"],
+        run.io,
+      );
+      expect(code).toBe(0);
+      const patch = cloud.requests.find((request) => request.method === "PATCH");
+      expect(JSON.parse(patch!.body)).toEqual({ allowLocalFirstAuth: false });
+    },
+  );
+
+  it("refuses both the device accounts flag and its old name at once", async () => {
     const run = io();
     const code = await runCloudCommand(
-      ["apps", "auth", "set", "app-1", "--allow-local-first-auth", "false", "--json"],
+      [
+        "apps",
+        "auth",
+        "set",
+        "app-1",
+        "--allow-device-accounts",
+        "true",
+        "--allow-local-first-auth",
+        "false",
+        "--json",
+      ],
       run.io,
     );
-    expect(code).toBe(0);
-    const patch = cloud.requests.find((request) => request.method === "PATCH");
-    expect(JSON.parse(patch!.body)).toEqual({ allowLocalFirstAuth: false });
+    expect(code).toBe(2);
+    expect(run.json()).toMatchObject({ error: "usage" });
+    expect(cloud.requests.some((request) => request.method === "PATCH")).toBe(false);
   });
 
   it.each([

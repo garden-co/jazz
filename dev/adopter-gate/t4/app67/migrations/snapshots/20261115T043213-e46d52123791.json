@@ -1,0 +1,298 @@
+{
+  "better_auth_user": {
+    "columns": [
+      {
+        "name": "name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "email",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "emailVerified",
+        "column_type": {
+          "type": "Boolean"
+        },
+        "nullable": false
+      },
+      {
+        "name": "image",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "createdAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updatedAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ],
+    "relations": {}
+  },
+  "better_auth_session": {
+    "columns": [
+      {
+        "name": "expiresAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "token",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "createdAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updatedAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "ipAddress",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "userAgent",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "userId",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "better_auth_user"
+      }
+    ],
+    "relations": {
+      "userIdRelation": {
+        "kind": "forward",
+        "table": "better_auth_user",
+        "column": "userId"
+      }
+    }
+  },
+  "better_auth_account": {
+    "columns": [
+      {
+        "name": "accountId",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "providerId",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "userId",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "better_auth_user"
+      },
+      {
+        "name": "accessToken",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "refreshToken",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "idToken",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "accessTokenExpiresAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      },
+      {
+        "name": "refreshTokenExpiresAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      },
+      {
+        "name": "scope",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "password",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
+        "name": "createdAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updatedAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ],
+    "relations": {
+      "userIdRelation": {
+        "kind": "forward",
+        "table": "better_auth_user",
+        "column": "userId"
+      }
+    }
+  },
+  "better_auth_verification": {
+    "columns": [
+      {
+        "name": "identifier",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "value",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "expiresAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "createdAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      },
+      {
+        "name": "updatedAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ],
+    "relations": {}
+  },
+  "team_notes": {
+    "columns": [
+      {
+        "name": "team",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "author_name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "text",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "sent_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ],
+    "relations": {}
+  },
+  "private_notes": {
+    "columns": [
+      {
+        "name": "text",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "sent_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ],
+    "relations": {}
+  }
+}

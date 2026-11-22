@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { testApp } from "../testing/test-app.js";
 import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
-import { createAccountManager } from "../accounts/create-account-manager.js";
+import { createTestAccountManager } from "./testing/account-fixtures.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { RuntimeClientContext } from "./runtime-source.js";
 import type { JazzClient } from "./client.js";
@@ -145,7 +145,7 @@ it.each(["selection", "logout"])(
     await db.shutdown();
     const appId = `account-admission-${crypto.randomUUID()}`;
     let saved: string | null = null;
-    const accounts = await createAccountManager({
+    const accounts = await createTestAccountManager({
       appId,
       serverUrl: "http://127.0.0.1:1",
       store: {

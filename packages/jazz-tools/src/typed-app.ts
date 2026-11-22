@@ -29,7 +29,9 @@ export type ColumnKind =
   | "bytes"
   | "json"
   | "enum"
-  | "array";
+  | "array"
+  | "vector"
+  | "point";
 
 /** One stored column in the generated type map. */
 export interface ColumnTypes {
@@ -208,7 +210,12 @@ type WhereInputForColumn<C extends ColumnTypes> = C["kind"] extends "string"
                         C["nullable"],
                         { contains?: ArrayElement<C["value"]> } & Membership<C["value"]>
                       >
-                    : never;
+                    : // Whole values, bit for bit (SPEC 6.1.1); nearness is an index search.
+                      C["kind"] extends "vector"
+                      ? WhereEqNe<Float32Array, C["nullable"], Membership<Float32Array | number[]>>
+                      : C["kind"] extends "point"
+                        ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
+                        : never;
 
 export type TableWhereInput<
   TSchema extends SchemaLike,
@@ -222,20 +229,18 @@ export type TableWhereInput<
     >;
   } & {
     [TColumn in ProvenanceMagicColumn]?: ProvenanceMagicColumns[TColumn] extends Date
-      ?
-          | Date
-          | number
-          | {
-              eq?: Date | number;
-              ne?: Date | number;
-              gt?: Date | number;
-              gte?: Date | number;
-              lt?: Date | number;
-              lte?: Date | number;
-            }
-      :
-          | ProvenanceMagicColumns[TColumn]
-          | { eq?: ProvenanceMagicColumns[TColumn]; ne?: ProvenanceMagicColumns[TColumn] };
+      ? | Date
+        | number
+        | {
+            eq?: Date | number;
+            ne?: Date | number;
+            gt?: Date | number;
+            gte?: Date | number;
+            lt?: Date | number;
+            lte?: Date | number;
+          }
+      : | ProvenanceMagicColumns[TColumn]
+        | { eq?: ProvenanceMagicColumns[TColumn]; ne?: ProvenanceMagicColumns[TColumn] };
   }
 >;
 
@@ -1526,7 +1531,7 @@ export type ComputedImpl<TTypes extends SchemaLike> = {
  * Null passes through: Jazz never calls a transform with null, so a null
  * branch is never reached. Either may still return null, so an alpha.64
  * transform on an optional column, which handled null itself and which
- * `jazz-tools upgrade` moves here unchanged, keeps typechecking.
+ * alpha.66's `jazz-tools upgrade` moved here unchanged, keeps typechecking.
  */
 /**
  * Whether every column stored through the transform `TName` is nullable: only

@@ -100,26 +100,49 @@ fn check_meters(meters: f64) -> Result<f64, GeoError> {
     }
 }
 
-/// Grid step of a value `offset` degrees from the axis origin, out of
-/// `span`. Monotonic in `offset`, so a value inside a range of degrees never
-/// lands outside that range's steps.
-fn step(offset: f64, span: f64) -> u32 {
-    let s = (offset / span * STEPS).floor();
-    if s >= MAX_STEP as f64 {
+/// Grid step of `value` on an axis starting at `origin` and `span` degrees
+/// long: `floor((value - origin) / span · 2³¹)` evaluated **exactly** (as
+/// over the reals, not as a sequence of rounded operations), clamped to
+/// `[0, 2³¹ − 1]`. Exactness makes the cell a function of the coordinate
+/// alone, independent of evaluation order, and monotonic, so a value inside
+/// a range of degrees never lands outside that range's steps.
+///
+/// `value - origin` is split exactly into `x + e` (TwoSum); a candidate
+/// `q` from rounded division can only be one too high; it is corrected by
+/// the sign of the exact remainder `(x + e)·2³¹ − q·span`, whose parts are each exact (`x·2³¹`
+/// and `e·2³¹` scale by a power of two; `q·span < 2⁴⁰` is an integer;
+/// `x·2³¹ − q·span` is exact by Sterbenz as `q` is within one of the
+/// quotient), and the sign of a sum of two doubles survives rounding.
+fn step(value: f64, origin: f64, span: f64) -> u32 {
+    let x = value - origin;
+    let back = x - value;
+    let e = (value - (x - back)) + (-origin - back);
+    let (t, et) = (x * STEPS, e * STEPS);
+    let mut q = (t / span).floor().max(0.0);
+    let r = t - q * span;
+    if r + et < 0.0 {
+        q -= 1.0;
+    }
+    // Never too low: if the exact quotient reached `q + 1`, then
+    // `t ≥ (q + 1)·span` (as `|et| ≤ ulp(t)/2` cannot carry `t` past the
+    // representable `(q + 1)·span`), so the rounded `t / span` would already
+    // be at least `q + 1`, rounding being monotonic.
+    debug_assert!((r - span) + et < 0.0, "step quotient too low for {value}");
+    if q >= MAX_STEP as f64 {
         MAX_STEP
-    } else if s <= 0.0 {
+    } else if q <= 0.0 {
         0
     } else {
-        s as u32
+        q as u32
     }
 }
 
 fn step_lng(lng: f64) -> u32 {
-    step(lng + 180.0, 360.0)
+    step(lng, -180.0, 360.0)
 }
 
 fn step_lat(lat: f64) -> u32 {
-    step(lat + 90.0, 180.0)
+    step(lat, -90.0, 180.0)
 }
 
 /// The cell of a point (encoding [`ENCODING`]): a non-negative 62-bit code.
@@ -217,7 +240,8 @@ fn radius_rects(lat: f64, lng: f64, meters: f64) -> Vec<Rect> {
     let delta = meters / EARTH_RADIUS_M; // radians, at most 0.157
     let delta_deg = delta * RAD_TO_DEG;
     // Covers the rounding of every step here and of the stored vectors
-    // (about 1e-15 rad), with a wide margin; 1e-9° is about 0.1 mm.
+    // (about 1e-15 rad), with a wide margin; 1e-9° is about 0.1 mm. Without
+    // it, `points_admitted_by_rounding_are_in_the_cover` fails.
     let pad = 1e-9 + delta_deg * 1e-9;
     let south = lat - delta_deg - pad;
     let north = lat + delta_deg + pad;
@@ -315,21 +339,23 @@ struct Cap {
     lat: f64,
     lng: f64,
     cos_lat: f64,
-    /// `hav` of the padded angular radius, with slack for rounding.
+    /// `hav` of the padded angular radius.
     limit: f64,
 }
 
 impl Cap {
     fn new(lat: f64, lng: f64, meters: f64) -> Cap {
         let delta_deg = meters / EARTH_RADIUS_M * RAD_TO_DEG;
-        // The same padding as the bounding box, then slack for the rounding
-        // of the bound itself (a few ulps of values at most 1).
+        // The same padding as the bounding box. It also absorbs the rounding
+        // of the bound itself (a few ulps of values at most 1): 1e-9° adds at
+        // least 7e-23 to `hav`, far above that. Removing it fails
+        // `points_admitted_by_rounding_are_in_the_cover`.
         let padded = (delta_deg + 1e-9 + delta_deg * 1e-9).min(180.0);
         Cap {
             lat,
             lng,
             cos_lat: trig::sin_cos_deg(lat).1,
-            limit: hav(padded) * (1.0 + 1e-9) + 1e-30,
+            limit: hav(padded),
         }
     }
 

@@ -5,3 +5,6 @@ dist
 .jazz
 test-results
 playwright-report
+.wrangler/
+.wrangler-dist/
+.dev.vars

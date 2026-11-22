@@ -96,9 +96,10 @@ describe("point columns", () => {
     expect(() =>
       db!.insert(app.places, { name: "nan", location: [Number.NaN, 0], pickup: null }),
     ).toThrow(/longitude/);
-    expect(() => db!.insert(app.places, { name: "short", location: [1], pickup: null })).toThrow(
-      /two numbers/,
-    );
+    expect(() =>
+      // @ts-expect-error a point is [lng, lat]: the type refuses one coordinate too
+      db!.insert(app.places, { name: "short", location: [1], pickup: null }),
+    ).toThrow(/two numbers/);
     expect(await db.all(app.places)).toEqual([]);
   });
 });

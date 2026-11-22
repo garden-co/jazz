@@ -2,12 +2,12 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
-import { JazzClientProvider, useSession } from "./provider.js";
+import { JazzClientProvider } from "./provider.js";
 import { useJazzSession } from "./session.js";
 import { makeFakeClient } from "./test-utils.js";
 import { SessionContext } from "./session-context.js";
 
-function clientWithSession(authMode: "external" | "local-first" | "anonymous") {
+function clientWithSession(authMode: "external" | "device-account" | "anonymous") {
   const client = makeFakeClient({ authMode, userId: "u-1", claims: { role: "admin" } });
   return Object.assign(client, { session: client.db.getAuthState().session });
 }
@@ -34,7 +34,7 @@ describe("useJazzSession under <JazzClientProvider client>", () => {
 
   it("names a device account by kind and has no user for an anonymous reader", () => {
     const device = renderHook(() => useJazzSession(), {
-      wrapper: wrapperFor(clientWithSession("local-first")),
+      wrapper: wrapperFor(clientWithSession("device-account")),
     });
     expect(device.result.current.user?.kind).toBe("device");
     const anonymous = renderHook(() => useJazzSession(), {
@@ -82,19 +82,5 @@ describe("useJazzSession under <JazzClientProvider client>", () => {
     expect(() => renderHook(() => useJazzSession())).toThrow(
       /within <JazzProvider> or <JazzClientProvider>/,
     );
-  });
-});
-
-describe("useSession (deprecated)", () => {
-  it("still returns the permission session, and warns once naming useJazzSession().user", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const client = clientWithSession("external");
-    const { result, rerender } = renderHook(() => useSession(), { wrapper: wrapperFor(client) });
-    rerender();
-    expect(result.current?.user).toBe("00000000-0000-4000-8000-000000000002");
-    const calls = warn.mock.calls.filter((call) => String(call[0]).includes("useSession()"));
-    expect(calls).toHaveLength(1);
-    expect(String(calls[0]![0])).toContain("useJazzSession().user");
-    warn.mockRestore();
   });
 });

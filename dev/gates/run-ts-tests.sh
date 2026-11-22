@@ -3,7 +3,82 @@
 # The test-ts runner has 16 CPUs. Turbo gets at most three package test tasks.
 # Jazz Tools retains its eight-worker Node cap; its separate Chromium lane
 # uses four file workers. All suites reuse the admitted artifact build.
+#
+# Usage: run-ts-tests.sh [--shard NAME]
+#        run-ts-tests.sh --describe-shard NAME
+#
+# Without --shard it runs every suite (the `all` shard). CI's test-ts matrix
+# runs the named shards instead, one per job; together they run exactly the
+# suites of `all` (dev/gates/test/ts-shards.test.mjs proves the union). Each
+# shard keeps every guarantee below: the producer receipt, the sealed dists and
+# the two-lane log handling. --describe-shard prints a shard's two lane
+# commands and exits, for that contract.
 set -u
+
+ts_shards="all tools-node-1 tools-node-2 tools-other browser-1 browser-2 packages examples"
+# Not a merge-group partition: build-jazz-packages.yml and nightly-tests.yml
+# run jazz-tools' Durable Object suite alone, on the -Oz host that ships.
+# Merge groups run the same suite inside tools-other.
+release_ts_shards="durable-objects"
+all_node_tests_command="pnpm test --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!jazz-rn --concurrency=3"
+all_browser_tests_command="pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser"
+
+# Two lanes per shard, run concurrently as the node and browser suites always
+# have been; ":" is an empty lane. jazz-tools' `test` is `test:without-node`
+# then `test:node`, and its `test:browser` is `test:browser:vitest`, then
+# `test:browser:storage-quota`, then `test:browser:transport`.
+shard_lanes() {
+  case "$1" in
+    all)
+      shard_node_command=${all_node_tests_command}
+      shard_browser_command=${all_browser_tests_command} ;;
+    tools-node-1)
+      shard_node_command="pnpm --filter jazz-tools run test:node --shard=1/2"
+      shard_browser_command=":" ;;
+    tools-node-2)
+      shard_node_command="pnpm --filter jazz-tools run test:node --shard=2/2"
+      shard_browser_command=":" ;;
+    tools-other)
+      shard_node_command="pnpm --filter jazz-tools run test:without-node"
+      shard_browser_command=":" ;;
+    # The other packages' browser suites share browser-1 with the first half
+    # of jazz-tools' files; its storage-quota and transport receipts follow
+    # the second half.
+    browser-1)
+      shard_node_command="pnpm --parallel --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser"
+      shard_browser_command="pnpm --filter jazz-tools run test:browser:vitest --shard=1/2" ;;
+    browser-2)
+      shard_node_command=":"
+      shard_browser_command="pnpm --filter jazz-tools run test:browser:vitest --shard=2/2 && pnpm --filter jazz-tools run test:browser:storage-quota && pnpm --filter jazz-tools run test:browser:transport" ;;
+    packages)
+      shard_node_command="${all_node_tests_command} --filter=!jazz-tools"
+      shard_browser_command=":" ;;
+    # The examples partition's own commands (typecheck, bindings, browser
+    # corpus) follow this runner; the shard only admits the prepared surface.
+    examples)
+      shard_node_command=":"
+      shard_browser_command=":" ;;
+    durable-objects)
+      shard_node_command="pnpm --filter jazz-tools run test:durable-objects"
+      shard_browser_command=":" ;;
+    *)
+      echo "run-ts-tests: unknown shard '$1' (expected one of: ${ts_shards} ${release_ts_shards})" >&2
+      return 1 ;;
+  esac
+}
+
+shard=all
+if [[ $# -eq 2 && "$1" == "--describe-shard" ]]; then
+  shard_lanes "$2" || exit 2
+  printf '%s\n%s\n' "${shard_node_command}" "${shard_browser_command}"
+  exit 0
+elif [[ $# -eq 2 && "$1" == "--shard" ]]; then
+  shard=$2
+elif [[ $# -ne 0 ]]; then
+  echo "usage: run-ts-tests.sh [--shard NAME] | --describe-shard NAME" >&2
+  exit 2
+fi
+shard_lanes "${shard}" || exit 2
 
 # macOS exposes its temporary directory through the `/var` symlink. Tests that
 # deliberately reject symlinked migration paths should receive the canonical
@@ -50,8 +125,9 @@ fi
 # Every workspace package's `test` target belongs to this Node/Turbo partition.
 # Browser-only receipts keep their topology out of that target and run through
 # `test:browser` below, where their Vitest projects own the Jazz server commands.
-node_tests_command=${JAZZ_NODE_TEST_COMMAND:-"pnpm test --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!jazz-rn --concurrency=3"}
-browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-"pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser"}
+node_tests_command=${JAZZ_NODE_TEST_COMMAND:-${shard_node_command}}
+browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-${shard_browser_command}}
+echo "TypeScript test shard: ${shard}"
 node_tests_pid=""
 browser_tests_pid=""
 log_monitor_pid=""

@@ -1,9 +1,5 @@
 import type { PublicSession } from "../runtime/context.js";
-import {
-  useDb as useCoreDb,
-  useJazzClient as useCoreJazzClient,
-  useSession,
-} from "../react-core/provider.js";
+import { useDb as useCoreDb, useJazzClient as useCoreJazzClient } from "../react-core/provider.js";
 import {
   JazzSessionProvider,
   type JazzSessionSourceProps,
@@ -48,10 +44,10 @@ export function JazzProvider(props: JazzProviderProps) {
       loading={loading === undefined ? <p role="status">Loading…</p> : loading}
       error={
         error === undefined
-          ? (state) => (
+          ? ({ retry }) => (
               <section role="alert">
                 <p>Jazz couldn’t start. Please try again.</p>
-                <button type="button" onClick={() => void state.retry().catch(() => {})}>
+                <button type="button" onClick={() => void retry()}>
                   Try again
                 </button>
               </section>
@@ -72,7 +68,5 @@ export function useJazzClient(): JazzClientContextValue {
 export function useDb(): CreatedJazzClient["db"] {
   return useCoreDb<CreatedJazzClient["db"]>();
 }
-
-export { useSession };
 
 export type { JazzClientContextValue };

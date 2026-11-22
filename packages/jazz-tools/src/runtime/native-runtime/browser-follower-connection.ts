@@ -114,6 +114,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       | "onFailure"
       | "onStorageReset"
       | "onStorageInvalidated"
+      | "onNewerBuild"
     >,
     private readonly traceRelay = false,
     inspectorBinding?: InspectorAttachmentBinding,
@@ -506,6 +507,20 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         resetId: message.resetId,
       } satisfies BrowserFollowerPortRequest);
       this.callbacks.onStorageReset?.(message.resetId);
+      return;
+    }
+    if (message.type === "newer-build-waiting") {
+      this.callbacks.onNewerBuild?.();
+      return;
+    }
+    if (message.type === "closed-for-newer-build") {
+      // As after a worker failure: the manager opens a new connection, which
+      // the worker refuses as an older build's.
+      this.fail(
+        new BrowserWorkerUnresponsiveError(
+          "The shared worker closed this tab's connection for a newer build of the app",
+        ),
+      );
       return;
     }
     if (message.type === "storage-invalidated") {

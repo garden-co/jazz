@@ -5,7 +5,6 @@
 //! cross-target bits) is only observable here. End-to-end geo queries are
 //! tested in `jazz-db` through the public query API.
 
-use super::cover::{self, Curve, Morton, Rect};
 use super::*;
 
 /// A small deterministic PRNG (xorshift64*), so the tests need no
@@ -336,60 +335,57 @@ fn covers_are_deterministic() {
 // ---------------------------------------------------------------------------
 // Fixtures (SPEC 20.2): `crates/jazz/SPEC/fixtures/ix/geo/`.
 //
-// Each line holds inputs and outputs; f64 values are written as the 16 hex
-// digits of their IEEE-754 bits so the fixture pins exact bytes. Set
-// `JAZZ_BLESS=1` to rewrite them after a deliberate encoding change (which
-// also needs a new `ENCODING`).
+// `points-v1.json` is written by `generate.py` beside it, an independent
+// Python reference (exact rational cells, the SPEC's trigonometry checked
+// against mpmath), never by this code. `covers.txt` is a snapshot of this
+// code's covers (a cover only chooses which cells are read, so it is not an
+// encoding); `JAZZ_BLESS=1` rewrites it after a deliberate change.
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../SPEC/fixtures/ix/geo");
+const POINTS_FIXTURE: &str = include_str!("../../../../SPEC/fixtures/ix/geo/points-v1.json");
 
 fn hex(v: f64) -> String {
     format!("{:016x}", v.to_bits())
 }
 
-fn fixture_points() -> Vec<(f64, f64)> {
-    let mut pts = vec![
-        (0.0, 0.0),
-        (-0.0, -0.0),
-        (90.0, 0.0),
-        (-90.0, 0.0),
-        (90.0, 180.0),
-        (-90.0, -180.0),
-        (0.0, 180.0),
-        (0.0, -180.0),
-        (45.0, 45.0),
-        (-45.0, -135.0),
-        (51.477_928, -0.001_545),   // Greenwich
-        (37.774_929, -122.419_416), // San Francisco
-        (-33.868_820, 151.209_296), // Sydney
-        (64.146_582, -21.942_635),  // Reykjavík
-        (-77.846_323, 166.668_235), // McMurdo
-        (1e-300, -1e-300),
-        (89.999_999_999, 179.999_999_999),
-    ];
-    let mut rng = Rng(6);
-    for _ in 0..48 {
-        pts.push((some_lat(&mut rng), some_lng(&mut rng)));
-    }
-    pts
+fn f64_hex(value: &serde_json::Value) -> f64 {
+    f64::from_bits(u64::from_str_radix(value.as_str().unwrap(), 16).unwrap())
 }
 
-fn points_fixture() -> String {
-    let mut s =
-        format!("# {ENCODING} points: lat lng (f64 bits) → cell (decimal i64) x y z (f64 bits)\n");
-    for (lat, lng) in fixture_points() {
+/// Cells and unit vectors reproduce the independent reference bit for bit,
+/// including points on and next to quantization boundaries, where a rounded
+/// evaluation of `floor((lng + 180) / 360 · 2³¹)` (in either association)
+/// gives a different cell (`INV-IX-1`, `INV-IX-5`).
+#[test]
+fn points_match_the_independent_reference() {
+    let fixture: serde_json::Value = serde_json::from_str(POINTS_FIXTURE).unwrap();
+    assert_eq!(fixture["encoding"], ENCODING);
+    let cases = fixture["points"].as_array().unwrap();
+    assert!(cases.len() >= 150, "{}", cases.len());
+    for case in cases {
+        let (lat, lng) = (f64_hex(&case["lat"]), f64_hex(&case["lng"]));
         let p = point(lat, lng).unwrap();
-        s += &format!(
-            "{} {} {} {} {} {}\n",
-            hex(lat),
-            hex(lng),
-            p.cell,
-            hex(p.unit[0]),
-            hex(p.unit[1]),
-            hex(p.unit[2])
+        let expected: i64 = case["cell"].as_str().unwrap().parse().unwrap();
+        assert_eq!(p.cell, expected, "cell of ({lat:e}, {lng:e})");
+        let unit = [
+            f64_hex(&case["x"]),
+            f64_hex(&case["y"]),
+            f64_hex(&case["z"]),
+        ];
+        assert_eq!(
+            p.unit.map(f64::to_bits),
+            unit.map(f64::to_bits),
+            "unit of ({lat:e}, {lng:e})"
         );
     }
-    s
+    for case in fixture["chord_thresholds"].as_array().unwrap() {
+        let meters = f64_hex(&case["meters"]);
+        assert_eq!(
+            chord2_for_meters(meters).unwrap().to_bits(),
+            f64_hex(&case["chord2"]).to_bits(),
+            "{meters} m"
+        );
+    }
 }
 
 fn covers_fixture() -> String {
@@ -449,128 +445,121 @@ fn check_fixture(name: &str, actual: String) {
     );
 }
 
-/// Cells, unit vectors, chord thresholds and covers keep their exact bytes
-/// (`INV-IX-5`). The same fixtures are checked on wasm32 (see the PR).
+/// Covers stay what they were: a change shows up as a reviewed diff.
 #[test]
-fn fixtures() {
-    check_fixture("points.txt", points_fixture());
+fn covers_snapshot() {
     check_fixture("covers.txt", covers_fixture());
 }
 
-// ---------------------------------------------------------------------------
-// Read amplification: Z-order against Hilbert on the same grid, same
-// snapping, same 16-range limit. Run with
-// `cargo test -p jazz-index --release -- --ignored amplification --nocapture`.
-
-/// The Hilbert curve on the 31-bit grid (test-only, for comparison).
-struct Hilbert;
-
-impl Curve for Hilbert {
-    fn block_start(x: u32, y: u32, k: u32) -> i64 {
-        // The Hilbert index of the block among blocks of side 2^k, times 4^k.
-        // Wikipedia's `xy2d` on a grid of side 2^(31-k).
-        let side: u64 = 1 << (31 - k);
-        let (mut x, mut y) = ((x >> k) as u64, (y >> k) as u64);
-        let mut d: u64 = 0;
-        let mut s = side / 2;
-        while s > 0 {
-            let rx = u64::from(x & s > 0);
-            let ry = u64::from(y & s > 0);
-            d += s * s * ((3 * rx) ^ ry);
-            if ry == 0 {
-                if rx == 1 {
-                    x = side - 1 - x;
-                    y = side - 1 - y;
-                }
-                core::mem::swap(&mut x, &mut y);
-            }
-            s /= 2;
-        }
-        (d << (2 * k)) as i64
-    }
-}
-
-fn read_cells(ranges: &[(i64, i64)]) -> f64 {
-    ranges.iter().map(|&(a, b)| (b - a + 1) as f64).sum()
-}
-
-fn cover_with<C: Curve>(rects: &[Rect], max: usize) -> Vec<(i64, i64)> {
-    let mut r = cover::exact_ranges::<C>(rects, cover::snap_level(rects), &cover::keep_all);
-    r.sort_unstable();
-    cover::merge_touching(&mut r);
-    cover::limit(r, max)
-}
-
-/// The Hilbert comparison is only meaningful if its blocks tile the curve:
-/// the 16 × 16 blocks of side 2^27 start at distinct multiples of 4^27, and
-/// neighbours along the curve are neighbours on the grid.
+/// Points that pass the exact chord test only through rounding: each lies
+/// just past the circle's edge, on a quadtree block boundary, so a cover
+/// without the bounding-box pad (`pad = 0`) or without the cap test's slack
+/// misses it. Found by searching with those mutants; with the real code each
+/// must be in its cover. They sit at a latitude edge, near both poles and on
+/// the antimeridian.
 #[test]
-fn hilbert_blocks_tile() {
-    let mut starts: Vec<(i64, u32, u32)> = Vec::new();
-    for x in 0..16u32 {
-        for y in 0..16u32 {
-            starts.push((Hilbert::block_start(x << 27, y << 27, 27) >> 54, x, y));
-        }
-    }
-    starts.sort_unstable();
-    for (i, w) in starts.windows(2).enumerate() {
-        assert_eq!(w[0].0, i as i64);
-        assert_eq!(w[0].1.abs_diff(w[1].1) + w[0].2.abs_diff(w[1].2), 1);
-    }
-}
-
-/// A cover of `rects` on curve `C`, keeping only blocks that meet the cap.
-fn cap_cover<C: Curve>(rects: &[Rect], lat: f64, lng: f64, meters: f64) -> Vec<(i64, i64)> {
-    let cap = Cap::new(lat, lng, meters);
-    cover::cover::<C>(rects, &|x, y, k| cap.meets(x, y, k))
-}
-
-fn quantile(xs: &mut [f64], q: f64) -> f64 {
-    xs.sort_by(f64::total_cmp);
-    xs[((xs.len() - 1) as f64 * q) as usize]
-}
-
-#[test]
-#[ignore = "measurement; prints a table"]
-fn amplification() {
-    let cell_dlng = 2.0 * core::f64::consts::PI / (1u64 << 31) as f64;
-    let cell_dlat = core::f64::consts::PI / (1u64 << 31) as f64;
-    println!(
-        "{:>8} {:>5} | {:>8} {:>8} | {:>8} {:>8} | {:>8} {:>8}",
-        "radius", "lat", "Zcap", "Zcap p90", "Hcap", "Zbbox", "Hbbox", "Zbbox∞"
-    );
-    for &meters in &[100.0, 500.0, 1000.0, 2000.0, 5000.0, 10_000.0, 50_000.0] {
-        for &lat in &[0.0, 37.8, 51.5, 60.0, 70.0] {
-            let mut rng = Rng(7);
-            let mut cols: [Vec<f64>; 5] = Default::default();
-            for _ in 0..300 {
-                let clat = lat + rng.range(-0.5, 0.5);
-                let clng = rng.range(-170.0, 170.0);
-                let rects = radius_rects(clat, clng, meters);
-                let delta = meters / EARTH_RADIUS_M;
-                let disc = 2.0 * core::f64::consts::PI * (1.0 - delta.cos())
-                    / (cell_dlng * cell_dlat * clat.to_radians().cos());
-                let zcap = cover_radius(clat, clng, meters).unwrap();
-                assert_eq!(zcap, cap_cover::<Morton>(&rects, clat, clng, meters));
-                cols[0].push(read_cells(&zcap) / disc);
-                cols[1].push(read_cells(&cap_cover::<Hilbert>(&rects, clat, clng, meters)) / disc);
-                cols[2].push(read_cells(&cover_with::<Morton>(&rects, MAX_RANGES)) / disc);
-                cols[3].push(read_cells(&cover_with::<Hilbert>(&rects, MAX_RANGES)) / disc);
-                cols[4].push(read_cells(&cover_with::<Morton>(&rects, usize::MAX)) / disc);
-            }
-            let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
-            let means: Vec<f64> = cols.iter().map(|c| mean(c)).collect();
-            println!(
-                "{:>7}m {:>5} | {:>8.2} {:>8.2} | {:>8.2} {:>8.2} | {:>8.2} {:>8.2}",
-                meters,
-                lat,
-                means[0],
-                quantile(&mut cols[0], 0.9),
-                means[1],
-                means[2],
-                means[3],
-                means[4],
-            );
-        }
+fn points_admitted_by_rounding_are_in_the_cover() {
+    // (center lat, center lng, meters, point lat, point lng)
+    let cases: &[(f64, f64, f64, f64, f64)] = &[
+        // Killed `pad = 0`.
+        (
+            0.3755333718231392,
+            -73.04843142742129,
+            83.21466835371496,
+            0.37628173828125,
+            -73.04843142742129,
+        ),
+        (
+            1.9575128805689832,
+            -142.21443062525412,
+            776.1324622597966,
+            1.9644927978515625,
+            -142.21443062525412,
+        ),
+        (
+            -6.989551281485651,
+            -129.91900069881896,
+            1776.8422451507347,
+            -6.97357177734375,
+            -129.91900069881896,
+        ),
+        (
+            8.439329652757987,
+            -116.61372423370446,
+            3919.5381407690834,
+            8.474578857421875,
+            -116.61372423370446,
+        ),
+        (0.0, 179.99999937935942, 0.06901217877278167, 0.0, -180.0),
+        // Killed the cap test without slack.
+        (
+            14.29101860620539,
+            79.77751209907905,
+            14.938825094193772,
+            14.291152954101563,
+            79.77751209907905,
+        ),
+        (
+            -41.103254167914876,
+            -55.91188735877118,
+            110.9051960529292,
+            -41.102256774902344,
+            -55.91188735877118,
+        ),
+        (
+            18.867833629733777,
+            50.534274789539325,
+            169.93362646651806,
+            18.869361877441406,
+            50.534274789539325,
+        ),
+        (
+            28.92939814650216,
+            -23.485785943974662,
+            0.7856933379881635,
+            28.929405212402344,
+            -23.485785943974662,
+        ),
+        (0.0, 179.99992850883748, 7.949465551872666, 0.0, -180.0),
+        (
+            84.73583647527434,
+            33.86014848840307,
+            9.070157075913336,
+            84.73591804504395,
+            33.86014848840307,
+        ),
+        (
+            -88.58534553638447,
+            11.890164099022314,
+            0.7721225326562623,
+            -88.5853385925293,
+            11.890164099022314,
+        ),
+        (
+            -85.48544019016232,
+            -50.85820818346478,
+            5.401116553366116,
+            -85.48539161682129,
+            -50.85820818346478,
+        ),
+        (
+            85.83446387519132,
+            -153.03190848446948,
+            0.128059387640437,
+            85.83446502685547,
+            -153.03190848446948,
+        ),
+    ];
+    for &(lat, lng, meters, plat, plng) in cases {
+        let q = radius_query(lat, lng, meters).unwrap();
+        let p = point(plat, plng).unwrap();
+        assert!(
+            chord2(p.unit, q.center) <= q.chord2,
+            "({plat}, {plng}) should pass the chord test"
+        );
+        assert!(
+            inside(&q.ranges, p.cell),
+            "({plat}, {plng}) passes the chord test of ({lat}, {lng}, {meters} m) but is outside the cover"
+        );
     }
 }

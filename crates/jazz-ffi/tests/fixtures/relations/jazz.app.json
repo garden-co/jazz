@@ -13,8 +13,7 @@
     "notes": {
       "columns": { "body": "string", "team": "uuid" },
       "relations": {
-        "teamRow": { "rel": "teams", "column": "team" },
-        "misdirected": { "reverse": "teams", "relation": "leadRow" }
+        "teamRow": { "rel": "teams", "column": "team" }
       }
     }
   }

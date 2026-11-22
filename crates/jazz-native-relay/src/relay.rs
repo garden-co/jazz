@@ -68,6 +68,11 @@ const NATIVE_RELAY_QUEUE_MAX_MESSAGES: usize = 1024;
 /// Commands which cross from a platform call into a relay owner must not
 /// accumulate without bound.
 const NATIVE_RELAY_OWNER_COMMAND_MAX: usize = 1_024;
+/// Events one subscription's relay buffer holds before the relay stops
+/// taking more from its stream: the rest wait in the core, which coalesces
+/// a backlog past the subscription's limit into one reset, so a foreground
+/// that stops draining holds no more than this plus that limit.
+pub(crate) const FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS: usize = 16;
 /// Rounds of one drive before the owner yields to queued commands. A drive
 /// that hits it continues on the next owner turn.
 const NATIVE_RELAY_DRIVE_ROUNDS: usize = 64;
@@ -817,6 +822,7 @@ impl Foreground {
     fn collect_events(&mut self) -> Result<(), String> {
         for subscription in self.subscriptions.values_mut() {
             while !subscription.closed
+                && subscription.buffer.len() < FOREGROUND_SUBSCRIPTION_BUFFER_EVENTS
                 && let Some(event) = subscription.stream.try_next_event()
             {
                 subscription.opened = true;
@@ -826,6 +832,9 @@ impl Foreground {
                         reset,
                         settled,
                         tier,
+                        // Not in the foreground ABI yet: a coalesced backlog
+                        // reaches React Native as a plain reset.
+                        coalesced: _,
                     } => ForegroundSubscriptionEvent::Delta {
                         reset,
                         settled,
@@ -1277,6 +1286,12 @@ impl RelayWorker {
         self.persistent.pending_upload_count()
     }
 
+    /// The relay store's pending revision (see `UploadStatus`).
+    #[cfg(test)]
+    pub(crate) fn persistent_pending_revision(&self) -> u64 {
+        self.persistent.upload_status().pending_revision
+    }
+
     /// The current upstream connection's generation (tests carry the
     /// upstream themselves, and serve each new connection afresh).
     #[cfg(test)]
@@ -1345,6 +1360,7 @@ impl RelayWorker {
         // Transaction ids are (seq, node): a rebuilt store goes on above every
         // seq this node minted, so none is reused.
         let high_water = self.persistent.db.seq_high_water();
+        let revision = self.persistent.upload_status().pending_revision;
         if let Some(mut upstream) = self.upstream.take() {
             upstream.link.close();
             // Not a refusal: the socket worker reconnects to the new store.
@@ -1363,6 +1379,8 @@ impl RelayWorker {
         ))
         .map_err(|error| error.to_string())?;
         db.seed_seq_floor(high_water);
+        // Statuses compare by revision: the new store continues the old's.
+        db.seed_pending_revision(revision);
         if let Some(hint) = self.remote_link_hint {
             db.set_remote_link_hint(hint);
         }
@@ -1696,9 +1714,11 @@ fn foreground_command(
             let subscription = client.subscriptions.get_mut(&subscription).ok_or_else(|| {
                 HostError::Argument(format!("unknown subscription {subscription}"))
             })?;
-            Response::SubscriptionEvents {
-                events: subscription.buffer.drain(..).collect(),
-            }
+            let events = subscription.buffer.drain(..).collect();
+            // Refill from the core: what is left wakes the foreground to
+            // drain again.
+            client.collect_events().map_err(HostError::Argument)?;
+            Response::SubscriptionEvents { events }
         }
         Request::Unsubscribe { subscription } => {
             let closed = client.subscriptions.remove(&subscription).is_some();
@@ -1949,6 +1969,20 @@ fn foreground_command(
             ))
             .expect("an upload status serializes"),
         },
+        Request::PendingUploadRows { table } => {
+            let mut rows = binding.pending_upload_rows(&table)?;
+            // Each store resolves the app's name itself: a store opened
+            // along other versions keeps the table under another stored
+            // name. Both open with the app's schema, so the store knows the
+            // table too; if it ever did not, failing is right, as an empty
+            // answer would call its recovered writes sent.
+            rows.extend(client.authority.pending_upload_rows(&table)?);
+            rows.sort_unstable();
+            rows.dedup();
+            Response::PendingUploadRows {
+                rows: rows.into_iter().map(|row| *row.as_bytes()).collect(),
+            }
+        }
         Request::BeginStreamingMutation {
             mutation,
             table,
@@ -2109,6 +2143,7 @@ fn foreground_upload_status(binding: &Binding, authority: &Binding) -> UploadSta
             .into_iter()
             .chain(store.oldest_pending_at)
             .min(),
+        pending_revision: own.pending_revision + store.pending_revision,
         ..own
     }
 }

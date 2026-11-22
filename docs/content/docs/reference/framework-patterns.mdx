@@ -32,6 +32,12 @@ you give one. A closed session never starts again: give the provider a new sessi
 for its `config`. `useJazzSession()` (Svelte: `getJazzSession()`) reads the session anywhere below, including
 in those views.
 
+The `error` view receives the same `{ error, recovery, retry }` in every framework: as a function's
+argument in React, React Native and Solid, as slot props in Vue, and as a snippet's argument in
+Svelte. `recovery` says what `retry()` does: repeat the operation that failed (`"action"`) or
+reopen the signed-in account (`"session"`). This `retry()` never rejects: a new failure shows in
+the `error` view again, so you can hand it straight to a button.
+
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
     ```tsx title="App.tsx"
@@ -43,7 +49,7 @@ in those views.
           config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first") }}
           signedOut={<SignIn />}
           loading={<p>Loading…</p>}
-          error={(state) => <button onClick={state.retry}>{state.error?.message}: retry</button>}
+          error={({ error, retry }) => <button onClick={retry}>{error.message}: retry</button>}
         >
           <App />
         </JazzProvider>
@@ -85,7 +91,7 @@ in those views.
       <TodoApp />
       {#snippet signedOut()}<SignIn />{/snippet}
       {#snippet loading()}<p>Loading…</p>{/snippet}
-      {#snippet error(error, retry)}
+      {#snippet error({ error, retry })}
         <button onclick={retry}>{error.message}: retry</button>
       {/snippet}
     </JazzProvider>
@@ -113,7 +119,7 @@ in those views.
           config={{ serverUrl: "/jazz", client: () => import("jazz-tools/local-first") }}
           signedOut={<SignIn />}
           loading={<p>Loading…</p>}
-          error={(error, retry) => <button onClick={retry}>{error.message}: retry</button>}
+          error={({ error, retry }) => <button onClick={retry}>{error.message}: retry</button>}
         >
           <App />
         </JazzProvider>

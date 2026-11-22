@@ -350,7 +350,7 @@ answer may be published; it does not select another evaluator:
   subscription and evaluates only that closure, without pending local changes.
   It waits while offline;
 - `local-first` with a server wait (`FirstLoad::WaitForRemote
-{ timeout_ms }`) evaluates exactly like `local-first`; it differs only in
+  { timeout_ms }`) evaluates exactly like `local-first`; it differs only in
   withholding any unsettled first answer until the usage's first settled
   authority closure, rejection, link loss, or the deadline, whichever comes
   first, while a remote can answer, and in reading an `offset > 0` window as

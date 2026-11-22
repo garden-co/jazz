@@ -350,6 +350,8 @@ fn canonical_predicate_key(predicate: &Predicate) -> Vec<u8> {
         Predicate::Lt(left, right) => put_operands(&mut bytes, b't', left, right),
         Predicate::Lte(left, right) => put_operands(&mut bytes, b'T', left, right),
         Predicate::Contains(left, right) => put_operands(&mut bytes, b'c', left, right),
+        Predicate::StartsWith(left, right) => put_operands(&mut bytes, b'^', left, right),
+        Predicate::EndsWith(left, right) => put_operands(&mut bytes, b'$', left, right),
         Predicate::IsNull(operand) => {
             bytes.push(b'0');
             put_bytes(&mut bytes, &canonical_operand_key(operand));
@@ -576,9 +578,9 @@ fn validate_public_column_type(column_type: &ColumnType) -> Result<(), QueryErro
                 }
             }
         }
-        // Vectors are compared only by a vector index search (SPEC 20.4),
-        // never as query literals. Points get bit-exact `Eq`/`in` through the
-        // shared operator table (jazz#5966); until then they are refused too.
+        // A typed query parameter is never a vector or a point: their filter
+        // operands are byte literals compared bit for bit (SPEC 6.1.1), and
+        // nearness is an index search (SPEC 20.4).
         ColumnType::Internal(_)
         | ColumnType::U48
         | ColumnType::Vector(_)

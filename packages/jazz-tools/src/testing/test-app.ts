@@ -80,7 +80,8 @@ type ScalarName =
   | "boolean"
   | "timestamp"
   | "uuid"
-  | "bytes";
+  | "bytes"
+  | "point";
 
 type ScalarValue<S extends ScalarName> = {
   string: string;
@@ -91,6 +92,8 @@ type ScalarValue<S extends ScalarName> = {
   boolean: boolean;
   timestamp: Date;
   bytes: Uint8Array;
+  // GeoJSON order (SPEC 10.10), as the codegen writes it.
+  point: readonly [lng: number, lat: number];
 }[S];
 
 /** A column type as the loader reads it (`read_type`), in TS terms. */
@@ -125,11 +128,13 @@ type ParseType<S> = S extends `${infer B extends ScalarName}?`
           ? { kind: "json"; value: JsonValue; init: JsonValue; nullable: false }
           : S extends { readonly json: unknown }
             ? SchemaJsonType
-            : S extends { readonly array: infer E }
-              ? ParseType<E> extends infer P extends ParsedType
-                ? { kind: "array"; value: P["value"][]; init: P["init"][]; nullable: false }
-                : never
-              : never;
+            : S extends { readonly vector: number }
+              ? { kind: "vector"; value: Float32Array; init: Float32Array; nullable: false }
+              : S extends { readonly array: infer E }
+                ? ParseType<E> extends infer P extends ParsedType
+                  ? { kind: "array"; value: P["value"][]; init: P["init"][]; nullable: false }
+                  : never
+                : never;
 
 /** A column's type with its `optional`. */
 type ParseColumn<S> =
@@ -152,13 +157,13 @@ type FieldsOf<T> = T extends object ? { [K in keyof T & string]: T[K] } : {};
 
 type InsertFields<TFields, TValue extends Record<keyof TFields, unknown>> = Flat<
   {
-    -readonly [K in keyof TFields as OptionalOnInsert<TFields[K]> extends true
-      ? never
-      : K]: TValue[K];
+    -readonly [
+      K in keyof TFields as OptionalOnInsert<TFields[K]> extends true ? never : K
+    ]: TValue[K];
   } & {
-    -readonly [K in keyof TFields as OptionalOnInsert<TFields[K]> extends true
-      ? K
-      : never]?: TValue[K];
+    -readonly [
+      K in keyof TFields as OptionalOnInsert<TFields[K]> extends true ? K : never
+    ]?: TValue[K];
   }
 >;
 
@@ -260,11 +265,13 @@ type Widened<S> = S extends string
       : false;
 
 type TransformedColumns<TTable> = {
-  -readonly [K in keyof ColumnsOfSpec<TTable> as ColumnsOfSpec<TTable>[K] extends {
-    readonly transform: string;
-  }
-    ? K
-    : never]: ColumnsOfSpec<TTable>[K] extends { readonly transform: infer N } ? N : never;
+  -readonly [
+    K in keyof ColumnsOfSpec<TTable> as ColumnsOfSpec<TTable>[K] extends {
+      readonly transform: string;
+    }
+      ? K
+      : never
+  ]: ColumnsOfSpec<TTable>[K] extends { readonly transform: infer N } ? N : never;
 };
 
 /**

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jazz::account_registry::{AccountId, local_first_account_id};
+use jazz::account_registry::{AccountId, device_account_id};
 use jazz::tools::AppId;
 use jazz::tools::identity;
 
@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 /// How an end user signs in to an app ([`crate::Config::user`]).
 #[derive(Clone, Debug)]
 pub enum Auth {
-    /// A local-first device account: the key is the account, and the client
+    /// A device account: the key is the account, and the client
     /// proves it holds it with self-signed tokens it mints and renews itself.
     Device(DeviceKey),
     /// The app's own sign-in: its backend (`createJazz`'s `authenticate`)
@@ -121,7 +121,7 @@ const KEY_PREFIX: &str = "jazz-auth-v1:";
 /// accepts. They are renewed before they expire.
 pub(crate) const DEVICE_TOKEN_TTL_SECS: u64 = 3600;
 
-/// A local-first device account's secret: 32 random bytes from which its
+/// A device account's secret: 32 random bytes from which its
 /// signing key, user id and account derive. Whoever holds it is the account,
 /// so keep it as a password (the platform's keychain); losing it loses the
 /// account unless it was linked to a provider account.
@@ -262,19 +262,19 @@ impl DeviceKey {
 
     /// The account this key founds in `app`.
     pub fn account(&self, app: AppId) -> AccountId {
-        local_first_account_id(*app.uuid(), &self.user_id())
+        device_account_id(*app.uuid(), &self.user_id())
     }
 
     /// A proof of this key for one challenge a server issued.
     pub(crate) fn sign_challenge(&self, challenge: &str) -> Result<String> {
-        identity::sign_local_first_challenge(&self.0, challenge).map_err(Error::Config)
+        identity::sign_device_account_challenge(&self.0, challenge).map_err(Error::Config)
     }
 
     /// A self-signed proof of this key for `app`, valid for `ttl_secs`.
     pub(crate) fn mint(&self, app: AppId, ttl_secs: u64) -> Result<String> {
         identity::mint_jazz_self_signed_token(
             &self.0,
-            identity::LOCAL_FIRST_ISSUER,
+            identity::DEVICE_ACCOUNT_ISSUER,
             &app.to_string(),
             ttl_secs,
         )

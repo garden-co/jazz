@@ -152,7 +152,7 @@ function mintHandle(
 export function exportLocalFirstSecret(handle: AccountHandle): string {
   const material = credentials.get(handle);
   if (!material || handle.identity.issuer !== "urn:jazz:local-first" || !material.localFirstSecret)
-    throw new AccountAuthError("local_first_recovery_unavailable");
+    throw new AccountAuthError("device_account_recovery_unavailable");
   parseAuthSecret(material.localFirstSecret);
   return material.localFirstSecret;
 }
@@ -298,7 +298,7 @@ export function createAccountManagerWithRuntime(options: {
       ? undefined
       : options.localFirst.restore?.(options.restoredLocalFirstSecret);
   if (options.restoredLocalFirstSecret !== undefined && !restored)
-    throw new AccountAuthError("local_first_restore_unavailable");
+    throw new AccountAuthError("device_account_restore_unavailable");
   if (options.restoredLocalFirstSecret !== undefined && options.restoredBackendUser !== undefined)
     throw new AccountAuthError("ambiguous_restored_account");
   return new AccountManager(
@@ -330,7 +330,7 @@ export function createAccountManagerWithRuntime(options: {
       restoreLocalFirst(secret) {
         parseAuthSecret(secret);
         const local = options.localFirst.restore?.(secret);
-        if (!local) throw new AccountAuthError("local_first_restore_unavailable");
+        if (!local) throw new AccountAuthError("device_account_restore_unavailable");
         return retain(mintHandle(registry, local.accountId, local.identity, local.auth, secret));
       },
       async admitBackend(auth) {
@@ -367,14 +367,14 @@ export function createAccountManagerWithRuntime(options: {
         // once, and only to that user.
         if (account.identity.issuer !== "urn:jazz:local-first")
           throw new AccountAuthError(
-            "local_first_account_required",
+            "device_account_required",
             undefined,
             LINK_NEEDS_GUEST_MESSAGE,
           );
         const material = credentials.get(account);
         if (!material || material.registry !== registry || !material.localFirstSecret)
           throw new AccountAuthError(
-            "local_first_account_required",
+            "device_account_required",
             undefined,
             LINK_GUEST_KEY_MISSING_MESSAGE,
           );

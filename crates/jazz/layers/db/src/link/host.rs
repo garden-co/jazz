@@ -9,7 +9,7 @@
 //! `{"type": "ended", "attempt": n, "failure": {"kind": k, "message": s}}` with
 //! `k` one of `network`, `refused`, `serverNotReady`, `authRejected`, `fatal`,
 //! `reauthenticate`; or `{"kind": "wire", "code", "retry", "message",
-//! "admitted"}`, a server's `WireError` in its snake_case spelling, which the
+//! "admitted", "reason"?}`, a server's `WireError` in its snake_case spelling, which the
 //! link classifies itself ([`LinkFailure::from_wire_error`]; a code or retry
 //! this build does not know is a refusal, retried),
 //! `{"type": "credentialUpdated"}`, `{"type": "timerFired", "token": n}`.
@@ -31,7 +31,7 @@ use super::{
     LinkPolicy, LinkStatus, TimerToken, UpstreamLink,
 };
 use crate::options::RemoteLinkHint;
-use crate::wire::{WireError, WireErrorCode, WireRetry};
+use crate::wire::{WireError, WireErrorCode, WireErrorReason, WireRetry};
 
 /// An [`UpstreamLink`] with the default policy, stepped by JSON documents.
 #[derive(Debug)]
@@ -104,6 +104,9 @@ enum HostFailure {
         retry: String,
         message: String,
         admitted: bool,
+        /// The server's [`WireErrorReason`], when it named one.
+        #[serde(default)]
+        reason: Option<String>,
     },
 }
 
@@ -130,7 +133,8 @@ impl HostInput {
                         retry,
                         message,
                         admitted,
-                    } => wire_failure(&code, &retry, message, admitted),
+                        reason,
+                    } => wire_failure(&code, &retry, message, admitted, reason.as_deref()),
                 },
             ),
             Self::CredentialUpdated => LinkInput::CredentialUpdated,
@@ -143,13 +147,24 @@ impl HostInput {
 /// build cannot name came from a newer server. Nothing negotiates versions
 /// before hello, so it is a refusal the link retries (and reports at once),
 /// never a reason to stop for good.
-fn wire_failure(code: &str, retry: &str, message: String, admitted: bool) -> LinkFailure {
+fn wire_failure(
+    code: &str,
+    retry: &str,
+    message: String,
+    admitted: bool,
+    reason: Option<&str>,
+) -> LinkFailure {
+    // A reason this build cannot name is left out: the message still says it.
+    let reason = reason
+        .and_then(|reason| serde_json::from_value::<WireErrorReason>(Value::from(reason)).ok());
     let parsed = serde_json::from_value::<WireErrorCode>(Value::from(code)).and_then(|code| {
         serde_json::from_value::<WireRetry>(Value::from(retry)).map(|retry| (code, retry))
     });
     match parsed {
         Ok((code, retry)) => {
-            LinkFailure::from_wire_error(&WireError::new(code, retry, message), admitted)
+            let mut error = WireError::new(code, retry, message);
+            error.reason = reason;
+            LinkFailure::from_wire_error(&error, admitted)
         }
         Err(_) => LinkFailure::Refused(format!("{code} ({retry}): {message}")),
     }
@@ -307,6 +322,31 @@ mod tests {
         assert_eq!(ended("malformed_frame", "later", false), "stopped");
         assert_eq!(ended("unknown:9", "later", false), "backoff");
         assert_eq!(ended("not_ready", "unknown:7", false), "backoff");
+    }
+
+    /// A browser runtime passes the reason a server named along with its
+    /// error; one this build cannot name is left out and the message decides.
+    #[test]
+    fn a_host_passes_the_servers_reason() {
+        let reason = |reason: &str, message: &str| {
+            let mut link = HostLink::new(7);
+            step(
+                &mut link,
+                0.0,
+                json!({"type": "serverConfigured", "configured": true}),
+            );
+            step(
+                &mut link,
+                1.0,
+                json!({"type": "ended", "attempt": 1, "failure": {
+                    "kind": "wire", "code": "auth_failed", "retry": "never",
+                    "message": message, "admitted": false, "reason": reason,
+                }}),
+            )["status"]["authReason"]
+                .clone()
+        };
+        assert_eq!(reason("revoked", "token expired"), "revoked");
+        assert_eq!(reason("unknown:9", "token expired"), "expired");
     }
 
     /// A malformed document is refused instead of guessed at.

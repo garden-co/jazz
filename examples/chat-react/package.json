@@ -11,7 +11,7 @@
     "test:unit": "vitest run --config vitest.config.ts",
     "test:browser": "vitest run --config vitest.config.browser.ts",
     "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "@multiavatar/multiavatar": "^1.0.7",

@@ -90,7 +90,9 @@ denials and unsupported server capabilities, remain terminal.
 
 A disallowed remote plaintext endpoint returns
 `JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT`. React Native maps that status to
-a fixed diagnostic that contains no endpoint URL, bearer, or claims.
+a fixed diagnostic with the stable `error.code` `remote_plaintext_endpoint`: it
+names the hosts plaintext may reach and the development paths for a physical
+device, and contains no endpoint URL, bearer, or claims.
 An I/O wrapper alone is insufficient: rustls certificate and other TLS protocol failures
 arrive as `InvalidData` I/O errors and remain terminal, as do unknown I/O kinds.
 A structured pre-Hello `NotReady`/`Later` response is likewise retryable,

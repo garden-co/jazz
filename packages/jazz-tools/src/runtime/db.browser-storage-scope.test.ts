@@ -84,7 +84,7 @@ describe("resolveDefaultPersistentDbName", () => {
         config,
         internalSessionFromVerifiedReservedJwtPayload(
           { iss: LOCAL_FIRST_JWT_ISSUER, sub: subject },
-          "local-first",
+          "device-account",
         ),
       );
       return config;
@@ -96,6 +96,33 @@ describe("resolveDefaultPersistentDbName", () => {
     expect(createBrowserStorageOwner(configFor("alice"))).not.toBe(
       createBrowserStorageOwner(configFor("bob")),
     );
+  });
+
+  it("keeps the pre-rename local-first spelling in a device account's storage names", () => {
+    // Device accounts were "local-first" before 2026-11, and that spelling is
+    // in every existing IndexedDB name and owner marker. Changing it would
+    // open an empty store beside the device's data.
+    const config: DbConfig = {
+      appId: "chat-app",
+      driver: { type: "persistent", dbName: "app-db" },
+      jwtToken: makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "device-subject" }),
+    };
+    const session = internalSessionFromVerifiedReservedJwtPayload(
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "device-subject" },
+      "device-account",
+    );
+    expect(session?.authMode).toBe("device-account");
+    setTrustedReservedSession(config, session);
+
+    const owner = JSON.parse(createBrowserStorageOwner(config));
+    expect(owner.auth).toMatchObject({ kind: "principal", authMode: "local-first" });
+    expect(JSON.parse(createBrowserAuthSessionKey(config)).auth).toMatchObject({
+      kind: "principal",
+      authMode: "local-first",
+    });
+    const physicalName = resolveDefaultPersistentDbName(config);
+    expect(physicalName).toContain(encodeURIComponent('"authMode":"local-first"'));
+    expect(physicalName).not.toContain("device-account");
   });
 
   it("treats an explicit driver dbName as a scoped logical base", () => {
