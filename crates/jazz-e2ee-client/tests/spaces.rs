@@ -1953,16 +1953,21 @@ fn stream_metadata_keeps_the_epoch_chosen_before_pulling() {
         let db = &alice.db;
         let row = jazz::ids::RowUuid(uuid::Uuid::now_v7());
         let mut cells = note(space, "caption");
-        let mut upload = db
-            .begin_streaming_value_upload_for(
-                jazz::db::StreamingMutationKind::Insert,
-                "notes",
-                row,
-                &mut cells,
-                "attachment",
-                &jazz::db::WriteTarget::Root,
-            )
-            .unwrap();
+        let mut upload = drive(
+            &server,
+            &[db],
+            alice.client.write(db, async || {
+                db.begin_streaming_value_upload_for(
+                    jazz::db::StreamingMutationKind::Insert,
+                    "notes",
+                    row,
+                    &mut cells,
+                    "attachment",
+                    &jazz::db::WriteTarget::Root,
+                )
+            }),
+        )
+        .unwrap();
         drive(
             &server,
             &[db],

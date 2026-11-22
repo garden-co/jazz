@@ -1053,7 +1053,7 @@ impl Db {
         row: RowUuid,
         cells: BTreeMap<String, Value>,
         column: &str,
-        mut reader: R,
+        reader: R,
         identity: Option<AuthorSubject>,
         now_ms: Option<u64>,
         head: Option<BranchSelector>,
@@ -1061,8 +1061,33 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let target = view_target(head.clone(), base.clone());
         let mut cells = cells;
-        let mut upload = self
+        let upload = self
             .begin_streaming_value_upload_for(mutation, table, row, &mut cells, column, &target)?;
+        let upload = self
+            .feed_streaming_value_from_reader(upload, reader)
+            .await?;
+        self.finish_streaming_value_upload(
+            upload,
+            mutation,
+            table,
+            row,
+            cells,
+            column,
+            identity.map_or(WriteIdentity::Database, WriteIdentity::Session),
+            now_ms,
+            head,
+            base,
+        )
+        .await
+    }
+
+    /// Feed an open upload from a one-shot reader. The caller can prepare
+    /// the encryption key and retry opening before passing the reader here.
+    pub async fn feed_streaming_value_from_reader<R: std::io::Read>(
+        &self,
+        mut upload: StreamingValueUpload,
+        mut reader: R,
+    ) -> Result<StreamingValueUpload, Error> {
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
             match reader.read(&mut buffer) {
@@ -1080,19 +1105,7 @@ impl Db {
                 }
             }
         }
-        self.finish_streaming_value_upload(
-            upload,
-            mutation,
-            table,
-            row,
-            cells,
-            column,
-            identity.map_or(WriteIdentity::Database, WriteIdentity::Session),
-            now_ms,
-            head,
-            base,
-        )
-        .await
+        Ok(upload)
     }
 
     /// Begin a resumable upload of one large value, for hosts that feed it
