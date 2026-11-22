@@ -17,9 +17,15 @@ try {
   const head = run("git", ["-C", source, "rev-parse", "HEAD"], { capture: true }).trim();
   assert(head === pinned, `the checkout is at ${head}, not the pinned ${pinned}`);
   const { sha, run: runId, version } = candidate();
-  // The script takes the version to resolve from its own checkout.
-  const own = JSON.parse(readFileSync(join(source, "packages", "jazz-tools", "package.json"), "utf8")).version;
-  assert(own === version, `the pinned test resolves ${own}, the candidate is ${version}: move android.json's pin`);
+  // The script takes the version to resolve from its checkout, so this throwaway checkout is given
+  // the candidate's. Nothing else of it changes, and the AAR is still checked by sha256 below.
+  const pkgFile = join(source, "packages", "jazz-tools", "package.json");
+  const pkgText = readFileSync(pkgFile, "utf8");
+  const own = JSON.parse(pkgText).version;
+  if (own !== version) {
+    writeFileSync(pkgFile, pkgText.replace(`"version": "${own}"`, `"version": "${version}"`));
+    console.log(`NOTE the pinned test's checkout says ${own}: it resolves the candidate's ${version}`);
+  }
 
   const tree = join(WORK, "artifacts", "release-maven");
   const aar = `jazz-kotlin-android/${version}/jazz-kotlin-android-${version}.aar`;

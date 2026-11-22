@@ -14,7 +14,7 @@ import { Broken, NotCovered, Round } from "./round.mjs";
 import { RULES } from "./rules/index.mjs";
 import { startStack } from "./stack.mjs";
 
-const ROUND_MS = 120_000;
+const ROUND_MS = Number(process.env.LA_ROUND_MS ?? 120_000);
 
 const { values: options } = parseArgs({
   options: {
@@ -38,13 +38,17 @@ async function oneRound(context, rule, index) {
   const started = Date.now();
   let outcome;
   try {
-    const body = rule.run(round).then(() => ({ status: "PASS" }));
+    const body = rule
+      .run(round)
+      .then(() => ({ status: "PASS" }))
+      .catch((error) => {
+        if (error instanceof NotCovered) return { status: "NOT_COVERED", why: error.message };
+        const tag = error instanceof Broken ? error.tag : `harness: ${error.message}`;
+        return { status: "FAIL", tag: redact(tag), why: redact(error.message) };
+      });
     outcome = await within(body, ROUND_MS, () => {
-      throw new Broken("the round didn't finish", `${ROUND_MS} ms`);
-    }).catch((error) => {
-      if (error instanceof NotCovered) return { status: "NOT_COVERED", why: error.message };
-      const tag = error instanceof Broken ? error.tag : `harness: ${error.message}`;
-      return { status: "FAIL", tag: redact(tag), why: redact(error.message) };
+      const tag = `the round didn't finish within ${ROUND_MS} ms`;
+      return { status: "FAIL", tag, why: tag };
     });
   } catch (error) {
     outcome = { status: "FAIL", tag: `harness: ${redact(error.message)}`, why: redact(error.message) };

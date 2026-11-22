@@ -42,7 +42,41 @@ async function bearerColdOpen(r) {
   equal(value(await two.call("read", { h: "a", tier: "local" }), "offline read"), [title], "the offline read lacks the write");
 }
 
+async function sessionSecondOpen(r) {
+  const proxy = await r.proxy();
+  const args = { dir: r.dir(), url: proxy.url, app: r.stack.appId, start: "device" };
+  const process = await r.process();
+  value(await process.call("sopen", { ...args, h: "first" }), "first session");
+  value(await process.call("sjazz", { h: "first", as: "a" }), "first session's client");
+  const account = value(await process.call("account", { h: "a" }), "account");
+  // A session's open reports a failed sign-in in its snapshot, so either is how StoreHeld can arrive.
+  const second = await process.call("sopen", { ...args, h: "second" });
+  const held = inLang(storeHeld, r.lang);
+  if (!second.ok) {
+    refusal(second, held, "a second session on the dir");
+  } else {
+    const snapshot = value(await process.call("ssnap", { h: "second" }), "second session's snapshot");
+    if (snapshot.status !== "error") throw new Broken(`a second session on the dir is ${snapshot.status}`);
+    const kind = snapshot.error?.kind;
+    if (kind !== "storeHeld") throw new Broken(`a second session fails with ${kind}, expected storeHeld`, snapshot.error?.message);
+    value(await process.call("sclose", { h: "second" }), "second session's close");
+  }
+  value(await process.call("sclose", { h: "first" }), "first session's close");
+  // The refusal mustn't cost the device account.
+  value(await process.call("sopen", { ...args, h: "again" }), "session open afterwards");
+  value(await process.call("sjazz", { h: "again", as: "b" }), "client afterwards");
+  equal(value(await process.call("account", { h: "b" }), "account afterwards"), account, "the device account changed");
+}
+
 export default [
+  {
+    id: "store.second-session.same-process",
+    title: "a second JazzSession on a held dir reports storeHeld and keeps the device account",
+    basis: "pending",
+    rounds: 20,
+    notCovered: { kotlin: "jazz-kotlin has no JazzSession" },
+    run: sessionSecondOpen,
+  },
   {
     id: "delete.held.same-process",
     title: "delete while another app in the process holds the store",

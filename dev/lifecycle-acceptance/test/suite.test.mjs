@@ -99,6 +99,20 @@ for (const [fake, ids] of [
       }
     });
 
+test("a proxy's port can't be taken as an ephemeral one while it refuses", async () => {
+  const proxies = await Promise.all(Array.from({ length: 20 }, () => Proxy.start(9)));
+  try {
+    for (const proxy of proxies) {
+      assert.ok(proxy.port >= 10_000 && proxy.port < 32_768, String(proxy.port));
+      await proxy.refuse();
+      await proxy.up();
+    }
+    assert.equal(new Set(proxies.map((proxy) => proxy.port)).size, proxies.length);
+  } finally {
+    for (const proxy of proxies) await proxy.stop();
+  }
+});
+
 test("the proxy's outages are real", async () => {
   const server = createServer((socket) => socket.on("error", () => {}).pipe(socket)).listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -142,11 +156,11 @@ function verdict(edit, mustFail = []) {
   try {
     const results = new Map();
     for (const lang of [...LANGS, "android"]) {
-      const rules = (lang === "android" ? ANDROID_RULES : RULES).map(({ id }) => ({
+      const rules = (lang === "android" ? ANDROID_RULES : RULES).map(({ id, rounds = 1 }) => ({
         id,
         status: "PASS",
-        rounds: 1,
-        passed: 1,
+        rounds,
+        passed: rounds,
         failures: {},
       }));
       results.set(lang, { name: "c", lang, sha, run: "7", ms: 1, results: rules });
@@ -167,6 +181,10 @@ test("the verdict fails closed", () => {
   assert.equal(verdict((results) => results.delete("android")).status, 1, "no Android results");
   assert.equal(verdict((results) => results.get("rust").results.pop()).status, 1, "a rule without a result");
   assert.equal(verdict((results) => (results.get("go").sha = "b".repeat(40))).status, 1, "another candidate's results");
+
+  assert.equal(verdict((results) => (results.get("go").results[1].passed = 1)).status, 1, "a PASS of too few rounds");
+  const gap = verdict((results) => (results.get("go").results[1].status = "NOT_COVERED"));
+  assert.match(gap.stdout, /VERDICT c INCOMPLETE/, "a gap no rule declares");
 
   const undecided = RULES.findIndex((rule) => rule.basis === "pending");
   const incomplete = verdict((results) => (results.get("go").results[undecided].status = "NOT_COVERED"));

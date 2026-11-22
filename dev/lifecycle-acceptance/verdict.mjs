@@ -33,9 +33,14 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
   for (const rule of RULES) {
     const cells = LANGS.map((lang) => {
       const got = byLang[lang]?.results.find((result) => result.id === rule.id);
-      const is = got?.status ?? "FAIL";
+      let is = got?.status ?? "FAIL";
+      // A PASS is every round of the rule, not some.
+      const short = is === "PASS" && !(got.passed >= rule.rounds);
+      if (short || !(is in totals)) is = "FAIL";
       totals[is]++;
-      if (is === "NOT_COVERED" && (rule.basis === "pending" || rule.external)) open++;
+      // The only gap a PASS may have is one the rule declares for that language.
+      const declared = !rule.external && rule.notCovered?.[lang];
+      if (is === "NOT_COVERED" && !declared) open++;
       status[`${rule.id} ${lang}`] = is;
       if (!got) {
         console.log(`FAIL ${name} ${lang} ${rule.id}: no result (setup broke, see the job)`);
@@ -43,7 +48,11 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
       }
       const count = is === "NOT_COVERED" ? "" : ` ${got.passed}/${got.rounds}`;
       const worst = Object.entries(got.failures).sort((a, b) => b[1].count - a[1].count)[0];
-      const why = is === "FAIL" && worst ? `${worst[1].count}x ${worst[0]}` : got.why;
+      const why = short
+        ? `only ${got.passed} of ${rule.rounds} rounds ran`
+        : is === "FAIL" && worst
+          ? `${worst[1].count}x ${worst[0]}`
+          : got.why;
       console.log(`${is} ${name} ${lang} ${rule.id}${count}${why ? `: ${why}` : ""}`);
       if (why && is !== "PASS") reasons.push(`- \`${rule.id}\` ${lang} ${is}: ${why.replace(/\s+/g, " ").slice(0, 300)}`);
       return `${is}${count}`;

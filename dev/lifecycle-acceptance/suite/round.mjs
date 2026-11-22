@@ -47,6 +47,7 @@ export class Round {
   #processes = new Set();
   #proxies = [];
   #base;
+  #over = false;
   notes = [];
   times = [];
 
@@ -70,13 +71,24 @@ export class Round {
     return dir;
   }
 
+  // A round that ran out of time keeps running until its next step: it mustn't start anything new.
+  #stillRunning() {
+    if (this.#over) throw new Error("the round is over");
+  }
+
   async proxy() {
+    this.#stillRunning();
     const proxy = await Proxy.start(this.stack.backendPort);
+    if (this.#over) {
+      await proxy.stop();
+      this.#stillRunning();
+    }
     this.#proxies.push(proxy);
     return proxy;
   }
 
   async process() {
+    this.#stillRunning();
     const process = new DriverProcess(this.driver);
     this.#processes.add(process);
     return process.started();
@@ -103,6 +115,7 @@ export class Round {
   }
 
   async cleanup() {
+    this.#over = true;
     for (const process of this.#processes) await process.kill();
     for (const proxy of this.#proxies) await proxy.stop();
     // Stores hold secrets (inspect-token-secret) and 100 rounds of them add up.

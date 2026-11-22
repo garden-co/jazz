@@ -2,7 +2,14 @@
 //   up:     passes bytes through
 //   refuse: nothing listens on the port, as when the server's host is down (ECONNREFUSED)
 //   hole:   takes connections and bytes and never answers, as a dead network does
+import { randomInt } from "node:crypto";
 import { createConnection, createServer } from "node:net";
+
+// Below Linux's ephemeral range (32768-60999). A port from it can be taken while the proxy refuses:
+// by any outgoing connection, or by the client itself (a connect to a dead local port can connect
+// to itself), and then up() couldn't listen again.
+const [LOWEST, HIGHEST] = [10_000, 32_768];
+const reserved = new Set();
 
 export class Proxy {
   #server;
@@ -15,18 +22,25 @@ export class Proxy {
   static async start(targetPort) {
     const proxy = new Proxy();
     proxy.#target = targetPort;
-    await proxy.#listen();
-    return proxy;
+    for (let attempt = 1; ; attempt++) {
+      proxy.port = randomInt(LOWEST, HIGHEST);
+      if (reserved.has(proxy.port)) continue;
+      reserved.add(proxy.port);
+      try {
+        await proxy.#listen();
+        return proxy;
+      } catch (error) {
+        reserved.delete(proxy.port);
+        if (error.code !== "EADDRINUSE" || attempt === 50) throw error;
+      }
+    }
   }
 
   #listen() {
     this.#server = createServer((socket) => this.#connection(socket));
     return new Promise((resolve, reject) => {
       this.#server.once("error", reject);
-      this.#server.listen(this.port, "127.0.0.1", () => {
-        this.port = this.#server.address().port;
-        resolve();
-      });
+      this.#server.listen(this.port, "127.0.0.1", () => resolve());
     });
   }
 
@@ -86,5 +100,6 @@ export class Proxy {
   async stop() {
     this.mode = "refuse";
     await this.#stopListening();
+    reserved.delete(this.port);
   }
 }
