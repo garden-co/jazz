@@ -13,20 +13,10 @@ import { ANDROID_RULES, judgeAndroid } from "./suite/android-rules.mjs";
 
 const [source, name, out] = process.argv.slice(2);
 try {
-  const { sha: pinned, predatesOneStore } = JSON.parse(readFileSync(new URL("android.json", import.meta.url), "utf8"));
+  const { sha: pinned, reviewed } = JSON.parse(readFileSync(new URL("android.json", import.meta.url), "utf8"));
   const head = run("git", ["-C", source, "rev-parse", "HEAD"], { capture: true }).trim();
   assert(head === pinned, `the checkout is at ${head}, not the pinned ${pinned}`);
   const { sha, run: runId, version } = candidate();
-  // The script takes the version to resolve from its checkout, so this throwaway checkout is given
-  // the candidate's. Nothing else of it changes, and the AAR is still checked by sha256 below.
-  const pkgFile = join(source, "packages", "jazz-tools", "package.json");
-  const pkgText = readFileSync(pkgFile, "utf8");
-  const own = JSON.parse(pkgText).version;
-  if (own !== version) {
-    writeFileSync(pkgFile, pkgText.replace(`"version": "${own}"`, `"version": "${version}"`));
-    console.log(`NOTE the pinned test's checkout says ${own}: it resolves the candidate's ${version}`);
-  }
-
   const tree = join(WORK, "artifacts", "release-maven");
   const aar = `jazz-kotlin-android/${version}/jazz-kotlin-android-${version}.aar`;
   const manifest = JSON.parse(readFileSync(join(WORK, "artifacts", "release-manifest", "manifest.json"), "utf8"));
@@ -54,23 +44,24 @@ try {
   });
 
   // What was tested is the candidate's: the script prints the AAR's sha256 before it uses it.
-  const judged = judgeAndroid(log, { aarSha256: listed.sha256, code, predatesOneStore });
-  const results = judged.map(({ id, status, why }) => ({
+  const judged = judgeAndroid(log, { aarSha256: listed.sha256, version, code });
+  const results = judged.map(({ id, status, observed, why }) => ({
     id,
     title: ANDROID_RULES.find((rule) => rule.id === id).title,
-    basis: "brief",
+    basis: ANDROID_RULES.find((rule) => rule.id === id).basis,
     status,
+    observed,
     why,
     rounds: 1,
     passed: status === "PASS" ? 1 : 0,
     failures: status === "FAIL" ? { [why]: { count: 1, example: why } } : {},
   }));
-  assert(code === 0 || /: \w+ FAILED/.test(log), `the script exited ${code} without a failed phase (see the log above)`);
+  assert(code === 0 || /^RULE \S+ (FAIL|BLOCKED)/m.test(log) || results.some((r) => r.status === "FAIL"), `the script exited ${code} with no failed rule (see the log above)`);
   for (const { status, id, why } of results) console.log(`${status} android ${id}${why ? ` - ${why}` : ""}`);
   mkdirSync(out, { recursive: true });
   writeFileSync(
     join(out, `${name}-android.json`),
-    JSON.stringify({ name, lang: "android", sha, run: runId, version, pinned, ms: Date.now() - started, results }, null, 2),
+    JSON.stringify({ name, lang: "android", sha, run: runId, version, pinned, reviewed, ms: Date.now() - started, results }, null, 2),
   );
   process.exitCode = results.some((result) => result.status === "FAIL") ? 1 : 0;
 } catch (error) {

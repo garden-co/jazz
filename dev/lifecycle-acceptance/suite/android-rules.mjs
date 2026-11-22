@@ -1,48 +1,55 @@
-// The fifth leg's rules, read from the log of dev/scripts/test-kotlin-android-emulator.sh (jazz#6246).
+// The fifth leg: jazz#6246's emulator test at android.json's pin, which prints one line per rule
+// after `--- rules, jazz-kotlin-android <version>`: `RULE <id> PASS|FAIL|BLOCKED: <detail>`.
+// BLOCKED (something it needed failed first) is a FAIL of the candidate, never a pass.
+
+// The test's ids, as reported here (prefixed android.), and who decided each.
+const TEST_RULES = [
+  ["android.memory", "brief"],
+  ["persist.reopen.bearer", "brief"],
+  ["persist.reopen.device", "brief"],
+  ["offline.device-open", "brief"],
+  ["persist.killed-process", "brief"],
+  ["sync.offline-write", "brief"],
+  // #native-language-apis' store.second-open is these two; its store.reopen the next two.
+  ["store.second-open", "pending"],
+  ["store.second-open.process", "pending"],
+  ["store.reopen", "pending"],
+  ["store.killed-holder", "pending"],
+  ["store.reopen-after-failed-open", "pending"],
+  ["store.delete-reopen", "pending"],
+  ["offline.bearer-open", "pending"], // observe only: out of beta.1
+];
+const NOT_ON_ANDROID = ["store.no-two-writers", "store.per-account"];
+
+const id = (rule) => (rule.startsWith("android.") ? rule : `android.${rule}`);
+
 export const ANDROID_RULES = [
-  { id: "android.memory", title: "memory storage and sync on an emulator" },
-  { id: "android.write", title: "persistent storage opens, writes, closes and reads back on an emulator" },
-  { id: "android.restart", title: "reads back after SIGKILL and a restart, and syncs, on an emulator" },
-  { id: "android.one-store", title: "who may open and delete a held store, on an emulator" },
+  ...TEST_RULES.map(([rule, basis]) => ({ id: id(rule), basis, title: `${rule}, on an emulator` })),
+  ...NOT_ON_ANDROID.map((rule) => ({ id: id(rule), basis: "pending", title: `${rule}: no such check on Android` })),
 ];
 
-// What the restart phase logs before its store-sharing part.
-const RESTARTED = [
-  "ok: read from the store after the process was killed",
-  "ok: the offline write synced to a second client",
-];
-
-/**
- * `predatesOneStore` (android.json): the pinned test asserts that two apps share a store, the
- * opposite of the one-store rule. That part is then neither a PASS nor a FAIL of the product.
- */
-export function judgeAndroid(log, { aarSha256, code, predatesOneStore }) {
-  const tested = log.includes(`testing ${aarSha256} `);
-  const passed = (phase) => log.includes(`: ${phase} passed`);
-  const failed = (phase) => log.includes(`: ${phase} FAILED`);
-  const fail = (why) => ({ status: "FAIL", why });
-  const gap = (why) => ({ status: "NOT_COVERED", why });
-  const pass = { status: "PASS" };
-  const phase = (name) =>
-    passed(name) ? pass : fail(failed(name) ? `phase ${name} failed (see the job's log)` : `phase ${name} didn't run (exit ${code})`);
-
-  if (!tested) return ANDROID_RULES.map(({ id }) => ({ id, ...fail("the emulator test didn't test the candidate's AAR") }));
-  const restarted = RESTARTED.every((step) => log.includes(step));
-  const blocked = "not reached: the phase before it failed";
-  return [
-    { id: "android.memory", ...phase("memory") },
-    { id: "android.write", ...phase("write") },
-    {
-      id: "android.restart",
-      ...(!passed("write") ? gap(blocked) : restarted ? pass : fail("no read and sync after the restart (see the job's log)")),
-    },
-    {
-      id: "android.one-store",
-      ...(predatesOneStore
-        ? gap("the pinned test predates the one-store contract: it asserts that two apps share a store")
-        : !passed("write") || !restarted
-          ? gap(blocked)
-          : phase("restart")),
-    },
-  ];
+export function judgeAndroid(log, { aarSha256, version, code }) {
+  const fail = (why) => ({ status: "FAIL", observed: "FAIL", why });
+  const tested = new RegExp(`^testing jazz-kotlin-android ${version.replace(/\./g, "\\.")}: ${aarSha256} `, "m").test(log);
+  const marker = `--- rules, jazz-kotlin-android ${version}`;
+  const at = log.indexOf(marker);
+  const lines = at < 0 ? [] : log.slice(at + marker.length).split("\n");
+  const reported = new Map();
+  for (const line of lines) {
+    const m = line.match(/^RULE (\S+) (PASS|FAIL|BLOCKED):\s*(.*?)(?: \(observe only\))?\s*$/);
+    if (m && !reported.has(m[1])) reported.set(m[1], { outcome: m[2], detail: m[3] });
+  }
+  return ANDROID_RULES.map(({ id: ruleId, basis }) => {
+    if (!tested) return { id: ruleId, ...fail("the emulator test didn't test the candidate's AAR") };
+    const rule = ruleId === "android.memory" ? ruleId : ruleId.slice("android.".length);
+    if (NOT_ON_ANDROID.includes(rule)) return { id: ruleId, status: "NOT_COVERED", why: "the Android test has no such check" };
+    const got = reported.get(rule);
+    const observed = got?.outcome === "PASS" ? "PASS" : "FAIL";
+    const why = got
+      ? got.outcome === "PASS" ? undefined : `${got.outcome}: ${got.detail}`
+      : `not reported (exit ${code}${at < 0 ? ", no rules summary" : ""})`;
+    if (basis === "pending")
+      return { id: ruleId, status: "NOT_COVERED", observed, why: `awaiting Anselm; observed ${got?.outcome ?? "nothing"}${why ? ` (${why})` : ""}` };
+    return { id: ruleId, status: observed, observed, why };
+  });
 }

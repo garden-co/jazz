@@ -60,13 +60,15 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
     rows.push(`| \`${rule.id}\` (${rule.basis}) | ${cells.join(" | ")} |`);
   }
 
+  if (byLang.android && !byLang.android.reviewed)
+    console.log(`NOTE ${name} android: the pinned test (jazz#6246 @ ${byLang.android.pinned}) is unreviewed`);
   const android = ANDROID_RULES.map(({ id }) => {
     const got = byLang.android?.results.find((result) => result.id === id);
     const is = got?.status in totals ? got.status : "FAIL";
     const why = got ? got.why : "no result (setup broke, see the job)";
     totals[is]++;
     if (is === "NOT_COVERED") open++;
-    status[`${id} android`] = is;
+    status[`${id} android`] = got?.observed ?? is;
     console.log(`${is} ${name} android ${id}${why ? `: ${why}` : ""}`);
     if (why && is !== "PASS") reasons.push(`- \`${id}\` android ${is}: ${why}`);
     return `\`${id}\` ${is}`;
@@ -97,7 +99,7 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
     `| --- |${" --- |".repeat(LANGS.length)}`,
     ...rows,
     "",
-    `Android (AAR on an emulator): ${android.join(", ")}`,
+    `Android (AAR on an emulator, jazz#6246 @ ${byLang.android?.pinned ?? "?"}${byLang.android && !byLang.android.reviewed ? ", **unreviewed**" : ""}): ${android.join(", ")}`,
     "",
     `Suite times: ${times.join(", ")}`,
     "",

@@ -152,21 +152,27 @@ async function fetchEcho(port) {
 }
 
 test("the Android leg", () => {
-  const options = { aarSha256: "f00", code: 1, predatesOneStore: true };
-  const tested = "testing f00  /repo/x.aar\nx: 64s: memory passed\n";
-  const steps = "I/JazzSmoke: ok: read from the store after the process was killed\nI/JazzSmoke: ok: the offline write synced to a second client\n";
-  const judge = (log, more) => judgeAndroid(log, { ...options, ...more }).map((result) => result.status);
+  const head = "testing jazz-kotlin-android 2.0.0-beta.1: f00  /repo/x.aar\n";
+  const rules = (outcomes) =>
+    `${head}r1 RULE persist.reopen.device PASS: logcat, not the summary\n--- rules, jazz-kotlin-android 2.0.0-beta.1\n` +
+    Object.entries(outcomes).map(([id, o]) => `RULE ${id} ${o}: detail${id === "offline.bearer-open" ? " (observe only)" : ""}`).join("\n");
+  const options = { aarSha256: "f00", version: "2.0.0-beta.1", code: 1 };
+  const all = Object.fromEntries(ANDROID_RULES.map(({ id }) => [id.replace(/^android\.(?!memory)/, ""), "PASS"]));
+  const by = (log, more) => Object.fromEntries(judgeAndroid(log, { ...options, ...more }).map((r) => [r.id, r.status]));
 
-  const noStorage = `${tested}x: 65s: write FAILED\nx: 66s: restart FAILED\n`;
-  assert.deepEqual(judge(noStorage), ["PASS", "FAIL", "NOT_COVERED", "NOT_COVERED"]);
-  // A one-store candidate fails the pinned test's two-apps step: no product failure, and no pass.
-  const oneStore = `${tested}x: 65s: write passed\n${steps}x: 66s: restart FAILED\n`;
-  assert.deepEqual(judge(oneStore), ["PASS", "PASS", "PASS", "NOT_COVERED"]);
-  const shared = `${tested}x: 65s: write passed\n${steps}x: 66s: restart passed\n`;
-  assert.deepEqual(judge(shared, { code: 0 }), ["PASS", "PASS", "PASS", "NOT_COVERED"]);
-  assert.deepEqual(judge(oneStore, { predatesOneStore: false })[3], "FAIL");
-  assert.deepEqual(judge(`${tested}x: 65s: write passed\nx: 66s: restart FAILED\n`)[2], "FAIL");
-  assert.deepEqual(judge(shared, { aarSha256: "other" }), ["FAIL", "FAIL", "FAIL", "FAIL"]);
+  const green = by(rules(all), { code: 0 });
+  assert.equal(green["android.persist.reopen.device"], "PASS");
+  assert.equal(green["android.store.second-open"], "NOT_COVERED", "awaiting Anselm");
+  assert.equal(green["android.store.per-account"], "NOT_COVERED", "no such check");
+  assert.equal(by(rules({ ...all, "persist.reopen.device": "BLOCKED" }))["android.persist.reopen.device"], "FAIL", "BLOCKED is a FAIL");
+  assert.equal(by(rules({ ...all, "persist.reopen.device": "FAIL" }))["android.persist.reopen.device"], "FAIL");
+  const missing = { ...all };
+  delete missing["sync.offline-write"];
+  assert.equal(by(rules(missing))["android.sync.offline-write"], "FAIL", "a rule not reported");
+  assert.equal(by(`${head}r1 RULE android.memory PASS: x\n`)["android.memory"], "FAIL", "only the summary counts");
+  assert.ok(Object.values(by(rules(all), { aarSha256: "other" })).every((s) => s === "FAIL"), "another AAR");
+  const observed = judgeAndroid(rules({ ...all, "store.second-open": "FAIL" }), options).find((r) => r.id === "android.store.second-open");
+  assert.deepEqual([observed.status, observed.observed], ["NOT_COVERED", "FAIL"]);
 });
 
 function verdict(edit, mustFail = []) {
@@ -181,7 +187,7 @@ function verdict(edit, mustFail = []) {
         passed: rounds,
         failures: {},
       }));
-      results.set(lang, { name: "c", lang, sha, run: "7", ms: 1, results: rules });
+      results.set(lang, { name: "c", lang, sha, run: "7", ms: 1, reviewed: true, results: rules });
     }
     edit(results);
     for (const [lang, result] of results) writeFileSync(join(dir, `c-${lang}.json`), JSON.stringify(result));

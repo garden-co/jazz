@@ -46,9 +46,8 @@ candidate's own `jazz-tools generate`.
 - The verdict is `INCOMPLETE`, never `PASS`, while a rule is pending (awaiting a decision) or covered elsewhere.
 - `basis`: `contract` rules are decided by #native-language-apis and scored; `pending` ones are
   awaiting Anselm and report what they observed.
-- Android: while `android.json` says `predatesOneStore`, the pinned test's store-sharing part is
-  `NOT_COVERED`: it asserts the opposite of one app per store. A phase that wasn't reached is
-  `NOT_COVERED` too.
+- Android: one line per rule from jazz#6246's test at `android.json`'s pin (marked unreviewed
+  until it is). `BLOCKED` is a FAIL. Its store rules report what they observed while awaiting a decision.
 - `CONTROL_BROKEN`: a candidate in `candidates.json` known to break a rule (`mustFail`) didn't. The
   harness is then broken, whatever else it says.
 
