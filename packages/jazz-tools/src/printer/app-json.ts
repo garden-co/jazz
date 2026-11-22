@@ -27,6 +27,10 @@ export interface TableJson {
     scope: string;
     columns: Record<string, ColumnJson>;
     equality?: string[];
+    /** Read only to refuse: the TS DSL can't declare these yet. */
+    backfill?: string[];
+    rehome?: unknown;
+    sweep?: unknown;
   };
   indexes?: (string | string[])[];
   branchBy?: string[];
@@ -57,6 +61,8 @@ export interface AppJson {
   history?: Record<string, { tables: Record<string, TableJson>; $comment?: string }>;
   migrations?: MigrationJson[];
   transforms?: Record<string, { stored: ColumnJson; view: ColumnJson }>;
+  /** App-wide encryption settings; read only to refuse: the TS DSL can't declare them yet. */
+  encryption?: Record<string, unknown>;
 }
 
 export type PolicyJson =
