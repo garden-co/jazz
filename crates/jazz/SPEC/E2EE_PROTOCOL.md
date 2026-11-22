@@ -704,7 +704,7 @@ read policy).
   (`select`) policy that is `M(T)` or a conjunction that has `M(T)` as one of its conjuncts, where
   `T` is that table and `M(T)` is exactly
   `exists __e2ee_members(scopeId = table_id('T'), identifier = this.id,
-accountId = session.user)` (`table_id` is T's catalogue identity, [core
+  accountId = session.user)` (`table_id` is T's catalogue identity, [core
   hooks](E2EE_CORE_HOOKS.md) H7). The deploy refuses any other read rule for
   a space table: a session that could read the space row without a member
   row would never receive a key. (A declaration without encrypted columns
@@ -783,7 +783,7 @@ can read or manage it until then. Every other account is
 added by an updater.
 
 - **Column entries.** A `columns` value is either a type string (`"title":
-"string"`) or, during a schema conversion, an object with `type` and the
+  "string"`) or, during a schema conversion, an object with `type` and the
   conversion fields of [migrations](E2EE_MIGRATIONS.md) §3.2 (`from`, `to`,
   `convert`, `sealedType`); the string is shorthand for `{ "type": … }`.
 - **The system tables stay once added.** Once any version of an app carries
@@ -909,10 +909,10 @@ Stage `bootstrap`. Preconditions, all read at one cut:
 Then generate `epochId` and a 32-byte key `K`, and insert atomically:
 
 - identity `{id: account, generation: 0, deviceId, epochId, ledgerVersion: 1,
-envelope: seal(device.pub, A(deviceId, "envelope"), K),
-verification: wrap(K, A("", "verification"), Z32)}`,
+  envelope: seal(device.pub, A(deviceId, "envelope"), K),
+  verification: wrap(K, A("", "verification"), Z32)}`,
 - public root `{accountId, generation: 0, deviceId, epochId, ledgerVersion: 1,
-kind, deviceAccountPublicKey?, deviceAccountSignature?}`,
+  kind, deviceAccountPublicKey?, deviceAccountSignature?}`,
 - the account sealing key record of `epochId` (§2.12),
 
 where `A(recipient, column) = ctx{application: D, policy:
@@ -929,15 +929,15 @@ bootstrap is accepted (§0 item 5).
   **subject** `UUIDv5(namespace = UTF8("jazz-auth-key-v1"), name = pk)` (the
   16 ASCII bytes are the namespace), which Jazz's account registry turns into
   the account ID `UUIDv5(namespace = appId, name =
-UTF8("jazz-account-founder-v1") ‖ 0x00 ‖ UTF8(subject))`. The root has
+  UTF8("jazz-account-founder-v1") ‖ 0x00 ‖ UTF8(subject))`. The root has
   `kind: "device-account"`, `deviceAccountPublicKey: pk`, and `deviceAccountSignature`,
   a `jazz.sodium.sign` v1 signature by that key over
 
   `ctx{application: D, policy: "jazz.e2ee.device-account-root.v1",
-scope: "account", identifier: account, table: "__e2ee_account_roots", row:
-rootId, column: "device-account-signature", epoch: epochId, recipient:
-deviceId} ‖ frame[decimal generation, decimal ledgerVersion, pk,
-env(signingMechanism, signingPublicKey), env(mechanism, publicKey)]`
+  scope: "account", identifier: account, table: "__e2ee_account_roots", row:
+  rootId, column: "device-account-signature", epoch: epochId, recipient:
+  deviceId} ‖ frame[decimal generation, decimal ledgerVersion, pk,
+  env(signingMechanism, signingPublicKey), env(mechanism, publicKey)]`
 
   with the root device's published key columns: the signature binds
   everything the root introduces (account, generation, epoch, device and its
@@ -949,7 +949,7 @@ env(signingMechanism, signingPublicKey), env(mechanism, publicKey)]`
   the account's sessions write (R6), and replay rejects one whose key or
   signature does not check (§2.4 step 1).
   Fixture: the secret of bytes `00`–`1f` gives `pk =
-ff3d97bfb89227b2ae43697296031fe63bcfb9628f17df15e0e28013021451d9`, subject
+  ff3d97bfb89227b2ae43697296031fe63bcfb9628f17df15e0e28013021451d9`, subject
   `fa65957a-8b63-53c8-8187-fb1568365fa1` and, for application
   `6b0c3f8e-2d9a-4f61-9a57-1c2e3d4f5a6b`, account ID
   `d31c2893-e3f2-5285-9034-66bb6757657c` (the cases of
@@ -1143,9 +1143,9 @@ challenge.deviceId}`.
    removed and its request matches its keys. Generate a 32-byte secret `S`,
    kept only in memory, and a random 32-byte nonce `n_A`. Insert challenge
    `{id, deviceId, epochId: current, envelope: E = seal(requester.pub,
-P("challenge"), S), nonce: n_A, signerId, signature:
-sign(P("challenge-signature:" ‖ signerId) ‖ frame[env(signingMechanism,
-signingPublicKey), env(mechanism, publicKey), nonceCommitment, E, n_A])}`,
+   P("challenge"), S), nonce: n_A, signerId, signature:
+   sign(P("challenge-signature:" ‖ signerId) ‖ frame[env(signingMechanism,
+   signingPublicKey), env(mechanism, publicKey), nonceCommitment, E, n_A])}`,
    signed over the requester's key columns and nonce commitment as the
    approver was shown them. A challenge is created only on an explicit user
    action, one per approval: the runtime never re-challenges silently.
@@ -1154,8 +1154,8 @@ signingPublicKey), env(mechanism, publicKey), nonceCommitment, E, n_A])}`,
    signature verifies over this device's own key columns and nonce
    commitment; otherwise the requester refuses it (`invalid-challenge`): the
    approver was shown other keys. Open `S` (32 bytes). Insert proof `{id:
-challengeId, proof: wrap(S, P("proof"), Z32), nonce: n_R, signature:
-sign(P("proof-signature") ‖ frame[proof, n_R])}`, revealing the approval
+   challengeId, proof: wrap(S, P("proof"), Z32), nonce: n_R, signature:
+   sign(P("proof-signature") ‖ frame[proof, n_R])}`, revealing the approval
    nonce.
 3. **Completion** (stage `approval`, approving device). The challenge epoch
    equals both the challenge's and the current epoch, and the request is the
@@ -1166,21 +1166,21 @@ sign(P("proof-signature") ‖ frame[proof, n_R])}`, revealing the approval
    under the request's signing key; anything else refuses ("invalid device
    possession proof"). With the current account key `K`, insert atomically:
    - approval `{id: challengeId, signerId, verification: wrap(K,
-P("approval"), Z32), signature: sign(P("approval-signature:" ‖ signerId)
-‖ frame[verification])}`;
+     P("approval"), Z32), signature: sign(P("approval-signature:" ‖ signerId)
+     ‖ frame[verification])}`;
    - public approval `{id: challengeId, accountId, epochId, deviceId, signerId,
-signature}`
+     signature}`
      signed over `ctx{application: D, policy:
-"jazz.e2ee.public-device-approval.v1", scope: "account", identifier:
-account, table: "__e2ee_public_device_approvals", row: approvalId, column:
-"approval-signature:" ‖ signerId, epoch, recipient: deviceId} ‖
-frame[env(signingMechanism, signingPublicKey), env(mechanism, publicKey)]`,
+     "jazz.e2ee.public-device-approval.v1", scope: "account", identifier:
+     account, table: "__e2ee_public_device_approvals", row: approvalId, column:
+     "approval-signature:" ‖ signerId, epoch, recipient: deviceId} ‖
+     frame[env(signingMechanism, signingPublicKey), env(mechanism, publicKey)]`,
      with the requester's key columns from its request. The approval thereby
      vouches for the device's keys, not only for its ID: the keys row (R4) is
      unsigned, and only the server ties it to the request;
    - delivery `{id: challengeId, envelope: E = seal(requester.pub,
-P("delivery"), K), verification: wrap(K, P("delivery-verification") ‖
-frame[E], Z32)}`.
+     P("delivery"), K), verification: wrap(K, P("delivery-verification") ‖
+     frame[E], Z32)}`.
 
    Every marker is unwrapped again and every signature verified before
    submission. The secret is erased when the operation ends.
@@ -1284,19 +1284,19 @@ recipient}`. Insert atomically:
 - private successor: `membership` = ID list of surviving active devices;
   `revision` = ID list of authenticated private approvals of the predecessor
   epoch; `verification = wrap(K', S("verification"), Z32)`; `history =
-wrap(K', S("history"), K)`; `deliveries` = delivery map of `seal(member.pub,
-S("delivery", deviceId), K')` for exactly the members; signature over
+  wrap(K', S("history"), K)`; `deliveries` = delivery map of `seal(member.pub,
+  S("delivery", deviceId), K')` for exactly the members; signature over
   `S("signature", signerId) ‖ frame[predecessor, action, targetId,
-retiredRecoveryRootIds, membership, revision, verification, history,
-deliveries]`;
+  retiredRecoveryRootIds, membership, revision, verification, history,
+  deliveries]`;
 - public successor (same ID): same `membership`; `revision` = revision of the
   IDs of the public approval rows of the predecessor epoch that public replay
   accepted (§2.4, step 2) before the successor's position; signature
   over `ctx{application: D, policy: "jazz.e2ee.public-account-successor.v1",
-scope: "account", identifier: account, table:
-"__e2ee_public_account_successors", row: id, column: "signature", epoch:
-newEpoch, recipient: signerId} ‖ frame[predecessor, action, targetId,
-retiredRecoveryRootIds, membership, revision]`;
+  scope: "account", identifier: account, table:
+  "__e2ee_public_account_successors", row: id, column: "signature", epoch:
+  newEpoch, recipient: signerId} ‖ frame[predecessor, action, targetId,
+  retiredRecoveryRootIds, membership, revision]`;
 - a recovery delivery of `K'` for every unretired active recovery root whose
   sealing key is of the selected sealing mechanism; a root of another
   mechanism gets none (§0, mechanism agility) and does not block the
@@ -1425,18 +1425,18 @@ the 32 secret bytes, created and read with user verification required
 - **Derivation.** Let `Dₐ = Dₐ(account)` and `g` the account's current
   generation (§2.11). At `g = 0`,
   `seed = BLAKE2b-256(key = s, input = UTF8("jazz.e2ee.recovery-seed.v1") ‖
-0x00 ‖ UTF8(Dₐ))`; above it,
+  0x00 ‖ UTF8(Dₐ))`; above it,
   `seed = BLAKE2b-256(key = s, input =
-UTF8("jazz.e2ee.recovery-generation-seed.v1") ‖ 0x00 ‖ UTF8(Dₐ) ‖ 0x00 ‖
-UTF8(decimal g))` (`Dₐ` is canonical JSON and contains no `0x00`). So the
+  UTF8("jazz.e2ee.recovery-generation-seed.v1") ‖ 0x00 ‖ UTF8(Dₐ) ‖ 0x00 ‖
+  UTF8(decimal g))` (`Dₐ` is canonical JSON and contains no `0x00`). So the
   same secret gives a fresh, registrable root after each reset, while the
   roots of earlier generations stay invalid (§2.11). Then the sealing key pair is HPKE `DeriveKeyPair` of
   `BLAKE2b-256(key = seed, input = UTF8("jazz.e2ee.recovery-kem-key.v1") ‖
-0x00)`, the signing key pair's Ed25519 seed is
+  0x00)`, the signing key pair's Ed25519 seed is
   `BLAKE2b-256(key = seed, input = UTF8("jazz.e2ee.recovery-sign-key.v1") ‖
-0x00)`, and the root ID is the first 16 bytes of
+  0x00)`, and the root ID is the first 16 bytes of
   `BLAKE2b-256(key = seed, input = UTF8("jazz.e2ee.recovery-root-id.v1") ‖
-0x00)`
+  0x00)`
   with the version and variant bits of §0 ("Identifiers"). The labels
   are bound to the current mechanisms (`jazz.wrap.hpke-x25519` v1 and
   `jazz.sodium.sign` v1); a later mechanism defines its own labels and gives a
@@ -1462,22 +1462,22 @@ UTF8(decimal g))` (`Dₐ` is canonical JSON and contains no `0x00`). So the
   `recovery-root`: an active device holding the account key inserts the root
   `{id: rootId, accountId, epochId: current, signerId, keys…}` signed over
   `frame[ctx{application: D, policy: "jazz.e2ee.recovery.v1", scope:
-"account", identifier: account, table: "__e2ee_recovery_roots", row:
-rootId, column: json(["root", signerId]), epoch}, env(signingMechanism,
-signingPublicKey), env(mechanism, publicKey)]`. An existing root with the
+  "account", identifier: account, table: "__e2ee_recovery_roots", row:
+  rootId, column: json(["root", signerId]), epoch}, env(signingMechanism,
+  signingPublicKey), env(mechanism, publicKey)]`. An existing root with the
   same ID must match exactly. Stage `recovery-delivery`: unless a usable
   delivery exists, insert `{rootId, epochId: current, envelope:
-seal(root.pub, R, K)}` with `R = ctx{application: D, policy:
-"jazz.e2ee.recovery.v1", scope: "account", identifier: account, table:
-"__e2ee_recovery_deliveries", row: deliveryId, column: "envelope", epoch,
-recipient: rootId}`. An unknown outcome of the first stage is not retried.
+  seal(root.pub, R, K)}` with `R = ctx{application: D, policy:
+  "jazz.e2ee.recovery.v1", scope: "account", identifier: account, table:
+  "__e2ee_recovery_deliveries", row: deliveryId, column: "envelope", epoch,
+  recipient: rootId}`. An unknown outcome of the first stage is not retried.
 - **Exported recovery material (fallback).** For platforms without passkeys
   and for applications that want a root independent of any secret, the
   previous material remains. **Prepare** generates a random recipient keypair,
   signing keypair and root ID; nothing is published. The material is a secret
   string `json({format: "jazz-e2ee-recovery-v1", scope: Dₐ(account), rootId,
-mechanism, version, publicKey, privateKey, signingMechanism, signingVersion,
-signingPublicKey, signingPrivateKey})` with keys as byte arrays, handed to
+  mechanism, version, publicKey, privateKey, signingMechanism, signingVersion,
+  signingPublicKey, signingPrivateKey})` with keys as byte arrays, handed to
   the user and kept outside the application. Generating material is not
   evidence that recovery is active. **Decode / inspect:** at most 2,000,000
   characters; exactly those eleven keys; matching scope and mechanisms; byte
@@ -1984,7 +1984,7 @@ applications and users never handle deliveries.
   sealing key (§2.12) (without one it waits, watching the member's
   `__e2ee_account_keys` rows until one appears, §3.8), and inserts the delivery
   `{scopeId, identifier, keyEpochId, senderAccountId, recipientAccountId,
-recipientAccountEpochId, envelope}`, with a random ID, sealed to that
+  recipientAccountEpochId, envelope}`, with a random ID, sealed to that
   key, in a ledger transaction whose read set includes the member's public
   account rows, the member rows and the space's deliveries. Read-set
   validation (§0 item 5) refuses the delivery if the member's account
@@ -2023,7 +2023,7 @@ recipientAccountEpochId, envelope}`, with a random ID, sealed to that
   sealing key record of theirs that does not derive, which is reported
   against that record instead, §2.12)
   an `invalid-delivery` encryption event `{space, sender, recipient,
-keyEpochId}`, once per delivery and device. Nothing is written: holders
+  keyEpochId}`, once per delivery and device. Nothing is written: holders
   cannot see that the envelope failed, so they count the member as holding
   the version and do not deliver again. The member stays `key-pending` until
   an updater rotates (`db.encryption.rotate(space)`, §3.5), which delivers a
