@@ -141,10 +141,13 @@ describe("point filters compare whole values, bit for bit (SPEC 6.1.1)", () => {
     expect(() => conditions("isNull", true)).not.toThrow();
   });
 
-  it("refuses ordering, contains and out-of-range literals", () => {
+  it("leaves which operators a point takes to the engine (jazz#5966)", () => {
     for (const op of ["gt", "gte", "lt", "lte", "contains"]) {
-      expect(() => conditions(op, [1, 2])).toThrow(/only supports eq\/ne\/in\/notIn\/isNull/);
+      expect(() => conditions(op, [1, 2])).not.toThrow();
     }
+  });
+
+  it("refuses out-of-range literals", () => {
     expect(() => conditions("eq", [1, 91])).toThrow(/latitude/);
     expect(() => conditions("eq", { $pointf64le: "00" })).toThrow(/1 bytes, expected 16/);
   });
