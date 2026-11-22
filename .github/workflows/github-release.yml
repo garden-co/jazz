@@ -44,8 +44,8 @@ jobs:
     steps:
       - name: Validate inputs
         run: |
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N, got '${VERSION}'"
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-(alpha|beta)\.[0-9]+$ ]]; then
+            echo "::error::version must look like 2.0.0-(alpha|beta).N, got '${VERSION}'"
             exit 1
           fi
           if [ -z "${NOTES//[[:space:]]/}" ]; then

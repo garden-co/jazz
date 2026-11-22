@@ -70,12 +70,12 @@ jobs:
               version="$(gh api "repos/$GH_REPO/contents/packages/jazz-tools/package.json?ref=$PUBLISHED_SHA" \
                 --jq '.content' | base64 -d | jq -r .version)" ;;
           esac
-          if ! [[ "$version" =~ ^2\.0\.0-alpha\.[0-9]+$ ]]; then
+          if ! [[ "$version" =~ ^2\.0\.0-(alpha|beta)\.[0-9]+$ ]]; then
             if [ "$EVENT" = workflow_dispatch ]; then
-              echo "::error::not a jazz-tools 2.0 alpha version: $version"
+              echo "::error::not a jazz-tools 2.0 alpha or beta version: $version"
               exit 1
             fi
-            echo "::notice::not a jazz-tools 2.0 alpha release ($version); nothing to measure"
+            echo "::notice::not a jazz-tools 2.0 alpha or beta release ($version); nothing to measure"
             exit 0
           fi
           # Wait for npm to serve it (up to 30 minutes).
@@ -118,7 +118,7 @@ jobs:
       - name: Check the measurement
         run: |
           jq -e '
-            (.jazzToolsVersion | type == "string" and test("^2\\.0\\.0-alpha\\.[0-9]+$")) and
+            (.jazzToolsVersion | type == "string" and test("^2\\.0\\.0-(alpha|beta)\\.[0-9]+$")) and
             (.thinClientAddedGzipBytes | type == "number" and . > 0) and
             (.wasmGzipBytes | type == "number" and . > 0) and
             (.wasmRawBytes | type == "number" and . > 0)
