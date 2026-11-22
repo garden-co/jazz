@@ -18,8 +18,8 @@ const prose = (text) => text.replace(/[`*]/g, "").replace(/\s+/g, " ").trim();
 function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   assert.match(
     packageReadme,
-    /supported React Native alpha/,
-    "the package must describe the supported alpha client",
+    /supported React Native client/,
+    "the package must describe the supported client",
   );
   assert.match(
     packageReadme,
@@ -33,8 +33,8 @@ function assertCurrentRnBoundary(packageReadme, installGuide, spec) {
   );
   assert.match(
     installGuide,
-    /supported as an alpha.*jazz-tools\/react-native.*jazz-rn.*matching development or release build.*Expo Go is unsupported/i,
-    "the public install guide must retain the alpha native-build boundary",
+    /supported in the beta.*jazz-tools\/react-native.*jazz-rn.*matching development or release build.*Expo Go is unsupported/i,
+    "the public install guide must retain the native-build boundary",
   );
   assert.match(
     spec,
@@ -75,8 +75,8 @@ function assertRnDeviceWorkflowContract(workflow) {
   );
   assert.match(
     android,
-    /github\.event_name == 'workflow_dispatch' \|\| \( contains\(github\.event\.pull_request\.labels\.\*\.name, 'rn-preview-release'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \)/,
-    "native device jobs run only when manually dispatched or for a same-repository RN-preview PR",
+    /github\.event_name == 'workflow_dispatch' \|\| inputs\.artifacts_run_id != '' \|\| \( contains\(github\.event\.pull_request\.labels\.\*\.name, 'rn-preview-release'\) && github\.event\.pull_request\.head\.repo\.full_name == github\.repository \)/,
+    "native device jobs run only when manually dispatched, handed prebuilt artifacts, or for a same-repository RN-preview PR",
   );
 }
 
@@ -806,7 +806,7 @@ test("Expo config plugin describes the real iOS receipt boundary without claimin
   assert.doesNotMatch(plugin, /this workflow is source-only/);
 });
 
-test("RN packaging and public docs describe the proven alpha boundary semantically", () => {
+test("RN packaging and public docs describe the proven RN boundary semantically", () => {
   const packageReadme = prose(
     fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/README.md"), "utf8"),
   );
@@ -973,12 +973,8 @@ test("the emitted React Native graph cannot reach browser WASM through barrel ex
   // Plant the former `../index.js` re-export. This follows the emitted barrel
   // graph, unlike a direct source-import scan, and must discover its WASM
   // loader through runtime/index.
-  const oldBarrel = fs.readFileSync(entry, "utf8");
-  assert.ok(
-    oldBarrel.includes("../removed-schema-api.js"),
-    "the RN entry re-exports the removed-API stubs",
-  );
-  const planted = new Map([[entry, oldBarrel.replace("../removed-schema-api.js", "../index.js")]]);
+  const barrel = fs.readFileSync(entry, "utf8");
+  const planted = new Map([[entry, `${barrel}\nexport * from "../index.js";\n`]]);
   assert.throws(
     () => assertEmittedRnGraphHasNoBrowserWasm(emittedRelativeModuleGraph(entry, planted)),
     /browser\/Node runtime loading|browser WASM package/,
@@ -1218,7 +1214,7 @@ test("dispatch device workflow uses Blacksmith KVM while source jobs remain chea
   );
   assert.match(
     workflow,
-    /android-device-acceptance:[\s\S]*runs-on: blacksmith-4vcpu-ubuntu-2404[\s\S]*Grant the runner user access to KVM[\s\S]*setfacl -m "u:\$\{USER\}:rw" \/dev\/kvm/,
+    /android-device-acceptance:[\s\S]*runs-on: blacksmith-16vcpu-ubuntu-2404[\s\S]*Grant the runner user access to KVM[\s\S]*setfacl -m "u:\$\{USER\}:rw" \/dev\/kvm/,
   );
   assert.match(workflow, /android-source-scaffold:[\s\S]*runs-on: blacksmith-4vcpu-ubuntu-2404/);
   assert.match(workflow, /ios-source-scaffold:[\s\S]*runs-on: blacksmith-6vcpu-macos-15/);

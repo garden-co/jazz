@@ -26,7 +26,13 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { JazzCore } from "jazz-napi";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startTestJazz, testApp, testPermissions } from "../testing/index.js";
-import { decodeWebSocketFrameBatch } from "../runtime/native-runtime/websocket.js";
+import {
+  CLIENT_WIRE_FEATURES,
+  FEATURE_TYPED_ERROR_REASON,
+  decodeWebSocketFrameBatch,
+  decodeWireError,
+  type WireError,
+} from "../runtime/native-runtime/websocket.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import {
   acceptDeviceAccounts,
@@ -45,6 +51,7 @@ import {
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import { mapAuthReason } from "../runtime/auth-state.js";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import { requestBackendSignIn, requestBackendUser } from "../accounts/registry-client.js";
 import { signedInIdentity } from "../session/follow-user.js";
 import {
@@ -1235,6 +1242,50 @@ describe("createJazz", () => {
     await expect(jazz.revokeUser("")).rejects.toThrow(/pass the user's id/);
   }, 30_000);
 
+  // The HTTP stream hands the revoke's auth_failed and its close over in one
+  // read: the client went offline: auth on a socket, but read the stream's
+  // close as a dropped connection and kept reopening (refused each time).
+  it("ends a user's open HTTP stream session at once on revokeUser, as a refusal", async () => {
+    const signedOut = new Set<string>();
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const userId = request.headers.get("x-test-user");
+        return userId && !signedOut.has(userId) ? { userId, expiresAt: inAnHour() } : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: false });
+    // Same-origin, as a page is: the client falls back to the stream.
+    const previous = (globalThis as { location?: unknown }).location;
+    (globalThis as { location?: unknown }).location = {
+      host: new URL(origin).host,
+      href: `${origin}/`,
+    };
+    cleanups.push(async () => {
+      (globalThis as { location?: unknown }).location = previous;
+    });
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    const streamPath = `/jazz/apps/${jazz.appId}/stream`;
+    expect(requestPaths).toContain(streamPath);
+
+    signedOut.add("alice");
+    expect(await jazz.revokeUser("alice")).toBe(1);
+    await expect
+      .poll(() => alice.db.getSyncStatus().link, { timeout: 5_000, interval: 20 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    // A refusal: the client stops opening streams.
+    const opened = requestPaths.filter((path) => path === streamPath).length;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(requestPaths.filter((path) => path === streamPath).length).toBe(opened);
+    expect(alice.db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "auth" });
+  }, 30_000);
+
   it("ends a user's sessions on other instances on revokeUser (serverless)", async () => {
     // Three instances of one app on one core, as on a serverless host: one
     // holds Alice's socket (and Bob's), one her HTTP stream, and the sign-out
@@ -1287,19 +1338,11 @@ describe("createJazz", () => {
     await expect
       .poll(() => viaSocket.db.getSyncStatus().link, { timeout: 5_000, interval: 20 })
       .toMatchObject({ state: "offline", reason: "auth" });
-    // The stream host ended Alice's stream session as revoked, and refuses
-    // her new ones. (Its client then keeps reopening streams instead of
-    // going offline, as after a revokeUser on the same instance.)
-    const streamsBefore = requestPaths.filter((path) => path.endsWith(`/apps/${appId}/stream`));
+    // The stream host ended Alice's stream session as revoked: her stream
+    // client reads that as a refusal too, as a socket client does.
     await expect
-      .poll(
-        () =>
-          requestPaths.filter((path) => path.endsWith(`/apps/${appId}/stream`)).length >
-          streamsBefore.length,
-        { timeout: 5_000, interval: 20 },
-      )
-      .toBe(true);
-    expect(viaStream.db.getSyncStatus().link.state).not.toBe("connected");
+      .poll(() => viaStream.db.getSyncStatus().link, { timeout: 5_000, interval: 20 })
+      .toMatchObject({ state: "offline", reason: "auth" });
     const late = viaStream.db.insert(app.todos, {
       title: "after revocation",
       owner: viaStream.session!.user!,
@@ -2757,6 +2800,155 @@ describe("createJazz", () => {
     expect(mapAuthReason(missing)).toBe("missing");
   }, 60_000);
 
+  // #5927 R3b: a client whose Hello offers FEATURE_TYPED_ERROR_REASON is told
+  // why createJazz refused it in the error itself; one that doesn't gets the
+  // same bytes as before and reads the message.
+  it("names why it refused a sign-in to a client that reads the reason", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const refusal = async (prelude: unknown, features: number) => {
+      const socket = new NodeWebSocket(
+        `${origin.replace("http", "ws")}/jazz/apps/${jazz.appId}/ws`,
+      );
+      socket.binaryType = "arraybuffer";
+      socket.addEventListener("open", () => {
+        socket.send(JSON.stringify(prelude));
+        socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(features)]));
+      });
+      const messages: Uint8Array[] = [];
+      socket.addEventListener("message", (event) =>
+        messages.push(new Uint8Array(event.data as ArrayBuffer)),
+      );
+      await new Promise((resolve) => socket.addEventListener("close", resolve));
+      expect(messages).toHaveLength(1);
+      return decodeWireError(decodeWebSocketFrameBatch(messages[0]!)[0]!);
+    };
+    const nobody = {
+      peer_identity: "nobody",
+      backend_session: { issuer: "jazz:backend", user_id: "alice" },
+    };
+    const junk = { peer_identity: "junk", auth: { jwt_token: "junk" } };
+    const reads = CLIENT_WIRE_FEATURES | FEATURE_TYPED_ERROR_REASON;
+    expect(await refusal(nobody, reads)).toMatchObject({ code: "auth_failed", reason: "missing" });
+    expect(await refusal(junk, reads)).toMatchObject({ code: "auth_failed", reason: "invalid" });
+    // Without the bit: no reason, the message says it as before.
+    const plain = await refusal(nobody, CLIENT_WIRE_FEATURES);
+    expect(plain.reason).toBeUndefined();
+    expect(mapAuthReason(plain.message)).toBe("missing");
+  }, 60_000);
+
+  // #5927 R3b: every refusal createJazz sends names its reason to a client
+  // that offered FEATURE_TYPED_ERROR_REASON: an answer already expired at
+  // sign-in, `revokeUser` on an open session, the planned reconnect at the
+  // session's expiry, and a refusal the core gave (by its code).
+  it("names expired, revoked, reauthenticate and the core's refusals to a client that reads them", async () => {
+    const reads = CLIENT_WIRE_FEATURES | FEATURE_TYPED_ERROR_REASON;
+    // Signs `user` in (which gives them an account), opens a raw socket as
+    // them, and resolves with the first error the backend sends it.
+    // (`signIn: false`: a user the core refuses, who has no sign-in.)
+    const firstError = async (origin: string, appId: string, user: string, signIn = true) => {
+      let peerIdentity = user;
+      if (signIn) {
+        const signedIn = await fetch(`${origin}/jazz/apps/${appId}/accounts/backend-sign-in`, {
+          method: "POST",
+          headers: { "x-test-user": user },
+        });
+        expect(signedIn.status).toBe(200);
+        const { account } = (await signedIn.json()) as { account: string };
+        peerIdentity = canonicalAuthorSubject("jazz:backend", user, account);
+      }
+      const socket = new NodeWebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+        headers: { "x-test-user": user },
+      } as never);
+      socket.binaryType = "arraybuffer";
+      socket.addEventListener("open", () => {
+        socket.send(
+          JSON.stringify({
+            peer_identity: peerIdentity,
+            backend_session: { issuer: "jazz:backend", user_id: user },
+          }),
+        );
+        socket.send(encodeWebSocketFrameBatch([encodeWireClientHello(reads)]));
+      });
+      const error = new Promise<WireError>((resolve, reject) => {
+        socket.addEventListener("message", (event) => {
+          const frame = decodeWebSocketFrameBatch(new Uint8Array(event.data as ArrayBuffer))[0];
+          if (frame?.[0] === 1) resolve(decodeWireError(frame));
+        });
+        socket.addEventListener("close", () => reject(new Error("closed without an error")));
+      });
+      const opened = new Promise<void>((resolve) => {
+        socket.addEventListener("message", () => resolve(), { once: true });
+      });
+      return { error, opened, close: () => socket.close() };
+    };
+
+    // A session whose deadline has passed by the time it is admitted
+    // (`sessionTtlSeconds: 0` makes it so at once).
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    cleanups.push(async () => error.mockRestore());
+    const lapsing = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+      sessionTtlSeconds: 0,
+    }).ready();
+    cleanups.push(() => lapsing.close());
+    const lapsingOrigin = await serve(lapsing, { sockets: true });
+    expect(await (await firstError(lapsingOrigin, lapsing.appId, "carol")).error).toMatchObject({
+      code: "auth_failed",
+      reason: "expired",
+    });
+
+    // The planned reconnect at a session's expiry.
+    const expiring = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        const userId = request.headers.get("x-test-user");
+        if (userId === "soon") return { userId, expiresAt: inSeconds(4) };
+        return userId ? { userId, expiresAt: inAnHour() } : null;
+      },
+    }).ready();
+    cleanups.push(() => expiring.close());
+    const origin = await serve(expiring, { sockets: true });
+    expect(await (await firstError(origin, expiring.appId, "soon")).error).toMatchObject({
+      code: "auth_failed",
+      retry: "after_resume",
+      reason: "reauthenticate",
+    });
+
+    // `revokeUser` on an open session.
+    const alice = await firstError(origin, expiring.appId, "alice");
+    await alice.opened;
+    expect(await expiring.revokeUser("alice")).toBe(1);
+    expect(await alice.error).toMatchObject({ code: "auth_failed", reason: "revoked" });
+
+    // A refusal the core gave (an identity it revoked): its code decides.
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const store = remote({ url: core.url, appId, secret: core.adminSecret });
+    const jazz = await createJazz({ app, permissions, store, authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const coreOrigin = await serve(jazz, { sockets: true });
+    const bob = { issuer: "jazz:backend", subject: "bob" };
+    const admin = (operation: string, body: unknown) =>
+      fetch(`${core.url}/apps/${appId}/admin/accounts/${operation}`, {
+        method: "POST",
+        headers: { "X-Jazz-Admin-Secret": core.adminSecret, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    expect((await admin("login-or-register", { identity: bob })).status).toBe(200);
+    expect((await admin("revoke", { approver: bob, target: bob })).status).toBe(204);
+    const refused = await (await firstError(coreOrigin, appId, "bob", false)).error;
+    expect(refused.message).toContain("session refused:");
+    expect(refused).toMatchObject({ code: "auth_failed", reason: "invalid" });
+  }, 60_000);
+
   it("syncs over the HTTP stream when the host can't upgrade sockets", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
     const appId = jazz.appId;
@@ -2874,7 +3066,7 @@ describe("createJazz", () => {
     });
     // ...and let a send already under way finish.
     const sendsSoFar = () => requestPaths.filter((path) => path === sessionPath).length;
-    for (let seen = -1; seen !== sendsSoFar(); ) {
+    for (let seen = -1; seen !== sendsSoFar();) {
       seen = sendsSoFar();
       await new Promise((resolve) => setTimeout(resolve, 300));
     }

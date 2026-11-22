@@ -1,7 +1,7 @@
 /**
  * Null passes through a column transform: Jazz never calls `from` or `to`
  * with null, so an alpha.64 transform's null branch (kept as is by
- * `jazz-tools upgrade`) is never reached, and null reads and writes as null.
+ * alpha.66's `jazz-tools upgrade`) is never reached, and null reads and writes as null.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testApp } from "../testing/test-app.js";
@@ -17,7 +17,7 @@ describe("column transforms and null", () => {
   });
 
   it("passes null through without calling the transform, and transforms other values", async () => {
-    // As `jazz-tools upgrade` moves `s.timestamp().optional().transform({ from, to })`.
+    // As alpha.66's `jazz-tools upgrade` moved `s.timestamp().optional().transform({ from, to })`.
     const from = vi.fn((v: Date | null) => (v == null ? null : v.toISOString().slice(0, 10)));
     const to = vi.fn((v: string | null) => (v == null ? null : new Date(`${v}T00:00:00Z`)));
     const app = testApp(

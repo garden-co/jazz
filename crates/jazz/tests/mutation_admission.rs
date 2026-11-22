@@ -241,29 +241,31 @@ fn retained_mergeable_handles_cannot_stage_or_commit() {
     assert!(values(&alice).is_empty());
 }
 
-/// Alice's callback transaction must roll back when another retained view starts
-/// closing before the callback returns, even if the callback itself succeeds.
+/// Alice's staged writes cannot commit after another retained view starts closing.
 ///
 /// ```text
-/// callback: insert -> sibling sets fence -> return Ok -> rollback
+/// alice: stage insert -> sibling sets fence -> commit refused -> discard
 /// ```
 #[test]
-fn a_close_during_a_callback_rolls_back_its_uncommitted_writes() {
+fn a_close_before_commit_discards_staged_writes() {
     let alice = open(1);
     let sibling = block_on(alice.register_schema_view(schema(false))).unwrap();
-    closing(block_on(alice.transaction(async |tx| {
+    closing(block_on(async {
+        let tx = alice.mergeable_tx().await?;
         tx.insert("docs", body("uncommitted"), Default::default())
             .await?;
         sibling.stop_mutation_admission();
-        Ok(())
-    })));
+        tx.commit().await
+    }));
     assert!(values(&alice).is_empty());
     let called = std::cell::Cell::new(false);
-    closing(block_on(alice.transaction(async |_tx| {
+    closing(block_on(async {
+        let _tx = alice.mergeable_tx().await?;
         called.set(true);
-        Ok(())
-    })));
+        _tx.commit().await
+    }));
     assert!(!called.get());
+    assert_eq!(alice.held_for_test().open_batches, 0);
     block_on(alice.tick()).unwrap();
 }
 

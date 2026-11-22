@@ -5,9 +5,17 @@ on:
     branches:
       - changeset-release/*
   workflow_dispatch:
+  # The release candidate gate (release-candidate.yml): the preview of the
+  # release-artifacts run it verified, without rebuilding.
+  workflow_call:
+    inputs:
+      artifacts_run_id:
+        required: true
+        type: string
 
 concurrency:
-  group: preview-jazz-tools-alpha-${{ github.ref }}
+  # Called, github.workflow is the caller's: one group per calling run.
+  group: preview-jazz-tools-alpha-${{ github.ref }}${{ inputs.artifacts_run_id && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -50,6 +58,7 @@ jobs:
       pull-requests: read
     with:
       mode: dry-run
+      artifacts_run_id: ${{ inputs.artifacts_run_id || '' }}
     secrets: inherit
 
   mark-preview-final:

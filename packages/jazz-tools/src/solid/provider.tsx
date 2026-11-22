@@ -1,15 +1,11 @@
-import { warnSessionHookDeprecated } from "../session/deprecated-session-hook.js";
 import { SessionContext } from "./session-context.js";
 import { createContext, useContext, type JSX, type Accessor, Show } from "solid-js";
-import type { PublicSession } from "../runtime/context.js";
 import {
-  createSolidJazzClient,
   isPendingSolidJazzClientReady,
   type SolidJazzClient,
   type PendingSolidJazzClient,
 } from "./create-solid-jazz-client.js";
 import type { Db } from "../runtime/db.js";
-import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import {
   refuseAutoAttachDevTools,
   type NoAutoAttachDevTools,
@@ -42,20 +38,6 @@ export function JazzClientProvider(props: JazzClientProviderProps) {
   );
 }
 
-export type LegacyJazzProviderProps = Omit<JazzClientProviderProps, "client"> & {
-  config: DbConfig;
-};
-
-export function LegacyJazzProvider(props: LegacyJazzProviderProps) {
-  const client = createSolidJazzClient(() => props.config);
-
-  return (
-    <JazzClientProvider client={client} fallback={props.fallback}>
-      {props.children}
-    </JazzClientProvider>
-  );
-}
-
 export function useJazzClient(): JazzClientContextValue {
   const ctx = useContext(JazzClientContext);
   if (!ctx) {
@@ -67,16 +49,6 @@ export function useJazzClient(): JazzClientContextValue {
 export function useDb<TDb = Db>(): Accessor<TDb> {
   const client = useJazzClient();
   return () => client.db as TDb;
-}
-
-/**
- * @deprecated Use `useJazzSession().snapshot().user`: the same user, with
- * `user` as `accountId`. Warns once in development; removed in a later alpha.
- */
-export function useSession(): Accessor<PublicSession | null> {
-  warnSessionHookDeprecated("useSession()", "useJazzSession().snapshot().user");
-  const client = useJazzClient();
-  return () => client.session;
 }
 
 export function useAuthState() {

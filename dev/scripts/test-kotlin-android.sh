@@ -7,6 +7,17 @@
 #
 # CARGO_PROFILE picks the Cargo profile the .so files are built with (default
 # dev: the check is that everything cross-compiles, links and packages).
+#
+# Split builds (attach-language-artifacts.yml), all paths absolute or relative
+# to the repository root:
+#   KOTLIN_ANDROID_JNI_OUT=<dir> KOTLIN_ANDROID_ABIS=<abi>  builds only jazz-ffi,
+#       for that ABI, into <dir>/jniLibs/<abi>/libjazz_ffi.so (Gradle's own
+#       cargoNdkFfi task), and for arm64-v8a also its Kotlin bindings
+#       (generateUniffi) into <dir>/uniffi. No AAR.
+#   KOTLIN_ANDROID_JNI_LIBS=<dir>/jniLibs  packages those libraries instead of
+#       running cargo-ndk (-PprebuiltJniLibs), and
+#   KOTLIN_ANDROID_BINDINGS=<dir>/uniffi  those bindings (-PuniffiBindings):
+#       with both, no Rust toolchain is needed.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -84,20 +95,52 @@ grep -qx "Pkg.Revision = $ndk_revision" "$sdk/ndk/$ndk_revision/source.propertie
 # two different SDK paths.
 export ANDROID_HOME="$sdk" ANDROID_SDK_ROOT="$sdk" ANDROID_NDK_HOME="$sdk/ndk/$ndk_revision"
 
-rustup target add "${rust_targets[@]}"
-if ! "$cache/cargo/bin/cargo-ndk" --version 2>/dev/null | grep -q " $cargo_ndk_version\$"; then
-  CARGO_INSTALL_ROOT="$cache/cargo" cargo install "cargo-ndk@$cargo_ndk_version" --locked
+abspath() { mkdir -p "$1" && (cd "$1" && pwd); }
+props=(-PcargoProfile="${CARGO_PROFILE:-dev}")
+[ -n "${KOTLIN_ANDROID_ABIS:-}" ] && props+=(-PandroidAbis="$KOTLIN_ANDROID_ABIS")
+if [ -n "${KOTLIN_ANDROID_JNI_LIBS:-}" ]; then
+  [ -d "$KOTLIN_ANDROID_JNI_LIBS" ] || { echo "no $KOTLIN_ANDROID_JNI_LIBS" >&2; exit 1; }
+  props+=(-PprebuiltJniLibs="$(abspath "$KOTLIN_ANDROID_JNI_LIBS")")
 fi
-export PATH="$cache/cargo/bin:$PATH"
+if [ -n "${KOTLIN_ANDROID_BINDINGS:-}" ]; then
+  [ -d "$KOTLIN_ANDROID_BINDINGS" ] || { echo "no $KOTLIN_ANDROID_BINDINGS" >&2; exit 1; }
+  props+=(-PuniffiBindings="$(abspath "$KOTLIN_ANDROID_BINDINGS")")
+fi
+
+# Rust and cargo-ndk only when this build compiles jazz-ffi or its bindings.
+if [ -z "${KOTLIN_ANDROID_JNI_LIBS:-}" ] || [ -z "${KOTLIN_ANDROID_BINDINGS:-}" ]; then
+  rustup target add "${rust_targets[@]}"
+  if ! "$cache/cargo/bin/cargo-ndk" --version 2>/dev/null | grep -q " $cargo_ndk_version\$"; then
+    CARGO_INSTALL_ROOT="$cache/cargo" cargo install "cargo-ndk@$cargo_ndk_version" --locked
+  fi
+  export PATH="$cache/cargo/bin:$PATH"
+fi
+
+build=packages/jazz-kotlin-android/build
+if [ -n "${KOTLIN_ANDROID_JNI_OUT:-}" ]; then
+  abi="${KOTLIN_ANDROID_ABIS:?KOTLIN_ANDROID_JNI_OUT builds one ABI: set KOTLIN_ANDROID_ABIS}"
+  case "$abi" in arm64-v8a | armeabi-v7a | x86_64) ;; *) echo "one ABI of arm64-v8a, armeabi-v7a, x86_64, got '$abi'" >&2; exit 1 ;; esac
+  out="$(abspath "$KOTLIN_ANDROID_JNI_OUT")"
+  # The bindings come from the arm64-v8a library, as the AAR's do.
+  tasks=(cargoNdkFfi)
+  [ "$abi" = arm64-v8a ] && tasks+=(generateUniffi)
+  gradle --no-daemon --console=plain -p packages/jazz-kotlin-android "${props[@]}" "${tasks[@]}"
+  [ -s "$build/jniLibs/$abi/libjazz_ffi.so" ] || { echo "cargo-ndk wrote no $abi/libjazz_ffi.so" >&2; exit 1; }
+  rm -rf "$out/jniLibs" "$out/uniffi"
+  cp -R "$build/jniLibs" "$out/jniLibs"
+  [ "$abi" = arm64-v8a ] && cp -R "$build/generated/uniffi" "$out/uniffi"
+  ls -lR "$out"
+  exit 0
+fi
 
 # KOTLIN_ANDROID_TASKS: more tasks to run with the build (dev/scripts/publish-kotlin.sh's
 # publishToMavenLocal, publishToMavenCentral).
 read -ra extra_tasks <<<"${KOTLIN_ANDROID_TASKS:-}"
 gradle --no-daemon --console=plain -p packages/jazz-kotlin-android \
-  -PcargoProfile="${CARGO_PROFILE:-dev}" assembleRelease "${extra_tasks[@]}"
+  "${props[@]}" assembleRelease "${extra_tasks[@]}"
 
 # The AAR must carry jazz-ffi for every ABI, and the library's classes.
-aar=packages/jazz-kotlin-android/build/outputs/aar/jazz-kotlin-android-release.aar
+aar=$build/outputs/aar/jazz-kotlin-android-release.aar
 listing=$(unzip -l "$aar")
 for abi in arm64-v8a armeabi-v7a x86_64; do
   grep -q "jni/$abi/libjazz_ffi.so" <<<"$listing" || { echo "$aar lacks jni/$abi/libjazz_ffi.so" >&2; exit 1; }

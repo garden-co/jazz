@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && pnpm run build:web && pnpm run build:embedded",
+    "build": "tsrs -b && pnpm run build:web && pnpm run build:embedded",
     "build:vercel": "bash ../../dev/scripts/build-inspector-vercel.sh",
     "build:web": "vite build --mode web",
     "build:embedded": "vite build --mode embedded",
@@ -29,8 +29,8 @@
     "@types/node": "catalog:default",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react-swc": "^4.3.0",
-    "@vitest/ui": "4.1.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "@vitest/ui": "5.1.0",
     "happy-dom": "^20.8.4",
     "jsdom": "^28.1.0",
     "typescript": "catalog:default",
@@ -40,6 +40,6 @@
     "vitest": "catalog:default"
   },
   "engines": {
-    "node": ">=22.12"
+    "node": ">=22.18"
   }
 }

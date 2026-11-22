@@ -39,7 +39,7 @@ describe("client session resolution", () => {
       issuer: LOCAL_FIRST_JWT_ISSUER,
       user_id: "local-key-subject",
       claims: {},
-      authMode: "local-first" as const,
+      authMode: "device-account" as const,
     });
     const token = trustedReservedSessionToken(session);
     expect(isTrustedReservedSession({ ...session }, token)).toBe(true);
@@ -55,7 +55,7 @@ describe("client session resolution", () => {
   it("resolves a trusted reserved session stored beside a config", () => {
     const trusted = internalSessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "local-key-subject" },
-      "local-first",
+      "device-account",
     )!;
     const config = {
       appId: "side-table-app",
@@ -322,11 +322,11 @@ describe("client session resolution", () => {
     ) as Record<string, unknown>;
     const internal = internalSessionFromVerifiedReservedJwtPayload(
       { ...payload, iss: LOCAL_FIRST_JWT_ISSUER },
-      "local-first",
+      "device-account",
     )!;
     const session = sessionFromVerifiedReservedJwtPayload(
       { ...payload, iss: LOCAL_FIRST_JWT_ISSUER },
-      "local-first",
+      "device-account",
     )!;
 
     expect(Object.getPrototypeOf(internal.claims)).toBeNull();
@@ -475,7 +475,7 @@ describe("client session resolution", () => {
             claims: {},
             authMode:
               issuer === LOCAL_FIRST_JWT_ISSUER
-                ? "local-first"
+                ? "device-account"
                 : issuer === ANONYMOUS_JWT_ISSUER
                   ? "anonymous"
                   : "external",
@@ -528,13 +528,13 @@ describe("resolveJwtSession — reserved issuer admission", () => {
   it("verified reserved JWT paths construct only their dedicated auth modes", () => {
     const localFirst = sessionFromVerifiedReservedJwtPayload(
       { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER, role: "writer" },
-      "local-first",
+      "device-account",
     );
     expect(localFirst).toEqual({
       user: null,
       identity: { issuer: "urn:jazz:local-first", subject: "u1" },
       claims: { iss: LOCAL_FIRST_JWT_ISSUER, sub: "u1", role: "writer" },
-      authMode: "local-first",
+      authMode: "device-account",
     });
     expect(
       resolveClientSessionSync({
@@ -542,7 +542,7 @@ describe("resolveJwtSession — reserved issuer admission", () => {
         jwtToken: jwt({ sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER }),
         trustedReservedSession: internalSessionFromVerifiedReservedJwtPayload(
           { sub: "u1", iss: LOCAL_FIRST_JWT_ISSUER, role: "writer" },
-          "local-first",
+          "device-account",
         )!,
       }),
     ).toEqual(localFirst);
@@ -568,7 +568,7 @@ describe("resolveJwtSession — reserved issuer admission", () => {
   it("does not expose reserved self-signed proof keys while retaining identity metadata", () => {
     for (const [authMode, issuer] of [
       ["anonymous", ANONYMOUS_JWT_ISSUER],
-      ["local-first", LOCAL_FIRST_JWT_ISSUER],
+      ["device-account", LOCAL_FIRST_JWT_ISSUER],
     ] as const) {
       for (const proofKey of ["first-proof-key", "second-proof-key"]) {
         const payload = { sub: "user", iss: issuer, jazz_pub_key: proofKey };

@@ -10,9 +10,14 @@ import { RuntimeClosedError } from "../runtime/runtime-closed-error.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, testApp, type TestJazz } from "../testing/index.js";
 import {
+  createJazzClient as createPublicJazzClient,
   openBrowserSessionCore as createJazzClient,
   type BrowserJazzSession,
 } from "./create-jazz-session.js";
+import type { JazzSession } from "./jazz-session.js";
+import type { JazzClient } from "../web/registered-jazz-client.js";
+import { assertNativeArtifactCompatibility } from "../runtime/native-artifact-compatibility.js";
+import { EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS } from "../runtime/native-artifact-fingerprints.js";
 
 const app = testApp({ tables: { notes: { columns: { text: "string" } } } });
 const permissions = {
@@ -515,6 +520,29 @@ describe("browser session", () => {
       .toEqual(["unsent"]);
   }, 60_000);
 
+  it("names no pending rows while the thin runtime still uploads, then the local-first Db's", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
+    const seen: (readonly string[] | null)[] = [];
+    const stop = kept.onPendingUploadRowsChange(app.notes, (ids) => seen.push(ids));
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    // The thin runtime cannot name its writes' rows: unknown, not "none".
+    expect(kept.getPendingUploadRows(app.notes)).toBeNull();
+    kept.insert(app.notes, { text: "local" });
+    expect(kept.getPendingUploadRows(app.notes)).toBeNull();
+
+    await kept.reconnect();
+    await kept.waitForSync({ timeoutMs: 10_000 });
+    // Drained: the answer is the local-first Db's own, and it is complete.
+    await expect.poll(() => kept.getPendingUploadRows(app.notes), { timeout: 10_000 }).toEqual([]);
+    expect(seen.at(-1)).toEqual([]);
+    stop();
+  }, 60_000);
+
   it("keeps an app that went offline offline across the upgrade", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());
@@ -772,6 +800,104 @@ describe("browser session", () => {
     await db(session).insert(app.notes, { text: "still thin" }).wait({ tier: "global" });
     warn.mockRestore();
   }, 60_000);
+
+  describe("when the local-first client can't open", () => {
+    const publicSessions: JazzSession<JazzClient>[] = [];
+    afterEach(async () => {
+      for (const session of publicSessions.splice(0)) await session.close();
+    });
+
+    /**
+     * What `jazz-tools/local-first` does with a `.wasm` this build doesn't
+     * match (a stale asset, a cache, mixed versions): its WASM loader's
+     * fingerprint check throws before any runtime opens.
+     */
+    const loadMismatchedLocalFirst: LocalFirstLoader = async () => ({
+      createClient: async () => {
+        assertNativeArtifactCompatibility(
+          { nativeArtifactFingerprint: () => "9c1e-stale-wasm" },
+          "WASM",
+        );
+        throw new Error("unreachable");
+      },
+    });
+
+    async function openPublic(server: TestJazz, client: LocalFirstLoader) {
+      const session = await createPublicJazzClient({
+        scope: server.appId,
+        serverUrl: server.url,
+        store: memoryStore(),
+        initial: "device",
+        driver: { type: "memory" },
+        client,
+      });
+      publicSessions.push(session);
+      return session;
+    }
+
+    it("names a WASM fingerprint mismatch in the console and on the session", async () => {
+      const server = await startServer();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = await openPublic(server, loadMismatchedLocalFirst);
+      await expect
+        .poll(() => session.getSnapshot().localFirstUnavailable, { timeout: 10_000 })
+        .toBeDefined();
+
+      const snapshot = session.getSnapshot();
+      expect(snapshot.status).toBe("ready");
+      expect(snapshot.localFirst).toBe(false);
+      expect(snapshot.localFirstUnavailable).toMatchObject({
+        reason: "wasm-mismatch",
+        message: "local-first unavailable: WASM fingerprint mismatch",
+        expectedFingerprint: EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS.wasm,
+        actualFingerprint: "9c1e-stale-wasm",
+      });
+      expect(snapshot.localFirstUnavailable?.error.message).toMatch(/WASM artifact ABI mismatch/);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toBe(
+        "Jazz local-first unavailable: WASM fingerprint mismatch " +
+          `(expected ${EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS.wasm}, got 9c1e-stale-wasm); ` +
+          "staying thin, without offline use or local reads. The .wasm this page loaded does " +
+          "not match this jazz-tools build: serve the jazz-wasm asset from the same install " +
+          "(check caches and CDNs), reinstall matching Jazz package versions, or in the Jazz " +
+          "monorepo rebuild the generated bindings.",
+      );
+      // Still a working (thin) client.
+      await snapshot.client!.db.insert(app.notes, { text: "thin" }).wait({ tier: "global" });
+      warn.mockRestore();
+    }, 60_000);
+
+    it("says the client failed to load for any other failure", async () => {
+      const server = await startServer();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = await openPublic(server, async () => {
+        throw new Error("offline");
+      });
+      await expect
+        .poll(() => session.getSnapshot().localFirstUnavailable?.reason, { timeout: 10_000 })
+        .toBe("load-failed");
+      expect(session.getSnapshot().localFirstUnavailable?.error.message).toBe("offline");
+      expect(String(warn.mock.calls[0]?.[0])).toBe(
+        "Jazz could not upgrade to the local-first client; staying thin.",
+      );
+      warn.mockRestore();
+    }, 60_000);
+
+    it("clears the reason once a later upgrade succeeds", async () => {
+      const server = await startServer();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const session = await openPublic(server, loadMismatchedLocalFirst);
+      await expect
+        .poll(() => session.getSnapshot().localFirstUnavailable, { timeout: 10_000 })
+        .toBeDefined();
+
+      await session.getSnapshot().client!.db.upgradeToLocalFirst(loadLocalFirst);
+
+      expect(session.getSnapshot().localFirst).toBe(true);
+      expect(session.getSnapshot().localFirstUnavailable).toBeUndefined();
+      warn.mockRestore();
+    }, 60_000);
+  });
 
   it('opens the local-first client at once with localFirst: "now", on a first visit too', async () => {
     vi.stubGlobal("localStorage", memoryLocalStorage());

@@ -389,9 +389,18 @@ const char *relayStatusCode(jazz_native_relay_status status) {
       throw JSError(runtime, std::string("Jazz native foreground runtime is busy during ") +
                                 operation + "; retry after the next scheduled tick");
     case JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT:
-      throw JSError(runtime,
-                    "Remote HTTP sessions require HTTPS; local development endpoints "
-                    "remain supported.");
+      // The session's bearer would travel in plaintext: only this machine
+      // (localhost, a loopback address, an Android emulator's host) may be
+      // reached without TLS. Coded, so the app can tell it apart (#3595).
+      throwCodedError(runtime,
+                      "Jazz on React Native syncs over plaintext (http/ws) only with localhost, "
+                      "a loopback address or an Android emulator's host (10.0.2.2, 10.0.3.2): "
+                      "the session's token would otherwise travel unencrypted. Use an https/wss "
+                      "server URL for any other host, a LAN address or .local name included. "
+                      "To develop on a physical device, run `adb reverse tcp:<port> tcp:<port>` "
+                      "and use localhost (Android), or put the server behind a TLS tunnel "
+                      "(see https://jazz.tools/docs/setup/react-native).",
+                      "remote_plaintext_endpoint");
     case JAZZ_NATIVE_RELAY_UNSUPPORTED_STORAGE_CODECS:
       // The stable code every platform uses, so the app can detect the
       // refusal, delete the store and resync.

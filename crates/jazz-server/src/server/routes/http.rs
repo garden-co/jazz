@@ -64,8 +64,6 @@ pub(super) struct SchemaSummary {
 
 #[derive(Debug, Serialize)]
 pub(super) struct SchemaSummaryResponse {
-    #[deprecated(note = "Use `schemas` instead")]
-    hashes: Vec<String>,
     schemas: Vec<SchemaSummary>,
 }
 
@@ -167,12 +165,7 @@ pub(super) async fn schema_hashes_handler(
             published_at,
         });
     }
-    #[allow(deprecated)]
-    let body = SchemaSummaryResponse {
-        hashes: hashes.iter().map(ToString::to_string).collect(),
-        schemas,
-    };
-    Ok(Json(body))
+    Ok(Json(SchemaSummaryResponse { schemas }))
 }
 
 /// Return whether two known schema hashes are connected by non-draft uploaded migrations.

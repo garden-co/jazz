@@ -10,8 +10,11 @@
     "prebuild": "node scripts/check-config.mjs",
     "build": "jazz-tools generate && vite build",
     "start": "NODE_ENV=production tsx server/index.ts",
-    "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test"
+    "typecheck": "tsrs --noEmit && tsrs --noEmit -p tsconfig.worker.json",
+    "test:e2e": "playwright test",
+    "cf:dev": "jazz-tools generate && vite build && wrangler dev",
+    "cf:check": "wrangler deploy --dry-run --outdir .wrangler-dist",
+    "cf:deploy": "jazz-tools generate && vite build && wrangler deploy"
   },
   "dependencies": {
     "@astryxdesign/core": "0.6.3",
@@ -35,6 +38,7 @@
     "concurrently": "^9.1.0",
     "typescript": "catalog:default",
     "vite": "catalog:default",
-    "wait-on": "^8.0.2"
+    "wait-on": "^8.0.2",
+    "wrangler": "^4.80.0"
   }
 }

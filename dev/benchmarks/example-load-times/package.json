@@ -8,7 +8,7 @@
     "bench": "vitest bench --run --config vitest.config.bench.ts"
   },
   "devDependencies": {
-    "@codspeed/vitest-plugin": "^5.7.1",
+    "@codspeed/vitest-plugin": "^6.1.1",
     "@playwright/test": "^1.58.2",
     "vitest": "catalog:default"
   }

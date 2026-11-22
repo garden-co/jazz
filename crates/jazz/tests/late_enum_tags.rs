@@ -185,28 +185,35 @@ fn a_policy_pinned_to_a_variant_tagged_after_it_subscribed_wakes_for_its_rows() 
     check(&db, &mut lives, "second archived doc");
 }
 
-/// Results keyed by tagged variants (a filter, a policy pin) keep waking
-/// after a new current schema declares the variants in another order and
-/// so renumbers their tags: the keys are rebuilt when the schema changes.
+/// Results keyed by tagged variants (a filter, a policy pin) wake for the
+/// right rows after the store reopens under a schema that declares the
+/// variants in another order and so renumbers their tags.
 #[test]
 fn results_keyed_by_a_variant_keep_waking_after_its_tag_is_renumbered() {
     let policy = || Some(session_eq("status", &["claims", "role"]));
     let v1 = schema_of(&["todo", "done"], policy());
     let db = open(v1.clone(), 1);
     db.set_authority();
-    db.set_identity_claims(
-        user(0),
-        BTreeMap::from([("\0claims:role".to_owned(), Value::String("done".into()))]),
-    );
+    let claims = |db: &Db| {
+        db.set_identity_claims(
+            user(0),
+            BTreeMap::from([("\0claims:role".to_owned(), Value::String("done".into()))]),
+        )
+    };
+    claims(&db);
     doc(&db, 0, "todo");
     doc(&db, 1, "done");
     let filtered = |status: &str| Query::from("docs").filter(eq(col("status"), lit(text(status))));
-    let mut lives = vec![
-        subscribe(&db, "done", filtered("done"), None),
-        subscribe(&db, "todo", filtered("todo"), None),
-        subscribe(&db, "role", Query::from("docs"), Some(user(0))),
-    ];
-    check(&db, &mut lives, "subscribe");
+    let lives = |db: &Db| {
+        vec![
+            subscribe(db, "done", filtered("done"), None),
+            subscribe(db, "todo", filtered("todo"), None),
+            subscribe(db, "role", Query::from("docs"), Some(user(0))),
+        ]
+    };
+    let mut held = lives(&db);
+    check(&db, &mut held, "subscribe");
+    drop(held);
 
     // `done` was tag 1 and is tag 0 from here; `todo` the reverse.
     let v2 = schema_of(&["done", "todo"], policy());
@@ -220,7 +227,9 @@ fn results_keyed_by_a_variant_keep_waking_after_its_tag_is_renumbered() {
         }],
     )
     .unwrap();
-    block_on(db.activate_schema_with_lenses(v2, &[lens])).unwrap();
+    let db = db.reinstall(v2, 1, vec![lens]);
+    claims(&db);
+    let mut lives = lives(&db);
     check(&db, &mut lives, "the renumbering schema");
     doc(&db, 2, "done");
     check(&db, &mut lives, "a done doc");

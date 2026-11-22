@@ -33,7 +33,7 @@ function fakeDb() {
   const statusListeners = new Set<(status: SyncStatus) => void>();
   const subscriptions: DbDeltaSubscriptionCallbacks<Todo>[] = [];
   const db = {
-    getAuthState: () => ({ authMode: "local-first" as const, session: null }),
+    getAuthState: () => ({ authMode: "device-account" as const, session: null }),
     onAuthChanged: () => () => {},
     getSyncStatus: () => current,
     onSyncStatusChange(listener: (status: SyncStatus) => void) {

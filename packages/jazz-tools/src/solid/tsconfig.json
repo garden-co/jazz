@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.solid.json",
+  "compilerOptions": { "noEmit": true, "rootDir": "../.." },
+  "include": ["./**/*", "../types/**/*.d.ts"],
+  "exclude": []
+}

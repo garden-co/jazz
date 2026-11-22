@@ -1,36 +1,31 @@
-name: Publish jazz-tools alpha
+name: Verify jazz-tools release packages (dry run)
 
 on:
-  push:
-    branches:
-      - release
-    paths:
-      - .changeset/pre.json
+  # Retired as a publisher (2026-11-21): release-publish.yml publishes every
+  # registry. What stays is the dry run, the release candidate gate's preview
+  # leg (preview-jazz-tools-alpha-release.yml calls it): build or reuse the
+  # packages and verify exactly what would be published.
   workflow_call:
     inputs:
       mode:
-        description: "Execution mode: publish (real release) or dry-run (build + verify only)."
+        description: "dry-run only (build + verify): publishing moved to release-publish.yml."
         required: false
         type: string
-        default: publish
+        default: dry-run
+      artifacts_run_id:
+        description: "Verify the packages of this release-artifacts.yml run (or the calling run) instead of building them."
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       mode:
-        description: "Execution mode."
+        description: "dry-run only: publishing moved to release-publish.yml."
         required: true
         type: choice
-        default: publish
+        default: dry-run
         options:
-          - publish
           - dry-run
-      expected-sha:
-        description: "Required exact release commit SHA for manual publication."
-        required: false
-        type: string
-      version:
-        description: "Required expected source version for manual publication. Must match the release snapshot."
-        required: false
-        type: string
 
 env:
   JAZZ_RN_CARGO_NDK_VERSION: 4.1.2
@@ -38,11 +33,10 @@ env:
 
 jobs:
   release-push-gate:
-    name: Gate release push trigger
+    name: Gate (dry run only)
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
-      pull-requests: read
     outputs:
       should_run: ${{ steps.gate.outputs.should_run }}
       reason: ${{ steps.gate.outputs.reason }}
@@ -50,124 +44,27 @@ jobs:
       release_pr_head_ref: ${{ steps.gate.outputs.release_pr_head_ref }}
       release_pr_head_sha: ${{ steps.gate.outputs.release_pr_head_sha }}
     steps:
+      # Publishing moved to release-publish.yml: only a dry run proceeds.
       - id: gate
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF: ${{ github.ref }}
-          SHA: ${{ github.sha }}
-          RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'publish' }}
-          EXPECTED_SHA: ${{ inputs.expected-sha }}
-          EXPECTED_VERSION: ${{ inputs.version }}
+          RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'dry-run' }}
         with:
           script: |
-            const eventName = process.env.EVENT_NAME;
-            const ref = process.env.REF;
-            const sha = process.env.SHA;
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
             let shouldRun = "false";
             let reason = "";
-            let releasePrNumber = "";
-            let releasePrHeadRef = "";
-            let releasePrHeadSha = "";
-
-            async function listRecentMergedReleasePrs() {
-              const mergedPulls = await github.paginate(github.rest.pulls.list, {
-                owner,
-                repo,
-                state: "closed",
-                base: "release",
-                sort: "updated",
-                direction: "desc",
-                per_page: 100,
-              });
-
-              return mergedPulls.filter(
-                (pr) => pr.merged_at !== null && pr.head.ref === "changeset-release/release",
-              );
-            }
-
-            async function getToolsVersion(refish) {
-              const response = await github.rest.repos.getContent({
-                owner,
-                repo,
-                path: "packages/jazz-tools/package.json",
-                ref: refish,
-              });
-
-              if (Array.isArray(response.data) || response.data.type !== "file") {
-                throw new Error(`packages/jazz-tools/package.json is not a file at ${refish}`);
-              }
-
-              return JSON.parse(
-                Buffer.from(response.data.content, response.data.encoding).toString("utf8"),
-              ).version;
-            }
-
-            function applyReleasePrMetadata(releasePr) {
-              releasePrNumber = String(releasePr.number);
-              releasePrHeadRef = releasePr.head.ref;
-              releasePrHeadSha = releasePr.head.sha;
-            }
-
             if (process.env.RELEASE_MODE === "dry-run") {
               shouldRun = "true";
               reason = "dry-run invocation";
-            } else if (ref !== "refs/heads/release") {
-              core.setFailed(`Publication requires refs/heads/release, got ${ref}`);
-              reason = "publication is restricted to release";
-            } else if (eventName !== "push" &&
-                       (process.env.EXPECTED_SHA !== sha || !process.env.EXPECTED_VERSION)) {
-              core.setFailed("Manual publication requires the exact expected-sha and version inputs");
-              reason = "missing or mismatched manual release expectations";
             } else {
-              let matchSource = "commit pull association";
-              const associatedPulls = await github.request(
-                "GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls",
-                {
-                  owner,
-                  repo,
-                  commit_sha: sha,
-                },
-              );
-
-              let releasePr = associatedPulls.data.find(
-                (pr) =>
-                  pr.merged_at !== null &&
-                  pr.base.ref === "release" &&
-                  pr.merge_commit_sha === sha &&
-                  pr.head.ref === "changeset-release/release",
-              );
-
-              if (!releasePr) {
-                matchSource = "recent merged PR scan by merge_commit_sha";
-                const mergedReleasePrs = await listRecentMergedReleasePrs();
-
-                releasePr = mergedReleasePrs.find((pr) => pr.merge_commit_sha === sha);
-              }
-
-              if (releasePr && eventName !== "push" &&
-                  await getToolsVersion(sha) !== process.env.EXPECTED_VERSION) {
-                core.setFailed("Expected version does not match the release snapshot");
-                releasePr = null;
-              }
-              if (releasePr) {
-                shouldRun = "true";
-                reason = `merged changeset release PR #${releasePr.number} (${matchSource})`;
-                applyReleasePrMetadata(releasePr);
-              } else {
-                shouldRun = "false";
-                reason = "release commit is not from a merged changeset-release/release PR";
-                if (eventName !== "push") core.setFailed(reason);
-              }
+              reason = "publishing moved to release-publish.yml";
+              core.setFailed(`This workflow only dry-runs now (mode=${process.env.RELEASE_MODE}): publish with release-publish.yml`);
             }
-
             core.setOutput("should_run", shouldRun);
             core.setOutput("reason", reason);
-            core.setOutput("release_pr_number", releasePrNumber);
-            core.setOutput("release_pr_head_ref", releasePrHeadRef);
-            core.setOutput("release_pr_head_sha", releasePrHeadSha);
+            core.setOutput("release_pr_number", "");
+            core.setOutput("release_pr_head_ref", "");
+            core.setOutput("release_pr_head_sha", "");
 
       - name: Show gate decision
         run: |
@@ -176,50 +73,6 @@ jobs:
           echo "release_pr_number=${{ steps.gate.outputs.release_pr_number }}"
           echo "release_pr_head_ref=${{ steps.gate.outputs.release_pr_head_ref }}"
           echo "release_pr_head_sha=${{ steps.gate.outputs.release_pr_head_sha }}"
-
-  # Publication requires the release test tier on the exact tree being
-  # published: CI, examples E2E and RN device acceptance on the Version
-  # Packages PR head, which changesets-release-pr.yml dispatches. Dry runs
-  # build candidates before that tier has run, so they skip this gate.
-  release-test-gate:
-    name: Require release tests on the published tree
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 5
-    needs: [release-push-gate]
-    if: >-
-      needs.release-push-gate.outputs.should_run == 'true' &&
-      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          sparse-checkout: dev/scripts
-      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
-        env:
-          SHA: ${{ github.sha }}
-          RELEASE_PR_HEAD_REF: ${{ needs.release-push-gate.outputs.release_pr_head_ref }}
-          RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
-        with:
-          script: |
-            const { evaluateReleaseTestGate } = await import(
-              `${process.env.GITHUB_WORKSPACE}/dev/scripts/release-test-gate.mjs`
-            );
-            const { ok, lines } = await evaluateReleaseTestGate({
-              github,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: process.env.SHA,
-              headSha: process.env.RELEASE_PR_HEAD_SHA,
-              headRef: process.env.RELEASE_PR_HEAD_REF,
-            });
-            for (const line of lines) core.info(line);
-            if (!ok) {
-              core.setFailed(
-                "Release tests have not passed on the tree being published. Rerun or dispatch the failing workflow on the Version Packages PR head, then rerun this workflow.",
-              );
-            }
 
   resolve-preview-artifacts:
     name: Resolve preview artifact source
@@ -240,10 +93,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
           SHA: ${{ github.sha }}
-          RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'publish' }}
+          RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'dry-run' }}
           RELEASE_PR_NUMBER: ${{ needs.release-push-gate.outputs.release_pr_number }}
           RELEASE_PR_HEAD_REF: ${{ needs.release-push-gate.outputs.release_pr_head_ref }}
           RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
+          ARTIFACTS_RUN_ID: ${{ inputs.artifacts_run_id }}
         with:
           script: |
             const eventName = process.env.EVENT_NAME;
@@ -276,7 +130,32 @@ jobs:
               ).version;
             }
 
-            if (releaseMode !== "publish") {
+            const artifactsRunId = process.env.ARTIFACTS_RUN_ID;
+            if (artifactsRunId && releaseMode === "dry-run") {
+              // The release candidate gate passes the release-artifacts run it
+              // verified for this commit (the caller checked commit and status).
+              if (!/^[0-9]+$/.test(artifactsRunId)) throw new Error(`artifacts_run_id must be a run ID, got ${artifactsRunId}`);
+              // Supply-chain rule: that run must have built this very commit.
+              const { data: artifactsRun } = await github.rest.actions.getWorkflowRun({
+                owner,
+                repo,
+                run_id: Number(artifactsRunId),
+              });
+              const producer = (artifactsRun.path || "").split("@")[0].split("/").pop();
+              if (!["release-artifacts.yml", "release-candidate.yml"].includes(producer))
+                throw new Error(`artifacts_run_id ${artifactsRunId} is a ${producer} run, not release-artifacts or release-candidate`);
+              if (String(artifactsRun.event || "").startsWith("pull_request"))
+                throw new Error(`artifacts_run_id ${artifactsRunId} is a ${artifactsRun.event} run`);
+              if (artifactsRun.head_repository?.full_name !== `${owner}/${repo}`)
+                throw new Error(`artifacts_run_id ${artifactsRunId} built ${artifactsRun.head_repository?.full_name}, not ${owner}/${repo}`);
+              if (artifactsRun.head_sha !== sha)
+                throw new Error(`artifacts_run_id ${artifactsRunId} built ${artifactsRun.head_sha}, not this commit ${sha}`);
+              usePreviewArtifacts = "true";
+              previewRunId = artifactsRunId;
+              reason = `verifying release-artifacts run ${artifactsRunId}`;
+            } else if (artifactsRunId) {
+              reason = "artifacts_run_id is honoured in dry-run only";
+            } else if (releaseMode !== "publish") {
               reason = `preview artifact reuse disabled for mode=${releaseMode}`;
             } else if (ref !== "refs/heads/release") {
               reason = `preview artifact reuse disabled for ${eventName} on ${ref}`;
@@ -313,62 +192,12 @@ jobs:
               }
 
               if (treeReuseSafe) {
-                const runsResponse = await github.rest.actions.listWorkflowRuns({
-                  owner,
-                  repo,
-                  workflow_id: "preview-jazz-tools-alpha-release.yml",
-                  branch: releasePrHeadRef,
-                  per_page: 100,
-                });
-                const runs = (runsResponse.data.workflow_runs || []).filter(Boolean);
-
-                const previewRun = runs
-                  .filter(
-                    (run) =>
-                      run.head_sha === releasePrHeadSha &&
-                      run.status === "completed" &&
-                      run.conclusion === "success",
-                  )
-                  .sort(
-                    (a, b) =>
-                      new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-                  )[0];
-
-                if (!previewRun) {
-                  reason = `no successful preview run found for ${releasePrHeadRef}@${releasePrHeadSha}`;
-                } else {
-                  const artifactsResponse = await github.rest.actions.listWorkflowRunArtifacts({
-                    owner,
-                    repo,
-                    run_id: previewRun.id,
-                    per_page: 100,
-                  });
-                  const artifacts = (artifactsResponse.data.artifacts || []).filter(Boolean);
-
-                  const requiredArtifacts = [
-                    "pkg-jazz-tools",
-                    "pkg-jazz-wasm",
-                    "pkg-jazz-napi",
-                    "pkg-jazz-rn",
-                    "pkg-create-jazz",
-                    "inspector-prebuilt",
-                  ];
-
-                  const availableArtifacts = new Set(
-                    artifacts.filter((artifact) => !artifact.expired).map((artifact) => artifact.name),
-                  );
-                  const missingArtifacts = requiredArtifacts.filter(
-                    (artifactName) => !availableArtifacts.has(artifactName),
-                  );
-
-                  if (missingArtifacts.length > 0) {
-                    reason = `preview run ${previewRun.id} is missing artifacts: ${missingArtifacts.join(", ")}`;
-                  } else {
-                    usePreviewArtifacts = "true";
-                    previewRunId = String(previewRun.id);
-                    reason = `reusing preview artifacts from run ${previewRun.id} for PR #${releasePrNumber}`;
-                  }
-                }
+                // No reuse: the Version Packages head's runs (release-artifacts.yml
+                // or the preview) are on changeset-release/*, which restores an
+                // actions/cache scope any write collaborator can seed
+                // (#supply-chain, 2026-11-19). This run builds until
+                // release-artifacts.yml restores no cache on untrusted refs.
+                reason = "reuse of changeset-release/* runs is disabled (cache scope); building";
               }
             }
 
@@ -391,44 +220,29 @@ jobs:
     with:
       # Alpha releases publish jazz-rn, unlike an ordinary pkg.pr.new preview.
       include_rn: true
+      # What ships is also built without cache, and must match.
+      reproduce_ios_relay: true
 
   publish-npm:
-    name: Publish npm alpha
-    # npm trusted publishing and its sigstore provenance accept only
-    # GitHub-hosted runners: on a self-hosted (Blacksmith) runner the registry
-    # refuses the upload with E422 "Unsupported GitHub Actions runner
-    # environment". This job only downloads built artifacts and runs
-    # `npm publish`, so a standard runner is enough.
+    # The job id stays for existing references; it publishes nothing now.
+    name: Verify npm packages (dry run)
     runs-on: ubuntu-24.04
-    # A real publish runs in the protected `publish` environment, which the
-    # npm trusted publishers can be bound to. Dry-runs (including the PR
-    # preview, which calls this workflow) need no credential and run
-    # outside it.
-    environment: ${{ (inputs.mode || github.event.inputs.mode || 'publish') == 'publish' && 'publish' || '' }}
     needs:
       - release-push-gate
-      - release-test-gate
       - resolve-preview-artifacts
       - build
     if: >-
       always() &&
       needs.release-push-gate.outputs.should_run == 'true' &&
       (
-        needs.release-test-gate.result == 'success' ||
-        (inputs.mode || github.event.inputs.mode || 'publish') == 'dry-run'
-      ) &&
-      (
         needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true' ||
         needs.build.result == 'success'
       )
     permissions:
       actions: read
-      contents: write
-      # npm trusted publishing: each `npm publish` exchanges this job's OIDC
-      # token for a short-lived publish credential. There is no NPM_TOKEN.
-      id-token: write
+      contents: read
     env:
-      RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'publish' }}
+      RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'dry-run' }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -567,7 +381,6 @@ jobs:
           test -f packages/jazz-tools/dist/index.d.ts
           test -f packages/jazz-tools/dist/backend/index.js
           test -f packages/jazz-tools/dist/react/index.js
-          test -f packages/jazz-tools/dist/permissions/index.js
 
       - name: Verify staged jazz-rn relay artifacts
         env: &release-artifact-source-revision-env
@@ -576,7 +389,9 @@ jobs:
           # the latter's commit SHA here: it is the value sealed into its
           # relay-artifact manifests, whereas release's merge commit has a
           # different SHA despite the same source tree.
-          JAZZ_REUSE_PREVIEW_ARTIFACTS: ${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts }}
+          # A release-artifacts run (artifacts_run_id) was built at this very
+          # commit: it sealed GITHUB_SHA, like a build in this run.
+          JAZZ_REUSE_PREVIEW_ARTIFACTS: ${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true' && inputs.artifacts_run_id == '' }}
           JAZZ_RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
         run: |
           JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(node dev/artifacts/release-artifact-source-revision.mjs)" \
@@ -585,7 +400,7 @@ jobs:
       - name: Resolve lock-stepped npm package versions
         run: |
           VERSION=$(git show "${GITHUB_SHA}:packages/jazz-tools/package.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>console.log(JSON.parse(s).version))')
-          EXPECTED_VERSION="${{ github.event.inputs.version || '' }}"
+          EXPECTED_VERSION=""
           if [ -n "${EXPECTED_VERSION}" ] && [ "${EXPECTED_VERSION}" != "${VERSION}" ]; then
             echo "Manual version ${EXPECTED_VERSION} does not match checked-out source version ${VERSION}."
             echo "Publish a committed release snapshot first; release workflows never rewrite versions in place."
@@ -611,7 +426,7 @@ jobs:
 
       - name: Guard alpha-only lock-stepped publish versions
         run: |
-          EXPECTED_VERSION="${{ github.event.inputs.version || '' }}" node -e 'const fs=require("fs");const path=require("path");const expected=process.env.EXPECTED_VERSION;const alphaVersion=/^2\.0\.0-alpha\.[0-9A-Za-z.-]+$/;const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));const rn=JSON.parse(fs.readFileSync("crates/jazz-rn/package.json","utf8"));const createJazz=JSON.parse(fs.readFileSync("packages/create-jazz/package.json","utf8"));if(expected){if(!alphaVersion.test(expected)){throw new Error(`Version override must match 2.0.0-alpha.*, got ${expected}`);}if(tools.version!==expected){throw new Error(`Version override mismatch: expected ${expected}, got ${tools.version}`);}}for(const pkg of [tools,wasm,napi,rn,createJazz]){if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}const tag=pkg.publishConfig&&pkg.publishConfig.tag;if(tag&&tag!=="latest"){throw new Error(`${pkg.name} publishConfig.tag must be latest, got ${tag}`);}}if(!(tools.version===wasm.version&&tools.version===napi.version&&tools.version===rn.version&&napi.version===createJazz.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version} rn=${rn.version} create-jazz=${createJazz.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}for(const entry of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const pkgPath=path.join("crates/jazz-napi/npm",entry.name,"package.json");const pkg=JSON.parse(fs.readFileSync(pkgPath,"utf8"));if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}if(pkg.version!==napi.version){throw new Error(`${pkg.name} version ${pkg.version} must match jazz-napi ${napi.version}`);}}console.log(`Alpha-only publish guard passed at ${tools.version}`);'
+          EXPECTED_VERSION="" node -e 'const fs=require("fs");const path=require("path");const expected=process.env.EXPECTED_VERSION;const alphaVersion=/^2\.0\.0-(alpha|beta)\.[0-9A-Za-z.-]+$/;const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));const rn=JSON.parse(fs.readFileSync("crates/jazz-rn/package.json","utf8"));const createJazz=JSON.parse(fs.readFileSync("packages/create-jazz/package.json","utf8"));if(expected){if(!alphaVersion.test(expected)){throw new Error(`Version override must match 2.0.0-alpha.* or 2.0.0-beta.*, got ${expected}`);}if(tools.version!==expected){throw new Error(`Version override mismatch: expected ${expected}, got ${tools.version}`);}}for(const pkg of [tools,wasm,napi,rn,createJazz]){if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.* or 2.0.0-beta.*, got ${pkg.version}`);}const tag=pkg.publishConfig&&pkg.publishConfig.tag;if(tag&&tag!=="latest"){throw new Error(`${pkg.name} publishConfig.tag must be latest, got ${tag}`);}}if(!(tools.version===wasm.version&&tools.version===napi.version&&tools.version===rn.version&&napi.version===createJazz.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version} rn=${rn.version} create-jazz=${createJazz.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}for(const entry of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const pkgPath=path.join("crates/jazz-napi/npm",entry.name,"package.json");const pkg=JSON.parse(fs.readFileSync(pkgPath,"utf8"));if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.* or 2.0.0-beta.*, got ${pkg.version}`);}if(pkg.version!==napi.version){throw new Error(`${pkg.name} version ${pkg.version} must match jazz-napi ${napi.version}`);}}console.log(`Lock-step version guard passed at ${tools.version}`);'
 
       - name: Verify immutable release source snapshot
         run: |
@@ -633,29 +448,6 @@ jobs:
           done
           echo "Source snapshot ${GITHUB_SHA} exactly matches ${PUBLISHED_VERSION}."
 
-      - name: Ensure release source tag
-        if: env.RELEASE_MODE == 'publish'
-        run: |
-          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
-          TAG="v${VERSION}"
-          SOURCE_COMMIT=$(git rev-parse "${GITHUB_SHA}^{commit}")
-          EXISTING_TAG_TARGET=$(git ls-remote --tags origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}" | awk -v tag="${TAG}" '
-            $2 == "refs/tags/" tag "^{}" { peeled = $1 }
-            $2 == "refs/tags/" tag { direct = $1 }
-            END { print peeled ? peeled : direct }
-          ')
-
-          if [ -n "${EXISTING_TAG_TARGET}" ]; then
-            if [ "${EXISTING_TAG_TARGET}" != "${SOURCE_COMMIT}" ]; then
-              echo "${TAG} already points to ${EXISTING_TAG_TARGET}, not the release source ${SOURCE_COMMIT}."
-              exit 1
-            fi
-            echo "${TAG} already points at the release source snapshot."
-          else
-            git tag "${TAG}" "${SOURCE_COMMIT}"
-            git push origin "refs/tags/${TAG}"
-          fi
-
       - name: Verify packed jazz-wasm payload
         run: |
           TMP_DIR=$(mktemp -d)
@@ -664,6 +456,17 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm_bg.wasm"
           tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.js"
           tar -tf "${TARBALL}" | grep -q "package/pkg/jazz_wasm.d.ts"
+          # `jazz-wasm/durable-object`: the core a Durable Object hosts.
+          echo "durable-object files: $(tar -tf "${TARBALL}" | grep -c "package/durable-object/")"
+          tar -tf "${TARBALL}" | grep -q "package/durable-object/pkg/jazz_wasm_do_bg.wasm"
+          tar -tf "${TARBALL}" | grep -q "package/durable-object/pkg/jazz_wasm_do.js"
+          tar -tf "${TARBALL}" | grep -q "package/durable-object/index.js"
+          tar -tf "${TARBALL}" | grep -q "package/durable-object/host.js"
+          # `jazz-wasm/backend`: what a backend's `createJazz` runs on in a Worker.
+          echo "backend files: $(tar -tf "${TARBALL}" | grep -c "package/backend/")"
+          tar -tf "${TARBALL}" | grep -q "package/backend/pkg/jazz_wasm_backend_bg.wasm"
+          tar -tf "${TARBALL}" | grep -q "package/backend/pkg/jazz_wasm_backend.js"
+          tar -tf "${TARBALL}" | grep -q "package/backend/index.js"
 
       - name: Verify packed jazz-napi payload
         run: |
@@ -702,174 +505,6 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/bin/create-jazz.js"
           tar -tf "${TARBALL}" | grep -q "package/dist/index.js"
 
-      # Trusted publishing needs npm 11.5.1 or newer; the Node in .nvmrc
-      # bundles it. Fail before the first upload rather than mid-release.
-      - name: Require npm with trusted publishing
-        if: env.RELEASE_MODE == 'publish'
-        run: |
-          node -e 'const [a,b,c]=process.argv[1].split(".").map(Number);if(a<11||(a===11&&(b<5||(b===5&&c<1)))){console.error(`::error::npm ${process.argv[1]} cannot use trusted publishing; 11.5.1 or newer is required`);process.exit(1);}console.log(`npm ${process.argv[1]} supports trusted publishing`);' "$(npm --version)"
-
-      # Every package publishes straight to `latest` (npm's OIDC credentials
-      # can't move dist-tags afterwards), so refuse a re-run of an older
-      # version before it would move `latest` back.
-      - name: Refuse to move latest back
-        if: env.RELEASE_MODE == 'publish'
-        run: node dev/artifacts/latest-guard.mjs
-
-      - name: Publish jazz-wasm
-        if: env.RELEASE_MODE == 'publish'
-        run: |
-          WASM_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-wasm/package.json","utf8")).version')
-          if npm view "jazz-wasm@${WASM_VERSION}" version >/dev/null 2>&1; then
-            echo "jazz-wasm@${WASM_VERSION} already exists on npm; skipping publish."
-          else
-            pnpm --filter jazz-wasm publish --tag latest --access public --no-git-checks
-          fi
-
-      - name: Publish jazz-napi
-        if: env.RELEASE_MODE == 'publish'
-        run: |
-          NAPI_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("crates/jazz-napi/package.json","utf8")).version')
-          for pkg_dir in crates/jazz-napi/npm/*; do
-            pkg_name=$(node -p "JSON.parse(require('fs').readFileSync('${pkg_dir}/package.json','utf8')).name")
-            if npm view "${pkg_name}@${NAPI_VERSION}" version >/dev/null 2>&1; then
-              echo "${pkg_name}@${NAPI_VERSION} already exists on npm; skipping publish."
-            else
-              npm publish "${pkg_dir}" --tag latest --access public
-            fi
-          done
-
-          if npm view "jazz-napi@${NAPI_VERSION}" version >/dev/null 2>&1; then
-            echo "jazz-napi@${NAPI_VERSION} already exists on npm; skipping publish."
-          else
-            pnpm --filter jazz-napi publish --tag latest --access public --no-git-checks
-          fi
-
-      - name: Publish jazz-rn
-        if: env.RELEASE_MODE == 'publish'
-        run: node dev/artifacts/publish-rn-packages.mjs
-
-      - name: Publish jazz-tools
-        if: env.RELEASE_MODE == 'publish'
-        run: |
-          TOOLS_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
-          if npm view "jazz-tools@${TOOLS_VERSION}" version >/dev/null 2>&1; then
-            echo "jazz-tools@${TOOLS_VERSION} already exists on npm; skipping publish."
-          else
-            pnpm --filter jazz-tools publish --tag latest --access public --no-git-checks
-          fi
-
-      - name: Publish create-jazz
-        if: env.RELEASE_MODE == 'publish'
-        run: |
-          CREATE_JAZZ_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
-          if npm view "create-jazz@${CREATE_JAZZ_VERSION}" version >/dev/null 2>&1; then
-            echo "create-jazz@${CREATE_JAZZ_VERSION} already exists on npm; skipping publish."
-          else
-            pnpm --filter create-jazz publish --tag latest --access public --no-git-checks
-          fi
-
-  # The Rust crates follow npm: dispatch publish-jazz-crates-alpha.yml for
-  # this version. crates.io trusted publishing refuses workflow_run triggers,
-  # and GITHUB_TOKEN may dispatch workflows. That workflow publishes the
-  # v<version> commit, only when its crates match npm, behind the `publish`
-  # environment's approval.
-  dispatch-crates:
-    name: Dispatch the crates.io publish
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [publish-npm]
-    if: >-
-      always() &&
-      needs.publish-npm.result == 'success' &&
-      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
-    permissions:
-      actions: write
-      contents: read
-    steps:
-      - name: Dispatch publish-jazz-crates-alpha.yml
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
-        run: |
-          set -euo pipefail
-          VERSION=$(gh api "repos/${GH_REPO}/contents/packages/jazz-tools/package.json?ref=${SHA}" --jq .content | base64 -d | jq -r .version)
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+$ ]]; then
-            echo "::error::jazz-tools at ${SHA} is '${VERSION}', not 2.0.0-alpha.N; not dispatching the crates publish."
-            exit 1
-          fi
-          gh workflow run publish-jazz-crates-alpha.yml --ref "${DEFAULT_BRANCH}" -f mode=publish -f "tag=v${VERSION}"
-          echo "Dispatched the crates.io publish for v${VERSION}."
-
-  # Jazz Cloud's images run the Linux server binary from the GitHub release:
-  # npm's jazz-tools carries no native binary. Attach both builds with their
-  # SHA256SUMS to the version's draft; "GitHub release" refuses to publish
-  # without them. Only "GitHub release" creates the draft (with its notes),
-  # so the two never race to create two: without one, this job fails and is
-  # re-run once the draft exists. A published release's assets are never
-  # replaced.
-  attach-server-binaries:
-    name: Attach server binaries to the GitHub release
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs:
-      - release-push-gate
-      - resolve-preview-artifacts
-      - publish-npm
-    if: >-
-      always() &&
-      needs.publish-npm.result == 'success' &&
-      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
-    permissions:
-      actions: read
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
-        with:
-          pattern: jazz-tools-linux-*
-          merge-multiple: true
-          path: dist
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
-        with:
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
-          pattern: jazz-tools-linux-*
-          merge-multiple: true
-          path: dist
-
-      - name: Checksums
-        working-directory: dist
-        run: |
-          set -euo pipefail
-          test -s jazz-tools-linux-x64
-          test -s jazz-tools-linux-arm64
-          sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS
-          cat SHA256SUMS
-
-      - name: Upload
-        run: |
-          set -euo pipefail
-          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
-          TAG="v${VERSION}"
-          if ! is_draft=$(gh release view "${TAG}" --json isDraft --jq .isDraft 2>/dev/null); then
-            echo "::error::No draft for ${TAG}. Create it with \"GitHub release\" (publish: false, with the notes), then re-run this job."
-            exit 1
-          fi
-          if [ "${is_draft}" != true ]; then
-            echo "::error::${TAG} is published; its server binaries are never replaced."
-            exit 1
-          fi
-          gh release upload "${TAG}" dist/jazz-tools-linux-x64 dist/jazz-tools-linux-arm64 dist/SHA256SUMS --clobber
-
   # Read-only check that the Inspector Vercel token can see its project. It runs
   # in candidate dry-runs too, so a broken token shows up before anything
   # publishes. It deliberately does not gate npm publication.
@@ -893,47 +528,3 @@ jobs:
           node-version-file: .nvmrc
 
       - run: node dev/scripts/promote-inspector-deployment.mjs preflight
-
-  # Deploy the exact inspector-prebuilt bytes that were built for this tree
-  # (the tested candidate's when its artifacts were reused) instead of waiting
-  # for Vercel's Git integration to build `release`, which it never does.
-  stage-inspector-production:
-    name: Stage inspector production
-    needs:
-      - release-push-gate
-      - resolve-preview-artifacts
-      - publish-npm
-      - inspector-preflight
-    if: >-
-      always() &&
-      needs.release-push-gate.outputs.should_run == 'true' &&
-      needs.publish-npm.result == 'success' &&
-      needs.inspector-preflight.result == 'success' &&
-      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
-    uses: ./.github/workflows/stage-inspector-production.yml
-    permissions:
-      actions: read
-      contents: read
-    with:
-      artifact-run-id: ${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true' && needs.resolve-preview-artifacts.outputs.preview_run_id || '' }}
-      source-sha: ${{ github.sha }}
-      source-branch: release
-    secrets: inherit
-
-  deploy-inspector-production:
-    name: Promote inspector production
-    needs:
-      - release-push-gate
-      - publish-npm
-      - stage-inspector-production
-    if: >-
-      always() &&
-      needs.release-push-gate.outputs.should_run == 'true' &&
-      needs.publish-npm.result == 'success' &&
-      needs.stage-inspector-production.result == 'success' &&
-      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
-    uses: ./.github/workflows/promote-inspector-production.yml
-    with:
-      deploy-sha: ${{ github.sha }}
-      deployment-url: ${{ needs.stage-inspector-production.outputs.deployment-url }}
-    secrets: inherit

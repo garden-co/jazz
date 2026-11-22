@@ -15,8 +15,8 @@ name: Go module tag
 #   3. Verify: build the module zip as the Go proxy would (its size within
 #      Go's 500 MiB limit), and build and run an app from it with
 #      CGO_ENABLED=0 and nothing else.
-#   4. Unless dry-run: push packages/jazz-go/v<version> to that commit, in
-#      the publish environment (Anselm approves), refusing if it exists.
+#   4. Nothing is pushed: release-publish.yml pushes the tag (its go job).
+#      This workflow is the PR proof and a manual check only.
 #
 # A pull request changing this file runs it dry (read access only), on its
 # own head, with an archive it builds itself (linux-x86_64 only) instead of
@@ -66,8 +66,8 @@ jobs:
     steps:
       - name: Validate inputs
         run: |
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N, 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${VERSION}'"
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-(alpha|beta)\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-(alpha|beta).N, 2.0.0-(alpha|beta).N-rc.M or 2.0.0-(alpha|beta).N.K-rc.M, got '${VERSION}'"
             exit 1
           fi
       - name: Download and check
@@ -101,8 +101,8 @@ jobs:
     steps:
       - name: Validate inputs
         run: |
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N, 2.0.0-alpha.N-rc.M or 2.0.0-alpha.N.K-rc.M, got '${VERSION}'"
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-(alpha|beta)\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-(alpha|beta).N, 2.0.0-(alpha|beta).N-rc.M or 2.0.0-(alpha|beta).N.K-rc.M, got '${VERSION}'"
             exit 1
           fi
 
@@ -150,7 +150,7 @@ jobs:
           tar -czf "${RUNNER_TEMP}/art/libjazz_ffi-linux-x86_64.tar.gz" -C "${RUNNER_TEMP}/pack" .
 
       # The tag's commit can predate a fix to the embed script, so take it
-      # from the commit this workflow runs from (as release-candidate-npm.yml
+      # from the commit this workflow runs from (as release-candidate.yml
       # does with rc-tarballs.mjs). It only lays out files; the push job
       # still refuses a commit that touches more than lib/ and embed_*.go.
       - name: Take the embed script from the workflow's commit
@@ -245,40 +245,3 @@ jobs:
           name: jazz-go-bundle
           path: ${{ runner.temp }}/jazz-go.bundle
           if-no-files-found: error
-
-  push:
-    name: Push packages/jazz-go/v${{ inputs.version }}
-    needs: prepare
-    if: github.event_name != 'pull_request' && !inputs.dry-run
-    runs-on: blacksmith-4vcpu-ubuntu-2204
-    timeout-minutes: 10
-    environment: publish
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: v${{ inputs.version }}
-          fetch-depth: 1
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: jazz-go-bundle
-          path: ${{ runner.temp }}
-      - name: Push the tag
-        env:
-          COMMIT: ${{ needs.prepare.outputs.commit }}
-        run: |
-          git fetch -q "${RUNNER_TEMP}/jazz-go.bundle" "${COMMIT}"
-          test "$(git rev-parse "${COMMIT}^")" = "$(git rev-parse "v${VERSION}^{commit}")" \
-            || { echo "::error::the commit isn't a child of v${VERSION}"; exit 1; }
-          # It may only add the embedded libraries.
-          if git diff --name-only "${COMMIT}^" "${COMMIT}" | grep -Ev '^packages/jazz-go/(lib/.+|embed_[a-z0-9]+_[a-z0-9]+\.go)$'; then
-            echo "::error::the release commit touches more than packages/jazz-go/lib/ and embed_*.go"
-            exit 1
-          fi
-          if git ls-remote --exit-code --tags origin "refs/tags/packages/jazz-go/v${VERSION}" >/dev/null; then
-            echo "::error::packages/jazz-go/v${VERSION} already exists: tags are never moved"
-            exit 1
-          fi
-          git push origin "${COMMIT}:refs/tags/packages/jazz-go/v${VERSION}"
-          echo "Pushed packages/jazz-go/v${VERSION} → ${COMMIT}"

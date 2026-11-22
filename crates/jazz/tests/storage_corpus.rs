@@ -9,7 +9,7 @@
 //!   with every row, history version, branch, large value, renamed column
 //!   and pending upload intact, accept current writes, and reopen again.
 //! - A damaged copy is refused with a storage error, never read as data; a
-//!   file in another storage format, or one Jazz did not write, is refused
+//!   file in another storage format is refused
 //!   with `UnsupportedStorageCodecs` and left byte-for-byte as it was.
 //! - `fixtures/pre-sqlite/` holds Groove stores (RocksDB directories from the
 //!   published alpha.54 and alpha.56 packages and the last Groove format, and
@@ -628,8 +628,10 @@ fn produce_sqlite_storage_corpus_v1() {
         block_on(client.commit_serializable_handle(tx)).unwrap();
         drop(streams);
 
-        // Then the server renames a column.
-        block_on(server.activate_schema_with_lenses(v2(), &[rename_title()])).unwrap();
+        // Then the server renames a column. The pinned corpus was written
+        // when this made v2 current at runtime (recording a permissions
+        // revision); a deploy now only admits it.
+        block_on(server.admit_schema_with_lenses(v2(), &[rename_title()])).unwrap();
         insert_as(
             &server,
             "documents",

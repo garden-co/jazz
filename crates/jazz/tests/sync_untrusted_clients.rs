@@ -320,9 +320,9 @@ fn account_of(n: u8) -> jazz::account_registry::AccountId {
     user(n).account_id().expect("a test user has an account")
 }
 
-/// A local-first guest of account `n`, as the account registry admits it.
+/// A device account of account `n`, as the account registry admits it.
 fn guest_of(n: u8) -> AuthorSubject {
-    AuthorSubject::reserved(AuthorSubject::LOCAL_FIRST_ISSUER, &format!("key-{n}"))
+    AuthorSubject::reserved(AuthorSubject::DEVICE_ACCOUNT_ISSUER, &format!("key-{n}"))
         .unwrap()
         .with_account(account_of(n))
 }
@@ -384,7 +384,7 @@ fn commit_as(
     fates[0] == (tx, true)
 }
 
-/// A local-first guest that signs up keeps its account and its store, and
+/// A device account that signs up keeps its account and its store, and
 /// so its node: the signed-in principal takes the node over, and from then
 /// on the guest's key no longer writes as it.
 #[test]
@@ -632,14 +632,16 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
     };
     let server = block_on(Db::open_history_complete(cfg(0, AuthorSubject::SYSTEM))).unwrap();
     let row = RowUuid::from_bytes([7; 16]);
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "messages",
-            row,
-            AuthorSubject::SYSTEM,
-            [("body".to_owned(), Value::String("original".into()))].into(),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "messages",
+        [("body".to_owned(), Value::String("original".into()))].into(),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     let (_m_client, m_server, m_up, m_down) = pipe();
     server.accept_subscriber(m_server, user(1)).unwrap();
     m_up.borrow_mut().push_back(SyncMessage::Commit {
@@ -750,14 +752,16 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
 fn a_reopened_replica_continues_after_a_pending_commit_that_left_no_rows() {
     let server = server();
     let row = RowUuid::from_bytes([7; 16]);
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "messages",
-            row,
-            AuthorSubject::SYSTEM,
-            [("body".to_owned(), Value::String("held elsewhere".into()))].into(),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "messages",
+        [("body".to_owned(), Value::String("held elsewhere".into()))].into(),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("alice.db");
     let open_alice = || {
@@ -801,14 +805,16 @@ fn a_reopened_replica_continues_after_a_pending_commit_that_left_no_rows() {
 fn the_authority_refuses_misplaced_bases() {
     let server = server();
     let row = RowUuid::from_bytes([7; 16]);
-    server
-        .seed_settled_mergeable_for_bootstrap(
-            "messages",
-            row,
-            AuthorSubject::SYSTEM,
-            [("body".to_owned(), Value::String("original".into()))].into(),
-        )
-        .unwrap();
+    jazz::db::block_on(server.insert(
+        "messages",
+        [("body".to_owned(), Value::String("original".into()))].into(),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     let (_m_client, m_server, m_up, m_down) = pipe();
     server.accept_subscriber(m_server, user(1)).unwrap();
     let base = || WireBase {

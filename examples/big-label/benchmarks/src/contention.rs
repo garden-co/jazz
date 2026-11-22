@@ -273,7 +273,8 @@ fn seed(path: &Path, schema: &Schema, searched_releases: usize) {
     let mut own = 0;
     let mut searched = 0;
     for start in (0..total).step_by(500) {
-        block_on(db.transaction(async |tx| {
+        block_on(async {
+            let tx = db.mergeable_tx().await?;
             for n in start..(start + 500).min(total) {
                 let (label, ordinal) = if n % stride == 0 && own < OWN_RELEASES {
                     own += 1;
@@ -304,8 +305,8 @@ fn seed(path: &Path, schema: &Schema, searched_releases: usize) {
                 )
                 .await?;
             }
-            Ok(())
-        }))
+            tx.commit().await
+        })
         .expect("seed releases");
     }
     assert_eq!((own, searched), (OWN_RELEASES, searched_releases));

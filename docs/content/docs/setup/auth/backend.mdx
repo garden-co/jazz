@@ -50,7 +50,7 @@ export const jazz = createJazz({
   organization, under `session.claims`.
 - Return `null` for a signed-out request.
 - Return `acceptDeviceAccounts(request)` (from `jazz-tools/backend`) to let a signed-out
-  [device account](/docs/setup/auth/local-first) sync: that's how guests work. Device accounts are
+  [device account](/docs/setup/auth/device-accounts) sync: that's how guests work. Device accounts are
   refused otherwise. An app with no sign-in at all passes `authenticate: acceptDeviceAccounts`.
   This gates device-account sync only; [linking](#guests-and-linking) doesn't depend on it.
 
@@ -101,8 +101,14 @@ from before the call. A sign-in after the call works as usual. This needs a core
 your backend; in front of an older core, `revokeUser` ends this instance's connections only, and
 warns. To sign out the browser the user is in, every tab of it, call `refresh()` on the client
 after your sign-out (see [Signing out in every tab](#signing-out-in-every-tab)). A connection
-`revokeUser` does end asks your backend who is signed in; in a background tab, a "no one" answer
-then waits until the tab is in front again, since its cookies may be stale.
+`revokeUser` does end asks your backend who is signed in, in a background tab too: the refusal
+says the session was revoked, so a "no one" answer there signs the user out as in a tab in view
+(confirmed by a second answer two seconds later, after `onSignedOut`). Until then the link reads
+`{ state: "offline", reason: "auth", authReason: "revoked" }` in `db.getSyncStatus()`, and writes
+made meanwhile stay pending: stop taking edits from there if your app shouldn't accept them. A
+connection the server refuses because the user's account identity was retired reads as `revoked`
+too, and signs out the same way. Once the tab is admitted again (your backend still names the
+user), the reason is forgotten.
 
 ### Keep auth middleware off Jazz's routes
 
@@ -168,7 +174,9 @@ Jazz asks your backend who is signed in at these moments; the identity always co
 A "no one is signed in" answer signs the user out only once a second answer, two seconds later,
 agrees, so one failed session refresh in `authenticate` signs no one out. After `refresh()` Jazz
 follows the first answer. After a refused connection, a tab in the background doesn't sign out on
-its own: its cookies may be stale, so it asks again when it is in front. A failed check (a network
+its own: its cookies may be stale, so it asks again when it is in front. A connection
+`jazz.revokeUser` ended is the exception: the backend ended it on purpose, so a background tab
+follows the two answers as a tab in view does. A failed check (a network
 error, a timeout, a 5xx) is tried again with backoff. A device remembers the
 user your backend signed in (their account, identity and claims, never a credential), so a reload
 reopens their account straight away, offline too, and the first answer confirms it: another user
@@ -291,7 +299,7 @@ session?.identity; // { issuer: "jazz:backend", subject: "alice" }, subject = th
 
 On the client, the Jazz session names the same user: `getSnapshot().user` (or `user` from
 `useJazzSession()`) is `{ accountId, kind, identity, claims }`, or `null` while no one is signed in.
-`kind` is `"device"` for a [device account](/docs/setup/auth/local-first) and `"backend"` for a
+`kind` is `"device"` for a [device account](/docs/setup/auth/device-accounts) and `"backend"` for a
 user your backend signed in; `identity.subject` is your own user ID.
 
 - **Ownership** compares `session.user`. Linked identities share one account, so this is
@@ -412,7 +420,7 @@ A copied account ID or claim is not authorization: Jazz checks the request or ha
 
 ## Guests and linking
 
-Guests are [device accounts](/docs/setup/auth/local-first): accounts whose key lives on the device.
+Guests are [device accounts](/docs/setup/auth/device-accounts): accounts whose key lives on the device.
 A guest who signs up keeps its account and data: after your sign-up sets its session, the client
 calls `linkDeviceAccount()`. It proves it owns the device account by signing a one-time challenge
 with its key; your backend runs `authenticate` and links the new user to that account. Call it in
@@ -529,7 +537,7 @@ Signing out stays signed out until a user signs in again, across reloads too: wi
 local data or revoke anything at your auth provider; you are still responsible for any clean-up
 your auth library requires. A device account's key stays on the device, and
 `session.reopenDeviceAccount()` signs back in as it, with its data (see
-[Signing out of a device account](/docs/setup/auth/local-first#signing-out-of-a-device-account)).
+[Signing out of a device account](/docs/setup/auth/device-accounts#signing-out-of-a-device-account)).
 With `clearOnSignOut`, the key is forgotten and the data wiped.
 
 `session.signOut()` signs out of Jazz only. While your own auth still has the user signed in (its
@@ -546,7 +554,8 @@ completes. Changing accounts does.
 reached your backend and the same account can still read it. It keeps device account keys and doesn't
 sign anyone out. The [browser console helper](/docs/how-jazz-works#reset-browser-storage) does the
 same. If another tab holds the account's storage under another sign-in (a guest who just signed up
-in this tab), it waits for that tab to follow or close; after 30 seconds it fails with a
+in this tab), or with another build's schema (a tab of the app's previous deploy), it waits for
+that tab to follow, reload or close; after 30 seconds it fails with a
 `StoreHeldByAnotherTabError`, and you can call it again once that tab is gone.
 
 ### Owning the session yourself

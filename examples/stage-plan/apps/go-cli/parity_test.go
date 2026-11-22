@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -247,6 +248,9 @@ func TestPermissionAdvice(t *testing.T) {
 	if err := alice.WaitForSync(ctx, jazz.WriteGlobal); err != nil {
 		t.Fatal(err)
 	}
+	// Advice is the server's, and opening doesn't wait for it: without a
+	// link the answer is Unknown.
+	waitConnected(t, ctx, bob)
 	newTask := jazzapp.NewTask{ShowID: show.ID, Title: "More", Status: jazzapp.TaskStatusTodo, Rank: 2}
 	for _, c := range []struct {
 		name string
@@ -406,4 +410,25 @@ func TestATransactionWhoseContextEndsRollsBack(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// waitConnected waits until db's link to the server is up: opening a client
+// doesn't wait for it.
+func waitConnected(t *testing.T, ctx context.Context, db *jazz.DB) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	states, err := db.OnSyncStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for status := range states {
+		var link struct {
+			State string `json:"state"`
+		}
+		if json.Unmarshal(status.Link, &link) == nil && link.State == "connected" {
+			return
+		}
+	}
+	t.Fatalf("the client did not connect: %v", ctx.Err())
 }

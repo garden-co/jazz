@@ -21,12 +21,6 @@ async function compileAndWarn(filename: string) {
 }
 
 describe("svelte components produce no state_referenced_locally warnings", () => {
-  it("JazzSvelteProvider.svelte", async () => {
-    const warnings = await compileAndWarn("JazzSvelteProvider.svelte");
-    const bad = warnings.filter((w) => w.code === "state_referenced_locally");
-    expect(bad, bad.map((w) => w.message).join("\n")).toEqual([]);
-  });
-
   it("JazzSvelteClientProvider.svelte", async () => {
     const warnings = await compileAndWarn("JazzSvelteClientProvider.svelte");
     const bad = warnings.filter((w) => w.code === "state_referenced_locally");

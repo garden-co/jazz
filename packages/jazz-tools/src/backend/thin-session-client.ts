@@ -7,8 +7,9 @@
  * bundle). The core reads and checks for it as the session; the session's
  * staged writes run as the session.
  */
-import { NapiDb } from "jazz-napi";
+import { backendNative } from "./backend-native.js";
 import type { WasmSchema } from "../drivers/types.js";
+import type { ClientMigrations } from "../runtime/client-migrations.js";
 import { JazzClient } from "../runtime/client.js";
 import type { AppContext } from "../runtime/context.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
@@ -32,6 +33,12 @@ export interface ThinSessionClientOptions {
   trusted: boolean;
   /** Opens the session's link: a socket sending `prelude` first. */
   webSocket: WebSocketConstructor;
+  /**
+   * The migrations the app ships (see {@link ClientMigrations}). Without them
+   * the replica names the app's version itself, and the core refuses its
+   * transactions as a store opened without the app's migrations.
+   */
+  migrations?: ClientMigrations;
 }
 
 export function openThinSessionClient(options: ThinSessionClientOptions): ThinTransactionClient {
@@ -47,7 +54,7 @@ export function openThinSessionClient(options: ThinSessionClientOptions): ThinTr
     .tables;
   if (!schema) throw new Error("the thin client bound no schema tables");
   const runtime = new NativeRuntimeAdapter(
-    NapiDb,
+    backendNative().Db,
     schema,
     randomNodeUuidBytes(),
     new TextEncoder().encode(author),
@@ -55,6 +62,7 @@ export function openThinSessionClient(options: ThinSessionClientOptions): ThinTr
     false,
     {
       webSocket: options.webSocket,
+      migrations: options.migrations,
       ...(options.trusted
         ? { backendMode: true, readAuthorizationHost: "trusted-serving" as const }
         : { selfSignedClientProof: guestProof(parsed.auth?.jwt_token, author) }),

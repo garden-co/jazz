@@ -7,6 +7,7 @@ import topLevelAwait from "vite-plugin-top-level-await";
 import wasm from "vite-plugin-wasm";
 import {
   jazzServerInfo,
+  jazzBrowserServerLifecycle,
   stopJazzServerByUrl,
   jazzServerTransportControlCommands,
   jazzAppFront,
@@ -103,10 +104,9 @@ export default defineConfig({
   define: {
     __JAZZ_EXAMPLE_TOPOLOGY_SEED__: JSON.stringify(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? "47"),
   },
-  plugins: [wasm(), topLevelAwait(), react()],
+  plugins: [jazzBrowserServerLifecycle, wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
-    globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
       provider: playwright(),

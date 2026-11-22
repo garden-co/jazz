@@ -9,19 +9,8 @@ name: Publish jazz-kotlin
 # The tag is resolved once, to the commit refs/tags/<tag> points at (never a
 # branch of the same name), and every job builds that commit.
 #
-# mode=publish (dispatched with tag=v2.0.0-alpha.N, once the GitHub release is
-# published with the assets "Attach language artifacts" built): the jar
-# bundles exactly the release's libjazz_ffi-<platform>.tar.gz, checked against
-# SHA256SUMS-languages and their build-provenance attestations, and built from
-# that same commit (libjazz_ffi-source.txt); the AAR's are cross-built here
-# (dev/scripts/kotlin-release-natives.sh). It runs in the `publish`
-# environment (its required reviewer), with its secrets:
-#   MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD  a Central Portal user token
-#   MAVEN_SIGNING_KEY            the ASCII-armored private key (RSA 4096)
-#   MAVEN_SIGNING_KEY_PASSWORD   its passphrase
-# One Gradle run builds, signs, uploads and installs locally; the checks then
-# run on those files. Both deployments wait, validated, in the Central Portal
-# for Publish there: nothing is released from here.
+# Publishing moved to release-publish.yml (its Maven Central leg, from the
+# release-artifacts build): this workflow is the PR proof and a manual dry run.
 #
 # mode=dry-run (and a pull request changing what publishes) does the same
 # with a throwaway key and no upload, and keeps the result as a workflow
@@ -34,6 +23,7 @@ on:
     paths:
       - .github/workflows/publish-jazz-kotlin.yml
       - dev/scripts/publish-kotlin.sh
+      - dev/scripts/check-kotlin-sources-jar.sh
       - dev/scripts/kotlin-release-natives.sh
       - dev/scripts/kotlin-toolchain.sh
       - dev/scripts/test-kotlin-android.sh
@@ -44,13 +34,12 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "dry-run (throwaway key, local Maven repository, publishes nothing) or publish"
+        description: "dry-run (throwaway key, local Maven repository, publishes nothing). Publishing moved to release-publish.yml."
         required: true
         default: dry-run
         type: choice
         options:
           - dry-run
-          - publish
       tag:
         description: "The release tag (v2.0.0-alpha.N). Required to publish; a dry run without one builds this platform's library from the dispatched commit."
         required: false
@@ -91,8 +80,8 @@ jobs:
           if [ -z "${TAG}" ]; then
             sha="${EVENT_SHA}"
           else
-            if ! [[ "${TAG}" =~ ^v2\.0\.0-alpha\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
-              echo "::error::tag must look like v2.0.0-alpha.N, got '${TAG}'"
+            if ! [[ "${TAG}" =~ ^v2\.0\.0-(alpha|beta)\.[0-9]+((\.[0-9]+)?-rc\.[0-9]+)?$ ]]; then
+              echo "::error::tag must look like v2.0.0-(alpha|beta).N, got '${TAG}'"
               exit 1
             fi
             # The tag's commit (peeled, for annotated tags); never a branch
@@ -162,51 +151,3 @@ jobs:
           name: jazz-kotlin-maven-dry-run
           path: ~/.m2/repository/tools/jazz
           if-no-files-found: error
-
-  # The only job with the Central Portal token and the signing key.
-  publish:
-    name: Publish ${{ inputs.tag }} to Maven Central
-    needs: resolve
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'publish'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 90
-    environment: publish
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ needs.resolve.outputs.sha }}
-          persist-credentials: false
-
-      - name: Check the version
-        env:
-          TAG: ${{ inputs.tag }}
-        run: |
-          VERSION="$(jq -r '.version // empty' packages/jazz-tools/package.json)"
-          if [ -z "${VERSION}" ] || [ "v${VERSION}" != "${TAG}" ]; then
-            echo "::error::${TAG} has jazz-tools '${VERSION}': the Kotlin packages publish at jazz-tools' version."
-            exit 1
-          fi
-          if [ ! -f dev/scripts/publish-kotlin.sh ]; then
-            echo "::error::${TAG} has no dev/scripts/publish-kotlin.sh: it predates Maven Central publishing."
-            exit 1
-          fi
-
-      - uses: ./.github/actions/setup-build
-        with:
-          setup-node: "false"
-          rust-cache: "false"
-
-      - name: Natives from the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-          SHA: ${{ needs.resolve.outputs.sha }}
-        run: bash dev/scripts/kotlin-release-natives.sh "${TAG}" "${SHA}" natives
-
-      - name: Build, sign, upload, check
-        env:
-          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
-          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
-          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.MAVEN_SIGNING_KEY }}
-          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.MAVEN_SIGNING_KEY_PASSWORD }}
-        run: bash dev/scripts/publish-kotlin.sh natives central

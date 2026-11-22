@@ -103,14 +103,14 @@ async function setUpProfile(element: HTMLDivElement, name: string) {
     "profile setup should render",
     15_000,
   );
-  await preview(element).getByLabelText("Display name").fill(name);
+  await preview(element).getByLabelText("Display name", { exact: false }).fill(name);
   await preview(element).getByRole("button", { name: "Continue", exact: true }).click();
   await waitFor(() => hasText(element, name), "profile should be saved", 15_000);
 }
 
 async function createRoom(element: HTMLDivElement, name: string) {
   await preview(element).getByRole("button", { name: "New room", exact: true }).first().click();
-  await openDialog().getByLabelText("Room name").fill(name);
+  await openDialog().getByLabelText("Room name", { exact: false }).fill(name);
   await openDialog().getByRole("button", { name: "Create room", exact: true }).click();
   await waitFor(
     () => element.querySelector("h2")?.textContent === name,

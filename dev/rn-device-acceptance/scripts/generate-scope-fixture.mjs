@@ -31,7 +31,8 @@ execFileSync(
   "pnpm",
   [
     "exec",
-    "oxfmt",
+    "vp",
+    "fmt",
     path.join(root, "src/scope-fixture.ts"),
     path.join(root, "native/device-fixture.json"),
   ],

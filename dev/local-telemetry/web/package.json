@@ -5,7 +5,7 @@
   "description": "Embedded sync-flow viewer for the dev/local-telemetry collector. Sources are bundled in-process by the Go binary via esbuild — this package exists for type-checking and dependency hoisting only.",
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.0",

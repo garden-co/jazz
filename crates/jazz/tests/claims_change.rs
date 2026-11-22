@@ -56,12 +56,15 @@ fn setup(users: u32) -> (Db, Vec<jazz::db::SubscriptionStream>) {
         let mut bytes = [0u8; 16];
         bytes[12..].copy_from_slice(&n.to_be_bytes());
         let region = format!("r{}", n % 10);
-        db.seed_settled_mergeable_for_bootstrap(
+        jazz::db::block_on(db.insert(
             "documents",
-            RowUuid::from_bytes(bytes),
-            AuthorSubject::SYSTEM,
             [("region".to_owned(), Value::String(region))].into(),
-        )
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes(bytes)),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
         .unwrap();
     }
     let prepared = db.prepare_query(&Query::from("documents")).unwrap();
