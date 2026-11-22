@@ -292,7 +292,7 @@ use flock::try_lock;
 /// Remove this once the pinned toolchain's std implements file locks for
 /// Android.
 #[cfg(any(target_os = "android", all(test, target_os = "linux")))]
-mod flock {
+pub(crate) mod flock {
     use std::io::{Error, ErrorKind, Result};
     use std::os::fd::AsRawFd;
 
@@ -305,17 +305,29 @@ mod flock {
             Lock::Shared => libc::LOCK_SH,
             Lock::Exclusive => libc::LOCK_EX,
         } | libc::LOCK_NB;
+        match flock(file, operation) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Takes the exclusive lock, waiting for whoever holds it, as std's
+    /// `File::lock` would.
+    pub(crate) fn lock(file: &File) -> Result<()> {
+        flock(file, libc::LOCK_EX)
+    }
+
+    fn flock(file: &File, operation: libc::c_int) -> Result<()> {
         loop {
             // SAFETY: `file` is borrowed for the call, so its descriptor is
             // open, and flock takes no pointers.
             if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
-                return Ok(true);
+                return Ok(());
             }
             let error = Error::last_os_error();
-            match error.kind() {
-                ErrorKind::Interrupted => {}
-                ErrorKind::WouldBlock => return Ok(false),
-                _ => return Err(error),
+            if error.kind() != ErrorKind::Interrupted {
+                return Err(error);
             }
         }
     }
