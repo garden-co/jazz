@@ -1013,7 +1013,10 @@ impl JazzSession {
             let Some(inner) = inner.upgrade() else {
                 return;
             };
-            let this = Self { inner };
+            let this = Self {
+                inner,
+                call: CallEnds::default(),
+            };
             let _one = this.inner.one_at_a_time.lock().await;
             if this.ensure_open().is_err() || this.inner.state.borrow().client_epoch != epoch {
                 return;
