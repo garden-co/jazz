@@ -23,7 +23,7 @@ use jazz::tools::{ObjectId, StreamingUpload, Value};
 use crate::error::{Error, Result};
 use crate::handle::Jazz;
 use crate::query::Column;
-use crate::table::{Insert, Table, Update};
+use crate::table::{Insert, Table, Updatable, Update};
 use crate::value::{ColumnValue, Json};
 use crate::writes::read_back;
 
@@ -166,6 +166,7 @@ impl Jazz {
     ) -> Result<N::Row>
     where
         N: Insert,
+        N::Row: Updatable,
         V: LargeColumn,
         S: Stream<Item = std::result::Result<B, E>>,
         B: AsRef<[u8]> + Send + 'static,
@@ -335,6 +336,7 @@ impl crate::transaction::Transaction {
     ) -> Result<N::Row>
     where
         N: Insert,
+        N::Row: Updatable,
         V: LargeColumn,
         S: Stream<Item = std::result::Result<B, E>>,
         B: AsRef<[u8]>,
@@ -497,6 +499,7 @@ impl crate::transaction::OpenTransaction {
     ) -> Result<N::Row>
     where
         N: Insert,
+        N::Row: Updatable,
         V: LargeColumn,
         S: Stream<Item = std::result::Result<B, E>>,
         B: AsRef<[u8]> + Send + 'static,
