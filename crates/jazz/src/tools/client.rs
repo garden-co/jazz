@@ -2128,8 +2128,37 @@ impl JazzClient {
         transaction_id: TransactionId,
         tier: DurabilityTier,
     ) -> Result<()> {
-        let seq = self
-            .shared
+        self.await_transaction(transaction_id, tier, true).await
+    }
+
+    /// [`JazzClient::wait_for_transaction`], but a refusal it sees stays
+    /// unreported: a later [`JazzClient::wait_for_sync`] reports it, unless
+    /// [`JazzClient::mark_transaction_reported`] says its caller heard it.
+    /// Owned by `jazz-app-support`: not public API.
+    #[doc(hidden)]
+    pub async fn observe_transaction(
+        &self,
+        transaction_id: TransactionId,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        self.await_transaction(transaction_id, tier, false).await
+    }
+
+    /// The refusal of this client's commit was reported to a caller (see
+    /// [`JazzClient::observe_transaction`]): [`JazzClient::wait_for_sync`]
+    /// doesn't report it again. Not public API.
+    #[doc(hidden)]
+    pub fn mark_transaction_reported(&self, transaction_id: TransactionId) {
+        let Ok(seq) = self.committed_seq(transaction_id) else {
+            return;
+        };
+        if let Ok(db) = self.db() {
+            db.mark_rejection_reported(seq);
+        }
+    }
+
+    fn committed_seq(&self, transaction_id: TransactionId) -> Result<u64> {
+        self.shared
             .state
             .borrow()
             .writes
@@ -2139,7 +2168,16 @@ impl JazzClient {
                 JazzError::Write(format!(
                     "transaction {transaction_id} was not committed by this client"
                 ))
-            })?;
+            })
+    }
+
+    async fn await_transaction(
+        &self,
+        transaction_id: TransactionId,
+        tier: DurabilityTier,
+        reports: bool,
+    ) -> Result<()> {
+        let seq = self.committed_seq(transaction_id)?;
         let core_tier = match tier {
             DurabilityTier::Local => CoreDurabilityTier::Local,
             DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
@@ -2150,7 +2188,13 @@ impl JazzClient {
             )));
         }
         let db = self.db()?;
-        let wait = db.wait_for_transaction(seq, core_tier);
+        let wait = async {
+            if reports {
+                db.wait_for_transaction(seq, core_tier).await
+            } else {
+                db.observe_transaction(seq, core_tier).await
+            }
+        };
         let settled = if core_tier > CoreDurabilityTier::Local {
             self.unless_waits_end(self.shared.settle_upstream(wait))
                 .await?
