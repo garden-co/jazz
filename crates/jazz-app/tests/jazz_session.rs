@@ -786,6 +786,60 @@ async fn a_guest_is_kept_while_no_one_is_signed_in_and_linked_on_sign_up() {
     app.stop().await;
 }
 
+/// One app per store doesn't get in a session's way: signing out and in
+/// again, and linking, open the same directory while the handles they
+/// replace are still around and busy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_reopens_the_store_it_just_left() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let token = bearer(None);
+    let session = JazzSession::open(
+        client_files(),
+        app.session(&token)
+            .storage(Storage::Dir(dir.path().into()))
+            .initial(Initial::SignedOut),
+    )
+    .await
+    .unwrap();
+    session.create_device_account().await.unwrap();
+
+    let mut replaced = Vec::new();
+    for round in 0..20 {
+        let old = session.jazz().unwrap();
+        let busy = old.clone();
+        let (running, started) = tokio::sync::oneshot::channel();
+        let job = tokio::spawn(async move {
+            busy.with_client(move |_| async move {
+                let _ = running.send(());
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Ok(())
+            })
+            .await
+        });
+        started.await.unwrap();
+        if round % 2 == 1 {
+            // The client is already stopping when the session replaces it.
+            let stopping = old.clone();
+            tokio::spawn(async move { stopping.shutdown().await });
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        session.sign_out().await.unwrap();
+        session
+            .reopen_device_account()
+            .await
+            .unwrap_or_else(|error| panic!("round {round}: {error}"));
+        let _ = job.await.unwrap();
+        replaced.push(old);
+    }
+
+    *token.lock().unwrap() = Some("token-kim".to_owned());
+    session.link_device_account().await.unwrap();
+    assert_eq!(session.snapshot().user.unwrap().subject, "kim");
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
 /// Each account keeps its own store: one user's local data is not in the
 /// next one's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -7,16 +7,17 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_core::Stream;
 use jazz::tools::{JazzClient, MutationError, TransactionId};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::error::{Error, Result};
-use crate::handle::Jazz;
+use crate::handle::{Command, Jazz};
 
 /// How often refusals are collected from the client.
 const POLL: Duration = Duration::from_millis(50);
@@ -190,12 +191,11 @@ impl Jazz {
     /// syncs again. Writes the server hasn't accepted yet are lost. Nothing
     /// to delete for [`crate::Storage::Memory`].
     ///
-    /// Refused with [`Error::StoreHeld`] while another open app (in this
-    /// process or another) has the same store directory, as TS refuses
-    /// while another tab holds the store: that app is left running. Once
-    /// a check passes, opening the directory fails until the files are
-    /// gone. Another process is seen only after this client has stopped,
-    /// so there the refusal comes with this client stopped.
+    /// One app at a time has a store open, so nothing else holds it while
+    /// this one runs: the directory stays locked until the files are gone,
+    /// and opening it fails meanwhile. Refused with [`Error::StoreHeld`],
+    /// deleting nothing, when this app had already stopped and another has
+    /// the store now.
     ///
     /// Refused with [`Error::Unsupported`] on a handle acting for a user
     /// ([`Jazz::for_user`]): it has no store of its own.
@@ -205,7 +205,7 @@ impl Jazz {
             self.shutdown().await?;
             return Ok(());
         };
-        let deleting = StoreDir::begin_delete(dir)?;
+        let deleting = StoreDir::begin_delete(dir, &self.info.life)?;
         self.shutdown().await?;
         deleting.finish()
     }
@@ -218,17 +218,72 @@ const STORE_FILES: [&str; 4] = [
     "jazz.sqlite-shm",
     "client_id",
 ];
-/// Held shared by every open app of a directory, and exclusively while its
-/// store is deleted: the guard across processes. On unix the delete
-/// removes it last, so nothing is left behind; on Windows it stays.
+/// Held exclusively by the one open app of a directory, through the delete
+/// of its store: the guard across processes. On unix the delete removes it
+/// last, so nothing is left behind; on Windows it stays.
 const LOCK_FILE: &str = "jazz.lock";
+
+/// How long an open waits for the store's holder in this process when that
+/// is already stopping (its shutdown under way, its last handle dropped, its
+/// open failed or abandoned): closing and reopening mustn't race.
+const STOPPING_WAIT: Duration = Duration::from_secs(5);
+/// How long an open retries a lock that no app of this process has. A child
+/// process being spawned shares every open file until it execs, so the lock
+/// of an app that just closed here can outlive it by a moment.
+const SPAWN_WAIT: Duration = Duration::from_millis(100);
+/// How often a waiting open looks again.
+const HOLD_POLL: Duration = Duration::from_millis(5);
+
+/// One client's run, as whoever opens or deletes its store needs to know it.
+pub(crate) struct Life {
+    stopping: AtomicBool,
+    /// Not upgradable once the last handle is gone, or the open was given up.
+    commands: mpsc::WeakUnboundedSender<Command>,
+    /// Whether the client's thread ended, letting go of the store.
+    ended: watch::Sender<bool>,
+}
+
+impl Life {
+    pub(crate) fn new(commands: &mpsc::UnboundedSender<Command>) -> Arc<Self> {
+        Arc::new(Self {
+            stopping: AtomicBool::new(false),
+            commands: commands.downgrade(),
+            ended: watch::Sender::new(false),
+        })
+    }
+
+    /// The client is going to stop: an open of its store waits for it.
+    pub(crate) fn stop(&self) {
+        self.stopping.store(true, Ordering::Release);
+    }
+
+    fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::Acquire)
+            || self
+                .commands
+                .upgrade()
+                .is_none_or(|commands| commands.is_closed())
+    }
+
+    pub(crate) fn end(&self) {
+        self.ended.send_replace(true);
+    }
+
+    /// Returns once the client's thread ended, with the store let go of.
+    pub(crate) async fn ended(&self) {
+        // An error means no sender is left, which `self` rules out.
+        let _ = self.ended.subscribe().wait_for(|ended| *ended).await;
+    }
+}
 
 #[derive(Default)]
 struct DirState {
-    /// Apps open on it in this process.
-    open: usize,
+    /// The app of this process that has it open.
+    holder: Option<Arc<Life>>,
     /// A delete is under way: nothing may open it.
     deleting: bool,
+    /// The holder's lock, kept from its stop to the end of its delete.
+    kept: Option<File>,
 }
 
 /// Store directories in use in this process, by canonical path.
@@ -250,6 +305,16 @@ fn held(dir: &Path, by: &str) -> Error {
     Error::StoreHeld(format!("{} is {by}", dir.display()))
 }
 
+fn held_open(dir: &Path, by: &str) -> Error {
+    held(
+        dir,
+        &format!(
+            "{by}: one app at a time can have a store open, so share that app's handle \
+             or use another directory"
+        ),
+    )
+}
+
 fn io(error: std::io::Error) -> Error {
     jazz::tools::JazzError::Io(error).into()
 }
@@ -264,6 +329,9 @@ fn remove(file: &Path) -> Result<()> {
 
 #[derive(Clone, Copy)]
 enum Lock {
+    /// What apps took up to 2.0.0-beta.0, and what an exclusive lock still
+    /// has to see.
+    #[cfg_attr(not(test), allow(dead_code))]
     Shared,
     Exclusive,
 }
@@ -341,7 +409,13 @@ pub(crate) mod flock {
 fn lock_store(dir: &Path, kind: Lock) -> Result<Option<File>> {
     let path = dir.join(LOCK_FILE);
     loop {
-        let lock = File::create(&path).map_err(io)?;
+        // Not truncated: changing a file another handle locked fails on Windows.
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(io)?;
         if !try_lock(&lock, kind).map_err(io)? {
             return Ok(None);
         }
@@ -351,14 +425,10 @@ fn lock_store(dir: &Path, kind: Lock) -> Result<Option<File>> {
     }
 }
 
-/// Deletes the store files in `dir` under its exclusive lock, running
-/// `locked` once it holds it and dropping what that returns once the store
-/// files are gone; `false`, deleting nothing, while another app holds the
-/// lock.
-fn delete_store<G>(dir: &Path, locked: impl FnOnce() -> G) -> Result<bool> {
-    let Some(lock) = lock_store(dir, Lock::Exclusive)? else {
-        return Ok(false);
-    };
+/// Deletes the store files in `dir` under `lock`, its exclusive lock,
+/// running `locked` first and dropping what that returns once the store
+/// files are gone.
+fn delete_locked<G>(dir: &Path, lock: File, locked: impl FnOnce() -> G) -> Result<()> {
     let held = locked();
     for file in STORE_FILES {
         remove(&dir.join(file))?;
@@ -375,6 +445,17 @@ fn delete_store<G>(dir: &Path, locked: impl FnOnce() -> G) -> Result<bool> {
     // Elsewhere (Windows) it stays: an open file there can be removed
     // (POSIX deletes), and a lock on it can't be checked against its path.
     drop(lock);
+    Ok(())
+}
+
+/// [`delete_locked`] under a lock of its own; `false`, deleting nothing,
+/// while another holder has it.
+#[cfg(all(test, unix))]
+fn delete_store<G>(dir: &Path, locked: impl FnOnce() -> G) -> Result<bool> {
+    let Some(lock) = lock_store(dir, Lock::Exclusive)? else {
+        return Ok(false);
+    };
+    delete_locked(dir, lock, locked)?;
     Ok(true)
 }
 
@@ -397,34 +478,82 @@ fn still_named(_lock: &File, _path: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// An app's hold on its store directory, from open until its client has
-/// stopped.
+/// An app's hold on its store directory, from before anything reads it
+/// until its client has stopped. One app at a time has one: the engine is
+/// its file's only writer, and two clients of one store would mint
+/// transaction ids under the same node (INV-DATA-5).
 pub(crate) struct StoreDir {
     path: PathBuf,
-    /// A shared lock on [`LOCK_FILE`].
-    _lock: File,
+    life: Arc<Life>,
+    /// The exclusive lock on [`LOCK_FILE`].
+    lock: Option<File>,
 }
 
 impl StoreDir {
-    pub(crate) fn hold(dir: &Path) -> Result<Self> {
-        let path = canonical(dir)?;
-        let mut dirs = store_dirs();
-        let state = dirs
-            .get_or_insert_with(HashMap::new)
-            .entry(path.clone())
-            .or_default();
-        if state.deleting {
-            return Err(held(&path, "being deleted"));
+    /// Holds `dir` for `life`. Refused at once while another app has it
+    /// open; waits up to [`STOPPING_WAIT`] for one of this process that is
+    /// stopping. `None` when `abandoned` turns true while it waits.
+    ///
+    /// It blocks, so it runs on the client's own thread.
+    pub(crate) fn hold(
+        dir: &Path,
+        life: &Arc<Life>,
+        abandoned: impl Fn() -> bool,
+    ) -> Result<Option<Self>> {
+        let started = Instant::now();
+        // When the lock was first found taken by no app of this process.
+        let mut locked_elsewhere = None;
+        loop {
+            // Each time: a delete may have removed what it named.
+            let path = canonical(dir)?;
+            {
+                let mut dirs = store_dirs();
+                let state = dirs
+                    .get_or_insert_with(HashMap::new)
+                    .entry(path.clone())
+                    .or_default();
+                if state.deleting {
+                    return Err(held(&path, "being deleted"));
+                }
+                match &state.holder {
+                    Some(holder) => {
+                        locked_elsewhere = None;
+                        if !holder.is_stopping() {
+                            return Err(held_open(&path, "open in another app of this process"));
+                        }
+                        if started.elapsed() >= STOPPING_WAIT {
+                            return Err(held_open(
+                                &path,
+                                "still being closed by another app of this process",
+                            ));
+                        }
+                    }
+                    None => {
+                        if let Some(lock) = lock_store(&path, Lock::Exclusive)? {
+                            state.holder = Some(life.clone());
+                            return Ok(Some(Self {
+                                path,
+                                life: life.clone(),
+                                lock: Some(lock),
+                            }));
+                        }
+                        let since = *locked_elsewhere.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= SPAWN_WAIT {
+                            return Err(held_open(&path, "open in another process"));
+                        }
+                    }
+                }
+            }
+            if abandoned() {
+                return Ok(None);
+            }
+            std::thread::sleep(HOLD_POLL);
         }
-        let Some(lock) = lock_store(&path, Lock::Shared)? else {
-            return Err(held(&path, "being deleted by another process"));
-        };
-        state.open += 1;
-        Ok(Self { path, _lock: lock })
     }
 
-    /// Marks `dir` as being deleted, if only this app has it open here.
-    fn begin_delete(dir: &Path) -> Result<Deleting> {
+    /// Marks `dir` as being deleted by `life`'s app, with the lock: the one
+    /// it holds, or, when it has already stopped, one taken now.
+    fn begin_delete(dir: &Path, life: &Arc<Life>) -> Result<Deleting> {
         let path = canonical(dir)?;
         let mut dirs = store_dirs();
         let state = dirs
@@ -434,47 +563,60 @@ impl StoreDir {
         if state.deleting {
             return Err(held(&path, "being deleted"));
         }
-        // This app's own hold, if it is still running, is one of them.
-        if state.open > 1 {
-            return Err(held(&path, "open in another app of this process"));
+        match &state.holder {
+            Some(holder) if !Arc::ptr_eq(holder, life) => {
+                return Err(held(&path, "open in another app of this process"));
+            }
+            // Handed over when the client stops.
+            Some(_) => {}
+            None => match lock_store(&path, Lock::Exclusive)? {
+                Some(lock) => state.kept = Some(lock),
+                None => return Err(held(&path, "open in another process")),
+            },
         }
         state.deleting = true;
+        life.stop();
         Ok(Deleting { path })
     }
 }
 
 impl Drop for StoreDir {
     fn drop(&mut self) {
-        if let Some(state) = store_dirs()
-            .as_mut()
-            .and_then(|dirs| dirs.get_mut(&self.path))
+        let mut dirs = store_dirs();
+        let state = dirs.as_mut().and_then(|dirs| dirs.get_mut(&self.path));
+        if let Some(state) = state
+            && state
+                .holder
+                .as_ref()
+                .is_some_and(|holder| Arc::ptr_eq(holder, &self.life))
         {
-            state.open = state.open.saturating_sub(1);
+            state.holder = None;
+            if state.deleting {
+                state.kept = self.lock.take();
+            }
         }
+        // Closed with the registry still locked: whoever next sees no holder
+        // here finds the file unlocked too.
+        drop(self.lock.take());
     }
 }
 
 /// A delete under way: opening the directory in this process fails until
-/// it ends.
+/// it ends, and in another one while it has the lock.
 struct Deleting {
     path: PathBuf,
 }
 
 impl Deleting {
-    /// With this app stopped: deletes the store unless another process
-    /// still has it open.
+    /// With this app stopped: deletes the store.
     fn finish(self) -> Result<()> {
-        if store_dirs()
-            .as_ref()
-            .and_then(|dirs| dirs.get(&self.path))
-            .is_some_and(|state| state.open > 0)
-        {
-            return Err(held(&self.path, "open in another app of this process"));
-        }
-        if delete_store(&self.path, || ())? {
-            Ok(())
-        } else {
-            Err(held(&self.path, "open in another process"))
+        let kept = store_dirs()
+            .as_mut()
+            .and_then(|dirs| dirs.get_mut(&self.path))
+            .and_then(|state| state.kept.take());
+        match kept {
+            Some(lock) => delete_locked(&self.path, lock, || ()),
+            None => Err(held(&self.path, "still open in this app")),
         }
     }
 }
@@ -486,6 +628,7 @@ impl Drop for Deleting {
             .and_then(|dirs| dirs.get_mut(&self.path))
         {
             state.deleting = false;
+            state.kept = None;
         }
     }
 }
