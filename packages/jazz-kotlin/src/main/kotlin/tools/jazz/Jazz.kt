@@ -710,6 +710,8 @@ public class Jazz internal constructor(
      */
     private suspend fun <T> io(block: () -> T): T {
         checkOpen()
+        // A caller cancelled already starts nothing, not even its call.
+        currentCoroutineContext().ensureActive()
         val call = native.newCall() ?: return withContext(dispatcher) { block() }
         var cancelledBy: CancellationException? = null
         try {
