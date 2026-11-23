@@ -24,21 +24,6 @@ use super::system_tables::{MEMBERS, is_system_table};
 /// How an existing plaintext app can adopt encryption.
 pub const COPY_GUIDE: &str = "to encrypt existing data, copy it into a new encrypted table (docs/e2ee/encrypting-existing-data)";
 
-/// Add the copy recipe when a declaration names one of the retired keys.
-pub fn explain_unknown_key(reason: &str) -> String {
-    let key = reason
-        .strip_prefix("unknown key `")
-        .or_else(|| reason.strip_prefix("unknown field `"))
-        .and_then(|message| message.split_once('`'))
-        .map(|(key, _)| key);
-    match key {
-        Some("from" | "to" | "convert" | "reverse" | "backfill" | "rehome" | "sweep") => {
-            format!("{reason}; in-place conversion is not supported; {COPY_GUIDE}")
-        }
-        _ => reason.to_owned(),
-    }
-}
-
 /// A schema version's encryption entries, by table.
 pub type Entries = BTreeMap<String, EncryptionEntry>;
 

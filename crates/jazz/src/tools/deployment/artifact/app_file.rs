@@ -347,9 +347,7 @@ fn read_tables(
         if let Some(entry) = table.get("encryption") {
             entries.insert(
                 name.clone(),
-                read_entry(entry, &format!("{path}.encryption")).map_err(|(at, reason)| {
-                    (at, super::encryption::explain_unknown_key(&reason))
-                })?,
+                read_entry(entry, &format!("{path}.encryption"))?,
             );
         }
         let fields = object(table, &path)?;

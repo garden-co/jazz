@@ -338,17 +338,14 @@ async fn standalone_encryption_keeps_equality_while_the_token_column_remains() {
     refuses_standalone_change(|e| e["equality"] = json!([]), "token column").await;
 }
 
-/// Alice's deploy names the unsupported key and points her to the copy guide.
+/// Alice can locate an unknown declaration field and see which fields are accepted.
 #[tokio::test]
-async fn a_deployment_refuses_conversion_keys_even_when_their_values_are_empty() {
+async fn an_unknown_deployment_field_names_its_location_and_allowed_fields() {
     for (key, value, column) in [
-        ("from", json!("oldTitle"), true),
-        ("to", Value::Null, true),
-        ("convert", Value::Null, true),
-        ("reverse", Value::Null, true),
+        ("from", Value::Null, true),
+        ("typo", Value::Null, true),
         ("backfill", json!([]), false),
-        ("rehome", Value::Null, false),
-        ("sweep", json!("updaters"), false),
+        ("typo", json!([]), false),
     ] {
         let source = APP.replace(
             r#""title": "bytes""#,
@@ -374,8 +371,9 @@ async fn a_deployment_refuses_conversion_keys_even_when_their_values_are_empty()
             error.contains("tasks")
                 && (!column || error.contains("title"))
                 && error.contains(key)
-                && error.contains("in-place conversion is not supported")
-                && error.contains("docs/e2ee/encrypting-existing-data"),
+                && error.contains("expected")
+                && error.contains(if column { "sealedType" } else { "equality" })
+                && !error.contains("docs/e2ee/encrypting-existing-data"),
             "{key}: {refusal}"
         );
     }
@@ -635,7 +633,8 @@ async fn only_encrypted_declarations_refuse_unknown_scalar_type_fields() {
                 && error.contains("tasks")
                 && error.contains("title")
                 && error.contains("element")
-                && error.contains("docs/e2ee/encrypting-existing-data") == (*key != "typo"),
+                && error.contains("expected `type`")
+                && !error.contains("docs/e2ee/encrypting-existing-data"),
             "{response}"
         );
     }

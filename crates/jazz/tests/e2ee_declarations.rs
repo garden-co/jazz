@@ -177,13 +177,9 @@ fn malformed_declarations_are_refused() {
 fn unknown_encryption_keys_are_refused_in_the_app_file() {
     for (key, on_column) in [
         ("from", true),
-        ("to", true),
-        ("convert", true),
-        ("reverse", true),
+        ("typo", true),
         ("backfill", false),
-        ("rehome", false),
-        ("sweep", false),
-        ("unexpected", false),
+        ("typo", false),
     ] {
         let mut entry: serde_json::Value = serde_json::from_str(tasks_entry()).unwrap();
         let path = if on_column {
@@ -197,7 +193,9 @@ fn unknown_encryption_keys_are_refused_in_the_app_file() {
         assert!(
             error.contains(path)
                 && error.contains(&format!("unknown key `{key}`"))
-                && error.contains("docs/e2ee/encrypting-existing-data") == (key != "unexpected"),
+                && error.contains("this object takes")
+                && error.contains(if on_column { "`type`" } else { "`scope`" })
+                && !error.contains("docs/e2ee/encrypting-existing-data"),
             "{error}"
         );
     }
@@ -258,7 +256,7 @@ fn nested_encrypted_type_objects_refuse_unknown_fields() {
                     error.contains(&format!("tables.tasks.encryption.columns.notes.{path}"))
                         && error.contains(&format!("unknown key `{key}`"))
                         && error.contains("this object takes")
-                        && error.contains("docs/e2ee/encrypting-existing-data") == (key != "typo"),
+                        && !error.contains("docs/e2ee/encrypting-existing-data"),
                     "{error}"
                 );
             }
@@ -1270,7 +1268,7 @@ fn historical_versions_refuse_unknown_encryption_keys() {
     assert!(
         error.contains("history.v2.tables.notes.encryption.columns.body")
             && error.contains("unknown key `to`")
-            && error.contains("docs/e2ee/encrypting-existing-data"),
+            && error.contains("this object takes"),
         "{error}"
     );
 

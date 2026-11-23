@@ -235,20 +235,8 @@ pub struct DeployRequest {
 pub struct DeployBody {
     #[serde(flatten)]
     pub request: DeployRequest,
-    #[serde(default, deserialize_with = "read_encryption")]
+    #[serde(default)]
     pub encryption: Option<DeclaredEncryption>,
-}
-
-fn read_encryption<'de, D: serde::Deserializer<'de>>(
-    reader: D,
-) -> Result<Option<DeclaredEncryption>, D::Error> {
-    Option::<DeclaredEncryption>::deserialize(reader).map_err(|error| {
-        if error.to_string().starts_with("unknown field") {
-            serde::de::Error::custom(encryption::explain_unknown_key(&error.to_string()))
-        } else {
-            error
-        }
-    })
 }
 
 impl From<DeployRequest> for DeployBody {
