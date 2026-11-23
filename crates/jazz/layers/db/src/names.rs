@@ -520,7 +520,7 @@ impl Names {
     /// takes the value of a source it gives, as (source, copy). A dropped
     /// column's backwards default is never filled here: only a writer whose
     /// version descends from the drop names it, and it sends that default
-    /// itself (see `Inner::stored_op`), so an older writer's row takes the
+    /// itself (see `Store::stored_op`), so an older writer's row takes the
     /// stored column's own default.
     pub(crate) fn stored_copies(
         &self,

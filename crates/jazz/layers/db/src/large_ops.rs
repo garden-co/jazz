@@ -247,14 +247,14 @@ impl PreparedCell {
     }
 }
 
-impl Inner {
+impl Store {
     /// Drop queues contain only this owner's uploads. SQL errors retain the
     /// receipt for the next maintenance pass; crash recovery uses lease expiry.
-    pub(super) async fn release_dropped_uploads(&self) -> Result<(), Error> {
+    pub(super) async fn release_dropped_uploads(&self, conn: &Storage) -> Result<(), Error> {
         // Removing an in-memory receipt must not outlive a SQL rollback.
         // Callback transactions can tick while suspended; defer cleanup until
         // its deletes can commit independently of that application unit.
-        if !self.conn.is_autocommit() {
+        if !conn.is_autocommit() {
             return Ok(());
         }
         loop {
@@ -266,17 +266,19 @@ impl Inner {
                 .enumerate()
                 .next_back();
             let Some((index, id)) = next else { break };
-            crate::large::end_upload(&self.conn, &id).await?;
+            crate::large::end_upload(conn, &id).await?;
             // Dropped handles may have appended other receipts while SQL ran.
             self.upload_cleanup.borrow_mut().swap_remove(index);
         }
         Ok(())
     }
+}
 
+impl Store {
     /// Forget what the finished write's edits derived.
-    pub(crate) fn clear_derived(&mut self) {
-        self.pending_nodes.clear();
-        self.derived.clear();
+    pub(crate) fn clear_derived(&self) {
+        self.pending_nodes.borrow_mut().clear();
+        self.derived.borrow_mut().clear();
     }
 
     /// Whose read policy a cell-level read or edit runs under: the store's
@@ -539,7 +541,7 @@ impl Inner {
         }
     }
 
-    /// Whether [`Inner::partial_cell`] would refuse `part` of `cell`, as far
+    /// Whether [`Store::partial_cell`] would refuse `part` of `cell`, as far
     /// as that is decided without reading a chunk: an inline value is read
     /// as it would be (it is in the cell), a chunked one is checked against
     /// the lengths in its descriptor. What only a chunked value's content
@@ -563,7 +565,7 @@ impl Inner {
             Logical::Chunked(value) => value,
         };
         // A query's partial selection is clamped to the value
-        // ([`Inner::partial_cell`]): only an inverted range refuses.
+        // ([`Store::partial_cell`]): only an inverted range refuses.
         match part {
             Part::Bytes { from, to } | Part::TextUtf8 { from, to } => {
                 clamp_range(*from..*to, value.byte_length).map(drop)
@@ -680,7 +682,7 @@ impl Inner {
     /// holds. The edit's derived value and any nodes it wrote are left in
     /// `derived` and `pending_nodes` for the caller to take.
     pub(crate) async fn whole_write_as_edit(
-        &mut self,
+        &self,
         prepared: &PreparedCell,
         logical: &[u8],
         identity: WriteIdentity,
@@ -697,7 +699,7 @@ impl Inner {
     /// a value equal to the held one is the held value, so rewriting a
     /// document unchanged costs nothing.
     pub(crate) async fn as_edit_of(
-        &mut self,
+        &self,
         table: &str,
         column: &crate::values::Column,
         cell: Sql,
@@ -709,7 +711,7 @@ impl Inner {
         let current = self.chunks.value_bytes(&held).await.ok()?;
         let text = crate::large::kind(column) != lv::LargeValueKind::Bytes;
         let Some(splice) = byte_splices(&current, logical, text).pop() else {
-            self.derived.push((*held).clone());
+            self.derived.borrow_mut().push((*held).clone());
             return Some(Value::Large(held));
         };
         // A longer insertion materializes a new tree either way (SPEC 19.4),
@@ -729,7 +731,7 @@ impl Inner {
     /// tail entry, or is consolidated when its tail is full; the nodes a
     /// consolidation writes are stored with the row update.
     pub(crate) async fn edited(
-        &mut self,
+        &self,
         table: &str,
         column: &crate::values::Column,
         cell: Sql,
@@ -778,7 +780,7 @@ impl Inner {
         };
         let next = match outcome {
             lv::TailOutcome::Updated(next) => {
-                self.derived.push(next.clone());
+                self.derived.borrow_mut().push(next.clone());
                 next
             }
             lv::TailOutcome::ConsolidationRequired(transient) => {
@@ -795,7 +797,7 @@ impl Inner {
                 // A later edit of the same write reads the new tree before
                 // the row update stores it.
                 self.chunks.cache_pinned(&prepared);
-                self.pending_nodes.push(prepared);
+                self.pending_nodes.borrow_mut().push(Rc::new(prepared));
                 next
             }
         };
@@ -849,9 +851,9 @@ impl Db {
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>, Error> {
         let prepared = PreparedCell::new(self.operation_schema(), table, row, column)?;
-        self.fetching(async || {
-            self.inner()
-                .await
+        self.fetching(&[], async || {
+            self.inner
+                .without_overlay()
                 .read_range(&prepared, range.clone(), false)
                 .await
         })
@@ -871,8 +873,8 @@ impl Db {
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
         let schema = self.operation_schema();
         let table = schema.table(table)?;
-        self.fetching(async || {
-            let inner = self.inner().await;
+        self.fetching(&[], async || {
+            let inner = self.inner.without_overlay();
             inner
                 .value_delta(
                     table,
@@ -898,9 +900,9 @@ impl Db {
     ) -> Result<String, Error> {
         let prepared = PreparedCell::new(self.operation_schema(), table, row, column)?;
         let bytes = self
-            .fetching(async || {
-                self.inner()
-                    .await
+            .fetching(&[], async || {
+                self.inner
+                    .without_overlay()
                     .read_range(&prepared, range.clone(), true)
                     .await
             })
@@ -917,8 +919,10 @@ impl Db {
         column: &str,
         pointer: &str,
     ) -> Result<Option<serde_json::Value>, Error> {
-        self.fetching(async || self.json_pointer(table, row, column, pointer).await)
-            .await
+        self.fetching(&[], async || {
+            self.json_pointer(table, row, column, pointer).await
+        })
+        .await
     }
 
     async fn json_pointer(
@@ -928,9 +932,10 @@ impl Db {
         column: &str,
         pointer: &str,
     ) -> Result<Option<serde_json::Value>, Error> {
-        let inner = self.inner().await;
+        let inner = self.inner.without_overlay();
         let reader = inner.reader();
-        let prepared = PreparedCell::new(self.execution_schema(&inner.owner), table, row, column)?;
+        let prepared =
+            PreparedCell::new(self.execution_schema(&inner.owner()), table, row, column)?;
         let (col, cell) = inner.physical_cell(&prepared, reader).await?;
         if crate::large::kind(&col) != lv::LargeValueKind::Json {
             return Err(Error::new(
@@ -965,7 +970,7 @@ impl Db {
         bytes: Vec<u8>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
-        self.fetching_with((Edit::Append(bytes), opts), async |(edit, opts)| {
+        self.fetching_with(&[], (Edit::Append(bytes), opts), async |(edit, opts)| {
             self.edit_cell(table, row, column, edit, opts).await
         })
         .await
@@ -986,7 +991,7 @@ impl Db {
             delete: splice.delete,
             insert: splice.insert,
         };
-        self.fetching_with((edit, opts), async |(edit, opts)| {
+        self.fetching_with(&[], (edit, opts), async |(edit, opts)| {
             self.edit_cell(table, row, column, edit, opts).await
         })
         .await
@@ -1001,13 +1006,13 @@ impl Db {
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let value = {
-            let mut inner = self.inner().await;
+            let inner = self.inner.without_overlay();
             inner.require_mutation_admission()?;
             let edited = (async {
                 let (col, cell) = inner
                     .physical_cell(
                         &PreparedCell::new(
-                            self.execution_schema(&inner.owner),
+                            self.execution_schema(&inner.owner()),
                             table,
                             row,
                             column,
@@ -1036,7 +1041,7 @@ impl Db {
             self.write_prepared(prepared, who(opts.identity)).await
         })
         .await;
-        self.inner().await.clear_derived();
+        self.inner.without_overlay().clear_derived();
         result
     }
 
@@ -1052,6 +1057,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let mutations = prepare_mutations(self.operation_schema(), table, row, &patch, mutations)?;
         self.fetching_with(
+            &[],
             (patch, mutations, opts),
             async |(patch, mutations, opts)| {
                 self.update_with_mutations(table, row, patch, mutations, opts)
@@ -1070,7 +1076,7 @@ impl Db {
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let lowered = {
-            let mut inner = self.inner().await;
+            let inner = self.inner.without_overlay();
             inner.require_mutation_admission()?;
             let identity = identity_of(opts.identity);
             inner
@@ -1078,7 +1084,7 @@ impl Db {
                 .await
         };
         if let Err(error) = lowered {
-            self.inner().await.clear_derived();
+            self.inner.without_overlay().clear_derived();
             return Err(error);
         }
         // The outer edit already owns chunk-fetch retries.
@@ -1088,7 +1094,7 @@ impl Db {
             self.write_prepared(prepared, who(opts.identity)).await
         })
         .await;
-        self.inner().await.clear_derived();
+        self.inner.without_overlay().clear_derived();
         result
     }
 
@@ -1250,7 +1256,7 @@ impl Db {
     ) -> Result<(), Error> {
         let _operation = self.write_operation().await;
         self.check_streaming_upload(upload)?;
-        let inner = self.inner().await;
+        let inner = self.inner.without_overlay();
         inner.require_mutation_admission()?;
         let now = streaming_now_ms();
         if upload.preparation.is_none() {
@@ -1272,13 +1278,13 @@ impl Db {
                 .map_err(|e| rejected(e.to_string()))
                 .map(|()| std::mem::take(&mut *upload.emitted.borrow_mut()))?;
             {
-                admit_ingress(&inner, &staged, now)?;
+                admit_ingress(&self.inner, &staged, now)?;
                 crate::large::stage_upload(
                     &inner.conn,
                     &inner.chunks,
                     &upload.id,
                     &staged,
-                    inner.client.is_some(),
+                    inner.client().is_some(),
                 )
                 .await
             }
@@ -1300,7 +1306,7 @@ impl Db {
         let _operation = self.write_operation().await;
         self.check_streaming_upload(&mut upload)?;
         upload.preparation.take();
-        crate::large::end_upload(&self.inner().await.conn, &upload.id).await
+        crate::large::end_upload(&self.inner.without_overlay().conn, &upload.id).await
     }
 
     fn check_streaming_upload(&self, upload: &mut StreamingValueUpload) -> Result<(), Error> {
@@ -1308,8 +1314,9 @@ impl Db {
         if !upload.owner.ptr_eq(&Rc::downgrade(&self.inner)) {
             return Err(mismatch());
         }
-        let inner = self.inner.read_under_lease();
-        let schema = self.view.as_ref().unwrap_or(&inner.owner);
+        let inner = self.inner.without_overlay();
+        let owner_schema = inner.owner();
+        let schema = self.view.as_ref().unwrap_or(&owner_schema);
         let instance = Rc::downgrade(schema);
         if !upload.schema_instance.ptr_eq(&instance) {
             // An equivalent registered handle is allowed. Remember it so each
@@ -1355,17 +1362,21 @@ impl Db {
                 let _operation = self.write_operation().await;
                 self.prepare_write(op)?
             };
-            self.fetching_with(prepared, async |op| {
-                self.inner().await.derived.extend(large.iter().cloned());
+            self.fetching_with(&[], prepared, async |op| {
+                self.inner
+                    .without_overlay()
+                    .derived
+                    .borrow_mut()
+                    .extend(large.iter().cloned());
                 let result = self.write_prepared(op, who(identity)).await;
-                self.inner().await.clear_derived();
+                self.inner.without_overlay().clear_derived();
                 result
             })
             .await
         }
         .await;
         let _operation = self.write_operation().await;
-        let inner = self.inner().await;
+        let inner = self.inner.without_overlay();
         crate::large::end_upload(&inner.conn, &upload.id).await?;
         result
     }
@@ -1381,7 +1392,7 @@ impl Db {
         column: &str,
     ) -> Result<Option<lv::LargeValueRef>, Error> {
         let active_schema = self.operation_schema();
-        self.inner().await.require_mutation_admission()?;
+        self.inner.without_overlay().require_mutation_admission()?;
         self.check_streaming_upload(upload)?;
         if upload.table != table || upload.column != column {
             return Err(schema_error(
@@ -1394,7 +1405,7 @@ impl Db {
             ));
         }
         let value = {
-            let inner = self.inner().await;
+            let inner = self.inner.without_overlay();
             let now = streaming_now_ms();
             let alive = if upload.initialized {
                 crate::large::touch_upload(&inner.conn, &upload.id, now).await?
@@ -1415,13 +1426,13 @@ impl Db {
                     if crate::large::kind(&col) != upload.kind {
                         return Err(not_large(table, column));
                     }
-                    admit_ingress(&inner, &staged, now)?;
+                    admit_ingress(&self.inner, &staged, now)?;
                     crate::large::stage_upload(
                         &inner.conn,
                         &inner.chunks,
                         &upload.id,
                         &staged,
-                        inner.client.is_some(),
+                        inner.client().is_some(),
                     )
                     .await?;
                     crate::large::finish_upload(&inner.conn, &value).await?;
@@ -1442,7 +1453,12 @@ impl Db {
         // the store keeps it: its commit carries the bytes, not a
         // descriptor of chunks the store then reclaims.
         let (logical, large) = if value.byte_length <= crate::large::inline_max(&col) as u64 {
-            let bytes = self.inner().await.chunks.value_bytes(&value).await?;
+            let bytes = self
+                .inner
+                .without_overlay()
+                .chunks
+                .value_bytes(&value)
+                .await?;
             (logical_value(value.kind, bytes)?, None)
         } else {
             (Value::Large(Box::new(value.clone())), Some(value))
@@ -1461,12 +1477,12 @@ impl Db {
     /// many uploads ended.
     pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
         let _operation = self.write_operation().await;
-        let inner = self.inner().await;
+        let conn = self.inner.without_overlay().conn.clone();
         let now = streaming_now_ms();
-        let max_age = i64::try_from(inner.staging.get().max_age_ms).unwrap_or(i64::MAX);
-        inner.release_dropped_uploads().await?;
-        crate::large::expire_receipts(&inner.conn, now).await?;
-        crate::large::expire_uploads(&inner.conn, now.saturating_sub(max_age)).await
+        let max_age = i64::try_from(self.inner.staging_policy.get().max_age_ms).unwrap_or(i64::MAX);
+        self.inner.release_dropped_uploads(&conn).await?;
+        crate::large::expire_receipts(&conn, now).await?;
+        crate::large::expire_uploads(&conn, now.saturating_sub(max_age)).await
     }
 }
 
@@ -1595,7 +1611,7 @@ impl Drop for UploadLease {
 /// Renew the leases a batch holds before it commits; a lease that expired
 /// while the batch was open refuses the commit, as its chunks may be gone.
 pub(crate) async fn renew_upload_leases(
-    inner: &Inner,
+    inner: &Store,
     leases: &[UploadLease],
 ) -> Result<(), Error> {
     let now = streaming_now_ms();
@@ -1623,16 +1639,17 @@ fn view_target(head: Option<BranchSelector>, base: Option<BranchViewBase>) -> Wr
 }
 
 /// Charge `staged` to the staging policy's ingress window.
-fn admit_ingress(inner: &Inner, staged: &[lv::StagedChunk], now: i64) -> Result<(), Error> {
+fn admit_ingress(store: &Store, staged: &[lv::StagedChunk], now: i64) -> Result<(), Error> {
     let bytes: u64 = staged.iter().map(|chunk| chunk.encoded.len() as u64).sum();
     if bytes == 0 {
         return Ok(());
     }
-    let policy = inner.staging.get();
-    let mut window = inner.ingress.borrow_mut();
+    let policy = store.staging_policy.get();
+    let mut window = store.ingress.get();
     let now = now.max(0) as u64;
     if now.saturating_sub(window.0) >= policy.window_ms {
-        *window = (now, 0);
+        window = (now, 0);
+        store.ingress.set(window);
     }
     if window.1.saturating_add(bytes) > policy.incoming_bytes_per_window {
         return Err(Error::new(
@@ -1640,7 +1657,7 @@ fn admit_ingress(inner: &Inner, staged: &[lv::StagedChunk], now: i64) -> Result<
             "streaming upload exceeds the large-value ingress rate limit",
         ));
     }
-    window.1 += bytes;
+    store.ingress.set((window.0, window.1 + bytes));
     Ok(())
 }
 
@@ -1668,7 +1685,7 @@ fn closed() -> Error {
 /// made from `raw`, `len` bytes long, is a char boundary: its end, or a byte
 /// that doesn't continue a code point. Reads at most one byte of `raw`.
 async fn utf8_boundary(
-    inner: &Inner,
+    inner: &Store,
     raw: ValueRef<'_>,
     edits: &[Edit],
     mut offset: u64,
@@ -1706,7 +1723,7 @@ async fn utf8_boundary(
 /// current value. Each later splice is relative to the value the earlier
 /// ones produced.
 async fn lower_splices(
-    inner: &Inner,
+    inner: &Store,
     column: &crate::values::Column,
     cell: &Sql,
     within: &LargeValueUpdatePage,
@@ -1831,12 +1848,12 @@ fn prepare_mutations(
         .collect()
 }
 
-impl Inner {
+impl Store {
     /// Lower partial large-value updates into `patch` against the row as
     /// this store sees it now (inside a batch: with its staged writes).
     /// What the edits build is left in `derived` and `pending_nodes`.
     pub(crate) async fn lower_large_mutations(
-        &mut self,
+        &self,
         patch: &mut BTreeMap<String, Value>,
         mutations: Vec<(PreparedCell, LargeValueUpdate)>,
         identity: Option<AuthorSubject>,
@@ -1913,7 +1930,7 @@ impl Inner {
                             &edited_from,
                             &current,
                             &text,
-                            self.merge_budget,
+                            self.merge_budget.get(),
                         )
                     };
                     Value::String(value)
@@ -1986,7 +2003,10 @@ impl TxRef<'_> {
         let _operation = self.db.write_operation().await;
         let mutations =
             prepare_mutations(self.db.operation_schema(), table, row, &patch, mutations)?;
-        self.db.inner().await.require_mutation_admission()?;
+        self.db
+            .inner
+            .without_overlay()
+            .require_mutation_admission()?;
         let edits = self
             .db
             .in_overlay(self.id, None, async |inner, _| {
@@ -1995,8 +2015,8 @@ impl TxRef<'_> {
                     .lower_large_mutations(&mut patch, mutations, identity)
                     .await;
                 let edits = crate::db::LargeEdits {
-                    derived: std::mem::take(&mut inner.derived),
-                    pending_nodes: std::mem::take(&mut inner.pending_nodes),
+                    derived: inner.derived.take(),
+                    pending_nodes: inner.pending_nodes.take(),
                 };
                 lowered.map(|()| edits)
             })

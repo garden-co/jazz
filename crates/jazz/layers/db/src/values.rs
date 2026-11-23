@@ -338,7 +338,7 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::String(v) => Sql::Text(v.as_bytes().to_vec()),
         Value::Bytes(v) => Sql::Blob(v.clone()),
         // A chunked cell names an epoch, which only a store has: descriptors
-        // are stored through `Inner::large_cell`.
+        // are stored through `Store::large_cell`.
         Value::Large(_) => return Err(unsupported("a large-value descriptor as a literal")),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),

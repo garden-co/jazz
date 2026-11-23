@@ -171,7 +171,7 @@ fn predecessor(commit: Option<Option<Pos>>) -> Result<Pos, Error> {
 /// Which of a commit's ops write each (stored table, row), in op order.
 pub(super) type RowOps = HashMap<(String, RowUuid), Vec<usize>>;
 
-impl Inner {
+impl Store {
     /// Where the predecessor commit `tx` of `node` landed; refused if the
     /// authority rejected it (naming why) or never received it.
     async fn predecessor_at(&self, node: [u8; 16], tx: u64) -> Result<Pos, Error> {
@@ -318,7 +318,7 @@ impl Inner {
         bases: Vec<(usize, WireBase)>,
     ) -> Result<Vec<(usize, WireBase)>, Error> {
         let me = *self.identity.node.as_bytes();
-        let pending = &self.client.as_ref().expect("a relay is a client").pending;
+        let pending = self.client().expect("a relay is a client").pending.clone();
         let mut out = Vec::with_capacity(bases.len());
         for (op, base) in bases {
             // A version this relay shipped the session: one of the
@@ -529,7 +529,7 @@ impl Inner {
         // A session commit this relay carries, by its writer's id: its
         // local tx here.
         let carried = |node: [u8; 16], tx: u64| {
-            self.client.as_ref().and_then(|client| {
+            self.client().and_then(|client| {
                 client
                     .pending
                     .borrow()
@@ -816,7 +816,7 @@ impl Db {
         branch: Option<&BranchSelector>,
     ) -> Result<Vec<WriteConflict>, Error> {
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner.without_overlay();
         let stored = active_schema.stored_table(table)?.to_owned();
         let key = branch.map_or_else(Vec::new, |branch| crate::values::branch_key(&branch.values));
         inner.row_write_conflicts(&stored, row, &key).await
@@ -835,7 +835,7 @@ impl Db {
         column: &str,
     ) -> Result<Option<Value>, Error> {
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner.without_overlay();
         let schema_table = active_schema.table(table)?;
         let stored = schema_table.stored.clone();
         let stored_column = schema_table.stored_name(column).to_owned();
@@ -864,7 +864,7 @@ impl Db {
     /// (SPEC 4 §4.3).
     #[cfg(feature = "testing")]
     pub async fn as_sent_versions_for_test(&self) -> Result<u64, Error> {
-        self.inner().await.as_sent_versions().await
+        self.inner.without_overlay().as_sent_versions().await
     }
 
     /// The `(_clock, _writer)` of every history version of `table`'s unbranched row
@@ -876,7 +876,7 @@ impl Db {
         row: RowUuid,
     ) -> Result<Vec<(i64, Vec<u8>)>, Error> {
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner.without_overlay();
         let schema_table = active_schema.table(table)?;
         let sql = format!(
             "SELECT _clock, _writer FROM {} WHERE id = ?1 AND _branch = ?2 ORDER BY _clock, _writer",
@@ -905,7 +905,7 @@ impl Db {
         column: &str,
     ) -> Result<u64, Error> {
         let active_schema = self.operation_schema();
-        let inner = self.inner().await;
+        let inner = self.inner.without_overlay();
         let schema_table = active_schema.table(table)?;
         let sql = format!(
             "SELECT length(CAST({} AS BLOB)) FROM {} WHERE id = ?1 AND _branch = ?2",
