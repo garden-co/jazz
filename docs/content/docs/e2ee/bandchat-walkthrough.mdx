@@ -152,7 +152,8 @@ request. Then the app calls `keys.deliver()`.
 
 Being admitted does not give the person the key. Their devices get it from a device that already
 holds it. That device has to be online. Until then the new member sees the room's messages as
-**decrypting**, and after ten seconds as waiting for the room's key.
+**decrypting**, and after ten seconds usually as waiting for the room's key (the notices are
+described under "Messages you cannot read yet").
 
 If `deliver()` fails or reports `failed` above zero, BandChat shows "Key not delivered yet".
 The member is already admitted. The dialog shows the reason when the call returns one.
@@ -232,8 +233,9 @@ BandChat turns that count into one of three notices:
 While the key is on its way, the room says its messages are decrypting. A browser known to be
 waiting for approval, or with any message locked for another reason, shows a banner saying how many
 are locked. One whose status is not known yet sees decrypting for ten seconds, then locked. After
-those ten seconds an active browser says the messages are waiting for the room's key, since no
-device may hold it any more. The messages appear by themselves once the key arrives.
+those ten seconds an active browser whose rows are all `key-pending` says the messages are waiting
+for the room's key, since no device may hold it any more. Otherwise, as for a room whose key record
+has not arrived, they show as locked. The messages appear by themselves once the key arrives.
 
 The room list needs no key. For each room it asks for the newest message, using plain columns only:
 
