@@ -710,78 +710,80 @@ impl<'a> Writer<'a> {
             );
         }
 
-        // The patch.
-        let _ = writeln!(
-            out,
-            "// {patch} changes the fields of a row of `{}` that are set (jazz.Set).",
-            table.name
-        );
-        let lines: Vec<[String; 3]> = fields
-            .iter()
-            .map(|f| {
-                [
-                    f.ident.clone(),
-                    format!("jazz.Patch[{}]", f.ty),
-                    String::new(),
-                ]
-            })
-            .collect();
-        write_struct(&mut out, &patch, &lines);
-        let entries: Vec<String> = fields
-            .iter()
-            .filter(|f| f.transform.is_none())
-            .map(|f| format!("p.{}.Entry({})", f.ident, go_string(&f.name)))
-            .collect();
-        if fields.iter().any(|f| f.transform.is_some()) {
+        // The patch: none for a table whose rows never change.
+        if table.updatable {
             let _ = writeln!(
                 out,
-                "// JazzEncode is the patch, its transformed columns stored."
+                "// {patch} changes the fields of a row of `{}` that are set (jazz.Set).",
+                table.name
             );
-            let _ = writeln!(out, "func (p {patch}) JazzEncode(app any) (any, error) {{");
-            out.push_str(
+            let lines: Vec<[String; 3]> = fields
+                .iter()
+                .map(|f| {
+                    [
+                        f.ident.clone(),
+                        format!("jazz.Patch[{}]", f.ty),
+                        String::new(),
+                    ]
+                })
+                .collect();
+            write_struct(&mut out, &patch, &lines);
+            let entries: Vec<String> = fields
+                .iter()
+                .filter(|f| f.transform.is_none())
+                .map(|f| format!("p.{}.Entry({})", f.ident, go_string(&f.name)))
+                .collect();
+            if fields.iter().any(|f| f.transform.is_some()) {
+                let _ = writeln!(
+                    out,
+                    "// JazzEncode is the patch, its transformed columns stored."
+                );
+                let _ = writeln!(out, "func (p {patch}) JazzEncode(app any) (any, error) {{");
+                out.push_str(
                 "\tc, ok := app.(Computed)\n\tif !ok {\n\t\treturn nil, jazz.ErrNoComputed\n\t}\n",
             );
-            if entries.is_empty() {
-                out.push_str("\tentries := []jazz.PatchEntry{}\n");
-            } else {
-                out.push_str("\tentries := []jazz.PatchEntry{\n");
-                for e in &entries {
-                    let _ = writeln!(out, "\t\t{e},");
-                }
-                out.push_str("\t}\n");
-            }
-            for f in &fields {
-                let Some(t) = &f.transform else { continue };
-                let key = go_string(&f.name);
-                if f.nullable {
-                    let _ = write!(
-                        out,
-                        "\tif p.{id}.IsSet() {{\n\t\tvar stored *{s}\n\t\tif view := p.{id}.Value(); view != nil {{\n\t\t\tv, err := c.{stem}Stored(*view)\n\t\t\tif err != nil {{\n\t\t\t\treturn nil, err\n\t\t\t}}\n\t\t\tstored = &v\n\t\t}}\n\t\tentries = append(entries, jazz.Set(stored).Entry({key}))\n\t}}\n",
-                        id = f.ident,
-                        s = t.stored,
-                        stem = t.stem
-                    );
+                if entries.is_empty() {
+                    out.push_str("\tentries := []jazz.PatchEntry{}\n");
                 } else {
-                    let _ = write!(
-                        out,
-                        "\tif p.{id}.IsSet() {{\n\t\tstored, err := c.{stem}Stored(p.{id}.Value())\n\t\tif err != nil {{\n\t\t\treturn nil, err\n\t\t}}\n\t\tentries = append(entries, jazz.Set(stored).Entry({key}))\n\t}}\n",
-                        id = f.ident,
-                        stem = t.stem
-                    );
+                    out.push_str("\tentries := []jazz.PatchEntry{\n");
+                    for e in &entries {
+                        let _ = writeln!(out, "\t\t{e},");
+                    }
+                    out.push_str("\t}\n");
                 }
-            }
-            out.push_str("\treturn jazz.PatchJSON(entries...)\n}\n\n");
-        } else {
-            let _ = writeln!(out, "// MarshalJSON writes the fields that are set.");
-            let _ = writeln!(out, "func (p {patch}) MarshalJSON() ([]byte, error) {{");
-            if entries.is_empty() {
-                out.push_str("\treturn jazz.MarshalPatch()\n}\n\n");
+                for f in &fields {
+                    let Some(t) = &f.transform else { continue };
+                    let key = go_string(&f.name);
+                    if f.nullable {
+                        let _ = write!(
+                            out,
+                            "\tif p.{id}.IsSet() {{\n\t\tvar stored *{s}\n\t\tif view := p.{id}.Value(); view != nil {{\n\t\t\tv, err := c.{stem}Stored(*view)\n\t\t\tif err != nil {{\n\t\t\t\treturn nil, err\n\t\t\t}}\n\t\t\tstored = &v\n\t\t}}\n\t\tentries = append(entries, jazz.Set(stored).Entry({key}))\n\t}}\n",
+                            id = f.ident,
+                            s = t.stored,
+                            stem = t.stem
+                        );
+                    } else {
+                        let _ = write!(
+                            out,
+                            "\tif p.{id}.IsSet() {{\n\t\tstored, err := c.{stem}Stored(p.{id}.Value())\n\t\tif err != nil {{\n\t\t\treturn nil, err\n\t\t}}\n\t\tentries = append(entries, jazz.Set(stored).Entry({key}))\n\t}}\n",
+                            id = f.ident,
+                            stem = t.stem
+                        );
+                    }
+                }
+                out.push_str("\treturn jazz.PatchJSON(entries...)\n}\n\n");
             } else {
-                out.push_str("\treturn jazz.MarshalPatch(\n");
-                for e in &entries {
-                    let _ = writeln!(out, "\t\t{e},");
+                let _ = writeln!(out, "// MarshalJSON writes the fields that are set.");
+                let _ = writeln!(out, "func (p {patch}) MarshalJSON() ([]byte, error) {{");
+                if entries.is_empty() {
+                    out.push_str("\treturn jazz.MarshalPatch()\n}\n\n");
+                } else {
+                    out.push_str("\treturn jazz.MarshalPatch(\n");
+                    for e in &entries {
+                        let _ = writeln!(out, "\t\t{e},");
+                    }
+                    out.push_str("\t)\n}\n\n");
                 }
-                out.push_str("\t)\n}\n\n");
             }
         }
 
@@ -852,36 +854,38 @@ impl<'a> Writer<'a> {
             out,
             "func ({ty}) Insert(ctx context.Context, db jazz.Querier, row {new}, opts ...jazz.WriteOption) ({row}, error) {{\n\treturn jazz.Insert[{new}, {row}](ctx, db, {table_name}, row, opts...)\n}}\n"
         );
-        let _ = writeln!(
-            out,
-            "// Update changes the fields patch sets of the row of `{}` with id.",
-            table.name
-        );
-        let _ = writeln!(
-            out,
-            "func ({ty}) Update(ctx context.Context, db jazz.Querier, id string, patch {patch}, opts ...jazz.WriteOption) error {{\n\treturn jazz.Update(ctx, db, {table_name}, id, patch, opts...)\n}}\n"
-        );
-        for (method, column) in &text_edits {
+        if table.updatable {
             let _ = writeln!(
                 out,
-                "// {method} edits `{}.{column}`, a mergeable text: positions are UTF-8 byte offsets, and\n// the edits merge with others made meanwhile.",
+                "// Update changes the fields patch sets of the row of `{}` with id.",
                 table.name
             );
             let _ = writeln!(
                 out,
-                "func ({ty}) {method}(ctx context.Context, db jazz.Querier, id string, edits ...jazz.TextEdit) error {{\n\treturn jazz.EditText(ctx, db, {table_name}, id, {}, edits...)\n}}\n",
-                go_string(column)
+                "func ({ty}) Update(ctx context.Context, db jazz.Querier, id string, patch {patch}, opts ...jazz.WriteOption) error {{\n\treturn jazz.Update(ctx, db, {table_name}, id, patch, opts...)\n}}\n"
+            );
+            for (method, column) in &text_edits {
+                let _ = writeln!(
+                    out,
+                    "// {method} edits `{}.{column}`, a mergeable text: positions are UTF-8 byte offsets, and\n// the edits merge with others made meanwhile.",
+                    table.name
+                );
+                let _ = writeln!(
+                    out,
+                    "func ({ty}) {method}(ctx context.Context, db jazz.Querier, id string, edits ...jazz.TextEdit) error {{\n\treturn jazz.EditText(ctx, db, {table_name}, id, {}, edits...)\n}}\n",
+                    go_string(column)
+                );
+            }
+            let _ = writeln!(
+                out,
+                "// Upsert writes row as the row of `{}` with id: inserted, or updated if it exists.",
+                table.name
+            );
+            let _ = writeln!(
+                out,
+                "func ({ty}) Upsert(ctx context.Context, db jazz.Querier, id string, row {new}, opts ...jazz.WriteOption) ({row}, error) {{\n\treturn jazz.Upsert[{new}, {row}](ctx, db, {table_name}, id, row, opts...)\n}}\n"
             );
         }
-        let _ = writeln!(
-            out,
-            "// Upsert writes row as the row of `{}` with id: inserted, or updated if it exists.",
-            table.name
-        );
-        let _ = writeln!(
-            out,
-            "func ({ty}) Upsert(ctx context.Context, db jazz.Querier, id string, row {new}, opts ...jazz.WriteOption) ({row}, error) {{\n\treturn jazz.Upsert[{new}, {row}](ctx, db, {table_name}, id, row, opts...)\n}}\n"
-        );
         let _ = writeln!(
             out,
             "// Restore brings back the deleted row of `{}` with id.",
@@ -926,6 +930,9 @@ impl<'a> Writer<'a> {
                 "jazz.CanDelete(ctx, db, TABLE, id)",
             ),
         ] {
+            if method == "CanUpdate" && !table.updatable {
+                continue;
+            }
             let _ = writeln!(
                 out,
                 "// {method} advises whether the app's permissions allow {doc} in `{}`.",

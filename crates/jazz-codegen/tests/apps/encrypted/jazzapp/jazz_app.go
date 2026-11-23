@@ -62,22 +62,6 @@ type NewE2eeMember struct {
 	AccountID  string `json:"accountId"`
 }
 
-// E2eeMemberPatch changes the fields of a row of `__e2ee_members` that are set (jazz.Set).
-type E2eeMemberPatch struct {
-	ScopeID    jazz.Patch[string]
-	Identifier jazz.Patch[string]
-	AccountID  jazz.Patch[string]
-}
-
-// MarshalJSON writes the fields that are set.
-func (p E2eeMemberPatch) MarshalJSON() ([]byte, error) {
-	return jazz.MarshalPatch(
-		p.ScopeID.Entry("scopeId"),
-		p.Identifier.Entry("identifier"),
-		p.AccountID.Entry("accountId"),
-	)
-}
-
 // e2eeMembersTable is the type of E2eeMembers: the columns of `__e2ee_members`, to build conditions and orders from, and its relations, to include.
 type e2eeMembersTable struct {
 	ID         jazz.Column[E2eeMember, string]
@@ -104,16 +88,6 @@ func (e2eeMembersTable) Insert(ctx context.Context, db jazz.Querier, row NewE2ee
 	return jazz.Insert[NewE2eeMember, E2eeMember](ctx, db, "__e2ee_members", row, opts...)
 }
 
-// Update changes the fields patch sets of the row of `__e2ee_members` with id.
-func (e2eeMembersTable) Update(ctx context.Context, db jazz.Querier, id string, patch E2eeMemberPatch, opts ...jazz.WriteOption) error {
-	return jazz.Update(ctx, db, "__e2ee_members", id, patch, opts...)
-}
-
-// Upsert writes row as the row of `__e2ee_members` with id: inserted, or updated if it exists.
-func (e2eeMembersTable) Upsert(ctx context.Context, db jazz.Querier, id string, row NewE2eeMember, opts ...jazz.WriteOption) (E2eeMember, error) {
-	return jazz.Upsert[NewE2eeMember, E2eeMember](ctx, db, "__e2ee_members", id, row, opts...)
-}
-
 // Restore brings back the deleted row of `__e2ee_members` with id.
 func (e2eeMembersTable) Restore(ctx context.Context, db jazz.Querier, id string) (E2eeMember, error) {
 	return jazz.Restore[E2eeMember](ctx, db, "__e2ee_members", id, nil)
@@ -132,11 +106,6 @@ func (e2eeMembersTable) CanRead(ctx context.Context, db jazz.Querier, id string)
 // CanInsert advises whether the app's permissions allow inserting row in `__e2ee_members`.
 func (e2eeMembersTable) CanInsert(ctx context.Context, db jazz.Querier, row NewE2eeMember) (jazz.Advice, error) {
 	return jazz.CanInsert(ctx, db, "__e2ee_members", row)
-}
-
-// CanUpdate advises whether the app's permissions allow applying patch to the row with id in `__e2ee_members`.
-func (e2eeMembersTable) CanUpdate(ctx context.Context, db jazz.Querier, id string, patch E2eeMemberPatch) (jazz.Advice, error) {
-	return jazz.CanUpdate(ctx, db, "__e2ee_members", id, patch)
 }
 
 // CanDelete advises whether the app's permissions allow deleting the row with id in `__e2ee_members`.
