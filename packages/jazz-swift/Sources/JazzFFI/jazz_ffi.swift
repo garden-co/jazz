@@ -651,8 +651,7 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     /**
      * Closes the app and deletes its local store (TS's
      * `deleteClientStorage`): the next open starts empty and syncs again.
-     * Writes the server hasn't accepted yet are lost. Refused while another
-     * open app holds the same `dataDir`.
+     * Writes the server hasn't accepted yet are lost.
      */
     func deleteClientStorage() throws 
     
@@ -1070,8 +1069,7 @@ open func deleteAt(table: String, id: String, tier: String)throws   {try rustCal
     /**
      * Closes the app and deletes its local store (TS's
      * `deleteClientStorage`): the next open starts empty and syncs again.
-     * Writes the server hasn't accepted yet are lost. Refused while another
-     * open app holds the same `dataDir`.
+     * Writes the server hasn't accepted yet are lost.
      */
 open func deleteClientStorage()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
@@ -3555,7 +3553,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_delete_at() != 42862) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_delete_client_storage() != 20846) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_delete_client_storage() != 32557) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_disconnect() != 12631) {

@@ -14,10 +14,11 @@
 //! TypeScript's browser-only parts (focus and visibility checks, cross-tab
 //! sign-out, cookie renewal) and the thin-client upgrade are not here.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use futures_core::Stream;
+use futures_util::StreamExt as _;
 use jazz::account_registry::AccountId;
 use jazz::tools::AppId;
 use serde::Serialize;
@@ -146,8 +147,10 @@ pub enum Initial {
     /// no one without a bearer. The default with a bearer.
     #[default]
     Backend,
-    /// As the device account this device keeps (a new one if none): a
-    /// guest who needs no sign-in.
+    /// As the device account this device keeps: a guest who needs no
+    /// sign-in. A new one only when none is kept (no key file): a key that
+    /// can't be read or signed in with stays as it is, and the snapshot's
+    /// `error` says why.
     Device,
     /// Signed out.
     SignedOut,
@@ -163,10 +166,11 @@ pub struct SessionConfig {
     /// [`Storage::Dir`] keeps each account's store in a directory of its
     /// own under it (`<dir>/<account id>/`), and the device account's key
     /// in `<dir>/device.key`. [`Storage::Memory`] keeps both for the life
-    /// of the process. [`Jazz::delete_client_storage`] on a session's
-    /// client deletes that account's store only (and is refused with
-    /// [`Error::StoreHeld`] while another open client holds it); the device
-    /// key survives signing out.
+    /// of the process. One client at a time has an account's store open: a
+    /// second session, or client, of the same account and directory fails
+    /// with [`Error::StoreHeld`]. [`Jazz::delete_client_storage`] on a
+    /// session's client deletes that account's store only; the device key
+    /// survives signing out.
     pub storage: Storage,
     /// The app's own auth: who its backend should sign in.
     pub bearer: Option<Bearer>,
@@ -236,8 +240,12 @@ impl SessionConfig {
 /// holds the raw key.
 #[derive(Clone)]
 enum Op {
+    /// [`Initial::Device`]: the kept device account, or a new one when none
+    /// is kept.
+    StartDevice,
     Follow,
-    CreateDevice,
+    /// Holds the new key, so a retry is for the same account.
+    CreateDevice(DeviceKey),
     RestoreDevice(String),
     ReopenDevice,
     LinkDevice,
@@ -346,19 +354,14 @@ impl JazzSession {
         };
         let start = match initial {
             Initial::Backend if has_bearer => Some(Op::Follow),
-            Initial::Device => Some(Op::ReopenDevice),
+            Initial::Device => Some(Op::StartDevice),
             Initial::Backend | Initial::SignedOut => None,
         };
         match start {
             None => session.set(|snapshot| snapshot.status = SessionStatus::SignedOut),
             Some(op) => {
                 // Opening never fails on a sign-in: the snapshot says why.
-                let device_fallback = matches!(op, Op::ReopenDevice);
-                let result = session.run(op).await;
-                if device_fallback && matches!(result, Err(Error::Config(_))) {
-                    // No device account kept: start as a new one.
-                    let _ = session.run(Op::CreateDevice).await;
-                }
+                let _ = session.run(op).await;
             }
         }
         Ok(session)
@@ -403,8 +406,8 @@ impl JazzSession {
 
     /// The app's auth changed (its own sign-in, sign-out or account
     /// switch): asks the bearer and the backend who is signed in now, and
-    /// follows. The same user keeps the same [`Jazz`]; another one gets
-    /// theirs; no one signs out.
+    /// follows. The same user keeps the same [`Jazz`] while its client
+    /// lives; another one gets theirs; no one signs out.
     pub async fn refresh(&self) -> Result<()> {
         self.run(Op::Follow).await
     }
@@ -412,8 +415,12 @@ impl JazzSession {
     /// Signs in as a new device account: an account whose key lives on
     /// this device. It needs no sign-in and works offline. The key is kept
     /// (see [`SessionConfig::storage`]) for [`JazzSession::reopen_device_account`].
+    ///
+    /// It replaces a key kept before, readable or not, once the new account
+    /// signed in: export that one first to keep its account. A failure
+    /// leaves it, and [`JazzSession::retry`] is for the same new account.
     pub async fn create_device_account(&self) -> Result<()> {
-        self.run(Op::CreateDevice).await
+        self.run(Op::CreateDevice(DeviceKey::generate()?)).await
     }
 
     /// Signs in as the device account a key from
@@ -576,11 +583,15 @@ impl JazzSession {
     async fn perform(&self, op: Op) -> Result<()> {
         match op {
             Op::Follow => self.follow().await,
-            Op::CreateDevice => {
-                let key = DeviceKey::generate()?;
-                self.keep_key(&key)?;
+            Op::StartDevice => {
+                let kept = self.kept_key(&self.lock())?;
+                let key = match kept {
+                    Some(key) => key,
+                    None => self.keep_first_key()?,
+                };
                 self.sign_in_device(key).await
             }
+            Op::CreateDevice(key) => self.create_device(key).await,
             Op::RestoreDevice(text) => {
                 let key: DeviceKey = text.parse()?;
                 // Kept only once it signed in: a failed restore leaves the
@@ -609,7 +620,7 @@ impl JazzSession {
     /// - A user who has no account yet, while a device guest is signed in:
     ///   the guest is linked to them and keeps its data
     ///   ([`SessionConfig::link_guest`], on by default).
-    /// - The user signed in now: the same client goes on.
+    /// - The user signed in now: the same client goes on, while it lives.
     /// - Anyone else: signed in (their account made if need be), with a
     ///   client of their own.
     async fn follow(&self) -> Result<()> {
@@ -677,7 +688,7 @@ impl JazzSession {
             user.issuer == who.identity.issuer
                 && user.subject == who.identity.subject
                 && who.account.is_none_or(|account| account == user.account)
-        }) && self.lock().jazz.is_some();
+        }) && self.lock().jazz.as_ref().is_some_and(Jazz::is_live);
         if same {
             // The same user keeps the same client.
             self.set(|snapshot| snapshot.status = SessionStatus::Ready);
@@ -700,6 +711,34 @@ impl JazzSession {
             .user_config(key.account(self.inner.config.app_id))
             .user(Auth::Device(key.clone()));
         self.switch_to(config, Some(key)).await
+    }
+
+    /// Signs in as `key`'s new account and keeps it. A key kept before is
+    /// replaced only once that worked.
+    async fn create_device(&self, key: DeviceKey) -> Result<()> {
+        let Some(path) = self.key_path() else {
+            if self.lock().kept.is_none() {
+                self.keep_key(&key)?;
+                return self.sign_in_device(key).await;
+            }
+            self.sign_in_device(key.clone()).await?;
+            return self.keep_key(&key);
+        };
+        if is_absent(&path) {
+            self.keep_key(&key)?;
+            return self.sign_in_device(key).await;
+        }
+        // Written beside the kept one first: a key that can't be kept fails
+        // before the session changes.
+        let next = path.with_file_name(format!(".{DEVICE_KEY_FILE}.{}.next", key.user_id()));
+        key.write_to(&next)?;
+        let created = self.sign_in_device(key).await.and_then(|()| {
+            std::fs::rename(&next, &path).map_err(|error| key_file_error(&path, error))
+        });
+        if created.is_err() {
+            let _ = std::fs::remove_file(&next);
+        }
+        created
     }
 
     /// The device account's backend link, as TypeScript's
@@ -770,6 +809,7 @@ impl JazzSession {
                     }
                     SessionState::SignedOut => None,
                 });
+                let states = jazz.session().map(|session| session.changes());
                 {
                     let mut current = self.lock();
                     current.jazz = Some(jazz);
@@ -780,6 +820,9 @@ impl JazzSession {
                     snapshot.status = SessionStatus::Ready;
                     snapshot.client_epoch += 1;
                 });
+                if let Some(states) = states {
+                    self.follow_end(states);
+                }
                 Ok(())
             }
             Err(Error::SignedOut) => {
@@ -797,6 +840,37 @@ impl JazzSession {
                 Err(error)
             }
         }
+    }
+
+    /// Follows the current client ending by itself (its credential names no
+    /// one any more): the session signs out with it, keeping a device key
+    /// to reopen. A client the session replaced or closed meanwhile is not
+    /// its current one, and changes nothing.
+    fn follow_end(&self, mut states: impl Stream<Item = SessionState> + Send + Unpin + 'static) {
+        let epoch = self.inner.state.borrow().client_epoch;
+        // Holds neither the session nor the client open.
+        let inner = Arc::downgrade(&self.inner);
+        self.inner.handle.spawn(async move {
+            // The stream ends when the client stops.
+            while let Some(state) = states.next().await {
+                if state == SessionState::SignedOut {
+                    break;
+                }
+            }
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            let this = Self { inner };
+            let _one = this.inner.one_at_a_time.lock().await;
+            if this.ensure_open().is_err() || this.inner.state.borrow().client_epoch != epoch {
+                return;
+            }
+            this.replace(None, None, SessionStatus::SignedOut).await;
+            this.set(|snapshot| {
+                snapshot.error = None;
+                snapshot.recovery = None;
+            });
+        });
     }
 
     /// Ends the session's user and client, reading `status` after.
@@ -854,18 +928,44 @@ impl JazzSession {
         }
     }
 
+    /// The kept key, `None` only when none is kept: whatever else is at its
+    /// path is an error, never a reason to replace it.
     fn kept_key(&self, current: &Current) -> Result<Option<DeviceKey>> {
         let Some(path) = self.key_path() else {
             return Ok(current.kept.clone());
         };
-        match std::fs::read_to_string(&path) {
-            Ok(text) => text.parse().map(Some),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(Error::Config(format!(
-                "device key at {}: {error}",
-                path.display()
-            ))),
+        let text = match std::fs::read_to_string(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if is_absent(&path) {
+                    return Ok(None);
+                }
+                // There now: kept meanwhile (another first launch), or a
+                // link to nowhere, which fails again.
+                std::fs::read_to_string(&path)
+            }
+            read => read,
+        };
+        text.map_err(|error| key_file_error(&path, error))?
+            .parse()
+            .map(Some)
+    }
+
+    /// A new key, kept where none was: of first launches at once, the first
+    /// to keep one wins and the others use it.
+    fn keep_first_key(&self) -> Result<DeviceKey> {
+        if let Some(path) = self.key_path() {
+            match DeviceKey::load_or_create(&path) {
+                Ok(key) => return Ok(key),
+                // There now: another's, kept meanwhile, or what can't be read.
+                Err(_) if !is_absent(&path) => return DeviceKey::load_or_create(&path),
+                // Still none: where there are no hard links to create it
+                // with (Android, jazz#6256), it is written as any other.
+                Err(_) => {}
+            }
         }
+        let key = DeviceKey::generate()?;
+        self.keep_key(&key)?;
+        Ok(key)
     }
 
     /// Keeps `key` as the device account to reopen, replacing any kept
@@ -877,4 +977,13 @@ impl JazzSession {
         };
         key.write_to(&path)
     }
+}
+
+/// Whether nothing is at `path`. A link to a missing file is not nothing.
+fn is_absent(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn key_file_error(path: &Path, error: std::io::Error) -> Error {
+    Error::Config(format!("device key at {}: {error}", path.display()))
 }

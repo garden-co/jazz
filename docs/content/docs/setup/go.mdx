@@ -81,16 +81,22 @@ db, err := jazzapp.Open(ctx, jazz.Config{
 	AppID:     appID,
 	ServerURL: "https://my-app.com/jazz",
 	Storage:   jazz.StoragePersistent,
-	DataDir:   "./jazz-data",
+	DataDir:   "./jazz-data", // one open DB per directory: a second Open is refused
 	Auth:      jazz.DeviceAccount(jazz.FileStore("./jazz-data/device-key")),
 })
 ```
 
 Keep a device key like a password: `jazz.FileStore` keeps it in a file only its owner can read;
-implement `jazz.SecretStore` to keep it in the OS keychain. `db.Session(ctx)` is who is signed in,
+implement `jazz.SecretStore` to keep it in the OS keychain. Only a missing file starts a new
+account: an empty or unreadable one is an error, and is left as it is. Your own `Load` must return
+`""` only when there is no key yet, as `DeviceAccount` then saves a new one over it.
+
+`db.Session(ctx)` is who is signed in,
 `db.OnSession(ctx)` and `db.OnSyncStatus(ctx)` are channels of their changes, and `db.Refresh(ctx)`
 and `db.SignOut(ctx)` do what they say. On a `DB` from a `Session`, `SignOut` and `Link` fail with
 `jazz.ErrNotSupported`: use the session's `SignOut` and `LinkDeviceAccount`.
+A backend client's `ForUser` DB has no session of its own:
+on one, `Session`, `OnSession`, `Refresh`, `Link` and `SignOut` fail with `jazz.ErrNotSupported`.
 
 Writes are local-first: a write your permissions refuse returns no error. It is never synced, and
 other users never see it.

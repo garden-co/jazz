@@ -147,7 +147,7 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
         try {
             call { handle.deleteClientStorage() }
         } catch (e: JazzException.Refused) {
-            // Refused (e.g. another open app holds the store): the app stays open.
+            // Refused (e.g. a delete already under way): nothing was closed here.
             throw e
         } catch (e: Throwable) {
             if (closed.compareAndSet(false, true)) handle.destroy()
