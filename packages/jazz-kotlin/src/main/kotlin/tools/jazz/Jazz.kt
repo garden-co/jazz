@@ -155,13 +155,10 @@ public class Jazz internal constructor(
 
     /**
      * Closes the app and deletes its local store (e.g. on sign-out from a
-     * shared device). It throws [JazzException.Refused] while another open app
-     * uses the same `dataDir`:
-     * - an app in this process: this app stays open, with its watches;
-     * - an app in another process, which is seen only once this app has
-     *   stopped: this app is closed, with its store left in place.
-     *
-     * Any other failure closes this app too. Closed, [session] reads `SignedOut`.
+     * shared device). One app at a time has a store open, so no other can be
+     * holding it. If it fails the app is closed too, unless it was refused
+     * ([JazzException.Refused]) with the app still open. Closed, [session]
+     * reads `SignedOut`.
      */
     public suspend fun deleteClientStorage(): Unit = io {
         // Inside io: a cancelled caller gets no result back, and the handle is gone all the same.

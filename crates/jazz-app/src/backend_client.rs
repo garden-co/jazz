@@ -310,6 +310,8 @@ impl Jazz {
         if self.for_user {
             return Ok(());
         }
+        // An open of its store waits for this close rather than being refused.
+        self.begin_stopping();
         let started = std::time::Instant::now();
         if !self.info.serverless && !timeout.is_zero() {
             // An outage, or the server refusing, ends the wait: what is still

@@ -339,8 +339,7 @@ impl JazzHandle {
 
     /// Closes the app and deletes its local store (TS's
     /// `deleteClientStorage`): the next open starts empty and syncs again.
-    /// Writes the server hasn't accepted yet are lost. Refused while another
-    /// open app holds the same `dataDir`.
+    /// Writes the server hasn't accepted yet are lost.
     pub fn delete_client_storage(&self) -> Result<()> {
         self.core.surface(self.core.delete_client_storage())
     }

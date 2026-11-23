@@ -872,10 +872,11 @@ impl Machine {
     fn sign_out(&mut self) {
         self.renewal = None;
         self.pending = None;
-        self.set(SessionState::SignedOut);
+        // Stopping before anyone reads `SignedOut`: they may open the store again.
         if let Some(stop) = self.stop.take() {
             stop();
         }
+        self.set(SessionState::SignedOut);
     }
 
     fn set(&self, state: SessionState) {
@@ -927,6 +928,7 @@ impl crate::Jazz {
         let session = self.session().ok_or_else(|| {
             Error::Config("only an end user's client signs out (Config::user)".into())
         })?;
+        self.begin_stopping();
         session.sign_out().await;
         self.shutdown().await
     }
