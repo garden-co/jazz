@@ -368,6 +368,8 @@ export function toJsonValue(value: unknown): unknown {
   if (typeof value === "bigint") return value.toString();
   if (value instanceof Date) return value.toISOString();
   if (value instanceof Uint8Array) return { $bytes: bytesToBase64(value) };
+  // A vector column's value: its numbers (each f32 prints exactly).
+  if (value instanceof Float32Array) return Array.from(value);
   if (Array.isArray(value)) return value.map(toJsonValue);
   if (typeof value === "object") {
     const out: Record<string, unknown> = {};
@@ -400,6 +402,8 @@ export function fromJsonForColumn(type: ColumnType | undefined, value: unknown):
       return typeof value === "string" ? new Date(value) : value;
     case "BigInt":
       return typeof value === "string" && /^-?\d+$/.test(value) ? BigInt(value) : value;
+    case "Vector":
+      return Array.isArray(value) ? Float32Array.from(value as number[]) : value;
     case "Array":
       return Array.isArray(value)
         ? value.map((entry) => fromJsonForColumn(type.element, entry))

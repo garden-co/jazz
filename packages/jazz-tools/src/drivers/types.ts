@@ -123,7 +123,12 @@ export type ColumnType =
   | { type: "Uuid" }
   | { type: "Bytea" }
   | { type: "Array"; element: ColumnType }
-  | { type: "Row"; columns: ColumnDescriptor[] };
+  | { type: "Row"; columns: ColumnDescriptor[] }
+  /**
+   * `dimensions` binary32 values (SPEC 20.1), carried in `Value` as `Bytea`
+   * holding their `f32le/1` bytes; `Float32Array` at the JS edge.
+   */
+  | { type: "Vector"; dimensions: number };
 
 export type ColumnMergeStrategy = "Counter" | "GSet" | "Text" | "Markdown" | "Html";
 

@@ -90,6 +90,10 @@ function baseBuilderExpression(columnType: WasmColumnType): string {
       return "s.bigint()";
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
+    case "Vector":
+      throw new Error(
+        "Migration stub generation does not support vector columns: declare them in jazz.app.json.",
+      );
   }
 }
 
@@ -243,6 +247,10 @@ function renderColumnOperationExpression(
       return `${m}.bigint({ ${defaultEntry} })`;
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
+    case "Vector":
+      throw new Error(
+        "Migration stub generation does not support vector columns: declare them in jazz.app.json.",
+      );
   }
 }
 

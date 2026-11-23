@@ -517,6 +517,33 @@ fn a_reference_follows_a_renamed_table() {
     App::load(created.app.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// SPEC 20.1: no migration converts a column to, from or between vector
+/// types; adding a vector column is an ordinary new column.
+#[test]
+fn vector_type_changes_are_refused_and_new_vector_columns_migrate() {
+    let vec3 = r#"{ "docs": { "columns": { "e": { "vector": 3 } } } }"#;
+    for after in [
+        r#"{ "docs": { "columns": { "e": { "vector": 4 } } } }"#,
+        r#"{ "docs": { "columns": { "e": "bytes" } } }"#,
+    ] {
+        let error = refused(vec3, after);
+        assert!(
+            error.contains("Changing the type of column `docs.e` to or from a vector"),
+            "{after}: {error}"
+        );
+    }
+    let error = refused(r#"{ "docs": { "columns": { "e": "bytes" } } }"#, vec3);
+    assert!(error.contains("to or from a vector"), "{error}");
+
+    let created = migrate(
+        r#"{ "docs": { "columns": { "title": "string" } } }"#,
+        r#"{ "docs": { "columns": { "title": "string", "e": { "vector": 3, "optional": true } } } }"#,
+    );
+    assert!(created.changed);
+    assert!(created.todos.is_empty(), "{:?}", created.todos);
+    App::load(created.app.as_bytes()).unwrap();
+}
+
 /// The decisions every language renders its stub from, as the JSON the TS
 /// CLI reads (jazz-napi `migrationDiff`): a table renamed, one created,
 /// one dropped; in a kept table, a column that may be renamed, one added
