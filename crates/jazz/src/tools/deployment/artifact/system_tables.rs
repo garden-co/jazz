@@ -227,7 +227,10 @@ pub fn e2ee_system_tables_v1() -> Schema {
                     req("envelope", Bytes),
                 ]),
                 &["recipientAccountId"],
-                &[&["scopeId", "identifier", "keyEpochId"]],
+                &[
+                    &["scopeId", "identifier", "keyEpochId"],
+                    &["scopeId", "identifier", "recipientAccountId", "keyEpochId"],
+                ],
             ),
         ),
         (DEVICE_REQUESTS, table(&device_requests, &[], &[])),

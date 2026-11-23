@@ -692,6 +692,58 @@ fn the_first_write_after_reconnecting_checks_a_subscribed_space() {
     });
 }
 
+/// Alice's member subscription fails while her link stays online. Bob removes
+/// a device before she receives that change, so her first write must check
+/// the authority and rotate.
+#[test]
+fn the_first_write_after_losing_a_space_watch_checks_the_subscribed_space() {
+    within(|| {
+        let mut shared = SharedSpace::new();
+        let address = space_address(&shared.alice, shared.space);
+        shared.watch.use_space(&address);
+        shared.turns();
+
+        let db = &shared.alice.db;
+        let (_, members) = jazz_e2ee_client::watch_queries(&[address], &[])
+            .into_iter()
+            .find(|(table, _)| *table == "__e2ee_members")
+            .unwrap();
+        let mut witness =
+            block_on(db.subscribe(&db.prepare_query(&members).unwrap(), Default::default()))
+                .unwrap();
+        pump(&shared.server, db);
+        while witness.try_next_event().is_some() {}
+
+        // A change in another room makes the shared member query recheck
+        // without changing this room's membership.
+        let other = project(db, "other room");
+        pump(&shared.server, db);
+        let member = std::collections::BTreeMap::from([
+            (
+                "scopeId".to_owned(),
+                Value::Uuid(db.table_identity("projects").unwrap().unwrap().0),
+            ),
+            ("identifier".to_owned(), Value::Uuid(other)),
+            (
+                "accountId".to_owned(),
+                Value::Uuid(account(0xa1).account_id().unwrap().0),
+            ),
+        ]);
+        jazz::db::fail_rechecks_for_test(u32::MAX);
+        block_on(db.insert("__e2ee_members", member, Default::default())).unwrap();
+        jazz::db::fail_rechecks_for_test(0);
+        assert!(matches!(
+            witness.try_next_event(),
+            Some(jazz::db::SubscriptionEvent::Rejected { .. })
+        ));
+
+        shared.bob_removes_his_second_device();
+        shared.alice_writes("after losing the member watch");
+        assert_eq!(count(&shared.server, "__e2ee_space_successors"), 1);
+        shared.assert_removed_device_left_out();
+    });
+}
+
 /// Alice resumes her device and uses the space before its first write.
 enum BeforeWrite {
     Deliver,

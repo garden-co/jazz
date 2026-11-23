@@ -433,8 +433,9 @@ policies. The first release supports up to 1,000 member accounts per space
 The system tables define indexes on the columns their policies and the
 runtime's queries look up: `(scopeId, identifier)` on every space table,
 `(scopeId, identifier, accountId)` and `accountId` on members (the first
-also serves lookups by space), `(scopeId, identifier, keyEpochId)` and
-`recipientAccountId` on deliveries; on the account tables, `accountId` and
+also serves lookups by space), `(scopeId, identifier, keyEpochId)`,
+`(scopeId, identifier, recipientAccountId, keyEpochId)` and
+`recipientAccountId` on deliveries. The account tables index `accountId` and
 `deviceId` where present.
 
 **Filling the space address.** `scopeId` is minted by the authority, so the

@@ -28,7 +28,7 @@ use jazz::db::{
     UpdateOptions, WriteIdentity, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::Query;
+use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::deployment::artifact::DeclaredEncryption;
@@ -634,6 +634,49 @@ fn commit_on(
 
 fn project(owner: AuthorSubject) -> Cells {
     BTreeMap::from([("ownerId".to_owned(), account(owner))])
+}
+
+/// Bob can look up his deliveries in one room, optionally for one epoch.
+/// Alice can look up every recipient of a single epoch. EXPLAIN checks
+/// that SQLite uses every filter as an index key for all three reads.
+#[test]
+fn delivery_lookups_seek_by_room_recipient_and_epoch() {
+    let world = World::new();
+    let room = Query::from(SPACE_DELIVERIES)
+        .filter(eq(col("scopeId"), lit(world.projects.clone())))
+        .filter(eq(col("identifier"), lit(Value::Uuid(new_row().0))));
+    let own = room
+        .clone()
+        .filter(eq(col("recipientAccountId"), lit(account(bob()))));
+    let epoch = eq(col("keyEpochId"), lit(Value::Uuid(new_row().0)));
+    let by_recipient = "scopeId,identifier,recipientAccountId,keyEpochId";
+    for (query, reader, index, seek) in [
+        (
+            own.clone().order_by("keyEpochId", OrderDirection::Asc),
+            bob(),
+            by_recipient,
+            "scopeId=? AND identifier=? AND recipientAccountId=?",
+        ),
+        (
+            own.filter(epoch.clone()),
+            bob(),
+            by_recipient,
+            "scopeId=? AND identifier=? AND recipientAccountId=? AND keyEpochId=?",
+        ),
+        (
+            room.filter(epoch),
+            alice(),
+            "scopeId,identifier,keyEpochId",
+            "scopeId=? AND identifier=? AND keyEpochId=?",
+        ),
+    ] {
+        let (_, plan) = world
+            .server
+            .explain_query_plan(&world.server.prepare_query(&query).unwrap(), Some(reader))
+            .unwrap();
+        let expected = format!("SEARCH t USING INDEX {SPACE_DELIVERIES}__ix({index}) ({seek})");
+        assert!(common::unhashed(&plan).contains(&expected), "{plan}");
+    }
 }
 
 /// A project's owner opens its space in one transaction (the project, her
