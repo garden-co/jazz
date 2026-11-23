@@ -22,7 +22,8 @@ import {
   upgradeDbToLocalFirst,
   type LocalFirstLoader,
 } from "../runtime/local-first-upgrade.js";
-import type { MutationErrorEvent, WriteResult } from "../runtime/client.js";
+import type { MutationErrorEvent } from "../runtime/client.js";
+import { SerializableWriteResult } from "../runtime/client.js";
 import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
 import fixturePermissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
 import { openBrowserSessionCore, type BrowserJazzSession } from "./create-jazz-session.js";
@@ -700,8 +701,8 @@ describe("a thin session of an app with encrypted columns", () => {
       expect(error).toBeUndefined();
       expect(written!.value).toBe(2);
       // A serializable transaction's wait is for the authority's answer.
-      if (form === "transaction") await (written as WriteResult<number>).wait({ tier: "global" });
-      else await written!.wait();
+      if (written instanceof SerializableWriteResult) await written.wait();
+      else await written!.wait({ tier: "global" });
       expect(runs).toBe(2);
       // Only the rerun's note: the thin attempt committed nothing.
       expect(texts(await kept.all(app.notes, { tier: "remote" }))).toEqual([
