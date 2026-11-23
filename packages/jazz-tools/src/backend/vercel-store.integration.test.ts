@@ -14,6 +14,7 @@ import { testApp } from "../testing/index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
 import { createJazz, vercel, vercelBlob } from "./index.js";
+import { HANDSHAKE_TIMEOUT_MS } from "../runtime/native-runtime/websocket.js";
 import {
   newerVersion,
   perBranch,
@@ -938,9 +939,9 @@ describe("vercel() store", () => {
     const row = await jazz.db.insert(app.notes, { text: "kept" }).wait({ tier: "global" });
 
     // The Sandbox stops under the backend's live session, and resuming it
-    // takes longer than two handshake timeouts: the backend's reconnects
-    // give up while they wait for the wake. Then the woken core is busy for
-    // a moment, so the first connection to it times out too.
+    // takes longer than two handshake timeouts (reconnects used to give up
+    // while they waited for the wake; since #6294 they wait it out). Then the
+    // woken core is busy for a moment, so the first connection to it times out.
     const get = fake.sdk.Sandbox.get;
     fake.sdk.Sandbox.get = async (params) => {
       if (params.resume) await sleep(25_000);
@@ -971,6 +972,73 @@ describe("vercel() store", () => {
       expect.stringMatching(/^start /),
     ]);
   }, 120_000);
+  it("answers a backend read made while a wake takes longer than the handshake timeout (#6294)", async () => {
+    // Vercel's router in front of the core: while the Sandbox is stopped it
+    // answers nothing.
+    const core = await startTrustedCore(randomUUID());
+    const target = new URL(core.url);
+    let fake!: ReturnType<typeof fakeVercel>;
+    const passing = new Set<Socket>();
+    const router = createNetServer((client) => {
+      client.on("error", () => {});
+      client.once("data", (head) => {
+        if (fake.state.status !== "running") {
+          cleanups.push(async () => client.destroy());
+          return;
+        }
+        const upstream = connectTcp(Number(target.port), target.hostname, () => {
+          upstream.write(head);
+          client.pipe(upstream).pipe(client);
+        });
+        passing.add(client);
+        const end = () => {
+          passing.delete(client);
+          client.destroy();
+          upstream.destroy();
+        };
+        client.on("close", end);
+        upstream.on("error", end).on("close", end);
+      });
+    });
+    await new Promise<void>((resolve) => router.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => router.close(resolve)));
+    const url = `http://127.0.0.1:${(router.address() as AddressInfo).port}`;
+    fake = fakeVercel({ appId: core.appId, url });
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: vercel({
+        namespace: legacyNamespace,
+        region: "iad1",
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const row = await jazz.db.insert(app.notes, { text: "kept" }).wait({ tier: "global" });
+
+    // The Sandbox stops under the backend's live session, and resuming it
+    // takes longer than the handshake timeout and its confirmation (11 s),
+    // well within the wake's own deadline. The backend's reconnect waits for
+    // the wake, then connects. (The read itself waits up to 15 s for an
+    // answer, a budget of its own: a longer wake fails it as `NotObserved`.)
+    const get = fake.sdk.Sandbox.get;
+    fake.sdk.Sandbox.get = async (params) => {
+      if (params.resume) await sleep(HANDSHAKE_TIMEOUT_MS + 2_000);
+      return get(params);
+    };
+    fake.state.status = "stopped";
+    for (const socket of passing) socket.destroy();
+    fake.calls.length = 0;
+
+    const seen = await jazz.db.all(app.notes.where({ id: row.id }), { tier: "remote" });
+    expect(seen.map((note) => note.text)).toEqual(["kept"]);
+    expect(fake.calls.filter((call) => !call.startsWith("extend"))).toEqual([
+      "resume jazz-prj-test-production",
+      expect.stringMatching(/^start /),
+    ]);
+  }, 60_000);
   it("starts a fresh session when connections stop reaching a core that still answers /health", async () => {
     // Vercel's router in front of the core. While `cut`, it passes plain
     // HTTP (so `/health` answers) but holds every WebSocket upgrade without
@@ -1121,6 +1189,50 @@ describe("vercel() store", () => {
     cleanups.push(() => jazz.close());
     expect(fake.calls).toContain("resume jazz-prj-test-production");
     expect(fake.calls.some((call) => call.startsWith("create"))).toBe(false);
+  }, 60_000);
+
+  it("logs how long each wake took, and nothing for a core that was already answering", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel({ ...core, appId });
+    fake.state.exists = true;
+    fake.state.drive = true;
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const info = vi.spyOn(console, "info");
+    cleanups.push(async () => info.mockRestore());
+    const wakes = () =>
+      info.mock.calls.map(([line]) => String(line)).filter((line) => line.includes(" woke in "));
+
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: vercel({
+        namespace: legacyNamespace,
+        region: "iad1",
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    expect(wakes()).toEqual([
+      expect.stringMatching(
+        /^jazz: vercel\(\): core jazz-prj-test-production woke in \d+ ms \(resumed\)$/,
+      ),
+    ]);
+
+    // Another instance finds it running and answering: no wake to report.
+    const again = await createJazz({
+      app,
+      permissions,
+      store: vercel({
+        namespace: legacyNamespace,
+        region: "iad1",
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
+    }).ready();
+    cleanups.push(() => again.close());
+    expect(wakes()).toHaveLength(1);
   }, 60_000);
 
   it("runs its local store outside a Vercel deployment", async () => {

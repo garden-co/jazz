@@ -29,7 +29,10 @@ type Config struct {
 	Permissions string `json:"permissions,omitempty"`
 	// ServerURL is the sync server; empty keeps the app local.
 	ServerURL string `json:"serverUrl,omitempty"`
-	// DataDir is where persistent storage lives.
+	// DataDir is where persistent storage lives. An end user's store (or a
+	// scoped backend client's) is in DataDir/<account>/, so each user of one
+	// directory has their own; an app without a user refuses a store in
+	// DataDir itself that a signed-in user wrote.
 	DataDir string `json:"dataDir,omitempty"`
 	// Storage is StorageMemory or StoragePersistent (the default).
 	Storage Storage `json:"storage,omitempty"`

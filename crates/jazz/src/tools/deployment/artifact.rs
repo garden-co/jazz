@@ -822,6 +822,15 @@ pub fn load_relations(json: &[u8]) -> Result<relations::Relations, ArtifactError
         .map_err(|(path, message)| ArtifactError::at(APP_FILE, (path, message)))
 }
 
+/// The current schema of `jazz.app.json`, read as the file states it and
+/// nothing else checked: no lens is checked against its endpoints. What
+/// `migrations create` diffs against, since an edit of `tables` can leave
+/// an earlier migration (one without `to`) aimed at the edited version
+/// until the tool names its target.
+pub fn read_current_schema(json: &[u8]) -> Result<Schema, ArtifactError> {
+    Ok(read_app(json)?.current)
+}
+
 fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
     let root = read_version(APP_FILE, json)?;
     refuse_todos(&root)?;

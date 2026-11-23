@@ -3,6 +3,7 @@
 //! delivery, so a host's log shows why a first callback waited. Nothing is
 //! computed when debug logging is off.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 

@@ -799,7 +799,7 @@ impl LinkKeeper {
 
     /// Hand the machine's view to the read gate and the status accessor.
     fn publish(&mut self, shared: &Shared) {
-        shared.db.set_remote_link_hint(self.link.remote_link_hint());
+        crate::db::block_on(shared.db.set_remote_link_hint(self.link.remote_link_hint()));
         let mut changed = false;
         for event in self.link.drain_events() {
             match event {
@@ -971,7 +971,9 @@ impl JazzClient {
             _ => JazzError::Storage(error.to_string()),
         })?;
         if let Some(session) = default_session.as_ref() {
-            db.set_identity_claims(identity.author, session_claims_to_core_claims(session)?);
+            crate::db::block_on(
+                db.set_identity_claims(identity.author, session_claims_to_core_claims(session)?),
+            );
         }
         let work = Arc::new(Notify::new());
         let (progress, _) = watch::channel(0);
@@ -1011,7 +1013,7 @@ impl JazzClient {
         if connector.is_none() {
             // Still a replica: its writes queue for upload, so a store opened
             // without a server keeps them for the first one it connects to.
-            shared.db.set_remote_link_hint(RemoteLinkHint::NoServer);
+            crate::db::block_on(shared.db.set_remote_link_hint(RemoteLinkHint::NoServer));
         }
         if let Some(connector) = connector {
             let wake = work.clone();
@@ -1107,9 +1109,11 @@ impl JazzClient {
             return Ok(None);
         };
         let author = session.author_subject()?;
-        self.shared
-            .db
-            .set_identity_claims(author, session_claims_to_core_claims(session)?);
+        crate::db::block_on(
+            self.shared
+                .db
+                .set_identity_claims(author, session_claims_to_core_claims(session)?),
+        );
         Ok(Some(author))
     }
 
@@ -1391,7 +1395,16 @@ impl JazzClient {
     /// A [`ReadTier::Remote`] read, and a local-first read that waits for
     /// the server, return the first answer of a subscription held for the
     /// read: the server's settled result once it arrives.
-    pub async fn query_with_opts(&self, query: Query, opts: ReadOpts) -> Result<Vec<QueryResult>> {
+    pub fn query_with_opts(
+        &self,
+        query: Query,
+        opts: ReadOpts,
+    ) -> impl std::future::Future<Output = Result<Vec<QueryResult>>> + '_ {
+        // Concurrent reads would otherwise embed each SQL future in the caller's stack frame.
+        Box::pin(self.read_query(query, opts))
+    }
+
+    async fn read_query(&self, query: Query, opts: ReadOpts) -> Result<Vec<QueryResult>> {
         let read = with_history_identity(&query);
         let opts = self.branch_opts(opts);
         let rows = if let Some(transaction_id) = self.open_transaction()? {
@@ -2115,8 +2128,37 @@ impl JazzClient {
         transaction_id: TransactionId,
         tier: DurabilityTier,
     ) -> Result<()> {
-        let seq = self
-            .shared
+        self.await_transaction(transaction_id, tier, true).await
+    }
+
+    /// [`JazzClient::wait_for_transaction`], but a refusal it sees stays
+    /// unreported: a later [`JazzClient::wait_for_sync`] reports it, unless
+    /// [`JazzClient::mark_transaction_reported`] says its caller heard it.
+    /// Owned by `jazz-app-support`: not public API.
+    #[doc(hidden)]
+    pub async fn observe_transaction(
+        &self,
+        transaction_id: TransactionId,
+        tier: DurabilityTier,
+    ) -> Result<()> {
+        self.await_transaction(transaction_id, tier, false).await
+    }
+
+    /// The refusal of this client's commit was reported to a caller (see
+    /// [`JazzClient::observe_transaction`]): [`JazzClient::wait_for_sync`]
+    /// doesn't report it again. Not public API.
+    #[doc(hidden)]
+    pub fn mark_transaction_reported(&self, transaction_id: TransactionId) {
+        let Ok(seq) = self.committed_seq(transaction_id) else {
+            return;
+        };
+        if let Ok(db) = self.db() {
+            db.mark_rejection_reported(seq);
+        }
+    }
+
+    fn committed_seq(&self, transaction_id: TransactionId) -> Result<u64> {
+        self.shared
             .state
             .borrow()
             .writes
@@ -2126,7 +2168,16 @@ impl JazzClient {
                 JazzError::Write(format!(
                     "transaction {transaction_id} was not committed by this client"
                 ))
-            })?;
+            })
+    }
+
+    async fn await_transaction(
+        &self,
+        transaction_id: TransactionId,
+        tier: DurabilityTier,
+        reports: bool,
+    ) -> Result<()> {
+        let seq = self.committed_seq(transaction_id)?;
         let core_tier = match tier {
             DurabilityTier::Local => CoreDurabilityTier::Local,
             DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
@@ -2137,7 +2188,13 @@ impl JazzClient {
             )));
         }
         let db = self.db()?;
-        let wait = db.wait_for_transaction(seq, core_tier);
+        let wait = async {
+            if reports {
+                db.wait_for_transaction(seq, core_tier).await
+            } else {
+                db.observe_transaction(seq, core_tier).await
+            }
+        };
         let settled = if core_tier > CoreDurabilityTier::Local {
             self.unless_waits_end(self.shared.settle_upstream(wait))
                 .await?
@@ -2476,7 +2533,7 @@ impl JazzClient {
         }
         self.shared.upstream_paused.send_replace(true);
         let detached = detach(&self.shared);
-        self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        crate::db::block_on(self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed));
         detached
     }
 
@@ -2582,14 +2639,19 @@ impl JazzClient {
 
     /// A wait on the server. The answer wins over the end of waiting: it
     /// is polled first, so what is already there is still returned.
-    async fn unless_waits_end<T>(
+    fn unless_waits_end<T>(
         &self,
         wait: impl std::future::Future<Output = Result<T>>,
-    ) -> Result<T> {
-        tokio::select! {
-            biased;
-            answer = wait => answer,
-            () = self.waits_ended() => Err(JazzError::ChannelClosed),
+    ) -> impl std::future::Future<Output = Result<T>> {
+        // Keep the SQL future out of the caller's cancellation select, even
+        // before its first poll on a small client or session thread stack.
+        let wait = Box::pin(wait);
+        async move {
+            tokio::select! {
+                biased;
+                answer = wait => answer,
+                () = self.waits_ended() => Err(JazzError::ChannelClosed),
+            }
         }
     }
 
@@ -2616,7 +2678,7 @@ impl JazzClient {
             if rejection.writer != *node.as_bytes() {
                 continue;
             }
-            let _ = self.shared.db.discard_rejected_transaction(rejection.seq);
+            let _ = crate::db::block_on(self.shared.db.discard_rejected_transaction(rejection.seq));
             let (code, reason) =
                 super::rejection_code_and_reason(&rejection.error).unwrap_or_else(|| {
                     // Any other refusal is a plain `write_rejected`, as TS
@@ -3345,8 +3407,7 @@ impl<'a> Decoder<'a> {
             return Ok(projected);
         };
         Ok(
-            match db
-                .row_provenance(row.table(), row.row_uuid())
+            match jazz_db::options::block_on(db.row_provenance(row.table(), row.row_uuid()))
                 .map_err(|error| JazzError::Query(error.to_string()))?
             {
                 Some((created_at, created_by, updated_at, updated_by)) => {

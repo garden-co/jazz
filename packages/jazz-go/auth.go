@@ -85,7 +85,12 @@ func (a deviceAuth) authJSON() (map[string]any, error) {
 			if key, err = GenerateDeviceKey(); err != nil {
 				return nil, err
 			}
-			if err := a.store.Save(key); err != nil {
+			if f, ok := a.store.(fileStore); ok {
+				key, err = f.create(key)
+			} else {
+				err = a.store.Save(key)
+			}
+			if err != nil {
 				return nil, err
 			}
 		}
@@ -95,30 +100,123 @@ func (a deviceAuth) authJSON() (map[string]any, error) {
 
 // SecretStore keeps a device account's key: the OS keychain, ideally.
 type SecretStore interface {
-	// Load is the key, or "" when there is none yet.
+	// Load is the key, or "" only when there is none yet: DeviceAccount
+	// then saves a new account's over whatever is there. A key that's
+	// there but can't be read is an error.
 	Load() (string, error)
 	Save(key string) error
 }
 
 // FileStore keeps the key in a file readable only by its owner (0600): for
-// hosts without a keychain.
+// hosts without a keychain. Only a missing file means there is no key yet:
+// an empty or unreadable one is an error, and is left as it is. Saving
+// replaces the file whole, so its directory must be writable.
 func FileStore(path string) SecretStore { return fileStore(path) }
 
 type fileStore string
 
 func (f fileStore) Load() (string, error) {
-	b, err := os.ReadFile(string(f))
+	path := string(f)
+	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
+		if _, lerr := os.Lstat(path); errors.Is(lerr, os.ErrNotExist) {
+			return "", nil
+		}
+		// Something is there: a key another opener created just now, or a
+		// link to a file that isn't (an unmounted volume, say), which
+		// isn't a missing key.
+		b, err = os.ReadFile(path)
 	}
-	return strings.TrimSpace(string(b)), err
+	if err != nil {
+		return "", err
+	}
+	key := strings.TrimSpace(string(b))
+	if key == "" {
+		return "", fmt.Errorf("jazz: the device key file %s is empty: restore the key, or delete the file to start as a new account", path)
+	}
+	return key, nil
 }
 
 func (f fileStore) Save(key string) error {
-	if err := os.MkdirAll(filepath.Dir(string(f)), 0o700); err != nil {
+	path := string(f)
+	if strings.TrimSpace(key) == "" {
+		return fmt.Errorf("jazz: not saving an empty device key to %s: delete the file to start as a new account", path)
+	}
+	if target, err := filepath.EvalSymlinks(path); err == nil {
+		path = target
+	}
+	temp, err := writeBeside(path, key)
+	if err != nil {
 		return err
 	}
-	return os.WriteFile(string(f), []byte(key+"\n"), 0o600)
+	defer os.Remove(temp) // already gone once renamed
+	if err := os.Rename(temp, path); err != nil {
+		return err
+	}
+	syncDir(filepath.Dir(path))
+	return nil
+}
+
+// create keeps key as a new account's and returns it, or the key another
+// opener kept first.
+func (f fileStore) create(key string) (string, error) {
+	path := string(f)
+	temp, err := writeBeside(path, key)
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(temp)
+	err = os.Link(temp, path)
+	if errors.Is(err, os.ErrExist) {
+		kept, err := f.Load()
+		if err == nil && kept == "" {
+			err = fmt.Errorf("jazz: the device key file %s was removed while opening", path)
+		}
+		return kept, err
+	}
+	if err != nil {
+		// A file system without hard links: still whole, but the last
+		// opener wins.
+		if err := f.Save(key); err != nil {
+			return "", err
+		}
+		return key, nil
+	}
+	syncDir(filepath.Dir(path))
+	return key, nil
+}
+
+// writeBeside writes key durably to a new 0600 file in path's directory.
+func writeBeside(path, key string) (string, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	file, err := os.CreateTemp(dir, ".device-key-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	_, err = file.WriteString(key + "\n")
+	if err == nil {
+		err = file.Sync()
+	}
+	if cerr := file.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(file.Name())
+		return "", err
+	}
+	return file.Name(), nil
+}
+
+// syncDir makes a rename or link in dir survive a power cut, where the file
+// system can.
+func syncDir(dir string) {
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
 }
 
 // GenerateDeviceKey is a new device account's key: keep it like a
@@ -243,7 +341,9 @@ type SyncStatus struct {
 	Synced bool `json:"synced"`
 }
 
-// Session is the end user's session, or nil for a local app.
+// Session is the end user's session, or nil for a local app. On a DB
+// ForUser returned it is ErrNotSupported: the session is the backend
+// client's, shared by every user.
 func (db *DB) Session(ctx context.Context) (*SessionState, error) {
 	var s *SessionState
 	err := db.call(ctx, "session", map[string]any{}, &s)
@@ -258,19 +358,27 @@ func (db *DB) SyncStatus(ctx context.Context) (SyncStatus, error) {
 }
 
 // Link links the signed-in device account to the user bearer (a token
-// from your auth provider) signs in as, and returns that user.
+// from your auth provider) signs in as, and returns that user. On a DB
+// from a Session it is ErrNotSupported: use the Session's
+// LinkDeviceAccount. On a DB ForUser returned it is ErrNotSupported.
 func (db *DB) Link(ctx context.Context, bearer string) (*User, error) {
 	var u *User
 	err := db.call(ctx, "link", map[string]any{"bearer": bearer}, &u)
 	return u, err
 }
 
-// Refresh asks the TokenProvider for a fresh token now.
+// Refresh asks the TokenProvider for a fresh token now. On a DB ForUser
+// returned it is ErrNotSupported: refresh the backend client's DB.
 func (db *DB) Refresh(ctx context.Context) error {
 	return db.call(ctx, "refresh", map[string]any{}, nil)
 }
 
-// SignOut signs the end user out and closes the app.
+// SignOut signs the end user out and closes the app. On a DB from a
+// Session it is ErrNotSupported, and the DB stays open: use the Session's
+// SignOut.
+// A refused SignOut leaves the app open, as on a DB ForUser returned,
+// where it is ErrNotSupported: the session is the backend client's,
+// shared by every user. Close that DB instead.
 func (db *DB) SignOut(ctx context.Context) error {
 	if err := db.call(ctx, "signOut", map[string]any{}, nil); err != nil {
 		return err
@@ -280,7 +388,7 @@ func (db *DB) SignOut(ctx context.Context) error {
 }
 
 // OnSession is the session's states, the current one first, until ctx is
-// done.
+// done. On a DB ForUser returned it is ErrNotSupported, as Session is.
 func (db *DB) OnSession(ctx context.Context) (<-chan SessionState, error) {
 	return watch(ctx, db, "session", decodeSessionState)
 }

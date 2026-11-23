@@ -382,6 +382,191 @@ async fn an_interrupted_wait_leaves_its_refusal_to_mutation_errors() {
     server.shutdown().await;
 }
 
+/// Polls `call` once, then drops it, as `tokio::time::timeout` drops a
+/// call it gave up on: the call has begun, and its caller is gone.
+fn abandon<F: std::future::Future>(call: F) {
+    use futures::FutureExt as _;
+    assert!(call.now_or_never().is_none(), "the call finished at once");
+}
+
+/// The refusal of a durable write whose caller stopped waiting: it reaches
+/// both `mutation_errors()` and the next `wait_for_sync()`, as a plain
+/// write's refusal does.
+async fn assert_refusal_kept(
+    jazz: &Jazz,
+    errors: &mut jazz_app_support::MutationErrors,
+    what: &str,
+) {
+    let error = next_error(errors).await;
+    assert!(error.denied, "{what}: {error:?}");
+    match jazz.wait_for_sync().await {
+        Err(jazz_app_support::Error::WriteRejected { code, .. }) => {
+            assert_eq!(code, "permission_denied", "{what}");
+        }
+        other => panic!("{what}: wait_for_sync reported {other:?}"),
+    }
+}
+
+/// A durable write its caller stopped waiting for loses no bookkeeping:
+/// the write may still apply, and its refusal is still reported, on every
+/// path that waits for a write's verdict. One that its caller heard is
+/// reported to it alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_abandoned_durable_write_keeps_its_refusal() {
+    use futures::StreamExt;
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    connected(&jazz).await;
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    let someone_else = ObjectId::new();
+    let durable = jazz.durable(DurabilityTier::GlobalServer);
+    let to_update = durable.insert(NewNote::new(me, "to update")).await.unwrap();
+    let to_restore = durable
+        .insert(NewNote::new(me, "to restore"))
+        .await
+        .unwrap();
+    durable
+        .delete::<bindings::Note>(to_restore.id)
+        .await
+        .unwrap();
+    let mut errors = jazz.mutation_errors().await.unwrap();
+
+    abandon(durable.insert(NewNote::new(someone_else, "insert")));
+    assert_refusal_kept(&jazz, &mut errors, "insert").await;
+
+    abandon(durable.upsert(ObjectId::new(), NewNote::new(someone_else, "upsert")));
+    assert_refusal_kept(&jazz, &mut errors, "upsert").await;
+
+    abandon(durable.update(
+        to_update.id,
+        bindings::NoteUpdate {
+            owner: Some(someone_else),
+            body: None,
+        },
+    ));
+    assert_refusal_kept(&jazz, &mut errors, "update").await;
+
+    abandon(durable.restore_with(to_restore.id, NewNote::new(someone_else, "restore")));
+    assert_refusal_kept(&jazz, &mut errors, "restore").await;
+
+    abandon(durable.transaction(move |tx| async move {
+        tx.insert(NewNote::new(someone_else, "transaction"))?;
+        Ok(())
+    }));
+    assert_refusal_kept(&jazz, &mut errors, "transaction").await;
+
+    let open = durable.begin_transaction().await.unwrap();
+    open.insert(NewNote::new(someone_else, "open transaction"))
+        .await
+        .unwrap();
+    abandon(open.commit());
+    assert_refusal_kept(&jazz, &mut errors, "OpenTransaction::commit").await;
+
+    // Each was reported once.
+    jazz.wait_for_sync().await.unwrap();
+    // Heard: the caller's alone, neither a mutation error nor reported
+    // again.
+    assert_permission_denied(
+        durable
+            .insert(NewNote::new(someone_else, "heard"))
+            .await
+            .map(drop),
+    );
+    jazz.wait_for_sync().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), errors.next())
+            .await
+            .is_err(),
+        "a heard refusal is no mutation error"
+    );
+
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// Until it stops: every call fails with `Stopped`.
+async fn until_stopped(jazz: &Jazz) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(
+            jazz.all_with(notes::query(), jazz_app_support::ReadTier::LocalOnly)
+                .await,
+            Err(jazz_app_support::Error::Stopped)
+        ) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the client stops");
+}
+
+/// A close its caller stopped waiting for still closes: the client stops
+/// and lets go of its store, so another app may delete it at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_abandoned_close_still_closes() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let data = tempfile::TempDir::new().unwrap();
+    let jazz = bindings::open(open_dir(&server, app_id, data.path()))
+        .await
+        .unwrap();
+    connected(&jazz).await;
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    jazz.insert(NewNote::new(me, "kept")).await.unwrap();
+
+    abandon(jazz.close(Duration::from_secs(10)));
+    until_stopped(&jazz).await;
+    // Its store is free: only the app reopened on it holds it.
+    let reopened = bindings::open(open_dir(&server, app_id, data.path()))
+        .await
+        .unwrap();
+    reopened.delete_client_storage().await.unwrap();
+    server.shutdown().await;
+}
+
+/// So does a shutdown, and a delete of the client storage, which deletes
+/// the store once the client stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_abandoned_shutdown_or_delete_completes() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let data = tempfile::TempDir::new().unwrap();
+    let jazz = bindings::open(open_dir(&server, app_id, data.path()))
+        .await
+        .unwrap();
+    abandon(jazz.shutdown());
+    until_stopped(&jazz).await;
+
+    let jazz = bindings::open(open_dir(&server, app_id, data.path()))
+        .await
+        .unwrap();
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    jazz.insert(NewNote::new(me, "deleted")).await.unwrap();
+    assert!(data.path().join("jazz.sqlite").exists());
+    abandon(jazz.delete_client_storage());
+    until_stopped(&jazz).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while data.path().join("jazz.sqlite").exists() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the store is deleted");
+    server.shutdown().await;
+}
+
 /// `shutdown` ends the waits on the server at once, rather than draining
 /// them for 30 seconds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -551,55 +736,50 @@ async fn delete_client_storage_removes_every_file() {
     server.shutdown().await;
 }
 
-/// A store another app has open, in this process or another, is not
-/// deleted: the other app keeps it, and its writes.
+/// A store another app has open, in this process or another, is neither
+/// opened a second time nor deleted: the app that has it keeps it, and its
+/// writes.
 #[tokio::test]
 async fn delete_client_storage_refuses_a_held_store() {
     let app_id = AppId::random();
     let data = tempfile::TempDir::new().unwrap();
     let config = || Config::new(app_id).storage(jazz_app_support::Storage::Dir(data.path().into()));
     let a = bindings::open(config()).await.unwrap();
-    let b = bindings::open(config()).await.unwrap();
-
-    let refused = a.delete_client_storage().await;
-    assert!(
-        matches!(refused, Err(jazz_app_support::Error::StoreHeld(_))),
-        "{refused:?}"
-    );
-    // Both run on, on the same store.
-    let note = b
-        .insert(NewNote::new(ObjectId::new(), "b's"))
+    let refused = bindings::open(config()).await;
+    assert!(matches!(
+        refused,
+        Err(jazz_app_support::Error::StoreHeld(_))
+    ));
+    // The app that has it runs on.
+    let note = a
+        .insert(NewNote::new(ObjectId::new(), "a's"))
         .await
         .unwrap();
     assert!(data.path().join("jazz.sqlite").exists());
-    assert!(a.all(notes::query()).await.is_ok());
     a.shutdown().await.unwrap();
-    b.shutdown().await.unwrap();
-    let reopened = bindings::open(config()).await.unwrap();
-    assert_eq!(reopened.all(notes::query()).await.unwrap(), vec![note]);
 
     // Another process holds the store's lock while it has it open.
     let other = std::fs::File::open(data.path().join("jazz.lock")).unwrap();
     other.lock_shared().unwrap();
-    let refused = reopened.delete_client_storage().await;
+    let refused = a.delete_client_storage().await;
     assert!(
         matches!(refused, Err(jazz_app_support::Error::StoreHeld(_))),
         "{refused:?}"
     );
     assert!(data.path().join("jazz.sqlite").exists());
     drop(other);
+    let reopened = bindings::open(config()).await.unwrap();
+    assert_eq!(reopened.all(notes::query()).await.unwrap(), vec![note]);
     reopened.delete_client_storage().await.unwrap();
     assert!(!data.path().join("jazz.sqlite").exists());
     #[cfg(unix)]
     assert!(!data.path().join("jazz.lock").exists());
     // A later open of the directory locks it afresh, and is guarded again.
     let again = bindings::open(config()).await.unwrap();
-    let second = bindings::open(config()).await.unwrap();
     assert!(matches!(
-        again.delete_client_storage().await,
+        bindings::open(config()).await,
         Err(jazz_app_support::Error::StoreHeld(_))
     ));
-    second.shutdown().await.unwrap();
     again.delete_client_storage().await.unwrap();
     #[cfg(unix)]
     assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);

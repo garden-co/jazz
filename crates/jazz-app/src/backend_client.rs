@@ -19,10 +19,11 @@ use jazz::account_registry::{AccountId, SYSTEM_ACCOUNT_ID};
 use jazz::tools::{AppContext, AppId, JazzClient, Session};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
 
 use crate::auth::{Bearer, TokenReason};
 use crate::error::{Error, Result};
-use crate::handle::Jazz;
+use crate::handle::{Command, Jazz};
 use crate::session::{Credential, User, UserKind};
 
 /// What a trusted backend client states as its secret: its credential, on
@@ -62,7 +63,7 @@ pub(crate) struct BackendClientLink {
 const BUNDLE_HEADER: &str = "x-jazz-bundle";
 
 fn http() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    jazz_native_transport::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()
@@ -116,6 +117,7 @@ pub(crate) async fn connect(
     credential: Bearer,
     endpoint: &str,
     own_bundle: Option<String>,
+    place: &mut crate::handle::Place<'_>,
 ) -> Result<(JazzClient, User, Credential, BackendClientLink)> {
     let app = context.app_id;
     let first = token(&credential, TokenReason::Connect).await?;
@@ -132,6 +134,7 @@ pub(crate) async fn connect(
             _ => None,
         };
         context.backend_secret = Some(STAND_IN_SECRET.to_owned());
+        place.hold(&mut context, crate::handle::Owner::Machine)?;
         let client =
             JazzClient::connect_with_native_transport_bearer(context, connector, first.clone())
                 .await?;
@@ -161,6 +164,10 @@ pub(crate) async fn connect(
     session.account_id = Some(signed_in.account);
     context.account_id = Some(signed_in.account);
     context.backend_session = Some(session);
+    place.hold(
+        &mut context,
+        crate::handle::Owner::Account(signed_in.account),
+    )?;
     let client =
         JazzClient::connect_with_native_transport_bearer(context, connector, first.clone()).await?;
     let user = User {
@@ -321,17 +328,27 @@ impl Jazz {
         if self.for_user {
             return Ok(());
         }
+        // An open of its store waits for this close rather than being refused.
+        self.begin_stopping();
         let started = std::time::Instant::now();
-        if !self.info.serverless && !timeout.is_zero() {
-            // An outage, or the server refusing, ends the wait: what is still
-            // pending then is counted below.
-            // Every write the client holds, its users' handles' too (TS
-            // `close()` drains them all), not only this handle's: wait until
-            // none is pending, re-reading on each change of the client's
-            // status. The wait ends on the client's thread too, so shutting
-            // down does not wait for it in turn.
-            let _ = self
-                .with_client(move |client| async move {
+        let drains = !self.info.serverless && !timeout.is_zero();
+        // Once begun, the close runs on the client's thread to its end, even
+        // if its caller stops waiting (its call dropped, as
+        // `tokio::time::timeout` drops it): the job sends the shutdown
+        // itself, so the client stops and lets go of its store.
+        let (stop, stopped) = oneshot::channel();
+        let commands = self.commands.clone();
+        let pending = self
+            .with_client(move |client| async move {
+                if drains {
+                    // An outage, or the server refusing, ends the wait: what
+                    // is still pending then is counted below.
+                    // Every write the client holds, its users' handles' too
+                    // (TS `close()` drains them all), not only this
+                    // handle's: wait until none is pending, re-reading on
+                    // each change of the client's status. The wait ends on
+                    // the client's thread too, so shutting down does not
+                    // wait for it in turn.
                     let mut changes = client.status_changes();
                     let drained = async {
                         while client.pending_uploads() > 0 {
@@ -345,18 +362,35 @@ impl Jazz {
                         // A shutdown meanwhile.
                         () = client.waits_ended() => {}
                     }
-                    Ok(())
-                })
-                .await;
+                }
+                let pending = client.pending_uploads();
+                // Ending the client's HTTP stream sessions gets what is left
+                // of `timeout`: nothing at all for `Duration::ZERO`. Once
+                // the client stops, nothing takes this: `stopped` reads it.
+                let _ = commands.send(Command::Shutdown(
+                    stop,
+                    session_end_budget(timeout, started.elapsed()),
+                ));
+                Ok(pending)
+            })
+            .await;
+        let pending = match pending {
+            Ok(pending) => pending,
+            // Stopped already (or its job cut short by a shutdown): stop it,
+            // as `shutdown` would, if it isn't.
+            Err(_) => {
+                self.shutdown_within(session_end_budget(timeout, started.elapsed()))
+                    .await?;
+                0
+            }
+        };
+        match stopped.await {
+            Ok(result) => result?,
+            // Nothing took the shutdown: another caller's stop, or the
+            // client's own. As `shutdown`, return once the store is let go
+            // of.
+            Err(_) => self.info.life.ended().await,
         }
-        let pending = self
-            .with_client(|client| async move { Ok(client.pending_uploads()) })
-            .await
-            .unwrap_or(0);
-        // Ending the client's HTTP stream sessions gets what is left of
-        // `timeout`: nothing at all for `Duration::ZERO`.
-        self.shutdown_within(session_end_budget(timeout, started.elapsed()))
-            .await?;
         if pending > 0 && self.info.memory && !self.info.serverless && !timeout.is_zero() {
             return Err(Error::Unsynced { pending });
         }

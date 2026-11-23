@@ -3,6 +3,7 @@
 //! its subscribers never wait for an unrelated later tick.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -73,7 +74,7 @@ fn a_relay_serves_upstream_rows_in_the_tick_that_applies_them() {
     let core = open(0xc0);
     let relay = open(0x10);
     let tab = open(0x11);
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let (client_side, server_side) = duplex();
     block_on(relay.connect_upstream(client_side));
     core.accept_subscriber(server_side, AuthorSubject::SYSTEM)

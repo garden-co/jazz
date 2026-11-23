@@ -45,22 +45,28 @@ pub fn create(
         todos: Vec::new(),
         note: None,
     };
-    let app = App::load(app_json).map_err(CodegenError::from_artifact)?;
     let Some(bindings) = bindings else {
         // No bindings: the app has no earlier version yet.
+        App::load(app_json).map_err(CodegenError::from_artifact)?;
         return Ok(unchanged());
     };
     let recorded = bindings::read(lang, bindings)?;
-    if app
-        .compiled
-        .schemas
-        .iter()
-        .any(|(h, _)| *h == recorded.current)
+    // The file as it is: when it already holds the bindings' version,
+    // there is nothing to write. Otherwise it may not load (#6296): a
+    // migration without `to` targets the current `tables`, so editing them
+    // retargets it until the version it was written for is named below.
+    // Read the edited `tables` alone, then.
+    if let Ok(app) = App::load(app_json)
+        && app
+            .compiled
+            .schemas
+            .iter()
+            .any(|(h, _)| *h == recorded.current)
     {
         return Ok(unchanged());
     }
     let from = &recorded.current_schema;
-    let to = app.compiled.current_schema();
+    let to = &artifact::read_current_schema(app_json).map_err(CodegenError::from_artifact)?;
     // Single-column indexes change the hash, not the version or the rows
     // (#5494): there is nothing to migrate, as `bindings::staleness` says.
     if bindings::differs_only_in_indexes(from, to) {
@@ -75,11 +81,11 @@ pub fn create(
 
     let mut root = artifact::json::parse(app_json).map_err(CodegenError::new)?;
     let Json::Object(top) = &mut root else {
-        unreachable!("loaded above")
+        unreachable!("read above")
     };
     let history = entry(top, "history", || Json::Object(Vec::new()), "tables");
     let Json::Object(versions) = history else {
-        unreachable!("loaded above")
+        unreachable!("read above")
     };
     if versions.iter().any(|(k, _)| *k == version) {
         return Err(CodegenError::new(format!(
@@ -90,7 +96,22 @@ pub fn create(
     }
     let tables = artifact::version_tables(from).map_err(CodegenError::from_artifact)?;
     versions.push((version.clone(), Json::object(vec![("tables", tables)])));
-
+    // Every migration written without `to` was written for the bindings'
+    // version, which is in `history` now: name it, so the edited `tables`
+    // don't become its target.
+    if let Some((_, Json::Array(items))) = top.iter_mut().find(|(k, _)| k == "migrations") {
+        for item in items {
+            if let Json::Object(fields) = item
+                && !fields.iter().any(|(k, _)| k == "to")
+            {
+                let at = fields
+                    .iter()
+                    .position(|(k, _)| k == "from")
+                    .map_or(fields.len(), |i| i + 1);
+                fields.insert(at, ("to".to_string(), Json::string(&version)));
+            }
+        }
+    }
     let mut migration = vec![
         ("name".to_string(), Json::string(name)),
         ("from".to_string(), Json::string(&version)),

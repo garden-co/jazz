@@ -10,6 +10,7 @@ use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 use std::future::{Future, pending};
 use std::pin::{Pin, pin};
@@ -259,7 +260,7 @@ fn cancellation_after_sqlite_automatic_rollback_keeps_the_owner_usable() {
         tx.insert("notes", body("gone"), Default::default()).await?;
         // Existing fault injection reproduces SQLite's whole-transaction
         // rollback after disk-full/I/O errors; no public API causes that fault.
-        alice.rollback_sqlite_transaction_for_test();
+        jazz::db::block_on(alice.rollback_sqlite_transaction_for_test());
         pending::<Result<(), Error>>().await
     });
     poll_pending(transaction.as_mut());

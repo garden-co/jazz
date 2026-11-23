@@ -6,9 +6,9 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -54,32 +54,10 @@ func testServer(t *testing.T) server {
 	if relay == "" {
 		relay = "../../../../target/debug/jazz-app-test-relay"
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
 	appID := randomUUID(t)
-	core := fmt.Sprintf("http://127.0.0.1:%d", port)
 	const backendSecret, adminSecret = "go-cli-test-backend-secret", "go-cli-test-admin-secret"
-	cmd := exec.Command(tools, "server", appID, "--in-memory", "--port", strconv.Itoa(port),
+	core := startCore(t, tools, "server", appID, "--in-memory",
 		"--backend-secret", backendSecret, "--admin-secret", adminSecret)
-	cmd.Env = append(os.Environ(), "RUST_LOG=warn")
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("starting %s (build it with cargo build -p jazz-cli): %v", tools, err)
-	}
-	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
-	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(100 * time.Millisecond) {
-		if conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
-			conn.Close()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the core didn't listen")
-		}
-	}
 	r := exec.Command(relay, "--core", core, "--app-id", appID, "--app", "jazz.app.json", "--permissions", "jazz.permissions.json")
 	r.Env = append(os.Environ(), "RUST_LOG=warn", "JAZZ_BACKEND_SECRET="+backendSecret, "JAZZ_ADMIN_SECRET="+adminSecret)
 	r.Stderr = os.Stderr
@@ -96,6 +74,44 @@ func testServer(t *testing.T) server {
 		t.Fatalf("the relay printed no endpoint: %v", err)
 	}
 	return server{appID: appID, url: strings.TrimSpace(line)}
+}
+
+// startCore starts `jazz-tools <args> --port 0` and returns its URL once it
+// listens. The core picks its own port and writes it to JAZZ_BOUND_PORT_FILE
+// after binding: a port picked here (listen on :0, close, hand it over) could
+// be taken by another socket before the core binds it, and the core would
+// exit with "Address already in use".
+func startCore(t *testing.T, tools string, args ...string) string {
+	t.Helper()
+	portFile := filepath.Join(t.TempDir(), "bound-port")
+	cmd := exec.Command(tools, append(args, "--port", "0")...)
+	cmd.Env = append(os.Environ(), "RUST_LOG=warn", "JAZZ_BOUND_PORT_FILE="+portFile)
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting %s (build it with cargo build -p jazz-tools --bin jazz-tools): %v", tools, err)
+	}
+	exited := make(chan struct{})
+	var waitErr error
+	go func() { waitErr = cmd.Wait(); close(exited) }()
+	t.Cleanup(func() { cmd.Process.Kill(); <-exited })
+	deadline := time.After(30 * time.Second)
+	for {
+		// The core ends the file with a newline once the write is complete.
+		if b, err := os.ReadFile(portFile); err == nil && strings.HasSuffix(string(b), "\n") {
+			port, err := strconv.Atoi(strings.TrimSpace(string(b)))
+			if err != nil {
+				t.Fatalf("the core's bound port %q: %v", b, err)
+			}
+			return fmt.Sprintf("http://127.0.0.1:%d", port)
+		}
+		select {
+		case <-exited:
+			t.Fatalf("the core exited before it listened: %v", waitErr)
+		case <-deadline:
+			t.Fatal("the core didn't listen within 30s")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 func randomUUID(t *testing.T) string {

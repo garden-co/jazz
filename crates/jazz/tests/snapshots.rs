@@ -4,6 +4,7 @@
 //! write under a frozen base reaches the authority as a frozen view.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -77,7 +78,7 @@ fn client(node: u8) -> Db {
 fn connect(client: &Db, server: &Db) {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
-    client.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(client.set_remote_link_hint(RemoteLinkHint::Live));
     server
         .accept_subscriber(server_side, alice_subject())
         .unwrap();
@@ -253,7 +254,7 @@ fn an_offline_capture_names_its_unsettled_writes_and_they_stay_in_after_settling
     let row = RowUuid::from_bytes([0x31; 16]);
     let theirs = RowUuid::from_bytes([0x32; 16]);
 
-    alice.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Failed));
     insert(&alice, row, None, "before");
     let snapshot = block_on(alice.capture_snapshot()).unwrap();
     assert_eq!(snapshot.dots.len(), 1);

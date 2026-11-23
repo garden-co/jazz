@@ -8,6 +8,7 @@
 //! maybe conflicting, and through a worker each tab is its own writer.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -137,7 +138,7 @@ impl Net {
 
     fn add_worker(&mut self) {
         let worker = open(WORKER, author(WORKER));
-        worker.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
         self.worker = Some(Client {
             node: WORKER,
             db: worker,
@@ -152,9 +153,9 @@ impl Net {
         let identity = if via.is_some() { WORKER } else { node };
         let db = open(node, author(identity));
         if via.is_some() {
-            db.set_non_durable_client();
+            jazz::db::block_on(db.set_non_durable_client());
         }
-        db.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(db.set_remote_link_hint(RemoteLinkHint::Live));
         self.clients.push(Client {
             node,
             db,
@@ -205,13 +206,13 @@ impl Net {
         let worker = self.worker.as_mut().expect("worker");
         let up = worker.up.take().expect("online");
         assert!(worker.db.detach_connection(&up));
-        worker.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        jazz::db::block_on(worker.db.set_remote_link_hint(RemoteLinkHint::Failed));
     }
 
     fn worker_online(&mut self) {
         self.connect_worker();
         let worker = self.worker.as_ref().expect("worker");
-        worker.db.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(worker.db.set_remote_link_hint(RemoteLinkHint::Live));
         self.pump();
     }
 
@@ -219,14 +220,16 @@ impl Net {
         let client = &mut self.clients[i];
         let up = client.up.take().expect("online");
         assert!(client.db.detach_connection(&up));
-        client.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        jazz::db::block_on(client.db.set_remote_link_hint(RemoteLinkHint::Failed));
     }
 
     fn online(&mut self, i: usize) {
         self.connect(i);
-        self.clients[i]
-            .db
-            .set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(
+            self.clients[i]
+                .db
+                .set_remote_link_hint(RemoteLinkHint::Live),
+        );
         self.pump();
     }
 

@@ -12,6 +12,7 @@
 //! evidence tables are watched whole; the randomized differential at the
 //! end compares runs with the watches on and off.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 
 use jazz::db::{Db, InsertOptions, ReadOpts, ReadTier, WriteIdentity, block_on, duplex};
@@ -106,7 +107,7 @@ fn seed(db: &Db) -> World {
                 ("handle", text(&format!("h{p}"))),
             ],
         );
-        db.set_identity_claims(user(p), claims(person(p)));
+        jazz::db::block_on(db.set_identity_claims(user(p), claims(person(p))));
     }
     for r in 0..ROOMS {
         insert(db, "rooms", room(r), &[("title", text(&format!("r{r}")))]);
@@ -409,7 +410,7 @@ fn two_versions_of_a_membership_in_one_replica_tick() {
     };
     let world = seed(&server);
     for p in 0..PEOPLE {
-        client.set_identity_claims(user(p), claims(person(p)));
+        jazz::db::block_on(client.set_identity_claims(user(p), claims(person(p))));
     }
     let local = ReadOpts {
         tier: ReadTier::LocalOnly,
@@ -482,7 +483,7 @@ fn a_claims_change_moves_the_pin() {
         Some(user(0)),
     )];
     let opened = check(&db, &mut lives, "subscribe");
-    db.set_identity_claims(user(0), claims(person(3)));
+    jazz::db::block_on(db.set_identity_claims(user(0), claims(person(3))));
     let now = check(&db, &mut lives, "alice's claim names dave");
     assert_ne!(opened, now, "dave's rooms are readable");
     let (woke, now) = reruns(&db, &mut lives, "dave joins room 0", || {
@@ -828,7 +829,7 @@ fn random_write(db: &Db, rng: &mut Rng, world: &mut World, step: usize, replica:
         14 if !replica => {
             let u = rng.next(4);
             world.me[u] = p;
-            db.set_identity_claims(user(u), claims(person(p)));
+            jazz::db::block_on(db.set_identity_claims(user(u), claims(person(p))));
             format!("user {u}'s claim names person {p}")
         }
         14 | 16 => match any_member(rng, world) {
@@ -1120,7 +1121,9 @@ fn seed_teams(db: &Db) -> Rows {
 }
 
 fn set_team_claims(db: &Db, u: usize) {
-    db.set_identity_claims(user(u), team_claims(u, ROLES[(u + 1) % 3], (u % 3) as i64));
+    jazz::db::block_on(
+        db.set_identity_claims(user(u), team_claims(u, ROLES[(u + 1) % 3], (u % 3) as i64)),
+    );
 }
 
 fn team_queries(u: usize) -> Vec<(String, Query)> {
@@ -1271,7 +1274,9 @@ fn random_team_write(
         }
         13 if !replica => {
             let reader = rng.next(4);
-            db.set_identity_claims(user(reader), team_claims(reader, role, level as i64));
+            jazz::db::block_on(
+                db.set_identity_claims(user(reader), team_claims(reader, role, level as i64)),
+            );
             format!("user {reader}'s claims: {role} at {level}")
         }
         _ => match rows.any(NOTE, rng) {
@@ -1325,7 +1330,7 @@ fn rooms_fixture() -> Fixture {
         },
         claims: |db| {
             for p in 0..PEOPLE {
-                db.set_identity_claims(user(p), claims(person(p)));
+                jazz::db::block_on(db.set_identity_claims(user(p), claims(person(p))));
             }
         },
     }
@@ -1456,7 +1461,7 @@ fn replica_run(fixture: &Fixture, topology: Topology, seed_of: u64) {
             server
                 .accept_subscriber(server_side, AuthorSubject::SYSTEM)
                 .unwrap();
-            relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+            jazz::db::block_on(relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
             let (client_side, relay_down) = duplex();
             links.push(block_on(client.connect_upstream(client_side)));
             relay.accept_subscriber(relay_down, served_as).unwrap();
@@ -1922,7 +1927,7 @@ fn linked_queries(u: usize) -> Vec<(String, Query)> {
 
 fn linked_claims(db: &Db) {
     for u in 0..PEOPLE {
-        db.set_identity_claims(user(u), team_claims(u, ROLES[0], 0));
+        jazz::db::block_on(db.set_identity_claims(user(u), team_claims(u, ROLES[0], 0)));
     }
 }
 

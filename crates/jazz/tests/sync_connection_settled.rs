@@ -14,6 +14,7 @@
 //! sharded gateway does when one read's shards are behind another's.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -523,7 +524,7 @@ fn a_relay_forwards_each_reads_settle_and_the_connection_position() {
     let server = open(0, AuthorSubject::SYSTEM);
     let relay = open(1, user(1));
     let tab = open(2, user(1));
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let link = connect(&server, &relay, user(1));
     let _tab_link = connect(&relay, &tab, user(1));
     let mut a = Room::open(&tab, "a");
@@ -565,7 +566,7 @@ fn relay_passes_on(release: fn(&SyncMessage) -> bool) {
     let server = open(0, AuthorSubject::SYSTEM);
     let relay = open(1, user(1));
     let tab = open(2, user(1));
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let link = connect(&server, &relay, user(1));
     let _tab_link = connect(&relay, &tab, user(1));
     let mut a = Room::open(&tab, "a");
@@ -609,7 +610,7 @@ fn a_relay_passes_on_the_connection_position_with_no_results() {
     let server = open(0, AuthorSubject::SYSTEM);
     let relay = open(1, user(1));
     let tab = open(2, user(1));
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let link = connect(&server, &relay, user(1));
     let _tab_link = connect(&relay, &tab, user(1));
     pump3(&server, &relay, &tab);
@@ -903,8 +904,8 @@ fn a_relay_with_no_server_settles_its_tabs_at_the_authority_position_it_holds() 
     let server = open(0, AuthorSubject::SYSTEM);
     let relay = open(1, user(1));
     let tab = open(2, user(1));
-    tab.set_non_durable_client();
-    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer));
     let tab_link = connect(&relay, &tab, user(1));
     let mut a = Room::open(&tab, "a");
     pump3(&server, &relay, &tab);
@@ -936,13 +937,13 @@ fn a_relay_that_loses_its_server_settles_earlier_reads_at_the_authority_position
     let server = open(0, AuthorSubject::SYSTEM);
     let relay = open(1, user(1));
     let tab = open(2, user(1));
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let _link = connect(&server, &relay, user(1));
     let tab_link = connect(&relay, &tab, user(1));
     let mut a = Room::open(&tab, "a");
     insert(&server, 20, "c", "the server's");
     pump3(&server, &relay, &tab);
-    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    jazz::db::block_on(relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer));
     let known = server.seq_high_water();
     // The relay's own writes, pending: they number no accepted position.
     for n in 10..15 {
@@ -975,13 +976,13 @@ fn a_relay_back_from_no_server_forwards_its_reads_upstream_settles() {
     let server = open(0, AuthorSubject::SYSTEM);
     let relay = open(1, user(1));
     let tab = open(2, user(1));
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let link = connect(&server, &relay, user(1));
-    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    jazz::db::block_on(relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer));
     let _tab_link = connect(&relay, &tab, user(1));
     let mut a = Room::open(&tab, "a");
     pump3(&server, &relay, &tab);
-    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    jazz::db::block_on(relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     pump3(&server, &relay, &tab);
     link.hold_position();
     insert(&server, 1, "a", "the server's");
