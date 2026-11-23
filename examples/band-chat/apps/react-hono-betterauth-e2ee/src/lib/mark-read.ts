@@ -75,6 +75,9 @@ export function useMarkRead({
     return () => document.removeEventListener("visibilitychange", update);
   }, []);
   const attempted = useRef<string | null>(null);
+  // The marker this hook inserted, until this reader's query shows it: a newer message can
+  // arrive first, and must move that marker rather than insert a second one.
+  const inserted = useRef<{ key: string; id: string } | null>(null);
   const write = isVisible
     ? markerToWrite({ newest, decryptedIds, markers, markersUnreadable })
     : null;
@@ -85,14 +88,23 @@ export function useMarkRead({
     if (!hasWrite || !newestId || attempted.current === newestId) return;
     attempted.current = newestId;
     const lastReadAt = write!.lastReadAt;
+    const key = `${roomId}/${author}`;
+    const existing = markerId ?? (inserted.current?.key === key ? inserted.current.id : undefined);
+    const insertId = existing ? undefined : crypto.randomUUID();
+    // A refused insert leaves no marker to move.
+    const forget = () => {
+      if (insertId && inserted.current?.id === insertId) inserted.current = null;
+    };
+    if (insertId) inserted.current = { key, id: insertId };
     try {
-      const written = markerId
-        ? db.update(app.readMarkers, markerId, { lastReadAt })
-        : db.insert(app.readMarkers, { roomId, reader: author, lastReadAt });
+      const written = existing
+        ? db.update(app.readMarkers, existing, { lastReadAt })
+        : db.insert(app.readMarkers, { roomId, reader: author, lastReadAt }, { id: insertId });
       // Refused: leave it until a newer message arrives.
-      void Promise.resolve(written?.wait?.({ tier: "global" })).catch(() => {});
+      void Promise.resolve(written?.wait?.({ tier: "global" })).catch(forget);
     } catch {
       // Same: no retry for this message.
+      forget();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [db, hasWrite, newestId, markerId, roomId, author]);

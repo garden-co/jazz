@@ -80,12 +80,25 @@ describe("read marker writes", () => {
     expect(writes()).toBe(0);
   });
 
+  it("moves the marker it inserted when a newer message arrives before its query shows it", () => {
+    const view = render(<Reader {...props({})} />);
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    const id = (db.insert.mock.calls[0]![2] as { id: string }).id;
+    // This reader's markers still read as none: the insert has not reached the query yet.
+    const later = { id: "m4", $createdAt: new Date("2026-01-04T00:00:00Z") };
+    view.rerender(<Reader {...props({ newest: later, decryptedIds: new Set(["m4"]) })} />);
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(db.update).toHaveBeenCalledTimes(1);
+    expect(db.update.mock.calls[0]![1]).toBe(id);
+  });
+
   it("does not retry a refused write until a newer message arrives", async () => {
     db.insert.mockImplementation(() => ({
       wait: async () => Promise.reject(new Error("refused")),
     }));
     const view = render(<Reader {...props({})} />);
-    await Promise.resolve();
+    // Let the refusal come back.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     view.rerender(<Reader {...props({ markers: [] })} />);
     expect(db.insert).toHaveBeenCalledTimes(1);
     const later = { id: "m4", $createdAt: new Date("2026-01-04T00:00:00Z") };
