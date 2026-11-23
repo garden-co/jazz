@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -19,11 +18,6 @@ func openSession(t *testing.T, ctx context.Context, srv server, auth jazz.Auth, 
 		App: jazzapp.App, AppID: srv.appID, ServerURL: srv.url,
 		Storage: jazz.StoragePersistent, DataDir: t.TempDir(), Auth: auth,
 	}, opts)
-	// Only a library from elsewhere (JAZZ_FFI_LIBRARY) may lack sessions:
-	// the repository's own build has them.
-	if errors.Is(err, jazz.ErrNotSupported) && os.Getenv("JAZZ_FFI_LIBRARY") != "" {
-		t.Skipf("this libjazz_ffi has no sessions yet: %v", err)
-	}
 	if err != nil {
 		t.Fatal(err)
 	}

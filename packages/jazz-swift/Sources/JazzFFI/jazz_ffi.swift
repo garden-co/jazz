@@ -796,6 +796,13 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func upsert(table: String, id: String, rowJson: String) throws  -> String
     
     /**
+     * [`Self::upsert`], returning once the write reaches `tier`: `"local"`
+     * or `"global"`. The row is as written here, not as the server has it
+     * by then.
+     */
+    func upsertAt(table: String, id: String, rowJson: String, tier: String) throws  -> String
+    
+    /**
      * Returns once every write committed so far reaches `tier`
      * (`"local"` or `"global"`).
      */
@@ -1398,6 +1405,24 @@ open func upsert(table: String, id: String, rowJson: String)throws  -> String  {
         FfiConverterString.lower(table),
         FfiConverterString.lower(id),
         FfiConverterString.lower(rowJson),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * [`Self::upsert`], returning once the write reaches `tier`: `"local"`
+     * or `"global"`. The row is as written here, not as the server has it
+     * by then.
+     */
+open func upsertAt(table: String, id: String, rowJson: String, tier: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_upsert_at(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),
+        FfiConverterString.lower(id),
+        FfiConverterString.lower(rowJson),
+        FfiConverterString.lower(tier),uniffiCallStatus
     )
 })
 }
@@ -3620,6 +3645,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_upsert() != 59620) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_upsert_at() != 31942) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_wait_for_sync() != 43748) {

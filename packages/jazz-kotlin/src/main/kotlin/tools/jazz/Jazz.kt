@@ -219,9 +219,26 @@ public class Jazz internal constructor(
         (SessionState.parse("""{"status":"signedIn","user":${native.link(bearer)}}""") as SessionState.SignedIn).user
     }
 
-    /** Inserts row [id] as [row], or replaces it whole if it exists; returns it. */
+    /**
+     * Inserts row [id] as [row], or sets the columns [row] gives if it exists;
+     * returns it as written. With [tier] [WriteTier.Global] it returns once the
+     * sync server accepted it, and a refusal throws ([JazzException.Permission]).
+     */
+    public suspend fun <Row : Any, Insert : Any, P : Patch> upsert(
+        table: Table<Row, Insert, P>,
+        id: String,
+        row: Insert,
+        tier: WriteTier? = null,
+    ): Row = io {
+        val json = insertJson(table, row)
+        val stored = if (tier == null) native.upsert(table.tableName, id, json) else native.upsertAt(table.tableName, id, json, tier.wire)
+        decodeStored(table, stored)
+    }
+
+    /** The signature before `tier`, for code compiled against it. */
+    @Deprecated("Binary compatibility", level = DeprecationLevel.HIDDEN)
     public suspend fun <Row : Any, Insert : Any, P : Patch> upsert(table: Table<Row, Insert, P>, id: String, row: Insert): Row =
-        io { decodeStored(table, native.upsert(table.tableName, id, insertJson(table, row))) }
+        upsert(table, id, row, null)
 
     /**
      * Inserts [row] with [column]'s value streamed from [data] (e.g. a file:

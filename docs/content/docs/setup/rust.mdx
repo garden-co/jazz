@@ -9,6 +9,11 @@ mobile app, or it acts as a [backend client](/docs/setup/backend-client) with a 
 credential. Like every other language, it works from your app's TypeScript schema and permissions:
 `npx jazz-tools generate` writes its typed bindings from them.
 
+<Callout type="warn" title="Known issue: a bearer user can't open offline">
+  An app signed in with a bearer token signs in with your backend when it opens, so it can't open
+  while your backend is unreachable, even with a persistent store.
+</Callout>
+
 ## Install
 
 Depend on the `jazz-app-support` crate:

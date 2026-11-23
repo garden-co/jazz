@@ -240,7 +240,7 @@ columns (`merge: "text"`) take plain string writes.
 - **Tiers:** reads and subscriptions take `"local"`, `"localFirst"`
   (default) or `"remote"`; writes and commits take `"local"` or `"global"`,
   the durability they wait for (`"edge"` is refused). UniFFI: `all_at`,
-  `one_at`, `insert_at`, `update_at`, `delete_at`, `subscribe_at`. C ABI:
+  `one_at`, `insert_at`, `update_at`, `delete_at`, `upsert_at`, `subscribe_at`. C ABI:
   `"tier"` in the args, or `{"query", "tier"}` for `jazz_subscribe`.
 - **waitForSync:** UniFFI `wait_for_sync(tier)`, C ABI `waitForSync {tier}`:
   returns once every write committed so far reaches `tier` (`local` returns
@@ -275,7 +275,9 @@ columns (`merge: "text"`) take plain string writes.
   `upsert {table, id, row}` write the row with this id: for a new id an
   insert (`row` then needs every required column, else `missing required
   field`), for an existing row the columns `row` names (a partial row
-  updates).
+  updates). At a tier (UniFFI `upsert_at(table, id, row, tier)`, C ABI
+  `"tier"`) they return once the write reached it, with the row as written
+  here: not as someone else may have changed it by then.
   `restore(table, id, patch?)` / `restore {table, id, patch?}` brings back a
   deleted row as it was, or with `patch` (a whole row) as its content; a
   patch naming another row's `id` is refused. Both
