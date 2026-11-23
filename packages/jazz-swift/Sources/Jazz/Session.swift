@@ -299,7 +299,7 @@ extension Client {
     /// Writes the row with this id: an insert if there's none, else all its
     /// columns replaced by `row`'s.
     @discardableResult
-    public func upsert<I: Insert>(_ id: Jazz.ID, _ row: I) async throws -> I.Row {
+    public func upsert<I: Insert>(_ id: Jazz.ID, _ row: I) async throws -> I.Row where I.Row: Updatable {
         try await Self.typed {
             let json = try Coding.json(row, userInfo)
             let stored = try await Self.run { try self.handle.upsert(table: I.Row.table, id: id, rowJson: json) }
@@ -328,7 +328,7 @@ extension Client {
 
 extension Transaction {
     @discardableResult
-    public func upsert<I: Insert>(_ id: Jazz.ID, _ row: I) async throws -> I.Row {
+    public func upsert<I: Insert>(_ id: Jazz.ID, _ row: I) async throws -> I.Row where I.Row: Updatable {
         try await Client.typed {
             let json = try Coding.json(row, userInfo)
             let stored = try await Client.run { try self.ffi.upsert(table: I.Row.table, id: id, rowJson: json) }
