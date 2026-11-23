@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use futures_core::Stream;
+use futures_util::StreamExt as _;
 use jazz::account_registry::AccountId;
 use jazz::tools::AppId;
 use serde::Serialize;
@@ -405,8 +406,8 @@ impl JazzSession {
 
     /// The app's auth changed (its own sign-in, sign-out or account
     /// switch): asks the bearer and the backend who is signed in now, and
-    /// follows. The same user keeps the same [`Jazz`]; another one gets
-    /// theirs; no one signs out.
+    /// follows. The same user keeps the same [`Jazz`] while its client
+    /// lives; another one gets theirs; no one signs out.
     pub async fn refresh(&self) -> Result<()> {
         self.run(Op::Follow).await
     }
@@ -619,7 +620,7 @@ impl JazzSession {
     /// - A user who has no account yet, while a device guest is signed in:
     ///   the guest is linked to them and keeps its data
     ///   ([`SessionConfig::link_guest`], on by default).
-    /// - The user signed in now: the same client goes on.
+    /// - The user signed in now: the same client goes on, while it lives.
     /// - Anyone else: signed in (their account made if need be), with a
     ///   client of their own.
     async fn follow(&self) -> Result<()> {
@@ -687,7 +688,7 @@ impl JazzSession {
             user.issuer == who.identity.issuer
                 && user.subject == who.identity.subject
                 && who.account.is_none_or(|account| account == user.account)
-        }) && self.lock().jazz.is_some();
+        }) && self.lock().jazz.as_ref().is_some_and(Jazz::is_live);
         if same {
             // The same user keeps the same client.
             self.set(|snapshot| snapshot.status = SessionStatus::Ready);
@@ -804,6 +805,7 @@ impl JazzSession {
                     }
                     SessionState::SignedOut => None,
                 });
+                let states = jazz.session().map(|session| session.changes());
                 {
                     let mut current = self.lock();
                     current.jazz = Some(jazz);
@@ -814,6 +816,9 @@ impl JazzSession {
                     snapshot.status = SessionStatus::Ready;
                     snapshot.client_epoch += 1;
                 });
+                if let Some(states) = states {
+                    self.follow_end(states);
+                }
                 Ok(())
             }
             Err(Error::SignedOut) => {
@@ -831,6 +836,37 @@ impl JazzSession {
                 Err(error)
             }
         }
+    }
+
+    /// Follows the current client ending by itself (its credential names no
+    /// one any more): the session signs out with it, keeping a device key
+    /// to reopen. A client the session replaced or closed meanwhile is not
+    /// its current one, and changes nothing.
+    fn follow_end(&self, mut states: impl Stream<Item = SessionState> + Send + Unpin + 'static) {
+        let epoch = self.inner.state.borrow().client_epoch;
+        // Holds neither the session nor the client open.
+        let inner = Arc::downgrade(&self.inner);
+        self.inner.handle.spawn(async move {
+            // The stream ends when the client stops.
+            while let Some(state) = states.next().await {
+                if state == SessionState::SignedOut {
+                    break;
+                }
+            }
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            let this = Self { inner };
+            let _one = this.inner.one_at_a_time.lock().await;
+            if this.ensure_open().is_err() || this.inner.state.borrow().client_epoch != epoch {
+                return;
+            }
+            this.replace(None, None, SessionStatus::SignedOut).await;
+            this.set(|snapshot| {
+                snapshot.error = None;
+                snapshot.recovery = None;
+            });
+        });
     }
 
     /// Ends the session's user and client, reading `status` after.

@@ -100,7 +100,8 @@ does.
   lost and reported as `Error::Unsynced { pending }`; `Duration::ZERO` closes at once and accepts
   that.
 - With `JazzSession`, `session.sign_out()` signs out and keeps the session usable, while
-  `session.close()` ends it.
+  `session.close()` ends it. When the client ends by itself (your bearer names no one at a
+  renewal or refresh), the session signs out too and `client_epoch` moves on.
 
 For a service acting with a machine credential instead of as a user, see
 [Backend Client](/docs/setup/backend-client).
