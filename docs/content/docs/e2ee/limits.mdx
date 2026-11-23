@@ -17,21 +17,23 @@ languageTabs: backend
   can upsert it with another space column, for example another `projectId`. Only sessions allowed
   to update the row can do this, and your backend, which your permissions don't check.
 
-  Nothing is lost or disclosed, but the row reads differently. The row moves to the new space, and
-  its readers are that space's members. The encrypted values the upsert left out stay sealed for
-  the old space:
+  The row moves to the new space, and its readers are that space's members. They see its plain
+  columns. The encrypted values the upsert left out stay sealed for the old space, so the move
+  discloses none of them:
   - a reader that also holds a key of the old space gets the row, with those cells reported
     `stale-space`;
   - any other reader doesn't get the row: it is reported `key-pending` or `key-unavailable`, then
     `invalid-ciphertext` once its device can tell the cells' key isn't the new space's;
   - a filter by one of those columns doesn't find the row in its new space.
 
-  Encrypted values the upsert did supply are sealed for the new space.
+  Encrypted values the upsert did supply are sealed for the new space, so its members can read
+  them.
 
   To repair the row, write its original space back. That write is checked the same way, so a
   writer whose copy shows the row in the new space is refused. Use a writer that hasn't loaded the
   row, and upsert the row with its original space. If the move also supplied encrypted values,
-  write them again once the row is back: until then they read as `stale-space`.
+  write them again once the row is back, from a writer that holds the old space's key: until then
+  they read as `stale-space`.
 
 - **Existing plain columns are not encrypted for you.** A column is encrypted when it is declared
   encrypted at creation; Jazz does not convert one that already holds data. Copy the data into a new

@@ -55,14 +55,17 @@ app encrypts data it already stores. References: the
     other reader treats them as a missing key until the chain shows the
     epoch is foreign, then as `invalid-ciphertext` (above), and an equality
     filter by those columns misses the row.
-  - Values the upsert supplied are sealed for the new space. Nothing is
-    disclosed: the cells stay sealed for the old space.
+  - What the new space's readers see: the row's plain columns, and the
+    encrypted values the upsert supplied, which are sealed for the new
+    space. The encrypted values it left out stay sealed for the old space
+    and are not disclosed.
   - Only a session the application's update rule admits, or the
     application's backend, can write this.
   - Writing the original space back repairs it. The same check refuses
     that write from a writer whose copy shows the new space, so it comes
     from a writer that has not loaded the row. Values the moving upsert
-    supplied are then written again.
+    supplied are then written again, by a writer that holds the old
+    space's key.
 
   Writing an
   encrypted value needs a held key for the row's space; an update that
@@ -162,8 +165,11 @@ app encrypts data it already stores. References: the
   the loaders all check this. `sealedType` names only the stored type and
   takes no `default`: the default is declared beside it.
 - Encrypted columns hold the types the type strings and objects above name.
-  Row and transaction-ID types, and arrays of them, are not supported:
-  clients refuse to seal or open them.
+  The deploy refuses, for the current version's declared and sealed types,
+  any type a client can't seal or open: row and transaction-ID types,
+  payload enums and catalogue scalar enums, arrays of them, and a JSON
+  schema containing a number that isn't an integer (such as
+  `"minimum": 0.5`), since the cell type encodes only integers.
 - An equality column's tokens are stored in a required `bytes` column
   `__e2ee_eq_<column>`, whose stored default, if it declares one, is the
   empty byte string. Equality is declared only on the types the equality
@@ -187,20 +193,20 @@ variants and default, and the table's space and scope, are checked against
 every stored declaration of the same stored table and column, whichever
 version holds it.
 
-| Change                                                     | Allowed?                                                     |
-| ---------------------------------------------------------- | ------------------------------------------------------------ |
-| New encrypted table                                        | Yes; spaces are created on first encrypted write             |
-| New encrypted column on an encrypted table                 | Yes, by a lens `add` of a `bytes` column with default `""`   |
-| Rename an encrypted column                                 | Yes, with its `__e2ee_eq_` column in the same migration      |
-| Rename an encrypted table, its scope table or space column | Yes; identities are kept                                     |
-| Drop equality tagging                                      | Yes, dropping the tag column in the same migration           |
-| Append variants to an encrypted enum                       | Yes, pinning the original type as `sealedType`               |
-| Any other type change, nullability included                | No: declare a new column, or copy into a new table (§5)      |
-| Change a column's declared default                         | No                                                           |
-| Change the space column or the scope table                 | No: copy into a new table (§5)                               |
-| Make a plaintext column encrypted                          | No: copy into a new table (§5)                               |
-| Stop declaring an encrypted column it keeps                | No: drop the column                                          |
-| Add equality to a table that existed before                | No: declare equality when the table is created, or copy (§5) |
+| Change                                                     | Allowed?                                                                     |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| New encrypted table                                        | Yes; spaces are created on first encrypted write                             |
+| New encrypted column on an encrypted table                 | Yes, by a lens `add` of a `bytes` column with default `""`                   |
+| Rename an encrypted column                                 | Yes, with its `__e2ee_eq_` column in the same migration                      |
+| Rename an encrypted table, its scope table or space column | Yes; identities are kept                                                     |
+| Drop equality tagging                                      | Yes, dropping the tag column (`backwardsDefault` `""`) in the same migration |
+| Append variants to an encrypted enum                       | Yes, pinning the original type as `sealedType`                               |
+| Any other type change, nullability included                | No: declare a new column, or copy into a new table (§5)                      |
+| Change a column's declared default                         | No                                                                           |
+| Change the space column or the scope table                 | No: copy into a new table (§5)                                               |
+| Make a plaintext column encrypted                          | No: copy into a new table (§5)                                               |
+| Stop declaring an encrypted column it keeps                | No: drop the column                                                          |
+| Add equality to a table that existed before                | No: declare equality when the table is created, or copy (§5)                 |
 
 - **Types.** `T` is part of every cell's context, and the cell does not
   record which `T` it used, so each encrypted stored column keeps one `T` for
@@ -239,6 +245,11 @@ version holds it.
   declared encrypted, or is dropped: a version that keeps the column but drops
   its declaration is refused. A column the earlier version stored as
   plaintext cannot be declared encrypted.
+- **Lens values for ciphertext and token columns.** A migration's lens that
+  adds an encrypted column or its `__e2ee_eq_` column gives it the empty byte
+  string as its `default`, and a lens that drops one gives the empty byte
+  string as its `backwardsDefault`: older clients read that column back
+  through the lens, and only the empty value reads as never written.
 
 ## 4. Members first
 
