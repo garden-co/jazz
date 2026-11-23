@@ -99,6 +99,7 @@ describe("locked messages", () => {
 
   it("says messages are waiting for the room's key once it has been on its way for a while", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    deviceStatus.current = "active";
     show({ messages: { data: [], unreadable: [pending] } });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
@@ -121,6 +122,16 @@ describe("locked messages", () => {
     });
     expect(screen.getByText(/1 message is locked on this browser/)).toBeTruthy();
     expect(screen.queryByText(/waiting for the room's key/)).toBeNull();
+  });
+
+  it("says messages are locked after a while when this browser's status is still unknown", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    show({ messages: { data: [], unreadable: [pending] } });
+    expect(screen.getByText(/Decrypting 1 message/)).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.getByText(/1 message is locked on this browser/)).toBeTruthy();
   });
 
   it("says messages are locked on this browser while it waits for approval", async () => {

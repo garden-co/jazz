@@ -462,5 +462,9 @@ function useKeyOnItsWay(unreadable: readonly { code: string }[]): "arriving" | "
   }, [onItsWay]);
   if (!onItsWay) return null;
   if (!slow) return "arriving";
-  return unreadable.every((row) => row.code === "key-pending") ? "slow" : null;
+  // Only a browser known to be active is waiting for a member's key: one whose
+  // status is still unknown may be waiting for approval instead.
+  return status === "active" && unreadable.every((row) => row.code === "key-pending")
+    ? "slow"
+    : null;
 }
