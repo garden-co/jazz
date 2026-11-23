@@ -45,7 +45,7 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
       totals[is]++;
       // The only gap a PASS may have is one the rule declares for that language.
       const declared = !rule.external && rule.notCovered?.[lang];
-      if (is === "NOT_COVERED" && !declared) open++;
+      if (is === "NOT_COVERED" && !declared && !isKnown(rule.id)) open++;
       status[`${rule.id} ${lang}`] = got?.observed ?? is;
       if (!got) {
         console.log(`FAIL ${name} ${lang} ${rule.id}: no result (setup broke, see the job)`);
@@ -71,12 +71,12 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
 
   if (byLang.android)
     console.log(`NOTE ${name} android: the pinned test, jazz#6246 @ ${byLang.android.pinned}, is ${byLang.android.review ?? "an unreviewed test head"}`);
-  const android = ANDROID_RULES.map(({ id }) => {
+  const android = ANDROID_RULES.map(({ id, gap }) => {
     const got = byLang.android?.results.find((result) => result.id === id);
     const is = got?.status in totals ? got.status : "FAIL";
     const why = got ? got.why : "no result (setup broke, see the job)";
     totals[is]++;
-    if (is === "NOT_COVERED") open++;
+    if (is === "NOT_COVERED" && !gap && !isKnown(id)) open++;
     status[`${id} android`] = got?.observed ?? is;
     const label = is === "FAIL" && got && isKnown(id) ? "KNOWN_ISSUE" : is;
     if (label === "KNOWN_ISSUE") knownFails.push(`${id} android`);
@@ -85,6 +85,21 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
     if (why && is !== "PASS") reasons.push(`- \`${id}\` android ${is}: ${why}`);
     return `\`${id}\` ${label}`;
   });
+
+  // What each leg resolved is the candidate's version: a fallback to a published release isn't.
+  for (const lang of LANGS) {
+    const result = byLang[lang];
+    if (!result) continue;
+    const seen = [...new Set((result.resolved ?? []).flatMap(({ what }) => [...what.matchAll(/v?(2\.\d+\.\d+-[a-z]+(?:\.\d+)*)/g)].map((m) => m[1])))];
+    const ok = seen.length > 0 && seen.every((v) => v === result.version);
+    console.log(`${ok ? "VERSION_OK" : "VERSION_WRONG"} ${name} ${lang} resolved ${seen.join(", ") || "nothing"} (candidate ${result.version})`);
+    if (!ok) blocking.unshift(`${lang} resolved ${seen.join(", ") || "no version"}, not ${result.version}`);
+  }
+  if (byLang.android) {
+    const ok = byLang.android.version === byLang[LANGS.find((l) => byLang[l])]?.version;
+    console.log(`${ok ? "VERSION_OK" : "VERSION_WRONG"} ${name} android tested jazz-kotlin-android ${byLang.android.version}`);
+    if (!ok) blocking.unshift(`android tested ${byLang.android.version}`);
+  }
 
   // The negative control: a harness that passes a candidate known to break a rule is itself broken.
   const controls = mustFail.flatMap((id) =>

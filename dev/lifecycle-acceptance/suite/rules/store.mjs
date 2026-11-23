@@ -108,28 +108,28 @@ export default [
   {
     id: "store.second-open",
     title: "a second open, in this process or another, is refused; the first still works; open after it closes",
-    basis: "pending",
+    basis: "contract", // decided for beta.1: Anselm's option B (relayed 03:05 UTC)
     rounds: 100,
     run: (r) => secondOpen(r, { otherProcess: r.index % 2 === 1 }),
   },
   {
     id: "store.second-open.race",
     title: "of two simultaneous opens, in one process or two, exactly one wins",
-    basis: "pending",
+    basis: "contract", // decided for beta.1: Anselm's option B (relayed 03:05 UTC)
     rounds: 100,
     run: (r) => simultaneousOpens(r, { otherProcess: r.index % 2 === 1 }),
   },
   {
     id: "store.no-two-writers",
     title: "two apps write: one open is refused, and every acknowledged write reaches the server",
-    basis: "pending",
+    basis: "contract", // decided for beta.1: Anselm's option B (relayed 03:05 UTC)
     rounds: 100,
     run: twoWriters,
   },
   {
     id: "store.reopen",
     title: "reopen after close at once; while a holder stops within 5 s; after a killed holder",
-    basis: "pending",
+    basis: "contract", // decided for beta.1: Anselm's option B (relayed 03:05 UTC)
     rounds: 30,
     jobs: 6,
     run: reopen,

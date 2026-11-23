@@ -11,12 +11,12 @@ const TEST_RULES = [
   ["persist.killed-process", "brief"],
   ["sync.offline-write", "brief"],
   // #native-language-apis' store.second-open is these two; its store.reopen the next two.
-  ["store.second-open", "pending"],
-  ["store.second-open.process", "pending"],
-  ["store.reopen", "pending"],
-  ["store.killed-holder", "pending"],
-  ["store.reopen-after-failed-open", "pending"],
-  ["store.delete-reopen", "pending"],
+  ["store.second-open", "contract"],
+  ["store.second-open.process", "contract"],
+  ["store.reopen", "contract"],
+  ["store.killed-holder", "contract"],
+  ["store.reopen-after-failed-open", "contract"],
+  ["store.delete-reopen", "contract"],
   ["offline.bearer-open", "brief"], // a beta.1 rule (Anselm, 23:09 UTC)
 ];
 const NOT_ON_ANDROID = ["store.no-two-writers", "store.per-account"];
@@ -25,7 +25,8 @@ const id = (rule) => (rule.startsWith("android.") ? rule : `android.${rule}`);
 
 export const ANDROID_RULES = [
   ...TEST_RULES.map(([rule, basis]) => ({ id: id(rule), basis, title: `${rule}, on an emulator` })),
-  ...NOT_ON_ANDROID.map((rule) => ({ id: id(rule), basis: "pending", title: `${rule}: no such check on Android` })),
+  // Not on Android; jazz-kotlin's store code is the JVM leg's, where both are scored.
+  ...NOT_ON_ANDROID.map((rule) => ({ id: id(rule), basis: "contract", gap: true, title: `${rule}: no such check on Android` })),
 ];
 
 export function judgeAndroid(log, { aarSha256, version, code }) {
@@ -42,7 +43,8 @@ export function judgeAndroid(log, { aarSha256, version, code }) {
   return ANDROID_RULES.map(({ id: ruleId, basis }) => {
     if (!tested) return { id: ruleId, ...fail("the emulator test didn't test the candidate's AAR") };
     const rule = ruleId === "android.memory" ? ruleId : ruleId.slice("android.".length);
-    if (NOT_ON_ANDROID.includes(rule)) return { id: ruleId, status: "NOT_COVERED", why: "the Android test has no such check" };
+    if (NOT_ON_ANDROID.includes(rule))
+      return { id: ruleId, status: "NOT_COVERED", why: "the Android test has no such check (the Kotlin/JVM leg scores it)" };
     const got = reported.get(rule);
     const observed = got?.outcome === "PASS" ? "PASS" : "FAIL";
     const why = got

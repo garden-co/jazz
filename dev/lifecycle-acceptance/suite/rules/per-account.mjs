@@ -107,14 +107,14 @@ export default [
   {
     id: "store.per-account",
     title: "plain client, device and bearer: A signs out, B opens the same dir, sees none of A's rows; A's pending writes upload only as A",
-    basis: "pending",
+    basis: "contract", // decided for beta.1: Anselm's option B (relayed 03:05 UTC)
     rounds: 100,
     run: plainClient,
   },
   {
     id: "store.per-account.session",
     title: "JazzSession, device and bearer, with and without a restart: B sees none of A's rows",
-    basis: "pending",
+    basis: "contract", // decided for beta.1: Anselm's option B (relayed 03:05 UTC)
     rounds: 100,
     notCovered: { kotlin: "jazz-kotlin has no JazzSession: store.per-account is its sign out, then a new open" },
     run: session,
@@ -122,7 +122,7 @@ export default [
   {
     id: "store.per-account.root",
     title: "an open with no account is refused the store a signed-in user wrote in that dir, or reads none of it",
-    basis: "pending",
+    basis: "contract", // decided for beta.1: Anselm's option B (relayed 03:05 UTC)
     rounds: 20,
     run: rootStore,
   },

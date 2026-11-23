@@ -162,7 +162,7 @@ test("the Android leg", () => {
 
   const green = by(rules(all), { code: 0 });
   assert.equal(green["android.persist.reopen.device"], "PASS");
-  assert.equal(green["android.store.second-open"], "NOT_COVERED", "awaiting Anselm");
+  assert.equal(green["android.store.second-open"], "PASS", "decided for beta.1");
   assert.equal(green["android.store.per-account"], "NOT_COVERED", "no such check");
   assert.equal(by(rules({ ...all, "persist.reopen.device": "BLOCKED" }))["android.persist.reopen.device"], "FAIL", "BLOCKED is a FAIL");
   assert.equal(by(rules({ ...all, "persist.reopen.device": "FAIL" }))["android.persist.reopen.device"], "FAIL");
@@ -171,8 +171,7 @@ test("the Android leg", () => {
   assert.equal(by(rules(missing))["android.sync.offline-write"], "FAIL", "a rule not reported");
   assert.equal(by(`${head}r1 RULE android.memory PASS: x\n`)["android.memory"], "FAIL", "only the summary counts");
   assert.ok(Object.values(by(rules(all), { aarSha256: "other" })).every((s) => s === "FAIL"), "another AAR");
-  const observed = judgeAndroid(rules({ ...all, "store.second-open": "FAIL" }), options).find((r) => r.id === "android.store.second-open");
-  assert.deepEqual([observed.status, observed.observed], ["NOT_COVERED", "FAIL"]);
+  assert.equal(by(rules({ ...all, "store.second-open": "BLOCKED" }))["android.store.second-open"], "FAIL");
 });
 
 function verdict(edit, mustFail = []) {
@@ -187,7 +186,10 @@ function verdict(edit, mustFail = []) {
         passed: rounds,
         failures: {},
       }));
-      results.set(lang, { name: "c", lang, sha, run: "7", ms: 1, review: "reviewed", results: rules });
+      results.set(lang, {
+        name: "c", lang, sha, run: "7", ms: 1, review: "reviewed", results: rules, version: "2.0.0-beta.1",
+        resolved: [{ what: "jazz-app-support-2.0.0-beta.1.crate" }, { what: "github.com/x/v2@v2.0.0-beta.1.zip" }],
+      });
     }
     edit(results);
     for (const [lang, result] of results) writeFileSync(join(dir, `c-${lang}.json`), JSON.stringify(result));
@@ -209,6 +211,12 @@ test("the verdict fails closed", () => {
   assert.equal(verdict((results) => (results.get("go").results[1].passed = 1)).status, 1, "a PASS of too few rounds");
   const gap = verdict((results) => (results.get("go").results[1].status = "NOT_COVERED"));
   assert.match(gap.stdout, /VERDICT c INCOMPLETE/, "a gap no rule declares");
+
+  // A leg that resolved another version (a registry fallback) blocks.
+  const fallback = verdict((results) => (results.get("go").resolved = [{ what: "github.com/x/v2@v2.0.0-beta.0.zip" }]));
+  assert.equal(fallback.status, 1);
+  assert.match(fallback.stdout, /VERSION_WRONG c go resolved 2\.0\.0-beta\.0 \(candidate 2\.0\.0-beta\.1\)/);
+  assert.equal(verdict((results) => (results.get("rust").resolved = [])).status, 1, "no version resolved");
 
   // A known issue's FAIL blocks nothing; any other FAIL does.
   const knownIndex = RULES.findIndex((rule) => rule.id === "close.ends-waits");

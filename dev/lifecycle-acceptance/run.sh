@@ -48,9 +48,9 @@ gh run watch "$id" -R "$repo" --interval 30 >/dev/null 2>&1 || true
 job=$(gh api "repos/$repo/actions/runs/$id/jobs?per_page=100" --jq '.jobs[]|select(.name=="verdict").id')
 [ -n "$job" ] || { echo "run $id has no verdict job" >&2; exit 1; }
 lines=$(gh api --allow-escape-sequences "repos/$repo/actions/jobs/$job/logs" | sed -E 's/^[^ ]+ //' |
-  grep -E '^(PASS|FAIL|KNOWN_ISSUE|NOT_COVERED|CONTROL_OK|CONTROL_BROKEN|BLOCKING|KNOWN_ISSUES|NOTE|VERDICT) ')
+  grep -E '^(PASS|FAIL|KNOWN_ISSUE|NOT_COVERED|CONTROL_OK|CONTROL_BROKEN|BLOCKING|KNOWN_ISSUES|NOTE|VERSION_OK|VERSION_WRONG|VERDICT) ')
 # Blocking failures and broken controls first.
-printf '%s\n' "$lines" | grep -E '^(CONTROL_BROKEN|BLOCKING|VERDICT) ' || true
+printf '%s\n' "$lines" | grep -E '^(CONTROL_BROKEN|VERSION_WRONG|BLOCKING|VERDICT) ' || true
 echo ---
 printf '%s\n' "$lines"
 gh api "repos/$repo/actions/runs/$id" --jq '"wall time \((.updated_at|fromdate) - (.run_started_at|fromdate)) s"'

@@ -127,7 +127,7 @@ export default [
   {
     id: "store.second-session",
     title: "a second JazzSession on a held dir reports storeHeld and keeps the device account",
-    basis: "pending",
+    basis: "contract", // decided for beta.1: Anselm's option B (relayed 03:05 UTC)
     rounds: 20,
     notCovered: { kotlin: "jazz-kotlin has no JazzSession" },
     run: sessionSecondOpen,
@@ -135,14 +135,14 @@ export default [
   {
     id: "delete.held.same-process",
     title: "delete while another app in the process holds the store",
-    basis: "pending",
+    basis: "contract", // a store rule: decided for beta.1 with them (option B, 03:05 UTC)
     rounds: 20,
     run: (r) => deleteWhileHeld(r, { otherProcess: false }),
   },
   {
     id: "delete.held.other-process",
     title: "delete while another process holds the store",
-    basis: "pending",
+    basis: "contract", // a store rule: decided for beta.1 with them (option B, 03:05 UTC)
     rounds: 20,
     run: (r) => deleteWhileHeld(r, { otherProcess: true }),
   },
