@@ -3215,12 +3215,17 @@ export class Db {
         // encrypted columns once it has verified the account, which syncs
         // what names them: that is part of the wait. If it fails, or is
         // still pending at the deadline, the operation goes ahead and gets
-        // the local-first client's own answer.
+        // the local-first client's own answer. The deadline is this wait's
+        // own: a verification already in flight may run longer.
         const left = Math.max(1, LOCAL_FIRST_WAIT_MS - (Date.now() - started));
-        return next.encryption
-          .ready({ timeoutMs: left })
-          .catch(() => undefined)
-          .then(() => next);
+        let cap: ReturnType<typeof setTimeout> | undefined;
+        const deadlinePassed = new Promise<void>((resolve) => {
+          cap = setTimeout(resolve, left);
+        });
+        const verified = next.encryption.ready({ timeoutMs: left }).catch(() => undefined);
+        return Promise.race([verified, deadlinePassed])
+          .then(() => next)
+          .finally(() => clearTimeout(cap));
       })
       .finally(() => {
         clearTimeout(timer);
