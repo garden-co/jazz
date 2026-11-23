@@ -869,6 +869,79 @@ async fn typed_streams_round_trip_encrypted_bytes_and_store_them_sealed() {
     app.stop().await;
 }
 
+/// Alice's stored title must remain readable after a deploy that pins its sealed type.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deploying_an_optional_encrypted_column_preserves_old_rows() {
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let alice = app.device_of(key.clone()).await;
+    alice
+        .encryption()
+        .ready(Duration::from_secs(30))
+        .await
+        .unwrap();
+    let project = make_project(&alice, "plans").await;
+    add_task(&alice, &project, "original title").await.unwrap();
+    assert_eq!(titles(&alice, 1).await, ["original title"]);
+
+    let mut next: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/encrypted/jazz.app.json")).unwrap();
+    next["tables"]["tasks"]["encryption"]["columns"]["title"] =
+        json!({"type": "string?", "sealedType": "string"});
+    let files = AppFiles::new(serde_json::to_vec(&next).unwrap(), None);
+    let backend = Jazz::open(
+        files.clone().with_permissions(
+            include_bytes!("fixtures/encrypted/jazz.permissions.json").as_slice(),
+        ),
+        Config::new(app.app_id)
+            .server(app.server.base_url())
+            .backend(Backend::new(
+                app.server.backend_secret(),
+                app.server.admin_secret(),
+                "service",
+            )),
+    )
+    .await
+    .expect("deploy the pinned declaration");
+
+    let reader = Jazz::open(
+        files,
+        app.user(key)
+            .encryption(EncryptionConfig::store(|| Rc::new(MemoryStore::new()))),
+    )
+    .await
+    .unwrap();
+    reader
+        .encryption()
+        .ready(Duration::from_secs(30))
+        .await
+        .unwrap();
+    alice
+        .encryption()
+        .call("keysDeliver", json!({}))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let rows = reader.with_client(|client| async move {
+                Ok(client.query(Query::from("tasks"), ReadTier::Remote).await?)
+            }).await.unwrap();
+            let reports = reader.encryption().take_reports().await.unwrap();
+            assert!(!reports.iter().any(|report| report.contains("invalid-ciphertext")),
+                "the deploy accepted the optional declaration but the old row was unreadable: {reports:?}");
+            if let Some(row) = rows.first() {
+                assert!(row.fields.iter().any(|field| field.name == "title" && field.value == text("original title")));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.unwrap();
+    reader.shutdown().await.unwrap();
+    backend.shutdown().await.unwrap();
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// Alice's first note in a project streams its label from a one-shot reader.
 /// The encrypted title needs a space key before the label can be read.
 ///
