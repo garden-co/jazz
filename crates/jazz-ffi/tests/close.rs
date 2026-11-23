@@ -1178,3 +1178,400 @@ fn session_jazz_as_the_session_closes() {
         session.free();
     }
 }
+
+// Per-call control: `callBegin` / `"call"` / `cancel` / `callEnd` in the C
+// ABI, `CallControl` and `controlled` over UniFFI.
+
+/// What a cancel may take to end a call's wait.
+const AT_ONCE: Duration = Duration::from_millis(100);
+
+fn call_begin(handle: Handle, args: Value) -> Value {
+    handle.call("callBegin", args).unwrap()["call"].clone()
+}
+
+/// `method` with `call`'s control, still waiting, then cancelled: what it
+/// failed with, within [`AT_ONCE`] of the cancel.
+fn cancelled(handle: Handle, method: &'static str, mut args: Value) -> Value {
+    let call = call_begin(handle, json!({}));
+    args["call"] = call.clone();
+    let running = handle.spawn(method, args);
+    running.still_running(method);
+    let cancelled = Instant::now();
+    handle.call("cancel", json!({ "call": call })).unwrap();
+    let ended = running.within(PROMPT, method);
+    let took = cancelled.elapsed();
+    assert!(took < AT_ONCE, "{method} took {took:?} after the cancel");
+    handle.call("callEnd", json!({ "call": call })).unwrap();
+    ended.expect_err(method)
+}
+
+fn interrupted(error: &Value, reason: &str, queued: bool) {
+    assert_eq!(error["kind"], "interrupted", "{error}");
+    assert_eq!(error["reason"], reason, "{error}");
+    assert_eq!(error["queued"], queued, "{error}");
+}
+
+/// A call whose control ended before it started does nothing.
+#[test]
+fn c_a_call_cancelled_before_it_starts_does_nothing() {
+    let app = device(&unreachable());
+    let chief = app.call("account", json!({})).unwrap();
+    let call = call_begin(app, json!({}));
+    app.call("cancel", json!({ "call": call })).unwrap();
+    let written = app.call(
+        "insert",
+        json!({ "table": "shows", "row": parse(&show(chief.as_str().unwrap())), "call": call }),
+    );
+    interrupted(&written.expect_err("insert"), "cancelled", false);
+    let rows = app
+        .call("all", json!({ "query": { "table": "shows" } }))
+        .unwrap();
+    assert_eq!(rows, json!([]), "the insert did nothing");
+    app.call("callEnd", json!({ "call": call })).unwrap();
+    app.spawn("close", json!({}))
+        .within(PROMPT, "close")
+        .unwrap();
+    app.free();
+}
+
+/// A cancel ends every kind of wait on the server at once: `queued` when
+/// the call committed a write.
+#[test]
+fn c_cancel_ends_each_wait_at_once() {
+    let app = device(&unreachable());
+    write_show(app);
+    let chief = app.call("account", json!({})).unwrap();
+    let chief = chief.as_str().unwrap();
+    let synced = cancelled(app, "waitForSync", json!({ "tier": "global" }));
+    interrupted(&synced, "cancelled", false);
+    let read = cancelled(
+        app,
+        "all",
+        json!({ "query": { "table": "shows" }, "tier": "remote" }),
+    );
+    interrupted(&read, "cancelled", false);
+    let written = cancelled(
+        app,
+        "insert",
+        json!({ "table": "shows", "row": parse(&show(chief)), "tier": "global" }),
+    );
+    interrupted(&written, "cancelled", true);
+    let tx = app.call("txBegin", json!({})).unwrap()["tx"].clone();
+    app.call(
+        "insert",
+        json!({ "table": "shows", "row": parse(&show(chief)), "tx": tx }),
+    )
+    .unwrap();
+    let committed = cancelled(app, "txCommit", json!({ "tx": tx, "tier": "global" }));
+    interrupted(&committed, "cancelled", true);
+    // What they committed is still there, and the handle goes on.
+    let rows = app
+        .call("all", json!({ "query": { "table": "shows" } }))
+        .unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 3, "{rows}");
+    app.spawn("close", json!({}))
+        .within(PROMPT, "close")
+        .unwrap();
+    app.free();
+}
+
+/// A timeout fires on time while the server takes requests and never
+/// answers.
+#[test]
+fn c_a_timeout_fires_on_time() {
+    let (endpoint, _) = stalling();
+    let app = device(&endpoint);
+    write_show(app);
+    let call = call_begin(app, json!({ "timeoutMs": 300 }));
+    let started = Instant::now();
+    let synced = app
+        .spawn("waitForSync", json!({ "tier": "global", "call": call }))
+        .within(PROMPT, "waitForSync");
+    let took = started.elapsed();
+    interrupted(&synced.expect_err("waitForSync"), "timeout", false);
+    assert!(
+        took >= Duration::from_millis(300) && took < Duration::from_millis(400),
+        "took {took:?}"
+    );
+    app.spawn("close", json!({}))
+        .within(PROMPT, "close")
+        .unwrap();
+    app.free();
+}
+
+/// A refusal that arrives after its call was cancelled is still reported:
+/// the next waitForSync reports it.
+#[test]
+fn c_a_refusal_after_a_cancel_is_still_reported() {
+    let app = App::start();
+    let alice = app.open(json!({ "bearer": true }), Host::new("token-alice"));
+    app.relay().set_unreachable(true);
+    // Alice may not make someone else the chief: the server refuses it.
+    let written = cancelled(
+        alice,
+        "insert",
+        json!({ "table": "shows", "row": parse(&show(nil_uuid())), "tier": "global" }),
+    );
+    interrupted(&written, "cancelled", true);
+    app.relay().set_unreachable(false);
+    let checked = alice
+        .spawn("waitForSync", json!({ "tier": "global" }))
+        .within(Duration::from_secs(45), "waitForSync");
+    assert_eq!(kind(&checked), "permission", "{checked:?}");
+    alice
+        .spawn("close", json!({}))
+        .within(PROMPT, "close")
+        .unwrap();
+    alice.free();
+}
+
+/// Controls work on a derived (for_user) handle, and leave its parent be.
+#[test]
+fn c_controls_on_a_derived_handle() {
+    let app = App::start();
+    app.register_alice();
+    let (job, host) = app.machine();
+    let alice = job.for_user("alice").unwrap();
+    app.relay().set_unreachable(true);
+    write_show(alice);
+    let synced = cancelled(alice, "waitForSync", json!({ "tier": "global" }));
+    interrupted(&synced, "cancelled", false);
+    assert!(job.call("account", json!({})).is_ok(), "the parent goes on");
+    alice
+        .spawn("close", json!({}))
+        .within(PROMPT, "close")
+        .unwrap();
+    alice.free();
+    job.spawn("close", json!({}))
+        .within(PROMPT, "close")
+        .unwrap();
+    job.free();
+    host.assert_freeable();
+    free_ctx(host);
+}
+
+/// A control the host never ended is freed with its handle; one used after
+/// the close fails `closed`, and cancelling it is harmless.
+#[test]
+fn c_free_with_a_control_still_live() {
+    let app = device(&unreachable());
+    let call = call_begin(app, json!({ "timeoutMs": 60_000 }));
+    let unknown = app.call("cancel", json!({ "call": "1" }));
+    assert_eq!(kind(&unknown), "refused", "{unknown:?}");
+    app.spawn("close", json!({}))
+        .within(PROMPT, "close")
+        .unwrap();
+    app.call("cancel", json!({ "call": call })).unwrap();
+    let after = app.call(
+        "all",
+        json!({ "query": { "table": "shows" }, "call": call }),
+    );
+    assert_eq!(kind(&after), "closed", "{after:?}");
+    app.free();
+}
+
+mod uniffi_control {
+    use super::*;
+    use jazz_ffi::{CallControl, JazzError, JazzHandle, StateListener};
+
+    fn device_handle(endpoint: &str) -> Arc<JazzHandle> {
+        let key = jazz_ffi::generate_device_key().unwrap();
+        JazzHandle::open(
+            json!({ "app": STAGE_PLAN_APP, "appId": jazz_app_support::AppId::random().to_string(),
+                "serverUrl": endpoint, "auth": { "deviceKey": key }, "contract": 2 })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    fn interrupted<T: std::fmt::Debug>(result: Result<T, JazzError>, reason: &str, queued: bool) {
+        match result {
+            Err(JazzError::Interrupted {
+                interruption,
+                queued: was_queued,
+                ..
+            }) => assert_eq!((interruption.as_str(), was_queued), (reason, queued)),
+            other => panic!("expected interrupted ({reason}, queued {queued}): {other:?}"),
+        }
+    }
+
+    /// Runs `call` on a view with a fresh control, cancels it once it
+    /// waits, and returns its result within [`AT_ONCE`] of the cancel.
+    fn cancelled<T: Send + 'static>(
+        jazz: &Arc<JazzHandle>,
+        call: impl FnOnce(Arc<JazzHandle>) -> Result<T, JazzError> + Send + 'static,
+    ) -> Result<T, JazzError> {
+        let control = CallControl::new(None);
+        let view = jazz.controlled(control.clone());
+        let running = Running::start(move || call(view));
+        running.still_running("the call");
+        let cancelled = Instant::now();
+        control.cancel();
+        let ended = running.within(PROMPT, "the call");
+        assert!(
+            cancelled.elapsed() < AT_ONCE,
+            "took {:?}",
+            cancelled.elapsed()
+        );
+        ended
+    }
+
+    fn a_show(jazz: &JazzHandle) -> String {
+        show(&jazz.account().unwrap().unwrap())
+    }
+
+    #[test]
+    fn a_call_cancelled_before_it_starts_does_nothing() {
+        let jazz = device_handle(&unreachable());
+        let control = CallControl::new(None);
+        control.cancel();
+        let view = jazz.controlled(control);
+        interrupted(
+            view.insert("shows".into(), a_show(&jazz)),
+            "cancelled",
+            false,
+        );
+        assert_eq!(
+            parse(&jazz.all(r#"{"table":"shows"}"#.into()).unwrap()),
+            json!([])
+        );
+        jazz.shutdown().unwrap();
+    }
+
+    #[test]
+    fn cancel_ends_each_wait_at_once() {
+        let jazz = device_handle(&unreachable());
+        jazz.insert("shows".into(), a_show(&jazz)).unwrap();
+        interrupted(
+            cancelled(&jazz, |view| view.wait_for_sync("global".into())),
+            "cancelled",
+            false,
+        );
+        interrupted(
+            cancelled(&jazz, |view| {
+                view.all_at(r#"{"table":"shows"}"#.into(), "remote".into())
+            }),
+            "cancelled",
+            false,
+        );
+        let row = a_show(&jazz);
+        interrupted(
+            cancelled(&jazz, move |view| {
+                view.insert_at("shows".into(), row, "global".into())
+            }),
+            "cancelled",
+            true,
+        );
+        let row = a_show(&jazz);
+        interrupted(
+            cancelled(&jazz, move |view| {
+                let tx = view.begin()?;
+                tx.insert("shows".into(), row)?;
+                tx.commit(Some("global".into()))
+            }),
+            "cancelled",
+            true,
+        );
+        jazz.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_timeout_fires_on_time() {
+        let (endpoint, _) = stalling();
+        let jazz = device_handle(&endpoint);
+        jazz.insert("shows".into(), a_show(&jazz)).unwrap();
+        let view = jazz.controlled(CallControl::new(Some(300)));
+        let started = Instant::now();
+        interrupted(view.wait_for_sync("global".into()), "timeout", false);
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(300) && took < Duration::from_millis(400),
+            "took {took:?}"
+        );
+        jazz.shutdown().unwrap();
+    }
+
+    struct Errors(mpsc::Sender<String>);
+    impl StateListener for Errors {
+        fn on_change(&self, state_json: String) {
+            let _ = self.0.send(state_json);
+        }
+    }
+
+    /// The refusal of a write whose call was cancelled reaches mutation
+    /// errors and the next waitForSync.
+    #[test]
+    fn a_refusal_after_a_cancel_is_still_reported() {
+        struct Alice;
+        impl jazz_ffi::TokenProvider for Alice {
+            fn token(&self, _: String) -> Result<Option<String>, JazzError> {
+                Ok(Some("token-alice".into()))
+            }
+        }
+        let app = App::start();
+        let jazz = JazzHandle::open_with_tokens(
+            json!({ "app": STAGE_PLAN_APP, "appId": app.app_id,
+                "serverUrl": app.relay().endpoint, "auth": { "bearer": true }, "contract": 2 })
+            .to_string(),
+            Arc::new(Alice),
+        )
+        .unwrap();
+        let (sender, errors) = mpsc::channel();
+        let _watch = jazz
+            .watch_mutation_errors(Arc::new(Errors(sender)))
+            .unwrap();
+        app.relay().set_unreachable(true);
+        interrupted(
+            cancelled(&jazz, |view| {
+                view.insert_at("shows".into(), show(nil_uuid()), "global".into())
+            }),
+            "cancelled",
+            true,
+        );
+        app.relay().set_unreachable(false);
+        let error = errors
+            .recv_timeout(Duration::from_secs(45))
+            .expect("a mutation error");
+        assert!(
+            error.contains("permission") || error.contains("denied"),
+            "{error}"
+        );
+        assert!(
+            matches!(
+                jazz.wait_for_sync("global".into()),
+                Err(JazzError::Permission { .. })
+            ),
+            "waitForSync reports it"
+        );
+        jazz.shutdown().unwrap();
+    }
+
+    #[test]
+    fn controls_on_a_derived_handle_and_a_freed_handle() {
+        let jazz = device_handle(&unreachable());
+        jazz.insert("shows".into(), a_show(&jazz)).unwrap();
+        let control = CallControl::new(None);
+        // A view of a view: the latest control rules.
+        let view = jazz
+            .controlled(CallControl::new(None))
+            .controlled(control.clone());
+        let waiting = Running::start({
+            let view = view.clone();
+            move || view.wait_for_sync("global".into())
+        });
+        waiting.still_running("waitForSync");
+        control.cancel();
+        interrupted(waiting.within(PROMPT, "waitForSync"), "cancelled", false);
+        // Freeing the view leaves the app open.
+        drop(view);
+        assert!(jazz.account().is_ok());
+        // Freeing the app with a control still live, then cancelling it.
+        let live = CallControl::new(Some(60_000));
+        let view = jazz.controlled(live.clone());
+        jazz.shutdown().unwrap();
+        drop(jazz);
+        assert!(matches!(view.account(), Err(JazzError::Closed)));
+        drop(view);
+        live.cancel();
+    }
+}
