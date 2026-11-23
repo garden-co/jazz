@@ -346,7 +346,8 @@ func (db *DB) SyncStatus(ctx context.Context) (SyncStatus, error) {
 
 // Link links the signed-in device account to the user bearer (a token
 // from your auth provider) signs in as, and returns that user. On a DB
-// ForUser returned it is ErrNotSupported.
+// from a Session it fails with KindNotSupported: use the Session's
+// LinkDeviceAccount. On a DB ForUser returned it is ErrNotSupported.
 func (db *DB) Link(ctx context.Context, bearer string) (*User, error) {
 	var u *User
 	err := db.call(ctx, "link", map[string]any{"bearer": bearer}, &u)
@@ -359,10 +360,12 @@ func (db *DB) Refresh(ctx context.Context) error {
 	return db.call(ctx, "refresh", map[string]any{}, nil)
 }
 
-// SignOut signs the end user out and closes the app. A refused SignOut
-// leaves the app open, as on a DB ForUser returned, where it is
-// ErrNotSupported: the session is the backend client's, shared by every
-// user. Close that DB instead.
+// SignOut signs the end user out and closes the app. On a DB from a
+// Session it fails with KindNotSupported, and the DB stays open: use the
+// Session's SignOut.
+// A refused SignOut leaves the app open, as on a DB ForUser returned,
+// where it is ErrNotSupported: the session is the backend client's,
+// shared by every user. Close that DB instead.
 func (db *DB) SignOut(ctx context.Context) error {
 	if err := db.call(ctx, "signOut", map[string]any{}, nil); err != nil {
 		return err

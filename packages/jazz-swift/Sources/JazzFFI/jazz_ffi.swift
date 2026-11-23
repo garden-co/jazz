@@ -702,7 +702,8 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     /**
      * Links this device account to the user's account with the app's own
      * sign-in (`bearer`): the session becomes that user's. Returns the user
-     * as JSON.
+     * as JSON. Not supported on a session's handle: use
+     * `Session.linkDeviceAccount`.
      */
     func link(bearer: String) throws  -> String
     
@@ -755,7 +756,8 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func shutdownWithin(timeoutMs: UInt64) throws 
     
     /**
-     * Signs the end user out and closes the app.
+     * Signs the end user out and closes the app. Not supported on a
+     * session's handle, which stays open: use `Session.signOut`.
      */
     func signOut() throws 
     
@@ -1186,7 +1188,8 @@ open func insertAt(table: String, rowJson: String, tier: String)throws  -> Strin
     /**
      * Links this device account to the user's account with the app's own
      * sign-in (`bearer`): the session becomes that user's. Returns the user
-     * as JSON.
+     * as JSON. Not supported on a session's handle: use
+     * `Session.linkDeviceAccount`.
      */
 open func link(bearer: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
@@ -1306,7 +1309,8 @@ open func shutdownWithin(timeoutMs: UInt64)throws   {try rustCallWithError(FfiCo
 }
     
     /**
-     * Signs the end user out and closes the app.
+     * Signs the end user out and closes the app. Not supported on a
+     * session's handle, which stays open: use `Session.signOut`.
      */
 open func signOut()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
@@ -3595,7 +3599,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_insert_at() != 7087) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_link() != 1170) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_link() != 51862) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_one() != 37106) {
@@ -3622,7 +3626,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown_within() != 15915) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_sign_out() != 13738) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_sign_out() != 29504) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_subscribe() != 48094) {

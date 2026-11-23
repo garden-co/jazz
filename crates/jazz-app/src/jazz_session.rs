@@ -781,7 +781,7 @@ impl JazzSession {
         let session = jazz
             .session()
             .ok_or_else(|| Error::Config("the device account's client has no session".into()))?;
-        let user = session.link(token).await?;
+        let user = session.link_account(token).await?;
         drop(jazz);
         self.transition();
         let config = self
@@ -801,6 +801,10 @@ impl JazzSession {
         let jazz = Jazz::open(self.inner.files.clone(), config).await;
         match jazz {
             Ok(jazz) => {
+                // Before any handle of it is given out.
+                if let Some(session) = jazz.session() {
+                    session.mark_owned();
+                }
                 let user = jazz.session().map(|session| match session.state() {
                     SessionState::SignedIn { user } | SessionState::Expired { user, .. } => {
                         Some(user)
