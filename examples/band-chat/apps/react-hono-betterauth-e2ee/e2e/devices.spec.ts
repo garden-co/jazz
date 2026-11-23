@@ -265,7 +265,8 @@ test("leaves this browser: another device completes it and the browser signs its
   const panel = await openDevices(b.page);
   await thisBrowserRow(panel).getByRole("button", { name: "Leave this browser" }).click();
   await panel.getByRole("alertdialog").getByRole("button", { name: "Leave this browser" }).click();
-  await expect(panel.getByText("Removal pending").first()).toBeVisible({ timeout: T });
+  // "Removal pending" may never show here: A can complete the request before
+  // B's device list confirms it. The reload test below covers the pending state.
   await closeDialog(b.page);
 
   // A is online and does nothing: it completes the removal by itself.
