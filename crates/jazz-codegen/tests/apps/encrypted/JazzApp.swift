@@ -107,33 +107,6 @@ public enum JazzApp {
         }
     }
 
-    /// A change to a row of `__e2ee_members`: only the columns set to `.set(…)` change; `.set(nil)` stores `null`.
-    public struct E2eeMemberPatch: Jazz.Patch {
-        public typealias Row = E2eeMember
-        public var scopeId: Jazz.Change<Jazz.ID>
-        public var identifier: Jazz.Change<Jazz.ID>
-        public var accountId: Jazz.Change<Jazz.ID>
-
-        public init(scopeId: Jazz.Change<Jazz.ID> = .unchanged, identifier: Jazz.Change<Jazz.ID> = .unchanged, accountId: Jazz.Change<Jazz.ID> = .unchanged) {
-            self.scopeId = scopeId
-            self.identifier = identifier
-            self.accountId = accountId
-        }
-
-        enum CodingKeys: Swift.String, Swift.CodingKey {
-            case scopeId = "scopeId"
-            case identifier = "identifier"
-            case accountId = "accountId"
-        }
-
-        public func encode(to encoder: any Swift.Encoder) throws {
-            var container = encoder.container(keyedBy: CodingKeys.self)
-            try container.encodeChange(self.scopeId, forKey: .scopeId)
-            try container.encodeChange(self.identifier, forKey: .identifier)
-            try container.encodeChange(self.accountId, forKey: .accountId)
-        }
-    }
-
     /// Queries of `__e2ee_members` and its columns.
     public enum e2eeMembers {
         /// Every row of `__e2ee_members`; narrow it with `where`, `orderBy`, `limit` and `offset`.
@@ -150,7 +123,7 @@ public enum JazzApp {
     }
 
     /// A row of `projects`.
-    public struct Project: Jazz.Row {
+    public struct Project: Jazz.Row, Jazz.Updatable {
         public static let table = "projects"
         public let id: Jazz.ID
         public var name: Swift.String
@@ -223,7 +196,7 @@ public enum JazzApp {
     }
 
     /// A row of `tasks`.
-    public struct Task: Jazz.Row {
+    public struct Task: Jazz.Row, Jazz.Updatable {
         public static let table = "tasks"
         public let id: Jazz.ID
         public var projectId: Jazz.ID
