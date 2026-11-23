@@ -119,27 +119,53 @@ const KEY_PREFIX: &str = "jazz-auth-v1:";
 
 /// Puts the whole file `temp` at `path` unless something is there already
 /// (`AlreadyExists`): the first creator wins.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", all(test, target_os = "linux"))))]
 fn publish_new(temp: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
     std::fs::hard_link(temp, path)
 }
 
-#[cfg(target_os = "android")]
+/// What to hold while replacing the key at `path`: nothing, as a creator's
+/// hard link never lands on a replacer's key.
+#[cfg(not(any(target_os = "android", all(test, target_os = "linux"))))]
+pub(crate) fn lock_to_replace(_path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    Ok(None)
+}
+
+// The lib's own tests on Linux keep keys as Android does; `tests/` run
+// Linux's way.
+#[cfg(any(target_os = "android", all(test, target_os = "linux")))]
+pub(crate) use locked_rename::lock_to_replace;
+#[cfg(any(target_os = "android", all(test, target_os = "linux")))]
 use locked_rename::publish_new;
 
 /// The same on Android, which denies apps hard links (SELinux). A rename
-/// replaces what's there, so creators look and rename under a lock. It
-/// isn't renameat2's `RENAME_NOREPLACE`: our oldest Android's kernel (API
-/// 24: 3.10) hasn't that call.
+/// replaces what's there, so creators look and rename under a lock, and
+/// whatever replaces a key takes it too: else a creator's rename could land
+/// on the replacer's key. It isn't renameat2's `RENAME_NOREPLACE`: our
+/// oldest Android's kernel (API 24: 3.10) hasn't that call.
+///
+/// The lock is never held across an await or while another is taken, and
+/// waited for only [`WAIT`]: a session waits on its one runtime thread,
+/// which `close` needs.
 #[cfg(any(target_os = "android", all(test, target_os = "linux")))]
 mod locked_rename {
+    use std::fs::File;
     use std::io::{Error, ErrorKind, Result};
     use std::os::unix::fs::OpenOptionsExt as _;
     use std::path::Path;
+    use std::time::Duration;
 
     use crate::lifecycle::flock;
 
-    pub(super) fn publish_new(temp: &Path, path: &Path) -> Result<()> {
+    /// Far longer than a key takes to write and rename.
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// The lock to hold while replacing the key at `path`.
+    pub(crate) fn lock_to_replace(path: &Path) -> Result<Option<File>> {
+        lock_key(path).map(Some)
+    }
+
+    fn lock_key(path: &Path) -> Result<File> {
         let mut name = std::ffi::OsString::from(".");
         name.push(path.file_name().ok_or(ErrorKind::InvalidInput)?);
         name.push(".lock");
@@ -151,7 +177,12 @@ mod locked_rename {
             .truncate(false)
             .mode(0o600)
             .open(path.with_file_name(name))?;
-        flock::lock(&lock)?;
+        flock::lock(&lock, WAIT)?;
+        Ok(lock)
+    }
+
+    pub(super) fn publish_new(temp: &Path, path: &Path) -> Result<()> {
+        let _lock = lock_key(path)?;
         // Not `exists()`: like a hard link, never replace even a dangling
         // symlink.
         match std::fs::symlink_metadata(path) {
@@ -210,9 +241,22 @@ impl DeviceKey {
     }
 
     /// Writes the key to the file at `path` (readable by this user only),
-    /// replacing what it held: written whole beside it, then renamed into
-    /// place.
+    /// replacing what it held, under the creators' lock where creating
+    /// takes one ([`lock_to_replace`]).
     pub(crate) fn write_to(&self, path: &std::path::Path) -> Result<()> {
+        let io = |error: std::io::Error| {
+            Error::Config(format!("device key at {}: {error}", path.display()))
+        };
+        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        let _lock = lock_to_replace(path).map_err(io)?;
+        self.write_aside(path)
+    }
+
+    /// [`Self::write_to`] without the lock, for a path no creator publishes
+    /// at: written whole beside it, then renamed into place.
+    pub(crate) fn write_aside(&self, path: &std::path::Path) -> Result<()> {
         let io = |error: std::io::Error| {
             Error::Config(format!("device key at {}: {error}", path.display()))
         };
@@ -250,7 +294,8 @@ impl DeviceKey {
     ///
     /// Callers creating it at once, in this process or others, all get the
     /// same key. On Android this leaves an empty `.<file name>.lock` beside
-    /// the key; leave it there.
+    /// the key (leave it there), and fails if another process holds that
+    /// for 5 seconds.
     pub fn load_or_create(path: &std::path::Path) -> Result<Self> {
         let io = |error: std::io::Error| {
             Error::Config(format!("device key at {}: {error}", path.display()))

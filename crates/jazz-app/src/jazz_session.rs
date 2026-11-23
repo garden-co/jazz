@@ -731,9 +731,11 @@ impl JazzSession {
         // Written beside the kept one first: a key that can't be kept fails
         // before the session changes.
         let next = path.with_file_name(format!(".{DEVICE_KEY_FILE}.{}.next", key.user_id()));
-        key.write_to(&next)?;
+        key.write_aside(&next)?;
         let created = self.sign_in_device(key).await.and_then(|()| {
-            std::fs::rename(&next, &path).map_err(|error| key_file_error(&path, error))
+            crate::auth::lock_to_replace(&path)
+                .and_then(|_lock| std::fs::rename(&next, &path))
+                .map_err(|error| key_file_error(&path, error))
         });
         if created.is_err() {
             let _ = std::fs::remove_file(&next);
@@ -954,8 +956,13 @@ impl JazzSession {
                 Ok(key) => return Ok(key),
                 // There now: another's, kept meanwhile, or what can't be read.
                 Err(_) if !is_absent(&path) => return DeviceKey::load_or_create(&path),
+                // On Android creating needs only the lock that writing it
+                // as any other would wait for again, then replace blindly.
+                #[cfg(any(target_os = "android", all(test, target_os = "linux")))]
+                Err(error) => return Err(error),
                 // Still none: where there are no hard links to create it
-                // with (Android, jazz#6256), it is written as any other.
+                // with, it is written as any other.
+                #[cfg(not(any(target_os = "android", all(test, target_os = "linux"))))]
                 Err(_) => {}
             }
         }
@@ -982,4 +989,203 @@ fn is_absent(path: &Path) -> bool {
 
 fn key_file_error(path: &Path, error: std::io::Error) -> Error {
     Error::Config(format!("device key at {}: {error}", path.display()))
+}
+
+/// Android's device-key lock through sessions, run on Linux: the lib's own
+/// tests keep keys as Android does (`auth`'s `cfg`s), as CI runs no Rust
+/// tests on Android. White-box for that reason; offline, so they need no
+/// server.
+#[cfg(all(test, target_os = "linux"))]
+mod android_key_lock_tests {
+    use std::fs::File;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// Longer than a creator's lock is waited for, shorter than twice that.
+    const BOUND: Duration = Duration::from_secs(8);
+    /// Set for the process that holds the lock in
+    /// `a_killed_creator_lets_a_sessions_restore_through`.
+    const HOLDER_DIR: &str = "JAZZ_DEVICE_KEY_HOLDER_DIR";
+
+    #[derive(Clone, Copy, Debug)]
+    enum Replace {
+        Restore,
+        Create,
+        CreateOverKept,
+    }
+
+    async fn session(dir: &Path, initial: Initial) -> JazzSession {
+        let files = include_bytes!("../tests/fixtures/todos/jazz.app.json");
+        let config = SessionConfig::new(AppId::from_name("device-key-lock"))
+            .server("http://127.0.0.1:9/jazz")
+            .allow_insecure_http()
+            .storage(Storage::Dir(dir.into()))
+            .initial(initial);
+        JazzSession::open(AppFiles::new(files.to_vec(), None), config)
+            .await
+            .unwrap()
+    }
+
+    fn creators_lock(dir: &Path) -> File {
+        let file = File::create(dir.join(".device.key.lock")).unwrap();
+        file.lock().unwrap();
+        file
+    }
+
+    fn new_key() -> String {
+        DeviceKey::generate().unwrap().to_string()
+    }
+
+    fn kept(dir: &Path) -> Option<String> {
+        std::fs::read_to_string(dir.join(DEVICE_KEY_FILE)).ok()
+    }
+
+    /// alice's first launch has looked and not yet renamed its key in, as
+    /// she restores or creates an account in another process:
+    ///
+    /// ```text
+    /// first launch ──lock──look──────────────rename──unlock
+    /// alice              └──restore/create──(waits)────────┴──rename──► kept
+    /// ```
+    ///
+    /// Told it worked, she finds that account kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_first_launch_never_overwrites_a_restored_or_created_key() {
+        for replace in [Replace::Restore, Replace::Create, Replace::CreateOverKept] {
+            let dir = tempfile::tempdir().unwrap();
+            if let Replace::CreateOverKept = replace {
+                std::fs::write(dir.path().join(DEVICE_KEY_FILE), new_key()).unwrap();
+            }
+            let alice = session(dir.path(), Initial::SignedOut).await;
+            let guests = dir.path().join("guest.tmp");
+            std::fs::write(&guests, new_key()).unwrap();
+
+            let first_launch = creators_lock(dir.path());
+            let replacing = tokio::spawn({
+                let alice = alice.clone();
+                async move {
+                    match replace {
+                        Replace::Restore => alice.restore_device_account(&new_key()).await,
+                        _ => alice.create_device_account().await,
+                    }
+                }
+            });
+            // Time to get as far as it can before the first launch is done.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            std::fs::rename(&guests, dir.path().join(DEVICE_KEY_FILE)).unwrap();
+            drop(first_launch);
+
+            replacing.await.unwrap().unwrap();
+            let signed_in = alice.export_device_key().unwrap();
+            assert_eq!(
+                kept(dir.path()),
+                Some(signed_in),
+                "{replace:?}: the first launch's key replaced alice's"
+            );
+            alice.close().await.unwrap();
+        }
+    }
+
+    /// A process of alice's is frozen holding the lock (Android freezes
+    /// cached apps): her restore and create fail without touching the kept
+    /// key, and `close` isn't stalled. Once it lets go, `retry` keeps the
+    /// same account.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_frozen_creator_stalls_neither_replacing_nor_close() {
+        for replace in [Replace::Restore, Replace::CreateOverKept] {
+            let dir = tempfile::tempdir().unwrap();
+            let before = new_key();
+            std::fs::write(dir.path().join(DEVICE_KEY_FILE), &before).unwrap();
+            let alice = session(dir.path(), Initial::SignedOut).await;
+            let frozen = creators_lock(dir.path());
+
+            let started = Instant::now();
+            let failed = match replace {
+                Replace::Restore => alice.restore_device_account(&new_key()).await,
+                _ => alice.create_device_account().await,
+            };
+            assert!(failed.is_err(), "{replace:?} didn't wait for the lock");
+            assert!(started.elapsed() < BOUND, "{replace:?}");
+            assert_eq!(kept(dir.path()), Some(before), "{replace:?}");
+
+            drop(frozen);
+            alice.retry().await.unwrap();
+            assert_eq!(
+                kept(dir.path()),
+                alice.export_device_key().ok(),
+                "{replace:?}"
+            );
+            alice.close().await.unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let alice = session(dir.path(), Initial::SignedOut).await;
+        let _frozen = creators_lock(dir.path());
+        let restoring = tokio::spawn({
+            let alice = alice.clone();
+            async move { alice.restore_device_account(&new_key()).await }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let closed = tokio::time::timeout(BOUND, alice.close()).await;
+        closed.expect("close stalled").unwrap();
+        assert!(
+            restoring.await.unwrap().is_err(),
+            "restore didn't wait for the lock"
+        );
+    }
+
+    /// alice's first launch meets a frozen creator: it opens in time, as an
+    /// error, and writes no key beside that creator's back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_first_launch_waits_for_a_frozen_creator_only_so_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let _frozen = creators_lock(dir.path());
+        let alice = tokio::time::timeout(BOUND, session(dir.path(), Initial::Device))
+            .await
+            .expect("open stalled");
+        assert_eq!(alice.snapshot().status, SessionStatus::Error);
+        assert_eq!(kept(dir.path()), None);
+        alice.close().await.unwrap();
+    }
+
+    /// A creator of alice's is killed holding the lock: the restore waiting
+    /// for it in another process goes through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_killed_creator_lets_a_sessions_restore_through() {
+        const NAME: &str = "jazz_session::android_key_lock_tests::a_killed_creator_lets_a_sessions_restore_through";
+        if let Some(dir) = std::env::var_os(HOLDER_DIR) {
+            let _held = creators_lock(Path::new(&dir));
+            std::fs::write(Path::new(&dir).join("held"), "").unwrap();
+            std::thread::sleep(Duration::from_secs(60));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let alice = session(dir.path(), Initial::SignedOut).await;
+        let mut creator = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([NAME, "--exact", "--test-threads=1"])
+            .env(HOLDER_DIR, dir.path())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !dir.path().join("held").exists() {
+            assert!(Instant::now() < deadline, "the creator never took the lock");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let key = new_key();
+        let restoring = tokio::spawn({
+            let (alice, key) = (alice.clone(), key.clone());
+            async move { alice.restore_device_account(&key).await }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let waited = !restoring.is_finished();
+        creator.kill().unwrap();
+        creator.wait().unwrap();
+        restoring.await.unwrap().unwrap();
+        assert!(waited, "restore didn't wait for the lock");
+        assert_eq!(kept(dir.path()), Some(key));
+        alice.close().await.unwrap();
+    }
 }
