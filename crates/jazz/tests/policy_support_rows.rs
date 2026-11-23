@@ -582,6 +582,110 @@ fn support_still_readable_after_a_reconnect_stays_current() {
     assert_current(&server, &now);
 }
 
+/// #5097 across a restart. Ada's replica is durable: her comments read
+/// holds c1, with d1 and both of d1's memberships as its support. She
+/// closes the app; while it is closed her membership of d1 is deleted, so
+/// none of the four is hers to read. When she reopens it, the read resumes
+/// from its stored point with the rows it held stored beside it, so the
+/// support it no longer holds is re-checked and evicted, as after a
+/// reconnect within one process.
+///
+/// ```text
+/// ada ─subscribe comments─► holds c1, d1, m1_ada, m1_bo ─close─► (stored)
+/// server: delete m1_ada
+/// ada ─reopen, resume─► Holds {c2..} ─re-check d1, m1_*─► AccessLost × 3
+/// ```
+#[test]
+fn support_lost_while_the_replica_was_closed_is_evicted_after_it_reopens() {
+    let (d1, d2) = (id(1, 1), id(1, 2));
+    let (m1_ada, m1_bo, m2_ada) = (id(2, 1), id(2, 2), id(2, 3));
+    let (c1, c2) = (id(3, 1), id(3, 2));
+    let server = open(docs_schema(), 0, AuthorSubject::SYSTEM);
+    for doc in [d1, d2] {
+        seed(
+            &server,
+            "docs",
+            doc,
+            cells(&[("owner", subject(BO)), ("visibility", "private".into())]),
+        );
+    }
+    for (member, doc, who) in [(m1_ada, d1, ADA), (m1_bo, d1, BO), (m2_ada, d2, ADA)] {
+        seed(
+            &server,
+            "members",
+            member,
+            cells(&[("doc_id", uuid(doc)), ("user_id", subject(who))]),
+        );
+    }
+    for (comment, doc) in [(c1, d1), (c2, d2)] {
+        seed(
+            &server,
+            "comments",
+            comment,
+            cells(&[("doc", uuid(doc)), ("body", "c".into())]),
+        );
+    }
+    let tables = ["comments", "docs", "members"];
+    let dir = std::env::temp_dir().join(format!("jazz-support-reopen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.sqlite");
+    let open_ada = || {
+        block_on(Db::open_at(
+            DbConfig::new(
+                docs_schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([1; 16]),
+                    author: user(ADA),
+                },
+            ),
+            &path,
+            Default::default(),
+        ))
+        .unwrap()
+    };
+    let comments = Query::from("comments");
+    {
+        let ada = open_ada();
+        let (link, _log) = connect(&server, &ada, user(ADA));
+        let prepared = ada.prepare_query(&comments).unwrap();
+        let _live = block_on(ada.subscribe(&prepared, ReadOpts::default())).unwrap();
+        pump(&server, &ada);
+        assert_eq!(
+            ids(&held(&ada, &tables)),
+            expect(&[
+                ("comments", &[c1, c2]),
+                ("docs", &[d1, d2]),
+                ("members", &[m1_ada, m1_bo, m2_ada]),
+            ])
+        );
+        assert!(ada.detach_connection(&link));
+    }
+
+    block_on(server.delete("members", m1_ada, Default::default())).unwrap();
+
+    let ada = open_ada();
+    let (_link, log) = connect(&server, &ada, user(ADA));
+    let prepared = ada.prepare_query(&comments).unwrap();
+    let _live = block_on(ada.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &ada);
+    let sent = Sent::take(&log);
+    let now = held(&ada, &tables);
+    assert_eq!(
+        ids(&now),
+        expect(&[("comments", &[c2]), ("docs", &[d2]), ("members", &[m2_ada]),]),
+        "after reopening, the support Ada lost while away is gone: {sent:?}"
+    );
+    assert_eq!(
+        distinct(&sent.lost),
+        &rows("docs", &[d1]) | &rows("members", &[m1_ada, m1_bo]),
+        "the reopened read evicts the support it no longer holds: {sent:?}"
+    );
+    assert_current(&server, &now);
+    drop(ada);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Each note's read rests on the note itself through three arms, at every
 /// depth. Ada holds exactly the notes she has a role on, gains one when she
 /// is given a role, and loses one when her role is taken away offline.

@@ -2579,8 +2579,10 @@ struct LiveRead {
     /// point may still count them as held (a support row released with
     /// no change to the result settles nothing), so losing one forgets it.
     released: HashMap<String, HashSet<[u8; 16]>>,
-    /// Whether its resume point was settled in this process. One loaded
-    /// from the store (a reload, or the read reopened) may count rows its
+    /// Whether its holds are what its resume point counts: the point
+    /// settled in this process, or was loaded with the held set stored
+    /// beside it ([`StoredHolds`]). One loaded without such a set (a store
+    /// from before the table, a one-shot read's point) may count rows its
     /// holds here never named, so it is never kept until it settles again.
     settled_here: bool,
 }
@@ -2849,6 +2851,10 @@ pub(crate) struct Client {
     /// known). A forgetting that keeps exactly these leaves the store as it
     /// is; a point whose read closed since is not kept, so it is pruned.
     stored_points: Option<HashSet<[u8; 32]>>,
+    /// The held sets stored beside the resume points (`_jazz_read_holds`),
+    /// by watermark key, once read from the store (`None`: not read yet).
+    /// Kept in step with every write and delete of that table.
+    stored_holds: Option<HashMap<[u8; 32], StoredHolds>>,
 }
 
 /// A session's commit a relay uploads as its own, for its upload: the
@@ -6825,6 +6831,94 @@ pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld
 const WATERMARKS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_watermarks \
     (key BLOB PRIMARY KEY, through INTEGER NOT NULL, context BLOB) WITHOUT ROWID";
 
+/// Per resume point (its `_jazz_watermarks` key), the rows its live read
+/// held as of that point, as results or support ([`StoredHolds`]). Created
+/// by the first held set stored, so that opening an existing store without
+/// one leaves the file byte-identical; a store that never had a live
+/// remote read never has it.
+const READ_HOLDS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_read_holds \
+    (key BLOB PRIMARY KEY, holds BLOB NOT NULL) WITHOUT ROWID";
+
+/// The leading byte of a `_jazz_read_holds` record: the encoding
+/// `jazz.read-holds.v1`, then a postcard [`StoredHolds`].
+const READ_HOLDS_V1: u8 = 1;
+
+/// What a live read held as of its resume point: the opening's `Holds`
+/// plus the changes up to the `Settled` that moved the point there, never
+/// what the store happens to hold. It speaks for the stored point only
+/// while that point is still at `through` in `context`: a build that
+/// predates the table rewrites or drops points without it, which leaves a
+/// record that no longer matches, so it is ignored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredHolds {
+    through: u64,
+    context: Option<[u8; 32]>,
+    /// By stored table, each table's rows: both in ascending order, so a
+    /// set has one encoding.
+    holds: Vec<(String, Vec<[u8; 16]>)>,
+}
+
+impl StoredHolds {
+    fn new(
+        through: u64,
+        context: Option<[u8; 32]>,
+        holds: &HashMap<String, HashSet<[u8; 16]>>,
+    ) -> Self {
+        let mut tables: Vec<(String, Vec<[u8; 16]>)> = holds
+            .iter()
+            .filter(|(_, rows)| !rows.is_empty())
+            .map(|(table, rows)| {
+                let mut rows: Vec<[u8; 16]> = rows.iter().copied().collect();
+                rows.sort_unstable();
+                (table.clone(), rows)
+            })
+            .collect();
+        tables.sort();
+        StoredHolds {
+            through,
+            context,
+            holds: tables,
+        }
+    }
+
+    /// The `jazz.read-holds.v1` record.
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = vec![READ_HOLDS_V1];
+        bytes.extend(encode(self));
+        bytes
+    }
+
+    /// A record in a layout this build does not know (another version, or
+    /// damaged) is no record: its read counts as unknown, as one stored by
+    /// a build without the table does.
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        match bytes.split_first() {
+            Some((&READ_HOLDS_V1, rest)) => decode_stored(rest).ok(),
+            _ => None,
+        }
+    }
+
+    /// Whether it speaks for the point at `through` in `context`.
+    fn describes(&self, through: u64, context: Option<[u8; 32]>) -> bool {
+        self.through == through && self.context == context
+    }
+
+    /// Whether it counts any of `rows` of stored table `table` as held.
+    fn counts(&self, table: &str, rows: &[[u8; 16]]) -> bool {
+        self.holds
+            .iter()
+            .find(|(held, _)| held == table)
+            .is_some_and(|(_, held)| rows.iter().any(|row| held.binary_search(row).is_ok()))
+    }
+
+    fn to_holds(&self) -> HashMap<String, HashSet<[u8; 16]>> {
+        self.holds
+            .iter()
+            .map(|(table, rows)| (table.clone(), rows.iter().copied().collect()))
+            .collect()
+    }
+}
+
 /// A remote query's `_jazz_watermarks` key: what it reads, and as whom.
 /// How far it reaches (tier and wait) is not part of it: every tier's
 /// result settles from the same server state.
@@ -7194,13 +7288,14 @@ impl Inner {
     /// (it was evicted, or is owed whole): each such read opens fresh until
     /// it settles again.
     ///
-    /// Only a live read this connection told what it holds, whose point
-    /// settled in this process, can be cleared: it keeps its resume point
-    /// when neither its holds nor the rows they
-    /// released since that point moved list any of the rows. Every other
-    /// one is forgotten, since nothing here says which rows it held: a
-    /// closed read's stored point, a one-shot read's, and a live read not
-    /// yet told on this connection. Reads sharing a watermark key (the same
+    /// A point is kept when what its read held as of it is known and does
+    /// not list any of the rows: a live read this connection told what it
+    /// holds, whose point settled in this process, by its holds and the
+    /// rows they released since that point moved; any other read, open or
+    /// closed, by the held set stored with its point (`_jazz_read_holds`).
+    /// A point with no such set (a one-shot read's, one stored before the
+    /// table existed, or by a build without it) is forgotten, since nothing
+    /// says which rows it held. Reads sharing a watermark key (the same
     /// query, binding and view: two live reads, or a live and a one-shot
     /// one) share its stored point, kept only when every one of them keeps
     /// it.
@@ -7208,12 +7303,21 @@ impl Inner {
     /// `table` is a stored name, as holds, `AccessLost` and evictions name
     /// tables: a table no holds name is one no told read holds a row of.
     fn forget_watermarks_holding(&mut self, table: &str, rows: &[[u8; 16]]) -> Result<(), Error> {
-        let Some(client) = self.client.as_mut() else {
+        let Some(client) = self.client.as_ref() else {
             return Ok(());
         };
         if client.forgotten {
             return Ok(());
         }
+        let points = self.stored_watermarks()?;
+        self.stored_holds()?;
+        let client = self.client.as_mut().expect("client");
+        let stored = client.stored_holds.as_ref().expect("loaded");
+        let unaffected = |key: &[u8; 32], through: u64, context: Option<[u8; 32]>| {
+            stored
+                .get(key)
+                .is_some_and(|held| held.describes(through, context) && !held.counts(table, rows))
+        };
         // A stored point is kept only when every read using its key keeps
         // it: reads sharing a key read the same result, and any one of them
         // counting a lost row speaks for the stored row.
@@ -7222,8 +7326,8 @@ impl Inner {
             let Some(key) = read.watermark else {
                 continue;
             };
-            let keep = read.through.is_some()
-                && read.live().is_some_and(|live| {
+            let keep = read.through.is_some_and(|through| {
+                let held_here = read.live().is_some_and(|live| {
                     let counts = |held: &HashMap<String, HashSet<[u8; 16]>>| {
                         held.get(table)
                             .is_some_and(|held| rows.iter().any(|row| held.contains(row)))
@@ -7233,7 +7337,17 @@ impl Inner {
                         && !counts(&live.holds)
                         && !counts(&live.released)
                 });
+                held_here || unaffected(&key, through, read.context)
+            });
             *keeps.entry(key).or_insert(true) &= keep;
+        }
+        // A closed read's point, by the set stored with it.
+        for (key, point) in &points {
+            if let Some((through, context)) = *point {
+                keeps
+                    .entry(*key)
+                    .or_insert_with(|| unaffected(key, through, context));
+            }
         }
         let kept: HashSet<[u8; 32]> = keeps
             .into_iter()
@@ -7250,45 +7364,113 @@ impl Inner {
             return Ok(());
         }
         client.stored_points = Some(kept.clone());
-        if self.has_table("_jazz_watermarks")? {
-            if kept.is_empty() {
+        if kept.is_empty() {
+            if self.has_table("_jazz_watermarks")? {
                 self.exec("DELETE FROM _jazz_watermarks", [])
                     .map_err(storage)?;
-            } else {
-                let mut stored = Vec::new();
-                {
-                    let mut statement = self
-                        .conn
-                        .prepare("SELECT key FROM _jazz_watermarks")
-                        .map_err(storage)?;
-                    let keys = statement
-                        .query_map([], |row| row.get::<_, Vec<u8>>(0))
-                        .map_err(storage)?;
-                    for key in keys {
-                        stored.push(key.map_err(storage)?);
-                    }
-                }
-                for key in stored {
-                    let keep =
-                        <[u8; 32]>::try_from(key.as_slice()).is_ok_and(|key| kept.contains(&key));
-                    if !keep {
-                        self.exec(
-                            "DELETE FROM _jazz_watermarks WHERE key = ?1",
-                            rusqlite::params![key],
-                        )
-                        .map_err(storage)?;
-                    }
-                }
             }
+            if self.has_table("_jazz_read_holds")? {
+                self.exec("DELETE FROM _jazz_read_holds", [])
+                    .map_err(storage)?;
+            }
+            if let Some(stored) = self
+                .client
+                .as_mut()
+                .and_then(|client| client.stored_holds.as_mut())
+            {
+                stored.clear();
+            }
+            return Ok(());
         }
+        let mut gone = Vec::new();
+        for (raw, _) in points.iter().filter(|(key, _)| !kept.contains(key)) {
+            self.exec(
+                "DELETE FROM _jazz_watermarks WHERE key = ?1",
+                rusqlite::params![raw.as_slice()],
+            )
+            .map_err(storage)?;
+            gone.push(*raw);
+        }
+        for raw in self.malformed_watermarks()? {
+            self.exec(
+                "DELETE FROM _jazz_watermarks WHERE key = ?1",
+                rusqlite::params![raw],
+            )
+            .map_err(storage)?;
+        }
+        self.forget_read_holds(&gone)?;
         Ok(())
     }
 
+    /// The stored resume points, by key: where each settled through and in
+    /// which read context (`None` for one this build cannot read, which no
+    /// read resumes from and which is forgotten with the rest).
+    #[allow(clippy::type_complexity)]
+    fn stored_watermarks(&self) -> Result<Vec<([u8; 32], Option<(u64, Option<[u8; 32]>)>)>, Error> {
+        if !self.has_table("_jazz_watermarks")? {
+            return Ok(Vec::new());
+        }
+        let mut statement = self
+            .conn
+            .prepare("SELECT key, through, context FROM _jazz_watermarks")
+            .map_err(storage)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                ))
+            })
+            .map_err(storage)?;
+        let mut points = Vec::new();
+        for row in rows {
+            let (key, through, context) = row.map_err(storage)?;
+            let Ok(key) = <[u8; 32]>::try_from(key.as_slice()) else {
+                continue;
+            };
+            let point = match context {
+                None => Some((through as u64, None)),
+                Some(context) => <[u8; 32]>::try_from(context.as_slice())
+                    .ok()
+                    .map(|context| (through as u64, Some(context))),
+            };
+            points.push((key, point));
+        }
+        Ok(points)
+    }
+
+    /// Stored resume point keys of another length than a key's: no read
+    /// names them.
+    fn malformed_watermarks(&self) -> Result<Vec<Vec<u8>>, Error> {
+        if !self.has_table("_jazz_watermarks")? {
+            return Ok(Vec::new());
+        }
+        let mut statement = self
+            .conn
+            .prepare("SELECT key FROM _jazz_watermarks WHERE length(key) != 32")
+            .map_err(storage)?;
+        let keys = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(storage)?;
+        keys.collect::<Result<_, _>>().map_err(storage)
+    }
+
     /// Record that a remote query's result settled through authority seq
-    /// `through`, replacing where it had settled before.
+    /// `through`, replacing where it had settled before, with what its live
+    /// read held as of that point (`holds`; `None` for a read that cannot
+    /// say: a one-shot read, or a live one this connection has not told
+    /// what it holds). The held set is replaced whole with the point, in
+    /// the same write, or removed: a point is never left with a set that
+    /// describes another one.
     /// It is stamped with this connection's read context; before the
     /// upstream's `Welcome` said which, nothing is stored.
-    fn store_watermark(&self, key: &[u8; 32], through: u64) -> Result<(), Error> {
+    fn store_watermark(
+        &mut self,
+        key: &[u8; 32],
+        through: u64,
+        holds: Option<&HashMap<String, HashSet<[u8; 16]>>>,
+    ) -> Result<(), Error> {
         let Some(context) = self.client.as_ref().and_then(|client| client.context) else {
             return Ok(());
         };
@@ -7302,6 +7484,102 @@ impl Inner {
             ],
         )
         .map_err(storage)?;
+        match holds {
+            Some(holds) => {
+                let record = StoredHolds::new(through, context, holds);
+                self.exec(READ_HOLDS_DDL, []).map_err(storage)?;
+                self.exec(
+                    "INSERT OR REPLACE INTO _jazz_read_holds (key, holds) VALUES (?1, ?2)",
+                    rusqlite::params![key.as_slice(), record.encode()],
+                )
+                .map_err(storage)?;
+                if let Some(stored) = self
+                    .client
+                    .as_mut()
+                    .and_then(|client| client.stored_holds.as_mut())
+                {
+                    stored.insert(*key, record);
+                }
+            }
+            None => self.forget_read_holds(&[*key])?,
+        }
+        Ok(())
+    }
+
+    /// The held sets stored beside the resume points, read once.
+    fn stored_holds(&mut self) -> Result<&HashMap<[u8; 32], StoredHolds>, Error> {
+        let loaded = self
+            .client
+            .as_ref()
+            .is_some_and(|client| client.stored_holds.is_some());
+        if !loaded {
+            let mut stored = HashMap::new();
+            if self.has_table("_jazz_read_holds")? {
+                let mut statement = self
+                    .conn
+                    .prepare("SELECT key, holds FROM _jazz_read_holds")
+                    .map_err(storage)?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(storage)?;
+                for row in rows {
+                    let (key, bytes) = row.map_err(storage)?;
+                    if let (Ok(key), Some(record)) = (
+                        <[u8; 32]>::try_from(key.as_slice()),
+                        StoredHolds::decode(&bytes),
+                    ) {
+                        stored.insert(key, record);
+                    }
+                }
+            }
+            self.client.as_mut().expect("client").stored_holds = Some(stored);
+        }
+        Ok(self
+            .client
+            .as_ref()
+            .and_then(|client| client.stored_holds.as_ref())
+            .expect("loaded"))
+    }
+
+    /// What the live read under `key` held as of its stored point at
+    /// `through` in `context`, if that was stored.
+    fn stored_holds_for(
+        &mut self,
+        key: &[u8; 32],
+        through: u64,
+        context: Option<[u8; 32]>,
+    ) -> Result<Option<StoredHolds>, Error> {
+        Ok(self
+            .stored_holds()?
+            .get(key)
+            .filter(|record| record.describes(through, context))
+            .cloned())
+    }
+
+    /// Drop the held sets stored for `keys` (their points went, or moved
+    /// without one).
+    fn forget_read_holds(&mut self, keys: &[[u8; 32]]) -> Result<(), Error> {
+        if keys.is_empty() || !self.has_table("_jazz_read_holds")? {
+            return Ok(());
+        }
+        for key in keys {
+            self.exec(
+                "DELETE FROM _jazz_read_holds WHERE key = ?1",
+                rusqlite::params![key.as_slice()],
+            )
+            .map_err(storage)?;
+        }
+        if let Some(stored) = self
+            .client
+            .as_mut()
+            .and_then(|client| client.stored_holds.as_mut())
+        {
+            for key in keys {
+                stored.remove(key);
+            }
+        }
         Ok(())
     }
 
@@ -8839,6 +9117,7 @@ impl Client {
             releasing: None,
             forgotten: false,
             stored_points: None,
+            stored_holds: None,
         }
     }
 }
@@ -9664,13 +9943,24 @@ impl Inner {
         };
         live.publish();
         let signal = live.signal.clone();
-        let read = self.active_read(
+        let mut read = self.active_read(
             query,
             binding.clone(),
             include_deleted,
             view,
             ReadLifetime::Live(Box::new(live)),
         );
+        // A point stored with what the read held as of it (an earlier
+        // process's, or a read reopened) resumes knowing those rows: its
+        // first `Holds` re-checks the ones it no longer holds, as after a
+        // reconnect, and an eviction clears it only if they list the row.
+        if let (Some(key), Some(through)) = (read.watermark, read.through)
+            && let Ok(Some(stored)) = self.stored_holds_for(&key, through, read.context)
+            && let Some(live) = read.live_mut()
+        {
+            live.holds = stored.to_holds();
+            live.settled_here = true;
+        }
         let client = self.client.as_mut().expect("client");
         client.outbox.push(SyncMessage::Read {
             id,
@@ -10728,6 +11018,9 @@ impl Db {
                         let client = inner.client.as_mut().expect("client");
                         let resumable = client.whole.is_empty();
                         let mut live_watermark = None;
+                        // What the live read holds as of its new point, if
+                        // this connection told it (see `StoredHolds`).
+                        let mut live_holds = None;
                         let mut once = false;
                         if let Some(read) = client.reads.get_mut(&id) {
                             let (listed, save_after) = match &mut read.lifetime {
@@ -10767,6 +11060,7 @@ impl Db {
                                         client.forgotten = false;
                                         client.stored_points = None;
                                         live_watermark = read.watermark;
+                                        live_holds = live.told().then(|| live.holds.clone());
                                     }
                                     (members.clone(), false)
                                 }
@@ -10794,7 +11088,7 @@ impl Db {
                         // Live checkpoints retain their existing savepoint ordering:
                         // a subsequent membership eviction can invalidate them.
                         if let Some(watermark) = live_watermark {
-                            inner.store_watermark(&watermark, through)?;
+                            inner.store_watermark(&watermark, through, live_holds.as_ref())?;
                         }
                     }
                     SyncMessage::CheckAllowedResult { id, result } => {
@@ -11146,7 +11440,9 @@ impl Db {
             if let Some(watermark) = watermark {
                 let mut inner = self.inner.borrow_mut();
                 if inner.client.as_ref().expect("client").whole.is_empty() {
-                    inner.store_watermark(&watermark, through)?;
+                    // A one-shot read lists its result, not the rows it
+                    // rests on: it stores no held set.
+                    inner.store_watermark(&watermark, through, None)?;
                     let client = inner.client.as_mut().expect("client");
                     client.forgotten = false;
                     client.stored_points = None;
@@ -17614,5 +17910,65 @@ mod tests {
         // An older link's answer changes nothing.
         assert!(!live.answered(2, true));
         assert!(!live.signal.confirmed_globally());
+    }
+
+    /// `jazz.read-holds.v1` pinned byte for byte: a version byte, then the
+    /// postcard record with tables and rows in ascending order, so one held
+    /// set has one encoding whatever order it was built in. White-box: the
+    /// bytes are the storage contract (AGENTS.md, durable encodings), and
+    /// no public API shows them.
+    #[test]
+    fn read_holds_v1_encoding_is_pinned() {
+        let held = HashMap::from([
+            ("t2".to_owned(), HashSet::from([[1; 16]])),
+            ("t1".to_owned(), HashSet::from([[2; 16], [0; 16]])),
+            ("empty".to_owned(), HashSet::new()),
+        ]);
+        let record = StoredHolds::new(300, None, &held);
+        let mut expected = vec![
+            0x01, // jazz.read-holds.v1
+            0xac, 0x02, // through: 300 (varint)
+            0x00, // context: none
+            0x02, // two tables (an empty one is left out)
+            0x02, b't', b'1', 0x02, // "t1", two rows
+        ];
+        expected.extend([0u8; 16]);
+        expected.extend([2u8; 16]);
+        expected.extend([0x02, b't', b'2', 0x01]);
+        expected.extend([1u8; 16]);
+        assert_eq!(record.encode(), expected);
+        assert_eq!(StoredHolds::decode(&expected), Some(record.clone()));
+
+        let with_context = StoredHolds::new(1, Some([9; 32]), &HashMap::new());
+        let mut expected = vec![0x01, 0x01, 0x01];
+        expected.extend([9u8; 32]);
+        expected.push(0x00);
+        assert_eq!(with_context.encode(), expected);
+
+        // Another version, trailing bytes or a truncated record: no record.
+        let mut bytes = record.encode();
+        bytes[0] = 2;
+        assert_eq!(StoredHolds::decode(&bytes), None);
+        let mut bytes = record.encode();
+        bytes.push(0);
+        assert_eq!(StoredHolds::decode(&bytes), None);
+        let bytes = record.encode();
+        assert_eq!(StoredHolds::decode(&bytes[..bytes.len() - 1]), None);
+        assert_eq!(StoredHolds::decode(&[]), None);
+    }
+
+    /// A stored set speaks only for the point it was written with, and
+    /// counts rows by table.
+    #[test]
+    fn a_stored_held_set_describes_its_own_point() {
+        let held = HashMap::from([("t".to_owned(), HashSet::from([[3; 16]]))]);
+        let record = StoredHolds::new(10, Some([1; 32]), &held);
+        assert!(record.describes(10, Some([1; 32])));
+        assert!(!record.describes(11, Some([1; 32])), "a moved point");
+        assert!(!record.describes(10, None), "another read context");
+        assert!(record.counts("t", &[[0; 16], [3; 16]]));
+        assert!(!record.counts("t", &[[4; 16]]));
+        assert!(!record.counts("u", &[[3; 16]]));
+        assert_eq!(record.to_holds(), held);
     }
 }

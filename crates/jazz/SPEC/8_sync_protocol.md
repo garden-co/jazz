@@ -556,7 +556,9 @@ A read's first `Holds` on a connection is its whole set and goes with its
 opening, never before it; later ones carry only changes, after the tick's
 `Rows` and `AccessLost` and before its `Settled`. The replica keeps each live
 read's set in memory and across reconnects, replacing it with the read's
-first `Holds` on the new connection; neither side stores it. A row a
+first `Holds` on the new connection. A durable replica also stores the set as
+of each resume point beside that point (§8.11), so a read reopened after a
+restart starts from the set it held then. The server stores none. A row a
 replacing `Holds` drops that no live read holds, and that no `members` listing
 evicted, is no longer kept current for the reader: the replica asks for it
 again with `ResendWhole`, and the server ships it whole if the reader may still
@@ -999,10 +1001,28 @@ resumed read leaves the replica with the same rows as a fresh one
 (`INV-SYNC-25`, `INV-SYNC-11`). A replica that cannot read its watermark opens
 the read fresh.
 
+Beside a live read's watermark the replica stores what that read held as of it,
+in `_jazz_read_holds` under the same key: the read's opening `Holds` plus the
+changes up to the `Settled` that moved the point, never what the store happens
+to hold. The record is the encoding `jazz.read-holds.v1`: a version byte, then
+the point's `through` and read context and the held rows by stored table, each
+in ascending order. It is written with the watermark, in the same tick, and
+replaced whole each time; a point a read cannot vouch for (a one-shot read's,
+or a live read this connection has not told what it holds) is stored without
+one. A record speaks for its point only while that point is still at its
+`through` in its context: a build without the table may rewrite or drop
+points and leave a record that no longer matches, which is then ignored. The
+table is created by the first record, so a store that never had a live remote
+read is unchanged.
+
 A watermark claims the replica holds the result as it settled. Two events make
 that untrue for results the replica cannot name, so the replica forgets every
-watermark when either happens, and each read opens fresh until it settles
-again:
+watermark that may count the row when either happens, and each such read opens
+fresh until it settles again. A point whose read's held set is known (in
+memory, or stored with it) and does not list the row is kept; a point with no
+known set (a one-shot read's, one stored before the table existed) is forgotten,
+since nothing says which rows it held. Points sharing a key are kept only when
+every read using that key keeps them. The events:
 
 - an `AccessLost` for a row the replica held: a result settled earlier may
   have held the row, and a resume from it would count the row as held after it
