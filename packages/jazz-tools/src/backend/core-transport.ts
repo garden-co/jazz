@@ -1,10 +1,10 @@
 /**
- * How a backend reaches a core over the network: `fetch` for its HTTP routes
- * and a WebSocket for each session. By default the global `fetch` and Node's
- * WebSocket (undici, which takes upgrade headers). In a Cloudflare Worker a
- * core in a Durable Object of the same Worker is reached through its binding
- * instead: `stub.fetch`, and a socket upgraded through `stub.fetch`.
+ * A backend sends HTTP requests and opens a socket per core session.
+ * Node's WebSocket accepts upgrade headers directly. A Worker upgrades with
+ * fetch, using the global fetch for a remote core or stub.fetch for a binding.
  */
+
+import { backendNative } from "./backend-native.js";
 
 /** What `openRemoteCore` uses of a WebSocket. */
 export interface CoreWebSocket {
@@ -27,8 +27,15 @@ export interface CoreTransport {
   openWebSocket(url: string, headers: Record<string, string>): CoreWebSocket;
 }
 
-/** The global `fetch` and Node's WebSocket. */
+/** A remote core reached through the host's HTTP and WebSocket APIs. */
 export function networkTransport(): CoreTransport {
+  // A Worker sends upgrade headers through fetch. Keep the backend credential
+  // on the configured origin if the core answers with a redirect.
+  if (backendNative().host === "workerd") {
+    return bindingTransport({
+      fetch: (input, init) => fetch(input, { ...init, redirect: "manual" }),
+    });
+  }
   return {
     fetch: (url, init) => fetch(url, init),
     openWebSocket(url, headers) {

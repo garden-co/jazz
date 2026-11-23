@@ -4280,15 +4280,6 @@ async function compiledApp(options: CreateJazzOptions): Promise<LoadedBackendApp
   const tables = isRecord(current) ? current.tables : undefined;
   const hasEncryptionTables =
     isRecord(tables) && Object.keys(tables).some((table) => table.startsWith("__e2ee_"));
-  // jazz-wasm's backend build has no keyless openers yet: refuse at open.
-  if (
-    backendNative().host === "workerd" &&
-    (hasEncryptionTables || declaresEncryption(options.app))
-  ) {
-    throw new Error(
-      "createJazz: opening an app that declares end-to-end encryption is not supported in a Cloudflare Worker yet",
-    );
-  }
   if (
     hasEncryptionTables &&
     (!declaresEncryption(options.app) ||

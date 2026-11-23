@@ -410,8 +410,8 @@ Leaving wipes the keys, not the browser's local copy of the plain data.
   one entry that cannot be removed.
 - **Removing a member cannot take back what they read.** A message can be sealed under the old key
   until the key is rotated.
-- **The Cloudflare Worker engine refuses encrypted apps.** Run the backend on Node. BandChat's Hono
-  server does.
+- **BandChat's Hono server runs on Node.** A Cloudflare Worker can also serve an encrypted app
+  by connecting to a native Jazz core with `remote()`.
 - **The room list is not built for hundreds of rooms.** It runs one live query for each room.
 
 The rest of the limits are on [Encryption limits](/docs/e2ee/limits).

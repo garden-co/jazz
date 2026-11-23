@@ -1426,7 +1426,11 @@ impl WasmDb {
         token: Option<String>,
         claimed_author: Option<String>,
     ) -> Result<WasmDb, JsValue> {
-        let hooks = encryption::keyless_hooks(&bindings, &app_id, &environment)?;
+        let hooks = jazz_e2ee_client::KeylessHooks::relay(encryption::keyless_declarations(
+            &bindings,
+            &app_id,
+            &environment,
+        )?);
         let how = match (&token, &claimed_author) {
             (Some(token), Some(claimed_author)) => OpenAs::SelfSigned {
                 token,

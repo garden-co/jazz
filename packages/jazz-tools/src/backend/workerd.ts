@@ -5,8 +5,8 @@
  * (`jazz-wasm/backend`, which the browser build leaves out), initialised
  * from its statically imported module, which wrangler bundles as a
  * CompiledWasm module.
- * Only `durableObjects()` stores run here; `createJazz` runs in the app's
- * backend Durable Object (`jazzBackend`).
+ * `createJazz` runs in the app's backend Durable Object (`jazzBackend`),
+ * with a bound Durable Object core or a remote core.
  */
 import * as wasm from "jazz-wasm/backend";
 import { provideBackendNative, type BackendNative } from "./backend-native.js";

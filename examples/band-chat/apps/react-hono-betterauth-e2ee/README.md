@@ -28,8 +28,8 @@ pnpm test:e2e     # Playwright, against `pnpm dev`
 Deployments set `APP_ORIGIN`, `JAZZ_APP_ID` and `BETTER_AUTH_SECRET`, and
 optionally `JAZZ_SERVER_URL` with the app's secrets (see `.env.example`).
 
-The backend runs on Node. Jazz's Cloudflare Worker engine refuses encrypted
-apps for now, so this app has no Worker deployment.
+This example runs its Hono backend on Node. A Cloudflare Worker can also
+serve encrypted apps by connecting to a native Jazz core with `remote()`.
 
 ### The browser tests
 

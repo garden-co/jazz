@@ -158,24 +158,18 @@ impl WasmEncryptionRuntime {
     }
 }
 
-/// The keyless hooks of an app's compiled bindings: a worker's, which holds
-/// and relays sealed rows and no keys.
+/// Bind the app's encryption declarations to this deployment.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn keyless_hooks(
+pub(crate) fn keyless_declarations(
     bindings: &str,
     app_id: &str,
     environment: &str,
-) -> Result<Rc<dyn jazz::e2ee::E2eeHooks>, JsValue> {
+) -> Result<jazz::e2ee::E2eeDeclarations, JsValue> {
     let app = jazz::tools::AppId::from_string(app_id)
         .unwrap_or_else(|_| jazz::tools::AppId::from_name(app_id));
-    let declarations = jazz::tools::deployment::artifact::bound_declarations(
-        bindings.as_bytes(),
-        app,
-        environment,
-    )
-    .map_err(|failure| error(failure.to_string()))?
-    .ok_or_else(|| error("the app's bindings declare no encryption"))?;
-    Ok(jazz_e2ee_client::KeylessHooks::relay(declarations))
+    jazz::tools::deployment::artifact::bound_declarations(bindings.as_bytes(), app, environment)
+        .map_err(|failure| error(failure.to_string()))?
+        .ok_or_else(|| error("the app's bindings declare no encryption"))
 }
 
 fn error(message: impl AsRef<str>) -> JsValue {
@@ -195,6 +189,27 @@ fn proof_of(proof: &JsValue) -> Result<(Option<String>, Option<String>), JsValue
 }
 
 impl WasmDb {
+    #[cfg(all(target_arch = "wasm32", feature = "backend"))]
+    fn open_keyless_as(
+        schema: &[u8],
+        config: &[u8],
+        bindings: &str,
+        app_id: &str,
+        environment: &str,
+        how: OpenAs<'_>,
+    ) -> Result<Self, JsValue> {
+        super::initialize_wasm_tracing();
+        let (config, identity, trusted) = Self::prepare_open(schema, config, how)?;
+        let hooks = jazz_e2ee_client::KeylessHooks::hooks(keyless_declarations(
+            bindings,
+            app_id,
+            environment,
+        )?);
+        let db = block_on(binding_host::open_memory(config.with_e2ee(hooks)))
+            .map_err(super::to_js_error)?;
+        Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
+    }
+
     /// The encryption runtime of this database, or why there is none.
     fn encryption(&self) -> Result<Rc<Encryption>, JsValue> {
         self.open_inner()?
@@ -208,6 +223,57 @@ impl WasmDb {
 
 #[wasm_bindgen]
 impl WasmDb {
+    /// Open the Worker's own database with keyless backend hooks.
+    #[cfg(all(target_arch = "wasm32", feature = "backend"))]
+    #[wasm_bindgen(js_name = openMemoryAsBackendKeyless)]
+    pub fn open_memory_as_backend_keyless(
+        schema: &[u8],
+        config: &[u8],
+        bindings: &str,
+        app_id: &str,
+        environment: &str,
+    ) -> Result<WasmDb, JsValue> {
+        Self::open_keyless_as(
+            schema,
+            config,
+            bindings,
+            app_id,
+            environment,
+            OpenAs::Backend,
+        )
+    }
+
+    /// Serve a thin session with the same keyless hooks, as its own author.
+    #[cfg(all(target_arch = "wasm32", feature = "backend"))]
+    #[wasm_bindgen(js_name = openMemoryKeyless)]
+    pub fn open_memory_keyless(
+        schema: &[u8],
+        config: &[u8],
+        bindings: &str,
+        app_id: &str,
+        environment: &str,
+        proof: JsValue,
+    ) -> Result<WasmDb, JsValue> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Proof {
+            token: String,
+            app_id: String,
+            claimed_author: String,
+        }
+        let proof: Option<Proof> =
+            serde_wasm_bindgen::from_value(proof).map_err(super::to_js_error)?;
+        let how = match &proof {
+            Some(proof) => OpenAs::SelfSigned {
+                token: &proof.token,
+                app_id: &proof.app_id,
+                claimed_author: &proof.claimed_author,
+            },
+            None => OpenAs::Untrusted,
+        };
+        Self::open_keyless_as(schema, config, bindings, app_id, environment, how)
+    }
+
     /// Open an encrypted app's in-memory database with its runtime
     /// installed (see [`WasmEncryptionRuntime`]). `proof` is `{ token,
     /// claimedAuthor }` for a self-signed client identity.

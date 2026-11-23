@@ -7,7 +7,9 @@ languageTabs: backend
 - **Equality only.** Encrypted columns can be filtered by equality when they are listed in `equality`.
   Ordering, ranges, aggregates and text search on an encrypted column fail with an error naming the
   pattern.
-- **Encrypted backends run on Node.** The Cloudflare Worker engine refuses encrypted apps.
+- **Cloudflare Workers can serve encrypted apps.** Connect the Worker backend to a native Jazz core
+  with `remote()`. The Worker holds no keys. Running a key-holding client on the Worker and
+  deploying an encrypted schema to a Durable Object core are unsupported.
 - **The backend cannot compute on encrypted content.** It relays it and works on plain columns.
 - **Keys follow members.** A member's device gets a key from another member's device; if no member
   device that holds it is online, a new member waits, and a write waits ten seconds before it fails
