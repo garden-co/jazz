@@ -74,7 +74,8 @@ type Session struct {
 // OpenSession opens a session for the app cfg describes: cfg.App and
 // cfg.Computed as jazzapp sets them (cfg.App = jazzapp.App), ServerURL the
 // app's /jazz, and DataDir where each account's store and the device key
-// live. cfg.Auth is Token (the app's own sign-in) or nil.
+// live. cfg.Auth is Token (the app's own sign-in) or nil. As with Open,
+// when ctx ends first it returns once what it opened is closed again.
 func OpenSession(ctx context.Context, cfg Config, opts SessionOptions) (*Session, error) {
 	if err := cfg.checkTransport(); err != nil {
 		return nil, err
@@ -114,11 +115,13 @@ func OpenSession(ctx context.Context, cfg Config, opts SessionOptions) (*Session
 		err      error
 	}
 	done := make(chan opened, 1)
+	var id uint64
+	if provider != nil {
+		id = nextProvider.Add(1)
+	}
 	go func() {
-		var id uint64
 		cb, cbCtx := uintptr(0), uintptr(0)
 		if provider != nil {
-			id = nextProvider.Add(1)
 			providers.Store(id, provider)
 			cb, cbCtx = ffi.tokenCallback, uintptr(id)
 		}
@@ -141,12 +144,12 @@ func OpenSession(ctx context.Context, cfg Config, opts SessionOptions) (*Session
 		return &Session{app: cfg.Computed,
 			owner: &DB{handle: o.h, app: cfg.Computed, provider: o.provider}}, nil
 	case <-ctx.Done():
-		go func() {
-			if o := <-done; o.h != 0 {
-				ffi.sessionClose(o.h)
-				releaseProvider(o.provider)
-			}
-		}()
+		// As Open: the store is free again when OpenSession returns.
+		cancelFetches(id)
+		if o := <-done; o.h != 0 {
+			ffi.sessionClose(o.h)
+		}
+		releaseProvider(id)
 		return nil, ctx.Err()
 	}
 }
@@ -205,20 +208,43 @@ func (s *Session) DB(ctx context.Context) (*DB, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	session, release, err := s.owner.acquire(nil)
-	if err != nil {
-		return nil, err
+	type got struct {
+		h   uintptr
+		err error
 	}
-	defer release()
-	var cerr uintptr
-	h := ffi.sessionJazz(session, &cerr)
-	if err := takeError(cerr); err != nil {
-		return nil, err
+	done := make(chan got, 1)
+	go func() {
+		session, release, err := s.owner.acquire(nil)
+		if err != nil {
+			done <- got{err: err}
+			return
+		}
+		defer release()
+		var cerr uintptr
+		h := ffi.sessionJazz(session, &cerr)
+		if err := takeError(cerr); err != nil {
+			done <- got{err: err}
+			return
+		}
+		if h == 0 {
+			err = &Error{Kind: KindRefused, Message: "no handle"}
+		}
+		done <- got{h, err}
+	}()
+	select {
+	case g := <-done:
+		if g.err != nil {
+			return nil, g.err
+		}
+		return &DB{handle: g.h, app: s.app}, nil
+	case <-ctx.Done():
+		go func() {
+			if g := <-done; g.h != 0 {
+				ffi.close(g.h)
+			}
+		}()
+		return nil, ctx.Err()
 	}
-	if h == 0 {
-		return nil, &Error{Kind: KindRefused, Message: "no handle"}
-	}
-	return &DB{handle: h, app: s.app}, nil
 }
 
 // Refresh says the app's own sign-in changed: the session asks the Token
