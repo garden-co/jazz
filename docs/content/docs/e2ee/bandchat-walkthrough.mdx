@@ -568,8 +568,9 @@ export async function leaveThisBrowser(db: Db) {
 A sole device cannot leave. Nothing would hold the account's keys. The call fails with the code
 `no-other-device`, and BandChat says an only device cannot leave.
 
-Otherwise the row shows "Removal pending". The browser stays usable. When another of the person's
-devices is online, it completes the removal by itself. Then this browser's keys for the account are
+Otherwise, once Jazz lists the published request, the row shows "Removal pending". The browser stays
+usable. When another of the person's devices is online, it completes the removal by itself, sometimes
+before "Removal pending" has shown. Then this browser's keys for the account are
 erased, and the browser signs itself out.
 
 Before sending the request, BandChat records the account and this browser's device ID in
