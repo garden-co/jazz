@@ -33,17 +33,25 @@ teardown() {
     t4_vercel rm --yes "$url" >> "$T4_WORK/teardown.log" 2>&1 && echo "PASS teardown: deployment $url removed" || { echo "FAIL teardown: deployment $url not removed (see teardown.log)"; FAIL=1; }
   fi
   if [ -n "$core" ]; then
-    # --all: plain `sandbox ls` hides stopped sandboxes, which still have to go.
-    if t4_vercel sandbox ls --all --project "$VERCEL_PROJECT_ID" 2>/dev/null | grep -q "^$core "; then
-      t4_vercel sandbox rm --project "$VERCEL_PROJECT_ID" "$core" >> "$T4_WORK/teardown.log" 2>&1 && echo "PASS teardown: sandbox $core removed" || { echo "FAIL teardown: sandbox $core not removed (see teardown.log)"; FAIL=1; }
+    # `sandbox rm` returns before a running session ends: the session runs on, holds the Drive and snapshots itself
+    # when it stops (RC 45103746609). So stop the session first, then remove, then wait until the Sandbox is really
+    # gone and the Drive detached. Every wait is bounded (3 min) and a leftover still FAILs.
+    gone() { ! t4_vercel sandbox ls --all --project "$VERCEL_PROJECT_ID" 2>/dev/null | grep -q "^$core "; }
+    drive() { t4_vercel sandbox drives ls --project "$VERCEL_PROJECT_ID" --name-prefix "$core-data" 2>/dev/null | grep "^$core-data "; }
+    if ! gone; then
+      t4_vercel sandbox stop --project "$VERCEL_PROJECT_ID" "$core" >> "$T4_WORK/teardown.log" 2>&1 || true
+      t4_vercel sandbox rm --project "$VERCEL_PROJECT_ID" "$core" >> "$T4_WORK/teardown.log" 2>&1 || true
+      for i in $(seq 36); do gone && break; sleep 5; done
+      gone && echo "PASS teardown: sandbox $core removed" || { echo "FAIL teardown: sandbox $core still listed 3 min after stop and remove (see teardown.log)"; FAIL=1; }
     fi
-    # A Drive can't be deleted while a Sandbox holds it: wait (up to 3 min) until it shows no attached sandbox.
-    for i in $(seq 36); do
-      row=$(t4_vercel sandbox drives ls --project "$VERCEL_PROJECT_ID" --name-prefix "$core-data" 2>/dev/null | grep "^$core-data ")
-      [ -z "$row" ] || [ "$(echo "$row" | awk '{print $(NF-1)}')" = - ] && break; sleep 5
-    done
-    if [ -z "$row" ]; then echo "PASS teardown: no drive $core-data left"
-    else t4_vercel sandbox drives rm --project "$VERCEL_PROJECT_ID" "$core-data" >> "$T4_WORK/teardown.log" 2>&1 && echo "PASS teardown: drive $core-data removed" || { echo "FAIL teardown: drive $core-data not removed (see teardown.log)"; FAIL=1; }; fi
+    # A Drive can't be deleted while a session holds it: wait until it shows neither an attached sandbox nor session.
+    row=$(drive)
+    for i in $(seq 36); do [ -z "$row" ] || [ "$(echo "$row" | awk '{print $(NF-1) $NF}')" = -- ] && break; sleep 5; row=$(drive); done
+    if [ -n "$row" ]; then
+      t4_vercel sandbox drives rm --project "$VERCEL_PROJECT_ID" "$core-data" >> "$T4_WORK/teardown.log" 2>&1 || true
+      for i in $(seq 12); do row=$(drive); [ -z "$row" ] && break; sleep 5; done
+    fi
+    [ -z "$(drive)" ] && echo "PASS teardown: drive $core-data removed" || { echo "FAIL teardown: drive $core-data still there (see teardown.log)"; FAIL=1; }
   fi
   step "teardown end"; [ "$FAIL" = 0 ] || exit 1
 }
