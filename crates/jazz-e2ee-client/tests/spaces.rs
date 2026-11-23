@@ -456,6 +456,109 @@ fn a_member_without_a_delivery_sees_key_pending_once() {
     });
 }
 
+/// Alice holds both space keys. Bob belongs only to the second space.
+/// A note stored there with its original ciphertext is stale for Alice
+/// and unreadable for Bob. Restoring its original space restores the read.
+///
+/// ```text
+/// Stored space    Alice                         Bob
+/// other           reads with stale-space        key-pending → invalid-ciphertext
+/// original        finds and reads the note
+/// ```
+#[test]
+fn readers_of_a_moved_note_before_and_after_its_space_is_restored() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        let bob = device(&server, account(0xb0), MemoryStore::new(), 2);
+        alice.activate(&server);
+        bob.activate(&server);
+        let original = new_project(&server, &alice, "original");
+        let other = new_project(&server, &alice, "other");
+        let moved = write_note(&server, &alice, original, SECRET)
+            .unwrap()
+            .row_uuid();
+        let control = write_note(&server, &alice, other, SECRET)
+            .unwrap()
+            .row_uuid();
+        pump(&server, &alice.db);
+        drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
+        add_member(&server, &alice, other, &bob.id());
+
+        // Set the fixture's stored coordinate directly so the same ciphertext
+        // and equality token are read before and after restoring the coordinate.
+        let set_stored_space = |space| {
+            let patch = BTreeMap::from([("projectId".to_owned(), Value::Uuid(space))]);
+            block_on(server.update("notes", moved, patch, Default::default())).unwrap();
+        };
+        set_stored_space(other);
+        let alice_seen = reports_of(&alice);
+        alice.follow_notes(&server);
+        bob.follow_notes(&server);
+        let in_space =
+            |space| Query::from("notes").filter(eq(col("projectId"), lit(Value::Uuid(space))));
+        let matching = |space| in_space(space).filter(eq(col("body"), lit(text(SECRET))));
+        let rows = read_notes(&server, &alice, other).unwrap();
+        let stale = rows.iter().find(|r| r.row_uuid() == moved).unwrap();
+        assert_eq!(stale.cell("body"), Some(text(SECRET)));
+        let original_address = space_address(&alice, original);
+        let reports = alice_seen.borrow();
+        assert!(
+            reports.iter().any(|report| {
+                matches!(report, Report::Unreadable(u) if u.id == Some(moved)
+                && u.column.as_deref() == Some("body")
+                && u.space.as_ref() == Some(&original_address)
+                && u.code == UnreadableCode::StaleSpace)
+            }),
+            "{reports:?}"
+        );
+        drop(reports);
+
+        // Both notes have the same body. Only the correctly indexed note matches.
+        let found = all(&alice.db, matching(other)).unwrap();
+        assert_eq!(
+            found.iter().map(|r| r.row_uuid()).collect::<Vec<_>>(),
+            [control]
+        );
+
+        let query = postcard::to_allocvec(&in_space(other)).unwrap();
+        let bob_read = || {
+            block_on(
+                bob.db
+                    .all_serialized_query_reporting(&query, local(), None, None, None),
+            )
+            .unwrap()
+        };
+        let (before, missing) = bob_read();
+        assert!(matches!(before, jazz::db::SerializedReadResult::Rows(rows) if rows.is_empty()));
+        assert!(
+            missing
+                .iter()
+                .any(|r| r.id == moved && r.code == "key-pending"),
+            "{missing:?}"
+        );
+
+        assert_eq!(deliver(&server, &alice, &[&bob], other), 1);
+        let rows = read_notes(&server, &bob, other).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.row_uuid()).collect::<Vec<_>>(),
+            [control]
+        );
+        let (_, unreadable) = bob_read();
+        assert_eq!(unreadable.len(), 1, "{unreadable:?}");
+        assert_eq!(unreadable[0].id, moved);
+        assert_eq!(unreadable[0].code, "invalid-ciphertext");
+
+        set_stored_space(original);
+        pump(&server, &alice.db);
+        let prepared = alice.db.prepare_query(&matching(original)).unwrap();
+        let repaired = block_on(alice.db.all_strict(&prepared, local())).unwrap();
+        assert_eq!(repaired.len(), 1);
+        assert_eq!(repaired[0].row_uuid(), moved);
+        assert_eq!(repaired[0].cell("body"), Some(text(SECRET)));
+    });
+}
+
 /// Contract: settling what reads left out settles every space, even when
 /// acquiring one fails: the others are reported, the failed space's
 /// entries are kept for the next settle, and its error is returned.
