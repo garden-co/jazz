@@ -274,15 +274,16 @@ describe("calls on a db.encryption handle taken while thin", () => {
     await vi.waitFor(() => expect(gate.calls).toBe(1));
     gate.release();
     await vi.waitFor(() => expect(isThinDb(kept)).toBe(false));
-    // Step the clock past the deadline, letting real work run between steps: the wait's own
-    // timer may start only after the upgrade has finished.
-    for (let second = 0; second < 40 && outcome === "pending"; second++) {
-      await vi.advanceTimersByTimeAsync(1_000);
+    // Step the clock in small increments, letting real work run between steps, until the call
+    // settles: the wait's own timer may start only after the upgrade has finished, and the full
+    // client's own call then runs on the same clock. A wait without a deadline never settles.
+    for (let step = 0; step < 1_200 && outcome === "pending"; step++) {
+      await vi.advanceTimersByTimeAsync(100);
       await new Promise((resolve) => setImmediate(resolve));
     }
-    vi.useRealTimers();
-    await vi.waitFor(() => expect(outcome).toEqual({ id: expect.any(String) }), { timeout: 5_000 });
+    expect(outcome).toEqual({ id: expect.any(String) });
     await call;
+    vi.useRealTimers();
   }, 90_000);
 
   it("ends a call at a stalled load at the deadline, and at sign-out", async () => {
