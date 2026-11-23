@@ -106,7 +106,7 @@ public enum JazzApp {
     }
 
     /// A row of `people`.
-    public struct Person: Jazz.Row {
+    public struct Person: Jazz.Row, Jazz.Updatable {
         public static let table = "people"
         public let id: Jazz.ID
         public var name: Swift.String
@@ -223,7 +223,7 @@ public enum JazzApp {
     }
 
     /// A row of `projects`.
-    public struct Project: Jazz.Row {
+    public struct Project: Jazz.Row, Jazz.Updatable {
         public static let table = "projects"
         public let id: Jazz.ID
         public var name: Swift.String
@@ -325,7 +325,7 @@ public enum JazzApp {
     }
 
     /// A row of `tasks`.
-    public struct Task: Jazz.Row {
+    public struct Task: Jazz.Row, Jazz.Updatable {
         public static let table = "tasks"
         public let id: Jazz.ID
         public var title: Swift.String

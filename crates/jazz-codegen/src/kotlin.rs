@@ -556,27 +556,29 @@ impl<'a> Writer<'a> {
         }
         out.push_str(")\n\n");
 
-        // Patches.
-        let _ = writeln!(
-            out,
-            "/** Changes to a row of `{}`: columns not set are left as they are. */",
-            doc(&table.name)
-        );
-        let _ = writeln!(out, "public class {patch} : tools.jazz.Patch() {{");
-        let mut members = BTreeSet::new();
-        for f in &fields {
-            members.insert(f.ident.clone());
+        // Patches: none for a table whose rows never change.
+        if table.updatable {
             let _ = writeln!(
                 out,
-                "    /** Sets `{}`. */\n    public fun {}(value: {}): {patch} = apply {{ set({}, value, {}) }}",
-                doc(&f.column.name),
-                f.ident,
-                plain_type(&f.ty.ty),
-                string_literal(&f.column.name),
-                f.ty.ser
+                "/** Changes to a row of `{}`: columns not set are left as they are. */",
+                doc(&table.name)
             );
+            let _ = writeln!(out, "public class {patch} : tools.jazz.Patch() {{");
+            let mut members = BTreeSet::new();
+            for f in &fields {
+                members.insert(f.ident.clone());
+                let _ = writeln!(
+                    out,
+                    "    /** Sets `{}`. */\n    public fun {}(value: {}): {patch} = apply {{ set({}, value, {}) }}",
+                    doc(&f.column.name),
+                    f.ident,
+                    plain_type(&f.ty.ty),
+                    string_literal(&f.column.name),
+                    f.ty.ser
+                );
+            }
+            out.push_str("}\n\n");
         }
-        out.push_str("}\n\n");
 
         // The table object.
         let _ = writeln!(
@@ -584,11 +586,21 @@ impl<'a> Writer<'a> {
             "/** Table `{}`: its columns, and queries with `query()`. */",
             doc(&table.name)
         );
-        let _ = writeln!(
-            out,
-            "public object {object} : tools.jazz.Table<{row}, {insert}, {patch}>(\n    {},\n    {row}.serializer(),\n    {insert}.serializer(),\n    ::{patch},\n) {{",
-            string_literal(&table.name)
-        );
+        if table.updatable {
+            let _ = writeln!(
+                out,
+                "public object {object} : tools.jazz.Table<{row}, {insert}, {patch}>(\n    {},\n    {row}.serializer(),\n    {insert}.serializer(),\n    ::{patch},\n) {{",
+                string_literal(&table.name)
+            );
+        } else {
+            // Read, inserted and deleted only: no update, upsert or
+            // update advice takes it.
+            let _ = writeln!(
+                out,
+                "public object {object} : tools.jazz.BaseTable<{row}, {insert}>(\n    {},\n    {row}.serializer(),\n    {insert}.serializer(),\n) {{",
+                string_literal(&table.name)
+            );
+        }
         out.push_str("    /** The row's id. */\n    public val id: tools.jazz.Column<kotlin.String> =\n        tools.jazz.Column(\"id\", kotlinx.serialization.serializer<kotlin.String>())\n");
         // The public members of `tools.jazz.Table` (and `Any`): a column of
         // that name gets `Column` after it.

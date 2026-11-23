@@ -44,21 +44,11 @@ impl NewE2eeMember {
     }
 }
 
-/// Changes to a row of `__e2ee_members`: a `None` field leaves its column as it is.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct E2eeMemberUpdate {
-    /// `scopeId`.
-    pub scope_id: ::std::option::Option<::jazz_app_support::ObjectId>,
-    pub identifier: ::std::option::Option<::jazz_app_support::ObjectId>,
-    /// `accountId`.
-    pub account_id: ::std::option::Option<::jazz_app_support::ObjectId>,
-}
-
 impl ::jazz_app_support::Table for E2eeMember {
     const NAME: &'static str = "__e2ee_members";
     const COLUMNS: &'static [&'static str] = &["scopeId", "identifier", "accountId"];
     type New = NewE2eeMember;
-    type Update = E2eeMemberUpdate;
+    type Update = ::jazz_app_support::NoUpdate;
 
     fn decode(row: &mut ::jazz_app_support::Fields<'_>) -> ::jazz_app_support::Result<Self> {
         let scope_id = row.take::<::jazz_app_support::ObjectId>("scopeId")?;
@@ -91,27 +81,6 @@ impl ::jazz_app_support::Insert for NewE2eeMember {
         cells.insert("identifier".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
         let value = self.account_id;
         cells.insert("accountId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value));
-        ::std::result::Result::Ok(cells)
-    }
-}
-
-impl ::jazz_app_support::Update for E2eeMemberUpdate {
-    type Row = E2eeMember;
-
-    fn into_cells(
-        self,
-        _implementations: &::jazz_app_support::Implementations,
-    ) -> ::jazz_app_support::Result<::std::vec::Vec<(::std::string::String, ::jazz_app_support::jazz::tools::Value)>> {
-        let mut cells = ::std::vec::Vec::new();
-        if let ::std::option::Option::Some(value) = self.scope_id {
-            cells.push(("scopeId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
-        }
-        if let ::std::option::Option::Some(value) = self.identifier {
-            cells.push(("identifier".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
-        }
-        if let ::std::option::Option::Some(value) = self.account_id {
-            cells.push(("accountId".to_owned(), ::jazz_app_support::ColumnValue::into_value(value)));
-        }
         ::std::result::Result::Ok(cells)
     }
 }
