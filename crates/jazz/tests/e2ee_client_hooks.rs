@@ -217,6 +217,9 @@ struct Fake {
     encrypted_app: Cell<bool>,
     /// A project to stage as the next write's companion instead of a space root.
     companion_project: RefCell<Option<(RowUuid, String)>>,
+    /// A sealed `attachment` to give a row an upsert creates, as the
+    /// sealed default of a column the upsert leaves out.
+    created_attachment: RefCell<Option<Vec<u8>>>,
     /// The companion rows core said it dropped, call by call.
     dropped: RefCell<Vec<Vec<(String, RowUuid)>>>,
 }
@@ -294,6 +297,15 @@ impl E2eeHooks for Fake {
         let Some(entry) = self.declarations().tables.get(write.table) else {
             return Ok(());
         };
+        if write.kind == WriteKind::Upsert
+            && write.stored_space.is_none()
+            && !write.cells.contains_key("attachment")
+            && let Some(sealed) = self.created_attachment.borrow().clone()
+        {
+            write
+                .insert_only
+                .insert("attachment".to_owned(), Value::Bytes(sealed));
+        }
         if self.hostile.get() {
             return Ok(());
         }
@@ -1430,6 +1442,74 @@ fn a_sealed_partial_update_keeps_the_nodes_its_edit_built() {
     );
     assert_eq!(rows[0].cell("body"), Some(text("second")));
     assert_eq!(all(&alice, "projects").len(), 1, "the companion committed");
+}
+
+/// Contract: a sealed value the hooks give only a row an upsert creates
+/// (the sealed default of a column it leaves out) travels as a chunked
+/// reference when it is above the inline threshold, as a written value
+/// does. Alice upserts a new note; her commit carries the sealed
+/// attachment as a reference, the server stores it, and she reads the
+/// plaintext back.
+///
+/// ```text
+/// alice ──seal (created: attachment)──► push chunks, commit { reference } ──► server
+/// ```
+#[test]
+fn a_creating_upserts_large_sealed_default_travels_as_chunks() {
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let server = authority();
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let wire = Rc::new(RefCell::new(Vec::new()));
+    let _link = block_on(alice.connect_upstream(Box::new(Recorded {
+        out: up.clone(),
+        inbound: down.clone(),
+        wire: wire.clone(),
+    })));
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Recorded {
+            out: down,
+            inbound: up.clone(),
+            wire,
+        }),
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
+    pump(&server, &alice);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    let plain: Vec<u8> = (0..200 * 1024).map(|i| (i * 7 % 251) as u8).collect();
+    *hooks.created_attachment.borrow_mut() = Some(seal(space, &plain));
+    let row = RowUuid(uuid::Uuid::now_v7());
+
+    block_on(alice.upsert("notes", row, note(space, SECRET), Default::default())).unwrap();
+    block_on(alice.tick()).unwrap();
+
+    let attachment = alice.stored_column_for_test("notes", "attachment").1;
+    let created: Vec<Value> = up
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Commit { ops, .. } => Some(ops),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|op| match &op.write {
+            jazz::db::WireWrite::Upsert { created, .. } => created.get(&attachment).cloned(),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(created.as_slice(), [Value::Large(_)]),
+        "the sealed attachment travels as a reference"
+    );
+    pump(&server, &alice);
+    assert_eq!(all(&server, "notes").len(), 1);
+    assert_eq!(
+        all(&alice, "notes")[0].cell("attachment"),
+        Some(Value::Bytes(plain))
+    );
 }
 
 /// Contract: an append or splice of a plain column of an encrypted row is
