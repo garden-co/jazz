@@ -2412,6 +2412,37 @@ fn a_member_whose_history_this_client_cannot_read_is_skipped_and_reported() {
     assert_eq!(missing.recipients.err(), inconsistent);
 }
 
+/// Alice's current-epoch read covers its holders and mark, but cannot
+/// stand in for a whole-space read or for the previous epoch's deliveries.
+#[test]
+fn an_epoch_read_cannot_claim_whole_space_coverage() {
+    let mut world = space(66, &[ALICE, BOB]);
+    let epoch = world.rotate(ALICE);
+    let whole = world.read();
+    let directory = whole.directory(&world);
+    let chain = whole.chain(&world).unwrap();
+    let current = whole.space.clone().for_epochs([epoch].into());
+    let inconsistent = Some(ProtocolError::InconsistentEvidence);
+    assert!(members::holders(&chain, &current, 1).is_ok());
+    assert_eq!(
+        rotation_mark(&chain, &current, &directory),
+        rotation_mark(&chain, &whole.space, &directory)
+    );
+    assert_eq!(members::holders(&chain, &current, 0).err(), inconsistent);
+    assert_eq!(
+        rotation_recipients(
+            &chain,
+            &current,
+            &directory,
+            ALICE,
+            BUILTIN,
+            &mut TestRandom(66)
+        )
+        .err(),
+        inconsistent
+    );
+}
+
 /// A read filtered for one account (the space's roots and successors, that
 /// account's member rows and the deliveries addressed to it) serves that
 /// account's acquisition and the chain replay, and nothing else: another

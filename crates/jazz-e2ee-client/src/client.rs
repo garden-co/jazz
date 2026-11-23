@@ -564,6 +564,13 @@ impl E2eeClient {
         (watch.last_check_rows, watch.chain_reads)
     }
 
+    /// Delivery rows returned and queries lacking an epoch filter since the last call.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "testing"))]
+    pub fn take_delivery_reads(&self) -> (usize, usize) {
+        std::mem::take(&mut self.shared.member_watch.borrow_mut().delivery_reads)
+    }
+
     #[doc(hidden)]
     #[cfg(any(test, feature = "testing"))]
     pub fn delivery_mark_checks(&self) -> usize {

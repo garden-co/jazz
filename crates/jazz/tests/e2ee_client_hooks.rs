@@ -2998,6 +2998,44 @@ fn finish_in(
     ))
 }
 
+/// The database rejects a change of space before opening the stream, even
+/// when the encryption hooks would accept the supplied metadata.
+#[test]
+fn a_streamed_update_cannot_name_another_space_before_reading() {
+    struct Unread;
+    impl std::io::Read for Unread {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("read the attachment before checking its space");
+        }
+    }
+    let hooks = Fake::new();
+    let db = client(&hooks);
+    let (home, other) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    hooks.hold(home);
+    hooks.hold(other);
+    let row = block_on(db.insert("notes", note(home, SECRET), Default::default()))
+        .unwrap()
+        .row_uuid();
+    hooks.hostile.set(true);
+    let cells = BTreeMap::from([("projectId".into(), Value::Uuid(other))]);
+    let error = block_on(db.write_streaming_value_with_id(
+        jazz::db::StreamingMutationKind::Update,
+        "notes",
+        row,
+        cells,
+        "attachment",
+        Unread,
+        None,
+        None,
+        None,
+        None,
+    ))
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(error.message.contains("space"), "{error}");
+    assert_eq!(hooks.streams.get(), 0);
+}
+
 /// Contract: a sealed stream is bound to its row's space as the write that
 /// publishes it finds it, the transaction's own writes included. Moved to
 /// another space earlier in the same transaction, the row refuses the

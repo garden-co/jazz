@@ -1,4 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { BrowserPasskeyBackup } from "../local-first-auth/passkey.js";
+import { formatSecret } from "../local-first-auth/secret.js";
 import { Encryption, type EncryptionNative } from "./index.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -30,5 +32,31 @@ it.each([false, true])(
     else await expect(result).resolves.toEqual({ method: "passkey" });
     expect(backup).toHaveBeenCalledOnce();
     expect(generated).toEqual(new Uint8Array(32));
+  },
+);
+
+it.each([false, true])(
+  "clears the WebAuthn user ID after credentials.create settles (rejected: %s)",
+  async (rejected) => {
+    const original = new Uint8Array(32).fill(7);
+    let userId: Uint8Array | undefined;
+    const create = vi.fn(async ({ publicKey }: { publicKey: { user: { id: Uint8Array } } }) => {
+      userId = publicKey.user.id;
+      expect(userId).toEqual(original);
+      if (rejected) throw new Error("credential creation rejected");
+      return {};
+    });
+    vi.stubGlobal("navigator", { credentials: { create } });
+    const result = new BrowserPasskeyBackup({ appName: "App" }).backup(
+      formatSecret(original),
+      "alice",
+    );
+    if (rejected)
+      await expect(result).rejects.toMatchObject({
+        code: "create-failed",
+        cause: new Error("credential creation rejected"),
+      });
+    else await result;
+    expect(userId).toEqual(new Uint8Array(32));
   },
 );

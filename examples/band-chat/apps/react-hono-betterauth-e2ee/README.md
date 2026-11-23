@@ -140,11 +140,12 @@ confirm. If the page goes away between the steps, the device is still
 listed: press the button again, and both steps run again.
 
 The removed device keeps the keys it already holds. It receives no new keys.
-Other room members learn of the removal one sync round trip after it commits.
-Writes can still use the current key during that round trip, while offline
-after learning of the removal, or when an online rotation is refused or
-undecided by the write's deadline. The write goes ahead and the room's key
-rotates at the next opportunity.
+A device that's connected and watching the room learns of the removal one
+sync round trip after it commits. Other devices learn of it when they next
+sync the room. Writes can still use the current key before the device learns
+of the removal, while offline after learning of it, or when an online
+rotation is refused or undecided by the write's deadline. The write goes
+ahead and the room's key rotates at the next opportunity.
 
 ## Signing out, and leaving a browser
 

@@ -83,6 +83,8 @@ pub(crate) struct Acquired {
 /// One space's rows and the public histories of the accounts they name, at
 /// one cut.
 pub(crate) struct SpaceRead {
+    chain: Option<ReplayedSpaceChain>,
+    acquisition: Option<jazz_e2ee::protocol::space::Acquisition>,
     pub(crate) ledger: SpaceLedger,
     pub(crate) accounts: Vec<PublicAccountLedger>,
     /// Rows of the space's own tables (roots, successors, members,
@@ -91,6 +93,14 @@ pub(crate) struct SpaceRead {
     /// accounts' histories are not counted: they make an account invalid,
     /// not the space incomplete.
     pub(crate) skipped: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SpaceReadPurpose {
+    Acquire,
+    WriteCheck,
+    Deliver,
+    Rotate,
 }
 
 pub(crate) fn protocol_address(space: &SpaceAddress) -> Result<ProtocolAddress, ClientError> {
@@ -105,6 +115,25 @@ pub fn successor_probe(address: &ProtocolAddress, epoch: &str) -> Result<Query, 
         .filter(eq(col("identifier"), lit(id(&address.identifier)?)))
         .filter(eq(col("predecessor"), lit(id(epoch)?)))
         .limit(1))
+}
+
+/// Deliveries for one version, using the space and epoch index for both
+/// acquisition by one account and decisions about all recipients.
+#[doc(hidden)]
+pub fn epoch_deliveries_query(
+    address: &ProtocolAddress,
+    epoch: &str,
+    account: Option<&str>,
+) -> Result<Query, ClientError> {
+    let id = |s| uuid_cell(s).ok_or(ProtocolError::InconsistentEvidence);
+    let mut query = Query::from(rows::SPACE_DELIVERIES)
+        .filter(eq(col("scopeId"), lit(id(&address.scope_id)?)))
+        .filter(eq(col("identifier"), lit(id(&address.identifier)?)))
+        .filter(eq(col("keyEpochId"), lit(id(epoch)?)));
+    if let Some(account) = account {
+        query = query.filter(eq(col("recipientAccountId"), lit(id(account)?)));
+    }
+    Ok(query)
 }
 
 pub(crate) fn offline() -> ClientError {
@@ -127,21 +156,18 @@ impl E2eeClient {
         tx: OpenTransactionId,
         address: &ProtocolAddress,
     ) -> Result<SpaceRead, ClientError> {
-        self.read_space_of(db, tx, address, false).await
+        self.read_space_of(db, tx, address, SpaceReadPurpose::Acquire)
+            .await
     }
 
-    /// [`E2eeClient::read_space`], or with `whole` the whole space: every
-    /// member row and every delivery of the address (protocol §3.4), and
-    /// the public history of every account they name. Deliveries are
-    /// readable to every member (R14), so a delivery another holder writes
-    /// meanwhile is a phantom of this read and makes a transaction that
-    /// read it conflict.
+    /// Read the chain evidence first, then select deliveries by authenticated
+    /// epoch at the same serializable cut. Rotation needs the whole space.
     pub(crate) async fn read_space_of(
         &self,
         db: &Db,
         tx: OpenTransactionId,
         address: &ProtocolAddress,
-        whole: bool,
+        purpose: SpaceReadPurpose,
     ) -> Result<SpaceRead, ClientError> {
         let skipped = Cell::new(0);
         let own = self.shared.account_id.clone();
@@ -165,15 +191,15 @@ impl E2eeClient {
             .read_rows(db, tx, &skipped, of_space(rows::SPACE_SUCCESSORS))
             .await?;
         let mut members_query = of_space(rows::SPACE_MEMBERS);
-        let mut deliveries_query = of_space(rows::SPACE_DELIVERIES);
-        if !whole {
+        let all_members = matches!(
+            purpose,
+            SpaceReadPurpose::Deliver | SpaceReadPurpose::Rotate
+        );
+        if !all_members {
             members_query = members_query.filter(eq(col("accountId"), lit(account.clone())));
-            deliveries_query = deliveries_query.filter(eq(col("recipientAccountId"), lit(account)));
         }
         let (members, _) = self.read_rows(db, tx, &skipped, members_query).await?;
-        let (deliveries, _) = self.read_rows(db, tx, &skipped, deliveries_query).await?;
-        let space_skipped = skipped.get();
-        let mut ledger = if whole {
+        let mut ledger = if all_members {
             SpaceLedger::whole_space(address.clone(), Position(through))
         } else {
             SpaceLedger::one_account(address.clone(), Position(through), &own)
@@ -181,35 +207,127 @@ impl E2eeClient {
         ledger.roots = roots;
         ledger.successors = successors;
         ledger.members = members;
-        ledger.deliveries = deliveries;
         let mut named = BTreeSet::from([own]);
         named.extend(
             ledger
                 .roots
                 .iter()
-                .map(|root| root.row.creator_account_id.clone()),
+                .map(|row| row.row.creator_account_id.clone()),
         );
         named.extend(
             ledger
                 .successors
                 .iter()
-                .map(|successor| successor.row.author_account_id.clone()),
+                .map(|row| row.row.author_account_id.clone()),
         );
-        if whole {
-            named.extend(ledger.members.iter().map(|m| m.row.account_id.clone()));
-            for delivery in &ledger.deliveries {
-                named.insert(delivery.row.recipient_account_id.clone());
-                named.insert(delivery.row.sender_account_id.clone());
+        if all_members {
+            named.extend(ledger.member_accounts());
+        }
+        let named_ids: Vec<_> = named.iter().cloned().collect();
+        let account_skipped = Cell::new(0);
+        let mut accounts = self
+            .read_public_many(db, tx, &account_skipped, &named_ids, BTreeSet::new())
+            .await?;
+        let directory = AccountDirectory::new(
+            &accounts,
+            &self.shared.domain,
+            &self.shared.registry,
+            ledger.through,
+        )?;
+        self.space_floors(&accounts, &directory).await?;
+        let chain = ReplayedSpaceChain::replay(&ledger, &directory)?;
+        let mut acquisition = None;
+        if purpose == SpaceReadPurpose::Rotate {
+            (ledger.deliveries, _) = self
+                .read_rows(db, tx, &skipped, of_space(rows::SPACE_DELIVERIES))
+                .await?;
+        } else {
+            let mut epochs = BTreeSet::new();
+            let epoch_deliveries = async |epochs: &BTreeSet<String>, own_only: bool| {
+                let mut rows = Vec::new();
+                for epoch in epochs {
+                    let query = epoch_deliveries_query(
+                        address,
+                        epoch,
+                        own_only.then_some(&self.shared.account_id),
+                    )?;
+                    let (found, _) = self.read_rows(db, tx, &skipped, query).await?;
+                    rows.extend(found);
+                }
+                Ok::<_, ClientError>(rows)
+            };
+            if let Some(chain) = &chain {
+                epochs.insert(chain.last().epoch_id.clone());
+                if purpose != SpaceReadPurpose::WriteCheck {
+                    epochs.extend(
+                        chain
+                            .skipped()
+                            .into_iter()
+                            .map(|depth| chain.versions[depth].epoch_id.clone()),
+                    );
+                }
+                ledger.deliveries = epoch_deliveries(&epochs, true).await?;
+                if purpose != SpaceReadPurpose::WriteCheck {
+                    let acquired = {
+                        let own = self.account.borrow();
+                        let own = own.as_ref().ok_or(ClientError::NoAccount)?;
+                        acquire(chain, &ledger, &directory, &own.epoch_keys)?
+                    };
+                    let held: BTreeSet<_> = acquired.keys.epoch_ids().collect();
+                    if purpose == SpaceReadPurpose::Deliver {
+                        // Only held versions can be delivered or mark a rotation.
+                        epochs.retain(|id| held.contains(id.as_str()));
+                        ledger.deliveries = epoch_deliveries(&epochs, false).await?;
+                        acquisition = Some(acquired);
+                    } else {
+                        // If a newer key could not open its history, earlier
+                        // deliveries may still give this device the missing keys.
+                        let missing: BTreeSet<_> = chain
+                            .versions
+                            .iter()
+                            .map(|v| &v.epoch_id)
+                            .filter(|id| !epochs.contains(*id) && !held.contains(id.as_str()))
+                            .cloned()
+                            .collect();
+                        ledger
+                            .deliveries
+                            .extend(epoch_deliveries(&missing, true).await?);
+                        if missing.is_empty() {
+                            acquisition = Some(acquired);
+                        }
+                        epochs.extend(missing);
+                    }
+                }
+            }
+            ledger = ledger.for_epochs(epochs);
+        }
+        if all_members {
+            let additional: BTreeSet<_> = ledger
+                .deliveries
+                .iter()
+                .flat_map(|d| [&d.row.sender_account_id, &d.row.recipient_account_id])
+                .filter(|id| !named.contains(*id))
+                .cloned()
+                .collect();
+            if !additional.is_empty() {
+                accounts.extend(
+                    self.read_public_many(
+                        db,
+                        tx,
+                        &account_skipped,
+                        &additional.into_iter().collect::<Vec<_>>(),
+                        BTreeSet::new(),
+                    )
+                    .await?,
+                );
             }
         }
-        let named: Vec<String> = named.into_iter().collect();
-        let accounts = self
-            .read_public_many(db, tx, &skipped, &named, BTreeSet::new())
-            .await?;
         Ok(SpaceRead {
+            chain,
+            acquisition,
             ledger,
             accounts,
-            skipped: space_skipped,
+            skipped: skipped.get(),
         })
     }
 
@@ -302,11 +420,13 @@ impl E2eeClient {
                     {
                         self.shared.member_watch.borrow_mut().chain_reads += 1;
                     }
-                    let read = self.read_space(db, tx, address).await?;
+                    let read = self
+                        .read_space_of(db, tx, address, SpaceReadPurpose::WriteCheck)
+                        .await?;
                     if read.skipped != 0 {
                         return Err(ProtocolError::InconsistentEvidence.into());
                     }
-                    let acquired = self.take_space(db, space, address, &read).await?;
+                    let acquired = self.take_space(db, space, address, read).await?;
                     let Some(chain) = acquired.chain else {
                         return Ok(false);
                     };
@@ -334,10 +454,7 @@ impl E2eeClient {
                 }
                 return Ok(false);
             }
-            let query = by_space(rows::SPACE_DELIVERIES).filter(eq(
-                col("keyEpochId"),
-                lit(uuid_cell(version.epoch()).ok_or(ProtocolError::InconsistentEvidence)?),
-            ));
+            let query = epoch_deliveries_query(address, version.epoch(), None)?;
             let (deliveries, _) = self
                 .read_rows::<jazz_e2ee::protocol::records::space::SpaceDelivery>(
                     db, tx, &skipped, query,
@@ -430,6 +547,25 @@ impl E2eeClient {
         .await
     }
 
+    /// Check the floors before authenticating the chain or opening a key.
+    /// Check again when consuming the finished read, which can name extra recipients.
+    async fn space_floors(
+        &self,
+        accounts: &[PublicAccountLedger],
+        directory: &AccountDirectory<'_>,
+    ) -> Result<Vec<(String, AccountFloor)>, ClientError> {
+        let own = &self.shared.account_id;
+        let through = directory.through();
+        if let Some(floor) = self.floor(own).await {
+            directory
+                .replay(own)?
+                .current()?
+                .ok_or(ProtocolError::StaleState)?
+                .check_floor(through, &floor)?;
+        }
+        self.check_others(accounts, through, directory).await
+    }
+
     /// The chain of `read`, with the keys this account obtains from it, and
     /// whether it is a member. Every account history in the read is checked
     /// against this device's floor for that account first (§6.3a): a server
@@ -446,30 +582,20 @@ impl E2eeClient {
     /// writes a floor once per account and then only when that account
     /// changes. The own account's floor is kept by account verification
     /// alone ([`E2eeClient::ensure_account`]).
-    pub(crate) async fn replay_space(&self, read: &SpaceRead) -> Result<Replayed, ClientError> {
+    pub(crate) async fn replay_space(&self, read: &mut SpaceRead) -> Result<Replayed, ClientError> {
         let own = &self.shared.account_id;
-        let floor = self.floor(own).await;
         let directory = AccountDirectory::new(
             &read.accounts,
             &self.shared.domain,
             &self.shared.registry,
             read.ledger.through,
         )?;
-        if let Some(floor) = &floor {
-            let state = directory
-                .replay(own)?
-                .current()?
-                .ok_or(ProtocolError::StaleState)?;
-            state.check_floor(read.ledger.through, floor)?;
-        }
-        let floors = self
-            .check_others(&read.accounts, read.ledger.through, &directory)
-            .await?;
+        let floors = self.space_floors(&read.accounts, &directory).await?;
         let member = read.ledger.is_member(own);
         let replayed = {
             let account = self.account.borrow();
             let account = account.as_ref().ok_or(ClientError::NoAccount)?;
-            match ReplayedSpaceChain::replay(&read.ledger, &directory)? {
+            match read.chain.take() {
                 None => Replayed {
                     chain: None,
                     held: None,
@@ -477,8 +603,10 @@ impl E2eeClient {
                     acquisition: None,
                 },
                 Some(chain) => {
-                    let acquisition =
-                        acquire(&chain, &read.ledger, &directory, &account.epoch_keys)?;
+                    let acquisition = match read.acquisition.take() {
+                        Some(acquired) => acquired,
+                        None => acquire(&chain, &read.ledger, &directory, &account.epoch_keys)?,
+                    };
                     let held = HeldSpace::from_acquisition(&chain, &acquisition.keys)?;
                     Replayed {
                         chain: Some(chain),
@@ -578,10 +706,12 @@ impl E2eeClient {
             return Err(offline());
         }
         let read = crate::account::serializable(db, ATTEMPTS, async |tx| {
-            self.read_space(db, tx, &address).await
+            self.read_space(db, tx, &address)
+                .await
+                .map_err(|error| self.forget_account_on(error))
         })
         .await?;
-        self.take_space(db, space, &address, &read).await
+        self.take_space(db, space, &address, read).await
     }
 
     /// Takes what `read` shows of a space: the chain this device now knows,
@@ -591,14 +721,14 @@ impl E2eeClient {
         db: &Db,
         space: &SpaceAddress,
         address: &ProtocolAddress,
-        read: &SpaceRead,
+        mut read: SpaceRead,
     ) -> Result<Acquired, ClientError> {
         let Replayed {
             chain,
             held,
             member,
             acquisition,
-        } = match self.replay_space(read).await {
+        } = match self.replay_space(&mut read).await {
             Ok(replayed) => replayed,
             Err(error) => return Err(self.forget_account_on(error)),
         };

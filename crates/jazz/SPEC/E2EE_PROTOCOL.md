@@ -2256,14 +2256,20 @@ sees more than 1,000 member accounts in a space emits a
 and keeps working; the costs below then grow beyond what the first release
 is designed for.
 
-**What a device watches.** Only spaces in active use are watched: when the
-app has an open subscription on an encrypted table, the spaces of its rows
-join a shared set, counted per subscription, and leave it when the last
-subscription using them closes. The runtime cannot see a subscription open
-or close, so the binding that opens it tells the runtime. Per space in the
-set: the
-space's member rows (at most 1,000), its roots and successors (one per
-version), the deliveries of the versions concerned (the current
+**What a device watches.** A device watches a space while an open
+subscription uses it or for 60 seconds after its most recent encrypted
+write to that space. The binding tells the runtime when a subscription
+opens or closes. Closing the last subscription releases its interest in
+the space. A recent write keeps the watch active for the rest of its
+60-second window. While a subscription keeps the watch active, a pause
+between writes adds no authority round trip. Once both kinds of interest
+expire, the next write checks the authority for changes that require
+rotation before reusing a held key. This bounds the cost of watching idle
+spaces and catches removals that occurred while the space was unwatched.
+
+For each watched space the device watches its member rows (at most 1,000),
+its roots and successors (one per version), the deliveries of the versions
+concerned (the current
 version, and skipped versions it holds, §3.4), and the public account roots
 of its member accounts (one per generation), since who lacks a version
 depends on each member's current generation (§2.11). Deliveries of earlier
@@ -2313,9 +2319,9 @@ is made or abandoned.
 - A device removal marks every space whose current version the removed
   device could open; each is rotated by the next encrypted write of an
   updater (§2.8), at the cost above.
-- A device watches the public account rows of every member of every space
-  it belongs to (above); the design figure is 10,000 watched accounts per
-  device.
+- A device watches the public account rows needed for spaces in active
+  use, as described above. The design figure is 10,000 watched accounts
+  per device.
 - On the server, reading an internal row and inserting a delivery each cost
   one or two indexed member lookups; inserting a root, successor or member
   row also evaluates the space row's read rule and both update clauses

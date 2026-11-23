@@ -178,13 +178,19 @@ fn version_envelopes(
 /// The key holders of the version at `depth` (§1.1): the account that wrote
 /// its root or successor, and every account a delivery of it was accepted
 /// to. A delivery at or before the root's position counts here (§3.4).
-/// `ledger` must be the read of the whole space `chain` was replayed from.
+/// The read must cover every recipient of this epoch.
 pub fn holders(
     chain: &SpaceChain,
     ledger: &SpaceLedger,
     depth: usize,
 ) -> ProtocolResult<BTreeSet<String>> {
-    check_whole_read(chain, ledger, None)?;
+    chain.check_read(ledger, None)?;
+    ledger.require_epoch(
+        &chain
+            .version(depth)
+            .ok_or(ProtocolError::InconsistentEvidence)?
+            .epoch_id,
+    )?;
     version_holders(chain, ledger, depth)
 }
 
@@ -234,17 +240,43 @@ pub struct LackingMembers {
 /// device-removal account rotation changes nothing here. A member whose
 /// account history needs a capability this client lacks is reported in
 /// [`LackingMembers::unsupported`] and the others are still evaluated.
-/// Needs the public ledger of every member, from the read of the whole
-/// space `chain` was replayed from.
+/// Needs every member and every delivery of the concerned epochs at the same cut.
 pub fn lacking(
     chain: &SpaceChain,
     ledger: &SpaceLedger,
     accounts: &AccountDirectory<'_>,
 ) -> ProtocolResult<LackingMembers> {
-    check_whole_read(chain, ledger, Some(accounts))?;
-    let concerned = chain.concerned()?;
+    lacking_at(chain, ledger, accounts, chain.concerned()?)
+}
+
+/// Members lacking a version the sender holds and can deliver. A read of
+/// those epochs covers this decision, including after a recovery rotation.
+pub fn lacking_held(
+    chain: &SpaceChain,
+    ledger: &SpaceLedger,
+    accounts: &AccountDirectory<'_>,
+    keys: &super::SpaceKeys,
+) -> ProtocolResult<LackingMembers> {
+    keys.check_chain(chain)?;
+    let mut concerned = chain.concerned()?;
+    let held: BTreeSet<_> = keys.depths().collect();
+    concerned.retain(|depth| held.contains(depth));
+    lacking_at(chain, ledger, accounts, concerned)
+}
+
+fn lacking_at(
+    chain: &SpaceChain,
+    ledger: &SpaceLedger,
+    accounts: &AccountDirectory<'_>,
+    concerned: Vec<usize>,
+) -> ProtocolResult<LackingMembers> {
+    chain.check_read(ledger, Some(accounts))?;
+    if ledger.filtered_for().is_some() {
+        return Err(ProtocolError::InconsistentEvidence);
+    }
     let mut by_depth = BTreeMap::new();
     for depth in &concerned {
+        ledger.require_epoch(&chain.versions[*depth].epoch_id)?;
         by_depth.insert(*depth, version_envelopes(chain, ledger, *depth, true)?);
     }
     let mut out = Vec::new();
@@ -354,8 +386,9 @@ pub fn rotation_mark(
     ledger: &SpaceLedger,
     accounts: &AccountDirectory<'_>,
 ) -> ProtocolResult<RotationMark> {
-    check_whole_read(chain, ledger, Some(accounts))?;
+    chain.check_read(ledger, Some(accounts))?;
     let depth = chain.current_depth()?;
+    ledger.require_epoch(&chain.versions[depth].epoch_id)?;
     let members = ledger.member_accounts();
     let found = version_envelopes(chain, ledger, depth, false)?;
     mark_envelopes(&chain.versions[depth].epoch_id, &members, found, accounts)

@@ -12,6 +12,7 @@ export function encryptionError(code: string, message = code): Error {
 export interface FakeDevice {
   id: string;
   status: "active" | "waiting";
+  removalRequested?: boolean;
 }
 
 export function fakeEncryption(
@@ -51,6 +52,7 @@ export function fakeEncryption(
         return state.devices.map((device) => ({
           ...device,
           isThisDevice: device.id === state.deviceId,
+          removalRequested: device.removalRequested ?? false,
         }));
       }),
       challenge: vi.fn(async (deviceId: string) => {
@@ -74,6 +76,9 @@ export function fakeEncryption(
       }),
       requestRemoval: vi.fn(async () => {
         calls.push("requestRemoval");
+        state.devices = state.devices.map((device) =>
+          device.id === state.deviceId ? { ...device, removalRequested: true } : device,
+        );
       }),
       completeRemovals: vi.fn(async () => []),
     },

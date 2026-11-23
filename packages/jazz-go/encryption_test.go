@@ -241,3 +241,13 @@ func TestEncryptedShutdownReleasesCallbacksAfterDraining(t *testing.T) {
 		t.Error("shutdown retained its private store")
 	}
 }
+
+func TestDeviceListKeepsRemovalRequests(t *testing.T) {
+	var devices []Device
+	if err := json.Unmarshal([]byte(`[{"id":"a","status":"active","removalRequested":false},{"id":"b","status":"active","removalRequested":true}]`), &devices); err != nil {
+		t.Fatal(err)
+	}
+	if devices[0].RemovalRequested || !devices[1].RemovalRequested {
+		t.Fatalf("unexpected removal requests: %+v", devices)
+	}
+}

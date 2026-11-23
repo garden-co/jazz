@@ -38,8 +38,9 @@ export function clearLeaveRecord(): void {
 
 /**
  * Where leaving stands for `accountId`, given the device ID this browser has
- * now (`null` while unknown) and whether its encryption runtime has closed.
- * - `none`: no wish to leave for this account.
+ * now (`null` while unknown), whether its encryption runtime has closed
+ * and whether Jazz lists a published removal request for this device.
+ * - `none`: no confirmed request for this account and device.
  * - `pending`: waiting for another device to remove this one.
  * - `complete`: a new device ID, so the old keys are gone; sign out.
  * - `unfinished`: the runtime closed (erasing the keys or storing the new
@@ -52,9 +53,10 @@ export function leaveState(
   accountId: string,
   thisDeviceId: string | null,
   runtimeClosed: boolean,
+  removalRequested: boolean,
 ): LeaveState {
   if (!record || record.accountId !== accountId) return "none";
   if (runtimeClosed) return "unfinished";
-  if (thisDeviceId === null || thisDeviceId === record.deviceId) return "pending";
-  return "complete";
+  if (thisDeviceId !== null && thisDeviceId !== record.deviceId) return "complete";
+  return removalRequested ? "pending" : "none";
 }

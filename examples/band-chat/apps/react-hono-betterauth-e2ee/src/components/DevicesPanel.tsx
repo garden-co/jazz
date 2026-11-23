@@ -209,10 +209,8 @@ function LeaveThisBrowser({ device }: { device: DeviceInfo }) {
       // A tab can close before the authority's answer reaches it. Keep the
       // intent so the next page can sign out after Jazz changes its device ID.
       writeLeaveRecord({ accountId, deviceId: device.id });
-      await encryption.devices.requestRemoval();
       reloadLeaveRecord();
-      setConfirming(false);
-      void refresh();
+      await encryption.devices.requestRemoval();
     } catch (cause) {
       const failed = failureOf(cause);
       if (
@@ -221,15 +219,17 @@ function LeaveThisBrowser({ device }: { device: DeviceInfo }) {
         (failed.code === "database" && failed.message.startsWith("WriteRejected:"))
       ) {
         clearLeaveRecord();
+        reloadLeaveRecord();
       }
       setError(
         failed.code === "no-other-device"
           ? "This is your only device, so it can't leave: no other device would hold your keys. Nothing was removed, and your messages stay readable here."
           : `Could not ask to leave: ${failed.message}`,
       );
-      setConfirming(false);
     } finally {
+      setConfirming(false);
       setBusy(false);
+      void refresh();
     }
   }
 

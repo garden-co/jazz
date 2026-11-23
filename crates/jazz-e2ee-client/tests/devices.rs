@@ -760,6 +760,39 @@ fn a_closed_read_before_the_first_write_keeps_the_member_watch() {
     within(|| reopen_and_write(BeforeWrite::Read));
 }
 
+/// Alice writes to a space she wrote to a moment ago, right after her
+/// runtime learns that bob was removed from it by someone else, before any
+/// pass runs on it: the change she was sent makes the write read the space
+/// first, so it rotates rather than seal under the version bob holds.
+#[test]
+fn a_write_right_after_a_member_leaves_the_space_rotates_first() {
+    within(|| {
+        let mut shared = SharedSpace::new();
+        let address = space_address(&shared.alice, shared.space);
+        shared.alice_writes("before");
+        shared.turns();
+        assert!(!shared.alice.client.needs_rotation(&address).unwrap());
+        let before = count(&shared.server, "__e2ee_space_successors");
+        let bob = Value::Uuid(uuid::Uuid::parse_str(&account_id(account(0xb0))).unwrap());
+        let member = all(&shared.server, Query::from("__e2ee_members"))
+            .unwrap()
+            .into_iter()
+            .find(|row| row.cell("accountId") == Some(bob.clone()))
+            .expect("bob's member row")
+            .row_uuid();
+        block_on(
+            shared
+                .server
+                .delete("__e2ee_members", member, Default::default()),
+        )
+        .unwrap();
+        // Alice's runtime receives the change; no watch sync runs before the write.
+        pump(&shared.server, &shared.alice.db);
+        shared.alice_writes("after");
+        assert_eq!(count(&shared.server, "__e2ee_space_successors"), before + 1);
+    });
+}
+
 /// Alice stops watching an idle room, then checks its members on first reuse.
 /// Bob removes his second device during the idle period.
 #[test]
@@ -799,6 +832,88 @@ fn a_write_after_the_member_watch_expires_checks_the_room_again() {
         let before = count(&shared.server, "__e2ee_space_successors");
         shared.alice_writes("resumed");
         assert_eq!(count(&shared.server, "__e2ee_space_successors"), before + 1);
+    });
+}
+
+/// After Alice rotates the room, Bob receives a delivery for each new epoch.
+/// His cold write and his subscription's pass need only the current delivery.
+#[test]
+fn cold_writes_and_watch_passes_read_only_the_deliveries_they_need() {
+    within(|| {
+        let shared = SharedSpace::new();
+        let address = space_address(&shared.alice, shared.space);
+        let bob = &shared.bob_first;
+        let mut watch =
+            drive(&shared.server, &[&bob.db], bob.client.watch_spaces(&bob.db)).unwrap();
+        let protocol_address = jazz_e2ee::protocol::records::space::SpaceAddress::new(
+            &address.scope_id,
+            &address.identifier,
+        )
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        for account in [None, Some(id.as_str())] {
+            let query =
+                jazz_e2ee_client::epoch_deliveries_query(&protocol_address, &id, account).unwrap();
+            let (_, plan) = shared
+                .server
+                .explain_query_plan(&shared.server.prepare_query(&query).unwrap(), None)
+                .unwrap();
+            assert!(
+                plan.contains("SEARCH") && plan.contains("keyEpochId~") && plan.contains("=?)"),
+                "{plan}"
+            );
+        }
+        let mut counts = Vec::new();
+        for rotations in [1, 4] {
+            for _ in 0..rotations {
+                drive(
+                    &shared.server,
+                    &[&shared.alice.db],
+                    shared.alice.client.rotate(&shared.alice.db, &address),
+                )
+                .unwrap();
+            }
+            bob.client
+                .advance_settle_clock(std::time::Duration::from_secs(61));
+            drive(
+                &shared.server,
+                &[&bob.db],
+                bob.client.sync_spaces(&bob.db, &mut watch),
+            )
+            .unwrap();
+            bob.client.take_delivery_reads();
+            drive(
+                &shared.server,
+                &[&bob.db],
+                bob.client.write(&bob.db, async || {
+                    bob.db
+                        .insert("notes", note(shared.space, "resumed"), Default::default())
+                        .await
+                }),
+            )
+            .unwrap();
+            let write = bob.client.take_delivery_reads();
+            watch.use_space(&address);
+            let served = drive(
+                &shared.server,
+                &[&bob.db],
+                bob.client.sync_spaces(&bob.db, &mut watch),
+            )
+            .unwrap();
+            assert!(
+                served
+                    .iter()
+                    .any(|(space, state)| space == &address && state.is_ok())
+            );
+            let pass = bob.client.take_delivery_reads();
+            watch.release_space(&address);
+            counts.push((write, pass));
+        }
+        for (write, pass) in &counts {
+            assert!(write.0 > 0 && pass.0 > 0, "{counts:?}");
+            assert_eq!((write.1, pass.1), (0, 0), "{counts:?}");
+        }
+        assert_eq!(counts[0], counts[1]);
     });
 }
 
@@ -3047,5 +3162,41 @@ fn old_history_at_a_later_cut_gets_no_delivery() {
         let fresh = open_account(alice_store, alice, settings, None);
         assert_eq!(block_on(fresh.floor(&account_id(bob))), None);
         assert_eq!(fresh.with_held(|held| held.spaces().len()), 0);
+    });
+}
+/// Alice keeps the room open between sends. Both writes finish locally even
+/// when she loses the connection without the host detecting it.
+#[test]
+fn an_open_space_stays_ready_to_write_between_messages() {
+    within(|| {
+        let mut shared = SharedSpace::new();
+        let address = space_address(&shared.alice, shared.space);
+        shared.watch.use_space(&address);
+        shared.turns();
+        shared.alice_writes("warm");
+        shared.turns();
+        let alice = &shared.alice;
+        alice.client.take_reports();
+        for message in ["still online", "disconnected"] {
+            alice
+                .client
+                .advance_settle_clock(std::time::Duration::from_secs(61));
+            // No server pump: preparation that needs a round trip cannot finish.
+            let write = alice.client.write(&alice.db, async || {
+                alice
+                    .db
+                    .insert("notes", note(shared.space, message), Default::default())
+                    .await
+            });
+            assert!(
+                futures::FutureExt::now_or_never(write)
+                    .expect("write waited for the authority")
+                    .is_ok()
+            );
+            if message == "still online" {
+                pump(&shared.server, &alice.db);
+            }
+        }
+        assert!(alice.client.take_reports().is_empty());
     });
 }
