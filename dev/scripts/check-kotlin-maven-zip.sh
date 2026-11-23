@@ -15,7 +15,7 @@ version="$2"
 fail() { echo "$(basename "$zip"): $*" >&2; exit 1; }
 entries="$(unzip -Z1 "$zip" | grep -v '/$')"
 
-if stray="$(grep -Ev "^tools/jazz/[a-z-]+/${version//./\\.}/[^/]+\$" <<<"$entries")"; then
+if stray="$(grep -Ev "^tools/jazz/[a-z0-9-]+/${version//./\\.}/[^/]+\$" <<<"$entries")"; then
   fail "entries outside tools/jazz/<artifact>/$version/:"$'\n'"$stray"
 fi
 has() { grep -qxF "$1" <<<"$entries" || fail "lacks $1"; }

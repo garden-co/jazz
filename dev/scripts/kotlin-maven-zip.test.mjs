@@ -109,3 +109,21 @@ test("a sources jar holding a native library fails", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("an optional overlay (iOS klibs) joins the zip, and the zip still passes", () => {
+  const root = repo();
+  const ios = mkdtempSync(join(tmpdir(), "m2-ios-"));
+  try {
+    const d = join(ios, `tools/jazz/jazz-kotlin-iosarm64/${V}`);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, `jazz-kotlin-iosarm64-${V}.klib`), "klib");
+    const out = join(root, "out", "z.zip");
+    execFileSync("bash", [pack, root, V, out, ios], { stdio: "pipe" });
+    const r = spawnSync("bash", [checkScript, out, V], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(execFileSync("unzip", ["-Z1", out], { encoding: "utf8" }), /jazz-kotlin-iosarm64-.*\.klib/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(ios, { recursive: true, force: true });
+  }
+});
