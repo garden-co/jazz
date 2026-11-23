@@ -672,6 +672,26 @@ fn a_members_removed_device_cannot_read_what_another_member_writes_after() {
     });
 }
 
+/// Alice keeps the space open while offline. Bob removes his second device
+/// during the gap. Alice's first write after reconnecting must rotate even
+/// before her subscriptions have received the removal.
+#[test]
+fn the_first_write_after_reconnecting_checks_a_subscribed_space() {
+    within(|| {
+        let mut shared = SharedSpace::new();
+        let address = space_address(&shared.alice, shared.space);
+        shared.watch.use_space(&address);
+        shared.turns();
+
+        shared.alice.client.set_online(false);
+        shared.bob_removes_his_second_device();
+        shared.alice.client.set_online(true);
+        shared.alice_writes("after reconnect");
+        assert_eq!(count(&shared.server, "__e2ee_space_successors"), 1);
+        shared.assert_removed_device_left_out();
+    });
+}
+
 /// Alice resumes her device and uses the space before its first write.
 enum BeforeWrite {
     Deliver,
