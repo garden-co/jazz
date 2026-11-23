@@ -403,11 +403,11 @@ impl Inner {
             if self.landed_commit(commit).await? || self.applied_fate(commit.node, commit.tx).await?.is_some() {
                 self.exec(
                     "DELETE FROM _jazz_shard_holds WHERE node = ?1 AND tx = ?2",
-                    rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                    crate::storage::params![commit.node.to_vec(), commit.tx as i64],
                 ).await.map_err(storage)?;
                 self.exec(
                     "DELETE FROM _jazz_shard_held_rows WHERE node = ?1 AND tx = ?2",
-                    rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                    crate::storage::params![commit.node.to_vec(), commit.tx as i64],
                 ).await.map_err(storage)?;
                 continue;
             }
@@ -456,7 +456,7 @@ impl Inner {
                     ).map_err(storage)?;
                 statement
                     .query_map(
-                        rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                        crate::storage::params![commit.node.to_vec(), commit.tx as i64],
                         |r| {
                             let id: Vec<u8> = r.get(1)?;
                             Ok(HeldRow {
@@ -479,12 +479,12 @@ impl Inner {
         let node = commit.node.to_vec();
         self.exec(
             "INSERT INTO _jazz_shard_queued (node, tx, part) VALUES (?1, ?2, ?3)",
-            rusqlite::params![node, commit.tx as i64, part],
+            crate::storage::params![node, commit.tx as i64, part],
         ).await.map_err(storage)?;
         for row in rows {
             self.exec(
                 "INSERT INTO _jazz_shard_queued_rows (node, tx, tbl, id) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![node, commit.tx as i64, row.table, row.row.to_vec()],
+                crate::storage::params![node, commit.tx as i64, row.table, row.row.to_vec()],
             ).await.map_err(storage)?;
         }
         self.shard
@@ -495,7 +495,7 @@ impl Inner {
 
     /// Drop the durable record of `commit`'s queued hold, if any.
     async fn forget_queued(&self, commit: CommitRef) -> Result<(), Error> {
-        let params = rusqlite::params![commit.node.to_vec(), commit.tx as i64];
+        let params = crate::storage::params![commit.node.to_vec(), commit.tx as i64];
         self.exec(
             "DELETE FROM _jazz_shard_queued WHERE node = ?1 AND tx = ?2",
             params,
@@ -514,12 +514,12 @@ impl Inner {
         let node = commit.node.to_vec();
         self.exec(
             "INSERT INTO _jazz_shard_holds (at, node, tx, part) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![at as i64, node, commit.tx as i64, part],
+            crate::storage::params![at as i64, node, commit.tx as i64, part],
         ).await.map_err(storage)?;
         for row in rows {
             self.exec(
                 "INSERT INTO _jazz_shard_held_rows (node, tx, tbl, id) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![node, commit.tx as i64, row.table, row.row.to_vec()],
+                crate::storage::params![node, commit.tx as i64, row.table, row.row.to_vec()],
             ).await.map_err(storage)?;
         }
         self.seq = at;
@@ -562,7 +562,7 @@ impl Inner {
             .query_row(
                 "SELECT 1 FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
                  WHERE n.node = ?1 AND t.tx = ?2 AND t.t IS NOT NULL",
-                rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                crate::storage::params![commit.node.to_vec(), commit.tx as i64],
                 |r| r.get(0),
             )
             .await.optional().map_err(storage)?;
@@ -591,7 +591,7 @@ impl Inner {
         if !kept {
             return Ok(());
         }
-        let params = rusqlite::params![commit.node.to_vec(), commit.tx as i64];
+        let params = crate::storage::params![commit.node.to_vec(), commit.tx as i64];
         self.exec(
             "DELETE FROM _jazz_shard_holds WHERE node = ?1 AND tx = ?2",
             params,
@@ -608,7 +608,7 @@ impl Inner {
     }
 }
 
-use rusqlite::OptionalExtension;
+use crate::storage::OptionalExtension;
 
 /// The shard role of a store (see the module docs), from [`Db::shard`].
 pub struct ShardRole<'a> {
@@ -771,7 +771,7 @@ impl ShardRole<'_> {
             .conn
             .query_row(
                 "SELECT part FROM _jazz_shard_holds WHERE node = ?1 AND tx = ?2",
-                rusqlite::params![commit.node.to_vec(), commit.tx as i64],
+                crate::storage::params![commit.node.to_vec(), commit.tx as i64],
                 |r| r.get(0),
             )
             .await.optional().map_err(storage)
@@ -860,7 +860,7 @@ impl ShardRole<'_> {
         inner
             .exec(
                 "UPDATE _jazz_shard_holds SET fixed = ?3 WHERE node = ?1 AND tx = ?2",
-                rusqlite::params![commit.node.to_vec(), commit.tx as i64, position as i64],
+                crate::storage::params![commit.node.to_vec(), commit.tx as i64, position as i64],
             )
             .await
             .map_err(storage)?;

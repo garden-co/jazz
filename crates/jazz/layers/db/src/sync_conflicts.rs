@@ -583,7 +583,7 @@ impl Inner {
                     "UPDATE {} SET _base = ?1, _touched = ?2 WHERE id = ?3 AND _branch = ?4 AND _clock = ?5",
                     quote(table),
                 ),
-                rusqlite::params![
+                crate::storage::params![
                     built.get(row_key).map(|built| built.stored()),
                     self.authored(ops, indexes, table).await?,
                     row.0.as_bytes().to_vec(),
@@ -633,13 +633,16 @@ impl Inner {
         );
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let versions = statement
-            .query_map(rusqlite::params![row.0.as_bytes().to_vec(), key], |r| {
-                Ok(Version {
-                    seq: r.get::<_, i64>(0)? as u64,
-                    built: r.get::<_, Option<i64>>(1)?.map(Built::from_stored),
-                    cols: r.get(2)?,
-                })
-            })
+            .query_map(
+                crate::storage::params![row.0.as_bytes().to_vec(), key],
+                |r| {
+                    Ok(Version {
+                        seq: r.get::<_, i64>(0)? as u64,
+                        built: r.get::<_, Option<i64>>(1)?.map(Built::from_stored),
+                        cols: r.get(2)?,
+                    })
+                },
+            )
             .await
             .map_err(storage)?
             .collect::<Vec<_>>()
@@ -771,7 +774,7 @@ impl Inner {
             );
             let cell = self
                 .conn
-                .cached_row(&sql, rusqlite::params![id, key, -(on as i64)], |r| {
+                .cached_row(&sql, crate::storage::params![id, key, -(on as i64)], |r| {
                     r.get::<_, Sql>(0)
                 })
                 .await
@@ -790,7 +793,7 @@ impl Inner {
         );
         let cell = self
             .conn
-            .cached_row(&sql, rusqlite::params![id, key, at as i64], |r| {
+            .cached_row(&sql, crate::storage::params![id, key, at as i64], |r| {
                 r.get::<_, Sql>(0)
             })
             .await
@@ -882,7 +885,7 @@ impl Db {
         let mut statement = inner.conn.prepare_cached(&sql).map_err(storage)?;
         statement
             .query_map(
-                rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new()],
+                crate::storage::params![row.0.as_bytes().to_vec(), Vec::<u8>::new()],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
             )
             .await
@@ -913,7 +916,7 @@ impl Db {
             .conn
             .cached_row(
                 &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new()],
+                crate::storage::params![row.0.as_bytes().to_vec(), Vec::<u8>::new()],
                 |r| r.get::<_, i64>(0).map(|n| n as u64),
             )
             .await

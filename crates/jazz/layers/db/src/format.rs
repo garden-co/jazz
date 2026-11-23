@@ -21,8 +21,8 @@
 //! of each released format; a change to the layout that an older file would
 //! not read bumps [`STORAGE_FORMAT`] and adds its corpus.
 
+use crate::storage::OptionalExtension;
 use crate::storage::Storage;
-use rusqlite::OptionalExtension;
 use std::path::Path;
 
 use crate::options::{Error, ErrorCode};
@@ -89,7 +89,7 @@ pub(crate) async fn check(conn: &Storage) -> Result<bool, Error> {
     if stamp.as_deref() != Some("table") {
         return Err(unsupported("Jazz format stamp is not a table"));
     }
-    let versions: Vec<rusqlite::types::Value> = (async {
+    let versions: Vec<crate::storage::Value> = (async {
         let mut statement = conn.prepare(&format!("SELECT version FROM {STAMP_TABLE}"))?;
         {
             statement
@@ -102,8 +102,8 @@ pub(crate) async fn check(conn: &Storage) -> Result<bool, Error> {
     .await
     .map_err(storage)?;
     match versions.as_slice() {
-        [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => Ok(true),
-        [rusqlite::types::Value::Integer(version)] => Err(unsupported(format!(
+        [crate::storage::Value::Integer(STORAGE_FORMAT)] => Ok(true),
+        [crate::storage::Value::Integer(version)] => Err(unsupported(format!(
             "this store was written in Jazz SQLite storage format {version}"
         ))),
         other => Err(Error::new(

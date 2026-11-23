@@ -27,13 +27,13 @@ use crate::values::CachedRow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
+use crate::storage::Cell as ValueRef;
+use crate::storage::OptionalExtension;
 use bytes::Bytes;
 use jazz_types::large_values::{
     self as lv, AttemptError, ChunkInputs, ChunkNode, LargeValueKind, LargeValueRef,
     chunks::ChunkRequest, epoch,
 };
-use rusqlite::OptionalExtension;
-use rusqlite::types::ValueRef;
 
 use crate::chunk_store::{ChunkStore, NodeKey};
 use crate::options::{Error, ErrorCode, Reason};
@@ -695,6 +695,13 @@ impl Chunks {
         let reader = match (path, shared) {
             (_, Some(shared)) => Some(shared),
             (None, None) => None,
+            #[cfg(not(feature = "sqlite"))]
+            (Some(_), None) => {
+                return Err(crate::values::unsupported(
+                    "file chunk reader requires sqlite",
+                ));
+            }
+            #[cfg(feature = "sqlite")]
             (Some((path, vfs)), None) => {
                 let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
                     | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
@@ -1416,7 +1423,7 @@ async fn record_base(conn: &Storage, value: &LargeValueRef) -> Result<(), Error>
         )?;
         {
             statement
-                .execute(rusqlite::params![
+                .execute(crate::storage::params![
                     value.root.object_hash.as_bytes().as_slice(),
                     encoded
                 ])
@@ -1460,7 +1467,7 @@ pub(crate) async fn intern(
         )?;
         {
             statement
-                .query_map(rusqlite::params![root, encoded_base], |r| {
+                .query_map(crate::storage::params![root, encoded_base], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?))
                 })
                 .await?
@@ -1488,7 +1495,7 @@ pub(crate) async fn intern(
                     "UPDATE _jazz_lv_epoch SET edits = ?2, count = ?3 WHERE id = ?1",
                 )?;
                 statement
-                    .execute(rusqlite::params![id, edits, n as i64])
+                    .execute(crate::storage::params![id, edits, n as i64])
                     .await
             })
             .await
@@ -1502,7 +1509,7 @@ pub(crate) async fn intern(
                 )?;
                 {
                     statement
-                        .execute(rusqlite::params![root, encoded_base, edits, n as i64])
+                        .execute(crate::storage::params![root, encoded_base, edits, n as i64])
                         .await
                 }
             })
@@ -1543,7 +1550,7 @@ async fn store_chunk(
              ON CONFLICT (hash) DO NOTHING",
         )?;
         insert
-            .execute(rusqlite::params![hash.as_slice(), chunk.encoded])
+            .execute(crate::storage::params![hash.as_slice(), chunk.encoded])
             .await
     })
     .await
@@ -1594,7 +1601,7 @@ async fn store_chunk(
 pub(crate) async fn begin_upload(conn: &Storage, id: &[u8; 32], now: i64) -> Result<(), Error> {
     conn.execute(
         "INSERT INTO _jazz_lv_upload (id, touched) VALUES (?1, ?2)",
-        rusqlite::params![id.as_slice(), now],
+        crate::storage::params![id.as_slice(), now],
     )
     .await
     .map_err(storage)?;
@@ -1607,7 +1614,7 @@ pub(crate) async fn touch_upload(conn: &Storage, id: &[u8; 32], now: i64) -> Res
         let mut statement =
             conn.prepare_cached("UPDATE _jazz_lv_upload SET touched = ?2 WHERE id = ?1")?;
         statement
-            .execute(rusqlite::params![id.as_slice(), now])
+            .execute(crate::storage::params![id.as_slice(), now])
             .await
     })
     .await
@@ -1902,7 +1909,7 @@ pub(crate) async fn receive_pushed(
         )?;
         {
             statement
-                .execute(rusqlite::params![
+                .execute(crate::storage::params![
                     request.object_hash.as_slice(),
                     author,
                     expires
@@ -1934,7 +1941,7 @@ pub(crate) async fn settle_receipts(
         )?;
         {
             statement
-                .execute(rusqlite::params![root.as_bytes().as_slice(), author])
+                .execute(crate::storage::params![root.as_bytes().as_slice(), author])
                 .await
         }
     })
@@ -2144,7 +2151,7 @@ pub(crate) async fn possessed(
         let receipt: bool = conn
             .cached_row(
                 "SELECT EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE hash = ?1 AND author = ?2)",
-                rusqlite::params![hash.as_slice(), possession.author],
+                crate::storage::params![hash.as_slice(), possession.author],
                 |r| r.get(0),
             )
             .await
@@ -2185,7 +2192,7 @@ pub(crate) async fn record_via(conn: &Storage, root: &[u8; 32], via: &Via) -> Re
         )?;
         {
             statement
-                .execute(rusqlite::params![
+                .execute(crate::storage::params![
                     root.as_slice(),
                     via.table,
                     via.id.as_slice(),
@@ -3299,7 +3306,7 @@ mod tests {
             );
             crate::options::block_on(self.conn.execute(
                 "INSERT INTO t (id, body) VALUES (?1, ?2)",
-                rusqlite::params![id, cell],
+                crate::storage::params![id, cell],
             ))
             .unwrap();
             cell

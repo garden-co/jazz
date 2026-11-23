@@ -207,13 +207,16 @@ fn cell_sql(value: &Value) -> Result<(&'static str, i64, SqlValue), Error> {
         // Its bits, so NaN and -0.0 survive (SQLite stores NaN as NULL).
         Value::F64(v) => ("f64", SqlValue::Blob(v.to_bits().to_be_bytes().to_vec())),
         Value::Bool(v) => ("bool", SqlValue::Integer(i64::from(*v))),
-        Value::String(v) => ("string", SqlValue::Text(v.clone())),
+        Value::String(v) => ("string", SqlValue::Text(v.as_bytes().to_vec())),
         Value::Bytes(v) => ("bytes", SqlValue::Blob(v.clone())),
         Value::Uuid(v) => ("uuid", SqlValue::Blob(v.as_bytes().to_vec())),
         Value::EnumTag(v) => ("enum_tag", SqlValue::Integer(i64::from(*v))),
         // A chunked value's descriptor, an array, tuple, record or enum.
         Value::Large(_) | Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::Enum(_) => {
-            ("json", SqlValue::Text(exact_json("a cell", value)?))
+            (
+                "json",
+                SqlValue::Text(exact_json("a cell", value)?.into_bytes()),
+            )
         }
     };
     Ok((ty, nulls, sql))
@@ -251,7 +254,9 @@ fn sql_cell(ty: &str, nulls: i64, sql: SqlValue) -> Result<Value, Error> {
             _ => return Err(wrong()),
         },
         "string" => match sql {
-            SqlValue::Text(v) => Value::String(v),
+            SqlValue::Text(v) => {
+                Value::String(String::from_utf8(v).map_err(|_| bad("contains invalid UTF-8 text"))?)
+            }
             _ => return Err(wrong()),
         },
         "bytes" => match sql {
@@ -263,7 +268,9 @@ fn sql_cell(ty: &str, nulls: i64, sql: SqlValue) -> Result<Value, Error> {
             _ => return Err(wrong()),
         },
         "json" => match &sql {
-            SqlValue::Text(json) => from_json("cell", json)?,
+            SqlValue::Text(json) => {
+                from_json("cell", std::str::from_utf8(json).map_err(|_| wrong())?)?
+            }
             _ => return Err(wrong()),
         },
         _ => return Err(wrong()),
@@ -320,7 +327,7 @@ pub(crate) async fn write(
     )?;
         {
             statement
-                .execute(rusqlite::params![
+                .execute(crate::storage::params![
                     tx,
                     id.node.as_bytes().as_slice(),
                     id.time.0 as i64,
@@ -350,7 +357,7 @@ pub(crate) async fn write(
             )?;
             {
                 statement
-                    .execute(rusqlite::params![
+                    .execute(crate::storage::params![
                         tx,
                         n,
                         read.version.as_slice(),
@@ -372,7 +379,9 @@ pub(crate) async fn write(
                 let mut statement = conn.prepare_cached(
                     "INSERT INTO _jazz_pending_read_views (tx, n, view) VALUES (?1, ?2, ?3)",
                 )?;
-                statement.execute(rusqlite::params![tx, n, view]).await
+                statement
+                    .execute(crate::storage::params![tx, n, view])
+                    .await
             })
             .await
             .map_err(storage)?;
@@ -385,7 +394,7 @@ pub(crate) async fn write(
                 )?;
                 {
                     statement
-                        .execute(rusqlite::params![
+                        .execute(crate::storage::params![
                             tx,
                             n,
                             i as i64,
@@ -407,7 +416,7 @@ pub(crate) async fn write(
             )?;
             {
                 statement
-                    .execute(rusqlite::params![
+                    .execute(crate::storage::params![
                         tx,
                         n as i64,
                         table,
@@ -460,7 +469,7 @@ async fn write_op(conn: &Storage, tx: i64, n: i64, op: &WireOp) -> Result<(), Er
          (tx, n, op, tbl, id, target, move_from, move_to, at, has_cells, bases, proof_key, proof_seq) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
     )?; {
-        statement.execute(rusqlite::params![
+        statement.execute(crate::storage::params![
             tx,
             n,
             op_name(&op.write),
@@ -487,7 +496,9 @@ async fn write_op(conn: &Storage, tx: i64, n: i64, op: &WireOp) -> Result<(), Er
                 )?;
                 {
                     statement
-                        .execute(rusqlite::params![tx, n, list, column, ty, nulls, value])
+                        .execute(crate::storage::params![
+                            tx, n, list, column, ty, nulls, value
+                        ])
                         .await
                 }
             })
@@ -503,7 +514,7 @@ async fn write_op(conn: &Storage, tx: i64, n: i64, op: &WireOp) -> Result<(), Er
             )?;
             {
                 statement
-                    .execute(rusqlite::params![
+                    .execute(crate::storage::params![
                         tx,
                         n,
                         i as i64,
@@ -569,7 +580,9 @@ pub(crate) async fn read(conn: &Storage, tx: u64) -> Result<SyncMessage, Error> 
         )
         .await
         .map_err(|error| match error {
-            rusqlite::Error::InvalidColumnType(..) => bad(format_args!("has a malformed header")),
+            crate::storage::SqlError::InvalidColumnType { .. } => {
+                bad(format_args!("has a malformed header"))
+            }
             error => storage(error),
         })?;
     let acting = match (acting.as_str(), author, claims) {

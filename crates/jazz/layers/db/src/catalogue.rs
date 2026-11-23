@@ -39,7 +39,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{OptionalExtension, params};
+use crate::storage::{OptionalExtension, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 

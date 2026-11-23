@@ -44,13 +44,13 @@
 //!   non-serializable commit.
 
 use crate::schema::history::{history_source_table, is_history_table};
+use crate::storage::OptionalExtension;
 use crate::storage::Scoped;
 use crate::storage::Storage;
+use crate::storage::Value as SqlValue;
 use crate::values::CachedRow;
 use crate::values::query_error;
 use crate::values::{STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT};
-use rusqlite::OptionalExtension;
-use rusqlite::types::Value as SqlValue;
 use std::cell::Cell as StdCell;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -5023,7 +5023,7 @@ impl Inner {
                 {
                     statement
                         .query_row(
-                            rusqlite::params![
+                            crate::storage::params![
                                 tx as i64,
                                 node.as_bytes().to_vec(),
                                 band_start(PENDING)
@@ -5327,7 +5327,7 @@ impl Inner {
             } else {
                 format!("{} = ?1", quote(column))
             };
-            let mut values: Vec<&dyn rusqlite::ToSql> = vec![value];
+            let mut values: Vec<&dyn crate::storage::ToSql> = vec![value];
             for (column, value) in &further {
                 values.push(value);
                 filter.push_str(&format!(" AND {} = ?{}", quote(column), values.len()));
@@ -5659,7 +5659,7 @@ impl Inner {
         table: &str,
         history: bool,
         filter: &str,
-        params: &[&dyn rusqlite::ToSql],
+        params: &[&dyn crate::storage::ToSql],
     ) -> Result<Vec<Image>, Error> {
         let name = if history {
             format!("{table}__h")
@@ -6130,7 +6130,7 @@ impl Inner {
         let id = row.0.as_bytes().to_vec();
         self.exec(
             "INSERT OR IGNORE INTO _jazz_withheld (tbl, id, _branch) VALUES (?1, ?2, ?3)",
-            rusqlite::params![table, id, key],
+            crate::storage::params![table, id, key],
         )
         .await
         .map_err(storage)?;
@@ -6149,7 +6149,7 @@ impl Inner {
         let lifted = self
             .exec(
                 "DELETE FROM _jazz_withheld WHERE tbl = ?1 AND id = ?2 AND _branch = ?3",
-                rusqlite::params![table, id, key],
+                crate::storage::params![table, id, key],
             )
             .await
             .map_err(storage)?;
@@ -6189,7 +6189,7 @@ impl Inner {
         self.conn
             .cached_row(
                 "SELECT count(*) FROM _jazz_withheld WHERE tbl = ?1 AND id = ?2 AND _branch = ?3",
-                rusqlite::params![table, id, key],
+                crate::storage::params![table, id, key],
                 |r| r.get::<_, i64>(0),
             )
             .await
@@ -6207,7 +6207,9 @@ impl Inner {
             .prepare_cached("SELECT id FROM _jazz_withheld WHERE tbl = ?1 AND _branch = ?2")
             .map_err(storage)?;
         let mut rows = statement
-            .query_map(rusqlite::params![table, key], |r| r.get::<_, Vec<u8>>(0))
+            .query_map(crate::storage::params![table, key], |r| {
+                r.get::<_, Vec<u8>>(0)
+            })
             .await
             .map_err(storage)?;
         let mut ids = Vec::new();
@@ -6290,12 +6292,12 @@ impl Inner {
                 _ => unreachable!("a key binds a row id or a version"),
             };
             let last = chunk.last().expect("a chunk is never empty");
-            let params: Vec<&dyn rusqlite::ToSql> = chunk
+            let params: Vec<&dyn crate::storage::ToSql> = chunk
                 .iter()
                 .chain(std::iter::repeat(last))
                 .take(size)
                 .flatten()
-                .map(|value| value as &dyn rusqlite::ToSql)
+                .map(|value| value as &dyn crate::storage::ToSql)
                 .collect();
             images.extend(self.images_where(table, history, &filter, &params).await?);
         }
@@ -6469,7 +6471,7 @@ impl Inner {
                     "SELECT _writer FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3",
                     quote(table)
                 ),
-                rusqlite::params![row.0.as_bytes().to_vec(), key, at.t()],
+                crate::storage::params![row.0.as_bytes().to_vec(), key, at.t()],
                 |r| r.get(0),
             )
             .await
@@ -6502,7 +6504,12 @@ impl Inner {
                          WHERE id = ?1 AND _branch = ?2 AND _clock > ?3 AND _clock <= ?4",
                         quote(&name)
                     ),
-                    rusqlite::params![row.0.as_bytes().to_vec(), key, at.t(), Pos::SETTLED.t()],
+                    crate::storage::params![
+                        row.0.as_bytes().to_vec(),
+                        key,
+                        at.t(),
+                        Pos::SETTLED.t()
+                    ],
                     |r| r.get(0),
                 )
                 .await
@@ -6612,7 +6619,7 @@ impl Inner {
                 "DELETE FROM {} WHERE id = ?1 AND _branch = ?2",
                 quote(table)
             ),
-            rusqlite::params![id, key],
+            crate::storage::params![id, key],
         )
         .await
         .map_err(storage)?;
@@ -6621,7 +6628,7 @@ impl Inner {
                 "DELETE FROM {} WHERE id = ?1 AND _branch = ?2 AND (_clock >= ?3 OR (_clock < 0 AND ?3 < ?4))",
                 quote(&format!("{table}__h"))
             ),
-            rusqlite::params![
+            crate::storage::params![
                 id,
                 key,
                 from.t(),
@@ -6709,7 +6716,7 @@ impl Inner {
                 "DELETE FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3 AND _writer = ?4",
                 quote(&format!("{table}__h"))
             ),
-            rusqlite::params![row.0.as_bytes().to_vec(), key, at.0.t(), w],
+            crate::storage::params![row.0.as_bytes().to_vec(), key, at.0.t(), w],
         )
         .await
         .map_err(storage)?;
@@ -6914,9 +6921,10 @@ impl Inner {
             );
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
-                .query_map(rusqlite::params![row.0.as_bytes().to_vec(), at.t()], |r| {
-                    r.get(0)
-                })
+                .query_map(
+                    crate::storage::params![row.0.as_bytes().to_vec(), at.t()],
+                    |r| r.get(0),
+                )
                 .await
                 .map_err(storage)?
                 .collect::<_>()
@@ -6943,7 +6951,7 @@ impl Inner {
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
                 .query_map(
-                    rusqlite::params![row.0.as_bytes().to_vec(), self.own_pos(seq).t()],
+                    crate::storage::params![row.0.as_bytes().to_vec(), self.own_pos(seq).t()],
                     |r| r.get(0),
                 )
                 .await
@@ -7570,7 +7578,7 @@ impl Inner {
                     if !keep {
                         self.exec(
                             "DELETE FROM _jazz_watermarks WHERE key = ?1",
-                            rusqlite::params![key],
+                            crate::storage::params![key],
                         )
                         .await
                         .map_err(storage)?;
@@ -7592,7 +7600,7 @@ impl Inner {
         self.exec(WATERMARKS_DDL, []).await.map_err(storage)?;
         self.exec(
             "INSERT OR REPLACE INTO _jazz_watermarks (key, through, context) VALUES (?1, ?2, ?3)",
-            rusqlite::params![
+            crate::storage::params![
                 key.as_slice(),
                 through as i64,
                 context.map(|context| context.to_vec())
@@ -7617,7 +7625,7 @@ impl Inner {
         }
         self.exec(
             "INSERT OR REPLACE INTO _jazz_rejected (tx, error, serializable) VALUES (?1, ?2, ?3)",
-            rusqlite::params![tx as i64, encode(&wire_error(error)), serializable],
+            crate::storage::params![tx as i64, encode(&wire_error(error)), serializable],
         )
         .await
         .map_err(storage)?;
@@ -7758,7 +7766,7 @@ impl Inner {
     pub(super) async fn persist_meta(&self, key: &str, value: u64) -> Result<(), Error> {
         self.exec(
             "INSERT OR REPLACE INTO _jazz_meta (k, v) VALUES (?1, ?2)",
-            rusqlite::params![key, encode(&value)],
+            crate::storage::params![key, encode(&value)],
         )
         .await
         .map_err(storage)?;
@@ -7785,7 +7793,7 @@ impl Inner {
                     .try_into()
                     .map_err(|_| Error::new(ErrorCode::Storage, "bad namespace in _jazz_meta"))?,
             ),
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(crate::storage::SqlError::QueryReturnedNoRows) => None,
             Err(error) => return Err(storage(error)),
         };
         if stored.is_some() || !self.publishes_catalogue() {
@@ -7799,7 +7807,7 @@ impl Inner {
     pub(super) async fn persist_namespace(&self, namespace: [u8; 16]) -> Result<(), Error> {
         self.exec(
             "INSERT OR REPLACE INTO _jazz_meta (k, v) VALUES (?1, ?2)",
-            rusqlite::params![NAMESPACE_META, namespace.to_vec()],
+            crate::storage::params![NAMESPACE_META, namespace.to_vec()],
         )
         .await
         .map_err(storage)?;
@@ -7831,7 +7839,7 @@ impl Inner {
             .await
         {
             Ok(bytes) => Ok(postcard::from_bytes(&bytes).ok()),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(crate::storage::SqlError::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }
     }
@@ -7846,7 +7854,7 @@ impl Inner {
             .cached_row(
                 "SELECT t.result FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
              WHERE n.node = ?1 AND t.tx = ?2 AND t.result IS NOT NULL",
-                rusqlite::params![node.to_vec(), tx as i64],
+                crate::storage::params![node.to_vec(), tx as i64],
                 |r| r.get::<_, Vec<u8>>(0),
             )
             .await
@@ -7855,7 +7863,7 @@ impl Inner {
             // unseen commit: treating it as unseen would authorize a resend
             // afresh.
             Ok(bytes) => decode_stored(&bytes).map(Some),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(crate::storage::SqlError::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }
     }
@@ -7925,7 +7933,7 @@ impl Inner {
         let code = self.node_code(node).await?;
         self.exec(
             "UPDATE _jazz_nodes SET author = ?2 WHERE n = ?1 AND author IS NULL",
-            rusqlite::params![code, author],
+            crate::storage::params![code, author],
         )
         .await
         .map_err(storage)?;
@@ -7947,7 +7955,7 @@ impl Inner {
         let handed_over = self
             .exec(
                 "UPDATE _jazz_nodes SET author = ?2 WHERE n = ?1 AND author = ?3",
-                rusqlite::params![code, author, owner],
+                crate::storage::params![code, author, owner],
             )
             .await
             .map_err(storage)?;
@@ -7975,7 +7983,7 @@ impl Inner {
             .await
         {
             Ok(stored) => Ok(stored.as_slice() == account.0.as_bytes().as_slice()),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(crate::storage::SqlError::QueryReturnedNoRows) => Ok(false),
             Err(error) => Err(storage(error)),
         }
     }
@@ -7998,7 +8006,7 @@ impl Inner {
             .await
         {
             Ok(owner) => Ok(owner == Some(author)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(crate::storage::SqlError::QueryReturnedNoRows) => Ok(false),
             Err(error) => Err(storage(error)),
         }
     }
@@ -8018,7 +8026,7 @@ impl Inner {
             .await
         {
             Ok(owner) => Ok(owner == Some(author)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(crate::storage::SqlError::QueryReturnedNoRows) => Ok(false),
             Err(error) => Err(storage(error)),
         }
     }
@@ -8115,7 +8123,7 @@ impl Inner {
         self.exec(
             "INSERT INTO _jazz_transactions (n, tx, result) VALUES (?1, ?2, ?3) \
              ON CONFLICT (n, tx) DO UPDATE SET result = excluded.result",
-            rusqlite::params![code, tx as i64, encode(result)],
+            crate::storage::params![code, tx as i64, encode(result)],
         )
         .await
         .map_err(storage)?;
@@ -8216,14 +8224,14 @@ impl Inner {
             self.exec(
                 "DELETE FROM _jazz_transactions \
                  WHERE n = ?1 AND tx = ?2 AND t BETWEEN 0 AND ?3",
-                rusqlite::params![code, tx, MAX_SEQ as i64],
+                crate::storage::params![code, tx, MAX_SEQ as i64],
             )
             .await
             .map_err(storage)?;
             self.exec(
                 "INSERT INTO _jazz_pruned_txs (n, waiting, through) VALUES (?1, NULL, ?2) \
                  ON CONFLICT (n) DO UPDATE SET through = max(through, excluded.through)",
-                rusqlite::params![code, tx],
+                crate::storage::params![code, tx],
             )
             .await
             .map_err(storage)
@@ -8246,7 +8254,7 @@ impl Inner {
         self.exec(
             "INSERT INTO _jazz_pruned_txs (n, waiting, through) VALUES (?1, ?2, -1) \
              ON CONFLICT (n) DO UPDATE SET waiting = excluded.waiting",
-            rusqlite::params![code, waiting],
+            crate::storage::params![code, waiting],
         )
         .await
         .map_err(storage)?;
@@ -8283,7 +8291,7 @@ impl Inner {
             self.exec(ORIGIN_ENTRIES_DDL, []).await.map_err(storage)?;
             self.exec(
                 "INSERT OR IGNORE INTO _jazz_origin_entries (at, n, tx) VALUES (?1, ?2, ?3)",
-                rusqlite::params![now, self.node_code(node).await?, tx as i64],
+                crate::storage::params![now, self.node_code(node).await?, tx as i64],
             )
             .await
             .map_err(storage)?;
@@ -8300,7 +8308,7 @@ impl Inner {
             (async {
                 let rows = statement
                     .query_map(
-                        rusqlite::params![
+                        crate::storage::params![
                             now.saturating_sub(ORIGIN_ENTRY_RETENTION_MS),
                             ORIGIN_PRUNE_BATCH
                         ],
@@ -8316,13 +8324,13 @@ impl Inner {
         for (at, code, tx) in expired {
             self.exec(
                 "DELETE FROM _jazz_origin_entries WHERE at = ?1 AND n = ?2 AND tx = ?3",
-                rusqlite::params![at, code, tx],
+                crate::storage::params![at, code, tx],
             )
             .await
             .map_err(storage)?;
             self.exec(
                 "DELETE FROM _jazz_transactions WHERE n = ?1 AND tx = ?2",
-                rusqlite::params![code, tx],
+                crate::storage::params![code, tx],
             )
             .await
             .map_err(storage)?;
@@ -8371,7 +8379,7 @@ impl Inner {
         self.exec(
             "INSERT INTO _jazz_transactions (n, tx, t) VALUES (?1, ?2, ?3) \
              ON CONFLICT (n, tx) DO UPDATE SET t = excluded.t",
-            rusqlite::params![code, tx as i64, at.map(Pos::t)],
+            crate::storage::params![code, tx as i64, at.map(Pos::t)],
         )
         .await
         .map_err(storage)?;
@@ -8403,13 +8411,13 @@ impl Inner {
             .cached_row(
                 "SELECT t.t FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
              WHERE n.node = ?1 AND t.tx = ?2",
-                rusqlite::params![node.to_vec(), tx as i64],
+                crate::storage::params![node.to_vec(), tx as i64],
                 |r| r.get::<_, Option<i64>>(0),
             )
             .await
         {
             Ok(t) => Ok(Some(t.map(Pos::from_t))),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(crate::storage::SqlError::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }
     }

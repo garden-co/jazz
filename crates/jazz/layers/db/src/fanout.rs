@@ -2180,7 +2180,7 @@ impl Inner {
         columns: &BTreeSet<String>,
     ) -> Option<Vec<Vec<(String, Sql)>>> {
         let read = async |sql: String,
-                          params: &[&dyn rusqlite::ToSql]|
+                          params: &[&dyn crate::storage::ToSql]|
                -> Option<Vec<(i64, Vec<u8>, Vec<(String, Sql)>)>> {
             let mut statement = self.conn.prepare_cached(&sql).ok()?;
             // Names from the first row: a cached `SELECT *` prepared before
@@ -2668,14 +2668,14 @@ impl Inner {
             quote(&table.stored)
         );
         let ids = crate::compile::json_ids(rows.iter().map(|row| row.id.0.as_bytes().as_slice()));
-        let read = async || -> rusqlite::Result<HashMap<Vec<u8>, Vec<Sql>>> {
+        let read = async || -> crate::storage::SqlResult<HashMap<Vec<u8>, Vec<Sql>>> {
             let mut statement = self.conn.prepare_cached(&sql)?;
             let found = statement
                 .query_map([&ids], |r| {
                     let id: Vec<u8> = r.get(0)?;
                     let values = (1..=order.len())
                         .map(|i| r.get::<_, Sql>(i))
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                        .collect::<crate::storage::SqlResult<Vec<_>>>()?;
                     Ok((id, values))
                 })
                 .await?;

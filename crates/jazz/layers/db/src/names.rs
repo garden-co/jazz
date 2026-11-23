@@ -8,8 +8,8 @@
 //! (`_jazz_names`), so a reopened store and its old-version views find the
 //! same columns again.
 
+use crate::storage::OptionalExtension;
 use crate::storage::Storage;
-use rusqlite::OptionalExtension;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::ids::SchemaVersionId;
@@ -494,7 +494,7 @@ impl Names {
                 LensCellRule::Dropped(default) => (None, default.clone()),
             };
             insert
-                .execute(rusqlite::params![
+                .execute(crate::storage::params![
                     cell.table,
                     cell.column,
                     cell.since.as_bytes().to_vec(),
@@ -710,7 +710,7 @@ impl Names {
         conn.scope("jazz_names", async |conn| {
             conn.execute(
                 "INSERT INTO _jazz_versions (n, version) VALUES (?1, ?2)",
-                rusqlite::params![n, version.as_bytes().to_vec()],
+                crate::storage::params![n, version.as_bytes().to_vec()],
             )
             .await
             .map_err(storage)?;
@@ -864,7 +864,7 @@ impl Names {
                 .map_err(storage)?;
             for (tag, name) in &new {
                 insert
-                    .execute(rusqlite::params![table, column, tag, name])
+                    .execute(crate::storage::params![table, column, tag, name])
                     .await
                     .map_err(storage)?;
             }
@@ -927,14 +927,14 @@ impl Names {
             if let Some(name) = &stale_default {
                 conn.execute(
                     "INSERT INTO _jazz_enum_defaults (tbl, col, name) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![table, column, name],
+                    crate::storage::params![table, column, name],
                 )
                 .await
                 .map_err(storage)?;
             }
             conn.execute(
                 "DELETE FROM _jazz_enum_tags WHERE tbl = ?1 AND col = ?2",
-                rusqlite::params![table, column],
+                crate::storage::params![table, column],
             )
             .await
             .map_err(storage)?;
@@ -945,7 +945,7 @@ impl Names {
                 .map_err(storage)?;
             for (tag, name) in renumbered.iter() {
                 insert
-                    .execute(rusqlite::params![table, column, tag, name])
+                    .execute(crate::storage::params![table, column, tag, name])
                     .await
                     .map_err(storage)?;
             }
@@ -1036,7 +1036,7 @@ impl Names {
                 .map_err(storage)?;
             for (version, digest) in &new {
                 update
-                    .execute(rusqlite::params![
+                    .execute(crate::storage::params![
                         version.as_bytes().to_vec(),
                         digest.to_vec()
                     ])
@@ -1446,12 +1446,18 @@ async fn write_names(conn: &Storage, n: i64, names: &StoredNames) -> Result<(), 
         .map_err(storage)?;
     for (table, (stored, columns)) in &names.tables {
         insert
-            .execute(rusqlite::params![n, table, "", stored, ""])
+            .execute(crate::storage::params![n, table, "", stored, ""])
             .await
             .map_err(storage)?;
         for (column, stored_column) in columns {
             insert
-                .execute(rusqlite::params![n, table, column, stored, stored_column])
+                .execute(crate::storage::params![
+                    n,
+                    table,
+                    column,
+                    stored,
+                    stored_column
+                ])
                 .await
                 .map_err(storage)?;
         }
@@ -1490,7 +1496,7 @@ async fn write_stored_columns(conn: &Storage, columns: &[NewStoredColumn]) -> Re
             .transpose()?;
         let default = column.branch.clone().flatten();
         insert
-            .execute(rusqlite::params![
+            .execute(crate::storage::params![
                 column.table,
                 column.column,
                 ty,

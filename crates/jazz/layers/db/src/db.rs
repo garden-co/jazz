@@ -15,12 +15,12 @@ use crate::protocol::{
 use crate::query::Query;
 use crate::records::{Value, ValueType};
 use crate::schema::{JazzSchema, MergeStrategy};
+use crate::storage::Cell as ValueRef;
+use crate::storage::OptionalExtension;
 use crate::storage::params_from_iter;
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
 use crate::tx::DurabilityTier;
-use rusqlite::OptionalExtension;
-use rusqlite::types::ValueRef;
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
@@ -1561,23 +1561,30 @@ pub(crate) async fn execute_script(conn: &Storage, script: &str) -> Result<(), E
     // tables then paid a durable commit per table, index and trigger when
     // its store opened. It also leaves no half-created schema behind.
     conn.scope("jazz_ddl", async |conn| {
-        let mut start = 0;
-        for (end, _) in script.match_indices(';') {
-            let statement = &script[start..=end];
-            let text = std::ffi::CString::new(statement)
-                .map_err(|_| Error::new(ErrorCode::Storage, "NUL in SQL"))?;
-            // SAFETY: a NUL-terminated string; `sqlite3_complete` only reads
-            // it. A `;` inside a trigger body or a literal leaves it incomplete.
-            if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
-                conn.execute_batch(statement).await.map_err(storage)?;
-                start = end + 1;
+        if script.contains('\0') {
+            return Err(Error::new(ErrorCode::Storage, "NUL in SQL"));
+        }
+        #[cfg(feature = "sqlite")]
+        if !conn.is_managed() {
+            let mut start = 0;
+            for (end, _) in script.match_indices(';') {
+                let statement = &script[start..=end];
+                let text = std::ffi::CString::new(statement)
+                    .map_err(|_| Error::new(ErrorCode::Storage, "NUL in SQL"))?;
+                // SAFETY: a NUL-terminated string; `sqlite3_complete` only reads
+                // it. A `;` inside a trigger body or a literal leaves it incomplete.
+                if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
+                    conn.execute_batch(statement).await.map_err(storage)?;
+                    start = end + 1;
+                }
             }
+            let rest = &script[start..];
+            if !rest.trim().is_empty() {
+                conn.execute_batch(rest).await.map_err(storage)?;
+            }
+            return Ok(());
         }
-        let rest = &script[start..];
-        if !rest.trim().is_empty() {
-            conn.execute_batch(rest).await.map_err(storage)?;
-        }
-        Ok(())
+        conn.execute_batch(script).await.map_err(storage)
     })
     .await
 }
@@ -1925,6 +1932,7 @@ impl Error {
 }
 
 impl Db {
+    #[cfg(feature = "sqlite")]
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
         #[cfg(not(feature = "managed-storage-emulation"))]
         let conn = Storage::open_in_memory().map_err(storage)?;
@@ -1943,6 +1951,7 @@ impl Db {
     /// says otherwise). Reopening restores rows, history, the commit seq
     /// and, for a replica, its pending uploads and history baselines; they are resent
     /// on the next connection.
+    #[cfg(feature = "sqlite")]
     pub async fn open_at(
         config: DbConfig,
         path: &std::path::Path,
@@ -2434,6 +2443,7 @@ impl Db {
 
     /// Every SQLite store holds complete history; this one is also the
     /// global authority (see [`Db::set_authority`]).
+    #[cfg(feature = "sqlite")]
     pub async fn open_history_complete(config: DbConfig) -> Result<Self, Error> {
         let db = Self::open(config).await?;
         db.set_authority().await;
@@ -5295,7 +5305,7 @@ impl Inner {
         &self,
         sql: &str,
         params: P,
-    ) -> rusqlite::Result<usize> {
+    ) -> crate::storage::SqlResult<usize> {
         self.conn.prepare_cached(sql)?.execute(params).await
     }
 
@@ -5574,10 +5584,10 @@ impl Inner {
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut statement = self.conn.prepare_cached(sql).map_err(storage)?;
         // Cached statements keep counting across runs: start this one at 0.
-        statement.reset_status(rusqlite::StatementStatus::FullscanStep);
-        statement.reset_status(rusqlite::StatementStatus::Sort);
+        statement.reset_status(crate::storage::StatementStatus::FullscanStep);
+        statement.reset_status(crate::storage::StatementStatus::Sort);
         #[cfg(any(test, feature = "testing"))]
-        statement.reset_status(rusqlite::StatementStatus::VmStep);
+        statement.reset_status(crate::storage::StatementStatus::VmStep);
         let names: Arc<str> = Arc::from(table);
         let types: Arc<[ValueType]> = compiled
             .projection
@@ -5709,11 +5719,11 @@ impl Inner {
             });
         }
         drop(rows);
-        run.scanned += statement.reset_status(rusqlite::StatementStatus::FullscanStep) as u64;
-        run.sorted |= statement.reset_status(rusqlite::StatementStatus::Sort) > 0;
+        run.scanned += statement.reset_status(crate::storage::StatementStatus::FullscanStep) as u64;
+        run.sorted |= statement.reset_status(crate::storage::StatementStatus::Sort) > 0;
         #[cfg(any(test, feature = "testing"))]
         {
-            let steps = statement.reset_status(rusqlite::StatementStatus::VmStep) as u64;
+            let steps = statement.reset_status(crate::storage::StatementStatus::VmStep) as u64;
             VM_STEPS.with(|cell| cell.set(cell.get() + steps));
         }
         if let Some(error) = blocked {
@@ -6496,13 +6506,13 @@ impl Inner {
             .conn
             .cached_row(
                 &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key],
+                crate::storage::params![row.0.as_bytes().to_vec(), key],
                 |r| Ok((Pos::from_t(r.get(0)?), r.get::<_, i64>(1)? != 0)),
             )
             .await
         {
             Ok(found) => Ok(Some(found)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(crate::storage::SqlError::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }
     }
@@ -6537,7 +6547,7 @@ impl Inner {
             .conn
             .cached_row(
                 &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key, version.t(), w],
+                crate::storage::params![row.0.as_bytes().to_vec(), key, version.t(), w],
                 |r| r.get(0),
             )
             .await
@@ -6597,7 +6607,7 @@ impl Inner {
         self.conn
             .cached_row(
                 &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key, cut.seq.t()],
+                crate::storage::params![row.0.as_bytes().to_vec(), key, cut.seq.t()],
                 |r| Ok((Pos::from_t(r.get(0)?), r.get(1)?)),
             )
             .await
@@ -7000,9 +7010,10 @@ impl Inner {
             ))?;
             {
                 statement
-                    .query_row(rusqlite::params![row.0.as_bytes().as_slice(), key], |_| {
-                        Ok(())
-                    })
+                    .query_row(
+                        crate::storage::params![row.0.as_bytes().as_slice(), key],
+                        |_| Ok(()),
+                    )
                     .await
                     .optional()
             }
@@ -7484,7 +7495,7 @@ impl Inner {
             .conn
             .cached_row(
                 &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key],
+                crate::storage::params![row.0.as_bytes().to_vec(), key],
                 |r| r.get(0),
             )
             .await
@@ -7539,7 +7550,7 @@ impl Inner {
         let find = async |conn: &Storage| {
             conn.cached_row(
                 "SELECT n FROM _jazz_authors WHERE account = ?1 AND issuer = ?2 AND subject = ?3",
-                rusqlite::params![account, issuer, subject],
+                crate::storage::params![account, issuer, subject],
                 |row| row.get::<_, i64>(0),
             )
             .await
@@ -7551,7 +7562,7 @@ impl Inner {
             None => {
                 self.exec(
                     "INSERT INTO _jazz_authors (account, issuer, subject) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![account, issuer, subject],
+                    crate::storage::params![account, issuer, subject],
                 )
                 .await
                 .map_err(storage)?;
@@ -8214,7 +8225,7 @@ impl Inner {
         self.conn
             .cached_row(
                 &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key],
+                crate::storage::params![row.0.as_bytes().to_vec(), key],
                 |r| r.get(0),
             )
             .await
@@ -8385,7 +8396,7 @@ impl Inner {
                      JOIN _jazz_nodes AS n ON n.n = s.n WHERE s.t = -_clock AND n.node = ?3)",
                     quote(&format!("{stored}__h"))
                 ),
-                rusqlite::params![row.0.as_bytes().to_vec(), key, node.to_vec()],
+                crate::storage::params![row.0.as_bytes().to_vec(), key, node.to_vec()],
             )
             .await.map_err(storage)?;
         }
@@ -8491,7 +8502,7 @@ impl Inner {
                     "SELECT _clock, _writer FROM {} WHERE id = ?1 AND _branch = ?2",
                     quote(&table.stored)
                 ),
-                rusqlite::params![id, key],
+                crate::storage::params![id, key],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .await
@@ -8513,7 +8524,7 @@ impl Inner {
             quote(&format!("{}__h", table.stored)),
             quote(&table.stored),
         );
-        self.exec(&sql, rusqlite::params![id, key])
+        self.exec(&sql, crate::storage::params![id, key])
             .await
             .map_err(storage)?;
         self.prune_history(prune, &table.stored, row, key).await
@@ -8619,7 +8630,7 @@ impl Inner {
                  AND _clock >= 0 AND _clock < (SELECT max(_clock) FROM {history} \
                  WHERE id = ?1 AND _branch = ?2 AND _writer = X'' AND _clock BETWEEN 0 AND ?3 - 1)"
             ),
-            rusqlite::params![row.0.as_bytes().to_vec(), key, pending],
+            crate::storage::params![row.0.as_bytes().to_vec(), key, pending],
         )
         .await
         .map_err(storage)?;
@@ -8684,7 +8695,7 @@ impl Inner {
         let w = self.own_writer_at(seq);
         self.exec(
             &sql,
-            rusqlite::params![to, self.own_pos(seq).t(), id, from, w],
+            crate::storage::params![to, self.own_pos(seq).t(), id, from, w],
         )
         .await
         .map_err(storage)?;
@@ -9894,7 +9905,7 @@ impl Inner {
                 .conn
                 .cached_row(
                     &sql,
-                    rusqlite::params![row.0.as_bytes().to_vec(), key],
+                    crate::storage::params![row.0.as_bytes().to_vec(), key],
                     |r| r.get(0),
                 )
                 .await

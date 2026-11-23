@@ -24,10 +24,35 @@ use std::sync::{Arc, Mutex};
 use crate::options::Error;
 
 pub use crate::values::Sql as Value;
-pub use rusqlite::types;
-pub use rusqlite::{
-    Error as SqlError, OptionalExtension, Result as SqlResult, StatementStatus, ToSql,
-};
+mod cell;
+pub use cell::{Cell, CellError, FromCell, ToSql};
+mod error;
+pub use error::{OptionalExtension, SqlError, SqlResult};
+
+// SQLite result codes are part of the managed backend contract too.
+const SQLITE_ABORT: i32 = 4;
+pub(crate) const SQLITE_INTERRUPT: i32 = 9;
+const SQLITE_CONSTRAINT_COMMITHOOK: i32 = 531;
+
+#[derive(Clone, Copy)]
+pub enum StatementStatus {
+    FullscanStep,
+    Sort,
+    VmStep,
+    RePrepare,
+}
+
+#[cfg(feature = "sqlite")]
+impl From<StatementStatus> for rusqlite::StatementStatus {
+    fn from(status: StatementStatus) -> Self {
+        match status {
+            StatementStatus::FullscanStep => Self::FullscanStep,
+            StatementStatus::Sort => Self::Sort,
+            StatementStatus::VmStep => Self::VmStep,
+            StatementStatus::RePrepare => Self::RePrepare,
+        }
+    }
+}
 
 /// A managed backend's threading: native hosts share it across threads;
 /// a wasm32 host (a Durable Object) has one.
@@ -67,7 +92,7 @@ pub fn transaction_sync(
         Ok(())
     } else {
         Err(backend_error(
-            rusqlite::ffi::SQLITE_ABORT,
+            SQLITE_ABORT,
             "synchronous transaction body did not complete".into(),
         ))
     }
@@ -127,7 +152,7 @@ async fn checked_command<T>(
 ) -> SqlResult<T> {
     if interrupted.load(Ordering::Acquire) {
         return Err(backend_error(
-            rusqlite::ffi::SQLITE_ABORT,
+            SQLITE_ABORT,
             "SQL operation interrupted; reopen the database".into(),
         ));
     }
@@ -306,6 +331,7 @@ pub struct Storage {
 }
 
 enum Owner {
+    #[cfg(feature = "sqlite")]
     Native(rusqlite::Connection),
     Managed(Managed),
 }
@@ -320,6 +346,7 @@ impl Storage {
     }
 
     /// Own a native SQLite connection.
+    #[cfg(feature = "sqlite")]
     pub fn native(conn: rusqlite::Connection) -> Self {
         Self::new(Owner::Native(conn))
     }
@@ -340,6 +367,7 @@ impl Storage {
     /// storage, where a file store opens its own read-only connection.
     pub(crate) fn shared_reader(&self) -> Option<Storage> {
         match &self.owner {
+            #[cfg(feature = "sqlite")]
             Owner::Native(_) => None,
             Owner::Managed(managed) => Some(Storage::new(Owner::Managed(Managed {
                 backend: managed.backend.clone(),
@@ -363,6 +391,7 @@ impl Storage {
             (Owner::Managed(root), Owner::Managed(tx)) => {
                 root.backend.with_transaction(&tx.backend, body).await
             }
+            #[cfg(feature = "sqlite")]
             _ => body.await,
         }
     }
@@ -414,6 +443,7 @@ impl Storage {
         f: impl AsyncFnOnce(&Storage) -> Scoped<T>,
     ) -> Result<T, Error> {
         match &self.owner {
+            #[cfg(feature = "sqlite")]
             Owner::Native(_) => {
                 crate::values::begin_savepoint(self, name)?;
                 struct NativeScope<'a> {
@@ -493,9 +523,9 @@ impl Storage {
                 // The commit hook vetoed it: as on native SQLite, where the
                 // commit then fails.
                 if chose_keep && !kept {
-                    return Err(crate::values::storage(SqlError::SqliteFailure(
-                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_COMMITHOOK),
-                        Some(format!("scope `{name}` was rolled back by the commit hook")),
+                    return Err(crate::values::storage(backend_error(
+                        SQLITE_CONSTRAINT_COMMITHOOK,
+                        format!("scope `{name}` was rolled back by the commit hook"),
                     )));
                 }
                 Ok(value.expect("a scope's body ran"))
@@ -508,30 +538,42 @@ impl Storage {
 /// method names.
 impl Storage {
     /// Open a private in-memory database.
+    #[cfg(feature = "sqlite")]
     pub fn open_in_memory() -> SqlResult<Self> {
-        rusqlite::Connection::open_in_memory().map(Self::native)
+        rusqlite::Connection::open_in_memory()
+            .map(Self::native)
+            .map_err(Into::into)
     }
 
     /// Open (creating) the database file at `path`.
+    #[cfg(feature = "sqlite")]
     pub fn open(path: impl AsRef<std::path::Path>) -> SqlResult<Self> {
-        rusqlite::Connection::open(path).map(Self::native)
+        rusqlite::Connection::open(path)
+            .map(Self::native)
+            .map_err(Into::into)
     }
 
     /// Open `path` with `flags`.
+    #[cfg(feature = "sqlite")]
     pub fn open_with_flags(
         path: impl AsRef<std::path::Path>,
         flags: rusqlite::OpenFlags,
     ) -> SqlResult<Self> {
-        rusqlite::Connection::open_with_flags(path, flags).map(Self::native)
+        rusqlite::Connection::open_with_flags(path, flags)
+            .map(Self::native)
+            .map_err(Into::into)
     }
 
     /// Open `path` with `flags` on the SQLite VFS named `vfs`.
+    #[cfg(feature = "sqlite")]
     pub fn open_with_flags_and_vfs(
         path: impl AsRef<std::path::Path>,
         flags: rusqlite::OpenFlags,
         vfs: &str,
     ) -> SqlResult<Self> {
-        rusqlite::Connection::open_with_flags_and_vfs(path, flags, vfs).map(Self::native)
+        rusqlite::Connection::open_with_flags_and_vfs(path, flags, vfs)
+            .map(Self::native)
+            .map_err(Into::into)
     }
 
     /// Identifies this store among the open ones, for state kept beside it
@@ -542,8 +584,10 @@ impl Storage {
 
     /// The native connection, for what only native SQLite has (its
     /// planner, limits and tracing); `None` on a managed store.
+    #[cfg(feature = "sqlite")]
     pub(crate) fn native_conn(&self) -> Option<&rusqlite::Connection> {
         match &self.owner {
+            #[cfg(feature = "sqlite")]
             Owner::Native(conn) => Some(conn),
             Owner::Managed(_) => None,
         }
@@ -552,10 +596,11 @@ impl Storage {
     /// Prepare `sql` through the statement cache.
     pub fn prepare_cached(&self, sql: &str) -> SqlResult<Statement<'_>> {
         match &self.owner {
+            #[cfg(feature = "sqlite")]
             Owner::Native(conn) => Ok(Statement::Native(conn.prepare_cached(sql)?)),
             Owner::Managed(managed) => Ok(Statement::Managed {
                 backend: managed.backend.current(),
-                interrupted: managed.interrupted.clone(),
+                interrupted: &managed.interrupted,
                 sql: sql.to_owned(),
                 bindings: Vec::new(),
             }),
@@ -565,6 +610,7 @@ impl Storage {
     /// Prepare `sql`, uncached on native SQLite.
     pub fn prepare(&self, sql: &str) -> SqlResult<Statement<'_>> {
         match &self.owner {
+            #[cfg(feature = "sqlite")]
             Owner::Native(conn) => Ok(Statement::Uncached(conn.prepare(sql)?)),
             Owner::Managed(_) => self.prepare_cached(sql),
         }
@@ -580,7 +626,8 @@ impl Storage {
     /// Run statements with no parameters and no results.
     pub async fn execute_batch(&self, sql: &str) -> SqlResult<()> {
         match &self.owner {
-            Owner::Native(conn) => conn.execute_batch(sql),
+            #[cfg(feature = "sqlite")]
+            Owner::Native(conn) => conn.execute_batch(sql).map_err(Into::into),
             Owner::Managed(managed) => {
                 checked_command(
                     &managed.interrupted,
@@ -605,6 +652,7 @@ impl Storage {
     /// Whether no transaction or scope is open.
     pub fn is_autocommit(&self) -> bool {
         match &self.owner {
+            #[cfg(feature = "sqlite")]
             Owner::Native(conn) => conn.is_autocommit(),
             Owner::Managed(managed) => managed.hooks.lock().expect("hooks").depth == 0,
         }
@@ -612,9 +660,10 @@ impl Storage {
 
     /// How long a statement waits for another connection's lock (native
     /// only: a managed store has no other connection).
-    pub fn busy_timeout(&self, timeout: std::time::Duration) -> SqlResult<()> {
+    pub fn busy_timeout(&self, _timeout: std::time::Duration) -> SqlResult<()> {
         match &self.owner {
-            Owner::Native(conn) => conn.busy_timeout(timeout),
+            #[cfg(feature = "sqlite")]
+            Owner::Native(conn) => conn.busy_timeout(_timeout).map_err(Into::into),
             Owner::Managed(_) => Ok(()),
         }
     }
@@ -622,6 +671,7 @@ impl Storage {
     /// The rowid of the last row inserted.
     pub async fn last_insert_rowid(&self) -> SqlResult<i64> {
         match &self.owner {
+            #[cfg(feature = "sqlite")]
             Owner::Native(conn) => Ok(conn.last_insert_rowid()),
             Owner::Managed(managed) => {
                 checked_command(
@@ -636,6 +686,7 @@ impl Storage {
     /// How many rows all statements so far changed.
     pub async fn total_changes(&self) -> SqlResult<u64> {
         match &self.owner {
+            #[cfg(feature = "sqlite")]
             Owner::Native(conn) => Ok(conn.total_changes()),
             Owner::Managed(managed) => {
                 checked_command(
@@ -650,17 +701,20 @@ impl Storage {
     /// The most `?` parameters a statement may bind.
     pub fn max_parameters(&self) -> SqlResult<usize> {
         match &self.owner {
+            #[cfg(feature = "sqlite")]
             Owner::Native(conn) => conn
                 .limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
-                .map(|n| n as usize),
+                .map(|n| n as usize)
+                .map_err(Into::into),
             Owner::Managed(managed) => Ok(managed.backend.current().max_parameters()),
         }
     }
 
     /// How many prepared statements the cache keeps (native only).
-    pub fn set_prepared_statement_cache_capacity(&self, capacity: usize) {
+    pub fn set_prepared_statement_cache_capacity(&self, _capacity: usize) {
+        #[cfg(feature = "sqlite")]
         if let Owner::Native(conn) = &self.owner {
-            conn.set_prepared_statement_cache_capacity(capacity);
+            conn.set_prepared_statement_cache_capacity(_capacity);
         }
     }
 
@@ -671,7 +725,8 @@ impl Storage {
         hook: Option<impl FnMut() -> bool + Send + 'static>,
     ) -> SqlResult<()> {
         match &self.owner {
-            Owner::Native(conn) => conn.commit_hook(hook),
+            #[cfg(feature = "sqlite")]
+            Owner::Native(conn) => conn.commit_hook(hook).map_err(Into::into),
             Owner::Managed(managed) => {
                 managed.hooks.lock().expect("hooks").commit = hook.map(|h| Box::new(h) as _);
                 Ok(())
@@ -683,7 +738,8 @@ impl Storage {
     /// including SQLite's own rollbacks after an error.
     pub fn rollback_hook(&self, hook: Option<impl FnMut() + Send + 'static>) -> SqlResult<()> {
         match &self.owner {
-            Owner::Native(conn) => conn.rollback_hook(hook),
+            #[cfg(feature = "sqlite")]
+            Owner::Native(conn) => conn.rollback_hook(hook).map_err(Into::into),
             Owner::Managed(managed) => {
                 managed.hooks.lock().expect("hooks").rollback = hook.map(|h| Box::new(h) as _);
                 Ok(())
@@ -751,31 +807,28 @@ where
     }
 }
 
-pub use rusqlite::params;
+pub use crate::params;
 
 fn bind_iter<I: IntoIterator>(statement: &mut Statement<'_>, values: I) -> SqlResult<()>
 where
     I::Item: ToSql,
 {
     match statement {
+        #[cfg(feature = "sqlite")]
         Statement::Native(statement) => bind_native(statement, values),
+        #[cfg(feature = "sqlite")]
         Statement::Uncached(statement) => bind_native(statement, values),
         Statement::Managed { bindings, .. } => {
             bindings.clear();
             for value in values {
-                bindings.push(match value.to_sql()? {
-                    types::ToSqlOutput::Borrowed(value) => Value::from(value),
-                    types::ToSqlOutput::Owned(ref value) => {
-                        Value::from(types::ValueRef::from(value))
-                    }
-                    _ => return Err(SqlError::InvalidQuery),
-                });
+                bindings.push(Value::from(value.as_cell()));
             }
             Ok(())
         }
     }
 }
 
+#[cfg(feature = "sqlite")]
 fn bind_native<I: IntoIterator>(statement: &mut rusqlite::Statement<'_>, values: I) -> SqlResult<()>
 where
     I::Item: ToSql,
@@ -783,7 +836,7 @@ where
     let mut n = 0;
     for value in values {
         n += 1;
-        statement.raw_bind_parameter(n, value)?;
+        statement.raw_bind_parameter(n, value.as_cell())?;
     }
     if n != statement.parameter_count() {
         return Err(SqlError::InvalidParameterCount(
@@ -797,13 +850,15 @@ where
 /// A prepared statement.
 pub enum Statement<'a> {
     /// Native, from the statement cache.
+    #[cfg(feature = "sqlite")]
     Native(rusqlite::CachedStatement<'a>),
     /// Native, uncached.
+    #[cfg(feature = "sqlite")]
     Uncached(rusqlite::Statement<'a>),
     /// Managed: the SQL and its bound cells, run by the backend.
     Managed {
         backend: Arc<dyn Backend>,
-        interrupted: Arc<AtomicBool>,
+        interrupted: &'a Arc<AtomicBool>,
         sql: String,
         bindings: Vec<Value>,
     },
@@ -817,8 +872,10 @@ impl Statement<'_> {
     pub async fn execute<P: Params>(&mut self, params: P) -> SqlResult<usize> {
         params.bind(self)?;
         match self {
-            Self::Native(statement) => statement.raw_execute(),
-            Self::Uncached(statement) => statement.raw_execute(),
+            #[cfg(feature = "sqlite")]
+            Self::Native(statement) => statement.raw_execute().map_err(Into::into),
+            #[cfg(feature = "sqlite")]
+            Self::Uncached(statement) => statement.raw_execute().map_err(Into::into),
             Self::Managed {
                 backend,
                 sql,
@@ -832,7 +889,9 @@ impl Statement<'_> {
     pub async fn query<P: Params>(&mut self, params: P) -> SqlResult<Rows<'_>> {
         params.bind(self)?;
         match self {
+            #[cfg(feature = "sqlite")]
             Self::Native(statement) => Ok(Rows::Native(statement.raw_query())),
+            #[cfg(feature = "sqlite")]
             Self::Uncached(statement) => Ok(Rows::Native(statement.raw_query())),
             Self::Managed {
                 backend,
@@ -845,7 +904,7 @@ impl Statement<'_> {
                 Ok(Rows::Managed {
                     cursor,
                     columns,
-                    interrupted: interrupted.clone(),
+                    interrupted: Arc::clone(interrupted),
                 })
             }
         }
@@ -881,19 +940,23 @@ impl Statement<'_> {
 
     /// A SQLite VM counter (native only; 0 on managed SQL, which has none:
     /// diagnostics only, never a correctness decision).
-    pub fn get_status(&self, status: StatementStatus) -> i32 {
+    pub fn get_status(&self, _status: StatementStatus) -> i32 {
         match self {
-            Self::Native(statement) => statement.get_status(status),
-            Self::Uncached(statement) => statement.get_status(status),
+            #[cfg(feature = "sqlite")]
+            Self::Native(statement) => statement.get_status(_status.into()),
+            #[cfg(feature = "sqlite")]
+            Self::Uncached(statement) => statement.get_status(_status.into()),
             Self::Managed { .. } => 0,
         }
     }
 
     /// A SQLite VM counter, reset (as [`Statement::get_status`]).
-    pub fn reset_status(&self, status: StatementStatus) -> i32 {
+    pub fn reset_status(&self, _status: StatementStatus) -> i32 {
         match self {
-            Self::Native(statement) => statement.reset_status(status),
-            Self::Uncached(statement) => statement.reset_status(status),
+            #[cfg(feature = "sqlite")]
+            Self::Native(statement) => statement.reset_status(_status.into()),
+            #[cfg(feature = "sqlite")]
+            Self::Uncached(statement) => statement.reset_status(_status.into()),
             Self::Managed { .. } => 0,
         }
     }
@@ -901,8 +964,11 @@ impl Statement<'_> {
     /// Release it now rather than when dropped.
     pub fn finalize(self) -> SqlResult<()> {
         match self {
-            Self::Uncached(statement) => statement.finalize(),
-            Self::Native(_) | Self::Managed { .. } => Ok(()),
+            #[cfg(feature = "sqlite")]
+            Self::Uncached(statement) => statement.finalize().map_err(Into::into),
+            #[cfg(feature = "sqlite")]
+            Self::Native(_) => Ok(()),
+            Self::Managed { .. } => Ok(()),
         }
     }
 }
@@ -910,6 +976,7 @@ impl Statement<'_> {
 /// A query's rows.
 pub enum Rows<'a> {
     /// Native: rusqlite's rows.
+    #[cfg(feature = "sqlite")]
     Native(rusqlite::Rows<'a>),
     /// Managed: the backend's cursor.
     Managed {
@@ -925,6 +992,7 @@ impl Rows<'_> {
     #[allow(clippy::should_implement_trait)]
     pub async fn next(&mut self) -> SqlResult<Option<Row<'_>>> {
         match self {
+            #[cfg(feature = "sqlite")]
             Self::Native(rows) => Ok(rows.next()?.map(Row::Native)),
             Self::Managed {
                 cursor,
@@ -964,6 +1032,7 @@ impl<T, F: FnMut(&Row<'_>) -> SqlResult<T>> MappedRows<'_, F> {
 /// One row of a query's result.
 pub enum Row<'a> {
     /// Native: rusqlite's row.
+    #[cfg(feature = "sqlite")]
     Native(&'a rusqlite::Row<'a>),
     /// Managed: the cursor's cells and the result's column names.
     Managed {
@@ -974,24 +1043,21 @@ pub enum Row<'a> {
 
 impl Row<'_> {
     /// Column `index` (a position or a name), converted to `T`.
-    pub fn get<I: ColumnIndex, T: types::FromSql>(&self, index: I) -> SqlResult<T> {
+    pub fn get<I: ColumnIndex, T: FromCell>(&self, index: I) -> SqlResult<T> {
         let index = index.index(self)?;
         let value = self.get_ref(index)?;
-        T::column_result(value).map_err(|error| match error {
-            types::FromSqlError::InvalidType => SqlError::InvalidColumnType(
-                index,
-                self.column_name(index).unwrap_or("").into(),
-                value.data_type(),
-            ),
-            types::FromSqlError::OutOfRange(n) => SqlError::IntegralValueOutOfRange(index, n),
-            error => SqlError::FromSqlConversionFailure(index, value.data_type(), Box::new(error)),
+        T::from_cell(value).map_err(|reason| SqlError::InvalidColumnType {
+            index,
+            name: self.column_name(index).unwrap_or("").into(),
+            reason,
         })
     }
 
     /// Column `index`, as SQLite holds it.
-    pub fn get_ref(&self, index: usize) -> SqlResult<types::ValueRef<'_>> {
+    pub fn get_ref(&self, index: usize) -> SqlResult<Cell<'_>> {
         match self {
-            Self::Native(row) => row.get_ref(index),
+            #[cfg(feature = "sqlite")]
+            Self::Native(row) => row.get_ref(index).map(Cell::from).map_err(Into::into),
             Self::Managed { cells, .. } => cells
                 .get(index)
                 .map(Value::as_value_ref)
@@ -1002,6 +1068,7 @@ impl Row<'_> {
     /// How many columns the row has.
     pub fn column_count(&self) -> usize {
         match self {
+            #[cfg(feature = "sqlite")]
             Self::Native(row) => row.as_ref().column_count(),
             Self::Managed { columns, .. } => columns.len(),
         }
@@ -1010,7 +1077,8 @@ impl Row<'_> {
     /// Column `index`'s name.
     pub fn column_name(&self, index: usize) -> SqlResult<&str> {
         match self {
-            Self::Native(row) => row.as_ref().column_name(index),
+            #[cfg(feature = "sqlite")]
+            Self::Native(row) => row.as_ref().column_name(index).map_err(Into::into),
             Self::Managed { columns, .. } => columns
                 .get(index)
                 .map(String::as_str)
@@ -1044,7 +1112,10 @@ impl ColumnIndex for &str {
 
 /// A host's SQL error, as a SQLite error with `code`.
 pub fn backend_error(code: i32, message: String) -> SqlError {
-    SqlError::SqliteFailure(rusqlite::ffi::Error::new(code), Some(message))
+    SqlError::Backend {
+        code: Some(code),
+        message,
+    }
 }
 
 /// What a scope ([`Storage::scope_then`]) does with what it wrote.
@@ -1055,6 +1126,7 @@ pub enum Scoped<T> {
     Undo(T),
 }
 
+#[cfg(feature = "sqlite")]
 impl From<rusqlite::Connection> for Storage {
     fn from(conn: rusqlite::Connection) -> Self {
         Self::native(conn)
@@ -1185,6 +1257,7 @@ pub mod managed_emulation {
 
     impl EmulatedObjectSql {
         /// A fresh in-memory database.
+        #[cfg(feature = "sqlite")]
         pub fn open_in_memory() -> SqlResult<Self> {
             let conn = rusqlite::Connection::open_in_memory()?;
             #[cfg(feature = "durable-object-limits")]
@@ -1213,7 +1286,7 @@ pub mod managed_emulation {
             while let Some(row) = rows.next()? {
                 let mut cells = Vec::with_capacity(n);
                 for i in 0..n {
-                    let cell = Value::from(row.get_ref(i)?);
+                    let cell = Value::from(super::Cell::from(row.get_ref(i)?));
                     cells.push(cell);
                 }
                 out.push(cells);
@@ -1229,7 +1302,9 @@ pub mod managed_emulation {
             super::durable_object_refusal(sql, false)?;
             let conn = self.conn.lock().expect("connection");
             let mut statement = conn.prepare_cached(sql)?;
-            statement.execute(rusqlite::params_from_iter(parameters.iter()))
+            statement
+                .execute(rusqlite::params_from_iter(parameters.iter()))
+                .map_err(Into::into)
         }
 
         async fn execute_script(&self, script: &str) -> SqlResult<()> {
@@ -1269,7 +1344,7 @@ pub mod managed_emulation {
                     .execute_batch(&format!("SAVEPOINT {name}"));
                 if let Err(error) = begin {
                     *self.depth.lock().expect("depth") -= 1;
-                    return Err(error);
+                    return Err(error.into());
                 }
                 // As with `transactionSync`, a panic in the body rolls back.
                 let keep = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut *body));
@@ -1282,7 +1357,7 @@ pub mod managed_emulation {
                 *self.depth.lock().expect("depth") -= 1;
                 match keep {
                     Err(panic) => std::panic::resume_unwind(panic),
-                    Ok(_) => end,
+                    Ok(_) => end.map_err(Into::into),
                 }
             })
         }

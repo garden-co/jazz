@@ -19,15 +19,23 @@
 //! [`FileOptions::synchronous_full`]: crate::db::FileOptions::synchronous_full
 //! [`Db`]: crate::db::Db
 
-use std::path::{Path, PathBuf};
+#[cfg(feature = "sqlite")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(feature = "sqlite")]
 use std::sync::Mutex;
+#[cfg(feature = "sqlite")]
 use std::time::Duration;
 
-use rusqlite::{OptionalExtension, params};
+use crate::storage::{OptionalExtension, params};
 
 use crate::catalogue::{CataloguePut, CatalogueRows};
-use crate::db::{Db, FileOptions, Journal};
-use crate::options::{Error, ErrorCode};
+use crate::db::Db;
+#[cfg(feature = "sqlite")]
+use crate::db::{FileOptions, Journal};
+use crate::options::Error;
+#[cfg(feature = "sqlite")]
+use crate::options::ErrorCode;
 use crate::storage::Storage;
 use crate::values::storage;
 
@@ -118,16 +126,19 @@ pub trait HostTables {
 /// (thousands of reprepares per write on a busy client). The engine never
 /// runs `ANALYZE`, uses no `LIKE` on bound patterns and no partial indexes,
 /// so the guarantee costs no plan it would otherwise pick.
-pub(crate) fn stable_plans(conn: &Storage) -> Result<(), Error> {
+pub(crate) fn stable_plans(_conn: &Storage) -> Result<(), Error> {
     // Managed SQL plans as its host does.
-    let Some(conn) = conn.native_conn() else {
-        return Ok(());
-    };
-    conn.set_db_config(
-        rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG,
-        true,
-    )
-    .map_err(storage)?;
+    #[cfg(feature = "sqlite")]
+    {
+        let Some(conn) = _conn.native_conn() else {
+            return Ok(());
+        };
+        conn.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG,
+            true,
+        )
+        .map_err(storage)?;
+    }
     Ok(())
 }
 
@@ -144,6 +155,7 @@ impl StoreFile {
     /// storage format (see [`crate::format`]); a refused file is left as it
     /// was. New stores are stamped transactionally with their first write,
     /// not by opening this handle.
+    #[cfg(feature = "sqlite")]
     pub async fn open(path: &Path, options: FileOptions) -> Result<Self, Error> {
         // SQLite cannot open a directory; one the Groove engine wrote gets
         // the typed refusal.
@@ -219,6 +231,7 @@ impl StoreFile {
     }
 
     /// A store that lives only as long as what is opened on it.
+    #[cfg(feature = "sqlite")]
     pub async fn memory() -> Result<Self, Error> {
         let conn = Storage::open_in_memory().map_err(storage)?;
         crate::format::check(&conn).await?;
@@ -232,6 +245,7 @@ impl StoreFile {
     /// An in-memory store this process shares by `name`: it lives while any
     /// connection to it is open, so a host keeping one can reopen the store
     /// (or read it with a [`HostReader`]) without losing it.
+    #[cfg(feature = "sqlite")]
     pub async fn shared_memory(name: &str) -> Result<Self, Error> {
         let conn =
             Storage::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
@@ -248,10 +262,12 @@ impl StoreFile {
 /// another thread never waits for work on the store's connection (a WAL
 /// file serves readers beside its writer). It sees every write that
 /// returned before the read began.
+#[cfg(feature = "sqlite")]
 pub struct HostReader {
     conn: Mutex<Option<Storage>>,
 }
 
+#[cfg(feature = "sqlite")]
 impl HostReader {
     /// Read the file at `path`, which a [`StoreFile`] opened already.
     pub fn open(path: &Path, vfs: Option<&'static str>) -> Result<Self, Error> {
@@ -325,10 +341,12 @@ impl HostReader {
 
 /// SQLite's `memdb` VFS shares a database whose name starts with `/`
 /// between the process's connections.
+#[cfg(feature = "sqlite")]
 fn shared_memory_uri(name: &str) -> String {
     format!("file:/{name}?vfs=memdb")
 }
 
+#[cfg(feature = "sqlite")]
 fn uri_flags() -> rusqlite::OpenFlags {
     rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_URI
 }
@@ -618,8 +636,8 @@ async fn delete(conn: &Storage, table: HostTable, key: &[u8]) -> Result<(), Erro
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::StatementStatus;
     use crate::storage::Storage;
-    use rusqlite::StatementStatus;
 
     /// Reprepares of a cached `LIMIT ?` read run `runs` times on `conn`.
     fn reprepares(conn: &Storage, runs: i64) -> i32 {

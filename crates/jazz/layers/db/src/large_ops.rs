@@ -9,8 +9,8 @@
 
 use super::*;
 use crate::large::Logical;
+use crate::storage::OptionalExtension;
 use jazz_types::large_values as lv;
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 /// Coordinate space of a partial large-value update.
@@ -449,7 +449,7 @@ impl Inner {
                         quote(stored),
                         quote(&table)
                     ),
-                    rusqlite::params![id, Vec::<u8>::new(), at.0.t(), sync::writer_bytes(node, tx)],
+                    crate::storage::params![id, Vec::<u8>::new(), at.0.t(), sync::writer_bytes(node, tx)],
                     |r| r.get(0),
                 ).await,
                 None => self.conn.cached_row(
@@ -459,7 +459,7 @@ impl Inner {
                         quote(stored),
                         quote(&table)
                     ),
-                    rusqlite::params![id, Vec::<u8>::new(), at.0.t()],
+                    crate::storage::params![id, Vec::<u8>::new(), at.0.t()],
                     |r| r.get(0),
                 ).await,
             }
