@@ -316,7 +316,8 @@ cannot stop every writer as step 2 describes, is not covered.
    read permissions, so two lists it reads can agree while a row it cannot
    see has no copy. A backend's own database reads every row whatever the
    permissions, and needs no keys here: IDs, space columns and references are
-   plain. The check passes when, for every space: the old and new tables
+   plain. It reads accepted rows (the `remote` tier), after every reference
+   fill has reached the server (a `global` write wait). The check passes when, for every space: the old and new tables
    hold the same set of IDs; each copy has its old row's space; and each
    row's new reference equals its old one, null equal to null. Missing
    copies name the spaces whose key holders have not copied yet; those are

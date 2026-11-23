@@ -143,6 +143,10 @@ The check passes when, for every space:
 - each copy is in the same space as its old row;
 - each row's new reference equals its old one, with an empty reference equal to an empty one.
 
+Check settled data: wait for each reference fill to reach the server (`.wait({ tier: "global" })`;
+an `await` on the write alone doesn't wait for it), and read with `tier: "remote"`, which returns
+only rows the server has accepted.
+
 A sketch of the backend's part (schematic; for a large table, work one space at a time):
 
 ```ts
@@ -152,23 +156,30 @@ import { jazz } from "./jazz.server";
 
 const backendApp = keyless(app);
 
+// Reads of rows the server has accepted, never pending writes.
+const accepted = { tier: "remote" } as const;
+
 // After the stop: each comment's new reference takes its old one.
 async function fillReferences() {
-  for (const comment of await jazz.db.all(backendApp.comments)) {
-    await jazz.db.update(backendApp.comments, comment.id, { secureTaskId: comment.taskId });
+  for (const comment of await jazz.db.all(backendApp.comments, accepted)) {
+    await jazz.db
+      .update(backendApp.comments, comment.id, { secureTaskId: comment.taskId })
+      .wait({ tier: "global" });
   }
 }
 
 // What is still wrong. Empty lists mean the copy is complete.
 async function checkCopy() {
-  const copies = new Map((await jazz.db.all(backendApp.secureTasks)).map((t) => [t.id, t]));
-  const old = await jazz.db.all(backendApp.tasks);
+  const copies = new Map(
+    (await jazz.db.all(backendApp.secureTasks, accepted)).map((t) => [t.id, t]),
+  );
+  const old = await jazz.db.all(backendApp.tasks, accepted);
   const oldIds = new Set(old.map((t) => t.id));
   return {
     // Grouped by projectId, these are the spaces whose key holders have not copied yet.
     missing: old.filter((t) => copies.get(t.id)?.projectId !== t.projectId),
     extra: [...copies.values()].filter((t) => !oldIds.has(t.id)),
-    references: (await jazz.db.all(backendApp.comments)).filter(
+    references: (await jazz.db.all(backendApp.comments, accepted)).filter(
       (c) => (c.secureTaskId ?? null) !== (c.taskId ?? null),
     ),
   };
