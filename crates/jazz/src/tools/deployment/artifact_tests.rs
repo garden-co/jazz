@@ -3404,6 +3404,44 @@ fn the_removed_local_first_auth_mode_is_refused_by_name() {
     read_policy("todos", "session.claims.mode = 'local-first'").unwrap();
 }
 
+/// An enum whose cases carry fields may stay in a `history` version, plain
+/// or encrypted, so that a migration can drop it: the JSON Schema takes
+/// such a file as the reader does, and refuses the same enum in the current
+/// tables as the reader does.
+#[test]
+fn the_json_schema_takes_enum_cases_with_fields_in_history_only() {
+    let validator = jsonschema::validator_for(&json_schema("jazz.app.v1.json")).unwrap();
+    let permissions = br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let encrypted = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"notes":{"columns":{"summary":"bytes"},"encryption":{"space":"id","scope":"notes","columns":{"summary":"string?"}}}},
+        "history":{"old":{"tables":{"notes":{"columns":{"detail":"bytes"},"encryption":{"space":"id","scope":"notes","columns":{"detail":{"enum":{"pending":{"reason":"string"}}}}}}}}},
+        "migrations":[{"from":"old","migrate":{"notes":{"detail":{"drop":"bytes","backwardsDefault":""},"summary":{"add":"bytes","default":""}}}}]}"#;
+    let plain = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"todos":{"columns":{"title":"string"}}},
+        "history":{"v1":{"tables":{"todos":{"columns":{"title":"string","status":{"enum":{"open":{},"done":{"at":"timestamp"}},"optional":true}}}}}},
+        "migrations":[{"from":"v1","migrate":{"todos":{"status":{"drop":{"enum":{"open":{},"done":{"at":"timestamp"}}}}}}}]}"#;
+    let plain_permissions =
+        br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }"#;
+    let current = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"todos":{"columns":{"title":"string","status":{"enum":{"open":{},"done":{"at":"timestamp"}},"optional":true}}}}}"#;
+    for (text, permissions, expected) in [
+        (encrypted, &permissions[..], true),
+        (plain, &plain_permissions[..], true),
+        (current, &plain_permissions[..], false),
+    ] {
+        let instance: serde_json::Value = serde_json::from_str(text).unwrap();
+        let by_schema = validator.is_valid(&instance);
+        let by_reader = load(text.as_bytes(), permissions);
+        assert_eq!(
+            (by_schema, by_reader.is_ok()),
+            (expected, expected),
+            "{text}: schema {by_schema}, reader {:?}",
+            by_reader.err().map(|e| e.to_string())
+        );
+    }
+}
+
 /// The app file's JSON Schema takes an encrypted column's declaration
 /// exactly when the reader does (`load`, what `loadAppArtifact` calls): each
 /// declaration below sits in an otherwise valid encrypted app, and the 2020-12
@@ -3437,6 +3475,8 @@ fn the_json_schema_takes_exactly_the_encrypted_columns_the_reader_takes() {
         r#"{ "type": "string", "$comment": "a note" }"#,
         r#"{ "array": { "type": "string", "$comment": "a note" } }"#,
         r#"{ "type": { "array": { "enum": ["low"], "$comment": "a note" } } }"#,
+        r#"{ "json": { "type": "integer", "minimum": 1, "maximum": 10 } }"#,
+        r#"{ "array": { "json": { "enum": [1, "two", null, true] } } }"#,
     ];
     let refused = [
         r#"42"#,
@@ -3459,7 +3499,22 @@ fn the_json_schema_takes_exactly_the_encrypted_columns_the_reader_takes() {
         r#"{ "type": { "array": { "type": "string", "reverse": "etc" } } }"#,
         r#"{ "type": { "enum": ["low"], "from": "etc" } }"#,
         r#"{ "array": { "type": "string", "$comment": 1 } }"#,
+        // The current version may not hold what a client can't seal.
+        r#"{ "json": { "minimum": 0.5 } }"#,
+        r#"{ "type": { "array": { "json": { "multipleOf": 0.25 } } } }"#,
+        r#"{ "enum": { "pending": { "reason": "string" } } }"#,
+        r#"{ "array": { "enum": { "pending": { "reason": "string" } } } }"#,
     ];
+    // The one known difference. JSON Schema compares numbers by value, so it
+    // takes `1.0` (or `1e2`) as an integer; the reader goes by how the number
+    // is written and refuses it, as a client could not encode it.
+    let schema_only = [r#"{ "json": { "minimum": 1.0 } }"#];
+    for declaration in schema_only {
+        let text = app(declaration);
+        let instance: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(validator.is_valid(&instance), "{declaration}");
+        assert!(load(text.as_bytes(), permissions).is_err(), "{declaration}");
+    }
     for (declarations, expected) in [(&accepted[..], true), (&refused[..], false)] {
         for declaration in declarations {
             let text = app(declaration);

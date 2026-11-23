@@ -18,7 +18,14 @@
       "type": "string"
     },
     "tables": {
-      "$ref": "#/$defs/tables",
+      "allOf": [
+        {
+          "$ref": "#/$defs/tables"
+        },
+        {
+          "$ref": "#/$defs/currentTables"
+        }
+      ],
       "description": "The current schema."
     },
     "history": {
@@ -273,10 +280,17 @@
               "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
             },
             "enum": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
             },
             "json": {},
             "array": {
@@ -355,10 +369,17 @@
               "$ref": "#/$defs/encryptedTypeExpression"
             },
             "enum": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
             },
             "json": {},
             "array": {
@@ -403,10 +424,17 @@
               "$ref": "#/$defs/encryptedTypeExpression"
             },
             "enum": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
             },
             "json": {},
             "array": {
@@ -433,6 +461,87 @@
         }
       ]
     },
+    "enumCases": {
+      "description": "An enum whose cases carry fields: each case's fields, by name. Only a `history` version may hold one, so that a migration can drop it.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/$defs/column"
+        }
+      }
+    },
+    "currentTables": {
+      "description": "What the current `tables` may not hold, though a `history` version may: an enum whose cases carry fields, and, in an encrypted column, a JSON schema with a number that isn't an integer.",
+      "type": "object",
+      "additionalProperties": {
+        "properties": {
+          "columns": {
+            "additionalProperties": {
+              "$ref": "#/$defs/currentColumnType"
+            }
+          },
+          "encryption": {
+            "properties": {
+              "columns": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/currentEncryptedType"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "currentColumnType": {
+      "properties": {
+        "enum": {
+          "type": "array"
+        },
+        "array": {
+          "$ref": "#/$defs/currentColumnType"
+        }
+      }
+    },
+    "currentEncryptedType": {
+      "properties": {
+        "enum": {
+          "type": "array"
+        },
+        "json": {
+          "$ref": "#/$defs/integerNumbersOnly"
+        },
+        "type": {
+          "$ref": "#/$defs/currentEncryptedType"
+        },
+        "sealedType": {
+          "$ref": "#/$defs/currentEncryptedType"
+        },
+        "array": {
+          "$ref": "#/$defs/currentEncryptedType"
+        }
+      }
+    },
+    "integerNumbersOnly": {
+      "description": "A JSON value whose numbers are all integers.",
+      "anyOf": [
+        {
+          "type": ["integer", "string", "boolean", "null"]
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/integerNumbersOnly"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/integerNumbersOnly"
+          }
+        }
+      ]
+    },
     "column": {
       "description": "A type string (\"string\", \"uuid?\", …) or an object with one of type / enum / json / array and options.",
       "anyOf": [
@@ -448,10 +557,17 @@
               "enum": ["string", "int", "bigint", "float", "boolean", "timestamp", "uuid", "bytes"]
             },
             "enum": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
             },
             "json": {},
             "array": {
@@ -491,10 +607,17 @@
               "enum": ["string", "int", "bigint", "float", "boolean", "timestamp", "uuid", "bytes"]
             },
             "enum": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
             },
             "json": {},
             "array": {
