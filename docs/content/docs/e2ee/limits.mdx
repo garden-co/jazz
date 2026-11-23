@@ -14,13 +14,14 @@ languageTabs: backend
   `key-pending`.
 - **Removing a member** stops later reads through permissions and a rotation; it cannot take back what
   the member could already read.
-- **Writes can still use the old key after a removal.** Other room members learn of a device
-  removal one sync round trip after it commits. A write can use the old key during that round
-  trip, while the writer is offline after learning of the removal, or if an online rotation is
-  refused or still undecided at the write's deadline. In each case the write goes ahead.
-  When the host reports a reconnection, the runtime checks each watched space for removals
-  before its next encrypted write. The space rotates at the next opportunity when an online
-  member who can update it writes or explicitly rotates it. A removed device keeps its existing keys and receives no new keys
+- **Writes can still use the old key after a removal.** A device that's connected and watching
+  the space learns of a device removal one sync round trip after it commits. Other devices learn
+  of it when they next sync the space. A write can use the old key before the writer learns of
+  the removal, while offline after learning of it, or if an online rotation is refused or
+  still undecided at the write's deadline. In each case the write goes ahead. When the host
+  reports a reconnection, the runtime checks each watched space for removals before its next
+  encrypted write. The space rotates at the next opportunity when an online member who can
+  update it writes or explicitly rotates it. A removed device keeps its existing keys and receives no new keys
   through that device record.
 - **A device account's secret is the account.** Whoever holds the secret (its 24-word phrase, passkey or
   exported key) controls the account, encryption included. Removing a device does not lock out a holder:
