@@ -19,7 +19,10 @@ leads to it; a table whose rows are their own spaces says `{ space: "id" }`.
 import { schema as s } from "jazz-tools";
 
 export const schema = s.defineSchema({
-  projects: s.table({ name: s.string(), ownerId: s.uuid() }),
+  projects: s.table({
+    name: s.string(),
+    ownerId: s.uuid(),
+  }),
   tasks: s.table(
     {
       projectId: s.uuid(),
