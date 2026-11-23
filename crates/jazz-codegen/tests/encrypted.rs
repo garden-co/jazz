@@ -96,7 +96,8 @@ fn members_table_gets_no_update_surface() {
     );
 
     let go = generate(Lang::Go);
-    for method in ["Update", "Upsert", "CanUpdate"] {
+    // A restore is checked against the update policy, so it goes too.
+    for method in ["Update", "Upsert", "CanUpdate", "Restore"] {
         assert!(
             !go.contains(&format!("func (e2eeMembersTable) {method}(")),
             "{method}"

@@ -232,7 +232,7 @@ extension Client {
     }
 
     /// Replaces `column` of row `id` with what `bytes` streams.
-    public func upload<R: Row, S: AsyncSequence & Sendable>(
+    public func upload<R: Updatable, S: AsyncSequence & Sendable>(
         _ type: R.Type, id: Jazz.ID, column: String, from bytes: S
     ) async throws -> R where S.Element == Data {
         try await upload(R.self, column: column, kind: "update", id: id, row: Optional<NoRow>.none, from: bytes)
