@@ -107,6 +107,22 @@ describe("locked messages", () => {
     expect(screen.queryByText(/Decrypting/)).toBeNull();
   });
 
+  it("says messages are locked once a room has had no key record for a while", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    show({
+      messages: {
+        data: [],
+        unreadable: [{ table: "messages", id: "m3", code: "space-pending" }],
+      },
+    });
+    expect(screen.getByText(/Decrypting 1 message/)).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.getByText(/1 message is locked on this browser/)).toBeTruthy();
+    expect(screen.queryByText(/waiting for the room's key/)).toBeNull();
+  });
+
   it("says messages are locked on this browser while it waits for approval", async () => {
     deviceStatus.current = "awaiting-approval";
     show({ messages: { data: [], unreadable: [pending] } });

@@ -439,9 +439,11 @@ const KEY_ARRIVING_MS = 10_000;
 
 /**
  * Whether the messages this browser cannot read are only waiting for the
- * room's key, which another member's device is sharing: "arriving" for the
- * first few seconds, then "slow". `null` when something else keeps them
- * locked, such as this browser waiting for approval or holding no access.
+ * room's key: "arriving" for the first few seconds (the key, or the room's
+ * key record, is usually still syncing), then "slow" while a member's device
+ * has the key to share. `null` when something else keeps them locked: this
+ * browser waits for approval or holds no access, or after those seconds the
+ * room still has no key record to share a key from.
  */
 function useKeyOnItsWay(unreadable: readonly { code: string }[]): "arriving" | "slow" | null {
   const status = useDeviceStateIfAny()?.status;
@@ -457,5 +459,7 @@ function useKeyOnItsWay(unreadable: readonly { code: string }[]): "arriving" | "
     const timer = setTimeout(() => setSlow(true), KEY_ARRIVING_MS);
     return () => clearTimeout(timer);
   }, [onItsWay]);
-  return onItsWay ? (slow ? "slow" : "arriving") : null;
+  if (!onItsWay) return null;
+  if (!slow) return "arriving";
+  return unreadable.every((row) => row.code === "key-pending") ? "slow" : null;
 }
