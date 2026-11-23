@@ -400,6 +400,82 @@ describe("later versions of an encrypted app", () => {
   });
 });
 
+/** `chat()` with a second encrypted table, `archived`, in the same rooms. */
+function chatWithArchive(archived: boolean): string {
+  return `
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  rooms: s.table({ name: s.string() }),
+  messages: s.table(
+    { roomId: s.uuid(), text: s.string().encrypted() },
+    { room: s.rel("rooms", "roomId") },
+    { space: "room" },
+  ),${
+    archived
+      ? `
+  archived: s.table(
+    { roomId: s.uuid(), note: s.string().encrypted() },
+    { room: s.rel("rooms", "roomId") },
+    { space: "room" },
+  ),`
+      : ""
+  }
+});
+
+const { definePermissions, isMember } = schema;
+export const permissions = definePermissions({
+  rooms: { read: (room) => isMember("rooms", room.id) },
+  messages: { read: (message) => isMember("rooms", message.roomId) },${
+    archived ? `\n  archived: { read: (row) => isMember("rooms", row.roomId) },` : ""
+  }
+});
+`;
+}
+
+describe("a history version whose snapshot is missing", () => {
+  type App = { history: Record<string, { tables: Record<string, { encryption?: unknown }> }> };
+
+  /** v1 with `messages` and `archived` encrypted, v2 without `archived`: the root and v1's snapshot. */
+  async function twoVersions(): Promise<{ root: string; app: App; snapshot: string }> {
+    const root = await project(chatWithArchive(true));
+    await createAppMigration({ cwd: root, name: "init" });
+    await generated(root);
+    const [snapshot] = (await readdir(join(root, "migrations", "snapshots")))
+      .filter((file) => !file.endsWith(".encryption.json"))
+      .sort();
+    await writeFile(join(root, "schema.ts"), chatWithArchive(false));
+    const created = await createAppMigration({ cwd: root, name: "drop-archived" });
+    expect(created.changed).toBe(true);
+    const app = JSON.parse((await generated(root)).app) as App;
+    expect(
+      Object.values(app.history).map((version) => version.tables.archived?.encryption),
+    ).toEqual([{ space: "roomId", scope: "rooms", columns: { note: "string" } }]);
+    return { root, app, snapshot: snapshot! };
+  }
+
+  it("is rebuilt with the declarations its .encryption.json keeps", async () => {
+    const { root, app, snapshot } = await twoVersions();
+    await rm(join(root, "migrations", "snapshots", snapshot));
+    await rm(join(root, "jazz.app.json"));
+    const rebuilt = JSON.parse((await generated(root)).app) as App;
+    expect(rebuilt.history).toEqual(app.history);
+  });
+
+  it("is refused without its .encryption.json, naming what is missing", async () => {
+    const { root, snapshot } = await twoVersions();
+    await rm(join(root, "migrations", "snapshots", snapshot));
+    await rm(
+      join(root, "migrations", "snapshots", snapshot.replace(/\.json$/, ".encryption.json")),
+    );
+    await rm(join(root, "jazz.app.json"));
+    await expect(generateApp({ cwd: root })).rejects.toThrow(
+      /neither the version's snapshot nor its \.encryption\.json is there/,
+    );
+    expect(existsSync(join(root, "jazz.app.json"))).toBe(false);
+  });
+});
+
 describe("what deploy would refuse is refused at generate, naming the table", () => {
   async function refusal(tables: string): Promise<string> {
     const root = await project(`

@@ -850,12 +850,41 @@ async function snapshotEntries(
         "declarations, is missing. Restore it from version control.",
     );
   }
+  return parseEntries(file, text);
+}
+
+function parseEntries(file: string, text: string): EncryptionEntries {
   const parsed = JSON.parse(text) as { tables?: EncryptionEntries };
   if (!parsed || typeof parsed.tables !== "object" || parsed.tables === null)
     throw new Error(
       `migrations/snapshots/${file}: expected { "tables": { <table>: <encryption> } }.`,
     );
   return parsed.tables;
+}
+
+/**
+ * The encryption entries kept for version `short` in a `.encryption.json`
+ * of its own, if there is one: what a version whose snapshot is missing
+ * still records of its declarations.
+ */
+async function sidecarEntries(
+  migrationsDir: string,
+  short: string,
+): Promise<EncryptionEntries | undefined> {
+  const dir = join(migrationsDir, "snapshots");
+  const file = (await listDir(dir))
+    .filter((name) => name.toLowerCase().endsWith(`${short}.encryption.json`))
+    .sort()
+    .at(-1);
+  if (!file) return undefined;
+  return parseEntries(file, await readFile(join(dir, file), "utf8"));
+}
+
+/** `tables` without any table's encryption entry. */
+function withoutEntries(tables: Record<string, ReadableTable>): Record<string, ReadableTable> {
+  return Object.fromEntries(
+    Object.entries(tables).map(([name, { encryption: _entry, ...table }]) => [name, table]),
+  );
 }
 
 /** `tables` with each table's encryption entry from `entries`. */
@@ -997,6 +1026,12 @@ export async function loadMigrationHistory(options: {
   }
 
   // Derive what no snapshot holds, walking migrations until nothing changes.
+  // A derived version takes its encryption declarations from its own
+  // `.encryption.json` when that is kept; in an app that declares
+  // encryption, a version without one can't be known to declare none.
+  const declaresEncryption =
+    Object.keys(currentEntries).length > 0 ||
+    snapshots.some((snapshot) => Object.keys(snapshot.schema).some((t) => t.startsWith("__e2ee_")));
   const failures = new Map<string, string>();
   for (let progress = true; progress;) {
     progress = false;
@@ -1006,22 +1041,30 @@ export async function loadMigrationHistory(options: {
         [entry.fromHash, entry.toHash, "forward"],
       ] as const) {
         if (versions.has(unknown) || !versions.has(known)) continue;
-        // A witness table holds what is stored, not an encryption declaration.
-        const witness = (
-          direction === "backward" ? entry.migration.from : entry.migration.to
-        ) as Record<string, unknown>;
-        const encrypted = Object.keys(witness).find(
-          (table) => versions.get(known)![table]?.encryption !== undefined,
-        );
-        if (encrypted) {
+        // A witness table holds what is stored, not an encryption declaration:
+        // the version's own `.encryption.json` gives its declarations.
+        const kept = await sidecarEntries(options.migrationsDir, unknown);
+        if (!kept && declaresEncryption) {
           failures.set(
             unknown,
-            `${entry.file}: ${encrypted} declares encryption, which a version can't be derived through; ` +
-              `keep the version's snapshot and its .encryption.json`,
+            `the app declares encryption, and neither the version's snapshot nor its ` +
+              `.encryption.json is there to say which of its tables are encrypted; restore ` +
+              `migrations/snapshots/*-${unknown}.json and its .encryption.json from version control`,
           );
           continue;
         }
-        const derived = deriveVersion(versions.get(known)!, entry.migration, direction);
+        const rebuilt = deriveVersion(
+          kept ? withoutEntries(versions.get(known)!) : versions.get(known)!,
+          entry.migration,
+          direction,
+        );
+        let derived: Record<string, ReadableTable>;
+        try {
+          derived = kept ? withEntries(rebuilt, kept, unknown) : rebuilt;
+        } catch (error) {
+          failures.set(unknown, `${entry.file}: ${(error as Error).message}`);
+          continue;
+        }
         let hash: string;
         try {
           hash = shortSchemaHash((await snapshotFromVersion(derived)).hash);
