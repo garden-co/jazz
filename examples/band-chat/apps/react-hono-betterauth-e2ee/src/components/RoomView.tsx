@@ -232,29 +232,33 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
           endContent={<Button label="Retry" size="sm" onClick={retryRotation} />}
         />
       ) : null}
-      {lockedCount > 0 && keyOnItsWay === "arriving" ? (
-        <Center axis="both" padding={2}>
-          <Spinner
-            label={`Decrypting ${lockedCount} ${lockedCount === 1 ? "message" : "messages"}…`}
+      {
+        // #region bandchat-locked-notice
+        lockedCount > 0 && keyOnItsWay === "arriving" ? (
+          <Center axis="both" padding={2}>
+            <Spinner
+              label={`Decrypting ${lockedCount} ${lockedCount === 1 ? "message" : "messages"}…`}
+            />
+          </Center>
+        ) : lockedCount > 0 && keyOnItsWay === "slow" ? (
+          <Banner
+            status="info"
+            title={`${lockedCount} ${lockedCount === 1 ? "message is" : "messages are"} waiting for the room's key`}
+            description="It usually comes from another member's device once one that holds it is online. If no device holds it any more, these messages stay locked."
+            container="section"
+            collapsible={false}
           />
-        </Center>
-      ) : lockedCount > 0 && keyOnItsWay === "slow" ? (
-        <Banner
-          status="info"
-          title={`${lockedCount} ${lockedCount === 1 ? "message is" : "messages are"} waiting for the room's key`}
-          description="It usually comes from another member's device once one that holds it is online. If no device holds it any more, these messages stay locked."
-          container="section"
-          collapsible={false}
-        />
-      ) : lockedCount > 0 ? (
-        <Banner
-          status="warning"
-          title={`${lockedCount} ${lockedCount === 1 ? "message is" : "messages are"} locked on this browser`}
-          description="This browser does not hold the room's key yet. They show here once it arrives, for example after another of your devices approves this one."
-          container="section"
-          collapsible={false}
-        />
-      ) : null}
+        ) : lockedCount > 0 ? (
+          <Banner
+            status="warning"
+            title={`${lockedCount} ${lockedCount === 1 ? "message is" : "messages are"} locked on this browser`}
+            description="This browser does not hold the room's key yet. They show here once it arrives, for example after another of your devices approves this one."
+            container="section"
+            collapsible={false}
+          />
+        ) : null
+        // #endregion bandchat-locked-notice
+      }
       {actionError ? (
         <Banner
           status="error"

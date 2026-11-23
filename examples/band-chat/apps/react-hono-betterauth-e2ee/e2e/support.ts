@@ -362,11 +362,6 @@ export function lockedBanner(page: Page): Locator {
   return page.getByText(/locked on this browser/);
 }
 
-/** Shown while the room's key is on its way to this browser. */
-export function decryptingNotice(page: Page): Locator {
-  return page.getByText(/^Decrypting \d+ messages?…$/);
-}
-
 export function waitingBanner(page: Page): Locator {
   return page.getByText("This browser is waiting for approval");
 }
@@ -552,9 +547,45 @@ export async function pageStorage(page: Page): Promise<string> {
 declare global {
   interface Window {
     bandChatMarkerWrites?: string[];
+    bandChatKeyNotices?: KeyNotice[];
     holdBandChatSync: () => Promise<void>;
     bandChatRemovalAccepted?: boolean;
   }
+}
+
+export type KeyNotice = "decrypting" | "waiting for the key" | "locked";
+
+/**
+ * Records each locked-message notice the room shows from now on, in order, so
+ * a test can wait for a notice however briefly it was shown: the decrypting
+ * notice gives way to another after ten seconds.
+ */
+export async function watchKeyNotices(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const seen: KeyNotice[] = (window.bandChatKeyNotices = []);
+    const record = () => {
+      const text = document.body.textContent ?? "";
+      const notice: KeyNotice | undefined = /Decrypting \d+ messages?…/.test(text)
+        ? "decrypting"
+        : /waiting for the room's key/.test(text)
+          ? "waiting for the key"
+          : /locked on this browser/.test(text)
+            ? "locked"
+            : undefined;
+      if (notice && seen.at(-1) !== notice) seen.push(notice);
+    };
+    record();
+    new MutationObserver(record).observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  });
+}
+
+/** The notices recorded since {@link watchKeyNotices}. */
+export async function keyNoticesSeen(page: Page): Promise<KeyNotice[]> {
+  return page.evaluate(() => window.bandChatKeyNotices ?? []);
 }
 
 /** Count calls at the Db so a write refused locally still counts as an attempt. */

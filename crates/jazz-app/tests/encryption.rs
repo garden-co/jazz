@@ -263,30 +263,35 @@ async fn titles(jazz: &Jazz, count: usize) -> Vec<String> {
     .expect("the rows reach this device and open")
 }
 
+/// One app-supplied store that successive clients can use from their own threads.
+fn shared_private_store() -> (EncryptionConfig, impl AsyncFnOnce(MemoryStore) + Send) {
+    let (requests, mut receiver) =
+        tokio::sync::mpsc::unbounded_channel::<(String, std::sync::mpsc::Sender<(bool, String)>)>();
+    let config = EncryptionConfig::store_calls(move |request| {
+        let (reply, answer) = std::sync::mpsc::channel();
+        requests.send((request, reply)).unwrap();
+        answer.recv().unwrap()
+    });
+    let serve = async move |store| {
+        let handler = jazz_e2ee_client::host::bridge::serve(Rc::new(store));
+        while let Some((request, reply)) = receiver.recv().await {
+            reply.send(handler(request).await).unwrap();
+        }
+    };
+    (config, serve)
+}
+
 /// Alice and Bob sign in on the same installation. Each opens their own local
 /// rows and encryption keys, including when Alice returns after Bob signs out.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn signing_in_opens_the_same_accounts_rows_and_keys() {
     use bindings::{NewNote, notes, tasks};
-    use std::sync::mpsc;
 
     let app = App::start().await;
     let dir = tempfile::tempdir().unwrap();
-    // Serve one app-supplied private store across all three client threads.
-    let (requests, receiver) = mpsc::channel::<(String, mpsc::Sender<(bool, String)>)>();
-    let private_store = std::thread::spawn(move || {
-        let serve = jazz_e2ee_client::host::bridge::serve(Rc::new(MemoryStore::new()));
-        for (request, reply) in receiver {
-            reply
-                .send(futures::executor::block_on(serve(request)))
-                .unwrap();
-        }
-    });
-    let store = EncryptionConfig::store_calls(move |request| {
-        let (reply, answer) = mpsc::channel();
-        requests.send((request, reply)).unwrap();
-        answer.recv().unwrap()
-    });
+    let (store, serve) = shared_private_store();
+    let private_store =
+        std::thread::spawn(move || futures::executor::block_on(serve(MemoryStore::new())));
     let mut devices = HashMap::new();
     for user in ["alice", "bob", "alice"] {
         let config = Config::new(app.app_id)
@@ -353,6 +358,77 @@ async fn signing_in_opens_the_same_accounts_rows_and_keys() {
     }
     drop(store);
     private_store.join().unwrap();
+    app.stop().await;
+}
+
+/// Alice deletes her database after syncing an encrypted task. Her private
+/// store keeps every document, so a fresh replica can decrypt the synced task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_client_storage_preserves_keys_and_decrypts_the_resynced_row() {
+    use jazz_e2ee_client::PrivateStore;
+
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = MemoryStore::new();
+    let (encryption, serve) = shared_private_store();
+    let documents = async || {
+        let mut docs = std::collections::BTreeMap::new();
+        for scope in store.scopes() {
+            for name in store.list(&scope).await.unwrap() {
+                let document = store.load(&scope, &name).await.unwrap().unwrap();
+                docs.insert((scope.clone(), name), document);
+            }
+        }
+        docs
+    };
+    let device = async {
+        let config = Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .user(Auth::bearer(|_| async {
+                Ok(Some("token-alice".to_owned()))
+            }))
+            .storage(jazz_app_support::Storage::Dir(dir.path().into()))
+            .encryption(encryption);
+        let alice = Jazz::open(client_files(), config.clone()).await.unwrap();
+        assert_eq!(
+            alice
+                .encryption()
+                .ready(Duration::from_secs(30))
+                .await
+                .unwrap(),
+            "active"
+        );
+        let project = make_project(&alice, "plans").await;
+        add_task(&alice, &project, "private draft").await.unwrap();
+        let database = dir
+            .path()
+            .join(alice.account().unwrap().0.to_string())
+            .join("jazz.sqlite");
+        assert!(database.is_file());
+        let before = documents().await;
+        assert!(before.keys().any(|(_, name)| name.starts_with("held-")));
+
+        alice.delete_client_storage().await.unwrap();
+        assert!(!database.exists());
+        assert_eq!(
+            documents().await,
+            before,
+            "deletion changed the private store"
+        );
+
+        let reopened = Jazz::open(client_files(), config).await.unwrap();
+        assert_eq!(
+            reopened
+                .encryption()
+                .ready(Duration::from_secs(30))
+                .await
+                .unwrap(),
+            "active"
+        );
+        assert_eq!(titles(&reopened, 1).await, ["private draft"]);
+        reopened.shutdown().await.unwrap();
+    };
+    tokio::join!(serve(store.clone()), device);
     app.stop().await;
 }
 

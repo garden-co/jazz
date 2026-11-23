@@ -308,7 +308,7 @@ extension Client {
 
     /// Brings back deleted row `id` as it was, or with `row` as its content.
     @discardableResult
-    public func restore<R: Row>(_ type: R.Type, id: Jazz.ID) async throws -> R {
+    public func restore<R: Updatable>(_ type: R.Type, id: Jazz.ID) async throws -> R {
         try await Self.typed {
             let stored = try await Self.run { try self.handle.restore(table: R.table, id: id, patchJson: nil) }
             return try Coding.decode(R.self, stored, userInfo)
@@ -316,7 +316,7 @@ extension Client {
     }
 
     @discardableResult
-    public func restore<I: Insert>(_ id: Jazz.ID, as row: I) async throws -> I.Row {
+    public func restore<I: Insert>(_ id: Jazz.ID, as row: I) async throws -> I.Row where I.Row: Updatable {
         try await Self.typed {
             let json = try Coding.json(row, userInfo)
             let stored = try await Self.run { try self.handle.restore(table: I.Row.table, id: id, patchJson: json) }
@@ -336,7 +336,7 @@ extension Transaction {
     }
 
     @discardableResult
-    public func restore<R: Row>(_ type: R.Type, id: Jazz.ID) async throws -> R {
+    public func restore<R: Updatable>(_ type: R.Type, id: Jazz.ID) async throws -> R {
         try await Client.typed {
             let stored = try await Client.run { try self.ffi.restore(table: R.table, id: id, patchJson: nil) }
             return try Coding.decode(R.self, stored, userInfo)
