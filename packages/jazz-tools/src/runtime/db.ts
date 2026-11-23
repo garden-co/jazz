@@ -3213,11 +3213,14 @@ export class Db {
         if (!deadline) return next;
         // A local-first client that has just opened reads and writes
         // encrypted columns once it has verified the account, which syncs
-        // what names them: that is part of the wait. If it fails, the
-        // operation gets the local-first client's own answer.
+        // what names them: that is part of the wait. If it fails, or is
+        // still pending at the deadline, the operation goes ahead and gets
+        // the local-first client's own answer.
         const left = Math.max(1, LOCAL_FIRST_WAIT_MS - (Date.now() - started));
-        const verified = next.encryption.ready({ timeoutMs: left }).catch(() => undefined);
-        return Promise.race([verified, timedOut]).then(() => next);
+        return next.encryption
+          .ready({ timeoutMs: left })
+          .catch(() => undefined)
+          .then(() => next);
       })
       .finally(() => {
         clearTimeout(timer);
