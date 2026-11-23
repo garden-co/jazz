@@ -28,7 +28,7 @@ The server still sees the rest:
 - Room names, reactions and sketches.
 - The type and the size of an attachment.
 - When each read marker was written. The stored time is encrypted. The moment of the write is not,
-  and it shows when that person read the room.
+  and it shows about when that person read the room.
 
 Read markers are hidden from the server, but not from the room's other members. Every member holds
 the room's key, so every member could open a marker. The read rule keeps the server from sending
@@ -598,7 +598,7 @@ Leaving wipes the keys, not the browser's local copy of the plain data.
 
 - **The server sees more than the content.** It sees who is in which room, who wrote when, room
   names, reactions, sketches, attachment types and sizes, and when each read marker was written. A
-  marker's write time shows when its reader read.
+  marker's write time shows about when its reader read.
 - **Read markers are not hidden from co-members.** The room's key seals them, so every member could
   open one. A deploy of BandChat prints one warning for this: the read-marker rule is narrower than
   its room's, so every member of a room can decrypt a marker that Jazz does not send them. That is
