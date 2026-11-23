@@ -362,6 +362,11 @@ export function lockedBanner(page: Page): Locator {
   return page.getByText(/locked on this browser/);
 }
 
+/** Shown while the room's key is on its way to this browser. */
+export function decryptingNotice(page: Page): Locator {
+  return page.getByText(/^Decrypting \d+ messages?…$/);
+}
+
 export function waitingBanner(page: Page): Locator {
   return page.getByText("This browser is waiting for approval");
 }

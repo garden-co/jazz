@@ -191,8 +191,10 @@ Leaving erases the keys, not the browser's local copy of the plain data.
   instant: until the key is renewed, a message can be sealed under the old
   key.
 - **Being admitted is not having the key.** A new member's devices get it from
-  a device that holds it, once that device is online. Until then the room's
-  messages show as locked.
+  a device that holds it, once that device is online. Until then the room says
+  its messages are decrypting, and after ten seconds that they are waiting for
+  the room's key. A browser still waiting for approval, or with no access to
+  the key, shows them as locked.
 - **Losing every device without recovery** loses the encrypted messages for
   good. Clearing site data on the only browser does the same. Set up recovery.
 - **The room list runs one live query per room.** Fine for a band's handful of

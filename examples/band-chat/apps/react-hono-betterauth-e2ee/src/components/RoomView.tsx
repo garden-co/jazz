@@ -24,6 +24,7 @@ import {
   VStack,
 } from "@astryxdesign/core";
 import { app, type Reaction } from "../../jazz.generated";
+import { useDeviceStateIfAny } from "../lib/device-state";
 import { useMarkRead } from "../lib/mark-read";
 import { removeMember, renewRoomKey, useRoomMembers } from "../lib/membership";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
@@ -91,6 +92,7 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   const { data: newestFirst, unreadable, db } = useAll(roomMessagesQuery(roomId));
   // Messages this browser holds no key for yet are left out of the read.
   const lockedCount = unreadable.length;
+  const keyOnItsWay = useKeyOnItsWay(unreadable);
   // Undefined until the first result: "No messages yet" only for a room that has none.
   const isLoadingMessages = newestFirst === undefined;
   const messages = useMemo(() => [...(newestFirst ?? [])].reverse(), [newestFirst]);
@@ -228,7 +230,21 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
           endContent={<Button label="Retry" size="sm" onClick={retryRotation} />}
         />
       ) : null}
-      {lockedCount > 0 ? (
+      {lockedCount > 0 && keyOnItsWay === "arriving" ? (
+        <Center axis="both" padding={2}>
+          <Spinner
+            label={`Decrypting ${lockedCount} ${lockedCount === 1 ? "message" : "messages"}…`}
+          />
+        </Center>
+      ) : lockedCount > 0 && keyOnItsWay === "slow" ? (
+        <Banner
+          status="info"
+          title={`${lockedCount} ${lockedCount === 1 ? "message is" : "messages are"} waiting for the room's key`}
+          description="Another member's device shares it with this browser. They show here once one is online."
+          container="section"
+          collapsible={false}
+        />
+      ) : lockedCount > 0 ? (
         <Banner
           status="warning"
           title={`${lockedCount} ${lockedCount === 1 ? "message is" : "messages are"} locked on this browser`}
@@ -416,4 +432,30 @@ function MessageGroup({
       })}
     </ChatMessage>
   );
+}
+
+/** How long a key may be on its way before the room says it is waiting for one. */
+const KEY_ARRIVING_MS = 10_000;
+
+/**
+ * Whether the messages this browser cannot read are only waiting for the
+ * room's key, which another member's device is sharing: "arriving" for the
+ * first few seconds, then "slow". `null` when something else keeps them
+ * locked, such as this browser waiting for approval or holding no access.
+ */
+function useKeyOnItsWay(unreadable: readonly { code: string }[]): "arriving" | "slow" | null {
+  const status = useDeviceStateIfAny()?.status;
+  const waitingForApproval = status === "awaiting-approval" || status === "reenrolled";
+  const onItsWay =
+    !waitingForApproval &&
+    unreadable.length > 0 &&
+    unreadable.every((row) => row.code === "key-pending" || row.code === "space-pending");
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    setSlow(false);
+    if (!onItsWay) return;
+    const timer = setTimeout(() => setSlow(true), KEY_ARRIVING_MS);
+    return () => clearTimeout(timer);
+  }, [onItsWay]);
+  return onItsWay ? (slow ? "slow" : "arriving") : null;
 }
