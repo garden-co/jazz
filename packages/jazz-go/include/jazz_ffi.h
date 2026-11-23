@@ -164,7 +164,8 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *              committed may still apply ("queued": true): its refusal, if
  *              one comes, reaches "mutationErrors" and the next
  *              waitForSync. Roll back a transaction whose call was
- *              cancelled before txCommit: txRollback ignores controls.
+ *              cancelled before txCommit: txRollback (and uploadAbort)
+ *              ignore controls, so a clean-up always runs.
  *   "cancel"  {"call"} -> null: ends the control's calls' waits now. May
  *              run beside any other call, and on a closed handle.
  *   "callEnd" {"call"} -> null: frees the control (jazz_close frees the
@@ -328,6 +329,14 @@ JazzSession *jazz_session_open(const char *config_json, JazzTokenCallback token_
  *              closing is always "closed", and wins when both hold.
  *              An open it interrupted gets up to 2 s to let go of its
  *              store.
+ *   "callBegin" {"timeoutMs"?} -> {"call"} | "cancel" {"call"} |
+ *   "callEnd" {"call"}: a control for one operation, as jazz_call's. An
+ *              operation given "call" stops waiting on the app and the
+ *              network once it is cancelled or timed out, and fails
+ *              "interrupted" ("queued" false; what it sent may still
+ *              apply); the snapshot reports the failure, and "retry"
+ *              repeats it. Handles from jazz_session_jazz take controls of
+ *              their own, from their own callBegin.
  */
 char *jazz_session_call(JazzSession *session, const char *method, const char *args_json,
                         char **err);

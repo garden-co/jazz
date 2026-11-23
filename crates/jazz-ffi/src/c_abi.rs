@@ -52,6 +52,18 @@ fn error_json(error: &JazzError) -> String {
     json.to_string()
 }
 
+/// The `"call"` (from `callBegin`) a call's args name, if any.
+fn call_id(args: &Json) -> Result<Option<u64>, FfiError> {
+    match args.get("call").filter(|call| !call.is_null()) {
+        None => Ok(None),
+        Some(call) => call
+            .as_str()
+            .and_then(|call| call.parse().ok())
+            .map(Some)
+            .ok_or_else(|| refused("args_json.call must be a call from callBegin")),
+    }
+}
+
 fn into_c(text: String) -> *mut c_char {
     // Interior NULs cannot occur in JSON we serialize (they're escaped);
     // replace them defensively rather than fail.
@@ -171,16 +183,6 @@ pub unsafe extern "C" fn jazz_call(
             core.close_within(close_timeout(&args)?)?;
             return Ok(into_c("null".into()));
         }
-        let call_id = |args: &Json| -> Result<Option<u64>, FfiError> {
-            match args.get("call").filter(|call| !call.is_null()) {
-                None => Ok(None),
-                Some(call) => call
-                    .as_str()
-                    .and_then(|call| call.parse().ok())
-                    .map(Some)
-                    .ok_or_else(|| refused("args_json.call must be a call from callBegin")),
-            }
-        };
         // A call's control: cancelling and ending it run beside any call,
         // and on a closed handle too.
         match method {
@@ -676,6 +678,26 @@ pub unsafe extern "C" fn jazz_session_call(
         } else {
             crate::convert::parse(args, "args_json")?
         };
+        // A call's control, as on a handle.
+        match method {
+            "cancel" => {
+                let id = call_id(&args)?.ok_or_else(|| refused("cancel needs \"call\""))?;
+                core.control(id)?.cancel();
+                return Ok(into_c("null".into()));
+            }
+            "callEnd" => {
+                let id = call_id(&args)?.ok_or_else(|| refused("callEnd needs \"call\""))?;
+                core.call_end(id);
+                return Ok(into_c("null".into()));
+            }
+            "callBegin" => {
+                let id = core.call_begin(close_timeout(&args)?)?;
+                return Ok(into_c(json!({ "call": id.to_string() }).to_string()));
+            }
+            _ => {}
+        }
+        let control = call_id(&args)?.map(|id| core.control(id)).transpose()?;
+        let _control = crate::core::Controlled::new(control);
         Ok(into_c(core.call(method, &args)?.to_string()))
     })
 }

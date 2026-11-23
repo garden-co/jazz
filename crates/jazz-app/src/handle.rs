@@ -509,8 +509,13 @@ impl Jazz {
     /// Inserts a row. Returns it as stored, once committed locally (or, on
     /// a [`Jazz::durable`] handle, once it reached that tier).
     ///
-    /// Like every write, it is sent to the client's thread when called:
-    /// dropping the returned future doesn't undo or cancel it.
+    /// Like every write, it is sent to the client's thread when called.
+    /// Dropping the returned future (as `tokio::time::timeout` does) ends
+    /// its wait for a tier on that thread, but doesn't undo the write: once
+    /// committed locally it may still apply, and a refusal of it is
+    /// reported to [`Jazz::mutation_errors`] and the next
+    /// [`Jazz::wait_for_sync`]. To learn that a call was cut short, make it
+    /// through [`Jazz::controlled`] instead.
     pub async fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
         let implementations = self.info.implementations.clone();
         let settle = self.settler()?;

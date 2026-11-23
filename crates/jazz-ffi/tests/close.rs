@@ -1575,3 +1575,104 @@ mod uniffi_control {
         live.cancel();
     }
 }
+
+/// A session's operations obey a control too: a refresh stuck on the
+/// backend's HTTP answer ends at once when cancelled, and one cancelled
+/// before it starts does nothing. Over C.
+#[test]
+fn c_cancel_ends_a_session_operation_at_once() {
+    let (endpoint, asked) = stalling();
+    let host = Host::new("token-alice");
+    let session = guest_session(&endpoint, Some(host));
+    let call = session.call("callBegin", json!({})).unwrap()["call"].clone();
+    let refreshing = Running::start({
+        let call = call.clone();
+        move || session.call("refresh", json!({ "call": call }))
+    });
+    until("the backend's request", || asked.load(Ordering::SeqCst) > 0);
+    let cancelled = Instant::now();
+    session.call("cancel", json!({ "call": call })).unwrap();
+    let ended = refreshing.within(PROMPT, "refresh");
+    assert!(
+        cancelled.elapsed() < AT_ONCE,
+        "took {:?}",
+        cancelled.elapsed()
+    );
+    interrupted(&ended.expect_err("refresh"), "cancelled", false);
+    // Cancelled already: the next does nothing.
+    let again = session.call("refresh", json!({ "call": call }));
+    interrupted(&again.expect_err("refresh"), "cancelled", false);
+    session.call("callEnd", json!({ "call": call })).unwrap();
+    // The session goes on.
+    assert!(session.call("snapshot", json!({})).is_ok());
+    let timed = session
+        .call("callBegin", json!({ "timeoutMs": 300 }))
+        .unwrap()["call"]
+        .clone();
+    let started = Instant::now();
+    let ended = session.call("refresh", json!({ "call": timed }));
+    let took = started.elapsed();
+    interrupted(&ended.expect_err("refresh"), "timeout", false);
+    assert!(
+        took >= Duration::from_millis(300) && took < Duration::from_millis(400),
+        "took {took:?}"
+    );
+    assert_eq!(
+        session.spawn("close").within(PROMPT, "close"),
+        Ok(Value::Null)
+    );
+    session.free();
+    host.assert_freeable();
+    free_ctx(host);
+}
+
+mod uniffi_session_control {
+    use super::*;
+    use jazz_ffi::{CallControl, JazzError, Session, TokenProvider};
+
+    struct Alice;
+    impl TokenProvider for Alice {
+        fn token(&self, _: String) -> Result<Option<String>, JazzError> {
+            Ok(Some("token-alice".into()))
+        }
+    }
+
+    #[test]
+    fn cancel_ends_a_session_operation_at_once() {
+        let (endpoint, asked) = stalling();
+        let session = Session::open(
+            json!({ "app": STAGE_PLAN_APP, "appId": jazz_app_support::AppId::random().to_string(),
+                "serverUrl": endpoint, "initial": "device", "auth": { "bearer": true }, "contract": 2 })
+            .to_string(),
+            Some(Arc::new(Alice)),
+        )
+        .unwrap();
+        let control = CallControl::new(None);
+        let view = session.controlled(control.clone());
+        let refreshing = Running::start({
+            let view = view.clone();
+            move || view.refresh()
+        });
+        until("the backend's request", || asked.load(Ordering::SeqCst) > 0);
+        let cancelled = Instant::now();
+        control.cancel();
+        let ended = refreshing.within(PROMPT, "refresh");
+        assert!(
+            cancelled.elapsed() < AT_ONCE,
+            "took {:?}",
+            cancelled.elapsed()
+        );
+        assert!(
+            matches!(
+                &ended,
+                Err(JazzError::Interrupted { interruption, queued: false, .. })
+                    if interruption == "cancelled"
+            ),
+            "{ended:?}"
+        );
+        assert!(matches!(view.refresh(), Err(JazzError::Interrupted { .. })));
+        drop(view);
+        assert!(session.snapshot().is_ok(), "the session goes on");
+        session.shutdown().unwrap();
+    }
+}

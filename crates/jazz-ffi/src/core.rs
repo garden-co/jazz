@@ -25,7 +25,7 @@ thread_local! {
     static CONTROL: RefCell<Option<jazz_app_support::CallControl>> = const { RefCell::new(None) };
 }
 
-fn current_control() -> Option<jazz_app_support::CallControl> {
+pub(crate) fn current_control() -> Option<jazz_app_support::CallControl> {
     CONTROL.with(|control| control.borrow().clone())
 }
 

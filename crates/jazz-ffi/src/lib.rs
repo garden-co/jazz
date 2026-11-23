@@ -70,6 +70,20 @@ impl std::ops::Deref for ControlledCore<'_> {
     }
 }
 
+/// [`Session::core`]: the session's core, with the view's control set.
+struct ControlledSession<'a> {
+    core: &'a session::SessionCore,
+    _control: core::Controlled,
+}
+
+impl std::ops::Deref for ControlledSession<'_> {
+    type Target = session::SessionCore;
+
+    fn deref(&self) -> &session::SessionCore {
+        self.core
+    }
+}
+
 /// Ends the calls made through [`JazzHandle::controlled`] views: cancelled,
 /// or once `timeout_ms` passed since it was made. A binding makes one per
 /// suspending call and cancels it when its coroutine or task is cancelled.
@@ -753,16 +767,27 @@ pub trait StateListener: Send + Sync {
 /// true}` and a token provider), `"device"` or `"signed-out"`.
 #[derive(uniffi::Object)]
 pub struct Session {
-    core: session::SessionCore,
+    core: Arc<session::SessionCore>,
+    /// A view's control (`controlled`): its operations obey it.
+    control: Option<jazz_app_support::CallControl>,
 }
 
 impl Session {
+    /// The session's core, with its operations (until the end of the
+    /// statement) obeying this view's control.
+    fn core(&self) -> ControlledSession<'_> {
+        ControlledSession {
+            core: &self.core,
+            _control: core::Controlled::new(self.control.clone()),
+        }
+    }
+
     fn surface<T>(&self, result: error::Result<T>) -> Result<T> {
-        result.map_err(|error| JazzError::from(error).for_contract(self.core.contract))
+        result.map_err(|error| JazzError::from(error).for_contract(self.core().contract))
     }
 
     fn call(&self, method: &str) -> Result<()> {
-        self.surface(self.core.call(method, &serde_json::Value::Null))
+        self.surface(self.core().call(method, &serde_json::Value::Null))
             .map(drop)
     }
 }
@@ -786,14 +811,17 @@ impl Session {
         });
         let core = session::SessionCore::open(&config_json, tokens)
             .map_err(|error| JazzError::from(error).for_contract(contract))?;
-        Ok(Arc::new(Self { core }))
+        Ok(Arc::new(Self {
+            core: Arc::new(core),
+            control: None,
+        }))
     }
 
     /// `{"status": "starting"|"ready"|"signed-out"|"transitioning"|"error"|
     /// "closed", "user"?, "clientEpoch", "error"?: {"kind", "message"},
     /// "recovery"?: "action"|"session"}`.
     pub fn snapshot(&self) -> Result<String> {
-        self.surface(self.core.snapshot())
+        self.surface(self.core().snapshot())
     }
 
     /// A handle acting for the user signed in now: `NoUser` (with the
@@ -801,8 +829,21 @@ impl Session {
     /// changes: one from before fails with `Replaced`. Its `shutdown`
     /// leaves the session open.
     pub fn jazz(&self) -> Result<Arc<JazzHandle>> {
-        let core = self.surface(self.core.jazz())?;
+        let core = self.surface(self.core().jazz())?;
         Ok(JazzHandle::new(core))
+    }
+
+    /// A view on the same session whose operations (refresh, sign-in,
+    /// link, signOut, retry) obey `control`: cut short, they fail
+    /// `Interrupted` (never `queued`; what they sent may still apply) and
+    /// the snapshot reports the failure. Freeing it frees only the view;
+    /// closing it closes the session. Handles it hands out (`jazz`) are
+    /// not controlled: make their calls through their own `controlled`.
+    pub fn controlled(&self, control: Arc<CallControl>) -> Arc<Self> {
+        Arc::new(Self {
+            core: self.core.clone(),
+            control: Some(control.0.clone()),
+        })
     }
 
     /// The app's auth changed: asks the bearer and the backend who is
@@ -817,7 +858,7 @@ impl Session {
 
     /// Signs in as the device account `device_key` (`jazz-auth-v1:…`).
     pub fn restore_device_account(&self, device_key: String) -> Result<()> {
-        self.surface(self.core.call(
+        self.surface(self.core().call(
             "restoreDeviceAccount",
             &serde_json::json!({ "deviceKey": device_key }),
         ))
@@ -836,7 +877,10 @@ impl Session {
 
     /// The device account's key (`jazz-auth-v1:…`): keep it as a password.
     pub fn export_device_key(&self) -> Result<String> {
-        let key = self.surface(self.core.call("exportDeviceKey", &serde_json::Value::Null))?;
+        let key = self.surface(
+            self.core()
+                .call("exportDeviceKey", &serde_json::Value::Null),
+        )?;
         Ok(key.as_str().unwrap_or_default().to_owned())
     }
 
@@ -853,7 +897,7 @@ impl Session {
     /// Calls `listener` with each snapshot, the current one first; when the
     /// session closes, a last `{"kind": "closed", "message"}`.
     pub fn watch(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
-        let inner = self.surface(self.core.watch(Box::new(move |state| {
+        let inner = self.surface(self.core().watch(Box::new(move |state| {
             listener.on_change(state.unwrap_or_else(|| CLOSED_STATE.to_owned()))
         })))?;
         Ok(Arc::new(Watch { inner }))
@@ -864,7 +908,7 @@ impl Session {
     /// isn't waited for; watches end. As `JazzHandle.shutdown`, it has no
     /// hard time limit and doesn't wait for a token provider already asked.
     pub fn shutdown(&self) -> Result<()> {
-        self.surface(self.core.close())
+        self.surface(self.core().close())
     }
 }
 
