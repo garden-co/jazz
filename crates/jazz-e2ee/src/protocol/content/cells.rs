@@ -274,7 +274,7 @@ pub fn seal_cells(
     })
 }
 
-/// What opening one stored value gives (§4.1–§4.3; E2EE_SCHEMA_CHANGES.md §3.2).
+/// What opening one stored value gives (§4.1–§4.3).
 /// A decrypted value is never printed.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Opened {

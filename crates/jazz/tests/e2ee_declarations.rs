@@ -1,5 +1,5 @@
 //! An app's encryption declarations in its files (E2EE protocol §1.5,
-//! migrations §3.1–§3.2): the `encryption` entry of each table and the
+//! E2EE_SCHEMA_CHANGES.md §2–§3): the `encryption` entry of each table and the
 //! top-level settings, read and written by the app-file reader and writer,
 //! recorded per schema version, returned by the loaders, and checked the way
 //! the deploy and `generate` check them.
@@ -470,7 +470,7 @@ fn migrations_are_checked_against_both_versions_declarations() {
 }
 
 /// A policy may not read an encrypted column's value, which the server
-/// sees only as ciphertext (migrations §4.1): not in its own table's
+/// sees only as ciphertext (E2EE_SCHEMA_CHANGES.md §3.1): not in its own table's
 /// policy, an `exists`, a relation (`exists (…)`), or through `this.col`.
 #[test]
 fn a_policy_may_not_read_an_encrypted_value() {

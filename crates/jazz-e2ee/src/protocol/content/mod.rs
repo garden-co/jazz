@@ -1,5 +1,4 @@
-//! Content under held space keys (`E2EE_PROTOCOL.md` §4, §5, §6.2;
-//! `E2EE_MIGRATIONS.md` §3, §4): the pure operations the write, read, query
+//! Content under held space keys (`E2EE_PROTOCOL.md` §4, §5, §6.2): the pure operations the write, read, query
 //! and streaming hooks and the runtime's lost-creation repair call.
 //! Nothing here does I/O or keeps global state: callers pass the held keys,
 //! the stored values and the declarations, and run every transaction.

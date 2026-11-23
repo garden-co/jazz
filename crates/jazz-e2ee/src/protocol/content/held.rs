@@ -583,7 +583,7 @@ impl HeldKeys {
 
     /// The held keys of `epoch_id` under every other address, by address
     /// then root ID: a cell of a row that moved between spaces may be
-    /// sealed under one of them (migrations §3.9).
+    /// sealed under one of them (protocol §4.3, `stale-space`).
     pub(crate) fn keys_elsewhere<'k>(
         &'k self,
         address: &SpaceAddress,

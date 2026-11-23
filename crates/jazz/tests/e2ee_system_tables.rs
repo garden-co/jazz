@@ -87,7 +87,7 @@ fn member_of_this_project() -> PolicyExpr {
 
 /// The app's own tables: projects are spaces, tasks encrypt their title
 /// in their project's space. Boards are spaces too, still read by their
-/// owner alone, before any column is encrypted in them (migrations §4.1).
+/// owner alone, before any column is encrypted in them (E2EE_SCHEMA_CHANGES.md §4).
 fn app() -> Schema {
     SchemaBuilder::new()
         .table(

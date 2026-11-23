@@ -1039,7 +1039,7 @@ pub fn warnings(permissions: &Permissions, entries: &Entries) -> Vec<String> {
 
 /// Refuse a policy that reads an encrypted column's value: the server
 /// sees only its ciphertext, so no comparison with it can mean what it says
-/// (E2EE_SCHEMA_CHANGES.md §4). Columns are read where a policy names them: its own
+/// (E2EE_SCHEMA_CHANGES.md §3.1). Columns are read where a policy names them: its own
 /// table's, an `exists` table's, and the checked row's through `this.col`.
 /// A relation (`exists (…)`) is judged conservatively: a column it names
 /// counts as a column of every table it might belong to.

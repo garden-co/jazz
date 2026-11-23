@@ -67,8 +67,8 @@ pub struct EncryptedColumn {
     /// The plaintext type the application reads and writes.
     #[serde(rename = "type")]
     pub plain: PlainType,
-    /// The type the column's cells are bound to, when a later schema widened
-    /// the type in an encoding-compatible way (E2EE_SCHEMA_CHANGES.md §3.2). `None`
+    /// The type the column's cells are bound to, when a later schema appended
+    /// variants to an encrypted enum (E2EE_SCHEMA_CHANGES.md §3.2). `None`
     /// means the declared type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed_type: Option<PlainType>,

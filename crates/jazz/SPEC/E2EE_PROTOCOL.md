@@ -8,7 +8,7 @@ underneath are specified separately: [cryptographic formats](E2EE_CRYPTO_FORMAT.
 (context, envelopes, cell cipher, key envelope, signatures),
 [equality tokens](E2EE_EQUALITY_FORMAT.md) and
 [large values](E2EE_LARGE_VALUE_FORMAT.md).
-Schema changes that involve encrypted data are specified in [E2EE migrations](E2EE_MIGRATIONS.md).
+What the deploy enforces when an encrypted app's schema changes is in [E2EE schema changes](E2EE_SCHEMA_CHANGES.md).
 
 **The model in one paragraph.** A **space** is one application row (for
 example a `projects` row) together with the encrypted rows that name it (its
@@ -33,10 +33,9 @@ adds no access rule of its own (§8).
 **Precedence.** This document governs protocol behaviour (records, replay,
 permissions, reads, writes, local state and failure codes). The three format
 specs govern bytes and the mechanism interfaces of `crates/jazz-e2ee`, which is
-the normative reference implementation of the formats. [E2EE migrations](E2EE_MIGRATIONS.md)
-extends this protocol for schema conversions; every code and read rule it adds
-is also stated here (§4.1, §4.3, §5.1, §7), and where the two still differ this
-document wins. The [core hooks note](E2EE_CORE_HOOKS.md) proposes how jazz-core
+the normative reference implementation of the formats. [E2EE schema
+changes](E2EE_SCHEMA_CHANGES.md) states the deploy's rules for schema changes;
+where the two differ, this document wins. The [core hooks note](E2EE_CORE_HOOKS.md) proposes how jazz-core
 provides what this document requires and does not change it. A reviewed
 specification is not an implementation or platform qualification: byte
 fixtures and behavioural tests must accompany each part when it is built.
@@ -470,9 +469,7 @@ row resumes administration.
 Each encrypted application table stores every encrypted column as non-null
 `bytes` (ciphertext; a null value is encrypted as a null value), plus a
 non-null `bytes` column `__e2ee_eq_<column>` for each equality-indexed column.
-Two short values are never ciphertext and have fixed meanings (§4.1): the
-empty byte string (never written) and the 5-byte cleared marker
-`4a 45 32 58 01` (written by a schema conversion, [migrations](E2EE_MIGRATIONS.md) §3.2).
+The empty byte string is never ciphertext: it means "never written" (§4.1).
 
 ### 1.4 Permissions
 
@@ -710,7 +707,7 @@ read policy).
   a space table: a session that could read the space row without a member
   row would never receive a key. (A declaration without encrypted columns
   lets an existing app write member rows before it changes the read rule,
-  [migrations](E2EE_MIGRATIONS.md) §4.1.) Further conjuncts (claims, row columns)
+  [schema changes](E2EE_SCHEMA_CHANGES.md) §4.) Further conjuncts (claims, row columns)
   narrow which members receive the rows, not the keys.
 - R14. **Reads.** The roots, successors and deliveries of a space
   are readable iff member(session account). A delivery's envelope is sealed to
@@ -723,7 +720,7 @@ read policy).
   member(session account), read(row) and update(row). Once a space table's
   read rule comes from the members table (R13), read(row) already implies
   membership; the explicit condition also covers the first migration step,
-  when it does not yet ([migrations](E2EE_MIGRATIONS.md) §4.1), so a
+  when it does not yet ([schema changes](E2EE_SCHEMA_CHANGES.md) §4), so a
   session that is not a member never holds a space key it wrote itself.
 - R17. **Deliver.** Insert into `__e2ee_space_deliveries` iff
   member(session account) and member(`recipientAccountId`).
@@ -744,8 +741,8 @@ An encrypted table's `encryption` entry names its space: `space` is the
 column holding the space row's ID (`id` for a table whose rows are their own
 spaces), and `scope` is the space table. An encrypted column may declare a
 plaintext `default` (§4.1), which is stored and deployed in plain text and
-visible to the server, so it must not be secret; changing it later takes a
-re-encrypt into a new column. Nothing else is declared in
+visible to the server, so it must not be secret; it cannot be changed later
+([schema changes](E2EE_SCHEMA_CHANGES.md) §3.2). Nothing else is declared in
 `jazz.app.json`. In `jazz.permissions.json`, the space table's read rule
 comes from the members table (R13), and its update rule decides who changes
 members, creates and rotates:
@@ -784,9 +781,9 @@ can read or manage it until then. Every other account is
 added by an updater.
 
 - **Column entries.** A `columns` value is either a type string (`"title":
-  "string"`) or, during a schema conversion, an object with `type` and the
-  conversion fields of [migrations](E2EE_MIGRATIONS.md) §3.2 (`from`, `to`,
-  `convert`, `sealedType`); the string is shorthand for `{ "type": … }`.
+  "string"`) or an object with `type` and, optionally, `default` and
+  `sealedType` ([schema changes](E2EE_SCHEMA_CHANGES.md) §3.2); the string is
+  shorthand for `{ "type": … }`.
 - **The system tables stay once added.** Once any version of an app carries
   the system tables (§1.2, §1.3), every later version carries them too, even
   one that declares no encryption (an app that stops encrypting keeps them,
@@ -814,8 +811,8 @@ added by an updater.
   tables, a deploy also refuses to target an older stored version without
   them, even when the deploy allows dropping history. Such a rollback would
   put application code from before encryption in front of encrypted data.
-  Turning encryption off is a schema conversion of the columns (a decrypt,
-  [migrations](E2EE_MIGRATIONS.md) §3), never a removal of the system tables.
+  An app that stops encrypting drops its encrypted columns (or copies them
+  into plain ones from a client); it never removes the system tables.
 - **Encrypted columns are last-writer-wins.** The server cannot merge
   ciphertext, so the deploy and code generation refuse a merge strategy
   (`counter`, `g-set`, `text`, `markdown`, `html`) on an encrypted column.
@@ -1747,8 +1744,7 @@ by delivery (§3.4).
 **When a space is created.** Inserting a space row creates nothing. A space
 is created only:
 
-- **with the first encrypted write that needs it.** An encrypted write (or a
-  conversion, [migrations](E2EE_MIGRATIONS.md) §3.4) to a space for which
+- **with the first encrypted write that needs it.** An encrypted write to a space for which
   the client knows no valid root stages the root in the **same
   transaction** as the write ([core hooks](E2EE_CORE_HOOKS.md) H2), so the
   encrypted rows and their space are accepted or refused together. Online,
@@ -1760,10 +1756,7 @@ is created only:
   existing space if one has a valid root. It always attempts otherwise,
   even after an earlier refusal on this device (below), except while this device has a creation of the
   space whose outcome is pending or unknown: it then reconciles that
-  creation and returns its outcome instead of staging a second root;
-- by a conversion sweep, in its first conversion transaction for the space
-  ([migrations](E2EE_MIGRATIONS.md) §3.5), unless an earlier attempt was
-  refused (below).
+  creation and returns its outcome instead of staging a second root.
 
 **Creation is optimistic.** A Jazz replica evaluates no write policy, and
 the runtime does not try to predict the authority's decision: it stages a
@@ -1801,14 +1794,14 @@ Whatever the outcome, a key whose root did not become the space's root
 follows §5.4 and is repaired as below.
 
 **After a refusal.** Once a creation is refused, the runtime's automatic
-paths (the first encrypted write and a conversion sweep) stage no root for that space on this device while the
+path (the first encrypted write) stages no root for that space on this device while the
 client runs: encrypted writes to the space fail with `space-pending`, and
 reads report it `space-pending` (§4.3), until a valid root exists. An
 explicit `createSpace(row)` always attempts. This is kept only in the
 memory of the running client; nothing about it is stored, so after a
 restart the next automatic path may try the space once more. A space is
-created only by someone who may update its row, through an encrypted write,
-a conversion or `createSpace`; a member who may not update the row reports
+created only by someone who may update its row, through an encrypted write
+or `createSpace`; a member who may not update the row reports
 the space `space-pending` until then. A session that is not a member is
 refused (R15) and reports `space-create-refused`; it would get no key
 anyway. Rotation follows the
@@ -1852,8 +1845,7 @@ device wrote under it. It repairs its own rows:
 - if it is not a member, or the session can no longer read the space row,
   those rows stay unreadable to everyone else.
 
-**Repair** is an online background task of the runtime, built like the
-conversion sweep ([migrations](E2EE_MIGRATIONS.md) §3.5). It finds the
+**Repair** is an online background task of the runtime. It finds the
 space's rows with a cell naming the losing epoch (it reads the space's rows,
 a cost proportional to the space), and rewrites them in serializable
 transactions of bounded size (default 100 rows). Each transaction reads
@@ -1862,8 +1854,8 @@ cells it rewrites; it decrypts the cells that still name the losing epoch,
 and only those, and writes the same plaintext re-encrypted under the newest
 held version of the space's chain (§5.2), with fresh equality tags. Other
 cells are not written. Read-set validation (§0 item 5) refuses the
-transaction if any row it read changed after its cut, so a concurrent edit,
-move or delete is never overwritten: the runtime re-reads and repairs only
+transaction if any row it read changed after its cut, so a concurrent edit
+or delete is never overwritten: the runtime re-reads and repairs only
 the cells that still name the losing epoch. A cell a later write replaced is
 left as it is. Repair never replays an application callback or source; its
 transactions are runtime publications, retried internally after a conflict
@@ -2352,34 +2344,27 @@ canonical JSON of the column's **sealed type**: the logical column type
 When an encrypted enum appends variants, the declaration pins the original
 type as `sealedType` and the cipher continues to use it as `cellType`.
 Each new version retains all variants previously declared for the same
-stored table and column, in order. Other type
-changes, including changing nullability in either direction or changing a
-JSON schema, require re-encryption into a new column ([migrations](E2EE_MIGRATIONS.md) §4.3).
+stored table and column, in order. Other type changes, including changing
+nullability in either direction or changing a JSON schema, need a new column
+([schema changes](E2EE_SCHEMA_CHANGES.md) §3.2).
 Plaintext is Jazz's native encoding of the single value.
 
 **Short values.** A stored encrypted value is never ciphertext when it is
 shorter than the smallest cell record: 78 bytes in all, the 31-byte common
-envelope header of `jazz.e2ee.cell-record` v1 and a 47-byte payload. Two such values have fixed
-meanings and are never reported as malformed:
-
-- The **empty byte string** means "never written": the row predates the
-  column, which a lens added with the empty default. The reader returns the
-  column's declared plaintext default (`{ "type": …, "default": … }` in the
-  encryption entry; it is stored and deployed in plain text, visible to the
-  server, so it must not be secret), or null for an optional column. When
-  the empty value is stored in the row (rather than supplied by the lens for
-  a row that predates the column), any writer Jazz permits could have put it
-  there, so the row is returned with the default and the cell is reported
-  `empty-cell`; the read does not fail. Core tells the two apart (H3).
-  A required column that declares no default has no value a never-written
-  cell could read as (deploy refuses to add one to rows already stored), so a
-  row whose cell of such a column is the empty byte string is left out of the
-  read and the cell is reported `empty-cell`; the other rows are returned.
-- The **cleared marker** `4a 45 32 58 01` means "moved by a schema
-  conversion". A reader whose declaration names this column as the source or
-  target of a conversion treats it as absent and applies the conversion rule
-  ([migrations](E2EE_MIGRATIONS.md) §3.2); any other reader leaves the row out
-  and reports the cell `superseded`.
+envelope header of `jazz.e2ee.cell-record` v1 and a 47-byte payload. One such value has a fixed
+meaning and is never reported as malformed: the **empty byte string** means "never written": the row predates the
+column, which a lens added with the empty default. The reader returns the
+column's declared plaintext default (`{ "type": …, "default": … }` in the
+encryption entry; it is stored and deployed in plain text, visible to the
+server, so it must not be secret), or null for an optional column. When
+the empty value is stored in the row (rather than supplied by the lens for
+a row that predates the column), any writer Jazz permits could have put it
+there, so the row is returned with the default and the cell is reported
+`empty-cell`; the read does not fail. Core tells the two apart (H3).
+A required column that declares no default has no value a never-written
+cell could read as (deploy refuses to add one to rows already stored), so a
+row whose cell of such a column is the empty byte string is left out of the
+read and the cell is reported `empty-cell`; the other rows are returned.
 
 Any other value shorter than a cell record is `invalid-ciphertext`.
 
@@ -2445,8 +2430,7 @@ encrypted cell and returns the rest; no partial plaintext is returned. Report
 | `key-pending`        | Per space, not per row: this account is a member and lacks a version it needs; a member's delivery is awaited (§3.4)                                     |
 | `space-pending`      | Per space, like `key-pending`: the space row has no valid root yet, and this device's creation was refused while the client runs, or not yet made (§3.2) |
 | `empty-cell`         | The stored cell is the empty byte string; the row is returned with the column's default (§4.1)                                                           |
-| `superseded`         | The cell holds the cleared marker (§4.1) and this reader's declaration names no conversion for the column                                                |
-| `stale-space`        | The cell was sealed under another space of the same row's history; it was read and needs repair ([migrations](E2EE_MIGRATIONS.md) §3.9)                  |
+| `stale-space`        | The cell opened under a held key of another space than the row's own; it was read and needs repair                                                       |
 
 A `key-pending` or `space-pending` report carries `{table, space, code}` with
 no `id` or `column`, and is deduplicated by `(table, space)`; it is not repeated for
@@ -2500,13 +2484,6 @@ acquisition outcomes are those of §4.2 (a member that lacks the key gets
 `key-pending` and no rows). The query then runs against the version set it was planned
 with.
 
-**Conversions.** On a column being converted ([migrations](E2EE_MIGRATIONS.md)
-§3.3), a query matches a row by its logical value: the source when present,
-otherwise the target. It covers source rows by index only when the
-conversion is the identity or declares a bounded, exact reverse mapping;
-otherwise it fails with `conversion-pending` while rows of the space still
-have a present source.
-
 **Completeness.** An equality query returns matching rows of the versions
 this device holds. When the device knows (from the chain it last read) that
 the space has versions it does not hold, the result may miss rows of those
@@ -2554,10 +2531,7 @@ one it holds (§5.2).
 Deletes, and updates or restores that touch no encrypted column, need no key. Partial edits of encrypted columns are refused.
 An update re-encrypts only the supplied encrypted columns, so one row may
 carry cells of different versions. An encrypted row cannot change its space
-coordinate through an ordinary write. The one exception is the `move` write
-of [migrations](E2EE_MIGRATIONS.md) §4.4: a serializable, online-only write
-that re-encrypts every encrypted column under the target space and changes
-the space column in one transaction, with held keys of both spaces.
+coordinate.
 
 ### 5.2 Which version
 
@@ -2801,7 +2775,8 @@ transaction identity for reconciliation after a restart, and is removed by
 rewriting the record. `refused` marks the key of a refused or lost creation
 (§3.2, §5.4): it is kept for good, is never chosen for a write (§5.2), and
 still opens the cells this device wrote under it. The lineage records also
-give the runtime its epoch-to-space lookup ([migrations](E2EE_MIGRATIONS.md) §3.9).
+give the runtime its epoch-to-space lookup, which tells a `stale-space` cell
+(§4.3) by its epoch.
 
 ### 6.3 Binding
 
@@ -2872,7 +2847,7 @@ original record IDs and, when the refusal has a specific cause, that cause's
 code (for example `recovery-root-mismatch`); a specific failure is never
 flattened into a bare `refused`. The data-error codes are exactly
 `key-unavailable`, `key-pending`, `space-pending`, `unsupported-format`,
-`invalid-ciphertext`, `empty-cell`, `superseded`, `stale-space` and
+`invalid-ciphertext`, `empty-cell`, `stale-space` and
 `encryption-failed`. The encryption status events (not data errors) are
 `account-reset` (§2.11), `invalid-delivery` (§3.4), `broken-history` (§3.4),
 `conflicting-account-key` and `unsupported-account-key` (§2.12) and `space-over-member-limit` (§3.8). Account roots that do not count are reported with
@@ -2887,11 +2862,6 @@ devices know. `device-no-longer-active` (§2.4, "Floors") is not an alert:
 this device was removed or the account was reset without it; the device
 wipes its E2EE state for the account and enrols again. `stale-state` (§2.4, "Floors") refuses evidence older than
 state the device already verified.
-Every reader from the first release knows all of them, so that rows written
-by a later schema version degrade to a reported gap. An equality query on a
-space whose conversion or tag backfill is unfinished fails with the query
-error `conversion-pending` ([migrations](E2EE_MIGRATIONS.md) §3.3), which
-names the table, column, space and pending count.
 
 | Outcome                     | Codes                                                                                                                                                                                            | Must                                                                                                | Must not                                                                                       |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
@@ -2899,7 +2869,7 @@ names the table, column, space and pending count.
 | Key pending                 | `key-pending`                                                                                                                                                                                    | Report the space `key-pending`; subscriptions wait one bounded episode, then emit and keep watching | Poll, fail the read, or report each row `key-unavailable`                                      |
 | Key unavailable             | `key-unavailable`                                                                                                                                                                                | Return what held keys decrypt; report the rest                                                      | Write plaintext, or wait for a delivery                                                        |
 | Space pending               | `space-pending`                                                                                                                                                                                  | Refuse the write `space-pending`; report the read; watch for the root (§3.2)                        | Retry a refused creation automatically in the same run, or write plaintext                     |
-| Superseded / stale space    | `superseded`, `stale-space`                                                                                                                                                                      | Report; leave a `superseded` row out; return a `stale-space` row                                    | Report either as `invalid-ciphertext`                                                          |
+| Stale space                 | `stale-space`                                                                                                                                                                                    | Report; return the row                                                                              | Report it as `invalid-ciphertext`                                                              |
 | Permission refusal          | Publication outcome `refused`, with its specific code                                                                                                                                            | Report; reflect in local state                                                                      | Treat key possession as overriding it                                                          |
 | Authentication failure      | `invalid-ciphertext`                                                                                                                                                                             | Leave the row out (ordinary reads) or fail (strict reads)                                           | Return unverified plaintext                                                                    |
 | Unsupported format          | `unsupported-format`                                                                                                                                                                             | Report                                                                                              | Treat as invalid ciphertext                                                                    |
@@ -2932,7 +2902,7 @@ Serialization and transaction conflicts are retried internally only by
 operations that are safe to repeat because they re-read their evidence and
 stage fresh rows: the runtime's own publications (space creation outside an
 application transaction, rotation, deliveries and the repair of refused or
-lost creations, §3.2), conversion sweeps, and a staging call retried after "needs key" before submission
+lost creations, §3.2), and a staging call retried after "needs key" before submission
 (§5.6). A public mutation or transaction callback is never retried or
 replayed: its conflict is returned to the caller, and an unknown outcome is
 reconciled by its transaction identity.
