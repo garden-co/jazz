@@ -884,11 +884,10 @@ async fn deploying_an_optional_encrypted_column_preserves_old_rows() {
     add_task(&alice, &project, "original title").await.unwrap();
     assert_eq!(titles(&alice, 1).await, ["original title"]);
 
-    let mut next: serde_json::Value =
-        serde_json::from_slice(include_bytes!("fixtures/encrypted/jazz.app.json")).unwrap();
-    next["tables"]["tasks"]["encryption"]["columns"]["title"] =
-        json!({"type": "string?", "sealedType": "string"});
-    let files = AppFiles::new(serde_json::to_vec(&next).unwrap(), None);
+    let files = AppFiles::new(
+        include_bytes!("fixtures/encrypted/jazz.optional-title.app.json").as_slice(),
+        None,
+    );
     let backend = Jazz::open(
         files.clone().with_permissions(
             include_bytes!("fixtures/encrypted/jazz.permissions.json").as_slice(),
