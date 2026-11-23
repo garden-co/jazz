@@ -646,8 +646,10 @@ impl Encryption {
 
     async fn run(&self, op: &str, args: &Value) -> Result<Value, String> {
         // The delivery pass belongs to the loop, which takes its turn itself.
+        // A space's row is a local catalogue lookup: it never waits for the
+        // loop's work.
         let _turn = match op {
-            "keysDeliver" | "prepareSpace" | "retryWithCurrentKey" => None,
+            "keysDeliver" | "prepareSpace" | "retryWithCurrentKey" | "spaceRow" => None,
             _ => Some(self.gate.enter().await),
         };
         let (client, db) = (&self.client, &*self.db);
@@ -1460,6 +1462,29 @@ mod tests {
         );
         db.set_authority().unwrap();
         Encryption::new_native(built, store, db)
+    }
+
+    /// A space's row answers from the local catalogue, even while the loop's
+    /// work holds the runtime (verification, a delivery pass).
+    #[test]
+    fn a_space_row_answers_while_the_loop_is_busy() {
+        let runtime = native_runtime_with_catalogue(true);
+        let busy = run(runtime.gate.enter());
+        let answer = run(within(
+            runtime.call(
+                "spaceRow".to_owned(),
+                json!({ "table": "projects", "id": "room" }),
+            ),
+            std::time::Duration::from_secs(5),
+        ));
+        drop(busy);
+        let row = answer.expect("the space row waited for the loop").unwrap();
+        assert_eq!(row["identifier"], "room");
+        assert!(
+            row["scopeId"]
+                .as_str()
+                .is_some_and(|scope| !scope.is_empty())
+        );
     }
 
     /// A confirmed catalogue that lacks an encrypted table stops
