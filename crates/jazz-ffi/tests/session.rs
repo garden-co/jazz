@@ -214,6 +214,34 @@ async fn a_session_keeps_a_device_account() {
         assert!(key.starts_with("jazz-auth-v1:"), "{key}");
         let jazz = session.jazz().unwrap();
         let account = jazz.account().unwrap().unwrap();
+        // Only the session signs out or links: the handle stays open, and
+        // its watch runs on.
+        let (seen, states) = mpsc::channel();
+        let watch = jazz
+            .watch_session(Arc::new(States(Mutex::new(seen))))
+            .unwrap();
+        watched_until(&states, |s| s["status"] == "signedIn");
+        match jazz.sign_out() {
+            Err(JazzError::NotSupported { reason }) => {
+                assert!(reason.contains("signOut"), "{reason}")
+            }
+            other => panic!("signOut on a session's handle: {other:?}"),
+        }
+        match jazz.link("token-carol".into()) {
+            Err(JazzError::NotSupported { reason }) => {
+                assert!(reason.contains("linkDeviceAccount"), "{reason}")
+            }
+            other => panic!("link on a session's handle: {other:?}"),
+        }
+        jazz.refresh().unwrap();
+        assert!(
+            matches!(
+                states.recv_timeout(Duration::from_millis(300)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "the watch changed or ended"
+        );
+        watch.cancel();
         jazz.insert("shows".into(), show(&account)).unwrap();
         jazz.wait_for_sync("global".into()).unwrap();
         session.shutdown().unwrap();
@@ -455,6 +483,12 @@ async fn a_c_host_follows_a_session() {
             take(out)
         };
         assert!(account.is_string());
+        for (method, args) in [("signOut", "{}"), ("link", r#"{"bearer":"token-alice"}"#)] {
+            let out = jazz_call(handle, c(method).as_ptr(), c(args).as_ptr(), &mut err);
+            assert!(out.is_null(), "{method} on a session's handle");
+            assert_eq!(take(err)["kind"], "notSupported", "{method}");
+        }
+        assert_eq!(call("snapshot").unwrap()["status"], "ready");
         call("signOut").unwrap();
         let none = jazz_session_jazz(session, &mut err);
         assert!(none.is_null());

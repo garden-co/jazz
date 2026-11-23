@@ -109,6 +109,9 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "link"     {"bearer"} -> the user (links a device account to the app's
  *                            own sign-in; the session becomes that user's)
  *   "signOut"  {}  -> null (signs out and closes the app)
+ *                     On a jazz_session_jazz handle "link" and "signOut"
+ *                     fail with notSupported, and it stays open: use
+ *                     jazz_session_call's "linkDeviceAccount" and "signOut".
  *                     "session", "refresh", "link", "signOut" and watching
  *                     "session" fail with notSupported on a for_user
  *                     handle: the session is the backend client's it came
