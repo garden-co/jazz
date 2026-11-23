@@ -570,3 +570,40 @@ async fn no_token_callback_runs_after_the_session_closes() {
     .unwrap();
     app.backend.shutdown().await.unwrap();
 }
+
+/// The app's own sign-out, as the handle's `refresh` finds it: the session
+/// follows, as hosts see it, and the same user signs in again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_follows_its_client_signing_out_by_itself() {
+    let app = App::start().await;
+    let config = app.config(json!({ "auth": { "bearer": true } }));
+    tokio::task::spawn_blocking(move || {
+        let bearer = Arc::new(Bearer(Mutex::new(Some("token-alice".into()))));
+        let session = Session::open(config, Some(bearer.clone())).unwrap();
+        let before = snapshot_until(&session, |s| s["status"] == "ready");
+        let (seen, states) = mpsc::channel();
+        let watch = session.watch(Arc::new(States(Mutex::new(seen)))).unwrap();
+        let old = session.jazz().unwrap();
+
+        *bearer.0.lock().unwrap() = None;
+        old.refresh().unwrap();
+        watched_until(&states, |s| {
+            s["status"] == "signed-out"
+                && s["clientEpoch"].as_u64() > before["clientEpoch"].as_u64()
+        });
+        match old.all(json!({ "table": "shows" }).to_string()) {
+            Err(JazzError::Replaced { .. }) => {}
+            other => panic!("an old handle: {other:?}"),
+        }
+
+        *bearer.0.lock().unwrap() = Some("token-alice".into());
+        session.refresh().unwrap();
+        let again = session.jazz().unwrap();
+        again.all(json!({ "table": "shows" }).to_string()).unwrap();
+        watch.cancel();
+        session.shutdown().unwrap();
+    })
+    .await
+    .unwrap();
+    app.backend.shutdown().await.unwrap();
+}
