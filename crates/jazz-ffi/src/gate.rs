@@ -16,6 +16,25 @@ struct State<T> {
     active: usize,
 }
 
+/// A host callback's gate, whatever the callback: what closing needs.
+pub(crate) trait HostGate: Send + Sync {
+    /// No call passes any more; doesn't wait for the running ones.
+    fn shut(&self);
+    /// [`Self::shut`], then waits until none runs but the caller's own.
+    /// Closing again waits again.
+    fn close(&self);
+}
+
+impl<T: Clone + Send> HostGate for Gate<T> {
+    fn shut(&self) {
+        Gate::shut(self);
+    }
+
+    fn close(&self) {
+        Gate::close(self);
+    }
+}
+
 thread_local! {
     /// The gates this thread is inside a call of (by address; a gate may
     /// appear more than once for nested calls).
@@ -65,6 +84,11 @@ impl<T: Clone> Gate<T> {
         INSIDE.with(|inside| inside.borrow_mut().push(self.address()));
         let _leave = Leave(self);
         Some(call(&value))
+    }
+
+    /// Lets no call pass from now on, without waiting for the running ones.
+    pub fn shut(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).value = None;
     }
 
     /// Closes the gate and waits until no call is running but this
