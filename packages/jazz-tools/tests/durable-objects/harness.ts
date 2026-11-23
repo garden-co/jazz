@@ -71,7 +71,7 @@ export async function startDurableObjectCore(
 }
 
 /** The Worker's modules: `script` first, then the other modules beside it. */
-function workerModules(script: string) {
+export function workerModules(script: string) {
   const dir = dirname(script);
   const others = readdirSync(dir, { recursive: true }) as string[];
   const modules = [{ type: "ESModule" as const, path: script }];
