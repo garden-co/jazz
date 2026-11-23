@@ -57,6 +57,11 @@ impl App {
             .start()
             .await
             .expect("start a Jazz server");
+        Self::on_server(files, server).await
+    }
+
+    async fn on_server(files: AppFiles, server: JazzServer) -> Self {
+        let app_id = server.app_id();
         let backend = Jazz::open(
             files,
             Config::new(app_id)
@@ -613,6 +618,160 @@ async fn typed_bindings_read_and_write_an_encrypted_column() {
         .expect("a typed read of an encrypted column");
     assert_eq!(found, vec![task]);
 
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// The first typed stream prepares the project key before polling its source.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_streams_seal_siblings_and_refuse_an_indexed_text_target() {
+    use bindings::{NewTask, Task, tasks};
+    let app = App::start().await;
+    let alice = app.device().await;
+    alice
+        .encryption()
+        .ready(Duration::from_secs(30))
+        .await
+        .unwrap();
+    let project = make_project(&alice, "plans").await;
+    let id = ObjectId::from_uuid(project.parse().unwrap());
+    let chunks = || futures::stream::iter([Ok::<_, Error>(b"public label")]);
+    let task = alice
+        .insert_streaming(NewTask::new(id, "private title"), tasks::label(), chunks())
+        .await
+        .unwrap();
+    let staged = alice
+        .transaction(move |tx| async move {
+            tx.insert_streaming(NewTask::new(id, "closure title"), tasks::label(), chunks())
+                .await
+        })
+        .await
+        .unwrap();
+    let open = alice.begin_transaction().await.unwrap();
+    let parked = open
+        .insert_streaming(NewTask::new(id, "open title"), tasks::label(), chunks())
+        .await
+        .unwrap();
+    open.commit().await.unwrap();
+    for (task, title) in [
+        (task, "private title"),
+        (staged, "closure title"),
+        (parked, "open title"),
+    ] {
+        let read = alice.get::<Task>(task.id).await.unwrap().unwrap();
+        assert_eq!(read.title, title);
+        assert_eq!(read.label.as_deref(), Some("public label"));
+    }
+
+    let unread = futures::stream::poll_fn(|_| -> std::task::Poll<Option<Result<Vec<u8>, Error>>> {
+        panic!("polled a stream for an indexed, encrypted text column")
+    });
+    let refused = alice
+        .insert_streaming(NewTask::new(id, ""), tasks::title(), unread)
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("only unindexed bytes columns stream"),
+        "{refused}"
+    );
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// A device opens the typed bytes it streamed. The authority stores the sealed record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_streams_round_trip_encrypted_bytes_and_store_them_sealed() {
+    use bindings::{NewTask, Task, tasks};
+    use jazz_app_support::{Column, jazz::tools::ColumnType};
+
+    let files = omitted_columns::with_private_note(ColumnType::Bytea);
+    let server = JazzServer::builder()
+        .with_persistent_storage()
+        .start()
+        .await
+        .unwrap();
+    let app = App::on_server(
+        AppFiles::new(files.app.clone(), Some(files.permissions.into_bytes())),
+        server,
+    )
+    .await;
+    let alice = Jazz::open(
+        AppFiles::new(files.app, None),
+        app.user(DeviceKey::generate().unwrap())
+            .encryption(EncryptionConfig::store(|| Rc::new(MemoryStore::new()))),
+    )
+    .await
+    .unwrap();
+    alice
+        .encryption()
+        .ready(Duration::from_secs(30))
+        .await
+        .unwrap();
+    let project = make_project(&alice, "plans").await;
+    let id = ObjectId::from_uuid(project.parse().unwrap());
+    struct Unread;
+    impl std::io::Read for Unread {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("read the bytes before checking the plain label")
+        }
+    }
+    let refused = alice
+        .with_client(move |client| async move {
+            let cells = HashMap::from([
+                ("projectId".into(), Value::Uuid(id)),
+                ("title".into(), text("private title")),
+                ("label".into(), Value::Integer(4)),
+            ]);
+            Ok(client
+                .insert_streaming_value("tasks", cells, "privateNote", Unread)
+                .await?)
+        })
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("label"), "{refused}");
+
+    let attachment = Column::<Task, Option<Vec<u8>>>::new("privateNote");
+    let plain = b"attachment plaintext marker";
+    let task = alice
+        .insert_streaming(
+            NewTask::new(id, "private title"),
+            attachment,
+            futures::stream::iter([Ok::<_, Error>(plain)]),
+        )
+        .await
+        .unwrap();
+    let read = alice
+        .one(
+            tasks::query()
+                .id(task.id)
+                .select((tasks::project_id(), attachment)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read.values.0, id);
+    assert_eq!(read.values.1.as_deref(), Some(plain.as_slice()));
+    alice.wait_for_sync().await.unwrap();
+
+    let conn = rusqlite::Connection::open_with_flags(
+        app.server.data_dir().join("jazz.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let (table, column): (String, String) = conn.query_row(
+        "SELECT stored_tbl, stored_col FROM _jazz_names WHERE tbl = 'tasks' AND col = 'privateNote'",
+        [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    let sealed: Vec<u8> = conn
+        .query_row(
+            &format!(r#"SELECT "{column}" FROM "{table}" WHERE id = ?1"#),
+            [task.id.uuid().as_bytes().as_slice()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(sealed.len() > plain.len());
+    assert!(!sealed.windows(plain.len()).any(|bytes| bytes == plain));
     alice.shutdown().await.unwrap();
     app.stop().await;
 }

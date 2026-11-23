@@ -298,7 +298,6 @@ mod plan {
             TICKED.with(|ticked| ticked.notify_waiters());
         }
 
-        #[cfg(not(target_family = "wasm"))]
         fn begin_streaming_upload<'a>(
             &self,
             begin: &'a mut dyn FnMut() -> jazz::tools::Result<jazz::db::StreamingValueUpload>,
