@@ -62,10 +62,9 @@ export class BrowserPasskeyBackup {
       throw new PasskeyBackupError("invalid-secret");
     }
 
-    const challenge = new Uint8Array(16);
-    crypto.getRandomValues(challenge);
-
     try {
+      const challenge = new Uint8Array(16);
+      crypto.getRandomValues(challenge);
       await navigator.credentials.create({
         publicKey: {
           rp: { id: this.rpId, name: this.appName },

@@ -501,6 +501,36 @@ impl Inner {
         let Some(entry) = hooks.declarations().tables.get(table) else {
             return Ok(());
         };
+        if mutation == StreamingMutationKind::Insert && !entry.columns.is_empty() {
+            let schema = self.schema.table(table)?;
+            let branch_cells = match target {
+                WriteTarget::BranchView { head, .. } => schema.selector_cells(head)?,
+                WriteTarget::Root => BTreeMap::new(),
+            };
+            // The branch selector supplies its columns, and sealing supplies equality tokens.
+            let tokens: std::collections::BTreeSet<_> = entry
+                .equality
+                .iter()
+                .map(|name| format!("__e2ee_eq_{name}"))
+                .collect();
+            for sibling in &schema.columns {
+                let name = &sibling.name;
+                if name == column
+                    || cells.contains_key(name)
+                    || branch_cells.contains_key(name)
+                    || tokens.contains(name)
+                {
+                    continue;
+                }
+                let required = match entry.columns.get(name) {
+                    Some(declared) => !declared.plain.nullable && declared.plain.default.is_none(),
+                    None => !sibling.nullable() && sibling.default.is_none(),
+                };
+                if required {
+                    return Err(super::missing_required(table, name));
+                }
+            }
+        }
         let stored = match mutation {
             StreamingMutationKind::Insert => None,
             _ => self.stored_space(&**hooks, table, row, &Target::of(target, self)?, false)?,

@@ -2636,8 +2636,9 @@ and set to `refused` otherwise. Reconciliation never stages another root.
 
 ### 5.5 Streaming large values
 
-Sources are distinct one-shot inputs; only non-indexed `bytes` columns
-stream. Metadata is validated and encrypted before any source is pulled. The
+Sources are distinct one-shot inputs. An encrypted column streams only if it
+is a non-indexed `bytes` column; plain columns stream under the ordinary
+rules, on encrypted tables too. Metadata is validated and encrypted before any source is pulled. The
 operation timer pauses while a source is consumed and restarts with a full
 budget for publication. Before attaching, the publication checks that its
 dependencies (or, for mergeable content, the space coordinate) are unchanged.
