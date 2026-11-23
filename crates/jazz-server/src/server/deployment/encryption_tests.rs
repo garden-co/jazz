@@ -298,6 +298,8 @@ async fn refuses_standalone_change(edit: impl FnOnce(&mut Value), reason: &str) 
     let mut body = next.deployment_body(false);
     let hash = next.current_hash().to_string();
     edit(&mut body["encryption"]["versions"][&hash]["tasks"]);
+    // Unknown deploy options cannot override the transition checks.
+    body["confirmDecrypt"] = json!(["tasks.title"]);
     let (status, refusal) = publish(&router, body).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
     let message = refusal["error"].as_str().unwrap();
@@ -317,7 +319,7 @@ async fn standalone_encryption_preserves_the_stored_space() {
     .await;
 }
 
-/// Alice must keep a stored ciphertext column declared or name a conversion.
+/// Alice must keep a stored ciphertext column declared until she drops it.
 #[tokio::test]
 async fn standalone_encryption_keeps_ciphertext_columns_declared() {
     refuses_standalone_change(
@@ -336,28 +338,47 @@ async fn standalone_encryption_keeps_equality_while_the_token_column_remains() {
     refuses_standalone_change(|e| e["equality"] = json!([]), "token column").await;
 }
 
-/// A standalone decrypt publishes only after Alice confirms its source column.
+/// Alice's deploy names the unsupported key and points her to the copy guide.
 #[tokio::test]
-async fn a_standalone_decrypt_requires_confirmation_for_the_source_column() {
-    let router = router().await;
-    let (first, next) = standalone_tasks();
-    let (status, response) = publish(&router, first.deployment_body(false)).await;
-    assert_eq!(status, StatusCode::OK, "{response}");
-    let mut body = next.deployment_body(false);
-    let hash = next.current_hash().to_string();
-    body["encryption"]["versions"][&hash]["tasks"]["columns"]["title"]["to"] = json!("plainTitle");
-    let (status, refusal) = publish(&router, body.clone()).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
-    assert!(
-        refusal["error"]
-            .as_str()
-            .unwrap()
-            .contains("confirmDecrypt"),
-        "{refusal}"
-    );
-    body["confirmDecrypt"] = json!(["tasks.title"]);
-    let (status, response) = publish(&router, body).await;
-    assert_eq!(status, StatusCode::OK, "{response}");
+async fn a_deployment_refuses_conversion_keys_even_when_their_values_are_empty() {
+    for (key, value, column) in [
+        ("from", json!("oldTitle"), true),
+        ("to", Value::Null, true),
+        ("convert", Value::Null, true),
+        ("reverse", Value::Null, true),
+        ("backfill", json!([]), false),
+        ("rehome", Value::Null, false),
+        ("sweep", json!("updaters"), false),
+    ] {
+        let source = APP.replace(
+            r#""title": "bytes""#,
+            r#""oldTitle": "string", "title": "bytes""#,
+        );
+        let app = artifact::load(
+            source.as_bytes(),
+            permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
+        )
+        .unwrap();
+        let hash = app.current_hash().to_string();
+        let mut body = app.deployment_body(false);
+        let entry = &mut body["encryption"]["versions"][&hash]["tasks"];
+        if column {
+            entry["columns"]["title"][key] = value;
+        } else {
+            entry[key] = value;
+        }
+        let (status, refusal) = publish(&router().await, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{key}: {refusal}");
+        let error = refusal["error"].as_str().unwrap();
+        assert!(
+            error.contains("tasks")
+                && (!column || error.contains("title"))
+                && error.contains(key)
+                && error.contains("in-place conversion is not supported")
+                && error.contains("docs/e2ee/encrypting-existing-data"),
+            "{key}: {refusal}"
+        );
+    }
 }
 
 /// Alice renames the project reference. The same stored column still selects the space.
@@ -383,9 +404,9 @@ async fn a_renamed_space_column_keeps_its_stored_identity() {
     assert_eq!(status, StatusCode::OK, "{response}");
 }
 
-/// Alice can declare a re-home from the old title into a new encrypted caption on either path.
+/// Alice cannot declare a re-home from the old title into a new encrypted caption on either path.
 #[tokio::test]
-async fn an_explicit_rehome_is_accepted_with_or_without_a_migration() {
+async fn an_explicit_rehome_is_refused_with_or_without_a_migration() {
     let (first, next) = standalone_tasks();
     let from = first.current_hash().to_string();
     let to = next.current_hash().to_string();
@@ -406,7 +427,7 @@ async fn an_explicit_rehome_is_accepted_with_or_without_a_migration() {
         let (status, response) = publish(&router, first.clone()).await;
         assert_eq!(status, StatusCode::OK, "{response}");
         let (status, response) = publish(&router, candidate).await;
-        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     }
 }
 
@@ -519,10 +540,9 @@ async fn a_renamed_enum_keeps_variants_from_deployments_outside_its_migration() 
     );
 }
 
-/// Alice can re-encrypt a required title into a new optional column even
-/// when the new column uses the same application name as the original.
+/// Alice cannot convert into a fresh stored column that reuses an old name.
 #[tokio::test]
-async fn a_conversion_can_reuse_the_name_of_a_different_stored_column() {
+async fn a_conversion_cannot_reuse_the_name_of_a_different_stored_column() {
     let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
         "tables": { "notes": {
             "columns": { "oldTitle": "bytes", "title": { "type": "bytes", "default": "" } },
@@ -538,9 +558,14 @@ async fn a_conversion_can_reuse_the_name_of_a_different_stored_column() {
             { "from": "v2", "migrate": { "notes": { "title": { "add": "bytes", "default": "" } } } }] }"#;
     let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
         "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
-    let app = artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap();
-    let (status, response) = publish(&router().await, app.deployment_body(false)).await;
-    assert_eq!(status, StatusCode::OK, "{response}");
+    let error = artifact::load(file.as_bytes(), permissions.as_bytes())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("tables.notes.encryption.columns.title")
+            && error.contains("unknown key `from`"),
+        "{error}"
+    );
 }
 
 /// The server's kept declarations judge a redeployed version like a
@@ -562,12 +587,9 @@ async fn a_redeclaration_may_not_convert_over_a_column_or_drop_its_equality() {
         "convert": "parse",
     });
     let (status, refusal) = publish(&router, converted).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
     assert!(
-        refusal["error"]
-            .as_str()
-            .unwrap()
-            .contains("was already encrypted"),
+        refusal["error"].as_str().unwrap().contains("unknown field"),
         "{refusal}"
     );
 
@@ -1060,7 +1082,7 @@ async fn a_policy_may_read_a_column_that_the_target_keeps_in_plaintext() {
             "v2": { "tables": { "notes": {
                 "columns": { "title": "bytes", "titleText": "string?" },
                 "encryption": { "space": "id", "scope": "notes",
-                    "columns": { "title": { "type": "string", "to": "titleText" } } } } } },
+                    "columns": { "title": "string" } } } } },
             "v3": { "tables": { "notes": { "columns": { "titleText": "string?" } } } } },
         "migrations": [
             { "from": "v1", "to": "v2", "migrate": { "notes": { "titleText": { "add": "string?", "default": null } } } },
@@ -1070,8 +1092,7 @@ async fn a_policy_may_read_a_column_that_the_target_keeps_in_plaintext() {
         "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user) and title = 'public'" } } }"#;
     let app =
         artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
-    let mut body = app.deployment_body(false);
-    body["confirmDecrypt"] = json!(["notes.title"]);
+    let body = app.deployment_body(false);
     let (status, deployed) = publish(&router, body).await;
     assert_eq!(status, StatusCode::OK, "{deployed}");
 }
@@ -1241,76 +1262,6 @@ async fn a_plain_branch_listed_after_an_encrypting_version_stays_plain() {
     );
 }
 
-/// Decrypting a column puts its plaintext on the server, so the deploy
-/// asks for an explicit confirmation naming it (migrations §4.2).
-#[tokio::test]
-async fn a_decrypt_needs_the_deployers_confirmation() {
-    let router = router().await;
-    let decrypting = APP
-        .replace(
-            r#""__e2ee_eq_title": "bytes" }"#,
-            r#""__e2ee_eq_title": "bytes", "notes": "bytes", "notesText": "string?" }"#,
-        )
-        .replace(
-            r#""columns": { "title": "string" }"#,
-            r#""columns": { "title": "string", "notes": { "type": "string", "to": "notesText" } }"#,
-        );
-    let app = artifact::load(
-        decrypting.as_bytes(),
-        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    let (status, refusal) = publish(&router, app.deployment_body(false)).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
-    assert!(
-        refusal["error"].as_str().unwrap().contains("tasks.notes"),
-        "{refusal}"
-    );
-    let mut confirmed = app.deployment_body(false);
-    confirmed["confirmDecrypt"] = json!(["tasks.notes"]);
-    let (status, body) = publish(&router, confirmed).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    // Confirmed once, the version's decrypt is known.
-    let (status, body) = publish(&router, app.deployment_body(false)).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-}
-
-/// Confirming one decrypt does not confirm another: a deploy that decrypts
-/// `tasks.notes` is refused when it names only `tasks.title`, or nothing,
-/// and deploys when it names `tasks.notes` among others.
-#[tokio::test]
-async fn a_decrypt_is_confirmed_by_naming_its_column() {
-    let router = router().await;
-    let decrypting = APP
-        .replace(
-            r#""__e2ee_eq_title": "bytes" }"#,
-            r#""__e2ee_eq_title": "bytes", "notes": "bytes", "notesText": "string?" }"#,
-        )
-        .replace(
-            r#""columns": { "title": "string" }"#,
-            r#""columns": { "title": "string", "notes": { "type": "string", "to": "notesText" } }"#,
-        );
-    let app = artifact::load(
-        decrypting.as_bytes(),
-        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    for confirmed in [json!([]), json!(["tasks.title"])] {
-        let mut body = app.deployment_body(false);
-        body["confirmDecrypt"] = confirmed.clone();
-        let (status, refusal) = publish(&router, body).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{confirmed}");
-        assert!(
-            refusal["error"].as_str().unwrap().contains("tasks.notes"),
-            "{refusal}"
-        );
-    }
-    let mut body = app.deployment_body(false);
-    body["confirmDecrypt"] = json!(["tasks.title", "tasks.notes"]);
-    let (status, body) = publish(&router, body).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-}
-
 /// A deployment can't drop a stored version's declarations to slip past
 /// the checks they bring: reposting the deployed version with no
 /// `encryption` (and nothing to submit) and a read rule that doesn't come
@@ -1442,7 +1393,7 @@ async fn an_app_policy_with_a_system_only_node_is_refused() {
 
 /// A migration from a deployed encrypted version is judged against the
 /// declarations of both of its versions: one that retypes an encrypted
-/// column without a conversion would make the old cells unreadable, so the
+/// column in place would make the old cells unreadable, so the
 /// deploy refuses it, naming the column, while the same migration with the
 /// declarations the app's files give deploys.
 ///
@@ -1547,7 +1498,7 @@ fn encrypted_app() -> (
 ) {
     use jazz::tools::deployment::artifact::DeclaredEncryption;
     use jazz::tools::deployment::artifact::system_tables::with_e2ee_fragment;
-    use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType, SweepBy};
+    use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType};
     use std::collections::BTreeMap;
     let schema = with_e2ee_fragment(&plain_app());
     let hash = SchemaHash::compute(&schema).to_string();
@@ -1567,16 +1518,9 @@ fn encrypted_app() -> (
                         default: Some(jazz::tools::public_schema::Value::Text(String::new())),
                     },
                     sealed_type: None,
-                    from: None,
-                    to: None,
-                    convert: None,
-                    reverse: None,
                 },
             )]),
             equality: Vec::new(),
-            backfill: Vec::new(),
-            rehome: None,
-            sweep: SweepBy::Updaters,
         },
     )]);
     let declared = DeclaredEncryption {

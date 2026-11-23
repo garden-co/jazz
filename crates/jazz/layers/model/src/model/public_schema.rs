@@ -2,6 +2,7 @@
 
 pub use crate::model::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 pub use crate::model::public_api::session::{AuthMode, Session, WriteContext};
+pub use crate::model::public_api::types::PlainType;
 pub use crate::model::public_api::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, E2eeDeclarations,
     EncryptedColumn, EncryptionEntry, EncryptionSettings, HistoryRetention, LegacyEnumCase,
@@ -9,7 +10,6 @@ pub use crate::model::public_api::types::{
     Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema, TableSchemaBuilder,
     Value, permissions, policy_expr,
 };
-pub use crate::model::public_api::types::{PlainType, Rehome, SweepBy};
 pub use crate::model::transaction::{OpenTransactionId, TransactionId};
 /// Relation-backed policies (`PolicyExpr::ExistsRel`) use the query relation IR.
 pub use crate::query::{

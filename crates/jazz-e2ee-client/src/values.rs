@@ -643,7 +643,7 @@ mod tests {
             transition(&first, &first, &second).unwrap();
             transition(&first, &second, &third).unwrap();
             let error = transition(&first, &second, &first).unwrap_err();
-            assert!(error.contains("re-encrypt"), "{error}");
+            assert!(error.contains("appending enum variants"), "{error}");
 
             let latest = ColumnCodec::new("value", &third, &first, false).unwrap();
             for (declared, name) in [(&first, "a"), (&second, "b"), (&third, "c")] {
@@ -666,7 +666,7 @@ mod tests {
         let loose = PlainType::new(ColumnType::Json { schema: None }, false);
         let error = transition(&restricted, &restricted, &loose).unwrap_err();
         assert!(
-            error.contains("re-encrypt") && error.contains("from"),
+            error.contains("docs/e2ee/encrypting-existing-data"),
             "{error}"
         );
     }

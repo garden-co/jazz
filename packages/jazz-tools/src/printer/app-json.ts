@@ -3,7 +3,7 @@
 export type ColumnJson = string | ColumnObject;
 
 export interface ColumnObject {
-  type?: string;
+  type?: ColumnJson;
   enum?: string[];
   json?: unknown;
   array?: ColumnJson;
@@ -25,12 +25,8 @@ export interface TableJson {
   encryption?: {
     space: string;
     scope: string;
-    columns: Record<string, ColumnJson>;
+    columns: Record<string, string | (ColumnObject & { sealedType?: ColumnJson })>;
     equality?: string[];
-    /** Read only to refuse: the TS DSL can't declare these yet. */
-    backfill?: string[];
-    rehome?: unknown;
-    sweep?: unknown;
   };
   indexes?: (string | string[])[];
   branchBy?: string[];
@@ -90,7 +86,7 @@ export interface PermissionsJson {
 export function columnKind(column: ColumnJson | undefined): string | undefined {
   if (column === undefined) return undefined;
   if (typeof column === "string") return column.replace(/\?$/, "");
-  if (column.type) return column.type;
+  if (column.type) return columnKind(column.type);
   if (column.enum) return "enum";
   if (column.json !== undefined) return "json";
   if (column.array !== undefined) return "array";

@@ -3389,7 +3389,7 @@ mod tests {
         use jazz::tools::deployment::artifact::system_tables::{
             self, derive_e2ee_policies, with_e2ee_fragment,
         };
-        use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType, SweepBy};
+        use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, PlainType};
 
         let app = "founders-view-test";
         store.set_app(app);
@@ -3422,16 +3422,9 @@ mod tests {
                             default: None,
                         },
                         sealed_type: None,
-                        from: None,
-                        to: None,
-                        convert: None,
-                        reverse: None,
                     },
                 )]),
                 equality: Vec::new(),
-                backfill: Vec::new(),
-                rehome: None,
-                sweep: SweepBy::Updaters,
             },
         )]);
         let mut tables = with_e2ee_fragment(

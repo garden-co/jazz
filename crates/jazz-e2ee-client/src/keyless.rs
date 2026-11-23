@@ -8,7 +8,7 @@ use std::rc::Rc;
 use jazz::db::{CurrentRow, Error, ErrorCode};
 use jazz::e2ee::{
     E2eeDeclarations, E2eeHooks, OpenOutcome, QueryPlan, ReadSite, SealError, StreamSealer,
-    StreamTarget, WriteCells, WriteKind,
+    StreamTarget, WriteCells,
 };
 use jazz::query::{Operand, Predicate, Query};
 use jazz::records::Value;
@@ -86,11 +86,6 @@ impl E2eeHooks for KeylessHooks {
 
     fn seal_write(&self, write: &mut WriteCells<'_>) -> Result<(), SealError> {
         let sealed = self.sealed(write.table);
-        if matches!(write.kind, WriteKind::Move { .. })
-            && self.declarations.tables.contains_key(write.table)
-        {
-            return Err(SealError::Refused(refused(write.table, "(space)")));
-        }
         match write.cells.keys().find(|name| sealed.contains(*name)) {
             Some(name) => Err(SealError::Refused(refused(write.table, name))),
             None => Ok(()),

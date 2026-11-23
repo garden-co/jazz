@@ -1,6 +1,6 @@
 //! Content under held space keys (`E2EE_PROTOCOL.md` §4, §5, §6.2;
 //! `E2EE_MIGRATIONS.md` §3, §4): the pure operations the write, read, query
-//! and streaming hooks and the runtime's repair and conversion sweeps call.
+//! and streaming hooks and the runtime's lost-creation repair call.
 //! Nothing here does I/O or keeps global state: callers pass the held keys,
 //! the stored values and the declarations, and run every transaction.
 //!
@@ -20,11 +20,9 @@
 //!   the signed floor records of the private store (§6.1, §6.3a).
 //! - [`repair`]: the plan that rewrites a refused or lost creation's cells
 //!   under the space's real key (§3.2).
-//! - [`convert`]: schema conversion helpers (migrations §3, §4).
 
 mod canonical;
 pub mod cells;
-pub mod convert;
 pub mod equality;
 pub mod held;
 pub mod local;
@@ -48,10 +46,6 @@ pub use held::{
     CreationFate, HeldKeys, HeldSpace, KeyMark, KnownChain, MissingKey, WriteChoice, WriteKey,
 };
 
-/// The 5-byte cleared marker a schema conversion writes into an encrypted
-/// source (§1.3, §4.1; migrations §3.2): "moved by a schema conversion".
-pub const CLEARED_MARKER: [u8; 5] = [0x4a, 0x45, 0x32, 0x58, 0x01];
-
 /// The data-error codes of unreadable cells and spaces (§4.3, §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataError {
@@ -70,11 +64,8 @@ pub enum DataError {
     /// The stored cell is the empty byte string; the row is returned with
     /// the column's default.
     EmptyCell,
-    /// The cell holds the cleared marker and the reader's declaration names
-    /// no conversion for the column.
-    Superseded,
     /// The cell was sealed under another space of the row's history; the
-    /// row is returned and needs repair (migrations §3.9).
+    /// row is returned with a stale-space report (§4.3).
     StaleSpace,
     /// Sealing a write failed; nothing is submitted.
     EncryptionFailed,
@@ -89,7 +80,6 @@ impl DataError {
             Self::UnsupportedFormat => "unsupported-format",
             Self::InvalidCiphertext => "invalid-ciphertext",
             Self::EmptyCell => "empty-cell",
-            Self::Superseded => "superseded",
             Self::StaleSpace => "stale-space",
             Self::EncryptionFailed => "encryption-failed",
         }
@@ -122,18 +112,10 @@ pub enum ContentError {
     /// A query shape encrypted columns do not support; never a scan (§4.5).
     #[error("Unsupported encrypted query: {}", .0.name())]
     UnsupportedQuery(UnsupportedQuery),
-    /// An equality query on a column whose conversion or tag backfill is
-    /// unfinished in the space (migrations §3.3, §7).
-    #[error("An encrypted conversion is pending")]
-    ConversionPending { pending: u64 },
     /// A large value for a column that may not stream: only non-indexed
     /// `bytes` columns stream (§4.1, §5.5).
     #[error("This column cannot hold a streamed encrypted value")]
     NotStreamable,
-    /// A move that does not re-encrypt every encrypted column of the row
-    /// (migrations §4.4), or a partial edit of an encrypted column.
-    #[error("Partial encrypted writes are refused")]
-    Partial,
 }
 
 impl From<crate::Error> for ContentError {
@@ -156,7 +138,7 @@ pub struct EncryptedColumn<'a> {
     /// Jazz's stable catalogue identity of the column.
     pub column_id: &'a str,
     /// The canonical JSON of the column's sealed type, as every cell's
-    /// context binds it (§4.1; migrations §4.3).
+    /// context binds it (§4.1).
     pub cell_type: &'a [u8],
     /// The declared equality index, if any.
     pub equality: Option<EqualityColumn>,

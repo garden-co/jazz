@@ -423,15 +423,7 @@ fn a_held_space_survives_the_store() {
     };
     assert_eq!(key_after.epoch_id(), key.epoch_id());
     assert_eq!(
-        open_cell(
-            &world.shared.registry,
-            &after,
-            &target,
-            &notes(),
-            &cell,
-            false
-        )
-        .unwrap(),
+        open_cell(&world.shared.registry, &after, &target, &notes(), &cell).unwrap(),
         Opened::Value(jazz_e2ee::Zeroizing::new(b"kept".to_vec()))
     );
 }

@@ -1,5 +1,5 @@
 //! Encryption declarations: what an app file says about its encrypted
-//! tables (E2EE protocol §1.5, migrations §3.2).
+//! tables (E2EE protocol §1.5, E2EE_SCHEMA_CHANGES.md §3.1).
 //!
 //! These are plain data. They live outside [`Schema`](super::Schema), so they
 //! never change the schema hash. The app-file reader produces them, the
@@ -58,21 +58,9 @@ pub struct EncryptionEntry {
     /// The encrypted columns that carry equality tokens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub equality: Vec<String>,
-    /// Equality columns whose tokens are still being written
-    /// (migrations §4.3).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub backfill: Vec<String>,
-    /// During a re-home, the space the rows are moving from
-    /// (migrations §3.2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rehome: Option<Rehome>,
-    /// Who sweeps conversions in the background (migrations §3.5).
-    #[serde(default, skip_serializing_if = "SweepBy::is_default")]
-    pub sweep: SweepBy,
 }
 
-/// One encrypted column: its plaintext type and, during a conversion, the
-/// conversion fields of migrations §3.2.
+/// One encrypted column and the type its stored cells were sealed under.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EncryptedColumn {
@@ -80,23 +68,10 @@ pub struct EncryptedColumn {
     #[serde(rename = "type")]
     pub plain: PlainType,
     /// The type the column's cells are bound to, when a later schema widened
-    /// the type in an encoding-compatible way (migrations §4.3). `None`
+    /// the type in an encoding-compatible way (E2EE_SCHEMA_CHANGES.md §3.2). `None`
     /// means the declared type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed_type: Option<PlainType>,
-    /// The source of an encrypt or re-encrypt conversion.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<String>,
-    /// The plaintext target of a decrypt conversion.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub to: Option<String>,
-    /// The function converting the source type to this column's type.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub convert: Option<String>,
-    /// The function listing every source value that converts to a target
-    /// value (at most 16), for equality queries during a conversion.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reverse: Option<String>,
 }
 
 impl EncryptedColumn {
@@ -139,32 +114,5 @@ impl PlainType {
     /// sealed under (protocol §4.1).
     pub fn same_type(&self, other: &PlainType) -> bool {
         self.column_type == other.column_type && self.nullable == other.nullable
-    }
-}
-
-/// The old space of a re-home.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Rehome {
-    /// The old space column.
-    pub space: String,
-    /// The old space table.
-    pub scope: String,
-}
-
-/// Who runs a table's background conversion sweep.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SweepBy {
-    /// Sessions that may update the space row and hold its key.
-    #[default]
-    Updaters,
-    /// Every member holding the key.
-    Members,
-}
-
-impl SweepBy {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
     }
 }

@@ -14,7 +14,7 @@ export interface UnreadableRow {
   /**
    * Why: `key-pending` (the key is being fetched; the row comes back once it
    * arrives), `key-unavailable` (this device holds no key for it),
-   * `invalid-ciphertext`, `unsupported-format`, `empty-cell`, `superseded`,
+   * `invalid-ciphertext`, `unsupported-format`, `empty-cell`,
    * `space-pending`.
    */
   code: string;

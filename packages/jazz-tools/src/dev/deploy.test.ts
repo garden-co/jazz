@@ -157,24 +157,3 @@ it("preserves bigint and byte defaults in the deployment JSON", async () => {
   );
   await deploy({ ...server, app: target, permissions });
 });
-
-it("sends the decrypt conversions the deployer confirms, and nothing otherwise", async () => {
-  const hash = hashOf(app);
-  const bodies: Array<Record<string, unknown>> = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: string, init?: RequestInit) => {
-      if (input.endsWith("/migrations/graph"))
-        return reply({ latestBundleSchemaHash: null, schemas: [], migrations: [] });
-      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-      return reply({ changed: true, published: { schemas: [hash], migrations: [] } });
-    }),
-  );
-  await deploy({ ...server, app, permissions });
-  await deploy({ ...server, app, permissions, confirmDecrypt: [] });
-  await deploy({ ...server, app, permissions, confirmDecrypt: ["notes.body", "tasks.notes"] });
-  expect(bodies).toHaveLength(3);
-  expect(bodies[0]).not.toHaveProperty("confirmDecrypt");
-  expect(bodies[1]).not.toHaveProperty("confirmDecrypt");
-  expect(bodies[2]?.confirmDecrypt).toEqual(["notes.body", "tasks.notes"]);
-});

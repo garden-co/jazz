@@ -164,10 +164,6 @@ pub fn encrypted(column_type: ColumnType, nullable: bool) -> EncryptedColumn {
             default: None,
         },
         sealed_type: None,
-        from: None,
-        to: None,
-        convert: None,
-        reverse: None,
     }
 }
 
@@ -191,9 +187,6 @@ pub fn declarations_with(settings: EncryptionSettings) -> E2eeDeclarations {
                         encrypted(ColumnType::Text, true),
                     )]),
                     equality: Vec::new(),
-                    backfill: Vec::new(),
-                    rehome: None,
-                    sweep: Default::default(),
                 },
             ),
             (
@@ -208,9 +201,6 @@ pub fn declarations_with(settings: EncryptionSettings) -> E2eeDeclarations {
                         ("rank".to_owned(), encrypted(ColumnType::Integer, true)),
                     ]),
                     equality: vec!["body".to_owned()],
-                    backfill: Vec::new(),
-                    rehome: None,
-                    sweep: Default::default(),
                 },
             ),
         ]),

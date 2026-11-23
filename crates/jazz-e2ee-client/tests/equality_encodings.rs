@@ -64,9 +64,6 @@ fn declarations() -> E2eeDeclarations {
                     ("tags".to_owned(), encrypted(tags_type(), false)),
                 ]),
                 equality: vec!["meta".to_owned(), "tags".to_owned()],
-                backfill: Vec::new(),
-                rehome: None,
-                sweep: Default::default(),
             },
         )]),
     }

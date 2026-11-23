@@ -39,8 +39,7 @@ use crate::values::CurrentRow;
 
 pub use crate::db::e2ee_ledger::{LedgerRead, Provisional, ProvisionalRead, TransactionFate};
 pub use jazz_model::model::public_api::types::{
-    E2eeDeclarations, EncryptedColumn, EncryptionEntry, EncryptionSettings, PlainType, Rehome,
-    SweepBy,
+    E2eeDeclarations, EncryptedColumn, EncryptionEntry, EncryptionSettings, PlainType,
 };
 
 pub use crate::options::SpaceAddress;
@@ -130,11 +129,6 @@ pub enum WriteKind {
     Delete,
     /// A restore, with replacement content or without.
     Restore,
-    /// An update that moves the row to `target_space` (migrations §4.4):
-    /// every encrypted column is sealed again under the target space.
-    Move {
-        target_space: Value,
-    },
 }
 
 /// One write, as [`E2eeHooks::seal_write`] sees it.
@@ -143,14 +137,13 @@ pub struct WriteCells<'a> {
     pub row: RowUuid,
     pub kind: WriteKind,
     /// The cells the write names, by column name: plaintext in, sealed
-    /// out. During a conversion the hook also writes the target and
-    /// clears the source here.
+    /// out.
     pub cells: &'a mut BTreeMap<String, Value>,
     /// The column supplied by a stream, omitted while its metadata is sealed.
     pub streamed_column: Option<&'a str>,
     /// The root the upload uses. Publication checks it and claims a pending creation.
     pub stream_root: Option<String>,
-    /// For updates, upserts and moves of a table with an encryption
+    /// For updates and upserts of a table with an encryption
     /// entry: the space cell of the row as the write finds it, `None` when
     /// there is no such row (yet).
     pub stored_space: Option<&'a Value>,
@@ -304,7 +297,6 @@ pub enum UnreadableCode {
     KeyPending,
     SpacePending,
     EmptyCell,
-    Superseded,
     StaleSpace,
 }
 
@@ -318,7 +310,6 @@ impl UnreadableCode {
             UnreadableCode::KeyPending => "key-pending",
             UnreadableCode::SpacePending => "space-pending",
             UnreadableCode::EmptyCell => "empty-cell",
-            UnreadableCode::Superseded => "superseded",
             UnreadableCode::StaleSpace => "stale-space",
         }
     }

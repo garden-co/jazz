@@ -63,9 +63,6 @@ fn declarations() -> E2eeDeclarations {
                 scope: "projects".to_owned(),
                 columns: BTreeMap::from([("body".to_owned(), encrypted(ColumnType::Text, false))]),
                 equality: Vec::new(),
-                backfill: Vec::new(),
-                rehome: None,
-                sweep: Default::default(),
             },
         )]),
     }

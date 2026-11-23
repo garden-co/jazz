@@ -103,8 +103,16 @@ export function printTable(table: TableJson, options: TablesPrintOptions): strin
 
 /** What an encryption entry holds that `s.table` and `.encrypted()` can print. */
 const PRINTED_ENTRY_KEYS = new Set(["space", "scope", "columns", "equality"]);
-/** The conversion fields of an encrypted column, which `.encrypted()` can't declare yet. */
-const CONVERSION_FIELDS = ["sealedType", "from", "to", "convert", "reverse"];
+/** Plaintext declaration fields represented by the column builder. */
+const PRINTED_COLUMN_KEYS = new Set([
+  "type",
+  "enum",
+  "json",
+  "array",
+  "optional",
+  "default",
+  "$comment",
+]);
 
 /** Report what a table's encryption entry holds that the TS DSL can't declare yet. */
 function refuseUnprintedEncryption(
@@ -122,12 +130,12 @@ function refuseUnprintedEncryption(
   }
   for (const [name, column] of Object.entries(encryption.columns)) {
     if (typeof column !== "object") continue;
-    for (const field of CONVERSION_FIELDS) {
-      if (!Object.hasOwn(column, field)) continue;
+    for (const field of Object.keys(column)) {
+      if (PRINTED_COLUMN_KEYS.has(field)) continue;
       options.unsupported.push({
         path: `${at}.columns.${name}.${field}`,
         text: JSON.stringify((column as Record<string, unknown>)[field]),
-        reason: `Printing an encrypted column's conversion field ${field} is not supported yet`,
+        reason: `Printing an encrypted column's field ${field} is not supported yet`,
       });
     }
   }

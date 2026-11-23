@@ -42,9 +42,6 @@ fn space_records_bind_their_author_to_the_session_and_the_creator() {
             scope: "projects".to_owned(),
             columns: BTreeMap::new(),
             equality: Vec::new(),
-            backfill: Vec::new(),
-            rehome: None,
-            sweep: Default::default(),
         },
     )]);
     let policies = derive_e2ee_policies(&schema, &entries, &Default::default()).unwrap();

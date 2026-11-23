@@ -1,5 +1,5 @@
 //! Sealing and opening stored encrypted values (`E2EE_PROTOCOL.md` §4.1,
-//! §4.2, §5.1, §5.2, §5.5; migrations §3.9), over the cell and stream
+//! §4.2, §5.1, §5.2, §5.5), over the cell and stream
 //! record formats of [`crate::records`].
 //!
 //! A write seals every supplied encrypted cell, and its equality token,
@@ -30,15 +30,14 @@ use crate::registry::{Registry, Suite};
 use super::super::error::ProtocolError;
 use super::super::records::space::SpaceAddress;
 use super::held::{HeldKeys, HeldSpace, WriteKey};
-use super::{CLEARED_MARKER, ContentError, ContentResult, DataError, EncryptedColumn, RowTarget};
+use super::{ContentError, ContentResult, DataError, EncryptedColumn, RowTarget};
 
 const EPOCH_BYTES: usize = 36;
 /// The smallest cell record payload: the epoch and the shortest envelope.
 const MIN_RECORD_PAYLOAD: usize = EPOCH_BYTES + 11;
 
 /// The length of the shortest stored cell record (header plus 47 payload
-/// bytes). Any shorter stored value other than the empty string and the
-/// cleared marker is `invalid-ciphertext` (§4.1).
+/// bytes). Any shorter non-empty stored value is `invalid-ciphertext` (§4.1).
 pub fn min_cell_record_len() -> usize {
     CELL_RECORD
         .header()
@@ -122,8 +121,7 @@ impl EqualityValueBuf {
 
 /// Decodes Jazz's native encoding of one value into the logical value its
 /// equality token hashes. Implemented by the runtime, which knows the
-/// encoding; repair, re-homing and tag backfill call it to tag plaintext
-/// they decrypted.
+/// encoding. Lost-creation repair uses it to tag the plaintext it decrypts.
 pub trait PlaintextValues {
     fn equality_value(
         &self,
@@ -276,7 +274,7 @@ pub fn seal_cells(
     })
 }
 
-/// What opening one stored value gives (§4.1–§4.3; migrations §3.2, §3.9).
+/// What opening one stored value gives (§4.1–§4.3; E2EE_SCHEMA_CHANGES.md §3.2).
 /// A decrypted value is never printed.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Opened {
@@ -292,14 +290,10 @@ pub enum Opened {
     /// default (or null for an optional column). Core reports `empty-cell`
     /// when the value is stored in the row rather than supplied by a lens.
     Empty,
-    /// The cleared marker in a column the reader's declaration converts:
-    /// absent, so the conversion rule applies.
-    Cleared,
     /// A version of the row's space this device does not hold: the runtime
     /// acquires it, at most once per read, and settles the report.
     Missing { epoch_id: String },
-    /// Unreadable: `invalid-ciphertext`, `unsupported-format` or
-    /// `superseded`.
+    /// Unreadable: `invalid-ciphertext`, `unsupported-format`.
     Unreadable(DataError),
 }
 
@@ -313,7 +307,6 @@ impl core::fmt::Debug for Opened {
                 .field("space", space)
                 .finish(),
             Self::Empty => f.write_str("Empty"),
-            Self::Cleared => f.write_str("Cleared"),
             Self::Missing { epoch_id } => f
                 .debug_struct("Missing")
                 .field("epoch_id", epoch_id)
@@ -331,7 +324,7 @@ impl Opened {
             Self::StaleSpace { .. } => Some(DataError::StaleSpace),
             Self::Empty => Some(DataError::EmptyCell),
             Self::Unreadable(code) => Some(*code),
-            Self::Value(_) | Self::Cleared | Self::Missing { .. } => None,
+            Self::Value(_) | Self::Missing { .. } => None,
         }
     }
 
@@ -417,18 +410,11 @@ fn try_keys(
     Ok(outcome)
 }
 
-/// Classifies a stored value before any key is used: `Ok(None)` for a
+/// Classifies a stored value before any key is used: `None` for a
 /// record to decrypt.
-pub(crate) fn classify_short(stored: &[u8], converting: bool) -> Option<Opened> {
+pub(crate) fn classify_short(stored: &[u8]) -> Option<Opened> {
     if stored.is_empty() {
         return Some(Opened::Empty);
-    }
-    if stored == CLEARED_MARKER {
-        return Some(if converting {
-            Opened::Cleared
-        } else {
-            Opened::Unreadable(DataError::Superseded)
-        });
     }
     if stored.len() < min_cell_record_len() {
         return Some(Opened::Unreadable(DataError::InvalidCiphertext));
@@ -438,8 +424,7 @@ pub(crate) fn classify_short(stored: &[u8], converting: bool) -> Option<Opened> 
 
 /// Opens a stored value of `column` in `row` with the held keys (§4.1,
 /// §4.2): any held key of the epoch the record names decrypts, of any
-/// mark, with no access check. `converting` says whether the reader's
-/// declaration names a conversion for the column (§4.1, cleared marker).
+/// mark, with no access check.
 ///
 /// A stream record in a column that may not stream is
 /// `unsupported-format` (large-value format). Only a key of the row's
@@ -456,30 +441,16 @@ pub fn open_cell(
     row: &RowTarget<'_>,
     column: &EncryptedColumn<'_>,
     stored: &[u8],
-    converting: bool,
 ) -> ContentResult<Opened> {
-    Ok(open_traced(registry, held, row, column, stored, converting)?.0)
-}
-
-/// [`open_cell`], also naming the held space and depth whose key opened a
-/// value of the row's own space.
-pub(crate) fn open_traced<'k>(
-    registry: &Registry,
-    held: &'k HeldKeys,
-    row: &RowTarget<'_>,
-    column: &EncryptedColumn<'_>,
-    stored: &[u8],
-    converting: bool,
-) -> ContentResult<(Opened, Option<(&'k HeldSpace, String)>)> {
-    if let Some(opened) = classify_short(stored, converting) {
-        return Ok((opened, None));
+    if let Some(opened) = classify_short(stored) {
+        return Ok(opened);
     }
     let record = match read_stored_record(stored) {
         Ok(record) => record,
-        Err(error) => return Ok((Opened::Unreadable(unreadable(error)?), None)),
+        Err(error) => return Ok(Opened::Unreadable(unreadable(error)?)),
     };
     if record.kind == RecordKind::Stream && !column.may_stream() {
-        return Ok((Opened::Unreadable(DataError::UnsupportedFormat), None));
+        return Ok(Opened::Unreadable(DataError::UnsupportedFormat));
     }
     let epoch_id = record.epoch_id;
     let own = held.keys_of(row.space, epoch_id);
@@ -493,16 +464,11 @@ pub(crate) fn open_traced<'k>(
         epoch_id,
         stored,
     )? {
-        Some(Ok((value, index))) => {
-            return Ok((
-                Opened::Value(value),
-                Some((own[index].0, epoch_id.to_owned())),
-            ));
-        }
+        Some(Ok((value, _))) => return Ok(Opened::Value(value)),
         Some(Err(code))
             if code == DataError::UnsupportedFormat || own.iter().any(|(_, _, own)| *own) =>
         {
-            return Ok((Opened::Unreadable(code), None));
+            return Ok(Opened::Unreadable(code));
         }
         // Only keys of another root of the address, which do not open the
         // cell: they decide nothing, and the root's own key is missing.
@@ -521,10 +487,10 @@ pub(crate) fn open_traced<'k>(
         match opened {
             Ok((value, index)) => {
                 let space = elsewhere[index].0.address().clone();
-                return Ok((Opened::StaleSpace { value, space }, None));
+                return Ok(Opened::StaleSpace { value, space });
             }
             Err(DataError::UnsupportedFormat) => {
-                return Ok((Opened::Unreadable(DataError::UnsupportedFormat), None));
+                return Ok(Opened::Unreadable(DataError::UnsupportedFormat));
             }
             // Another space's key that does not authenticate says nothing
             // about the row's own space: fall through.
@@ -534,16 +500,13 @@ pub(crate) fn open_traced<'k>(
     let absent = held
         .known(row.space)
         .is_some_and(|known| known.is_absent(epoch_id));
-    Ok((
-        if absent {
-            Opened::Unreadable(DataError::InvalidCiphertext)
-        } else {
-            Opened::Missing {
-                epoch_id: epoch_id.to_owned(),
-            }
-        },
-        None,
-    ))
+    Ok(if absent {
+        Opened::Unreadable(DataError::InvalidCiphertext)
+    } else {
+        Opened::Missing {
+            epoch_id: epoch_id.to_owned(),
+        }
+    })
 }
 
 /// Starts streaming one large value of `column` under `key` (§5.5, H5):
@@ -882,7 +845,7 @@ fn header_incomplete(bytes: &[u8]) -> bool {
 }
 
 /// Re-encrypts one stored stream under another key or context in bounded
-/// memory (repair, §3.2; re-homes, migrations §4.4): authenticated
+/// memory (lost-creation repair, §3.2): authenticated
 /// plaintext from the reader goes straight into the writer, and the writer
 /// finishes only after the reader's last record authenticated. A value
 /// that opens only under a key of another space than the reader's row is

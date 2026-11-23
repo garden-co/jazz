@@ -4210,7 +4210,7 @@ impl Db {
             let (notify, handle) = self.write_unnotified(|inner, seq| {
                 #[cfg(feature = "e2ee-client")]
                 {
-                    ops = inner.seal_op(&mut op, None, streamed)?;
+                    ops = inner.seal_op(&mut op, streamed)?;
                     companions = ops
                         .iter()
                         .filter_map(|companion| match companion {
@@ -11916,7 +11916,7 @@ impl Db {
         streamed: Option<large_ops::StreamedSeal<'_>>,
     ) -> Result<(), Error> {
         #[cfg(feature = "e2ee-client")]
-        return self.stage_sealed(id, op, edits, None, streamed);
+        return self.stage_sealed(id, op, edits, streamed);
         #[cfg(not(feature = "e2ee-client"))]
         {
             let _ = streamed;

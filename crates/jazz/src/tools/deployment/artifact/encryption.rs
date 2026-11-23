@@ -1,5 +1,5 @@
 //! What the deploy, `generate` and the loaders check of an app's encryption
-//! declarations (E2EE protocol §1.5, migrations §3.1–§3.2): each entry
+//! declarations (E2EE protocol §1.5, E2EE_SCHEMA_CHANGES.md §3): each entry
 //! against its schema version, each migration against the declarations of
 //! its two versions, and each space table's read rule.
 //!
@@ -19,6 +19,9 @@ use crate::tools::public_schema::{
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
 use super::system_tables::{MEMBERS, is_system_table};
+
+/// How an existing plaintext app can adopt encryption.
+pub const COPY_GUIDE: &str = "in-place conversion is not supported; to encrypt existing data, copy it into a new encrypted table (docs/e2ee/encrypting-existing-data)";
 
 /// A schema version's encryption entries, by table.
 pub type Entries = BTreeMap<String, EncryptionEntry>;
@@ -149,38 +152,23 @@ fn check_space(
 }
 
 /// Check one table's entry against its schema version (protocol §1.5,
-/// migrations §3.2). Deploy, `generate` and the loaders share it.
+/// E2EE_SCHEMA_CHANGES.md §3.1). Deploy, `generate` and the loaders share it.
 pub fn check_entry(
     table: &str,
     entry: &EncryptionEntry,
     schema: &Schema,
 ) -> Result<(), EntryRefusal> {
     check_space(table, &entry.space, &entry.scope, schema, "")?;
-    if let Some(rehome) = &entry.rehome {
-        check_space(table, &rehome.space, &rehome.scope, schema, ".rehome")?;
-    }
-    for (name, declared) in &entry.columns {
+    for name in entry.columns.keys() {
         let at = format!(".columns.{name}");
         // The `__e2ee_` column names are Jazz's: an equality column's token
         // column (`__e2ee_eq_<column>`) is Jazz's, not an encrypted column
         // of the app's, and neither is any other reserved name.
-        for (what, used) in [
-            ("an encrypted column", Some(name)),
-            ("a conversion's `from` column", declared.from.as_ref()),
-            ("a conversion's `to` column", declared.to.as_ref()),
-        ] {
-            if let Some(used) = used
-                && used.starts_with("__e2ee_")
-            {
-                return Err((
-                    at,
-                    format!(
-                        "`{used}` starts with `__e2ee_`, which Jazz reserves for its own columns \
-                         (an equality column's tokens are `{EQUALITY_PREFIX}<column>`); it can't \
-                         be {what}"
-                    ),
-                ));
-            }
+        if name.starts_with("__e2ee_") {
+            return Err((
+                at,
+                format!("`{name}` starts with `__e2ee_`, which Jazz reserves for its own columns"),
+            ));
         }
         let Some(stored) = column(schema, table, name) else {
             return Err((at, format!("table {table} has no column {name}")));
@@ -223,77 +211,6 @@ pub fn check_entry(
                     .into(),
             ));
         }
-        if declared.from.is_some() && declared.to.is_some() {
-            return Err((
-                at,
-                "a column converts `from` a source or `to` a target, not both".into(),
-            ));
-        }
-        if declared.reverse.is_some() && declared.convert.is_none() {
-            return Err((
-                format!("{at}.reverse"),
-                "`reverse` comes with `convert`".into(),
-            ));
-        }
-        if let Some(to) = &declared.to {
-            let Some(target) = column(schema, table, to) else {
-                return Err((
-                    format!("{at}.to"),
-                    format!("table {table} has no column {to}"),
-                ));
-            };
-            if entry.columns.contains_key(to) || !target.nullable {
-                return Err((
-                    format!("{at}.to"),
-                    format!("a decrypt's target is an optional plaintext column; {to} isn't one"),
-                ));
-            }
-            check_convert(
-                &declared.plain.column_type,
-                &target.column_type,
-                declared.convert.is_some(),
-                &at,
-            )?;
-        }
-        if let Some(from) = &declared.from {
-            let Some(source) = column(schema, table, from) else {
-                return Err((
-                    format!("{at}.from"),
-                    format!("table {table} has no column {from}"),
-                ));
-            };
-            if entry.columns.contains_key(from) {
-                return Err((
-                    format!("{at}.from"),
-                    format!(
-                        "a conversion's source is no longer an encrypted column of the entry; \
-                         {from} still is"
-                    ),
-                ));
-            }
-            // A plaintext source has its own type; an encrypted one is
-            // checked against the previous version's declaration.
-            if !is_cipher(source) {
-                check_convert(
-                    &source.column_type,
-                    &declared.plain.column_type,
-                    declared.convert.is_some(),
-                    &at,
-                )?;
-            }
-        } else if entry.rehome.is_some() {
-            return Err((
-                at,
-                "during a re-home every column names the old encrypted column it comes `from`"
-                    .into(),
-            ));
-        }
-        if declared.from.is_none() && declared.to.is_none() && declared.convert.is_some() {
-            return Err((
-                format!("{at}.convert"),
-                "`convert` comes with a conversion (`from` or `to`)".into(),
-            ));
-        }
     }
     let mut seen = BTreeSet::new();
     for name in &entry.equality {
@@ -327,14 +244,6 @@ pub fn check_entry(
                 format!(
                     "an equality column's tokens are stored in a required `bytes` column {tag}"
                 ),
-            ));
-        }
-    }
-    for name in &entry.backfill {
-        if !entry.equality.contains(name) {
-            return Err((
-                ".backfill".into(),
-                format!("`{name}` is not an equality column of the entry"),
             ));
         }
     }
@@ -373,27 +282,6 @@ fn without_equality_encoding(column_type: &ColumnType) -> Option<String> {
         ColumnType::Row { .. } => Some("row".to_owned()),
         ColumnType::TransactionId => Some("transaction-ID".to_owned()),
         _ => Some("this type of".to_owned()),
-    }
-}
-
-/// `convert` is required when a conversion changes the type, and refused
-/// when it doesn't (migrations §3.2).
-fn check_convert(
-    from: &ColumnType,
-    to: &ColumnType,
-    has_convert: bool,
-    at: &str,
-) -> Result<(), EntryRefusal> {
-    match (from == to, has_convert) {
-        (false, false) => Err((
-            at.to_string(),
-            "the conversion changes the type, so it names a `convert` function".into(),
-        )),
-        (true, true) => Err((
-            format!("{at}.convert"),
-            "the conversion keeps the type, so it takes no `convert`".into(),
-        )),
-        _ => Ok(()),
     }
 }
 
@@ -449,8 +337,8 @@ impl TableMap<'_> {
 }
 
 /// Refuse a migration that changes an encrypted column's type, scope or
-/// space without a conversion, or renames an equality column apart from
-/// its column (migrations §3.1, §3.2, §4.3). `from`/`to` are the two
+/// space, or renames an equality column apart from
+/// its column (E2EE_SCHEMA_CHANGES.md §3.2). `from`/`to` are the two
 /// versions' schemas and entries.
 pub fn check_transition(
     from: (&Schema, Option<&Entries>),
@@ -514,7 +402,7 @@ pub fn check_mapped_transition(
     new_name: impl Fn(&str, &str) -> Option<String>,
 ) -> Result<(), String> {
     // Every old encrypted column the new version keeps stays encrypted,
-    // or is a conversion's source.
+    // as long as its stored column remains.
     for (table, old) in old_entries {
         let Some(renamed) = new_table(table) else {
             continue;
@@ -525,16 +413,11 @@ pub fn check_mapped_transition(
                 continue;
             };
             let declared = new.is_some_and(|e| e.columns.contains_key(&kept));
-            let source = new.is_some_and(|e| {
-                e.columns
-                    .values()
-                    .any(|c| c.from.as_deref() == Some(kept.as_str()))
-            });
-            if !declared && !source {
+            if !declared {
                 return Err(format!(
                     "column {renamed}.{kept} holds ciphertext but is no longer declared \
-                     encrypted; decrypt it with a conversion (`\"to\"` naming a new plaintext \
-                     column) or drop it"
+                     encrypted; keep its declaration \
+                     or drop the column (E2EE_SCHEMA_CHANGES.md §3.2)"
                 ));
             }
         }
@@ -548,95 +431,25 @@ pub fn check_mapped_transition(
         let old_column =
             |name: &str| old_name(table, name).and_then(|n| column(old_schema, &was, &n));
         if let Some(old) = old {
-            if new.rehome.is_none() {
-                if new_table(&old.scope).as_deref() != Some(&new.scope) {
-                    return Err(format!(
-                        "table {table} moves its space table (`scope`) from {} to {}, which \
-                         changes every cell's context; write it as a re-home conversion \
-                         (`\"rehome\"`)",
-                        old.scope, new.scope
-                    ));
-                }
-                let space = if old.space == "id" {
-                    Some("id".to_owned())
-                } else {
-                    new_name(&was, &old.space)
-                };
-                if space.as_deref() != Some(new.space.as_str()) {
-                    return Err(format!(
-                        "table {table} changes its space column from {} to {}; write it as a \
-                         re-home conversion (`\"rehome\"`)",
-                        old.space, new.space
-                    ));
-                }
-            }
+            check_stored_space(
+                table,
+                old,
+                new,
+                new_table(&old.scope),
+                new_name(&was, &old.space),
+            )?;
         }
         for (name, declared) in &new.columns {
             let path = format!("{table}.{name}");
-            // The table existed in the earlier version, so it may hold rows
-            // that have no token for a column newly tagged (a column the
-            // migration adds, a plaintext column it encrypts, or one that was
-            // encrypted without equality, in a table encrypted before or
-            // for the first time): it starts in `backfill` (migrations
-            // §4.3, §4.5). A schema-level rule; no row is looked up.
+            // Existing rows may lack tokens for a newly tagged column.
             let tagged_before =
                 old_name(table, name).is_some_and(|n| old.is_some_and(|o| o.equality.contains(&n)));
-            if new.equality.contains(name) && !tagged_before && !new.backfill.contains(name) {
+            if new.equality.contains(name) && !tagged_before {
                 return Err(format!(
                     "{path}: the table existed in the earlier version, whose rows have no \
-                     equality token for it; list `{name}` in `backfill` until every row has one \
-                     (migrations §4.3, §4.5)"
+                     equality token for it; adding equality to an existing table is unsupported \
+                     (E2EE_SCHEMA_CHANGES.md §3.2)"
                 ));
-            }
-            if let Some(source) = &declared.from {
-                // A conversion writes new cells under a new type: the
-                // target of one is a column the earlier version did not
-                // hold as an encrypted column, or its cells (sealed under
-                // the old type) would no longer read.
-                if old_name(table, name)
-                    .is_some_and(|n| old.is_some_and(|o| o.columns.contains_key(&n)))
-                {
-                    return Err(format!(
-                        "{path}: column {name} was already encrypted in the earlier version, so \
-                         its cells are sealed under its type there; a conversion (`\"from\"`) \
-                         can't write over it. Convert into a new column"
-                    ));
-                }
-                let old_source = old_name(table, source);
-                match old_source
-                    .as_deref()
-                    .and_then(|s| old.and_then(|o| o.columns.get(s)))
-                {
-                    // A re-encrypt (or re-home) from the old encrypted column.
-                    Some(previous) => check_convert(
-                        &previous.plain.column_type,
-                        &declared.plain.column_type,
-                        declared.convert.is_some(),
-                        "",
-                    )
-                    .map_err(|(_, message)| format!("{path}: {message}"))?,
-                    // An encrypt from a plaintext column.
-                    None => {
-                        if old_column(source).is_some_and(|c| c.nullable) {
-                            return Err(format!(
-                                "{path}: encrypting {table}.{source} in place is refused because \
-                                 it was optional: after a conversion clears it, an older \
-                                 client's null would be lost. Copy the rows into a new \
-                                 encrypted table instead (migrations §5.1)"
-                            ));
-                        }
-                        if let Some(c) = old_column(source) {
-                            check_convert(
-                                &c.column_type,
-                                &declared.plain.column_type,
-                                declared.convert.is_some(),
-                                "",
-                            )
-                            .map_err(|(_, message)| format!("{path}: {message}"))?;
-                        }
-                    }
-                }
-                continue;
             }
             let previous = old_name(table, name)
                 .and_then(|n| old.and_then(|o| o.columns.get(&n).map(|c| (n, c))));
@@ -653,7 +466,7 @@ pub fn check_mapped_transition(
                     {
                         return Err(format!(
                             "{path}: it is no longer an equality column, but the token column \
-                             {} stays: drop it in the same migration (migrations §4.3)",
+                             {} stays: drop it in the same migration (E2EE_SCHEMA_CHANGES.md §3.2)",
                             equality_column(name)
                         ));
                     }
@@ -675,17 +488,14 @@ pub fn check_mapped_transition(
                     if old_column(name).is_some() {
                         return Err(format!(
                             "{path}: column {name} held plaintext in the earlier version; \
-                             encrypt it with a conversion (`\"from\"` naming the plaintext \
-                             column)"
+                             copy existing data into a new encrypted table \
+                             (docs/e2ee/encrypting-existing-data)"
                         ));
                     }
                     // A column added to a table that may hold rows: they
                     // read it as never written (the empty cell), which a
                     // required column answers with its declared default.
-                    if declared.to.is_none()
-                        && !declared.plain.nullable
-                        && declared.plain.default.is_none()
-                    {
+                    if !declared.plain.nullable && declared.plain.default.is_none() {
                         return Err(format!(
                             "{path}: the migration adds a required encrypted column, which the \
                              rows stored before it read as never written; declare its default \
@@ -695,6 +505,37 @@ pub fn check_mapped_transition(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Check the scope table and space column after mapping their stored identities into the new version.
+pub fn check_stored_space(
+    table: &str,
+    old: &EncryptionEntry,
+    new: &EncryptionEntry,
+    mapped_scope: Option<String>,
+    mapped_space: Option<String>,
+) -> Result<(), String> {
+    if mapped_scope.as_deref() != Some(&new.scope) {
+        return Err(format!(
+            "table {table} moves its space table (`scope`) from {} to {}, which \
+             changes every cell's context; copy the data into a new encrypted table \
+             (docs/e2ee/encrypting-existing-data)",
+            old.scope, new.scope
+        ));
+    }
+    let space = if old.space == "id" {
+        Some("id")
+    } else {
+        mapped_space.as_deref()
+    };
+    if space != Some(new.space.as_str()) {
+        return Err(format!(
+            "table {table} changes its space column from {} to {}; copy the data into a \
+             new encrypted table (docs/e2ee/encrypting-existing-data)",
+            old.space, new.space
+        ));
     }
     Ok(())
 }
@@ -709,9 +550,8 @@ pub fn check_stored_column_type(
     if !declared.cell_type().same_type(previous.cell_type()) {
         return Err(format!(
             "{path}: the encrypted column's type changes from {:?} to {:?}, \
-             which its cells were sealed under; re-encrypt it into a new column \
-             (`\"from\"`, with `\"convert\"` unless the values carry over), or \
-             pin the old type as `\"sealedType\"` for a widening",
+             which its cells were sealed under; only append-only enum widening can pin \
+             the old type with sealedType; {COPY_GUIDE}",
             previous.cell_type(),
             declared.cell_type()
         ));
@@ -722,14 +562,13 @@ pub fn check_stored_column_type(
     if declared.plain.default != previous.plain.default {
         return Err(format!(
             "{path}: the encrypted column's default changes, and the rows \
-             stored before the column read it; re-encrypt it into a new column \
-             (`\"from\"`) to change it"
+             stored before the column read it; {COPY_GUIDE}"
         ));
     }
     if !widens(declared.cell_type(), &declared.plain) || !widens(&previous.plain, &declared.plain) {
         return Err(format!(
             "{path}: only appending enum variants preserves existing encrypted values in place; \
-             re-encrypt other type changes into a new column with \"from\""
+             {COPY_GUIDE}"
         ));
     }
     Ok(())
@@ -822,7 +661,7 @@ fn scopes(entries: &Entries) -> BTreeMap<&str, bool> {
 /// Refuse a space table whose read rule doesn't come from the members
 /// table (protocol R13), naming it. Only space tables of an entry that
 /// encrypts a column are checked: an entry without encrypted columns lets
-/// an app write member rows first (migrations §4.1).
+/// an app write member rows first (E2EE_SCHEMA_CHANGES.md §4).
 pub fn check_space_read_rules(permissions: &Permissions, entries: &Entries) -> Result<(), String> {
     for (scope, encrypts) in scopes(entries) {
         let rule = permissions
@@ -1054,7 +893,7 @@ pub fn warnings(permissions: &Permissions, entries: &Entries) -> Vec<String> {
 
 /// Refuse a policy that reads an encrypted column's value: the server
 /// sees only its ciphertext, so no comparison with it can mean what it says
-/// (migrations §4.1). Columns are read where a policy names them: its own
+/// (E2EE_SCHEMA_CHANGES.md §4). Columns are read where a policy names them: its own
 /// table's, an `exists` table's, and the checked row's through `this.col`.
 /// A relation (`exists (…)`) is judged conservatively: a column it names
 /// counts as a column of every table it might belong to.
@@ -1316,28 +1155,4 @@ pub fn check_redeclaration(
         },
     )?;
     Err("the encryption declarations of a deployed schema version are immutable; deploy a new schema version to change them".to_owned())
-}
-
-/// The decrypt conversions (`to`) in `given` that `stored` (the version's
-/// declarations deployed before, if any) doesn't have yet, as
-/// `table.column`: each needs the deploy's explicit confirmation, since
-/// the server and every replica then hold the plaintext (migrations
-/// §4.2).
-pub fn new_decrypts(stored: Option<&Entries>, given: &Entries) -> Vec<String> {
-    let mut decrypts = Vec::new();
-    for (table, entry) in given {
-        for (column, declared) in &entry.columns {
-            let Some(to) = &declared.to else {
-                continue;
-            };
-            let known = stored
-                .and_then(|s| s.get(table))
-                .and_then(|e| e.columns.get(column))
-                .is_some_and(|c| c.to.as_ref() == Some(to));
-            if !known {
-                decrypts.push(format!("{table}.{column}"));
-            }
-        }
-    }
-    decrypts
 }

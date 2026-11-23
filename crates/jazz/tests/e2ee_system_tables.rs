@@ -39,9 +39,7 @@ use jazz::tools::deployment::artifact::system_tables::{
 use jazz::tools::deployment::{
     DeploymentCatalogue, DeploymentError, DeploymentRequest, prepare_encrypted_deployment,
 };
-use jazz::tools::public_schema::{
-    EncryptedColumn, EncryptionEntry, OperationPolicy, PlainType, SweepBy,
-};
+use jazz::tools::public_schema::{EncryptedColumn, EncryptionEntry, OperationPolicy, PlainType};
 use jazz::tools::{
     CmpOp, ColumnType, OpenTransactionId, PolicyExpr, PolicyValue, Schema, SchemaBuilder,
     SchemaHash, TableName, TablePolicies, TableSchemaBuilder,
@@ -135,9 +133,6 @@ fn entries() -> BTreeMap<String, EncryptionEntry> {
                 scope: "boards".to_owned(),
                 columns: BTreeMap::new(),
                 equality: Vec::new(),
-                backfill: Vec::new(),
-                rehome: None,
-                sweep: SweepBy::Updaters,
             },
         ),
         (
@@ -154,16 +149,9 @@ fn entries() -> BTreeMap<String, EncryptionEntry> {
                             default: None,
                         },
                         sealed_type: None,
-                        from: None,
-                        to: None,
-                        convert: None,
-                        reverse: None,
                     },
                 )]),
                 equality: Vec::new(),
-                backfill: Vec::new(),
-                rehome: None,
-                sweep: SweepBy::Updaters,
             },
         ),
     ])
@@ -2837,9 +2825,7 @@ fn a_version_with_two_parents_takes_their_declarations_only_if_they_agree() {
     };
     history(entries()).expect("two parents that declare alike");
     let mut other = entries();
-    for entry in other.values_mut() {
-        entry.sweep = SweepBy::Members;
-    }
+    other.retain(|_, entry| !entry.columns.is_empty());
     assert_ne!(other, entries());
     let error = history(other).expect_err("two parents that declare differently");
     assert!(error.to_string().contains("declare differently"), "{error}");

@@ -151,7 +151,7 @@ fn malformed_declarations_are_refused() {
         ),
         (
             r#"{ "space": "projectId", "scope": "projects", "columns": { "title": { "type": "int", "from": "done" } } }"#,
-            "names a `convert` function",
+            "unknown key `from`",
         ),
         (
             r#"{ "space": "projectId", "scope": "projects", "columns": {}, "unknown": 1 }"#,
@@ -170,6 +170,47 @@ fn malformed_declarations_are_refused() {
         r#""notes": { "type": "bytes", "merge": "counter" }"#,
     );
     assert!(refusal(load_app(merged.as_bytes())).contains("last-writer-wins"));
+}
+
+/// The app-file reader names an unknown key and the declaration containing it.
+#[test]
+fn unknown_encryption_keys_are_refused_in_the_app_file() {
+    for (key, on_column) in [
+        ("from", true),
+        ("to", true),
+        ("convert", true),
+        ("reverse", true),
+        ("backfill", false),
+        ("rehome", false),
+        ("sweep", false),
+        ("unexpected", false),
+    ] {
+        let mut entry: serde_json::Value = serde_json::from_str(tasks_entry()).unwrap();
+        let path = if on_column {
+            entry["columns"]["notes"] = serde_json::json!({"type": "string?", key: null});
+            "tables.tasks.encryption.columns.notes"
+        } else {
+            entry[key] = serde_json::Value::Null;
+            "tables.tasks.encryption"
+        };
+        let error = refusal(load_app(app(&entry.to_string()).as_bytes()));
+        assert!(
+            error.contains(path)
+                && error.contains(&format!("unknown key `{key}`"))
+                && error.contains("docs/e2ee/encrypting-existing-data"),
+            "{error}"
+        );
+    }
+    let nested = app(&tasks_entry().replace(
+        r#""notes": "string?""#,
+        r#""notes": {"type":{"enum":["a"], "from":"done"}}"#,
+    ));
+    let error = refusal(load_app(nested.as_bytes()));
+    assert!(
+        error.contains("tables.tasks.encryption.columns.notes.type")
+            && error.contains("unknown key `from`"),
+        "{error}"
+    );
 }
 
 /// Jazz's system tables are Jazz's: the app may not define one, reference
@@ -306,8 +347,7 @@ fn the_deploy_names_the_wrong_membership_column_and_the_declared_space() {
 }
 
 /// Every schema version records its own declarations, and a migration may
-/// not change an encrypted column's type, scope or space without a
-/// conversion (migrations §3.1).
+/// not change the encoding, space or scope of its stored ciphertext.
 #[test]
 fn migrations_are_checked_against_both_versions_declarations() {
     let with_history = |current_title: &str, history_title: &str| {
@@ -338,7 +378,7 @@ fn migrations_are_checked_against_both_versions_declarations() {
         .as_bytes(),
     ));
     assert!(
-        error.contains("re-encrypt") && error.contains("from"),
+        error.contains("copy it into a new encrypted table"),
         "{error}"
     );
 
@@ -351,7 +391,7 @@ fn migrations_are_checked_against_both_versions_declarations() {
             "bodyPlain": { "renameFrom": "body" },
             "body": { "add": "bytes", "default": "" } } } }] }"#;
     let error = refusal(load_app(encrypt.as_bytes()));
-    assert!(error.contains("was optional"), "{error}");
+    assert!(error.contains("unknown key `from`"), "{error}");
 
     // Declaring encryption for the first time adds the system tables along
     // the migration, so clients holding the earlier version open.
@@ -590,7 +630,7 @@ fn an_app_table_with_the_reserved_prefix_is_refused_in_every_version() {
 /// as, protocol §4.1) travels with its declarations: from the app file
 /// through the client loader, the rewritten file, the deploy request and
 /// the server's stored form. It is not part of the type the cells are
-/// sealed under, so another version may change it without a conversion.
+/// sealed under.
 ///
 /// ```text
 /// jazz.app.json { "type": "string", "default": "none yet" }
@@ -642,6 +682,28 @@ fn an_encrypted_columns_default_travels_with_its_declarations() {
     );
     assert_eq!(notes(&decode_stored(&stored).unwrap()), expected);
 
+    let pinned = file.replace(
+        r#""default": "none yet""#,
+        r#""sealedType": "string", "default": "none yet""#,
+    );
+    let written = rewrite(
+        pinned.as_bytes(),
+        permissions(MEMBERS_RULE).as_bytes(),
+        None,
+    )
+    .unwrap();
+    let json: serde_json::Value = serde_json::from_str(&written.app).unwrap();
+    assert_eq!(
+        json["tables"]["tasks"]["encryption"]["columns"]["notes"],
+        serde_json::json!({
+            "type": "string", "sealedType": "string", "default": "none yet"
+        })
+    );
+    let reloaded = load_app(written.app.as_bytes()).unwrap();
+    let entries = reloaded.encryption().versions.values().next().unwrap();
+    assert_eq!(notes(entries), expected);
+    assert!(entries["tasks"].columns["notes"].sealed_type.is_some());
+
     // A sealed type takes no default: it only names what cells are sealed
     // under.
     let sealed = app(r#"{ "space": "projectId", "scope": "projects",
@@ -654,10 +716,9 @@ fn an_encrypted_columns_default_travels_with_its_declarations() {
 /// A migration may add an encrypted column with or without a declared
 /// default, but a later version may not change a column's default: the
 /// rows stored before the column read it, and clients of each version
-/// would read them differently. Changing it is a re-encrypt into a new
-/// column.
+/// would read them differently.
 #[test]
-fn an_encrypted_columns_default_may_not_change_without_a_conversion() {
+fn an_encrypted_columns_default_may_not_change() {
     let with_body = |body: &str, history_body: Option<&str>| {
         let history_columns = match history_body {
             Some(_) => r#"{ "title": "bytes", "body": "bytes" }"#,
@@ -737,19 +798,9 @@ fn an_encrypted_enum_default_must_be_a_variant() {
     assert!(error.contains("one of the enum's variants"), "{error}");
 }
 
-/// An encrypted column keeps the type its cells were sealed under: a
-/// conversion (`from`) may not write over a column the earlier version
-/// already held as encrypted, which would leave every existing cell
-/// unreadable, while converting into a new column is the way to change a
-/// type.
-///
-/// ```text
-/// v1: title encrypted string, legacy plaintext
-/// v2: title encrypted int, from legacy          ✗ (title already encrypted)
-/// v2: title2 encrypted int, from title          ✓ (a new column)
-/// ```
+/// The app-file reader refuses a source on either an existing or a fresh encrypted column.
 #[test]
-fn a_conversion_may_not_write_over_an_encrypted_column() {
+fn a_column_cannot_declare_a_conversion_source() {
     let version = |columns: &str, entry: &str, migrate: &str| {
         format!(
             r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
@@ -767,27 +818,17 @@ fn a_conversion_may_not_write_over_an_encrypted_column() {
         r#"{ "done": { "add": "boolean", "default": false } }"#,
     );
     let error = refusal(load_app(over.as_bytes()));
-    assert!(error.contains("was already encrypted"), "{error}");
+    assert!(error.contains("unknown key `from`"), "{error}");
 
     let into_new = version(
         r#"{ "title": "bytes", "title2": { "type": "bytes", "default": "" } }"#,
         r#"{ "title2": { "type": "int", "from": "title", "convert": "parse" } }"#,
         r#"{ "title2": { "add": "bytes", "default": "" }, "legacy": { "drop": "string", "backwardsDefault": "" } }"#,
     );
-    load_app(into_new.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    assert!(refusal(load_app(into_new.as_bytes())).contains("unknown key `from`"));
 }
 
-/// Equality is part of what old and new clients agree on: adding it to
-/// cells that exist starts in `backfill`, since they have no token, and
-/// removing it drops the token column in the same migration, since older
-/// clients would keep querying tokens nobody writes (migrations §4.3).
-///
-/// ```text
-/// v1: title encrypted, no tag     v2: + tag, equality [title]            ✗
-///                                 v2: + tag, equality, backfill [title]  ✓
-/// v1: title + tag, equality       v2: equality [], tag kept              ✗
-///                                 v2: equality [], tag dropped           ✓
-/// ```
+/// Existing tables cannot add equality. Removing equality drops the token column in the same step.
 #[test]
 fn equality_changes_across_versions_follow_the_migrations_spec() {
     let app = |tables: &str, history: &str, migrate: &str| {
@@ -811,16 +852,18 @@ fn equality_changes_across_versions_follow_the_migrations_spec() {
     let error = refusal(load_app(
         app(&entry(r#", "equality": ["title"]"#), untagged, add_tag).as_bytes(),
     ));
-    assert!(error.contains("`backfill`"), "{error}");
-    load_app(
-        app(
-            &entry(r#", "equality": ["title"], "backfill": ["title"]"#),
-            untagged,
-            add_tag,
-        )
-        .as_bytes(),
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
+    assert!(error.contains("adding equality"), "{error}");
+    assert!(
+        refusal(load_app(
+            app(
+                &entry(r#", "equality": ["title"], "backfill": ["title"]"#),
+                untagged,
+                add_tag,
+            )
+            .as_bytes(),
+        ))
+        .contains("unknown key `backfill`")
+    );
 
     let tagged = r#"{ "columns": { "title": "bytes", "__e2ee_eq_title": "bytes" },
         "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" },
@@ -911,7 +954,7 @@ fn equality_follows_the_types_the_format_encodes() {
     use jazz::tools::deployment::artifact::encryption::check_entry;
     use jazz::tools::public_schema::{
         ColumnDescriptor, EncryptedColumn, EncryptionEntry, PlainType, RowDescriptor, Schema,
-        SweepBy, TableSchema,
+        TableSchema,
     };
     use std::collections::BTreeMap;
     let schema: Schema = Schema::from([(
@@ -929,16 +972,9 @@ fn equality_follows_the_types_the_format_encodes() {
             EncryptedColumn {
                 plain: PlainType::new(ty, false),
                 sealed_type: None,
-                from: None,
-                to: None,
-                convert: None,
-                reverse: None,
             },
         )]),
         equality: vec!["data".to_owned()],
-        backfill: Vec::new(),
-        rehome: None,
-        sweep: SweepBy::Updaters,
     };
     let array = |element: ColumnType| ColumnType::Array {
         element: Box::new(element),
@@ -1008,18 +1044,9 @@ fn connect_refuses_an_encrypted_schema_by_itself() {
     .unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// A column newly tagged for equality in a table that existed in the earlier
-/// version starts in `backfill`, whether that table was encrypted before or
-/// is encrypted for the first time: its rows have no token for it. The
-/// rule reads the schema, not the rows.
-///
-/// ```text
-/// v1: notes encrypted (title)      v2: + body, equality [body]            ✗
-///                                  v2: + body, equality, backfill [body]  ✓
-/// v1: notes plaintext              v2: encrypts body, equality [body]     ✗ / ✓ with backfill
-/// ```
+/// An existing table may hold rows with no token for a newly added column.
 #[test]
-fn a_new_equality_column_in_an_existing_table_starts_in_backfill() {
+fn a_new_equality_column_in_an_existing_table_is_refused() {
     let app = |history_columns: &str,
                history_entry: &str,
                current_columns: &str,
@@ -1053,21 +1080,26 @@ fn a_new_equality_column_in_an_existing_table_starts_in_backfill() {
         )
     };
     let error = refusal(load_app(before("").as_bytes()));
-    assert!(error.contains("`backfill`"), "{error}");
-    load_app(before(r#", "backfill": ["body"]"#).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    assert!(error.contains("adding equality"), "{error}");
+    assert!(
+        refusal(load_app(before(r#", "backfill": ["body"]"#).as_bytes()))
+            .contains("unknown key `backfill`")
+    );
 
     // The table is encrypted for the first time: it held plaintext before.
     let plain_columns = r#"{ "title": "string", "body": "bytes", "__e2ee_eq_body": "bytes" }"#;
     let first = |backfill| app(r#"{ "title": "string" }"#, "", plain_columns, "", backfill);
     let error = refusal(load_app(first("").as_bytes()));
-    assert!(error.contains("`backfill`"), "{error}");
-    load_app(first(r#", "backfill": ["body"]"#).as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    assert!(error.contains("adding equality"), "{error}");
+    assert!(
+        refusal(load_app(first(r#", "backfill": ["body"]"#).as_bytes()))
+            .contains("unknown key `backfill`")
+    );
 }
 
 /// The `__e2ee_` column names are Jazz's: the token column of an equality
 /// column (`__e2ee_eq_<column>`), or any other reserved name, can't be
-/// declared as an encrypted column, nor named as a conversion's source or
-/// target.
+/// declared as an encrypted column.
 #[test]
 fn reserved_column_names_cannot_be_encrypted_columns() {
     let with_columns = |declared: &str| {
@@ -1083,8 +1115,6 @@ fn reserved_column_names_cannot_be_encrypted_columns() {
     for declared in [
         r#""title": "string", "__e2ee_eq_title": "string""#,
         r#""title": "string", "__e2ee_other": "string""#,
-        r#""title": { "type": "string", "from": "__e2ee_eq_title" }"#,
-        r#""title": { "type": "string", "to": "__e2ee_plain" }"#,
     ] {
         let error = refusal(load_app(with_columns(declared).as_bytes()));
         assert!(error.contains("`__e2ee_`"), "{declared}: {error}");
@@ -1161,10 +1191,9 @@ fn a_version_without_declarations_keeps_the_system_tables_after_an_encrypted_one
     );
 }
 
-/// Decrypting every column of an encrypted table keeps the system tables,
-/// in the version that decrypts and in every later one.
+/// Alice cannot include a decrypt declaration in a historical version.
 #[test]
-fn decrypting_every_column_keeps_the_system_tables() {
+fn historical_versions_refuse_unknown_encryption_keys() {
     let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
         "tables": { "notes": { "columns": { "done": "boolean", "bodyText": "string?" } } },
         "history": {
@@ -1180,24 +1209,37 @@ fn decrypting_every_column_keeps_the_system_tables() {
             { "from": "v2", "migrate": { "notes": { "body": { "drop": "bytes", "backwardsDefault": "" } } } }] }"#;
     let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
         "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
-    let loaded = load(file.as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let error = refusal(load(file.as_bytes(), permissions.as_bytes()));
+    assert!(
+        error.contains("history.v2.tables.notes.encryption.columns.body")
+            && error.contains("unknown key `to`")
+            && error.contains("docs/e2ee/encrypting-existing-data"),
+        "{error}"
+    );
+
+    // Keeping the ciphertext declared until its column is dropped preserves the bundle.
+    let supported = file.replace(r#", "to": "bodyText""#, "");
+    let loaded = load(supported.as_bytes(), permissions.as_bytes()).unwrap();
     assert_eq!(loaded.schemas().len(), 3);
     assert!(
         loaded
             .schemas()
             .iter()
-            .all(|(_, schema)| schema.contains_key(&TableName::from(MEMBERS))),
-        "every version, the one that decrypts and the later one that declares nothing, keeps them"
+            .all(|(_, schema)| schema.contains_key(&TableName::from(MEMBERS)))
     );
     assert_eq!(loaded.encryption().versions.len(), 2);
-    // The last version declares nothing of its own: the client gets no
-    // encrypted column (v2's decrypting conversion is not its), and is still
-    // an encrypted app; the derived policies are unchanged.
-    let (_, _, declarations) =
-        load_client_encrypted(file.as_bytes(), AppId::from_name("notes-app"), "production")
-            .unwrap();
-    let declarations = declarations.expect("an encrypted app, with its system tables");
-    assert!(declarations.tables.is_empty(), "{:?}", declarations.tables);
+    let (_, _, declarations) = load_client_encrypted(
+        supported.as_bytes(),
+        AppId::from_name("notes-app"),
+        "production",
+    )
+    .unwrap();
+    assert!(
+        declarations
+            .expect("an encrypted app keeps its system tables")
+            .tables
+            .is_empty()
+    );
     assert_eq!(
         loaded.bundle().to_hex(),
         "583f00e5a15a00b10f8dbcabaacd8f98fbd155788ff7d9a507c147156bf86172"
@@ -1265,7 +1307,7 @@ fn the_backend_loader_accepts_a_version_that_keeps_the_system_tables() {
 /// ```
 #[test]
 fn equally_near_versions_that_declare_differently_are_refused() {
-    let file = |v2_sweep: &str| {
+    let file = |v2_type: &str| {
         format!(
             r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
             "tables": {{ "notes": {{ "columns": {{ "done": "boolean" }} }} }},
@@ -1275,7 +1317,7 @@ fn equally_near_versions_that_declare_differently_are_refused() {
                     "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": "string" }} }} }} }} }},
                 "v2": {{ "tables": {{ "notes": {{
                     "columns": {{ "title": "bytes", "done": "boolean", "extra": "boolean?" }},
-                    "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": "string" }}{v2_sweep} }} }} }} }} }},
+                    "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": "{v2_type}" }} }} }} }} }} }},
             "migrations": [
                 {{ "from": "v1", "migrate": {{ "notes": {{ "title": {{ "drop": "bytes", "backwardsDefault": "" }} }} }} }},
                 {{ "from": "v2", "migrate": {{ "notes": {{
@@ -1286,9 +1328,9 @@ fn equally_near_versions_that_declare_differently_are_refused() {
     let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
         "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
     // The same declarations: the nearest ones are unambiguous.
-    load(file("").as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    load(file("string").as_bytes(), permissions.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
     // Different ones: no nearest.
-    let disagreeing = file(r#", "sweep": "members""#);
+    let disagreeing = file("int");
     let error = refusal(load(disagreeing.as_bytes(), permissions.as_bytes()));
     assert!(error.contains("declare differently"), "{error}");
     // The client's declarations are the version's own, so the client loader
@@ -1310,7 +1352,7 @@ fn equally_near_versions_that_declare_differently_are_refused() {
 ///
 /// ```text
 /// v1: title encrypted
-/// v2: decrypts title into titleText       (declares)
+/// v2: adds plaintext titleText       (declares)
 /// v3: drops title                         (declares nothing)
 /// v4: titleText renamed title, plaintext  (declares nothing) ◄── may read title
 /// ```
@@ -1325,7 +1367,7 @@ fn a_policy_may_read_a_column_that_is_plaintext_in_this_version() {
             "v2": { "tables": { "notes": {
                 "columns": { "title": "bytes", "titleText": "string?" },
                 "encryption": { "space": "id", "scope": "notes",
-                    "columns": { "title": { "type": "string", "to": "titleText" } } } } } },
+                    "columns": { "title": "string" } } } } },
             "v3": { "tables": { "notes": { "columns": { "titleText": "string?" } } } } },
         "migrations": [
             { "from": "v1", "to": "v2", "migrate": { "notes": { "titleText": { "add": "string?", "default": null } } } },

@@ -182,10 +182,6 @@ impl Inner {
                 default: None,
             },
             sealed_type: None,
-            from: None,
-            to: None,
-            convert: None,
-            reverse: None,
         };
         self.schema
             .jazz
@@ -206,9 +202,6 @@ impl Inner {
                             scope: String::new(),
                             columns,
                             equality: Vec::new(),
-                            backfill: Vec::new(),
-                            rehome: None,
-                            sweep: Default::default(),
                         },
                     )
                 })

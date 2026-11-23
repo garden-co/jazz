@@ -103,9 +103,6 @@ fn declarations() -> E2eeDeclarations {
                         encrypted(ColumnType::Bytea, true),
                     )]),
                     equality: Vec::new(),
-                    backfill: Vec::new(),
-                    rehome: None,
-                    sweep: Default::default(),
                 },
             ),
             (
@@ -118,9 +115,6 @@ fn declarations() -> E2eeDeclarations {
                         ("attachment".to_owned(), encrypted(ColumnType::Bytea, true)),
                     ]),
                     equality: vec!["body".to_owned()],
-                    backfill: Vec::new(),
-                    rehome: None,
-                    sweep: Default::default(),
                 },
             ),
         ]),
@@ -135,10 +129,6 @@ fn encrypted(column_type: ColumnType, nullable: bool) -> EncryptedColumn {
             default: None,
         },
         sealed_type: None,
-        from: None,
-        to: None,
-        convert: None,
-        reverse: None,
     }
 }
 
@@ -311,7 +301,6 @@ impl E2eeHooks for Fake {
         let stored = uuid_of(write.stored_space);
         if let (Some(given), Some(stored)) = (given, stored)
             && given != stored
-            && !matches!(write.kind, WriteKind::Move { .. })
         {
             return Err(SealError::Refused(jazz::db::Error::new(
                 ErrorCode::WriteRejected,
@@ -1047,9 +1036,9 @@ fn the_hooks_hear_of_companion_rows_that_are_not_stored() {
 
 /// Contract: an update or upsert hands the hooks the space of the row it
 /// changes; an ordinary write that changes an encrypted row's space is
-/// refused, and only a move, in a serializable transaction, makes it.
+/// refused.
 #[test]
-fn only_a_move_changes_an_encrypted_row_s_space() {
+fn updates_and_upserts_preserve_an_encrypted_rows_space() {
     let hooks = Fake::new();
     let alice = client(&hooks);
     let (from, to) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
@@ -1083,41 +1072,10 @@ fn only_a_move_changes_an_encrypted_row_s_space() {
         block_on(alice.update("notes", row, note(to, "moved"), Default::default())).unwrap_err();
     assert_eq!(error.code, ErrorCode::WriteRejected);
 
-    let mergeable = OpenTransactionId::new();
-    block_on(alice.begin_mergeable(mergeable)).unwrap();
-    let refused = block_on(alice.tx_ref(mergeable).move_to_space(
-        "notes",
-        row,
-        BTreeMap::from([("body".to_owned(), text("moved"))]),
-        Value::Uuid(to),
-        Default::default(),
-    ));
-    assert_eq!(refused.unwrap_err().code, ErrorCode::Query);
-    alice.abandon_transaction_handle(mergeable).unwrap();
-
-    let id = OpenTransactionId::new();
-    block_on(alice.begin_serializable(id)).unwrap();
-    block_on(alice.tx_ref(id).move_to_space(
-        "notes",
-        row,
-        BTreeMap::from([("body".to_owned(), text("moved"))]),
-        Value::Uuid(to),
-        Default::default(),
-    ))
-    .unwrap();
-    block_on(alice.commit_serializable_handle(id)).unwrap();
     assert_eq!(
-        hooks.writes.borrow().last().unwrap().0,
-        WriteKind::Move {
-            target_space: Value::Uuid(to)
-        }
+        all(&alice, "notes")[0].cell("projectId"),
+        Some(Value::Uuid(from))
     );
-    let rows = all(&alice, "notes");
-    assert_eq!(rows[0].cell("projectId"), Some(Value::Uuid(to)));
-    assert_eq!(rows[0].cell("body"), Some(text("moved")));
-    // Sealed under the new space: without its key the row is unreadable.
-    hooks.forget(to);
-    assert!(all(&alice, "notes").is_empty());
 }
 
 /// Contract: an ordinary read leaves out the rows the hooks cannot open
@@ -3036,57 +2994,24 @@ fn a_streamed_update_cannot_name_another_space_before_reading() {
     assert_eq!(hooks.streams.get(), 0);
 }
 
-/// Contract: a sealed stream is bound to its row's space as the write that
-/// publishes it finds it, the transaction's own writes included. Moved to
-/// another space earlier in the same transaction, the row refuses the
-/// stream sealed for its old space, and the value never lands; in a
-/// transaction that leaves the row where it was, the stream publishes.
-///
-/// ```text
-/// begin upload (row in A) ─► tx: move row to B ─► finish ✗ ─► commit: no value
-/// begin upload (row in A) ─► tx: (row stays in A) ─► finish ✓ ─► value reads back
-/// ```
+/// Alice can finish a sealed stream in a transaction on the same row.
 #[test]
-fn a_sealed_stream_is_checked_against_its_transaction() {
+fn a_sealed_stream_publishes_in_a_transaction() {
     let hooks = Fake::new();
     let alice = client(&hooks);
-    let (home, other) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let home = uuid::Uuid::new_v4();
     hooks.hold(home);
-    hooks.hold(other);
     let row = block_on(alice.insert("notes", note(home, SECRET), Default::default()))
         .unwrap()
         .row_uuid();
-
     let upload = sealed_upload(&alice, None, row, &BTreeMap::new(), b"sealed for home").unwrap();
-    let id = OpenTransactionId::new();
-    block_on(alice.begin_serializable(id)).unwrap();
-    block_on(alice.tx_ref(id).move_to_space(
-        "notes",
-        row,
-        BTreeMap::from([("body".to_owned(), text("moved"))]),
-        Value::Uuid(other),
-        Default::default(),
-    ))
-    .unwrap();
-    let error = finish_in(&alice, id, upload, row).unwrap_err();
-    assert_eq!(error.code, ErrorCode::Schema);
-    block_on(alice.commit_serializable_handle(id)).unwrap();
-    let rows = all(&alice, "notes");
-    assert_eq!(rows[0].cell("projectId"), Some(Value::Uuid(other)));
-    assert_eq!(
-        rows[0].cell("attachment"),
-        Some(Value::Nullable(None)),
-        "the value never lands"
-    );
-
-    let upload = sealed_upload(&alice, None, row, &BTreeMap::new(), b"sealed for other").unwrap();
     let id = OpenTransactionId::new();
     block_on(alice.begin_mergeable(id)).unwrap();
     finish_in(&alice, id, upload, row).unwrap();
     block_on(alice.commit_mergeable_handle(id)).unwrap();
     assert_eq!(
         all(&alice, "notes")[0].cell("attachment"),
-        Some(Value::Bytes(b"sealed for other".to_vec()))
+        Some(Value::Bytes(b"sealed for home".to_vec()))
     );
 }
 

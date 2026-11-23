@@ -5,11 +5,9 @@ use std::collections::BTreeMap;
 
 use super::large_ops::{SealedFor, StreamedSeal, sealed_elsewhere};
 use super::{
-    BatchKind, Cells, Db, Inner, InsertOptions, LargeEdits, Located, StagedOp,
-    StreamingMutationKind, StreamingValueUpload, Target, TxRef, UpdateOptions, WriteHandle,
-    WriteTarget, column_from_sql, quote, rejected, storage,
+    Cells, Db, Inner, InsertOptions, LargeEdits, Located, StagedOp, StreamingMutationKind,
+    StreamingValueUpload, Target, WriteTarget, column_from_sql, quote, rejected, storage,
 };
-use crate::db::Pos;
 use crate::e2ee::{E2eeHooks, E2eeRefusal, SealError, StreamTarget, WriteCells, WriteKind};
 use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode};
@@ -30,19 +28,16 @@ impl Db {
         )
     }
 
-    /// Stage `op` in batch `id` sealed by the encryption hooks, as `kind`
-    /// when given. The internal rows the hooks stage with it go first; if any of them or
+    /// Stage `op` in batch `id` sealed by the encryption hooks. The internal rows the hooks stage with it go first; if any of them or
     /// the write fails, none stays staged.
     pub(crate) fn stage_sealed(
         &self,
         id: OpenTransactionId,
         mut op: StagedOp,
         edits: LargeEdits,
-        kind: Option<WriteKind>,
         streamed: Option<StreamedSeal<'_>>,
     ) -> Result<(), Error> {
-        let companions =
-            self.in_overlay(id, None, |inner, _| inner.seal_op(&mut op, kind, streamed))?;
+        let companions = self.in_overlay(id, None, |inner, _| inner.seal_op(&mut op, streamed))?;
         if companions.is_empty() {
             return self.stage_chunked(id, op, edits);
         }
@@ -152,73 +147,6 @@ impl Drop for StagedCompanions {
     }
 }
 
-impl TxRef<'_> {
-    /// Move `row` of encrypted `table` to the space `target_space`
-    /// (migrations §4.4): one update that sets the row's space column and
-    /// seals every encrypted column again under the target space. `cells`
-    /// holds the plaintext of every encrypted column; the hooks refuse a
-    /// partial move. Only a serializable transaction moves a row.
-    pub async fn move_to_space(
-        &self,
-        table: &str,
-        row: RowUuid,
-        mut cells: BTreeMap<String, Value>,
-        target_space: Value,
-        opts: UpdateOptions,
-    ) -> Result<WriteHandle, Error> {
-        let space = {
-            let inner = self.db.inner.staging();
-            let serializable = matches!(
-                inner.batches.get(&self.id).map(|batch| &batch.kind),
-                Some(BatchKind::Serializable { .. })
-            );
-            if !serializable {
-                return Err(Error::new(
-                    ErrorCode::Query,
-                    "a row moves between spaces only in a serializable transaction",
-                ));
-            }
-            let entry = inner
-                .e2ee
-                .as_ref()
-                .and_then(|hooks| hooks.declarations().tables.get(table).cloned())
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorCode::Query,
-                        format!("`{table}` is not an encrypted table"),
-                    )
-                })?;
-            if entry.space == "id" {
-                return Err(Error::new(
-                    ErrorCode::Query,
-                    format!("a row of `{table}` is its own space and cannot move"),
-                ));
-            }
-            entry.space
-        };
-        cells.insert(space, target_space.clone());
-        let op = StagedOp::Update(table.to_owned(), row, cells, opts);
-        self.db
-            .fetching_with(op, |op| {
-                self.db.stage_sealed(
-                    self.id,
-                    op,
-                    LargeEdits::default(),
-                    Some(WriteKind::Move {
-                        target_space: target_space.clone(),
-                    }),
-                    None,
-                )
-            })
-            .await?;
-        Ok(WriteHandle {
-            row,
-            seq: Pos::default(),
-            tx: 0,
-        })
-    }
-}
-
 fn seal_error(error: SealError) -> Error {
     match error {
         SealError::NeedsKey { space } => E2eeRefusal::NeedsKey { space }.error(),
@@ -240,13 +168,11 @@ impl From<StreamingMutationKind> for WriteKind {
 impl Inner {
     /// Seal `op`, a write this database authors, before anything stores or
     /// chunks it. Returns the internal rows the write needs, as inserts to
-    /// apply before it in the same transaction. `kind` overrides the kind
-    /// `op` implies (a move between spaces). A streamed write already holds
+    /// apply before it in the same transaction. A streamed write already holds
     /// its sealed cells. Check its space and claim any root it needs here.
     pub(crate) fn seal_op(
         &self,
         op: &mut StagedOp,
-        kind: Option<WriteKind>,
         streamed: Option<StreamedSeal<'_>>,
     ) -> Result<Vec<StagedOp>, Error> {
         let Some(hooks) = self.e2ee.clone() else {
@@ -254,7 +180,7 @@ impl Inner {
         };
         let identity = op.identity();
         let mut none = BTreeMap::new();
-        let (table, row, implied, cells, target) = match op {
+        let (table, row, kind, cells, target) = match op {
             StagedOp::Insert(table, cells, opts) => {
                 let row = opts.row_id.ok_or_else(|| {
                     Error::new(
@@ -292,7 +218,6 @@ impl Inner {
             ),
             StagedOp::Move(..) => return Ok(Vec::new()),
         };
-        let kind = kind.unwrap_or(implied);
         let stored_space = match target {
             Some((target, deleted)) => self.stored_space(&*hooks, &table, row, &target, deleted)?,
             None => None,

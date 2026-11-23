@@ -19,10 +19,9 @@ use jazz_e2ee::protocol::content::cells::{
     CellInput, EqualityValueBuf, Opened, StreamOpen, StreamResealer, StreamValueReader,
     begin_stream, min_cell_record_len, open_cell, seal_cells, stream_routing,
 };
-use jazz_e2ee::protocol::content::convert::SourceIndex;
 use jazz_e2ee::protocol::content::{
-    CLEARED_MARKER, ContentError, CreationFate, DataError, HeldKeys, HeldSpace, KeyMark,
-    MissingKey, RowTarget, TableTarget, WriteChoice, WriteKey,
+    ContentError, CreationFate, DataError, HeldKeys, HeldSpace, KeyMark, MissingKey, RowTarget,
+    WriteChoice, WriteKey,
 };
 use jazz_e2ee::protocol::domain::{AppDomain, SharedDomain};
 use jazz_e2ee::protocol::records::space::SpaceAddress;
@@ -152,7 +151,7 @@ fn sealed_cells_open_with_the_held_key_of_their_version() {
     assert_eq!(token.len(), 30 + 32);
     let registry = &world.shared.registry;
     assert_eq!(
-        value(open_cell(registry, &held, &target, &title(), &stored, false).unwrap()),
+        value(open_cell(registry, &held, &target, &title(), &stored).unwrap()),
         b"hello"
     );
     // Sealing twice gives different ciphertext of the same value.
@@ -237,7 +236,6 @@ fn a_cell_record_frames_its_epoch_and_binds_the_cell_context() {
     );
     assert_eq!(min_cell_record_len(), header.len() + 47);
     assert_eq!(min_cell_record_len(), 78);
-    assert_eq!(CLEARED_MARKER, [0x4a, 0x45, 0x32, 0x58, 0x01]);
 }
 
 #[test]
@@ -251,7 +249,7 @@ fn a_cell_opens_only_at_its_own_coordinates() {
     let registry = &world.shared.registry;
     let invalid = Opened::Unreadable(DataError::InvalidCiphertext);
     let open = |target: &RowTarget<'_>, column| {
-        open_cell(registry, &held, target, &column, &stored, false).unwrap()
+        open_cell(registry, &held, target, &column, &stored).unwrap()
     };
     assert_eq!(open(&row(&domain, &address, ROW_2), title()), invalid);
     let other_table = RowTarget {
@@ -285,7 +283,7 @@ fn a_cell_opens_only_at_its_own_coordinates() {
         let mut damaged = stored.clone();
         let at = 31 + 36 + rng.below(stored.len() - 31 - 36);
         damaged[at] ^= 1 << rng.below(8);
-        let opened = open_cell(registry, &held, &target, &title(), &damaged, false).unwrap();
+        let opened = open_cell(registry, &held, &target, &title(), &damaged).unwrap();
         assert!(
             matches!(opened, Opened::Unreadable(_)),
             "{opened:?} at byte {at}"
@@ -301,19 +299,11 @@ fn short_values_have_fixed_meanings() {
     let address = space(ROW);
     let target = row(&domain, &address, ROW_1);
     let registry = &world.shared.registry;
-    let open = |stored: &[u8], converting| {
-        open_cell(registry, &held, &target, &title(), stored, converting).unwrap()
-    };
-    assert_eq!(open(b"", false), Opened::Empty);
-    assert_eq!(open(b"", false).report(), Some(DataError::EmptyCell));
-    assert!(!open(b"", false).leaves_row_out());
-    assert_eq!(open(&CLEARED_MARKER, true), Opened::Cleared);
-    assert_eq!(open(&CLEARED_MARKER, true).report(), None);
-    assert_eq!(
-        open(&CLEARED_MARKER, false),
-        Opened::Unreadable(DataError::Superseded)
-    );
-    // Every other value shorter than a cell record is invalid, even a
+    let open = |stored: &[u8]| open_cell(registry, &held, &target, &title(), stored).unwrap();
+    assert_eq!(open(b""), Opened::Empty);
+    assert_eq!(open(b"").report(), Some(DataError::EmptyCell));
+    assert!(!open(b"").leaves_row_out());
+    // Every nonempty value shorter than a cell record is invalid, even a
     // well-formed envelope of a mechanism nobody routes.
     let unknown = envelope::encode(Mechanism::new("com.example.short", 1), &[0; 30]).unwrap();
     assert!(unknown.len() < 78);
@@ -321,13 +311,13 @@ fn short_values_have_fixed_meanings() {
     assert_eq!(short_cell.len(), 77);
     for stored in [
         &b"\x00"[..],
-        &CLEARED_MARKER[..4],
+        b"JE2X\x01",
         b"JE2X\x02",
         &unknown,
         &short_cell,
     ] {
         assert_eq!(
-            open(stored, true),
+            open(stored),
             Opened::Unreadable(DataError::InvalidCiphertext),
             "{stored:02x?}"
         );
@@ -337,7 +327,7 @@ fn short_values_have_fixed_meanings() {
     let long_unknown = envelope::encode(Mechanism::new("com.example.short", 1), &[0; 60]).unwrap();
     assert!(long_unknown.len() >= 78);
     assert_eq!(
-        open(&long_unknown, false),
+        open(&long_unknown),
         Opened::Unreadable(DataError::UnsupportedFormat)
     );
 }
@@ -359,11 +349,11 @@ fn the_shortest_record_length_is_the_boundary_for_any_mechanism() {
     let at = envelope::encode(unknown, &vec![0; 78 - header]).unwrap();
     assert_eq!((below.len(), at.len()), (77, 78));
     assert_eq!(
-        open_cell(registry, &held, &target, &title(), &below, false).unwrap(),
+        open_cell(registry, &held, &target, &title(), &below).unwrap(),
         Opened::Unreadable(DataError::InvalidCiphertext)
     );
     assert_eq!(
-        open_cell(registry, &held, &target, &title(), &at, false).unwrap(),
+        open_cell(registry, &held, &target, &title(), &at).unwrap(),
         Opened::Unreadable(DataError::UnsupportedFormat)
     );
 }
@@ -391,7 +381,7 @@ fn an_unrouted_cell_mechanism_is_unsupported_not_invalid() {
     .unwrap();
     let registry = &world.shared.registry;
     assert_eq!(
-        open_cell(registry, &held, &target, &title(), &relabelled, false).unwrap(),
+        open_cell(registry, &held, &target, &title(), &relabelled).unwrap(),
         Opened::Unreadable(DataError::UnsupportedFormat)
     );
     // A built-in mechanism the application's allow-list leaves out.
@@ -402,7 +392,7 @@ fn an_unrouted_cell_mechanism_is_unsupported_not_invalid() {
         })
         .unwrap();
     assert_eq!(
-        open_cell(&retired, &held, &target, &title(), &stored, false).unwrap(),
+        open_cell(&retired, &held, &target, &title(), &stored).unwrap(),
         Opened::Unreadable(DataError::UnsupportedFormat)
     );
     // A strict read fails on it.
@@ -441,11 +431,11 @@ fn a_provider_failure_fails_the_read() {
     .remove(0)
     .stored;
     assert_eq!(
-        value(open_cell(registry, &held, &target, &notes(), &stored, false).unwrap()),
+        value(open_cell(registry, &held, &target, &notes(), &stored).unwrap()),
         b"hello"
     );
     fails.store(true, Ordering::SeqCst);
-    let error = open_cell(registry, &held, &target, &notes(), &stored, false).unwrap_err();
+    let error = open_cell(registry, &held, &target, &notes(), &stored).unwrap_err();
     assert!(error.is_provider_failure(), "{error:?}");
     // Also when the key is another space's (a stale-space candidate).
     let elsewhere_address = space(OTHER_ROW);
@@ -455,7 +445,6 @@ fn a_provider_failure_fails_the_read() {
         &row(&domain, &elsewhere_address, ROW_1),
         &notes(),
         &stored,
-        false,
     )
     .unwrap_err();
     assert!(error.is_provider_failure(), "{error:?}");
@@ -474,7 +463,7 @@ fn a_missing_version_settles_by_membership_and_chain() {
 
     // Bob holds nothing: the version is missing until he acquires it.
     let mut bob = HeldKeys::new();
-    let opened = open_cell(registry, &bob, &target, &title(), &stored, false).unwrap();
+    let opened = open_cell(registry, &bob, &target, &title(), &stored).unwrap();
     assert_eq!(
         opened,
         Opened::Missing {
@@ -528,7 +517,7 @@ fn a_missing_version_settles_by_membership_and_chain() {
         Ok(MissingKey::Held)
     );
     assert_eq!(
-        value(open_cell(registry, &bob, &target, &title(), &stored, false).unwrap()),
+        value(open_cell(registry, &bob, &target, &title(), &stored).unwrap()),
         b"hello"
     );
 }
@@ -549,7 +538,7 @@ fn an_epoch_outside_the_chain_is_invalid_until_the_chain_advances() {
 
     let mut bob = HeldKeys::new();
     let lost_epoch = lost.root.epoch_id.clone();
-    let opened = open_cell(registry, &bob, &target, &title(), &stored, false).unwrap();
+    let opened = open_cell(registry, &bob, &target, &title(), &stored).unwrap();
     assert_eq!(
         opened,
         Opened::Missing {
@@ -564,7 +553,7 @@ fn an_epoch_outside_the_chain_is_invalid_until_the_chain_advances() {
     assert!(bob.known(&address).unwrap().is_absent(&lost_epoch));
     // Remembered: the next read reports it without acquiring again.
     assert_eq!(
-        open_cell(registry, &bob, &target, &title(), &stored, false).unwrap(),
+        open_cell(registry, &bob, &target, &title(), &stored).unwrap(),
         Opened::Unreadable(DataError::InvalidCiphertext)
     );
     // The same chain read again changes nothing.
@@ -575,7 +564,7 @@ fn an_epoch_outside_the_chain_is_invalid_until_the_chain_advances() {
     bob.observe_chain(&chain_of(&world, ROW));
     assert!(!bob.known(&address).unwrap().is_absent(&lost_epoch));
     assert!(matches!(
-        open_cell(registry, &bob, &target, &title(), &stored, false).unwrap(),
+        open_cell(registry, &bob, &target, &title(), &stored).unwrap(),
         Opened::Missing { .. }
     ));
     // Alice's own key, refused or not, still opens what she wrote under it.
@@ -584,7 +573,7 @@ fn an_epoch_outside_the_chain_is_invalid_until_the_chain_advances() {
         .unwrap()
         .settle(CreationFate::NotAccepted, None);
     assert_eq!(
-        value(open_cell(registry, &alice, &target, &title(), &stored, false).unwrap()),
+        value(open_cell(registry, &alice, &target, &title(), &stored).unwrap()),
         b"lost"
     );
 }
@@ -611,7 +600,6 @@ fn a_cell_of_another_space_this_device_holds_is_stale() {
         &row(&domain, &new, ROW_1),
         &title(),
         &stored,
-        false,
     )
     .unwrap();
     assert_eq!(opened.report(), Some(DataError::StaleSpace));
@@ -643,15 +631,7 @@ fn another_spaces_key_of_the_same_epoch_never_decides_a_cell() {
     let mut reader = HeldKeys::new();
     reader.hold(creation(&world, &ours, "tx-ours")).unwrap();
     assert_eq!(
-        open_cell(
-            &world.shared.registry,
-            &reader,
-            &target,
-            &title(),
-            &stored,
-            false
-        )
-        .unwrap(),
+        open_cell(&world.shared.registry, &reader, &target, &title(), &stored).unwrap(),
         Opened::Missing {
             epoch_id: theirs.root.epoch_id.clone()
         }
@@ -676,32 +656,14 @@ fn a_wrong_key_of_the_cells_epoch_does_not_block_the_right_one() {
     reader.hold(creation(&world, &first, "tx-1")).unwrap();
     reader.hold(creation(&world, &second, "tx-2")).unwrap();
     assert_eq!(
-        value(
-            open_cell(
-                &world.shared.registry,
-                &reader,
-                &target,
-                &title(),
-                &stored,
-                false
-            )
-            .unwrap()
-        ),
+        value(open_cell(&world.shared.registry, &reader, &target, &title(), &stored).unwrap()),
         b"right"
     );
     // With only the wrong key the cell does not open.
     let mut wrong = HeldKeys::new();
     wrong.hold(creation(&world, &first, "tx-1")).unwrap();
     assert_eq!(
-        open_cell(
-            &world.shared.registry,
-            &wrong,
-            &target,
-            &title(),
-            &stored,
-            false
-        )
-        .unwrap(),
+        open_cell(&world.shared.registry, &wrong, &target, &title(), &stored).unwrap(),
         Opened::Unreadable(DataError::InvalidCiphertext)
     );
 }
@@ -750,7 +712,7 @@ fn a_refused_roots_key_never_decides_the_spaces_cells() {
         .settle(CreationFate::NotAccepted, None);
     let registry = &world.shared.registry;
     let open = |held: &HeldKeys, stored: &[u8]| {
-        open_cell(registry, held, &target, &title(), stored, false).unwrap()
+        open_cell(registry, held, &target, &title(), stored).unwrap()
     };
     let missing = Opened::Missing {
         epoch_id: epoch.clone(),
@@ -802,11 +764,11 @@ fn a_write_uses_the_deepest_key_and_old_cells_stay_readable() {
     let (new, _) = seal_title(&world, &key, &target, "new");
     let registry = &world.shared.registry;
     assert_eq!(
-        value(open_cell(registry, &after, &target, &title(), &old, false).unwrap()),
+        value(open_cell(registry, &after, &target, &title(), &old).unwrap()),
         b"old"
     );
     assert_eq!(
-        value(open_cell(registry, &after, &target, &title(), &new, false).unwrap()),
+        value(open_cell(registry, &after, &target, &title(), &new).unwrap()),
         b"new"
     );
     // A device that has not obtained the newest version writes with the
@@ -1101,13 +1063,13 @@ fn large_values_stream_in_bytes_columns_only() {
         key.epoch_id().to_owned()
     );
     assert_eq!(
-        value(open_cell(registry, &held, &target, &blob(), &stored, false).unwrap()),
+        value(open_cell(registry, &held, &target, &blob(), &stored).unwrap()),
         plaintext
     );
     // A stream in a column that may not stream is unsupported.
     for column in [title(), notes()] {
         assert_eq!(
-            open_cell(registry, &held, &target, &column, &stored, false).unwrap(),
+            open_cell(registry, &held, &target, &column, &stored).unwrap(),
             Opened::Unreadable(DataError::UnsupportedFormat)
         );
     }
@@ -1355,22 +1317,11 @@ fn plaintext_and_equality_values_never_print() {
         panic!("a reader");
     };
     assert_eq!(&initial[..], secret, "the whole value opened");
-    let values = [EqualityValue::Text(text)];
-    let index = SourceIndex {
-        table: TableTarget {
-            domain: &domain,
-            space: &address,
-            table_id: TABLE,
-        },
-        column: title(),
-        values: &values,
-    };
     for debug in [
         format!("{opened:?}"),
         format!("{stale:?}"),
         format!("{input:?}"),
         format!("{stream:?}"),
-        format!("{index:?}"),
         format!("{:?}", EqualityValueBuf::Text(text.to_owned())),
         format!("{:?}", EqualityValueBuf::Bytes(secret.to_vec())),
         format!("{:?}", EqualityValueBuf::Enum(text.to_owned())),
@@ -1608,9 +1559,7 @@ const THIRD_ROW: &str = "038f2e3d-4c5b-7a69-8877-665544332233";
 /// under a third space: a cell is unconvertible (`stale-space`), and a
 /// stream is refused the same way, whether or not it has plaintext.
 #[test]
-fn a_value_of_a_third_space_is_never_rehomed() {
-    use jazz_e2ee::protocol::content::convert::{Rehome, RehomeCell, rehome_row};
-
+fn a_stream_of_a_third_space_is_never_resealed() {
     let mut world = world(29);
     for identifier in [OTHER_ROW, THIRD_ROW] {
         world.add_member_of(identifier, ALICE);
@@ -1627,31 +1576,6 @@ fn a_value_of_a_third_space_is_never_rehomed() {
     let registry = &world.shared.registry;
     let suite = registry.select(&Default::default()).unwrap();
     let to_key = write_key(&held, &to);
-
-    let (cell, _) = seal_title(&world, &write_key(&held, &other), &sealed_in, "elsewhere");
-    let rehomed = rehome_row(
-        registry,
-        &suite,
-        &held,
-        &source,
-        &to_key,
-        &target,
-        &[RehomeCell {
-            source: title(),
-            target: title(),
-            stored: &cell,
-        }],
-        &Values,
-        &mut TestRandom(29),
-    )
-    .unwrap();
-    assert!(matches!(
-        rehomed,
-        Rehome::Unconvertible {
-            opened: Opened::StaleSpace { .. },
-            ..
-        }
-    ));
 
     let reseal = |stored: &[u8]| -> Result<Vec<u8>, ContentError> {
         let StreamOpen::Reader { reader, .. } =
@@ -1845,15 +1769,7 @@ fn a_newer_unresolved_read_forgets_what_it_cannot_confirm_absent() {
     let target = row(&domain, &address, ROW_1);
     let (stored, _) = seal_title(&world, &write_key(&bob, &address), &target, "e1");
     let open = |held: &HeldKeys| {
-        open_cell(
-            &world.shared.registry,
-            held,
-            &target,
-            &title(),
-            &stored,
-            false,
-        )
-        .unwrap()
+        open_cell(&world.shared.registry, held, &target, &title(), &stored).unwrap()
     };
 
     assert_eq!(

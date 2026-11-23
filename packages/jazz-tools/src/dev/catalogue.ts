@@ -45,13 +45,6 @@ export interface DeployOptions extends CatalogueServerOptions {
    * which drops their past versions for good.
    */
   allowDroppingHistory?: boolean;
-  /**
-   * The decrypt conversions this deploy confirms, as `table.column`
-   * (`["notes.body"]`). A migration that decrypts a column puts its
-   * plaintext on the server and every replica, so the server refuses it
-   * until the deploy names the column.
-   */
-  confirmDecrypt?: string[];
 }
 
 /** A deployment Jazz's Rust loader built, with the warnings it raised. */
@@ -68,7 +61,6 @@ export interface LoadedDeployment {
 export async function publishLoadedDeployment(
   options: CatalogueServerOptions & {
     allowDroppingHistory?: boolean;
-    confirmDecrypt?: string[];
   },
   loaded: LoadedDeployment,
 ): Promise<DeployResult> {
@@ -85,8 +77,6 @@ export async function publishLoadedDeployment(
       (edge) => !storedMigrations.has(`${edge.fromHash}:${edge.toHash}`),
     ),
     allowDroppingHistory: options.allowDroppingHistory === true,
-    // Sent only when the deployer confirms a decrypt.
-    ...(options.confirmDecrypt?.length ? { confirmDecrypt: options.confirmDecrypt } : {}),
   });
   return {
     ...result,

@@ -13,7 +13,6 @@ use jazz::db::block_on;
 use jazz::e2ee::EncryptionSettings;
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
-use jazz::tools::ColumnType;
 use jazz_e2ee::OsRandom;
 use jazz_e2ee::protocol::account::AccountFloor;
 use jazz_e2ee::protocol::records::KeyColumns;
@@ -406,15 +405,6 @@ fn unusable_settings_and_declarations_are_refused_at_open() {
             "{refused}"
         );
     }
-    let mut converting = declarations();
-    let entry = converting.tables.get_mut("notes").unwrap();
-    let mut column = encrypted(ColumnType::Text, true);
-    column.from = Some("plainNote".to_owned());
-    entry.columns.insert("converted".to_owned(), column);
-    assert!(matches!(
-        try_open(Rc::new(MemoryStore::new()), converting),
-        Err(ClientError::Unsupported(_))
-    ));
 }
 
 /// Contract: a key whose document the store fails to save is not held: it

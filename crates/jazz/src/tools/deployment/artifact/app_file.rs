@@ -8,8 +8,8 @@ use base64::Engine as _;
 use crate::tools::ObjectId;
 use crate::tools::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, EncryptedColumn, EncryptionEntry,
-    EncryptionSettings, HistoryRetention, LegacyEnumCase, PlainType, Rehome, RowDescriptor, Schema,
-    SchemaHash, SweepBy, TableName, TablePolicies, TableSchema, Value,
+    EncryptionSettings, HistoryRetention, LegacyEnumCase, PlainType, RowDescriptor, Schema,
+    SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
@@ -104,12 +104,8 @@ pub const TRANSFORM_KEYS: &[&str] = &["stored", "view"];
 pub const COMPUTED_KEYS: &[&str] = &["type", "from"];
 pub const VERSION_KEYS: &[&str] = &["tables"];
 pub const SETTINGS_KEYS: &[&str] = &["allowAccountReset", "mechanisms"];
-pub const ENCRYPTION_KEYS: &[&str] = &[
-    "space", "scope", "columns", "equality", "backfill", "rehome", "sweep",
-];
-pub const ENCRYPTED_COLUMN_KEYS: &[&str] =
-    &["type", "sealedType", "from", "to", "convert", "reverse"];
-pub const REHOME_KEYS: &[&str] = &["space", "scope"];
+pub const ENCRYPTION_KEYS: &[&str] = &["space", "scope", "columns", "equality"];
+pub const ENCRYPTED_COLUMN_KEYS: &[&str] = &["type", "sealedType", "default"];
 
 /// Keys of `object` that aren't `allowed` (nor `$comment`) are refused.
 fn only_keys(object: &[(String, Json)], allowed: &[&str], path: &str) -> Result<(), Refusal> {
@@ -351,7 +347,13 @@ fn read_tables(
         if let Some(entry) = table.get("encryption") {
             entries.insert(
                 name.clone(),
-                read_entry(entry, &format!("{path}.encryption"))?,
+                read_entry(entry, &format!("{path}.encryption")).map_err(|(at, reason)| {
+                    if reason.starts_with("unknown key") {
+                        (at, format!("{reason}; {}", super::encryption::COPY_GUIDE))
+                    } else {
+                        (at, reason)
+                    }
+                })?,
             );
         }
         let fields = object(table, &path)?;
@@ -660,7 +662,7 @@ fn read_settings(value: &Json, path: &str) -> Result<EncryptionSettings, Refusal
     })
 }
 
-/// A table's `encryption` entry (protocol §1.5, migrations §3.2), read
+/// A table's `encryption` entry (protocol §1.5, E2EE_SCHEMA_CHANGES.md §3.1), read
 /// for its form only; [`super::encryption::check_entry`] checks it against
 /// its schema version.
 fn read_entry(value: &Json, path: &str) -> Result<EncryptionEntry, Refusal> {
@@ -697,47 +699,11 @@ fn read_entry(value: &Json, path: &str) -> Result<EncryptionEntry, Refusal> {
             .transpose()
             .map(Option::unwrap_or_default)
     };
-    let rehome = match value.get("rehome") {
-        None => None,
-        Some(spec) => {
-            let rehome_path = format!("{path}.rehome");
-            only_keys(object(spec, &rehome_path)?, REHOME_KEYS, &rehome_path)?;
-            let field = |key: &str| -> Result<String, Refusal> {
-                let value = spec.get(key).ok_or_else(|| {
-                    refuse(
-                        &rehome_path,
-                        format!("a re-home names the old `space` and `scope`; `{key}` is missing"),
-                    )
-                })?;
-                Ok(string(value, &format!("{rehome_path}.{key}"))?.to_string())
-            };
-            Some(Rehome {
-                space: field("space")?,
-                scope: field("scope")?,
-            })
-        }
-    };
-    let sweep = match value.get("sweep") {
-        None => SweepBy::default(),
-        Some(sweep) => match sweep.as_str() {
-            Some("updaters") => SweepBy::Updaters,
-            Some("members") => SweepBy::Members,
-            _ => {
-                return Err(refuse(
-                    format!("{path}.sweep"),
-                    "must be \"updaters\" or \"members\"",
-                ));
-            }
-        },
-    };
     Ok(EncryptionEntry {
         space,
         scope,
         columns,
         equality: list("equality")?,
-        backfill: list("backfill")?,
-        rehome,
-        sweep,
     })
 }
 
@@ -787,44 +753,37 @@ fn read_plain(spec: &Json, path: &str, with_default: bool) -> Result<PlainType, 
     })
 }
 
-/// One `columns` value of an encryption entry: a plaintext type, or an
-/// object with `type` and the conversion fields.
+/// One `columns` value of an encryption entry: a plaintext type, or a
+/// declaration with a default or the type that its cells were first sealed under.
 fn read_encrypted_column(spec: &Json, path: &str) -> Result<EncryptedColumn, Refusal> {
-    let conversion = ["sealedType", "from", "to", "convert", "reverse"]
-        .iter()
-        .any(|key| spec.get(key).is_some());
-    if !conversion {
+    let sealed = spec.get("sealedType");
+    if sealed.is_none() && spec.get("type").and_then(Json::as_object).is_none() {
         return Ok(EncryptedColumn {
             plain: read_plain(spec, path, true)?,
             sealed_type: None,
-            from: None,
-            to: None,
-            convert: None,
-            reverse: None,
         });
     }
     only_keys(object(spec, path)?, ENCRYPTED_COLUMN_KEYS, path)?;
-    let ty = spec.get("type").ok_or_else(|| {
-        refuse(
-            path,
-            "an encrypted column with conversion fields needs `type`, e.g. { \"type\": \"string\", \"from\": \"bodyPlain\" }",
-        )
-    })?;
-    let name = |key: &str| -> Result<Option<String>, Refusal> {
-        spec.get(key)
-            .map(|v| string(v, &format!("{path}.{key}")).map(str::to_string))
-            .transpose()
-    };
+    let ty = spec
+        .get("type")
+        .ok_or_else(|| refuse(path, "a column with sealedType needs its declared type"))?;
+    let mut plain = read_plain(ty, &format!("{path}.type"), false)?;
+    if let Some(default) = spec.get("default") {
+        let at = format!("{path}.default");
+        let value = read_value(default, &plain.column_type, &at)?;
+        if !in_variants(&plain.column_type, &value) {
+            return Err(refuse(
+                at,
+                "an enum default must be one of the enum's variants",
+            ));
+        }
+        plain.default = Some(value);
+    }
     Ok(EncryptedColumn {
-        plain: read_plain(ty, &format!("{path}.type"), true)?,
-        sealed_type: spec
-            .get("sealedType")
-            .map(|t| read_plain(t, &format!("{path}.sealedType"), false))
+        plain,
+        sealed_type: sealed
+            .map(|ty| read_plain(ty, &format!("{path}.sealedType"), false))
             .transpose()?,
-        from: name("from")?,
-        to: name("to")?,
-        convert: name("convert")?,
-        reverse: name("reverse")?,
     })
 }
 
@@ -1501,28 +1460,23 @@ fn write_entry(entry: &EncryptionEntry) -> Result<Json, String> {
                     .columns
                     .iter()
                     .map(|(name, column)| {
-                        let conversion = [
-                            ("from", &column.from),
-                            ("to", &column.to),
-                            ("convert", &column.convert),
-                            ("reverse", &column.reverse),
-                        ];
-                        let plain = write_plain(&column.plain)?;
-                        if column.sealed_type.is_none()
-                            && conversion.iter().all(|(_, v)| v.is_none())
-                        {
-                            return Ok((name.clone(), plain));
-                        }
-                        let mut spec = vec![("type".to_string(), plain)];
-                        if let Some(sealed) = &column.sealed_type {
-                            spec.push(("sealedType".to_string(), write_plain(sealed)?));
-                        }
-                        for (key, value) in conversion {
-                            if let Some(value) = value {
-                                spec.push((key.to_string(), Json::string(value)));
+                        let spec = if let Some(sealed) = &column.sealed_type {
+                            let plain = PlainType::new(
+                                column.plain.column_type.clone(),
+                                column.plain.nullable,
+                            );
+                            let mut fields = vec![
+                                ("type", write_plain(&plain)?),
+                                ("sealedType", write_plain(sealed)?),
+                            ];
+                            if let Some(value) = &column.plain.default {
+                                fields.push(("default", write_value(value, &plain.column_type)?));
                             }
-                        }
-                        Ok((name.clone(), Json::Object(spec)))
+                            Json::object(fields)
+                        } else {
+                            write_plain(&column.plain)?
+                        };
+                        Ok((name.clone(), spec))
                     })
                     .collect::<Result<_, String>>()?,
             ),
@@ -1530,21 +1484,6 @@ fn write_entry(entry: &EncryptionEntry) -> Result<Json, String> {
     ];
     if !entry.equality.is_empty() {
         fields.push(("equality".to_string(), names(&entry.equality)));
-    }
-    if !entry.backfill.is_empty() {
-        fields.push(("backfill".to_string(), names(&entry.backfill)));
-    }
-    if let Some(rehome) = &entry.rehome {
-        fields.push((
-            "rehome".to_string(),
-            Json::object(vec![
-                ("space", Json::string(&rehome.space)),
-                ("scope", Json::string(&rehome.scope)),
-            ]),
-        ));
-    }
-    if entry.sweep != SweepBy::default() {
-        fields.push(("sweep".to_string(), Json::string("members")));
     }
     Ok(Json::Object(fields))
 }

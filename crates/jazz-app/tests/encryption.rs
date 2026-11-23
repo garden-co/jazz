@@ -920,7 +920,7 @@ async fn check_required_title(files: AppFiles) {
     .expect_err("a pinned sealed type cannot change the stored layout");
     let reason = error.to_string();
     assert!(
-        reason.contains("tasks.title") && reason.contains("new column") && reason.contains("from"),
+        reason.contains("tasks.title") && reason.contains("copy it into a new encrypted table"),
         "{reason}"
     );
     assert_eq!(titles(&alice, 1).await, ["original title"]);

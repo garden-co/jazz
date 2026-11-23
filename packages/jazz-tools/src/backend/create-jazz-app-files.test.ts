@@ -105,8 +105,7 @@ describe("createJazz takes jazz.permissions.json in every form a project may hol
 });
 
 describe("createJazz validates and opens encrypted apps with keyless hooks", () => {
-  // Projects are spaces; a task's title is encrypted in its project's space,
-  // and its notes are being decrypted into `notesText`.
+  // Each task's title and notes are encrypted in its project's space.
   const encrypted = {
     format: 1,
     tables: {
@@ -116,13 +115,12 @@ describe("createJazz validates and opens encrypted apps with keyless hooks", () 
           projectId: "uuid",
           title: "bytes",
           notes: "bytes",
-          notesText: "string?",
         },
         relations: { project: { rel: "projects", column: "projectId" } },
         encryption: {
           space: "projectId",
           scope: "projects",
-          columns: { title: "string", notes: { type: "string", to: "notesText" } },
+          columns: { title: "string", notes: "string" },
         },
       },
     },
@@ -143,24 +141,20 @@ describe("createJazz validates and opens encrypted apps with keyless hooks", () 
 
   function startEncrypted(
     store: ReturnType<typeof memory> | ReturnType<typeof sqlite> | ReturnType<typeof remote>,
-    confirmDecrypt?: string[],
     permissionsFile: unknown = permissions,
   ) {
     const jazz = createJazz({
       app: testApp(encrypted),
       permissions: permissionsFile as never,
       store,
-      confirmDecrypt,
     });
     cleanups.push(() => jazz.close());
     return jazz.ready();
   }
 
-  it("opens a confirmed decrypt conversion with a keyless backend", async () => {
+  it("opens an encrypted app with a keyless backend", async () => {
     await inProject();
-    const jazz = await startEncrypted(sqlite({ path: join(process.cwd(), "store") }), [
-      "tasks.notes",
-    ]);
+    const jazz = await startEncrypted(sqlite({ path: join(process.cwd(), "store") }));
     // The backend's types have no encrypted column: its reads never carry
     // one, and writing one is refused at runtime too.
     const app = keyless(testApp(encrypted));
@@ -177,22 +171,10 @@ describe("createJazz validates and opens encrypted apps with keyless hooks", () 
     expect(await jazz.db.all(app.tasks)).toEqual([]);
   });
 
-  it("refuses, naming the column, without confirmDecrypt", async () => {
-    await inProject();
-    await expect(startEncrypted(memory())).rejects.toThrow(/decrypting tasks\.notes/);
-  });
-
-  it("refuses when confirmDecrypt names only another column", async () => {
-    await inProject();
-    await expect(startEncrypted(memory(), ["tasks.title"])).rejects.toThrow(
-      /decrypting tasks\.notes/,
-    );
-  });
-
   it("leaves the SQLite store untouched when the app has invalid permissions", async () => {
     await inProject();
     await expect(
-      startEncrypted(sqlite({ path: join(process.cwd(), "store") }), ["tasks.notes"], {
+      startEncrypted(sqlite({ path: join(process.cwd(), "store") }), {
         tables: {},
       }),
     ).rejects.toThrow(/permissions.*must be the app's jazz\.permissions\.json/);
@@ -208,12 +190,11 @@ describe("createJazz validates and opens encrypted apps with keyless hooks", () 
 
   it("refuses an invalid encrypted app before sending a deployment request to a remote store", async () => {
     // Current bindings, so the app itself is what is refused: its
-    // permissions are not a jazz.permissions.json. (A remote store checks a
-    // decrypt's confirmation itself, when it receives the deployment.)
+    // permissions are not a jazz.permissions.json.
     await inProject();
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected request"));
     try {
-      await expect(startEncrypted(remoteStore(), ["tasks.notes"], { tables: {} })).rejects.toThrow(
+      await expect(startEncrypted(remoteStore(), { tables: {} })).rejects.toThrow(
         /permissions.*must be the app's jazz\.permissions\.json/,
       );
       expect(fetch).not.toHaveBeenCalled();
@@ -240,14 +221,9 @@ describe("createJazz validates and opens encrypted apps with keyless hooks", () 
       throw new Error(`unexpected request to ${url}`);
     });
     try {
-      await expect(startEncrypted(remoteStore(), ["tasks.notes"])).rejects.toThrow(
-        /stopped by the test/,
-      );
+      await expect(startEncrypted(remoteStore())).rejects.toThrow(/stopped by the test/);
       expect(published).toHaveLength(1);
-      const [deployment] = published as [
-        { encryption?: unknown; confirmDecrypt?: string[]; schemas: { schema: unknown }[] },
-      ];
-      expect(deployment.confirmDecrypt).toEqual(["tasks.notes"]);
+      const [deployment] = published as [{ encryption?: unknown; schemas: { schema: unknown }[] }];
       expect(JSON.stringify(deployment.encryption)).toContain('"tasks"');
       // The stored schema keeps the sealed columns as bytes and Jazz's system tables.
       expect(JSON.stringify(deployment.schemas)).toContain("__e2ee_members");
@@ -260,9 +236,7 @@ describe("createJazz validates and opens encrypted apps with keyless hooks", () 
     await inProject(notes);
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected request"));
     try {
-      await expect(startEncrypted(remoteStore(), ["tasks.notes"])).rejects.toThrow(
-        /bindings out of date/,
-      );
+      await expect(startEncrypted(remoteStore())).rejects.toThrow(/bindings out of date/);
       expect(fetch).not.toHaveBeenCalled();
     } finally {
       fetch.mockRestore();

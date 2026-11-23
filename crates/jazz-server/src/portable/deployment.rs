@@ -180,13 +180,20 @@ pub struct DeployRequest {
 pub struct DeployBody {
     #[serde(flatten)]
     pub request: DeployRequest,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "read_encryption")]
     pub encryption: Option<DeclaredEncryption>,
-    /// Decrypt conversions the deployer confirms, as `table.column`: the
-    /// server and every replica then hold their plaintext (migrations
-    /// §4.2).
-    #[serde(default)]
-    pub confirm_decrypt: Vec<String>,
+}
+
+fn read_encryption<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> Result<Option<DeclaredEncryption>, D::Error> {
+    Option::<DeclaredEncryption>::deserialize(reader).map_err(|error| {
+        if error.to_string().starts_with("unknown field") {
+            serde::de::Error::custom(format!("{error}; {}", encryption::COPY_GUIDE))
+        } else {
+            error
+        }
+    })
 }
 
 impl From<DeployRequest> for DeployBody {
@@ -194,7 +201,6 @@ impl From<DeployRequest> for DeployBody {
         Self {
             request,
             encryption: None,
-            confirm_decrypt: Vec::new(),
         }
     }
 }
@@ -353,7 +359,6 @@ pub fn prepare_encrypted(
     let DeployBody {
         request,
         encryption: declared,
-        confirm_decrypt,
     } = body;
     let declared = declared.unwrap_or_default();
     let stored = index.deployment_catalogue();
@@ -434,17 +439,6 @@ pub fn prepare_encrypted(
                 version,
                 encryption::encode_stored(initial).map_err(DeployError::internal)?,
             );
-        }
-        if let Some(given) = given
-            && let Some(unconfirmed) = encryption::new_decrypts(previous, given)
-                .into_iter()
-                .find(|column| !confirm_decrypt.contains(column))
-        {
-            return Err(DeployError::invalid(format!(
-                "decrypting {unconfirmed} puts its plaintext on the server and every replica; \
-                 confirm it with `confirmDecrypt: [\"{unconfirmed}\"]` (`confirmDecrypt` \
-                 on `createJazz`, `confirm_decrypt` on the Rust backend)"
-            )));
         }
     }
     let migrations = request

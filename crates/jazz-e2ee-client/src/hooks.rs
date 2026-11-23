@@ -87,7 +87,6 @@ pub(crate) fn code(error: DataError) -> UnreadableCode {
         DataError::SpacePending => UnreadableCode::SpacePending,
         DataError::UnsupportedFormat => UnreadableCode::UnsupportedFormat,
         DataError::EmptyCell => UnreadableCode::EmptyCell,
-        DataError::Superseded => UnreadableCode::Superseded,
         DataError::StaleSpace => UnreadableCode::StaleSpace,
         DataError::InvalidCiphertext | DataError::EncryptionFailed => {
             UnreadableCode::InvalidCiphertext
@@ -349,16 +348,7 @@ impl E2eeHooks for Hooks {
                 identifier(write.stored_space).map_err(|()| invalid_space())?,
             )
         };
-        let target = match &write.kind {
-            WriteKind::Move { target_space } => Some(
-                identifier(Some(target_space))
-                    .map_err(|()| invalid_space())?
-                    .ok_or_else(|| refused("a move names the space it moves to"))?,
-            ),
-            _ => None,
-        };
-        if target.is_none()
-            && let (Some(given), Some(stored)) = (&given, &stored)
+        if let (Some(given), Some(stored)) = (&given, &stored)
             && given != stored
         {
             return Err(refused(
@@ -403,11 +393,6 @@ impl E2eeHooks for Hooks {
             .filter(|name| plan.columns.contains_key(*name))
             .cloned()
             .collect();
-        if target.is_some() && encrypted.len() != plan.columns.len() {
-            return Err(refused(
-                "a move writes every encrypted column of the row again",
-            ));
-        }
         let encrypted_stream = write
             .streamed_column
             .is_some_and(|name| plan.columns.contains_key(name));
@@ -416,8 +401,7 @@ impl E2eeHooks for Hooks {
         }
         let identifier = match plan.self_space() {
             true => row_id.clone(),
-            false => target
-                .or(given)
+            false => given
                 .or(stored)
                 .ok_or_else(|| refused("an encrypted write names its space"))?,
         };
@@ -628,15 +612,10 @@ impl E2eeHooks for Hooks {
                 let opened = match &stored {
                     Err(()) => Opened::Unreadable(DataError::InvalidCiphertext),
                     Ok(None) => Opened::Empty,
-                    Ok(Some(stored)) => open_cell(
-                        &self.shared.registry,
-                        &keys.held,
-                        &target,
-                        &column,
-                        stored,
-                        false,
-                    )
-                    .map_err(failed)?,
+                    Ok(Some(stored)) => {
+                        open_cell(&self.shared.registry, &keys.held, &target, &column, stored)
+                            .map_err(failed)?
+                    }
                 };
                 let stored = stored.ok().flatten();
                 let streamed = stored.as_deref().is_some_and(|stored| {
@@ -672,11 +651,6 @@ impl E2eeHooks for Hooks {
                             None
                         }
                     },
-                    Opened::Cleared => {
-                        report(&mut outcome, notice(UnreadableCode::Superseded, &address));
-                        readable = false;
-                        None
-                    }
                     Opened::Missing { epoch_id } => {
                         self.shared.report(Report::MissingKey {
                             table: site.table.to_owned(),
@@ -984,27 +958,13 @@ impl E2eeHooks for Hooks {
     }
 }
 
-/// The plans of every declared table. Conversions and re-homes are not
-/// supported by this runtime yet and are refused here, at open.
+/// The plans of every declared table.
 pub(crate) fn plans(
     declarations: &E2eeDeclarations,
 ) -> Result<BTreeMap<String, TablePlan>, crate::error::ClientError> {
     use crate::error::ClientError;
     let mut plans = BTreeMap::new();
     for (table, entry) in &declarations.tables {
-        let conversion = entry.rehome.is_some()
-            || !entry.backfill.is_empty()
-            || entry.columns.values().any(|column| {
-                column.from.is_some()
-                    || column.to.is_some()
-                    || column.convert.is_some()
-                    || column.reverse.is_some()
-            });
-        if conversion {
-            return Err(ClientError::Unsupported(format!(
-                "table `{table}`: encrypted schema conversions are not supported yet"
-            )));
-        }
         if let Some(name) = entry
             .equality
             .iter()

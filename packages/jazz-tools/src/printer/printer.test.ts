@@ -394,12 +394,12 @@ describe("the schema printer", () => {
     expect(schema).toContain('.history("latest")');
   });
 
-  it("reports app-wide encryption settings and conversion fields instead of dropping them", () => {
+  it("reports sealedType, app-wide settings and unknown encryption fields", () => {
     const rooms = { columns: { name: "bytes", nameText: "string?" } };
     const encryption = {
       space: "id",
       scope: "rooms",
-      columns: { name: { type: "string", from: "nameText" } },
+      columns: { name: { type: "string", sealedType: "string", from: "nameText" } },
       backfill: ["name"],
     };
     const out = printSchemaTs(
@@ -416,9 +416,14 @@ describe("the schema printer", () => {
         reason: "Printing an encryption entry's backfill is not supported yet",
       },
       {
+        path: "tables.rooms.encryption.columns.name.sealedType",
+        text: '"string"',
+        reason: "Printing an encrypted column's field sealedType is not supported yet",
+      },
+      {
         path: "tables.rooms.encryption.columns.name.from",
         text: '"nameText"',
-        reason: "Printing an encrypted column's conversion field from is not supported yet",
+        reason: "Printing an encrypted column's field from is not supported yet",
       },
       {
         path: "encryption",

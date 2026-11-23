@@ -1,6 +1,4 @@
-//! The runtime's sweeps as plans (`E2EE_PROTOCOL.md` §3.2; migrations
-//! §3–§4): repairing a refused or lost creation's cells, tag backfill under
-//! each cell's own epoch, and re-homing or moving rows to another space.
+//! Repair of ciphertext sealed under a refused or lost creation (E2EE protocol §3.2).
 
 mod common;
 mod content_support;
@@ -16,16 +14,13 @@ use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::content::cells::{
     CellInput, Opened, SealedCell, begin_stream, open_cell, seal_cells,
 };
-use jazz_e2ee::protocol::content::convert::{
-    Backfill, Converted, Rehome, RehomeCell, backfill_token, move_row, rehome_row,
-};
 use jazz_e2ee::protocol::content::repair::{
     REPAIR_BATCH, RepairPlan, RepairRow, RepairTarget, Rewrite, plan_repair,
 };
 use jazz_e2ee::protocol::content::store::{StoreOwner, decode_document};
 use jazz_e2ee::protocol::content::{
-    CLEARED_MARKER, ContentError, CreationFate, DataError, EncryptedColumn, HeldKeys, KeyMark,
-    MissingKey, QueryPlan, RowTarget, TableTarget, UnsupportedQuery, plan_equality,
+    ContentError, CreationFate, DataError, EncryptedColumn, HeldKeys, KeyMark, MissingKey,
+    QueryPlan, RowTarget, TableTarget, plan_equality,
 };
 use jazz_e2ee::protocol::domain::SharedDomain;
 use jazz_e2ee::protocol::records::space::SpaceAddress;
@@ -197,7 +192,7 @@ fn repair_rewrites_only_cells_naming_the_losing_epoch() {
     ];
     let short_cells = [
         (title().column_id, &b""[..]),
-        (notes().column_id, &CLEARED_MARKER[..]),
+        (notes().column_id, &b"short"[..]),
     ];
     let elsewhere = "0a000000-0000-4000-8000-000000000003";
     let rows = [
@@ -274,7 +269,7 @@ fn repair_rewrites_only_cells_naming_the_losing_epoch() {
         .find(|cell| cell.column_id == title().column_id)
         .unwrap();
     assert_eq!(
-        value(open_cell(registry, &bob, &target, &title(), &title_cell.stored, false).unwrap()),
+        value(open_cell(registry, &bob, &target, &title(), &title_cell.stored).unwrap()),
         b"old"
     );
     let tagger = registry
@@ -306,7 +301,7 @@ fn repair_rewrites_only_cells_naming_the_losing_epoch() {
         .unwrap();
     assert_eq!(notes_cell.equality_token, None);
     assert_eq!(
-        value(open_cell(registry, &bob, &target, &notes(), &notes_cell.stored, false).unwrap()),
+        value(open_cell(registry, &bob, &target, &notes(), &notes_cell.stored).unwrap()),
         b"n1"
     );
     const { assert!(REPAIR_BATCH == 100) };
@@ -370,12 +365,12 @@ fn an_unrepaired_row_stays_unreadable_to_others_and_readable_to_its_author() {
     let registry = &world.shared.registry.clone();
     let stored = stored_of(&cells, &title());
     assert_eq!(
-        value(open_cell(registry, &repairing.alice, &target, &title(), stored, false).unwrap()),
+        value(open_cell(registry, &repairing.alice, &target, &title(), stored).unwrap()),
         b"mine"
     );
     let mut bob = held_of(world, BOB, ROW);
     let Opened::Missing { epoch_id } =
-        open_cell(registry, &bob, &target, &title(), stored, false).unwrap()
+        open_cell(registry, &bob, &target, &title(), stored).unwrap()
     else {
         panic!("missing");
     };
@@ -654,7 +649,6 @@ fn a_plaintext_that_is_not_a_value_of_its_column_is_skipped_and_the_rest_repaire
                 &row(&domain, &address, ROW_2),
                 &notes(),
                 &second[0].stored,
-                false,
             )
             .unwrap()
         ),
@@ -796,323 +790,6 @@ fn a_provider_failure_fails_the_repair() {
             .unwrap_err()
             .is_provider_failure()
     );
-}
-
-/// Alice's two spaces, `ROW` and `OTHER_ROW`, both held.
-fn two_spaces(seed: u64) -> (World, HeldKeys) {
-    let mut world = World::new(seed);
-    world.account(ALICE);
-    world.account(BOB);
-    world.add_member(ALICE);
-    world.add_member_of(OTHER_ROW, ALICE);
-    world.create(ALICE);
-    world.create_of(OTHER_ROW, ALICE);
-    let mut held = held_of(&world, ALICE, ROW);
-    held.hold(acquire_held(&world, ALICE, OTHER_ROW)).unwrap();
-    (world, held)
-}
-
-#[test]
-fn tag_backfill_uses_each_cells_own_epoch() {
-    let mut world = World::new(9);
-    world.account(ALICE);
-    world.add_member(ALICE);
-    world.create(ALICE);
-    let domain = shared(&world);
-    let address = space(ROW);
-    let target = row(&domain, &address, ROW_1);
-    let before = held_of(&world, ALICE, ROW);
-    let cells = seal_texts(
-        &world,
-        &write_key(&before, &address),
-        &target,
-        &[(title(), "x")],
-    );
-    let first_epoch = world.current();
-    world.rotate(ALICE);
-    let held = held_of(&world, ALICE, ROW);
-    let registry = &world.shared.registry;
-    let tagger = registry
-        .select(&MechanismConfig::default())
-        .unwrap()
-        .equality;
-    let backfill = |held: &HeldKeys, column: &EncryptedColumn<'_>, stored: &[u8]| {
-        backfill_token(registry, tagger, held, &target, column, stored, &Values)
-    };
-    assert_eq!(
-        backfill(&held, &title(), &cells[0].stored),
-        Ok(Backfill::Token {
-            epoch_id: first_epoch,
-            token: cells[0].equality_token.clone().unwrap()
-        })
-    );
-    assert!(matches!(
-        backfill(&HeldKeys::new(), &title(), &cells[0].stored),
-        Ok(Backfill::Skip(Opened::Missing { .. }))
-    ));
-    assert_eq!(
-        backfill(&held, &title(), b""),
-        Ok(Backfill::Skip(Opened::Empty))
-    );
-    // A plaintext that is not a value of the column: that cell alone.
-    let suite = registry.select(&MechanismConfig::default()).unwrap();
-    let bad = seal_cells(
-        &suite,
-        &write_key(&held, &address),
-        &target,
-        &[CellInput {
-            column: title(),
-            value: &[0xff],
-            equality: Some(EqualityValue::Text("x")),
-        }],
-        &mut TestRandom(5),
-    )
-    .unwrap()
-    .cells
-    .remove(0)
-    .stored;
-    assert_eq!(
-        backfill(&held, &title(), &bad),
-        Ok(Backfill::Skip(Opened::Unreadable(
-            DataError::InvalidCiphertext
-        )))
-    );
-    assert_eq!(
-        backfill(&held, &notes(), &cells[0].stored),
-        Err(ContentError::UnsupportedQuery(
-            UnsupportedQuery::UnindexedEquality
-        ))
-    );
-}
-
-#[test]
-fn a_rehomed_row_converts_whole_under_the_new_space() {
-    let (world, held) = two_spaces(10);
-    let domain = shared(&world);
-    let old = space(ROW);
-    let new = space(OTHER_ROW);
-    let from = row(&domain, &old, ROW_1);
-    let to = row(&domain, &new, ROW_1);
-    let cells = seal_texts(
-        &world,
-        &write_key(&held, &old),
-        &from,
-        &[(title(), "x"), (notes(), "n")],
-    );
-    let mut new_title = title();
-    new_title.column_id = "c1000000-0000-5000-8000-00000000000a";
-    let mut new_notes = notes();
-    new_notes.column_id = "c1000000-0000-5000-8000-00000000000b";
-    let registry = &world.shared.registry;
-    let suite = registry.select(&MechanismConfig::default()).unwrap();
-    let key = write_key(&held, &new);
-    let rehome = |cells: &[RehomeCell<'_>]| {
-        rehome_row(
-            registry,
-            &suite,
-            &held,
-            &from,
-            &key,
-            &to,
-            cells,
-            &Values,
-            &mut TestRandom(3),
-        )
-    };
-    let pairs = [
-        RehomeCell {
-            source: title(),
-            target: new_title,
-            stored: &cells[0].stored,
-        },
-        RehomeCell {
-            source: notes(),
-            target: new_notes,
-            stored: &cells[1].stored,
-        },
-        RehomeCell {
-            source: notes(),
-            target: new_notes,
-            stored: b"",
-        },
-        RehomeCell {
-            source: notes(),
-            target: new_notes,
-            stored: &CLEARED_MARKER,
-        },
-    ];
-    let Rehome::Converted(converted) = rehome(&pairs).unwrap() else {
-        panic!("converted");
-    };
-    let Converted::Cell(title_cell) = &converted[0] else {
-        panic!("a cell");
-    };
-    assert_eq!(title_cell.column_id, new_title.column_id);
-    assert_eq!(
-        value(open_cell(registry, &held, &to, &new_title, &title_cell.stored, false).unwrap()),
-        b"x"
-    );
-    let QueryPlan::Tokens(query) = plan_equality(
-        suite.equality,
-        &held,
-        &TableTarget {
-            domain: &domain,
-            space: &new,
-            table_id: TABLE,
-        },
-        &new_title,
-        &EqualityValue::Text("x"),
-        true,
-    )
-    .unwrap() else {
-        panic!("tokens");
-    };
-    assert_eq!(
-        query.tokens,
-        vec![title_cell.equality_token.clone().unwrap()]
-    );
-    assert!(matches!(&converted[1], Converted::Cell(cell) if cell.equality_token.is_none()));
-    assert_eq!(
-        converted[2],
-        Converted::Empty {
-            target_column: new_notes.column_id.into()
-        }
-    );
-    assert_eq!(
-        converted[3],
-        Converted::Cleared {
-            target_column: new_notes.column_id.into()
-        }
-    );
-    // A source that does not open stops this row only.
-    let mut damaged = cells[1].stored.clone();
-    let last = damaged.len() - 1;
-    damaged[last] ^= 1;
-    assert_eq!(
-        rehome(&[
-            pairs[0],
-            RehomeCell {
-                stored: &damaged,
-                ..pairs[1]
-            }
-        ]),
-        Ok(Rehome::Unconvertible {
-            column_id: notes().column_id.into(),
-            opened: Opened::Unreadable(DataError::InvalidCiphertext)
-        })
-    );
-    // Keys and spaces must line up.
-    let old_key = write_key(&held, &old);
-    assert_eq!(
-        rehome_row(
-            registry,
-            &suite,
-            &held,
-            &from,
-            &old_key,
-            &to,
-            &pairs,
-            &Values,
-            &mut TestRandom(3)
-        ),
-        Err(ContentError::Protocol(ProtocolError::InconsistentEvidence))
-    );
-    assert_eq!(
-        rehome_row(
-            registry,
-            &suite,
-            &held,
-            &from,
-            &old_key,
-            &from,
-            &pairs,
-            &Values,
-            &mut TestRandom(3)
-        ),
-        Err(ContentError::Protocol(ProtocolError::Crypto(
-            Error::InvalidInput
-        )))
-    );
-    // A streamed source is resealed by the runtime in bounded memory.
-    let (mut writer, mut stream) = begin_stream(
-        &suite,
-        &write_key(&held, &old),
-        &from,
-        &blob(),
-        &mut TestRandom(4),
-    )
-    .unwrap();
-    writer.update(b"large", &mut stream).unwrap();
-    writer.finish(&mut stream).unwrap();
-    assert_eq!(
-        rehome(&[RehomeCell {
-            source: blob(),
-            target: blob(),
-            stored: &stream
-        }]),
-        Ok(Rehome::Converted(vec![Converted::Stream {
-            source_column: blob().column_id.into(),
-            target_column: blob().column_id.into()
-        }]))
-    );
-}
-
-#[test]
-fn a_move_reencrypts_every_encrypted_column() {
-    let (world, held) = two_spaces(11);
-    let domain = shared(&world);
-    let old = space(ROW);
-    let new = space(OTHER_ROW);
-    let from = row(&domain, &old, ROW_1);
-    let to = row(&domain, &new, ROW_1);
-    let cells = seal_texts(
-        &world,
-        &write_key(&held, &old),
-        &from,
-        &[(title(), "x"), (notes(), "n")],
-    );
-    let registry = &world.shared.registry;
-    let suite = registry.select(&MechanismConfig::default()).unwrap();
-    let key = write_key(&held, &new);
-    let declared = [title(), notes()];
-    let movement = |stored: &[(&str, &[u8])]| {
-        move_row(
-            registry,
-            &suite,
-            &held,
-            &from,
-            &key,
-            &to,
-            &declared,
-            stored,
-            &Values,
-            &mut TestRandom(5),
-        )
-    };
-    let title_stored = (title().column_id, &cells[0].stored[..]);
-    let notes_stored = (notes().column_id, &cells[1].stored[..]);
-    assert_eq!(movement(&[title_stored]), Err(ContentError::Partial));
-    assert_eq!(
-        movement(&[title_stored, title_stored]),
-        Err(ContentError::Partial)
-    );
-    let Rehome::Converted(converted) = movement(&[notes_stored, title_stored]).unwrap() else {
-        panic!("converted");
-    };
-    for (column, (cell, expected)) in declared.iter().zip(converted.iter().zip(["x", "n"])) {
-        let Converted::Cell(cell) = cell else {
-            panic!("a cell");
-        };
-        assert_eq!(cell.column_id, column.column_id);
-        assert_eq!(
-            value(open_cell(registry, &held, &to, column, &cell.stored, false).unwrap()),
-            expected.as_bytes()
-        );
-    }
-    // An update sealed under the old space after the move is read as
-    // stale, not lost.
-    let stale = open_cell(registry, &held, &to, &title(), &cells[0].stored, false).unwrap();
-    assert_eq!(stale.report(), Some(DataError::StaleSpace));
 }
 
 /// A plaintext the reader cannot turn into a value for want of a decoder is

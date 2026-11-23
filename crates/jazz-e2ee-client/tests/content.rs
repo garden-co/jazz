@@ -782,10 +782,9 @@ fn streamed_values_are_sealed_under_the_held_key() {
 }
 
 /// Contract: an ordinary write cannot move an encrypted row to another
-/// space; a move re-encrypts every encrypted column under the target
-/// space's key in one serializable transaction, and must supply them all.
+/// space.
 #[test]
-fn only_a_move_reseals_a_row_under_another_space() {
+fn a_write_cannot_move_an_encrypted_row() {
     let server = authority();
     let client = open_client(Rc::new(MemoryStore::new()));
     let (db, _link, _) = online(&client, &server, None);
@@ -798,36 +797,9 @@ fn only_a_move_reseals_a_row_under_another_space() {
     let moved = block_on(db.update("notes", row, note(to, "moved"), Default::default()));
     assert_eq!(moved.unwrap_err().code, ErrorCode::WriteRejected);
 
-    let move_with = |cells: BTreeMap<String, Value>| {
-        let id = jazz::tools::OpenTransactionId::new();
-        block_on(db.begin_serializable(id)).unwrap();
-        let staged = block_on(db.tx_ref(id).move_to_space(
-            "notes",
-            row,
-            cells,
-            Value::Uuid(to),
-            Default::default(),
-        ));
-        match staged {
-            Ok(_) => block_on(db.commit_serializable_handle(id)).map(|_| ()),
-            Err(error) => {
-                db.abandon_transaction_handle(id).unwrap();
-                Err(error)
-            }
-        }
-    };
-    let partial = move_with(BTreeMap::from([("body".to_owned(), text("moved"))]));
-    assert_eq!(partial.unwrap_err().code, ErrorCode::WriteRejected);
-    move_with(BTreeMap::from([
-        ("body".to_owned(), text("moved")),
-        ("note".to_owned(), Value::Nullable(None)),
-        ("attachment".to_owned(), Value::Nullable(None)),
-        ("rank".to_owned(), Value::Nullable(None)),
-    ]))
-    .unwrap();
     let rows = all(&db, Query::from("notes")).unwrap();
-    assert_eq!(cell(&rows[0], "projectId"), Value::Uuid(to));
-    assert_eq!(cell(&rows[0], "body"), text("moved"));
+    assert_eq!(cell(&rows[0], "projectId"), Value::Uuid(from));
+    assert_eq!(cell(&rows[0], "body"), text(SECRET));
 }
 
 /// Contract: a read that selects no encrypted column opens nothing: every

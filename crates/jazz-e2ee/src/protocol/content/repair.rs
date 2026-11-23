@@ -175,7 +175,7 @@ pub fn plan_repair(
                 .iter()
                 .find(|column| column.column_id == *column_id)
                 .ok_or(Error::InvalidInput)?;
-            if repair.other_space || classify_short(stored, false).is_some() {
+            if repair.other_space || classify_short(stored).is_some() {
                 continue;
             }
             // A value that does not route names no epoch, so not the
