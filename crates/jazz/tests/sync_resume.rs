@@ -3207,3 +3207,307 @@ fn edits_above_a_deduplicated_offset_page_reach_it() {
     pump(&server, &client);
     check("a row inserted at the top and a prefix row edited");
 }
+
+/// Alice's durable replica at `path`, as `author`.
+fn open_durable(path: &std::path::Path, author: AuthorSubject) -> Db {
+    block_on(Db::open_at(
+        DbConfig::new(
+            schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([1; 16]),
+                author,
+            },
+        ),
+        path,
+        Default::default(),
+    ))
+    .unwrap()
+}
+
+/// A fresh directory for one durable replica, removed with the guard.
+struct StoreDir(std::path::PathBuf);
+
+impl StoreDir {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("jazz-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        StoreDir(dir)
+    }
+
+    fn store(&self) -> std::path::PathBuf {
+        self.0.join("store.sqlite")
+    }
+}
+
+impl Drop for StoreDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Alice subscribes to `rooms` and closes it, so its resume point stays
+/// stored with no open read, while her `messages` subscription stays open.
+/// Then her membership is deleted online: the messages read loses its rows
+/// (an `AccessLost` each), none of which `rooms` held. Returns the client
+/// and its link.
+fn a_closed_rooms_point_beside_an_access_loss(
+    server: &Db,
+    client: &Db,
+) -> (jazz::db::Upstream, jazz::db::SubscriptionStream) {
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let rooms = client.prepare_query(&Query::from("rooms")).unwrap();
+    let rooms = block_on(client.subscribe(&rooms, ReadOpts::default())).unwrap();
+    let messages = client.prepare_query(&Query::from("messages")).unwrap();
+    let messages = block_on(client.subscribe(&messages, ReadOpts::default())).unwrap();
+    pump(server, client);
+    drop(rooms);
+    pump(server, client);
+    (upstream, messages)
+}
+
+/// Whether reopening `rooms` on a new connection resumes it.
+fn rooms_resume(server: &Db, client: &Db, upstream: &jazz::db::Upstream) -> bool {
+    assert!(client.detach_connection(upstream));
+    let (client_side, server_side, _, resumes) = watched_pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(server, client);
+    let before = resumes.borrow().len();
+    let rooms = client.prepare_query(&Query::from("rooms")).unwrap();
+    let _rooms = block_on(client.subscribe(&rooms, ReadOpts::default())).unwrap();
+    pump(server, client);
+    let resumes = resumes.borrow();
+    assert_eq!(resumes.len(), before + 1, "rooms is asked for once");
+    resumes[before]
+}
+
+/// A closed read's resume point outlives an access loss that names none of
+/// the rows it held: the rows it held are stored with its point, so the
+/// eviction clears only the points of reads that held them.
+///
+/// ```text
+/// alice: rooms ─open, settle, close─► point stored with its held rows
+///        messages (open) ──AccessLost × 3── membership deleted
+/// alice reconnects, reopens rooms ──Read { since }──► resumes
+/// ```
+#[test]
+fn an_unrelated_access_loss_keeps_a_closed_reads_resume_point() {
+    let server = seeded(3);
+    let client = open(1, alice());
+    let (upstream, _messages) = a_closed_rooms_point_beside_an_access_loss(&server, &client);
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    pump(&server, &client);
+    assert!(
+        ids(&client, None).is_empty(),
+        "the room's messages are evicted"
+    );
+    assert!(
+        rooms_resume(&server, &client, &upstream),
+        "the closed rooms read resumes"
+    );
+}
+
+/// A store whose points were stored without held sets (by a build without
+/// `_jazz_read_holds`, or before it existed) clears as it always did: an
+/// access loss anywhere forgets every closed read's point, since nothing
+/// says what it held.
+#[test]
+fn a_store_without_held_sets_forgets_closed_points_on_any_access_loss() {
+    let server = seeded(3);
+    let dir = StoreDir::new("no-read-holds");
+    let path = dir.store();
+    {
+        let client = open_durable(&path, alice());
+        let (upstream, _messages) = a_closed_rooms_point_beside_an_access_loss(&server, &client);
+        assert!(client.detach_connection(&upstream));
+    }
+    // As a build that predates the table left it.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("DROP TABLE _jazz_read_holds", []).unwrap();
+    drop(conn);
+
+    let client = open_durable(&path, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let messages = client.prepare_query(&Query::from("messages")).unwrap();
+    let _messages = block_on(client.subscribe(&messages, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    pump(&server, &client);
+    assert!(ids(&client, None).is_empty());
+    assert!(
+        !rooms_resume(&server, &client, &upstream),
+        "the closed rooms read opens fresh, as before"
+    );
+}
+
+/// Held sets live with the resume points they describe, which are keyed by
+/// identity: the same store opened as another identity resumes nothing of
+/// alice's, and her held rows clear none of its reads.
+#[test]
+fn another_identity_takes_no_stored_held_set() {
+    let server = seeded(3);
+    let dir = StoreDir::new("read-holds-identity");
+    let path = dir.store();
+    {
+        let client = open_durable(&path, alice());
+        let (upstream, _messages) = a_closed_rooms_point_beside_an_access_loss(&server, &client);
+        assert!(client.detach_connection(&upstream));
+    }
+    let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let client = open_durable(&path, bob);
+    let (client_side, server_side, _, resumes) = watched_pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, bob).unwrap();
+    let rooms = client.prepare_query(&Query::from("rooms")).unwrap();
+    let _rooms = block_on(client.subscribe(&rooms, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        *resumes.borrow(),
+        [false],
+        "bob's rooms read opens fresh: alice's point is not his"
+    );
+}
+
+/// What storing each read's held rows costs, for the record (run with
+/// `ROWS=… cargo test … read_holds_cost -- --ignored --nocapture`, here and
+/// on the base revision, which runs the same steps without the table):
+/// the client's ticks for a large opening and for one-row changes (each
+/// rewrites the read's held set whole), the bytes stored, reopening the
+/// store, and resuming after the reload with and without the held sets.
+#[test]
+#[ignore = "a measurement, not a check"]
+fn read_holds_cost() {
+    use std::time::{Duration, Instant};
+    let rows: u32 = std::env::var("ROWS").map_or(10_000, |rows| rows.parse().unwrap());
+    let changes = 50;
+    let server = open(0, AuthorSubject::SYSTEM);
+    let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+        jazz::db::block_on(server.insert(
+            table,
+            values,
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    };
+    seed(
+        "rooms",
+        id(1, 0),
+        cells(&[("name", Value::String("room".into()))]),
+    );
+    seed(
+        "memberships",
+        id(2, 0),
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("member", Value::String(subject())),
+        ]),
+    );
+    for n in 0..rows {
+        seed(
+            "messages",
+            id(3, n),
+            cells(&[
+                ("room", Value::Uuid(id(1, 0).0)),
+                ("body", Value::String(format!("m{n}"))),
+            ]),
+        );
+    }
+    // The client's own ticks only: the server's are the same either way.
+    let timed_pump = |client: &Db| -> Duration {
+        let mut spent = Duration::ZERO;
+        for _ in 0..5 {
+            let started = Instant::now();
+            block_on(client.tick()).unwrap();
+            spent += started.elapsed();
+            block_on(server.tick()).unwrap();
+        }
+        let started = Instant::now();
+        block_on(client.tick()).unwrap();
+        spent + started.elapsed()
+    };
+    let dir = StoreDir::new("read-holds-cost");
+    let path = dir.store();
+    let query = Query::from("messages");
+    let opening;
+    let mut per_change = Vec::new();
+    {
+        let client = open_durable(&path, alice());
+        let (client_side, server_side, _) = pipe();
+        let upstream = block_on(client.connect_upstream(client_side));
+        server.accept_subscriber(server_side, alice()).unwrap();
+        let prepared = client.prepare_query(&query).unwrap();
+        let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+        opening = timed_pump(&client);
+        for n in 0..changes {
+            seed(
+                "messages",
+                id(4, n),
+                cells(&[
+                    ("room", Value::Uuid(id(1, 0).0)),
+                    ("body", Value::String(format!("new {n}"))),
+                ]),
+            );
+            per_change.push(timed_pump(&client));
+        }
+        assert!(client.detach_connection(&upstream));
+    }
+    per_change.sort();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let stored: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT count(*), coalesce(sum(length(holds)), 0) FROM _jazz_read_holds",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    drop(conn);
+    let file = std::fs::metadata(&path).unwrap().len();
+
+    // Reopen and resume: as stored, and with the held sets dropped (as a
+    // store without them, or the base revision, has it).
+    let without = dir.0.join("without.sqlite");
+    std::fs::copy(&path, &without).unwrap();
+    if stored.is_some() {
+        let conn = rusqlite::Connection::open(&without).unwrap();
+        conn.execute("DROP TABLE _jazz_read_holds", []).unwrap();
+    }
+    let mut report = Vec::new();
+    for (label, store) in [("with held sets", &path), ("without held sets", &without)] {
+        let started = Instant::now();
+        let client = open_durable(store, alice());
+        let prepared = client.prepare_query(&query).unwrap();
+        let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+        block_on(client.tick()).unwrap();
+        let reopen = started.elapsed();
+        let (client_side, server_side, shipped, resumes) = watched_pipe();
+        let started = Instant::now();
+        let _upstream = block_on(client.connect_upstream(client_side));
+        server.accept_subscriber(server_side, alice()).unwrap();
+        pump(&server, &client);
+        let resume = started.elapsed();
+        report.push(format!(
+            "{label}: reopen + subscribe {reopen:?}; resume {resume:?}, {} images, resumed {:?}",
+            shipped.borrow(),
+            resumes.borrow()
+        ));
+    }
+    eprintln!(
+        "read holds, {rows} rows: opening (client ticks) {opening:?}; one-row change \
+         (client ticks) median {:?}, p90 {:?}; stored sets {stored:?} (count, bytes); \
+         store file {file} bytes",
+        per_change[per_change.len() / 2],
+        per_change[per_change.len() * 9 / 10],
+    );
+    for line in report {
+        eprintln!("{line}");
+    }
+}
