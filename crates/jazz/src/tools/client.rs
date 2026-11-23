@@ -2595,14 +2595,19 @@ impl JazzClient {
 
     /// A wait on the server. The answer wins over the end of waiting: it
     /// is polled first, so what is already there is still returned.
-    async fn unless_waits_end<T>(
+    fn unless_waits_end<T>(
         &self,
         wait: impl std::future::Future<Output = Result<T>>,
-    ) -> Result<T> {
-        tokio::select! {
-            biased;
-            answer = wait => answer,
-            () = self.waits_ended() => Err(JazzError::ChannelClosed),
+    ) -> impl std::future::Future<Output = Result<T>> {
+        // Keep the SQL future out of the caller's cancellation select, even
+        // before its first poll on a small client or session thread stack.
+        let wait = Box::pin(wait);
+        async move {
+            tokio::select! {
+                biased;
+                answer = wait => answer,
+                () = self.waits_ended() => Err(JazzError::ChannelClosed),
+            }
         }
     }
 
