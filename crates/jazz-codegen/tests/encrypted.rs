@@ -49,7 +49,77 @@ fn bindings_expose_plaintext_and_hide_ciphertext() {
 #[test]
 fn encrypted_app_generates_its_committed_rust_byte_for_byte() {
     let generated = jazz_codegen::generate(Lang::Rust, &app_json()).unwrap();
+    if std::env::var_os("JAZZ_UPDATE_FIXTURES").is_some() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/apps/encrypted/src/jazz_app.rs");
+        std::fs::write(path, &generated).unwrap();
+        return;
+    }
     assert_eq!(generated, include_str!("apps/encrypted/src/jazz_app.rs"));
+}
+
+/// The members table's fixed policy refuses every update, so no language's
+/// bindings give it an update, an upsert or update advice: its row, insert,
+/// reads and deletes only. App tables keep theirs.
+#[test]
+fn members_table_gets_no_update_surface() {
+    let app = App::load(&app_json()).unwrap();
+    assert!(!app.table("__e2ee_members").unwrap().updatable);
+    assert!(app.table("projects").unwrap().updatable);
+    let generate = |lang| jazz_codegen::generate(lang, &app_json()).unwrap();
+
+    let rust = generate(Lang::Rust);
+    assert!(rust.contains("type Update = ::jazz_app_support::NoUpdate;"));
+    assert!(!rust.contains("E2eeMemberUpdate"));
+    assert!(rust.contains("impl ::jazz_app_support::Insert for NewE2eeMember"));
+    assert!(rust.contains("pub struct ProjectUpdate"));
+
+    let swift = generate(Lang::Swift);
+    assert!(swift.contains("public struct E2eeMember: Jazz.Row {"));
+    assert!(!swift.contains("E2eeMemberPatch"));
+    assert!(swift.contains("public struct NewE2eeMember: Jazz.Insert {"));
+    assert!(swift.contains("public struct Project: Jazz.Row, Jazz.Updatable {"));
+    assert!(swift.contains("public struct ProjectPatch: Jazz.Patch {"));
+
+    let kotlin = generate(Lang::Kotlin);
+    assert!(
+        kotlin.contains(
+            "public object E2eeMembers : tools.jazz.BaseTable<E2eeMember, NewE2eeMember>("
+        )
+    );
+    assert!(!kotlin.contains("E2eeMemberPatch"));
+    assert!(kotlin.contains("public data class NewE2eeMember("));
+    assert!(
+        kotlin.contains(
+            "public object Projects : tools.jazz.Table<Project, NewProject, ProjectPatch>("
+        )
+    );
+
+    let go = generate(Lang::Go);
+    for method in ["Update", "Upsert", "CanUpdate"] {
+        assert!(
+            !go.contains(&format!("func (e2eeMembersTable) {method}(")),
+            "{method}"
+        );
+        assert!(
+            go.contains(&format!("func (projectsTable) {method}(")),
+            "{method}"
+        );
+    }
+    assert!(!go.contains("E2eeMemberPatch"));
+    for method in [
+        "Query",
+        "Insert",
+        "Delete",
+        "CanRead",
+        "CanInsert",
+        "CanDelete",
+    ] {
+        assert!(
+            go.contains(&format!("func (e2eeMembersTable) {method}(")),
+            "{method}"
+        );
+    }
 }
 
 /// The TypeScript type map marks each encrypted column `encrypted: true`

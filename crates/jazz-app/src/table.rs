@@ -21,8 +21,9 @@ pub trait Table: Sized + Send + 'static {
     const COMPUTED_FROM: &'static [&'static str] = &[];
     /// Values for a new row.
     type New: Insert<Row = Self>;
-    /// A partial update of a row.
-    type Update: Update<Row = Self>;
+    /// A partial update of a row: an [`Update`], or [`NoUpdate`] for a
+    /// table whose rows never change (the members table).
+    type Update;
 
     /// Reads a row from its fields, by column name.
     fn decode(row: &mut Fields<'_>) -> Result<Self>;
@@ -44,6 +45,16 @@ pub trait Update: Send + 'static {
     /// The cells it changes, by column name.
     fn into_cells(self, implementations: &Implementations) -> Result<Vec<(String, Value)>>;
 }
+
+/// The [`Table::Update`] of a table whose policy refuses every update:
+/// it has no values, so no update, upsert or update advice names the table.
+pub enum NoUpdate {}
+
+/// A table whose rows can be updated: its [`Table::Update`] is an
+/// [`Update`]. Upserts need it.
+pub trait Updatable: Table<Update: Update<Row = Self>> {}
+
+impl<T: Table<Update: Update<Row = T>>> Updatable for T {}
 
 /// A row's fields, as a query delivered them.
 pub struct Fields<'a> {

@@ -30,7 +30,7 @@ use crate::include::Row;
 use crate::query::{Column, Query};
 use crate::read::ReadOptions;
 use crate::subscription::{self, Subscription};
-use crate::table::{Insert, Table, Update};
+use crate::table::{Insert, Table, Updatable, Update};
 use crate::transaction::Transaction;
 use crate::value::ColumnValue;
 use crate::writes::read_back;
@@ -401,7 +401,10 @@ impl OnBranch {
 
     /// Writes the row with this id in the head branch, as [`Jazz::upsert`].
     /// Returns it as this view now sees it.
-    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         let implementations = self.jazz.info.implementations.clone();
         let settle = self.jazz.settler()?;
         self.with_branch(move |client| async move {
