@@ -38,6 +38,11 @@ With `use {}`, run the whole block in `withContext(Dispatchers.IO)`.
   at the default tier and watch `syncStatus`.
 </Callout>
 
+<Callout type="warn" title="Known issue: a bearer user can't open offline">
+  An app signed in with a bearer token signs in with your backend when it opens, so it can't open
+  while your backend is unreachable, even with a persistent store.
+</Callout>
+
 ## Install
 
 From `2.0.0-beta.1`, `jazz-kotlin` isn't published to Maven Central. Until it's in a Maven
