@@ -68,9 +68,17 @@ async function sessionSecondOpen(r) {
   equal(value(await process.call("account", { h: "b" }), "account afterwards"), account, "the device account changed");
 }
 
-/** A cancelled open gives the store back: the same user's next open in this process succeeds. */
+/**
+ * A cancelled open gives the store back: the same user's next open in this process succeeds.
+ * Even rounds bring the network back and open at once: the cancelled attempt then races the next
+ * open (on beta.0, Go's background open meets it as `database is locked`). Odd rounds keep the
+ * cancelled attempt on the dead connection and open through a live one: a store it still holds
+ * shows deterministically, on a build that holds stores exclusively.
+ */
 async function cancelledOpen(r) {
+  const stuck = r.index % 2 === 1;
   const proxy = await r.proxy();
+  const live = stuck ? await r.proxy() : proxy;
   const dir = r.dir();
   const token = await r.stack.token(`cancel-${r.id}`);
   const process = await r.process();
@@ -81,10 +89,10 @@ async function cancelledOpen(r) {
   const ended = await opening.reply;
   r.time("cancelled open ends", ended.ms - 300);
   if (ended.ok) r.note("the cancelled open completed anyway");
-  await proxy.up();
-  const again = await r.open(process, { h: "b", dir, proxy, token });
+  if (!stuck) await proxy.up();
+  const again = await r.open(process, { h: "b", dir, proxy: live, token });
   r.time("next open", again.ms);
-  value(again, "the next open after a cancelled one");
+  value(again, stuck ? "the next open, the cancelled one still stuck" : "the next open, the network back");
   if (again.ms > 5_000) throw new Broken("the next open waited over 5 s for the cancelled one", `${again.ms} ms`);
   value(await process.call("close", { h: "b" }), "close");
 }
@@ -94,7 +102,7 @@ export default [
     id: "cancel.no-leak",
     title: "a cancelled open gives the store back: the next open in the process succeeds within 5 s",
     basis: "contract",
-    rounds: 16,
+    rounds: 48,
     jobs: 8,
     idle: true,
     run: cancelledOpen,
