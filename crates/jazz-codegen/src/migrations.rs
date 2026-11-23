@@ -153,7 +153,9 @@ pub fn create(
         ("name".to_string(), Json::string(name)),
         ("from".to_string(), Json::string(&version)),
     ];
-    migration.extend(diff(from, to)?);
+    // Jazz's system tables are Jazz's: the loader adds or drops them with
+    // the encryption declarations, so the authored diff leaves them out.
+    migration.extend(diff(&authored_tables(from), &authored_tables(to))?);
     let migrations = entry(top, "migrations", || Json::Array(Vec::new()), "history");
     let Json::Array(items) = migrations else {
         unreachable!("loaded above")
@@ -176,6 +178,13 @@ pub fn create(
         todos,
         note: None,
     })
+}
+
+/// `schema` without Jazz's system tables.
+fn authored_tables(schema: &Schema) -> Schema {
+    let mut schema = schema.clone();
+    schema.retain(|name, _| !artifact::system_tables::is_system_table(name.as_str()));
+    schema
 }
 
 /// `top[key]`, inserted after `after` (or at the end) when absent.
