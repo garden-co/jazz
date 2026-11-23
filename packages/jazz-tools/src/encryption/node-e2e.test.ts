@@ -219,15 +219,20 @@ describe("encryption on Node, end to end", () => {
 
   it("lists a device's published removal request", async () => {
     const host = await serve();
-    const first = await device(host);
-    const alice = await device(host, { key: first.session.exportDeviceKey() });
-    // The other active device can complete the request when it comes back.
-    await first.session.close();
+    const alice = await device(host);
+    // A device leaves only through another active device, so alice signs in on a second one first.
+    const other = await device(host, { key: alice.session.exportDeviceKey() });
+    await until(async () => {
+      const devices = await alice.db.encryption.devices.list();
+      return devices.filter((d) => d.status === "active").length >= 2 ? devices : undefined;
+    }, "alice's first device to see her second one");
+    // The other device is offline, so the request stays published rather than completed at once.
+    await other.session.close();
     const mine = async () => (await alice.db.encryption.devices.list()).find((d) => d.isThisDevice);
     expect((await mine())?.removalRequested).toBe(false);
     await alice.db.encryption.devices.requestRemoval();
     expect((await mine())?.removalRequested).toBe(true);
-  }, 60_000);
+  }, 90_000);
 
   it.each(["new", "existing"] as const)(
     "streams encrypted bytes when the project key is %s",
