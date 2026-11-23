@@ -326,7 +326,8 @@ public class Jazz internal constructor(
             data.collect { chunk -> io { upload.push(chunk) } }
             return decodeStored(table, io { upload.finish() })
         } catch (e: Throwable) {
-            withContext(NonCancellable) { io { runCatching { upload.abort() } } }
+            // Even once the app is closed: aborting gives the upload back.
+            withContext(NonCancellable) { ioAlways { runCatching { upload.abort() } } }
             throw e
         }
     }
@@ -472,9 +473,11 @@ public class Jazz internal constructor(
             io(block)
         }
 
-        internal suspend fun end(block: () -> Unit): Unit = run {
+        /** Commits or rolls back: even once the app is closed, so a rollback after [close] still reaches the native core. */
+        internal suspend fun end(block: () -> Unit): Unit = lock.withLock {
+            if (ended) throw JazzException.Closed()
             ended = true
-            block()
+            ioAlways(block)
         }
 
         public suspend fun <Row : Any> all(query: Query<Row>): List<Row> = run { decodeAll(query, tx.all(query.toJson())) }
@@ -634,9 +637,10 @@ public class Jazz internal constructor(
      * with it, the session reads `SignedOut`, and a [JazzAuth.Bearer]
      * provider isn't asked again. Calls already running end with
      * [JazzException.Closed] as the native core shuts down, which finishes
-     * in the background (it may still wait for local work, or a DNS lookup,
-     * in progress): [closeAndWait] waits for that, and opening the same
-     * `dataDir` waits for it by itself. Closing again does nothing, so
+     * in the background (it may still wait for local work in progress):
+     * [closeAndWait] waits for that, and opening the same `dataDir` in this
+     * process, or deleting it, waits for it by itself (another process may
+     * be refused until the teardown ends). Closing again does nothing, so
      * `use {}` and an explicit `close()` mix. It never throws: a failed
      * shutdown reaches [closeAndWait], and the app is closed all the same.
      */
@@ -688,6 +692,9 @@ public class Jazz internal constructor(
 
     private suspend fun <T> io(block: () -> T): T {
         checkOpen()
-        return withContext(dispatcher) { block() }
+        return ioAlways(block)
     }
+
+    /** [io] without the closed check: for what gives a handle back (rollback, abort). */
+    private suspend fun <T> ioAlways(block: () -> T): T = withContext(dispatcher) { block() }
 }
