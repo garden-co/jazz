@@ -12,8 +12,8 @@ The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). It
 `suspend` functions, and subscriptions are `Flow`s. It runs on JDK 17 or later, and on Android
 (minSdk 24).
 
-<Callout type="warn" title="Before 2.0.0-beta.1: close() can block for 30 seconds">
-  Up to and including 2.0.0-beta.0, `close()` (and the end of `use {}`) can block for 30 seconds
+<Callout type="warn" title="Before 2.0.0-beta.2: close() can block for 30 seconds">
+  Up to and including 2.0.0-beta.1, `close()` (and the end of `use {}`) can block for 30 seconds
   while a call is still waiting for the server: a write or `waitForSync` at `Global`, or a `Remote`
   read. On Android's main thread that makes the app stop responding (ANR). On those releases, call it
   off the main thread:
@@ -25,7 +25,7 @@ withContext(NonCancellable + Dispatchers.IO) { jazz.close() }
 `NonCancellable` matters in a `finally`: without it, a cancelled coroutine skips the `close()`.
 With `use {}`, run the whole block in `withContext(Dispatchers.IO)`.
 
-From 2.0.0-beta.1, `close()` returns at once, and `closeAndWait()` waits for the teardown.
+From 2.0.0-beta.2, `close()` returns at once, and `closeAndWait()` waits for the teardown.
 
 </Callout>
 
