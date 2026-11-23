@@ -9,7 +9,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createJazzClient, memoryPrivateStore } from "jazz-tools/backend";
+import { createJazzClient, keyless, memoryPrivateStore } from "jazz-tools/backend";
 import permissions from "../jazz.permissions.json" with { type: "json" };
 import { app, cleanUp, createRoom, device, serve, storedBytes, until } from "./harness";
 
@@ -247,15 +247,17 @@ describe("the server holds no plaintext of an encrypted column", () => {
       .insert(app.readMarkers, { roomId, reader: alice.account, lastReadAt: new Date() })
       .wait({ tier: "global" });
 
+    // The app typed as the backend reads it: its encrypted columns are absent.
+    const backendApp = keyless(app);
     const messages = await until(async () => {
-      const rows = await host.jazz.db.all(app.messages);
+      const rows = await host.jazz.db.all(backendApp.messages);
       return rows.length > 0 ? rows : undefined;
     }, "the backend to see the message");
     expect(messages[0]!.attachmentType).toBe("application/pdf");
     expect(messages[0]).not.toHaveProperty("text");
     expect(messages[0]).not.toHaveProperty("attachmentName");
     const markers = await until(async () => {
-      const rows = await host.jazz.db.all(app.readMarkers);
+      const rows = await host.jazz.db.all(backendApp.readMarkers);
       return rows.length > 0 ? rows : undefined;
     }, "the backend to see the marker");
     expect(markers[0]!.reader).toBe(alice.account);
