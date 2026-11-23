@@ -84,6 +84,8 @@ mod flat_joins;
 mod follow_memo;
 #[path = "../follow_memo_policy.rs"]
 mod follow_memo_policy;
+#[path = "../frozen_reference_column.rs"]
+mod frozen_reference_column;
 #[path = "../gather_policy_double_ref.rs"]
 mod gather_policy_double_ref;
 #[path = "../history_reads.rs"]

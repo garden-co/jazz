@@ -183,9 +183,34 @@ Switch only once the check passes with every writer stopped.
 ### 5. Switch reads and writes to the new table
 
 Ship the app version that reads and writes the new table: its code, relations and permissions point
-at `secureTasks` and follow the new reference columns. Its permissions give the referencing tables
-their write rules back, and keep the old table frozen. IDs you keep outside Jazz's relations, such
+at `secureTasks` and follow the new reference columns. IDs you keep outside Jazz's relations, such
 as in URLs, still work, because the rows keep their IDs.
+
+Its permissions keep the old table frozen, and give the referencing tables their write rules back
+for every column but the old reference. That column stays frozen until you drop it: an older
+client still running could otherwise change `taskId` alone and leave `secureTaskId` pointing
+elsewhere. An insert must leave it empty, and an update must keep it as it was (see
+[Update policies](/docs/schemas/policies#update-policies-old-row-vs-new-row)):
+
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "comments": {
+      "read": "…the rule it has now…",
+      "insert": { "allOf": ["…the rule it has now…", "taskId = null"] },
+      "update": {
+        "old": "…the rule it has now…",
+        "new": {
+          "allOf": ["…the rule it has now…", "exists comments(id = this.id, taskId = this.taskId)"]
+        }
+      },
+      "delete": "…the rule it has now…"
+    }
+  }
+}
+```
+
+A row whose `taskId` is empty keeps it empty under this rule, and its other columns stay writable.
 
 ### 6. Drop the old table later
 

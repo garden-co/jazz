@@ -325,8 +325,15 @@ cannot stop every writer as step 2 describes, is not covered.
    row's, means a writer was still running. The app switches only once the
    check passes with every writer stopped.
 5. Switch: ship the app version whose code, relations and permissions use
-   the new table and the new reference columns. Its permissions give the
-   referencing tables their write rules back and keep the old table frozen.
+   the new table and the new reference columns. Its permissions keep the
+   old table frozen, and give the referencing tables their write rules back
+   for every column but the old reference, which stays frozen until it is
+   dropped: otherwise an older client still running could change it alone
+   and leave the new reference stale. An insert must leave it null, and an
+   update must keep it (`updateTo` comparing with the old row, which
+   compiles to `exists <table>(id = this.id, <column> = this.<column>)`;
+   null equals null there, so a row without the reference keeps its other
+   columns writable: [the test](../tests/frozen_reference_column.rs)).
    IDs kept outside Jazz's relations, such as in URLs, still resolve,
    because the copies keep their IDs.
 6. Drop the old table in a later migration, with the old reference columns
