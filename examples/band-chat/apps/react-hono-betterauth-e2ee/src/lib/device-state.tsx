@@ -155,6 +155,7 @@ export function DeviceStateProvider({
     };
   }, [refresh, pollMs]);
 
+  // #region bandchat-answer-challenge
   const answerChallenge = useCallback(async () => {
     try {
       const code = await encryption.devices.answer();
@@ -176,6 +177,7 @@ export function DeviceStateProvider({
       stopReports();
     };
   }, [encryption, answerChallenge]);
+  // #endregion bandchat-answer-challenge
 
   const retryReady = useCallback(async () => {
     try {

@@ -8,8 +8,9 @@ This page walks through one real app. It is BandChat with end-to-end encryption,
 `examples/band-chat/apps/react-hono-betterauth-e2ee`.
 It is a React app with a Hono server and Better Auth for sign-in.
 
-The code below is the app's own code, trimmed where it says so. Each section links to the reference
-page that has the full detail.
+The code blocks below are included from the app's source, so they are the app's own code. Each
+block is one part of the file named in its title; the text says what a block leaves out. Each
+section links to the reference page that has the full detail.
 
 ## What BandChat hides, and what it does not
 
@@ -26,6 +27,7 @@ The server still sees the rest:
 - Who is in which room.
 - Who wrote a message, and when.
 - Room names, reactions and sketches.
+- Each person's profile: their display name and avatar.
 - The type and the size of an attachment.
 - When each read marker was written. The stored time is encrypted. The moment of the write is not,
   and it shows about when that person read the room.
@@ -39,40 +41,20 @@ one member another's marker. Reading it takes a member and the server together.
 Mark each column to seal with `.encrypted()`. Give its table a `space`: the row whose members share
 one key. In BandChat a room is its own space, so the messages and the read markers name `"room"`.
 
-This is `schema.ts`, trimmed to the three tables that matter:
+These are the three tables of `schema.ts` that matter here. The file also has the profiles, the
+app's own `roomMembers` table, join requests, reactions and sketches:
 
-```ts title="schema.ts"
-import { schema as s } from "jazz-tools";
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/schema.ts#bandchat-schema-rooms
+</include>
 
-export const schema = s.defineSchema({
-  // The name stays plain, so a room is listed before its key arrives.
-  rooms: s.table({ name: s.string() }),
-  // One private row per reader and room. The time is sealed with the room's key.
-  readMarkers: s.table(
-    { roomId: s.uuid(), reader: s.uuid(), lastReadAt: s.timestamp().encrypted() },
-    { room: s.rel("rooms", "roomId") },
-    { space: "room" },
-  ),
-  // The text and the attachment are sealed. Who wrote when stays plain.
-  messages: s
-    .table(
-      {
-        roomId: s.uuid(),
-        senderId: s.uuid(),
-        text: s.string().encrypted(),
-        attachment: s.bytes().optional().encrypted(),
-        attachmentName: s.string().optional().encrypted(),
-        attachmentType: s.string().optional(),
-        attachmentSize: s.int().optional(),
-      },
-      { room: s.rel("rooms", "roomId") },
-      { space: "room" },
-    )
-    // A room's newest message is one index entry, so the room list reads it
-    // without sorting the room's history.
-    .compositeIndex(["roomId", "$createdAt"]),
-});
-```
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/schema.ts#bandchat-schema-read-markers
+</include>
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/schema.ts#bandchat-schema-messages
+</include>
 
 Run `npx jazz-tools generate`. It writes the encryption into `jazz.app.json` and the typed
 bindings into `jazz.generated.ts`. Your code sees the plain types. `text` is a string, even though
@@ -85,40 +67,26 @@ Membership is one thing: the rows of Jazz's members table. `isMember("rooms", ro
 the signed-in account has a member row for that room. Every rule that means "is in this room" says
 that, and nothing else.
 
-```ts title="permissions.ts"
-import { schema } from "./schema";
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/permissions.ts#bandchat-permissions-is-member
+</include>
 
-const { definePermissions, allOf, session, isMember } = schema;
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/permissions.ts#bandchat-permissions-rooms
+</include>
 
-const isRoomMember = (roomId: Parameters<typeof isMember>[1]) => isMember("rooms", roomId);
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/permissions.ts#bandchat-permissions-messages
+</include>
 
-export const permissions = definePermissions({
-  rooms: {
-    read: (room) => isRoomMember(room.id),
-    insert: true,
-    // Whoever may update a room manages its members, so only the creator may.
-    update: { "$createdBy.account": session.user },
-    delete: { "$createdBy.account": session.user },
-  },
-  messages: {
-    read: (message) => isRoomMember(message.roomId),
-    insert: (message) => isRoomMember(message.roomId),
-    update: false,
-  },
-  // The read rule is narrower than the room's. See "Know the limits" below.
-  readMarkers: {
-    read: (marker) => allOf({ reader: session.user }, isRoomMember(marker.roomId)),
-    insert: (marker) => allOf({ reader: session.user }, isRoomMember(marker.roomId)),
-    updateIf: { reader: session.user },
-    updateTo: (marker) => allOf({ reader: session.user }, isRoomMember(marker.roomId)),
-    delete: { reader: session.user },
-  },
-});
-```
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/permissions.ts#bandchat-permissions-read-markers
+</include>
 
-This is trimmed. The real file also has the rules for profiles, reactions, sketches, join requests
-and the app's own `roomMembers` table. Its `messages` rules also check the sender, and let only the
-sender delete a message.
+These are the rules for rooms, messages and read markers. The file also has the rules for profiles,
+reactions, sketches, join requests and the app's own `roomMembers` table. Its helpers read as their
+names say: `createdByMe` is `{ "$createdBy.account": session.user }`, `authoredByMe` is
+`{ author: session.user }` and `myReadMarker` is `{ reader: session.user }`.
 
 Two choices matter here.
 
@@ -133,59 +101,28 @@ In a browser, Jazz keeps the device's keys for you, in IndexedDB. You pass `app`
 columns are encrypted before the first query. You do not write a private store. Apps on Node and the
 native platforms do: see [Private store](/docs/e2ee/private-store).
 
-This is BandChat's provider:
+This is BandChat's provider. The file also defines the loading, signed-out and error screens it
+names:
 
-```tsx
-import { JazzProvider as Jazz } from "jazz-tools/react";
-import { app } from "./jazz.generated";
+<include cwd lang="tsx" meta='title="components/jazz-provider.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/components/jazz-provider.tsx#bandchat-provider-load
+</include>
 
-// Start on the thin client. Load the local-first client, which holds the keys,
-// in its own chunk once the page has loaded.
-const loadLocalFirst = () => import("jazz-tools/local-first");
-
-export function JazzProvider({ children }: React.PropsWithChildren) {
-  return (
-    <Jazz config={{ serverUrl: "/jazz", client: loadLocalFirst, encryption: { app } }}>
-      {children}
-    </Jazz>
-  );
-}
-```
+<include cwd lang="tsx" meta='title="components/jazz-provider.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/components/jazz-provider.tsx#bandchat-provider
+</include>
 
 The app starts on the thin client, which holds no keys. Rooms and other plain data show at once.
 Message text waits for the local-first client. See
 [Encryption in the browser](/docs/e2ee/browser#before-the-local-first-client-has-loaded).
 
 The server holds no keys at all. `createJazz` stores and relays the encrypted columns as bytes.
-Here is the heart of `server/jazz.ts`:
+This is `jazz()` in `server/jazz.ts`. It stores the data on a remote Jazz server when one is
+configured, in memory under tests and in SQLite otherwise, and reads the session with Better Auth:
 
-```ts
-import { createJazz, memory } from "jazz-tools/backend";
-import { app } from "./jazz.generated";
-import permissions from "./jazz.permissions.json" with { type: "json" };
-
-export const jazz = createJazz({
-  app,
-  permissions,
-  store: memory(),
-  // Better Auth's session cookie says who the user is.
-  authenticate: async (request) => {
-    const session = await readBetterAuthSession(request);
-    return session
-      ? {
-          userId: session.user.id,
-          expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
-        }
-      : null;
-  },
-}).ready();
-
-declare function readBetterAuthSession(
-  request: Request,
-): Promise<{ user: { id: string }; session: { expiresAt: Date } } | null>;
-```
-
-The real file uses `sqlite({ path })` outside tests and reads the session with `auth.api.getSession`.
+<include cwd lang="ts" meta='title="server/jazz.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/server/jazz.ts#bandchat-server-jazz
+</include>
 
 ## Create a room and its first member
 
@@ -193,23 +130,11 @@ A room and its creator's member row commit together. Without the member row, the
 read their own room.
 
 `members.row` makes the row to insert. The app chooses the room's ID first, so the row can name it.
+This is the body of the new-room dialog's submit handler:
 
-```ts
-import type { Db } from "jazz-tools";
-import { app } from "./jazz.generated";
-
-export async function createRoom(db: Db, author: string, profileId: string, name: string) {
-  const roomId = crypto.randomUUID();
-  const creatorMember = await db.encryption.members.row({ table: "rooms", id: roomId }, author);
-  const written = await db.transaction((tx) => {
-    tx.insert(app.rooms, { name }, { id: roomId });
-    tx.insert(app.__e2ee_members, creatorMember);
-    tx.insert(app.roomMembers, { roomId, memberAuthor: author, memberProfileId: profileId });
-  });
-  await written.wait({ tier: "global" });
-  return roomId;
-}
-```
+<include cwd lang="tsx" meta='title="src/components/NewRoomDialog.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/NewRoomDialog.tsx#bandchat-create-room
+</include>
 
 `app.roomMembers` is BandChat's own table. It carries each member's profile, so the members list
 can show names. Jazz does not read it. The member row is what decides who holds the key.
@@ -218,35 +143,12 @@ can show names. Jazz does not read it. The member row is what decides who holds 
 
 A room link only lets someone ask to join. They add a join request. The creator then admits them.
 
-Admission is one transaction. It inserts the member row, inserts the profile row and deletes the
+Admission is one transaction. It inserts the member row and the `roomMembers` row, and deletes the
 request. Then the app calls `keys.deliver()`.
 
-```ts
-import type { Db } from "jazz-tools";
-import { app } from "./jazz.generated";
-
-export async function admitMember({
-  db,
-  roomId,
-  memberAuthor,
-  memberProfileId,
-  requestIds,
-}: {
-  db: Db;
-  roomId: string;
-  memberAuthor: string;
-  memberProfileId: string;
-  requestIds: string[];
-}): Promise<void> {
-  const memberRow = await db.encryption.members.row({ table: "rooms", id: roomId }, memberAuthor);
-  const written = await db.transaction((tx) => {
-    tx.insert(app.__e2ee_members, memberRow);
-    tx.insert(app.roomMembers, { roomId, memberAuthor, memberProfileId });
-    for (const id of requestIds) tx.delete(app.joinRequests, id);
-  });
-  await written.wait({ tier: "global" });
-}
-```
+<include cwd lang="ts" meta='title="src/lib/membership.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/membership.ts#bandchat-admit-member
+</include>
 
 Being admitted does not give the person the key. Their devices get it from a device that already
 holds it. That device has to be online. Until then the new member sees the room's messages as
@@ -263,40 +165,9 @@ Ask Jazz for a filter. Then pass it to an ordinary query. If the browser opens o
 Jazz knows the room table's identity, the filter can fail. BandChat shows the reason and offers
 a Retry button.
 
-```tsx
-import { useEffect, useState } from "react";
-import type { Db } from "jazz-tools";
-import { useAll } from "jazz-tools/react";
-import { app, type E2eeMember } from "./jazz.generated";
-
-export function useRoomMembers(roomId: string): {
-  members: E2eeMember[] | undefined;
-  loadFailure: { reason: string; retry: () => void } | undefined;
-} {
-  const [filter, setFilter] = useState<Awaited<ReturnType<Db["encryption"]["members"]["where"]>>>();
-  const [error, setError] = useState<string>();
-  const [attempt, setAttempt] = useState(0);
-  const { data, db } = useAll(filter ? app.__e2ee_members.where(filter) : undefined);
-  useEffect(() => {
-    let isLive = true;
-    setFilter(undefined);
-    setError(undefined);
-    db.encryption.members.where({ table: "rooms", id: roomId }).then(
-      (found) => isLive && setFilter(found),
-      (cause: unknown) =>
-        isLive && setError(cause instanceof Error ? cause.message : String(cause)),
-    );
-    return () => {
-      isLive = false;
-    };
-  }, [attempt, db, roomId]);
-  return {
-    members: data,
-    loadFailure:
-      error === undefined ? undefined : { reason: error, retry: () => setAttempt((n) => n + 1) },
-  };
-}
-```
+<include cwd lang="ts" meta='title="src/lib/membership.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/membership.ts#bandchat-room-members
+</include>
 
 The list comes from the member rows. A person with a member row is listed, even if they have no
 `roomMembers` row or no profile. They show as "Unknown".
@@ -313,61 +184,20 @@ Removal needs two steps. BandChat does both.
 
 This is the first step:
 
-```ts
-import { PersistedWriteRejectedError, type Db } from "jazz-tools";
-import { app } from "./jazz.generated";
+<include cwd lang="ts" meta='title="src/lib/membership.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/membership.ts#bandchat-remove-member
+</include>
 
-const ATTEMPTS = 3;
-
-export async function removeMember({
-  db,
-  roomId,
-  accountId,
-}: {
-  db: Db;
-  roomId: string;
-  accountId: string;
-}): Promise<number> {
-  const filter = await db.encryption.members.where({ table: "rooms", id: roomId }, accountId);
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const written = await db.serializableTransaction(async (tx) => {
-        const memberRows = await tx.all(app.__e2ee_members.where(filter), { tier: "remote" });
-        const profileRows = await tx.all(
-          app.roomMembers.where({ roomId, memberAuthor: accountId }),
-          { tier: "remote" },
-        );
-        for (const row of memberRows) tx.delete(app.__e2ee_members, row.id);
-        for (const row of profileRows) tx.delete(app.roomMembers, row.id);
-        return memberRows.length;
-      });
-      return await written.wait();
-    } catch (error) {
-      if (
-        attempt >= ATTEMPTS ||
-        !(error instanceof PersistedWriteRejectedError) ||
-        (error.code !== "serialization_conflict" && error.code !== "transaction_conflict")
-      )
-        throw error;
-    }
-  }
-}
-```
-
-The real function can also delete a leaver's read markers in the same transaction.
+With `deleteMarkers`, the same transaction also deletes a leaver's read markers.
 
 BandChat asks Jazz to rotate the room's key once the server confirms that member rows were
 removed. A removal count of zero means the creator may be unable to see that member's rows.
 BandChat shows that no member rows were removed. If the room has no key yet, the rotation call
 succeeds and returns `0`. A room gets its key from its first encrypted write.
 
-```ts
-import type { Db } from "jazz-tools";
-
-export function renewRoomKey(db: Db, roomId: string): Promise<number> {
-  return db.encryption.keys.rotate({ table: "rooms", id: roomId });
-}
-```
+<include cwd lang="ts" meta='title="src/lib/membership.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/membership.ts#bandchat-renew-room-key
+</include>
 
 If the rotation fails, the dialog says "Removed, but the room's key is not renewed yet" and offers a
 retry. The member is already out. The key is not yet new.
@@ -386,34 +216,18 @@ A browser that lacks a room's key does not show empty rooms. It says the message
 
 Every read result has an `unreadable` list. It names the rows the read left out. BandChat counts it:
 
-```tsx
-import { useAll } from "jazz-tools/react";
-import { app } from "./jazz.generated";
+<include cwd lang="tsx" meta='title="src/components/RoomView.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/RoomView.tsx#bandchat-locked-count
+</include>
 
-export function LockedNotice({ roomId }: { roomId: string }) {
-  const { data: messages = [], unreadable } = useAll(app.messages.where({ roomId }));
-  return unreadable.length > 0 ? (
-    <p>
-      {unreadable.length} messages are locked on this browser. {messages.length} are shown.
-    </p>
-  ) : null;
-}
-```
-
-The messages appear by themselves once the key arrives.
+When the count is above zero, the room shows a banner saying how many messages are locked on this
+browser. The messages appear by themselves once the key arrives.
 
 The room list needs no key. For each room it asks for the newest message, using plain columns only:
 
-```ts
-import { app } from "./jazz.generated";
-
-export const newestMessage = (roomId: string) =>
-  app.messages
-    .where({ roomId })
-    .select("id", "senderId", "$createdAt")
-    .orderBy("$createdAt", "desc")
-    .limit(1);
-```
+<include cwd lang="tsx" meta='title="src/components/RoomActivity.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/RoomActivity.tsx#bandchat-newest-message
+</include>
 
 The `["roomId", "$createdAt"]` index in the schema makes this one index entry per room. The list
 orders rooms by it, and marks a room unread when its newest message is newer than the reader's read
@@ -425,33 +239,18 @@ handful of rooms, not hundreds.
 Each browser is one device. A new browser starts as **waiting for approval**. Its messages stay
 locked. A device that is already active approves it.
 
-On the new browser, answer the challenge. It shows a six-digit code:
+BandChat keeps `db.encryption` in a context as `encryption`. On the new browser, answer the
+challenge. It shows a six-digit code:
 
-```ts
-import type { Db } from "jazz-tools";
-
-export function showCodeWhenChallenged(db: Db, show: (code: string) => void): () => void {
-  return db.encryption.onChallenge(async () => {
-    show(await db.encryption.devices.answer());
-  });
-}
-```
+<include cwd lang="tsx" meta='title="src/lib/device-state.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/device-state.tsx#bandchat-answer-challenge
+</include>
 
 On the active browser, start the approval, wait for the new browser's answer, then type its code:
 
-```ts
-import type { Db } from "jazz-tools";
-
-export async function approveWaitingDevice(db: Db, confirmCode: () => Promise<string>) {
-  const waiting = (await db.encryption.devices.list()).filter(
-    (device) => device.status === "waiting",
-  );
-  const session = await db.encryption.devices.challenge(waiting[0].id);
-  // `code()` is null until the new browser has answered.
-  while ((await session.code()) === null) await new Promise((resolve) => setTimeout(resolve, 1500));
-  await session.approve(await confirmCode());
-}
-```
+<include cwd lang="tsx" meta='title="src/components/DevicesPanel.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#bandchat-approve-device
+</include>
 
 In BandChat the person types the code that the new browser shows. A wrong code approves nothing.
 The code is how a server that swapped keys gets caught. See
@@ -465,32 +264,17 @@ again, and the active one may start again.
 If a person loses every device and has no recovery, they lose their encrypted messages for good.
 Clearing site data on the only browser does the same. So BandChat has one button: "Set up recovery".
 
-```ts
-import type { Db } from "jazz-tools";
-
-export async function setUpRecovery(db: Db, accountName: string) {
-  const result = await db.encryption.recovery.enable({ appName: "BandChat", accountName });
-  // A passkey holds the secret, or the app shows a phrase once and keeps no copy.
-  return result.method === "phrase" ? result.phrase : null;
-}
-```
+<include cwd lang="tsx" meta='title="src/components/DevicesPanel.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#bandchat-enable-recovery
+</include>
 
 `enable` saves the secret in a passkey where the browser offers one. Otherwise it returns a
 24-word phrase. BandChat shows the phrase once, keeps it nowhere, and sends it nowhere.
 
-A browser that is waiting for approval offers both ways back:
-
-```ts
-import type { Db } from "jazz-tools";
-
-export async function restoreWithPhrase(db: Db, phrase: string) {
-  await db.encryption.recovery.restore(phrase.trim());
-}
-
-export async function restoreWithPasskey(db: Db) {
-  await db.encryption.recovery.restoreFromPasskey({ appName: "BandChat" });
-}
-```
+A browser that is waiting for approval offers both ways back, in `RestoreAccess` in
+`src/components/DevicesPanel.tsx`. Its phrase form calls `encryption.recovery.restore(words)` with
+the trimmed phrase, and clears the field before the call. Its passkey button calls
+`encryption.recovery.restoreFromPasskey({ appName: APP_NAME })`, where `APP_NAME` is `"BandChat"`.
 
 ## Remove a lost device
 
@@ -506,18 +290,13 @@ ends the person's sign-ins first, and removes the device second.
    closes the user's open connections.
 2. **The device step.** When the route answers, the browser calls `devices.remove(id)`.
 
-```ts
-import type { Db } from "jazz-tools";
+<include cwd lang="ts" meta='title="src/lib/end-other-sign-ins.ts"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/lib/end-other-sign-ins.ts#bandchat-end-other-sign-ins
+</include>
 
-export async function removeLostDevice(db: Db, deviceId: string) {
-  const response = await fetch("/api/end-other-sign-ins", {
-    method: "POST",
-    credentials: "same-origin",
-  });
-  if (!response.ok) throw new Error(`The server could not sign your other browsers out.`);
-  await db.encryption.devices.remove(deviceId);
-}
-```
+<include cwd lang="tsx" meta='title="src/components/DevicesPanel.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#bandchat-remove-lost-device
+</include>
 
 The route is in `server/index.ts` and `server/jazz.ts`. It lists the user's sessions page by page,
 because Better Auth lists at most 100 at a time, and it deletes them until only the caller's is left.
@@ -555,15 +334,12 @@ app's origin, can ask the browser to use the kept keys. There are two ways to re
 - **Before you sign out,** press "Leave this browser".
 - **Afterwards,** press "Remove lost device" on it from another device.
 
-**Leaving** asks another device to remove this browser. It calls `requestRemoval`:
+**Leaving** asks another device to remove this browser. It calls `requestRemoval`, after keeping a
+record of the leave (see below):
 
-```ts
-import type { Db } from "jazz-tools";
-
-export async function leaveThisBrowser(db: Db) {
-  await db.encryption.devices.requestRemoval();
-}
-```
+<include cwd lang="tsx" meta='title="src/components/DevicesPanel.tsx"'>
+  ../examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#bandchat-leave-browser
+</include>
 
 A sole device cannot leave. Nothing would hold the account's keys. The call fails with the code
 `no-other-device`, and BandChat says an only device cannot leave.
@@ -597,8 +373,8 @@ Leaving wipes the keys, not the browser's local copy of the plain data.
 ## Know the limits
 
 - **The server sees more than the content.** It sees who is in which room, who wrote when, room
-  names, reactions, sketches, attachment types and sizes, and when each read marker was written. A
-  marker's write time shows about when its reader read.
+  names, reactions, sketches, profile names and avatars, attachment types and sizes, and when each
+  read marker was written. A marker's write time shows about when its reader read.
 - **Read markers are not hidden from co-members.** The room's key seals them, so every member could
   open one. A deploy of BandChat prints one warning for this: the read-marker rule is narrower than
   its room's, so every member of a room can decrypt a marker that Jazz does not send them. That is

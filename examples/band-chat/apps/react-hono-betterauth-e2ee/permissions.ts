@@ -4,9 +4,11 @@ import { permissions as betterAuthPermissions } from "./schema-better-auth/schem
 
 const { definePermissions, exists, allowedTo, session, anyOf, allOf, ne, isMember } = schema;
 
+// #region bandchat-permissions-is-member
 // Membership is Jazz's members table: the member rows are what decides who
 // holds a room's key, so every "is a room member" rule reads them.
 const isRoomMember = (roomId: Parameters<typeof isMember>[1]) => isMember("rooms", roomId);
+// #endregion bandchat-permissions-is-member
 
 const createdByMe = { "$createdBy.account": session.user };
 
@@ -42,6 +44,7 @@ export const permissions = definePermissions({
     update: false,
     delete: (request) => anyOf(requestedByMe, request.room.where(createdByMe)),
   },
+  // #region bandchat-permissions-messages
   messages: {
     read: (message) => isRoomMember(message.roomId),
     insert: (message) =>
@@ -53,6 +56,7 @@ export const permissions = definePermissions({
     update: false,
     delete: (message) => message.sender.where(authoredByMe),
   },
+  // #endregion bandchat-permissions-messages
   profiles: {
     // Profiles are visible to their owner, to anyone who can read a message
     // they sent or a membership that names them (co-members), and to a room
@@ -74,6 +78,7 @@ export const permissions = definePermissions({
     update: false,
     delete: canMutateReaction,
   },
+  // #region bandchat-permissions-read-markers
   // Read markers: one "read up to" row per member and room, no history. The
   // stored time is sealed with the room's key, so every member of the room
   // could decrypt it; the read rule keeps the server from sending it to them.
@@ -84,6 +89,7 @@ export const permissions = definePermissions({
     updateTo: (marker) => allOf(myReadMarker, isRoomMember(marker.roomId)),
     delete: myReadMarker,
   },
+  // #endregion bandchat-permissions-read-markers
   roomMembers: {
     read: (member) => allowedTo.read(member.room),
     // Only the room creator can admit members. In particular, no rule permits an
@@ -113,6 +119,7 @@ export const permissions = definePermissions({
     // The creator removes members; a member may also leave on their own.
     delete: (member) => anyOf(member.room.where(createdByMe), myMembership),
   },
+  // #region bandchat-permissions-rooms
   rooms: {
     // The creator's member row is inserted in the transaction that creates
     // the room, so the creator needs no clause of their own.
@@ -123,6 +130,7 @@ export const permissions = definePermissions({
     update: createdByMe,
     delete: createdByMe,
   },
+  // #endregion bandchat-permissions-rooms
   // `roomId` is again a carrier: it must match the canvas and a current
   // membership, so a removed member can no longer draw.
   strokes: {

@@ -10,6 +10,7 @@ const roomSpace = (roomId: string) => ({ table: "rooms", id: roomId });
  * table (the one membership truth); undefined until they have loaded. A
  * profile or a `roomMembers` row is not needed to be listed.
  */
+// #region bandchat-room-members
 export function useRoomMembers(roomId: string): {
   members: E2eeMember[] | undefined;
   loadFailure: { reason: string; retry: () => void } | undefined;
@@ -37,7 +38,9 @@ export function useRoomMembers(roomId: string): {
       error === undefined ? undefined : { reason: error, retry: () => setAttempt((n) => n + 1) },
   };
 }
+// #endregion bandchat-room-members
 
+// #region bandchat-remove-member
 const ATTEMPTS = 3;
 
 /**
@@ -90,12 +93,14 @@ export async function removeMember({
     }
   }
 }
+// #endregion bandchat-remove-member
 
 /**
  * Admits an account: its member row and `roomMembers` row go in the one
  * transaction that clears its join requests. Resolves when the authority
  * accepts the admission. The caller then delivers the keys.
  */
+// #region bandchat-admit-member
 export async function admitMember({
   db,
   roomId,
@@ -117,6 +122,7 @@ export async function admitMember({
   });
   await written.wait({ tier: "global" });
 }
+// #endregion bandchat-admit-member
 
 /**
  * Renews the room's key after a removal, so the removed member reads nothing
@@ -124,6 +130,8 @@ export async function admitMember({
  * encrypted written) has nothing to renew, and Jazz answers 0. Resolves with
  * the deliveries written; any failure is the caller's to show, with a retry.
  */
+// #region bandchat-renew-room-key
 export function renewRoomKey(db: Db, roomId: string): Promise<number> {
   return db.encryption.keys.rotate(roomSpace(roomId));
 }
+// #endregion bandchat-renew-room-key

@@ -9,7 +9,7 @@
     "predev": "fumadocs-mdx",
     "start": "next start",
     "test": "vitest run",
-    "types:check": "fumadocs-mdx && next typegen && tsrs --noEmit && node scripts/check-bandchat-walkthrough.mjs",
+    "types:check": "fumadocs-mdx && next typegen && tsrs --noEmit",
     "postinstall": "fumadocs-mdx",
     "test:perf-timeline": "node --experimental-strip-types --test lib/perf-timeline/*.test.ts lib/showcase/*.test.ts ../dev/benchmarks/metadata/metadata.test.ts",
     "render:walkthroughs": "node --experimental-strip-types scripts/example-videos/render.mjs",

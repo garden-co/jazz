@@ -18,6 +18,7 @@ export const schema = s.defineSchema({
       joinRequestsViaProfile: s.reverse("joinRequests", "profile"),
     },
   ),
+  // #region bandchat-schema-rooms
   // Each room is an encrypted space: its members hold its key. The name stays
   // plain, so a room is listed before its key arrives. Only the creator may
   // update a room, because whoever may update it may manage its members.
@@ -32,6 +33,7 @@ export const schema = s.defineSchema({
       canvasesViaRoom: s.reverse("canvases", "room"),
     },
   ),
+  // #endregion bandchat-schema-rooms
   // A member's profile, so co-members see their name and avatar. Who may read
   // a room is Jazz's members table (`isMember` in permissions.ts), not this.
   roomMembers: s.table(
@@ -50,6 +52,7 @@ export const schema = s.defineSchema({
     { roomId: s.uuid(), requester: s.uuid(), profileId: s.uuid() },
     { room: s.rel("rooms", "roomId"), profile: s.rel("profiles", "profileId") },
   ),
+  // #region bandchat-schema-read-markers
   // One private row per reader and room: everything newer is unread. The time
   // is sealed with the room's key; when a marker is written stays visible to
   // the server.
@@ -58,6 +61,8 @@ export const schema = s.defineSchema({
     { room: s.rel("rooms", "roomId") },
     { space: "room" },
   ),
+  // #endregion bandchat-schema-read-markers
+  // #region bandchat-schema-messages
   // The text, the attachment's bytes and its name are sealed with the room's
   // key. Who wrote when, the attachment's type and size, and sketches stay
   // plain.
@@ -85,6 +90,7 @@ export const schema = s.defineSchema({
     // A room's newest message is one index entry: the room list reads it
     // without sorting the room's history.
     .compositeIndex(["roomId", "$createdAt"]),
+  // #endregion bandchat-schema-messages
   reactions: s.table(
     {
       roomId: s.uuid(),

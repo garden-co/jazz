@@ -88,9 +88,11 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   const directory = useDirectory();
   const { room, isCreator } = summary;
   const roomId = room.id;
+  // #region bandchat-locked-count
   const { data: newestFirst, unreadable, db } = useAll(roomMessagesQuery(roomId));
   // Messages this browser holds no key for yet are left out of the read.
   const lockedCount = unreadable.length;
+  // #endregion bandchat-locked-count
   // Undefined until the first result: "No messages yet" only for a room that has none.
   const isLoadingMessages = newestFirst === undefined;
   const messages = useMemo(() => [...(newestFirst ?? [])].reverse(), [newestFirst]);

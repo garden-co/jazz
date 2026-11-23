@@ -202,6 +202,7 @@ function LeaveThisBrowser({ device }: { device: DeviceInfo }) {
   const [isBusy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // #region bandchat-leave-browser
   async function leave() {
     setBusy(true);
     setError(null);
@@ -232,6 +233,7 @@ function LeaveThisBrowser({ device }: { device: DeviceInfo }) {
       void refresh();
     }
   }
+  // #endregion bandchat-leave-browser
 
   return (
     <VStack gap={2}>
@@ -265,6 +267,7 @@ function RemoveLostDevice({ device }: { device: DeviceInfo }) {
   const [isBusy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // #region bandchat-remove-lost-device
   async function remove() {
     setBusy(true);
     setError(null);
@@ -291,6 +294,7 @@ function RemoveLostDevice({ device }: { device: DeviceInfo }) {
       setConfirming(false);
     }
   }
+  // #endregion bandchat-remove-lost-device
 
   return (
     <VStack gap={2}>
@@ -329,6 +333,7 @@ function ApproveDevice({ device }: { device: DeviceInfo }) {
   const [isBusy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // #region bandchat-approve-device
   // The new browser answers on its own screen; wait for its answer.
   useEffect(() => {
     if (!session || answered) return;
@@ -381,6 +386,7 @@ function ApproveDevice({ device }: { device: DeviceInfo }) {
       setBusy(false);
     }
   }
+  // #endregion bandchat-approve-device
 
   return (
     <VStack gap={2}>
@@ -465,6 +471,7 @@ function RecoverySetup({ accountName }: { accountName: string }) {
     };
   }, [devices, encryption]);
 
+  // #region bandchat-enable-recovery
   async function enable() {
     setBusy(true);
     setError(null);
@@ -477,6 +484,7 @@ function RecoverySetup({ accountName }: { accountName: string }) {
       setBusy(false);
     }
   }
+  // #endregion bandchat-enable-recovery
 
   return (
     <VStack gap={2}>

@@ -4,11 +4,13 @@ import { Banner, Button, Center, Spinner } from "@astryxdesign/core";
 import { app } from "../jazz.generated";
 import { authClient } from "@/src/lib/auth-client";
 
+// #region bandchat-provider-load
 // Start on the thin client; load the local-first one (WASM, local storage,
 // offline writes, and this browser's encryption keys) in its own chunk once
 // the page has loaded. Rooms and other plain data show at once; encrypted
 // message text waits for the local-first client.
 const loadLocalFirst = () => import("jazz-tools/local-first");
+// #endregion bandchat-provider-load
 
 // Better Auth signs users in; BandChat's backend (`createJazz` in
 // server/jazz.ts) reads its session in `authenticate`.
@@ -25,6 +27,7 @@ export function useBandChatLifecycle(): AuthActions {
   };
 }
 
+// #region bandchat-provider
 export function JazzProvider({ children }: React.PropsWithChildren) {
   return (
     <Jazz
@@ -48,6 +51,7 @@ export function JazzProvider({ children }: React.PropsWithChildren) {
     </Jazz>
   );
 }
+// #endregion bandchat-provider
 
 /**
  * Jazz is signed out while the page still believes it is signed in: the

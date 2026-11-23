@@ -33,6 +33,7 @@ export function NewRoomDialog({
     const trimmed = name.trim();
     if (!trimmed) return;
     setError(null);
+    // #region bandchat-create-room
     // The room is its own encrypted space. Its creator's member row names
     // the room, so the room's id is chosen first and Jazz fills in the
     // rest of the row's address.
@@ -86,6 +87,7 @@ export function NewRoomDialog({
       );
       onOpenChange(true);
     });
+    // #endregion bandchat-create-room
   }
 
   return (

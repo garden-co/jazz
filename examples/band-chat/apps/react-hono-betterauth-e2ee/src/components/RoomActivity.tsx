@@ -7,12 +7,14 @@ import type { NewestMessage } from "../lib/room-summaries";
  * A room's newest message through plain columns only: no key, nothing
  * decrypted, one index entry (messages are indexed on room and creation time).
  */
+// #region bandchat-newest-message
 export const newestMessageQuery = (roomId: string) =>
   app.messages
     .where({ roomId })
     .select("id", "senderId", "$createdAt")
     .orderBy("$createdAt", "desc")
     .limit(1);
+// #endregion bandchat-newest-message
 
 /** The newest message of a room; undefined while loading, null when it has none. */
 export function useNewestMessage(roomId: string): NewestMessage | null | undefined {

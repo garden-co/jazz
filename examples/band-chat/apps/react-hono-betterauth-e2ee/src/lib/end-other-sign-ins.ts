@@ -5,6 +5,7 @@
  * connection of that device stays signed in. Resolves with how many sign-ins
  * it ended; rejects if the server did not do it.
  */
+// #region bandchat-end-other-sign-ins
 export async function endOtherSignIns(): Promise<number> {
   const response = await fetch("/api/end-other-sign-ins", {
     method: "POST",
@@ -16,3 +17,4 @@ export async function endOtherSignIns(): Promise<number> {
   const { ended } = (await response.json()) as { ended: number };
   return ended;
 }
+// #endregion bandchat-end-other-sign-ins
