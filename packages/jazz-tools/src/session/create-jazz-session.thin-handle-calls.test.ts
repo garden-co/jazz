@@ -277,13 +277,20 @@ describe("calls on a db.encryption handle taken while thin", () => {
     // Step the clock in small increments, letting real work run between steps, until the call
     // settles: the wait's own timer may start only after the upgrade has finished, and the full
     // client's own call then runs on the same clock. A wait without a deadline never settles.
-    for (let step = 0; step < 1_200 && outcome === "pending"; step++) {
-      await vi.advanceTimersByTimeAsync(100);
-      await new Promise((resolve) => setImmediate(resolve));
+    let elapsed = 0;
+    try {
+      while (elapsed < 120_000 && outcome === "pending") {
+        await vi.advanceTimersByTimeAsync(100);
+        elapsed += 100;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(outcome).toEqual({ id: expect.any(String) });
+      // Released at the 30-second deadline; the rest is the full client's own call.
+      expect(elapsed).toBeLessThan(45_000);
+      await call;
+    } finally {
+      vi.useRealTimers();
     }
-    expect(outcome).toEqual({ id: expect.any(String) });
-    await call;
-    vi.useRealTimers();
   }, 90_000);
 
   it("ends a call at a stalled load at the deadline, and at sign-out", async () => {
