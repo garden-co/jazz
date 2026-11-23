@@ -21,7 +21,7 @@ use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::account::{AccountFloor, PublicAccountLedger};
 use jazz_e2ee::protocol::content::{HeldSpace, KeyMark, MissingKey};
 use jazz_e2ee::protocol::error::UnsupportedCapability;
-use jazz_e2ee::protocol::records::space::SpaceAddress as ProtocolAddress;
+use jazz_e2ee::protocol::records::space::{SpaceAddress as ProtocolAddress, SpaceDelivery};
 use jazz_e2ee::protocol::space::members::{CurrentVersion, ReplayedSpaceChain};
 use jazz_e2ee::protocol::space::{AccountDirectory, SpaceLedger, acquire};
 use jazz_e2ee::protocol::{Position, ProtocolError};
@@ -289,13 +289,22 @@ impl E2eeClient {
                             .filter(|id| !epochs.contains(*id) && !held.contains(id.as_str()))
                             .cloned()
                             .collect();
-                        ledger
-                            .deliveries
-                            .extend(epoch_deliveries(&missing, true).await?);
                         if missing.is_empty() {
                             acquisition = Some(acquired);
+                        } else {
+                            // Read this account's deliveries for the room in one round trip.
+                            let query = of_space(rows::SPACE_DELIVERIES)
+                                .filter(eq(col("recipientAccountId"), lit(account.clone())));
+                            let (own_deliveries, _) = self
+                                .read_rows::<SpaceDelivery>(db, tx, &skipped, query)
+                                .await?;
+                            ledger.deliveries.extend(
+                                own_deliveries.into_iter().filter(|delivery| {
+                                    missing.contains(&delivery.row.key_epoch_id)
+                                }),
+                            );
+                            epochs.extend(missing);
                         }
-                        epochs.extend(missing);
                     }
                 }
             }
@@ -456,9 +465,7 @@ impl E2eeClient {
             }
             let query = epoch_deliveries_query(address, version.epoch(), None)?;
             let (deliveries, _) = self
-                .read_rows::<jazz_e2ee::protocol::records::space::SpaceDelivery>(
-                    db, tx, &skipped, query,
-                )
+                .read_rows::<SpaceDelivery>(db, tx, &skipped, query)
                 .await?;
             let mut holders = BTreeSet::from([version.writer().to_owned()]);
             holders.extend(

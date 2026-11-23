@@ -2262,7 +2262,10 @@ write to that space. The binding tells the runtime when a subscription
 opens or closes. Closing the last subscription releases its interest in
 the space. A recent write keeps the watch active for the rest of its
 60-second window. While a subscription keeps the watch active, a pause
-between writes adds no authority round trip. Once both kinds of interest
+between writes adds no authority round trip. When the host reports a
+reconnection, the runtime checks the authority again before the next
+encrypted write to each watched space, so that write accounts for removals
+that committed while the device was offline. Once both kinds of interest
 expire, the next write checks the authority for changes that require
 rotation before reusing a held key. This bounds the cost of watching idle
 spaces and catches removals that occurred while the space was unwatched.

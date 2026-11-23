@@ -500,7 +500,14 @@ impl E2eeClient {
     /// Whether the client is online: offline, equality queries compute no
     /// tokens and match every row of the space instead (protocol §4.5).
     pub fn set_online(&self, online: bool) {
-        self.shared.keys.borrow_mut().online = online;
+        let mut keys = self.shared.keys.borrow_mut();
+        if online && !keys.online {
+            self.shared
+                .member_watch
+                .borrow_mut()
+                .invalidate_coverage(&mut keys);
+        }
+        keys.online = online;
     }
 
     /// How many staged member rows are still waited for, and how long to wait
@@ -564,10 +571,10 @@ impl E2eeClient {
         (watch.last_check_rows, watch.chain_reads)
     }
 
-    /// Delivery rows returned and queries lacking an epoch filter since the last call.
+    /// Delivery rows returned, queries lacking an epoch filter, and total delivery queries since the last call.
     #[doc(hidden)]
     #[cfg(any(test, feature = "testing"))]
-    pub fn take_delivery_reads(&self) -> (usize, usize) {
+    pub fn take_delivery_reads(&self) -> (usize, usize, usize) {
         std::mem::take(&mut self.shared.member_watch.borrow_mut().delivery_reads)
     }
 
