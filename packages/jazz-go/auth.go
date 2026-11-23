@@ -282,8 +282,7 @@ func onToken(ctx, reason, token uintptr) (status int32) {
 	return 0 // "" signs the user out
 }
 
-func openUser(config string, provider TokenProvider) (uintptr, uint64, error) {
-	id := nextProvider.Add(1)
+func openUser(config string, id uint64, provider TokenProvider) (uintptr, uint64, error) {
 	providers.Store(id, provider)
 	var cerr uintptr
 	h := ffi.openUser(cstr(config), ffi.tokenCallback, uintptr(id), &cerr)
@@ -373,14 +372,15 @@ func (db *DB) Refresh(ctx context.Context) error {
 	return db.call(ctx, "refresh", map[string]any{}, nil)
 }
 
-// SignOut signs the end user out and closes the app. On a DB from a
-// Session it is ErrNotSupported, and the DB stays open: use the Session's
-// SignOut.
+// SignOut signs the end user out and closes the app. When ctx ends first
+// it returns ctx.Err(), and the app is freed once signed out. On a DB from
+// a Session it is ErrNotSupported, and the DB stays open: use the
+// Session's SignOut.
 // A refused SignOut leaves the app open, as on a DB ForUser returned,
 // where it is ErrNotSupported: the session is the backend client's,
 // shared by every user. Close that DB instead.
 func (db *DB) SignOut(ctx context.Context) error {
-	if err := db.call(ctx, "signOut", map[string]any{}, nil); err != nil {
+	if err := db.callOr(ctx, "signOut", map[string]any{}, nil, db.closeAfter); err != nil {
 		return err
 	}
 	db.settleStreams()

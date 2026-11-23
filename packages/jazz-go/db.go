@@ -173,6 +173,10 @@ func (db *DB) computed() any { return db.app }
 
 // Open opens the app cfg describes. Prefer the generated jazzapp.Open,
 // which embeds the app's jazz.app.json.
+//
+// When ctx ends first, Open cancels the TokenProvider's ctx and returns
+// ctx.Err() once the app it was opening is closed again, so its store is
+// free for the next Open.
 func Open(ctx context.Context, cfg Config) (*DB, error) {
 	if err := cfg.checkTransport(); err != nil {
 		return nil, err
@@ -201,9 +205,14 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		provider uint64
 	}
 	done := make(chan opened, 1)
+	var id uint64
+	t, withTokens := cfg.Auth.(tokenAuth)
+	if withTokens {
+		id = nextProvider.Add(1)
+	}
 	go func() {
-		if t, ok := cfg.Auth.(tokenAuth); ok {
-			h, provider, err := openUser(string(config), t.provider)
+		if withTokens {
+			h, provider, err := openUser(string(config), id, t.provider)
 			done <- opened{h, err, provider}
 			return
 		}
@@ -218,12 +227,13 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		}
 		return &DB{handle: o.h, app: cfg.Computed, provider: o.provider}, nil
 	case <-ctx.Done():
-		go func() {
-			if o := <-done; o.h != 0 {
-				ffi.close(o.h)
-				releaseProvider(o.provider)
-			}
-		}()
+		// Stop asking the provider, and close what the open still gives
+		// before answering, so the store is free again when Open returns.
+		cancelFetches(id)
+		if o := <-done; o.h != 0 {
+			ffi.close(o.h)
+		}
+		releaseProvider(id)
 		return nil, ctx.Err()
 	}
 }
@@ -238,7 +248,10 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 //
 // Close cancels the TokenProvider's ctx and waits for the provider to
 // return. A provider may call Close itself, but mustn't wait for a Close
-// made on another goroutine.
+// made on another goroutine. Called from the provider, Close returns at
+// once and the app is closed and freed once the provider has returned.
+//
+// Close blocks until the app is closed: run it in a goroutine not to wait.
 func (db *DB) Close() error {
 	return db.closeAndFree(0,
 		func(h uintptr) error { return callClose(ffi.call, h, "{}") },
@@ -250,6 +263,12 @@ func (db *DB) Close() error {
 // result is dropped, but the call itself runs until it ends or the DB
 // closes: a write may still apply.
 func (db *DB) call(ctx context.Context, method string, args map[string]any, out any) error {
+	return db.callOr(ctx, method, args, out, nil)
+}
+
+// callOr is call, with abandoned, if any, given the result of a call
+// that ctx's end returned from: to undo or finish what it began.
+func (db *DB) callOr(ctx context.Context, method string, args map[string]any, out any, abandoned func(text string, err error)) error {
 	argsJSON, err := json.Marshal(args)
 	if err != nil {
 		return err
@@ -286,6 +305,12 @@ func (db *DB) call(ctx context.Context, method string, args map[string]any, out 
 		}
 		return json.Unmarshal([]byte(r.text), out)
 	case <-ctx.Done():
+		if abandoned != nil {
+			go func() {
+				r := <-done
+				abandoned(r.text, r.err)
+			}()
+		}
 		return ctx.Err()
 	}
 }
