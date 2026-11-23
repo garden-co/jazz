@@ -3435,6 +3435,8 @@ fn the_json_schema_takes_exactly_the_encrypted_columns_the_reader_takes() {
         r#"{ "type": { "enum": ["low", "high"] }, "default": "low" }"#,
         r#"{ "type": { "enum": ["low", "high", "top"] }, "sealedType": { "enum": ["low", "high"] } }"#,
         r#"{ "type": "string", "$comment": "a note" }"#,
+        r#"{ "array": { "type": "string", "$comment": "a note" } }"#,
+        r#"{ "type": { "array": { "enum": ["low"], "$comment": "a note" } } }"#,
     ];
     let refused = [
         r#"42"#,
@@ -3453,6 +3455,10 @@ fn the_json_schema_takes_exactly_the_encrypted_columns_the_reader_takes() {
         r#"{ "type": { "enum": ["low"] }, "optional": true }"#,
         r#"{ "type": { "enum": ["low"], "default": "low" }, "sealedType": { "enum": ["low"] } }"#,
         r#"{ "type": { "enum": ["low"] }, "sealedType": { "enum": ["low"] }, "from": "etc" }"#,
+        r#"{ "array": { "type": "string", "from": "etc" } }"#,
+        r#"{ "type": { "array": { "type": "string", "reverse": "etc" } } }"#,
+        r#"{ "type": { "enum": ["low"], "from": "etc" } }"#,
+        r#"{ "array": { "type": "string", "$comment": 1 } }"#,
     ];
     for (declarations, expected) in [(&accepted[..], true), (&refused[..], false)] {
         for declaration in declarations {

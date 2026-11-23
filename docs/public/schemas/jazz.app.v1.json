@@ -389,7 +389,7 @@
       ]
     },
     "encryptedTypeExpression": {
-      "description": "A type nested in `type` or `array`: a type string, or an object with exactly one of `type`, `enum`, `json`, `array`.",
+      "description": "A type nested in `type` or `array`: a type string, or an object with exactly one of `type`, `enum`, `json`, `array`, and nothing else but `$comment`.",
       "oneOf": [
         {
           "type": "string",
@@ -397,6 +397,7 @@
         },
         {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "type": {
               "$ref": "#/$defs/encryptedTypeExpression"
@@ -410,6 +411,9 @@
             "json": {},
             "array": {
               "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "$comment": {
+              "type": "string"
             }
           },
           "oneOf": [
