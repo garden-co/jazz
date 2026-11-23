@@ -81,7 +81,7 @@ db, err := jazzapp.Open(ctx, jazz.Config{
 	AppID:     appID,
 	ServerURL: "https://my-app.com/jazz",
 	Storage:   jazz.StoragePersistent,
-	DataDir:   "./jazz-data",
+	DataDir:   "./jazz-data", // one open DB per directory: a second Open is refused
 	Auth:      jazz.DeviceAccount(jazz.FileStore("./jazz-data/device-key")),
 })
 ```

@@ -146,11 +146,16 @@ Not yet: deleting a session account's store through its handle (refused).
   transaction (TS's default `transaction`). Its writes commit together and
   merge with concurrent ones, and its commit is never refused as a
   conflict. `begin()` / `txBegin {}` stays serializable.
+- **One open app per `dataDir`:** opening a persistent store another app
+  has open, in this process or another, is refused (kind `"refused"`): the
+  engine is its file's only writer. An open that follows a close, sign-out
+  or last drop in this process waits up to 5 s for it to finish. Share the
+  one handle, or give each app a `dataDir` of its own.
 - `disconnect()` / `reconnect()` (C `"disconnect"`, `"reconnect"`): leave
   the server, with local reads and writes going on, then resume sync.
 - `delete_client_storage()` / `"deleteClientStorage"`: closes the app and
-  deletes its local store, so the next open starts empty. It is refused,
-  and the app left open, while another open app holds the same `dataDir`.
+  deletes its local store, so the next open starts empty. The store stays
+  locked until it is gone.
   On the C ABI, free the handle with `jazz_close` afterwards, as after
   `signOut`.
 - `watch_mutation_errors(listener)` / `jazz_watch(h, "mutationErrors", …)`:

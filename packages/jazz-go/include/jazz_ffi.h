@@ -24,6 +24,12 @@
  * on that handle may run concurrently with it or follow it. Likewise no
  * call may use a subscription concurrently with or after its
  * jazz_unsubscribe.
+ *
+ * One app at a time has a persistent store open: jazz_open of a dataDir
+ * another app has open, in this process or another, fails with kind
+ * "refused". An open that follows a close in this process waits up to 5 s
+ * for that to finish. Share the one handle (it takes calls from any
+ * thread), or give each app a dataDir of its own.
  */
 #ifndef JAZZ_FFI_H
 #define JAZZ_FFI_H
@@ -105,9 +111,8 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *                     on; TS's disconnect)
  *   "reconnect"  {} -> null (resumes sync after disconnect)
  *   "deleteClientStorage" {} -> null (closes the app and deletes its local
- *                     store; the next open starts empty. Refused while
- *                     another open app holds the same dataDir. Free the
- *                     handle with jazz_close after, as after signOut)
+ *                     store; the next open starts empty. Free the handle
+ *                     with jazz_close after, as after signOut)
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run
