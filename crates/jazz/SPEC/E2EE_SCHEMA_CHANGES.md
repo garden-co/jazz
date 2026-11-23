@@ -42,7 +42,29 @@ app encrypts data it already stores. References: the
   plaintext is encrypted like any other value. The empty byte string is never
   ciphertext: it means "never written" and reads as the declared default
   (when stored rather than lens-supplied it is also reported `empty-cell`).
-- **Writes cannot move a row between spaces** (spec §5.1). Writing an
+- **Writes cannot move a row between spaces** (spec §5.1). The check runs
+  in the writer's own runtime, against its local copy of the row
+  (`write_space` in the client and keyless hooks, and the streamed-write
+  check); the authority does not repeat it. A writer that has not loaded
+  the row can therefore upsert it with another space column.
+  - The upsert's generated values for the columns it omits apply only if
+    the row is created, so an existing row keeps those cells, sealed for
+    its old space.
+  - The row's readers are now the new space's members. One that holds a
+    key of the old space reads those cells, reported `stale-space`. Any
+    other reader treats them as a missing key until the chain shows the
+    epoch is foreign, then as `invalid-ciphertext` (above), and an equality
+    filter by those columns misses the row.
+  - Values the upsert supplied are sealed for the new space. Nothing is
+    disclosed: the cells stay sealed for the old space.
+  - Only a session the application's update rule admits, or the
+    application's backend, can write this.
+  - Writing the original space back repairs it. The same check refuses
+    that write from a writer whose copy shows the new space, so it comes
+    from a writer that has not loaded the row. Values the moving upsert
+    supplied are then written again.
+
+  Writing an
   encrypted value needs a held key for the row's space; an update that
   touches only plain columns needs none, and a backend that holds no keys
   writes plain columns only (it is refused any encrypted column). A client's
@@ -52,6 +74,7 @@ app encrypts data it already stores. References: the
   (spec R15, §3.2); the client does not evaluate it and creates
   optimistically, in the transaction of the first encrypted write that needs
   the space.
+
 - **Keys go to members only** (spec §1.3, R13). A space table's read rule
   must come from the members table (§4).
 
