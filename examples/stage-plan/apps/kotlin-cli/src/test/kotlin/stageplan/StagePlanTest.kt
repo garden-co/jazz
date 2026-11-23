@@ -277,6 +277,25 @@ class StagePlanTest {
     }
 
     @Test
+    fun a_cancelled_open_lets_go_of_the_store(): Unit = runBlocking {
+        val dir = kotlin.io.path.createTempDirectory("jazz-cancelled-open").toFile()
+        val asked = java.util.concurrent.CountDownLatch(1)
+        val answer = java.util.concurrent.CountDownLatch(1)
+        val slowSignIn = tools.jazz.JazzAuth.Bearer {
+            asked.countDown()
+            answer.await()
+            "token-user-cancelled"
+        }
+        val opening = launch(kotlinx.coroutines.Dispatchers.Default) { openAsUser(endpoint, appId, slowSignIn, dir.path) }
+        kotlin.test.assertTrue(asked.await(30, java.util.concurrent.TimeUnit.SECONDS), "open never asked for a token")
+        opening.cancel()
+        answer.countDown()
+        opening.join()
+        // Refused if the app no one got were still open on it.
+        openAsUser(endpoint, appId, tools.jazz.JazzAuth.Bearer { "token-user-cancelled" }, dir.path).use { it.deleteClientStorage() }
+    }
+
+    @Test
     fun a_token_provider_that_throws_doesnt_sign_the_user_out(): Unit = runBlocking {
         var n = 0
         val jazz = openAsUser(endpoint, appId, tools.jazz.JazzAuth.Bearer { if (n++ == 0) "token-tp" else throw java.io.IOException("sign-in server down") })
