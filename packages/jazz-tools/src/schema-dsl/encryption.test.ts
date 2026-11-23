@@ -3,7 +3,7 @@ import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createCliFixtures } from "../../tests/cli/fixtures.js";
-import { writeAppFiles } from "../dev/codegen-napi.js";
+import { generateTs, migrationsCreate, writeAppFiles } from "../dev/codegen-napi.js";
 import { createAppMigration, generateApp } from "../dev/project.js";
 import { printTs } from "../printer/cli.js";
 
@@ -683,4 +683,44 @@ describe("encryption declarations in migrations", () => {
       expect(await readFile(join(root, "jazz.app.json"), "utf8")).toBe(original.app);
     },
   );
+});
+
+describe("migrations create over a shipped encrypted migration", () => {
+  /** An encrypted `tasks` table, with or without its encrypted `notes`. */
+  function tasksApp(notes: boolean): string {
+    return JSON.stringify({
+      $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
+      tables: {
+        tasks: {
+          columns: { title: "bytes", ...(notes ? { notes: "bytes" } : {}) },
+          encryption: {
+            space: "id",
+            scope: "tasks",
+            columns: { title: "string", ...(notes ? { notes: "string?" } : {}) },
+          },
+        },
+      },
+    });
+  }
+
+  it("returns the loader's error for a dropped column's non-empty ciphertext default", async () => {
+    const second = await migrationsCreate(
+      tasksApp(false),
+      await generateTs(tasksApp(true)),
+      "drop-notes",
+    );
+    expect(second.todos).toEqual(["migrations[0].migrate.tasks.notes.backwardsDefault"]);
+    const shipped = second.app.replace(
+      /"backwardsDefault": "TODO:[^"]*"/,
+      '"backwardsDefault": ""',
+    );
+    const bindings = await generateTs(shipped);
+    const edited = shipped.replace('"backwardsDefault": ""', '"backwardsDefault": "AQ=="');
+    expect(edited).not.toBe(shipped);
+    // The tables are the bindings' version, so no new migration would make
+    // the file load: say why it doesn't, rather than that only indexes changed.
+    await expect(migrationsCreate(edited, bindings, "again")).rejects.toThrow(
+      "jazz.app.json: migrations[0]: tasks.notes: the migration's backwardsDefault must be an empty byte string",
+    );
+  });
 });

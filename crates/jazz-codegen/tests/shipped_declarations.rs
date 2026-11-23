@@ -160,3 +160,163 @@ fn history_keeps_the_recorded_declarations_not_the_edited_ones() {
         );
     }
 }
+
+/// `text` with every `from` replaced by `to`, exactly once.
+fn replaced_once(text: &str, from: &str, to: &str) -> String {
+    assert_eq!(text.matches(from).count(), 1, "`{from}` in {text}");
+    text.replace(from, to)
+}
+
+/// `text` with its current `tables` replaced by `tables`, history and
+/// migrations kept.
+fn with_tables(text: &str, tables: &str) -> String {
+    use jazz::tools::deployment::artifact::json;
+    let mut root = json::parse(text.as_bytes()).unwrap();
+    let json::Json::Object(top) = &mut root else {
+        panic!("not an object")
+    };
+    let at = top.iter().position(|(k, _)| k == "tables").unwrap();
+    top[at].1 = json::parse(tables.as_bytes()).unwrap();
+    json::print(&root)
+}
+
+/// The tasks table of [`app`] without its encrypted `notes` column.
+fn app_without_notes(boards: &str) -> String {
+    replaced_once(
+        &replaced_once(&app(r#""string?""#, boards), r#", "notes": "bytes""#, ""),
+        r#", "notes": "string?""#,
+        "",
+    )
+}
+
+/// The second version of [`app`], which drops the encrypted `tasks.notes`
+/// with the empty ciphertext as its backwards default, as the author
+/// resolves the stub's TODO.
+fn second_version(lang: Lang, committed: &str) -> String {
+    let created = create(
+        lang,
+        app_without_notes(BOARDS).as_bytes(),
+        Some(committed),
+        "drop-notes",
+    )
+    .unwrap();
+    assert_eq!(
+        created.todos,
+        ["migrations[0].migrate.tasks.notes.backwardsDefault"],
+        "{lang:?}: {created:?}"
+    );
+    let at = created.app.find(r#""backwardsDefault": "TODO:"#).unwrap();
+    let value = at + r#""backwardsDefault": "#.len();
+    let end = value + 1 + created.app[value + 1..].find('"').unwrap();
+    let resolved = format!("{}\"\"{}", &created.app[..value], &created.app[end + 1..]);
+    App::load(resolved.as_bytes()).unwrap();
+    resolved
+}
+
+/// The second version drops the encrypted `tasks.notes`, and the migration
+/// keeps the empty ciphertext as its backwards default. Editing only that
+/// default leaves the tables as the bindings recorded them, so no new
+/// migration is needed, and the file must load: the loader's error is
+/// returned rather than a note that only indexes changed.
+#[test]
+fn an_invalid_shipped_migration_is_refused_with_the_loaders_error() {
+    for lang in [Lang::TypeScript, Lang::Rust] {
+        let v1 = app(r#""string?""#, BOARDS);
+        let committed = generate(lang, v1.as_bytes()).unwrap();
+        let second = second_version(lang, &committed);
+        let shipped = generate(lang, second.as_bytes()).unwrap();
+        let edited = replaced_once(
+            &second,
+            r#""backwardsDefault": """#,
+            r#""backwardsDefault": "AQ==""#,
+        );
+        let Err(loader) = App::load(edited.as_bytes()) else {
+            panic!("{lang:?}: the loader refuses a non-empty ciphertext default")
+        };
+        let loader = loader.to_string();
+        let error = create(lang, edited.as_bytes(), Some(&shipped), "again")
+            .expect_err("migrations create refuses it too");
+        assert_eq!(error.message(), loader, "{lang:?}");
+    }
+}
+
+/// Removing the only encryption declaration while keeping the column's
+/// bytes leaves the stored tables as they were once Jazz's system tables
+/// are added back. That is still the bindings' version, so its
+/// declarations can't change.
+#[test]
+fn removing_the_last_declaration_is_refused() {
+    const ENCRYPTED: &str = r#"{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "notes": {
+      "columns": { "title": "string", "detail": "bytes" },
+      "encryption": { "space": "id", "scope": "notes", "columns": { "detail": "string" } }
+    }
+  }
+}
+"#;
+    const PLAIN: &str = r#"{
+  "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+  "tables": {
+    "notes": { "columns": { "title": "string", "detail": "bytes" } }
+  }
+}
+"#;
+    for lang in [Lang::TypeScript, Lang::Rust] {
+        let committed = generate(lang, ENCRYPTED.as_bytes()).unwrap();
+        let error = create(lang, PLAIN.as_bytes(), Some(&committed), "plain")
+            .expect_err("the declaration can't be removed from the recorded version");
+        assert!(
+            error.message().contains("can't change") && error.message().contains("notes"),
+            "{lang:?}: {}",
+            error.message()
+        );
+    }
+}
+
+/// A third version (#6296): the second version's migration has no `to`, so
+/// the edited file doesn't load until `migrations create` names it. The
+/// recorded declarations are still checked: of the first version, which
+/// retired the encrypted `tasks.notes`, as of the second.
+#[test]
+fn a_third_version_still_checks_the_recorded_declarations() {
+    for lang in [Lang::TypeScript, Lang::Rust] {
+        let v1 = app(r#""string?""#, BOARDS);
+        let committed = generate(lang, v1.as_bytes()).unwrap();
+        let second = second_version(lang, &committed);
+        let shipped = generate(lang, second.as_bytes()).unwrap();
+        let v3_tables = {
+            let v3 = app_without_notes(BOARDS_WITH_PRIORITY);
+            let root: serde_json::Value = serde_json::from_str(&v3).unwrap();
+            root["tables"].to_string()
+        };
+        let third = with_tables(&second, &v3_tables);
+        assert!(
+            App::load(third.as_bytes()).is_err(),
+            "{lang:?}: #6296's case"
+        );
+
+        // As recorded: the third version is written, and loads.
+        let created = create(lang, third.as_bytes(), Some(&shipped), "priority").unwrap();
+        assert!(
+            created.changed && created.todos.is_empty(),
+            "{lang:?}: {created:?}"
+        );
+        assert_eq!(
+            App::load(created.app.as_bytes())
+                .unwrap()
+                .compiled
+                .schemas
+                .len(),
+            3,
+            "{lang:?}"
+        );
+
+        // The first version's retired column declared anew.
+        let rewritten = replaced_once(&third, r#""notes": "string?""#, r#""notes": "int?""#);
+        let error = create(lang, rewritten.as_bytes(), Some(&shipped), "priority")
+            .expect_err("the first version's declarations can't change");
+        assert_names_the_change(error.message(), &format!("{lang:?}"));
+    }
+}

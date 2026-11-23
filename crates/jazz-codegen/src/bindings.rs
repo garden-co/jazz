@@ -83,20 +83,41 @@ pub(crate) fn check_declarations_of(
         let after = declared
             .and_then(|declared| declared.entries(&hash))
             .unwrap_or(&empty);
-        let changed = changed_declarations(before, after);
-        if !changed.is_empty() {
-            return Err(CodegenError::new(format!(
-                "{}: the encryption declarations of version {}, which your committed bindings were \
-                 generated from, can't change, and its stored columns are the same: {} changed. \
-                 Restore the declaration as that version shipped it. To change an encrypted column's \
-                 type, copy the data into a new encrypted table (docs/e2ee/encrypting-existing-data)",
-                jazz::tools::deployment::artifact::APP_FILE,
-                &hash[..12],
-                changed.join(", ")
-            )));
-        }
+        check_unchanged(&hash, before, after)?;
     }
     Ok(())
+}
+
+/// For a current version that is the bindings' version with Jazz's system
+/// tables and indexes set aside (so its hash may differ): its declarations,
+/// `current` (`None` when it declares none), must be the recorded ones.
+pub(crate) fn check_current_declarations(
+    current: Option<&Entries>,
+    recorded: &Recorded,
+) -> Result<(), CodegenError> {
+    check_unchanged(
+        &recorded.current.to_string(),
+        &recorded.encryption,
+        current.unwrap_or(&Entries::new()),
+    )
+}
+
+/// Refuse `after` as version `hash`'s declarations when they differ from
+/// what it shipped, `before`.
+fn check_unchanged(hash: &str, before: &Entries, after: &Entries) -> Result<(), CodegenError> {
+    let changed = changed_declarations(before, after);
+    if changed.is_empty() {
+        return Ok(());
+    }
+    Err(CodegenError::new(format!(
+        "{}: the encryption declarations of version {}, which your committed bindings were \
+         generated from, can't change, and its stored columns are the same: {} changed. \
+         Restore the declaration as that version shipped it. To change an encrypted column's \
+         type, copy the data into a new encrypted table (docs/e2ee/encrypting-existing-data)",
+        jazz::tools::deployment::artifact::APP_FILE,
+        &hash[..12],
+        changed.join(", ")
+    )))
 }
 
 /// The tables and columns whose declarations differ between `before` and
