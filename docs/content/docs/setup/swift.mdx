@@ -15,6 +15,11 @@ Jazz for Swift is for macOS and iOS apps (Swift 6.0 or newer, Xcode 16 or newer;
 prebuilt core, and the StagePlan SwiftUI example (`examples/stage-plan/apps/swiftui`) is built for
 macOS and UI-tested on the iPhone simulator.
 
+<Callout type="warn" title="Known issue: a bearer user can't open offline">
+  An app signed in with a bearer token signs in with your backend when it opens, so it can't open
+  while your backend is unreachable, even with a persistent store.
+</Callout>
+
 ## Install
 
 Add the package `https://github.com/garden-co/jazz-swift` at version `2.0.0-alpha.66` with the `Jazz`
@@ -90,7 +95,8 @@ server itself), signed in with a device account or with your own sign-in's beare
 `jazz.syncStatus()` and `jazz.syncChanges` report the link (`.connected`, `.offline(reason:…)`, …),
 pending uploads and rejections, as TypeScript's `SyncStatus`. `refresh()` asks your token provider
 again, `link(bearer:)` links a device account to your sign-in, and `signOut()` signs out and closes
-the app. `.local()` opens a client without a server.
+the app (on a `JazzSession`'s client both are refused: use the session's `linkDeviceAccount()` and
+`signOut()`). `.local()` opens a client without a server.
 
 Before the process exits, call `try await jazz.close()`. It ends every live `watch` and
 `subscribe` loop with `JazzError.closed`.
@@ -284,6 +290,7 @@ waited on.
 
 `jazz.disconnect()` leaves the server while local reads and writes go on, and `jazz.reconnect()`
 resumes sync. `jazz.deleteClientStorage()` rolls back open transactions, closes the app and deletes its local
-store (writes the server hasn't accepted are lost). While another open app holds the same `dataDir`,
-it throws `JazzError.refused` and the app stays open (its open transactions are still rolled back). The `session`, `syncChanges` and `mutationErrors` streams end with
+store (writes the server hasn't accepted are lost). One app at a time has a `dataDir` open: opening it
+again, in this process or another (an app extension, say), throws `JazzError.refused`, so share the
+one client. An open right after `close()` waits for it to finish. The `session`, `syncChanges` and `mutationErrors` streams end with
 `JazzError.closed` when the app closes.

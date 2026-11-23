@@ -72,6 +72,9 @@ backend decides what the client is, reported by `backend_client()` /
   two bundle ids) when the client's `permissions` aren't the ones the main
   backend serves: reopen it with the app's published
   `jazz.permissions.json`. Closing such a handle leaves its parent open.
+  The session is the parent's, shared by every user: `session_state`,
+  `refresh`, `link`, `sign_out` and watching the session fail with kind
+  `"notSupported"` on such a handle.
 - `"scoped"`: it acts as its one user; `for_user` is refused (`Refused`,
   kind `"refused"`), as on a `for_user` handle or any other app.
 
@@ -129,6 +132,9 @@ Linking reopens the account on the bearer: `clientEpoch` moves on.
   `"replaced"`; `Closed` without contract 2): fetch the new one when
   `clientEpoch` changes. Its `shutdown` / `jazz_close` leaves the session
   open.
+- A client that ends by itself (its bearer names no one at a renewal or a
+  handle's `refresh`) signs the session out: `signed-out`, a new
+  `clientEpoch`, and the old handles `Replaced`.
 - `refresh()` (the app's auth changed: ask the bearer and follow),
   `create_device_account()`, `restore_device_account(key)`,
   `reopen_device_account()`, `link_device_account()`,
@@ -136,6 +142,9 @@ Linking reopens the account on the bearer: `clientEpoch` moves on.
   `retry()` (as `recovery` says); C `jazz_session_call(s, method, args)`.
 - `watch(listener)` / `jazz_session_watch`: each snapshot, the current one
   first, and a last `{"kind": "closed"}` when the session closes.
+- On a handle it gave, `sign_out` and `link` fail with kind `"notSupported"`
+  and leave the handle open: use the session's `sign_out` and
+  `link_device_account`.
 - `shutdown()` / `jazz_session_close`: closes the session; its handles fail
   `Closed` and its watches end. No C token callback runs after; a Swift or
   Kotlin token provider already asked may outlive it (see "Closing").
@@ -188,11 +197,16 @@ another thread: waiting there deadlocks.
   transaction (TS's default `transaction`). Its writes commit together and
   merge with concurrent ones, and its commit is never refused as a
   conflict. `begin()` / `txBegin {}` stays serializable.
+- **One open app per `dataDir`:** opening a persistent store another app
+  has open, in this process or another, is refused (kind `"refused"`): the
+  engine is its file's only writer. An open that follows a close, sign-out
+  or last drop in this process waits up to 5 s for it to finish. Share the
+  one handle, or give each app a `dataDir` of its own.
 - `disconnect()` / `reconnect()` (C `"disconnect"`, `"reconnect"`): leave
   the server, with local reads and writes going on, then resume sync.
 - `delete_client_storage()` / `"deleteClientStorage"`: closes the app and
-  deletes its local store, so the next open starts empty. It is refused,
-  and the app left open, while another open app holds the same `dataDir`.
+  deletes its local store, so the next open starts empty. The store stays
+  locked until it is gone.
   On the C ABI, free the handle with `jazz_close` afterwards, as after
   `signOut`.
 - `watch_mutation_errors(listener)` / `jazz_watch(h, "mutationErrors", …)`:
@@ -268,7 +282,7 @@ columns (`merge: "text"`) take plain string writes.
 - **Tiers:** reads and subscriptions take `"local"`, `"localFirst"`
   (default) or `"remote"`; writes and commits take `"local"` or `"global"`,
   the durability they wait for (`"edge"` is refused). UniFFI: `all_at`,
-  `one_at`, `insert_at`, `update_at`, `delete_at`, `subscribe_at`. C ABI:
+  `one_at`, `insert_at`, `update_at`, `delete_at`, `upsert_at`, `subscribe_at`. C ABI:
   `"tier"` in the args, or `{"query", "tier"}` for `jazz_subscribe`.
 - **waitForSync:** UniFFI `wait_for_sync(tier)`, C ABI `waitForSync {tier}`:
   returns once every write committed so far reaches `tier` (`local` returns
@@ -303,7 +317,9 @@ columns (`merge: "text"`) take plain string writes.
   `upsert {table, id, row}` write the row with this id: for a new id an
   insert (`row` then needs every required column, else `missing required
   field`), for an existing row the columns `row` names (a partial row
-  updates).
+  updates). At a tier (UniFFI `upsert_at(table, id, row, tier)`, C ABI
+  `"tier"`) they return once the write reached it, with the row as written
+  here: not as someone else may have changed it by then.
   `restore(table, id, patch?)` / `restore {table, id, patch?}` brings back a
   deleted row as it was, or with `patch` (a whole row) as its content; a
   patch naming another row's `id` is refused. Both

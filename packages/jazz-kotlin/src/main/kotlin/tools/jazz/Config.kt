@@ -45,6 +45,10 @@ public data class JazzConfig(
     /** Your backend's Jazz endpoint (its `createJazz` handler), e.g. `https://app.example/jazz`. */
     val serverUrl: String? = null,
     val storage: Storage = Storage.Memory,
+    /**
+     * The directory of a [Storage.Persistent] store. One app at a time has it
+     * open: share that [Jazz], as opening a second one throws [JazzException.Refused].
+     */
     val dataDir: String? = null,
     /** How the user signs in to [serverUrl]: a device account, or your backend's sign-in. */
     val auth: JazzAuth? = null,
