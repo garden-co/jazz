@@ -103,6 +103,7 @@ and the time stored in each read marker. The server still sees:
 - who is in which room;
 - who wrote a message, and when;
 - room names, reactions and sketches;
+- each person's profile: their display name and avatar;
 - the type and the size of an attachment;
 - **when each read marker was written.** The stored time is encrypted; the
   moment of the write is not, and it shows about when that person read the
