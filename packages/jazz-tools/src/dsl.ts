@@ -139,6 +139,9 @@ export function hasEncryptionDeclarationInJsonSchema(
   return Object.values(schema).some((value) => hasEncryptionDeclarationInJsonSchema(value, seen));
 }
 
+/** A column declared `.encrypted()`: `Column` carrying its encryption declaration. */
+export type EncryptedColumn<Column> = Column & { readonly _encryption: ColumnEncryption };
+
 type Unencrypted<T> = T extends AnyTypedColumnBuilder & { readonly _encryption: ColumnEncryption }
   ? never
   : T;
@@ -220,16 +223,9 @@ export type TypedColumnBuilder<
    * exact value, through tokens that reveal which rows share a value.
    * An encrypted column takes no merge strategy and no transform.
    */
-  encrypted(options?: { equality?: boolean }): ColumnAlias<
-    Sql,
-    Optional,
-    Ref,
-    HasDefault,
-    Value,
-    Init
-  > & {
-    readonly _encryption: ColumnEncryption;
-  };
+  encrypted(options?: {
+    equality?: boolean;
+  }): EncryptedColumn<ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Init>>;
   /**
    * The column holds ids of `table`'s rows, for a reference no forward
    * relation names (a forward relation's column references its table
