@@ -28,6 +28,72 @@ pub struct Recorded {
     pub encryption: Entries,
 }
 
+/// Refuse an app file that declares the version `recorded` was generated
+/// from (the same stored schema, so the same hash) with other encryption
+/// declarations than they recorded. An encrypted column is stored as bytes
+/// whatever its plaintext type, so a type edit alone keeps the hash, and
+/// regenerating would otherwise overwrite what that version shipped with.
+pub(crate) fn check_recorded_declarations(
+    app: &App,
+    recorded: &Recorded,
+) -> Result<(), CodegenError> {
+    if !app
+        .compiled
+        .schemas
+        .iter()
+        .any(|(h, _)| *h == recorded.current)
+    {
+        return Ok(());
+    }
+    let declared = version_entries(app.compiled.encryption.as_ref(), &recorded.current);
+    let changed = changed_declarations(&recorded.encryption, &declared);
+    if changed.is_empty() {
+        return Ok(());
+    }
+    Err(CodegenError::new(format!(
+        "{}: the encryption declarations of version {}, which your committed bindings were \
+         generated from, can't change, and its stored columns are the same: {} changed. \
+         Restore the declaration as that version shipped it. To change an encrypted column's \
+         type, copy the data into a new encrypted table (docs/e2ee/encrypting-existing-data)",
+        jazz::tools::deployment::artifact::APP_FILE,
+        &recorded.current.to_string()[..12],
+        changed.join(", ")
+    )))
+}
+
+/// The tables and columns whose declarations differ between `before` and
+/// `after`: `table.column` for an encrypted column, `table` for the rest of
+/// an entry. The order of `equality` doesn't count.
+fn changed_declarations(before: &Entries, after: &Entries) -> Vec<String> {
+    let tables: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    let mut changed = Vec::new();
+    for table in tables {
+        let (Some(old), Some(new)) = (before.get(table), after.get(table)) else {
+            changed.push(table.clone());
+            continue;
+        };
+        let columns: std::collections::BTreeSet<&String> =
+            old.columns.keys().chain(new.columns.keys()).collect();
+        for column in columns {
+            if old.columns.get(column) != new.columns.get(column) {
+                changed.push(format!("{table}.{column}"));
+            }
+        }
+        let sorted = |list: &[String]| {
+            let mut list = list.to_vec();
+            list.sort();
+            list
+        };
+        if old.space != new.space
+            || old.scope != new.scope
+            || sorted(&old.equality) != sorted(&new.equality)
+        {
+            changed.push(table.clone());
+        }
+    }
+    changed
+}
+
 /// The entries `encryption` declares for version `current`.
 pub(crate) fn version_entries(
     encryption: Option<&DeclaredEncryption>,
@@ -339,6 +405,7 @@ pub fn staleness(
         }
         return Ok(Some(Staleness::SchemaChanged));
     }
+    check_recorded_declarations(app, &recorded)?;
     if recorded.source != app.source || recorded.format != lang.format() {
         return Ok(Some(Staleness::OutOfDate));
     }

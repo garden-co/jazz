@@ -51,6 +51,7 @@ pub fn create(
         return Ok(unchanged());
     };
     let recorded = bindings::read(lang, bindings)?;
+    bindings::check_recorded_declarations(&app, &recorded)?;
     if app
         .compiled
         .schemas
