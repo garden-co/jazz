@@ -1,0 +1,86 @@
+---
+title: Encrypting Existing Data
+description: "Jazz encrypts columns that are declared encrypted when they are created. To encrypt data you already store in plain columns, copy it into a new encrypted table."
+languageTabs: backend
+---
+
+Jazz encrypts a column that is declared encrypted when it is created. It does not convert a plain
+column that already holds data, and an app file cannot ask it to. To encrypt data you already
+store, add a new encrypted table, have your app's clients copy the rows into it, and then retire
+the old table.
+
+**The old plaintext stays.** Copying protects the values from then on, not the ones already
+stored. The old values remain in the old table's history, on every replica that synced them, and
+in backups. Dropping the old column or table does not erase them from any of these. If that
+matters, treat the old data as already disclosed.
+
+## The recipe
+
+### 1. Make the space table's members first
+
+An encrypted table's rows live in **spaces**, the rows of a space table (a project, a room), and
+its members are the rows of `__e2ee_members`. The space table's read rule must come from the
+members table before any table encrypts columns in its spaces (see
+[Sharing and keys](/docs/e2ee/sharing-and-keys)).
+
+If your space table already has that read rule, go to step 2. Otherwise, move it in two deploys:
+
+1. Declare an `encryption` entry for the space table itself with no encrypted columns
+   (`"space": "id", "scope": "<the table>", "columns": {}`). This adds Jazz's encryption tables,
+   and the read rule stays as it is for now (the deploy warns). Then write the member rows: for
+   each space row, one row per account that should keep reading it, from a client allowed to
+   update the space row or from your backend.
+2. Change the space table's read rule to the members rule. Accounts without a member row stop
+   reading the space row at this deploy.
+
+### 2. Add the new encrypted table
+
+Add the new table to your schema, with its encrypted columns and its `encryption` entry naming the
+space column, in the same migration that creates the table. Declare `equality` here, for every
+column you will filter by. Declare equality when you create the table: it cannot be added to a
+table that already exists, because rows older than the column have no equality token. To filter
+by a column of an existing table later, copy it into a new table that declares it, with this same
+recipe.
+
+If you want to know which rows are already copied, give the new table a plain column for the old
+row's ID.
+
+### 3. Copy the rows from your app's clients
+
+Only clients hold keys, so only clients can write the encrypted copies. The server never can. Each
+client copies what it can:
+
+- the rows it can read, in spaces whose key it holds;
+- in a space with no key yet, the first encrypted write creates it, and that needs a session
+  allowed to update the space row. Other members get the key from it.
+
+A space whose key holders are all offline waits until one of them comes online.
+
+A sketch of a copying client (not a drop-in function). `tasks` is the old table, `secureTasks` the
+new one with an encrypted `title`, and `copiedFrom` holds the old row's ID:
+
+```ts
+import type { Db } from "jazz-tools/backend";
+import { app } from "./jazz.generated";
+
+async function copyProject(db: Db, projectId: string) {
+  const oldTasks = await db.all(app.tasks.where({ projectId }));
+  for (const task of oldTasks) {
+    const copied = await db.all(app.secureTasks.where({ copiedFrom: task.id }));
+    if (copied.length > 0) continue;
+    await db
+      .insert(app.secureTasks, { projectId, copiedFrom: task.id, title: task.title })
+      .wait({ tier: "global" });
+  }
+}
+```
+
+Run it when a client opens a project, for example, so the work spreads across the members who
+use the app. Two clients copying the same row at the same time can both insert a copy: check for
+duplicates by `copiedFrom` before you switch over, or copy each project from one place only.
+
+### 4. Switch to the new table, then drop the old one
+
+Point your app's reads, writes, relations and permissions at the new table. The copies have new row
+IDs, so update references to the old rows, or map them in your app. Once nothing writes the old
+table, drop it in a later migration. As above, its data stays in history, replicas and backups.

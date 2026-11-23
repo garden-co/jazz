@@ -11,6 +11,13 @@ languageTabs: backend
   with `remote()`. The Worker holds no keys. Running a key-holding client on the Worker and
   deploying an encrypted schema to a Durable Object core are unsupported.
 - **The backend cannot compute on encrypted content.** It relays it and works on plain columns.
+- **Existing plain columns are not encrypted for you.** A column is encrypted when it is declared
+  encrypted at creation; Jazz does not convert one that already holds data. Copy the data into a new
+  encrypted table instead: see [Encrypting existing data](/docs/e2ee/encrypting-existing-data). The
+  old plaintext stays in history, replicas and backups.
+- **Equality is declared when the table is created.** It cannot be added to a column of a table that
+  already exists, because rows older than the column have no equality token. To filter by such a
+  column later, copy it into a new table that declares it.
 - **Keys follow members.** A member's device gets a key from another member's device; if no member
   device that holds it is online, a new member waits, and a write waits ten seconds before it fails
   `key-pending`.
