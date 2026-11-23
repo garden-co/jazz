@@ -593,10 +593,36 @@ async fn no_token_callback_runs_after_the_session_closes() {
     // host for another, on its own, again and again.
     app.relay.refuse("token-alice", "token expired");
     app.relay.kick();
+    let relay_events = app.relay.event_log();
     tokio::task::spawn_blocking(move || unsafe {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !host.running.load(Ordering::SeqCst) {
-            assert!(Instant::now() < deadline, "no renewal");
+            if Instant::now() >= deadline {
+                // What the client and the backend saw, for the cause.
+                let mut err = ptr::null_mut();
+                let out = jazz_session_call(
+                    session as *mut _,
+                    c("snapshot").as_ptr(),
+                    c("{}").as_ptr(),
+                    &mut err,
+                );
+                let snapshot = if out.is_null() { take(err) } else { take(out) };
+                let mut err = ptr::null_mut();
+                let jazz = jazz_session_jazz(session as *mut _, &mut err);
+                let sync = if jazz.is_null() {
+                    take(err).to_string()
+                } else {
+                    let mut err = ptr::null_mut();
+                    let out = jazz_call(jazz, c("syncStatus").as_ptr(), c("{}").as_ptr(), &mut err);
+                    let sync = if out.is_null() { take(err) } else { take(out) };
+                    jazz_close(jazz);
+                    sync.to_string()
+                };
+                panic!(
+                    "no renewal\nsession: {snapshot}\nsync: {sync}\nrelay:\n{}",
+                    relay_events().join("\n")
+                );
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
         jazz_session_close(session as *mut _);
