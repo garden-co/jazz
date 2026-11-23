@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::catalogue::Permissions;
+use crate::records::ValueType;
 use crate::tools::public_schema::{
     CmpOp, ColumnDescriptor, ColumnType, EncryptedColumn, EncryptionEntry, EncryptionSettings,
     PolicyExpr, PolicyValue, Schema, TableName, TablePolicies, Value,
@@ -173,6 +174,15 @@ pub fn check_entry(
     entry: &EncryptionEntry,
     schema: &Schema,
 ) -> Result<(), EntryRefusal> {
+    check_version_entry(table, entry, schema, true)
+}
+
+pub(crate) fn check_version_entry(
+    table: &str,
+    entry: &EncryptionEntry,
+    schema: &Schema,
+    current: bool,
+) -> Result<(), EntryRefusal> {
     check_space(table, &entry.space, &entry.scope, schema, "")?;
     for (name, declared) in &entry.columns {
         let at = format!(".columns.{name}");
@@ -298,7 +308,71 @@ pub fn check_entry(
             ));
         }
     }
+    if current {
+        for (name, declared) in &entry.columns {
+            let at = format!(".columns.{name}");
+            encrypted_value_type(&declared.plain.column_type)
+                .map_err(|reason| (at.clone(), reason.to_owned()))?;
+            if let Some(sealed) = &declared.sealed_type {
+                encrypted_value_type(&sealed.column_type)
+                    .map_err(|reason| (format!("{at}.sealedType"), reason.to_owned()))?;
+            }
+        }
+    }
     Ok(())
+}
+
+/// The record type that a client can encode for this encrypted column.
+pub fn encrypted_value_type(ty: &ColumnType) -> Result<ValueType, &'static str> {
+    Ok(match ty {
+        ColumnType::Integer => ValueType::I32,
+        ColumnType::BigInt => ValueType::I64,
+        ColumnType::Boolean => ValueType::Bool,
+        ColumnType::Text | ColumnType::Enum { .. } => ValueType::String,
+        ColumnType::Json { schema } => {
+            if schema
+                .as_ref()
+                .is_some_and(|s| !schema_numbers_are_integers(s))
+            {
+                return Err(
+                    "the encrypted cell type cannot encode a JSON schema with a non-integer number",
+                );
+            }
+            ValueType::String
+        }
+        ColumnType::Timestamp => ValueType::U64,
+        ColumnType::Double => ValueType::F64,
+        ColumnType::Uuid => ValueType::Uuid,
+        ColumnType::Bytea => ValueType::Bytes,
+        ColumnType::Array { element } => encrypted_value_type(element)?.array_of(),
+        ColumnType::LegacyEnumPayload { .. } => {
+            return Err("the encrypted cell type cannot encode a payload enum");
+        }
+        ColumnType::Row { .. } => return Err("the encrypted cell type cannot encode a row"),
+        ColumnType::ScalarEnum { .. } => {
+            return Err("the encrypted cell type cannot encode a catalogue scalar enum");
+        }
+        ColumnType::TransactionId => {
+            return Err("the encrypted cell type cannot encode a transaction ID");
+        }
+    })
+}
+
+/// The integer represented by a number in the cell type's canonical JSON.
+pub fn cell_type_integer(number: &serde_json::Number) -> Option<i128> {
+    number
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| number.as_u64().map(i128::from))
+}
+
+fn schema_numbers_are_integers(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Number(number) => cell_type_integer(number).is_some(),
+        serde_json::Value::Array(items) => items.iter().all(schema_numbers_are_integers),
+        serde_json::Value::Object(fields) => fields.values().all(schema_numbers_are_integers),
+        _ => true,
+    }
 }
 
 fn fits_default(ty: &ColumnType, value: &Value) -> bool {
@@ -338,7 +412,8 @@ fn without_equality_encoding(column_type: &ColumnType) -> Option<String> {
         }
         ColumnType::Row { .. } => Some("row".to_owned()),
         ColumnType::TransactionId => Some("transaction-ID".to_owned()),
-        _ => Some("this type of".to_owned()),
+        ColumnType::LegacyEnumPayload { .. } => Some("payload enum".to_owned()),
+        ColumnType::ScalarEnum { .. } => Some("catalogue scalar enum".to_owned()),
     }
 }
 

@@ -615,9 +615,9 @@ fn check_encryption(
             ));
         }
         for (table, entry) in entries.into_iter().flatten() {
-            declared::check_entry(table, entry, schema).map_err(|(at, message)| {
-                invalid(*hash, format!("tables.{table}.encryption{at}: {message}"))
-            })?;
+            declared::check_version_entry(table, entry, schema, *hash == target).map_err(
+                |(at, message)| invalid(*hash, format!("tables.{table}.encryption{at}: {message}")),
+            )?;
         }
     }
     let permissions: crate::catalogue::Permissions = request

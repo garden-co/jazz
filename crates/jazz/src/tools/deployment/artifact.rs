@@ -539,9 +539,9 @@ pub fn load_backend(bound: &[u8], permissions: &[u8]) -> Result<LoadedApp, Artif
             )));
         }
         for (table, entry) in entries.into_iter().flatten() {
-            encryption::check_entry(table, entry, schema).map_err(|(at, message)| {
-                refuse(format!("tables.{table}.encryption{at}: {message}"))
-            })?;
+            encryption::check_version_entry(table, entry, schema, *hash == current).map_err(
+                |(at, message)| refuse(format!("tables.{table}.encryption{at}: {message}")),
+            )?;
         }
     }
     let history = History {

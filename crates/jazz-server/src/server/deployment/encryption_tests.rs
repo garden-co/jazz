@@ -641,6 +641,67 @@ async fn only_encrypted_declarations_refuse_unknown_scalar_type_fields() {
     }
 }
 
+/// Alice gets the same refusal for an unreadable encrypted type in an app file and at the raw router.
+#[tokio::test]
+async fn unreadable_encrypted_types_are_refused_before_publication() {
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let source = APP.replace(r#", "equality": ["title"]"#, "");
+    let load = |file: &str| artifact::load(file.as_bytes(), permissions.as_bytes());
+    let base = load(&source).unwrap();
+    let hash = base.current_hash().to_string();
+    let payload = json!({"enum":{"pending":{"reason":"string"}}});
+    let raw_payload = json!({"type":"EnumPayload","cases":[{"name":"pending","fields":[
+        {"name":"reason","column_type":{"type":"Text"},"nullable":false}
+    ]}]});
+    let mut results = Vec::new();
+    for (file_type, raw_type, reason) in [
+        (payload.clone(), raw_payload.clone(), "payload enum"),
+        (
+            json!({"array":payload}),
+            json!({"type":"Array","element":raw_payload}),
+            "payload enum",
+        ),
+        (
+            json!({"json":{"minimum":0.5}}),
+            json!({"type":"Json","schema":{"minimum":0.5}}),
+            "non-integer",
+        ),
+    ] {
+        let file = source.replace(r#""title": "string""#, &format!(r#""title":{file_type}"#));
+        let file_error = load(&file).err().map(|e| e.to_string());
+        let mut raw = base.deployment_body(false);
+        raw["encryption"]["versions"][&hash]["tasks"]["columns"]["title"]["type"]["columnType"] =
+            raw_type;
+        let (status, response) = publish(&router().await, raw).await;
+        results.push((reason, file_error, status, response));
+    }
+    for (reason, file_error, status, response) in &results {
+        assert_eq!(*status, StatusCode::UNPROCESSABLE_ENTITY, "{results:?}");
+        for error in [
+            file_error.as_deref().unwrap(),
+            response["error"].as_str().unwrap(),
+        ] {
+            assert!(
+                error.contains("tasks") && error.contains("title") && error.contains(reason),
+                "{error}"
+            );
+        }
+    }
+}
+
+/// Alice can deploy a migration that drops an unreadable historical declaration.
+#[tokio::test]
+async fn a_historical_encrypted_payload_enum_can_be_dropped() {
+    let file = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"notes":{"columns":{"summary":"bytes"},"encryption":{"space":"id","scope":"notes","columns":{"summary":"string?"}}}},
+        "history":{"old":{"tables":{"notes":{"columns":{"detail":"bytes"},"encryption":{"space":"id","scope":"notes","columns":{"detail":{"enum":{"pending":{"reason":"string"}}}}}}}}},
+        "migrations":[{"from":"old","migrate":{"notes":{"detail":{"drop":"bytes","backwardsDefault":""},"summary":{"add":"bytes","default":""}}}}]}"#;
+    let policy = r#"{"$schema":"https://jazz.tools/schemas/jazz.permissions.v1.json","tables":{"notes":{"read":"exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)"}}}"#;
+    let app = artifact::load(file.as_bytes(), policy.as_bytes()).unwrap();
+    let (status, response) = publish(&router().await, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+}
+
 /// Alice can declare null only on an optional encrypted column.
 #[tokio::test]
 async fn defaults_in_files_and_raw_deployments_must_match_the_encrypted_type() {

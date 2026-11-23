@@ -1004,6 +1004,62 @@ async fn check_required_title(files: AppFiles) {
     app.stop().await;
 }
 
+/// Alice opens the published app with a native codec for each supported encrypted type.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_opens_every_supported_encrypted_type_after_deployment() {
+    let mut file: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/encrypted/jazz.app.json")).unwrap();
+    let table = &mut file["tables"]["tasks"];
+    for (name, ty) in [
+        ("flag", json!("boolean")),
+        ("count", json!("int")),
+        ("large", json!("bigint")),
+        ("amount", json!("float")),
+        ("instant", json!("timestamp")),
+        ("identifier", json!("uuid")),
+        ("words", json!("string?")),
+        ("blob", json!("bytes")),
+        ("choice", json!({"enum":["a","b"]})),
+        ("document", json!({"json":true})),
+        (
+            "constrained",
+            json!({"json":{"type":"number","minimum":-1}}),
+        ),
+        (
+            "groups",
+            json!({"array":{"array":{"enum":["open","closed"]}}}),
+        ),
+    ] {
+        table["columns"][name] = json!("bytes");
+        table["columns"][format!("__e2ee_eq_{name}")] = json!("bytes");
+        table["encryption"]["columns"][name] = ty;
+        table["encryption"]["equality"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(name));
+    }
+    let file = serde_json::to_vec(&file).unwrap();
+    let app =
+        App::start_with(AppFiles::new(file.clone(), None).with_permissions(
+            include_bytes!("fixtures/encrypted/jazz.permissions.json").as_slice(),
+        ))
+        .await;
+    let device = Jazz::open(
+        AppFiles::new(file, None),
+        app.user(DeviceKey::generate().unwrap())
+            .encryption(EncryptionConfig::store(|| Rc::new(MemoryStore::new()))),
+    )
+    .await
+    .unwrap();
+    device
+        .encryption()
+        .ready(Duration::from_secs(30))
+        .await
+        .unwrap();
+    device.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// Alice writes a task, upgrades to a schema with an empty stored cell for priority,
 /// and reads the declared priority from the row she wrote before the migration.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

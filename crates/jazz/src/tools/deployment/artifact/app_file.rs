@@ -618,7 +618,7 @@ fn read_tables(
         }
     }
     for (table, entry) in &entries {
-        super::encryption::check_entry(table, entry, &schema)
+        super::encryption::check_version_entry(table, entry, &schema, codegen.is_some())
             .map_err(|(at, message)| refuse(format!("{path}.{table}.encryption{at}"), message))?;
     }
     Ok((schema, entries))

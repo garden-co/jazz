@@ -15,6 +15,7 @@
 
 use jazz::e2ee::PlainType;
 use jazz::records::{RecordDescriptor, Value, ValueType};
+use jazz::tools::deployment::artifact::encryption::{cell_type_integer, encrypted_value_type};
 use jazz::tools::{ColumnType, Value as DeclaredValue};
 use jazz_e2ee::protocol::content::EqualityValueBuf;
 use jazz_e2ee::protocol::json::{push_string, utf16_cmp};
@@ -49,22 +50,6 @@ fn unsupported(column: &str, what: &str) -> ClientError {
     ))
 }
 
-/// The logical type of a column type an encrypted column may have.
-fn logical(column: &str, column_type: &ColumnType) -> Result<ValueType, ClientError> {
-    Ok(match column_type {
-        ColumnType::Integer => ValueType::I32,
-        ColumnType::BigInt => ValueType::I64,
-        ColumnType::Boolean => ValueType::Bool,
-        ColumnType::Text | ColumnType::Enum { .. } | ColumnType::Json { .. } => ValueType::String,
-        ColumnType::Timestamp => ValueType::U64,
-        ColumnType::Double => ValueType::F64,
-        ColumnType::Uuid => ValueType::Uuid,
-        ColumnType::Bytea => ValueType::Bytes,
-        ColumnType::Array { element } => logical(column, element)?.array_of(),
-        _ => return Err(unsupported(column, "this column type")),
-    })
-}
-
 fn equality_type(column_type: &ColumnType) -> EqualityColumnType {
     match column_type {
         ColumnType::Integer => EqualityColumnType::Integer,
@@ -93,11 +78,9 @@ fn push_schema(out: &mut String, value: &serde_json::Value) -> Result<(), ()> {
     match value {
         serde_json::Value::Null => out.push_str("null"),
         serde_json::Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
-        serde_json::Value::Number(number) => match (number.as_i64(), number.as_u64()) {
-            (Some(value), _) => out.push_str(&value.to_string()),
-            (None, Some(value)) => out.push_str(&value.to_string()),
-            _ => return Err(()),
-        },
+        serde_json::Value::Number(number) => {
+            out.push_str(&cell_type_integer(number).ok_or(())?.to_string())
+        }
         serde_json::Value::String(value) => push_string(out, value),
         serde_json::Value::Array(items) => {
             out.push('[');
@@ -197,7 +180,9 @@ impl ColumnCodec {
         sealed: &PlainType,
         indexed: bool,
     ) -> Result<Self, ClientError> {
-        let mut value_type = logical(column, &plain.column_type)?;
+        let mut value_type = encrypted_value_type(&plain.column_type).map_err(|reason| {
+            ClientError::Unsupported(format!("encrypted column `{column}`: {reason}"))
+        })?;
         if plain.nullable {
             value_type = value_type.nullable();
         }
