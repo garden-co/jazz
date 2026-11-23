@@ -26,6 +26,61 @@ fn fetch(server: &Db, db: &Db, query: Query) -> Result<Vec<jazz::db::CurrentRow>
 
 const SECRET: &str = "PLAINTEXT-ONLY-ALICE-KNOWS";
 
+/// Alice's backend can edit a loaded note, but both update and upsert must keep
+/// its project, even when the foreign key permits null.
+#[test]
+fn keyless_writes_keep_a_loaded_rows_nullable_space() {
+    let declared = declarations();
+    let mut schema = app_schema();
+    let notes = schema
+        .get_mut(&jazz::tools::public_schema::TableName::from("notes"))
+        .unwrap();
+    for column in &mut notes.columns.columns {
+        if column.name_str() == "projectId" {
+            column.nullable = true;
+        } else if declared.tables["notes"]
+            .columns
+            .contains_key(column.name_str())
+        {
+            column.default = Some(jazz::tools::Value::Bytea(Vec::new()));
+        }
+    }
+    let config = DbConfig::new(jazz::schema::JazzSchema::new(&schema).unwrap(), identity(2))
+        .with_e2ee(KeylessHooks::hooks(declared));
+    let db = block_on(Db::open(config)).unwrap();
+    let first = project(&db, "first");
+    let other = project(&db, "other");
+    let row = block_on(db.insert(
+        "notes",
+        BTreeMap::from([
+            ("projectId".into(), Value::Uuid(first)),
+            ("title".into(), text("draft")),
+        ]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    for space in [Value::Uuid(other), Value::Nullable(None)] {
+        let patch = BTreeMap::from([("projectId".into(), space)]);
+        for result in [
+            block_on(db.update("notes", row, patch.clone(), Default::default())),
+            block_on(db.upsert("notes", row, patch, Default::default())),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected);
+            assert_eq!(
+                error.message,
+                "an encrypted row cannot change its space through an ordinary write"
+            );
+        }
+    }
+    let rows = all(&db, Query::from("notes")).unwrap();
+    assert_eq!(
+        rows[0].cell("projectId"),
+        Some(Value::Nullable(Some(Box::new(Value::Uuid(first)))))
+    );
+}
+
 /// Contract: the backend relays alice's encrypted row. It reads the row's
 /// plain columns but never its encrypted ones (no ciphertext either); it
 /// reads and writes plain tables and plain columns as usual; a write naming

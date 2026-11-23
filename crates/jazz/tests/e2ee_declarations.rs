@@ -971,6 +971,25 @@ fn equality_and_stored_defaults_follow_their_formats() {
     assert!(error.contains("stored default"), "{error}");
 }
 
+/// Alice can give an equality token an empty stored default; any other bytes are refused.
+#[test]
+fn an_equality_tokens_stored_default_must_be_empty() {
+    let with_default = |encoded: &str| {
+        app(tasks_entry()).replace(
+            r#""__e2ee_eq_title": "bytes""#,
+            &format!(r#""__e2ee_eq_title": {{ "type": "bytes", "default": "{encoded}" }}"#),
+        )
+    };
+    load_app(with_default("").as_bytes()).unwrap();
+    let error = refusal(load_app(with_default("AQ==").as_bytes()));
+    assert!(
+        error.contains(
+            "the stored default of token column __e2ee_eq_title must be an empty byte string"
+        ),
+        "{error}"
+    );
+}
+
 /// A client has no encryption hooks yet, so none of the ways a client
 /// opens an app lets an encrypted one in: the files' client loader and the
 /// bindings' database open both refuse it, while a backend can still read
