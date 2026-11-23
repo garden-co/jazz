@@ -328,7 +328,9 @@ type SyncStatus struct {
 	Synced bool `json:"synced"`
 }
 
-// Session is the end user's session, or nil for a local app.
+// Session is the end user's session, or nil for a local app. On a DB
+// ForUser returned it is ErrNotSupported: the session is the backend
+// client's, shared by every user.
 func (db *DB) Session(ctx context.Context) (*SessionState, error) {
 	var s *SessionState
 	err := db.call(ctx, "session", map[string]any{}, &s)
@@ -343,19 +345,24 @@ func (db *DB) SyncStatus(ctx context.Context) (SyncStatus, error) {
 }
 
 // Link links the signed-in device account to the user bearer (a token
-// from your auth provider) signs in as, and returns that user.
+// from your auth provider) signs in as, and returns that user. On a DB
+// ForUser returned it is ErrNotSupported.
 func (db *DB) Link(ctx context.Context, bearer string) (*User, error) {
 	var u *User
 	err := db.call(ctx, "link", map[string]any{"bearer": bearer}, &u)
 	return u, err
 }
 
-// Refresh asks the TokenProvider for a fresh token now.
+// Refresh asks the TokenProvider for a fresh token now. On a DB ForUser
+// returned it is ErrNotSupported: refresh the backend client's DB.
 func (db *DB) Refresh(ctx context.Context) error {
 	return db.call(ctx, "refresh", map[string]any{}, nil)
 }
 
-// SignOut signs the end user out and closes the app.
+// SignOut signs the end user out and closes the app. A refused SignOut
+// leaves the app open, as on a DB ForUser returned, where it is
+// ErrNotSupported: the session is the backend client's, shared by every
+// user. Close that DB instead.
 func (db *DB) SignOut(ctx context.Context) error {
 	if err := db.call(ctx, "signOut", map[string]any{}, nil); err != nil {
 		return err
@@ -365,7 +372,7 @@ func (db *DB) SignOut(ctx context.Context) error {
 }
 
 // OnSession is the session's states, the current one first, until ctx is
-// done.
+// done. On a DB ForUser returned it is ErrNotSupported, as Session is.
 func (db *DB) OnSession(ctx context.Context) (<-chan SessionState, error) {
 	return watch(ctx, db, "session", decodeSessionState)
 }

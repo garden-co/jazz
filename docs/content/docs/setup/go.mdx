@@ -93,7 +93,8 @@ account: an empty or unreadable one is an error, and is left as it is. Your own 
 
 `db.Session(ctx)` is who is signed in,
 `db.OnSession(ctx)` and `db.OnSyncStatus(ctx)` are channels of their changes, and `db.Refresh(ctx)`
-and `db.SignOut(ctx)` do what they say.
+and `db.SignOut(ctx)` do what they say. A backend client's `ForUser` DB has no session of its own:
+on one, `Session`, `OnSession`, `Refresh`, `Link` and `SignOut` fail with `jazz.ErrNotSupported`.
 
 Writes are local-first: a write your permissions refuse returns no error. It is never synced, and
 other users never see it.
