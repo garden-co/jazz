@@ -95,7 +95,7 @@ unsafe fn text<'a>(text: *const c_char, what: &str) -> Result<&'a str, FfiError>
 }
 
 /// # Safety
-/// `handle` is NULL or a handle from `jazz_open` not yet closed.
+/// `handle` is NULL or a handle not yet freed.
 unsafe fn handle<'a>(handle: *const JazzHandle) -> Result<&'a Core, FfiError> {
     // SAFETY: per the function's contract.
     unsafe { handle.as_ref() }
@@ -134,7 +134,7 @@ pub unsafe extern "C" fn jazz_open(
 /// account id or `null`, `{tx}`, `null`, `null`.
 ///
 /// # Safety
-/// `handle` comes from `jazz_open` and is not closed; the strings are
+/// `handle` is not freed (it may be closed); the strings are
 /// NUL-terminated; `err` is NULL or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jazz_call(
@@ -158,6 +158,12 @@ pub unsafe extern "C" fn jazz_call(
         } else {
             crate::convert::parse(args, "args_json")?
         };
+        // Beside any other call, and on a closed handle too.
+        if method == "close" {
+            core.close_within(close_timeout(&args)?)?;
+            return Ok(into_c("null".into()));
+        }
+        core.ensure_open()?;
         let field = |name: &str| -> Result<&Json, FfiError> {
             args.get(name)
                 .ok_or_else(|| refused(format!("{method} needs \"{name}\" in args_json")))
@@ -374,6 +380,19 @@ pub unsafe extern "C" fn jazz_call(
     })
 }
 
+/// `"close"`'s `{"timeoutMs"?}`.
+fn close_timeout(args: &Json) -> Result<Option<std::time::Duration>, FfiError> {
+    match args.get("timeoutMs").filter(|timeout| !timeout.is_null()) {
+        None => Ok(None),
+        Some(timeout) => timeout
+            .as_u64()
+            .map(|ms| Some(std::time::Duration::from_millis(ms)))
+            .ok_or_else(|| {
+                refused("args_json.timeoutMs must be a non-negative whole number of milliseconds")
+            }),
+    }
+}
+
 struct Context(*mut c_void);
 // SAFETY: the caller of `jazz_subscribe` promises `ctx` may be used from
 // another thread (the header says so).
@@ -383,7 +402,7 @@ unsafe impl Send for Context {}
 /// own until `jazz_unsubscribe`.
 ///
 /// # Safety
-/// `handle` comes from `jazz_open` and is not closed; `query_json` is
+/// `handle` is not freed; `query_json` is
 /// NUL-terminated; `cb` and `ctx` stay valid, from any thread, until
 /// `jazz_unsubscribe` returns; `err` is NULL or writable.
 #[unsafe(no_mangle)]
@@ -398,6 +417,7 @@ pub unsafe extern "C" fn jazz_subscribe(
         // SAFETY: per the function's contract.
         let (core, query) = unsafe { (handle(handle_ptr)?, text(query_json, "query_json")?) };
         contract.set(core.contract);
+        core.ensure_open()?;
         let version = core.contract;
         // `{ "query": Q, "tier"? }`, or the query itself.
         let parsed = crate::convert::parse(query, "query_json")?;
@@ -464,6 +484,7 @@ pub unsafe extern "C" fn jazz_close(handle: *mut JazzHandle) {
         // SAFETY: per the function's contract.
         let handle = unsafe { Box::from_raw(handle) };
         let _ = handle.0.close();
+        handle.0.before_free();
     }));
 }
 
@@ -471,7 +492,9 @@ pub unsafe extern "C" fn jazz_close(handle: *mut JazzHandle) {
 /// client holds to reach the server. Returns 0; or -1 with `*err` set when
 /// writes were left unsent (memory storage, kind `"unsynced"` with
 /// `"pending"` under contract 2) or closing failed. The handle is closed and
-/// freed either way. `timeout_ms` 0 closes at once.
+/// freed either way; after a `"close"` call it only frees. `timeout_ms` 0
+/// waits for no writes, but is not instant: local work already started
+/// finishes, and stream sessions get up to 2 s to end (no hard limit).
 ///
 /// # Safety
 /// As [`jazz_close`]; `err` is NULL or writable.
@@ -488,9 +511,11 @@ pub unsafe extern "C" fn jazz_close_within(
         // SAFETY: per the function's contract.
         let handle = unsafe { Box::from_raw(handle) };
         contract.set(handle.0.contract);
-        handle
+        let closed = handle
             .0
-            .close_within(Some(std::time::Duration::from_millis(timeout_ms)))?;
+            .close_within(Some(std::time::Duration::from_millis(timeout_ms)));
+        handle.0.before_free();
+        closed?;
         Ok(0)
     })
 }
@@ -518,6 +543,7 @@ pub unsafe extern "C" fn jazz_for_user(
         // SAFETY: per the function's contract.
         let core = unsafe { handle(handle_ptr) }?;
         contract.set(core.contract);
+        core.ensure_open()?;
         // SAFETY: as above.
         let user_id = unsafe { text(user_id, "user_id") }?;
         let claims = if claims_json.is_null() {
@@ -536,7 +562,7 @@ pub unsafe extern "C" fn jazz_for_user(
 pub struct JazzSession(crate::session::SessionCore);
 
 /// # Safety
-/// `session` is NULL or a session from `jazz_session_open`, not yet closed.
+/// `session` is NULL or a session from `jazz_session_open`, not yet freed.
 unsafe fn session<'a>(
     session: *const JazzSession,
 ) -> Result<&'a crate::session::SessionCore, FfiError> {
@@ -580,7 +606,7 @@ pub unsafe extern "C" fn jazz_session_open(
         };
         let core = crate::session::SessionCore::open(config, tokens)?;
         if let Some(gate) = gate {
-            core.on_close(Box::new(move || gate.close()));
+            core.on_close(gate);
         }
         Ok(Box::into_raw(Box::new(JazzSession(core))))
     })
@@ -590,7 +616,7 @@ pub unsafe extern "C" fn jazz_session_open(
 /// its result as JSON.
 ///
 /// # Safety
-/// `session` comes from `jazz_session_open` and is not closed; the strings
+/// `session` is not freed (it may be closed); the strings
 /// are NUL-terminated; `err` is NULL or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jazz_session_call(
@@ -688,6 +714,7 @@ pub unsafe extern "C" fn jazz_session_close(session: *mut JazzSession) {
         // SAFETY: per the function's contract.
         let session = unsafe { Box::from_raw(session) };
         let _ = session.0.close();
+        session.0.before_free();
     }));
 }
 
@@ -757,7 +784,7 @@ pub unsafe extern "C" fn jazz_open_user(
         let core = Core::open_with_tokens(config, Some(std::sync::Arc::new(host)))?;
         // Closing waits for fetches in progress (but its own, when closed
         // from inside the callback); no fetch calls the host after.
-        core.on_close(Box::new(move || gate.close()));
+        core.on_close(gate);
         Ok(Box::into_raw(Box::new(JazzHandle(core))))
     })
 }
@@ -824,6 +851,7 @@ pub unsafe extern "C" fn jazz_watch(
         // SAFETY: per the function's contract.
         let (core, what) = unsafe { (handle(handle_ptr)?, text(what, "what")?) };
         contract.set(core.contract);
+        core.ensure_open()?;
         let cb = cb.ok_or_else(|| refused("the callback is NULL"))?;
         let ctx = Context(ctx);
         let kind = CString::new(what).unwrap_or_default();

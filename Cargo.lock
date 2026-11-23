@@ -2036,7 +2036,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jazz-app-support"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
@@ -2052,14 +2052,17 @@ dependencies = [
  "jazz-text",
  "libc",
  "postcard",
+ "rcgen",
  "reqwest",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "tracing",
 ]
@@ -2073,7 +2076,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-codegen"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "jazz-core",
  "serde",
@@ -2082,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-compression"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "jazz-ruzstd",
  "lz4_flex",
@@ -2091,7 +2094,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-core"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2141,8 +2144,9 @@ dependencies = [
 
 [[package]]
 name = "jazz-db"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
+ "async-trait",
  "bytes",
  "futures",
  "jazz-model",
@@ -2154,6 +2158,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "thiserror 2.0.18",
  "tracing",
  "uuid",
  "web-time",
@@ -2300,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-ffi"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -2319,7 +2324,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-model"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -2387,9 +2392,10 @@ dependencies = [
 
 [[package]]
 name = "jazz-native-transport"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "axum 0.8.9",
+ "base64 0.22.1",
  "bytes",
  "futures",
  "hex",
@@ -2397,19 +2403,23 @@ dependencies = [
  "jazz-core",
  "jazz-server",
  "postcard",
+ "rcgen",
  "reqwest",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
+ "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "jazz-otel"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "jazz-core",
  "jazz-server",
@@ -2432,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-protocol"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "hex",
  "jazz-compression",
@@ -2455,8 +2465,9 @@ version = "0.8.3"
 
 [[package]]
 name = "jazz-server"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
+ "async-trait",
  "axum 0.8.9",
  "base64 0.22.1",
  "bytes",
@@ -2528,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-text"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2536,7 +2547,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-tools"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
@@ -2572,7 +2583,7 @@ dependencies = [
 
 [[package]]
 name = "jazz-types"
-version = "2.0.0-beta.0"
+version = "2.0.0-beta.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2596,6 +2607,7 @@ dependencies = [
 name = "jazz-wasm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "bytes",
  "console_error_panic_hook",

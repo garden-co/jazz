@@ -7,7 +7,8 @@
 //!
 //! A [`Jazz`] is one user's: the session replaces it when someone signs in
 //! or out, or the user changes. One kept from before fails with
-//! [`Error::Replaced`], and its subscriptions end.
+//! [`Error::Replaced`] ([`Error::Stopped`] once the session closes), and
+//! its subscriptions end.
 //!
 //! Every operation runs on the session's own runtime, whatever the
 //! caller's executor (a foreign thread through jazz-ffi, `block_on`).
@@ -18,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use futures_core::Stream;
+use futures_util::StreamExt as _;
 use jazz::account_registry::AccountId;
 use jazz::tools::AppId;
 use serde::Serialize;
@@ -165,10 +167,11 @@ pub struct SessionConfig {
     /// [`Storage::Dir`] keeps each account's store in a directory of its
     /// own under it (`<dir>/<account id>/`), and the device account's key
     /// in `<dir>/device.key`. [`Storage::Memory`] keeps both for the life
-    /// of the process. [`Jazz::delete_client_storage`] on a session's
-    /// client deletes that account's store only (and is refused with
-    /// [`Error::StoreHeld`] while another open client holds it); the device
-    /// key survives signing out.
+    /// of the process. One client at a time has an account's store open: a
+    /// second session, or client, of the same account and directory fails
+    /// with [`Error::StoreHeld`]. [`Jazz::delete_client_storage`] on a
+    /// session's client deletes that account's store only; the device key
+    /// survives signing out.
     pub storage: Storage,
     /// The app's own auth: who its backend should sign in.
     pub bearer: Option<Bearer>,
@@ -252,6 +255,9 @@ enum Op {
 /// The signed-in user's client.
 #[derive(Default)]
 struct Current {
+    /// Ready once the client being opened has let go of its store, for
+    /// the close that interrupts it.
+    opening: Option<tokio::sync::oneshot::Receiver<()>>,
     jazz: Option<Jazz>,
     /// The device account's key, while signed in as it.
     device: Option<DeviceKey>,
@@ -270,6 +276,10 @@ struct Inner {
     runtime: Option<tokio::runtime::Runtime>,
     handle: tokio::runtime::Handle,
     one_at_a_time: tokio::sync::Mutex<()>,
+    /// Set as [`JazzSession::close`] begins, before it takes its turn: the
+    /// operation under way stops waiting on the app and the network, and
+    /// queued ones don't start.
+    closing: watch::Sender<bool>,
     state: watch::Sender<SessionSnapshot>,
     current: Mutex<Current>,
 }
@@ -346,6 +356,7 @@ impl JazzSession {
                 runtime: Some(runtime),
                 handle,
                 one_at_a_time: tokio::sync::Mutex::new(()),
+                closing: watch::Sender::new(false),
                 state,
                 current: Mutex::new(Current::default()),
             }),
@@ -404,8 +415,8 @@ impl JazzSession {
 
     /// The app's auth changed (its own sign-in, sign-out or account
     /// switch): asks the bearer and the backend who is signed in now, and
-    /// follows. The same user keeps the same [`Jazz`]; another one gets
-    /// theirs; no one signs out.
+    /// follows. The same user keeps the same [`Jazz`] while its client
+    /// lives; another one gets theirs; no one signs out.
     pub async fn refresh(&self) -> Result<()> {
         self.run(Op::Follow).await
     }
@@ -466,8 +477,7 @@ impl JazzSession {
     pub async fn sign_out(&self) -> Result<()> {
         let this = self.clone();
         self.on_runtime(async move {
-            let _one = this.inner.one_at_a_time.lock().await;
-            this.ensure_open()?;
+            let _one = this.take_turn().await?;
             this.replace(None, None, SessionStatus::SignedOut).await;
             Ok(())
         })
@@ -488,12 +498,30 @@ impl JazzSession {
     /// Closes the session for good: the signed-in user's [`Jazz`] closes,
     /// the snapshot reads `closed` (the last [`JazzSession::changes`]
     /// yields), and every operation fails with [`Error::Stopped`].
+    ///
+    /// It doesn't wait for an operation under way to hear from the app's
+    /// bearer or the backend: that operation fails with [`Error::Stopped`]
+    /// too (what it sent may still apply there), and installs no client.
+    /// A client being stopped is waited for, as [`Jazz::shutdown`] bounds it.
+    /// So is one being opened, for up to 2 s, to let go of its store: past
+    /// that (a token provider that doesn't return) deleting the store may
+    /// fail with [`Error::StoreHeld`] until it has.
     pub async fn close(&self) -> Result<()> {
+        // Before waiting for a turn, so whoever has it gives it up.
+        self.inner.closing.send_replace(true);
         let this = self.clone();
         self.on_runtime(async move {
             let _one = this.inner.one_at_a_time.lock().await;
             if this.inner.state.borrow().status == SessionStatus::Closed {
                 return Ok(());
+            }
+            // An opening it interrupted lets go of the store before close
+            // returns, so the store can be reopened or deleted at once. Not
+            // waited for longer: the app's token provider may be what holds
+            // it up, and may be what called close.
+            let opening = this.lock().opening.take();
+            if let Some(opening) = opening {
+                let _ = tokio::time::timeout(crate::handle::STREAM_SESSION_END, opening).await;
             }
             this.replace(None, None, SessionStatus::Closed).await;
             Ok(())
@@ -513,10 +541,28 @@ impl JazzSession {
     }
 
     fn ensure_open(&self) -> Result<()> {
-        match self.inner.state.borrow().status {
-            SessionStatus::Closed => Err(Error::Stopped),
-            _ => Ok(()),
+        if *self.inner.closing.borrow() {
+            Err(Error::Stopped)
+        } else {
+            Ok(())
         }
+    }
+
+    /// `wait`'s output, or [`Error::Stopped`] once the session closes.
+    async fn unless_closing<T>(&self, wait: impl std::future::Future<Output = T>) -> Result<T> {
+        let mut closing = self.inner.closing.subscribe();
+        tokio::select! {
+            biased;
+            () = async { let _ = closing.wait_for(|closing| *closing).await; } => Err(Error::Stopped),
+            output = wait => Ok(output),
+        }
+    }
+
+    /// This operation's turn, unless the session closes first.
+    async fn take_turn(&self) -> Result<tokio::sync::MutexGuard<'_, ()>> {
+        let turn = self.unless_closing(self.inner.one_at_a_time.lock()).await?;
+        self.ensure_open()?;
+        Ok(turn)
     }
 
     /// Runs `future` on the session's runtime, whatever the caller's.
@@ -536,9 +582,12 @@ impl JazzSession {
     async fn run(&self, op: Op) -> Result<()> {
         let this = self.clone();
         self.on_runtime(async move {
-            let _one = this.inner.one_at_a_time.lock().await;
-            this.ensure_open()?;
+            let _one = this.take_turn().await?;
             let result = this.perform(op.clone()).await;
+            if result.is_err() && *this.inner.closing.borrow() {
+                // Cut short by close, which has the snapshot's last word.
+                return Err(Error::Stopped);
+            }
             match &result {
                 Ok(()) => {
                     this.lock().last_failed = None;
@@ -618,7 +667,7 @@ impl JazzSession {
     /// - A user who has no account yet, while a device guest is signed in:
     ///   the guest is linked to them and keeps its data
     ///   ([`SessionConfig::link_guest`], on by default).
-    /// - The user signed in now: the same client goes on.
+    /// - The user signed in now: the same client goes on, while it lives.
     /// - Anyone else: signed in (their account made if need be), with a
     ///   client of their own.
     async fn follow(&self) -> Result<()> {
@@ -630,9 +679,14 @@ impl JazzSession {
         let endpoint = self.endpoint();
         let app = self.inner.config.app_id;
         let guest = self.lock().device.is_some();
-        let token = bearer.token(TokenReason::Refresh).await?;
+        let token = self
+            .unless_closing(bearer.token(TokenReason::Refresh))
+            .await??;
         let who = match &token {
-            Some(token) => crate::backend::backend_user(&endpoint, app, token).await?,
+            Some(token) => {
+                self.unless_closing(crate::backend::backend_user(&endpoint, app, token))
+                    .await??
+            }
             None => None,
         };
         let (Some(token), Some(who)) = (token, who) else {
@@ -686,28 +740,27 @@ impl JazzSession {
             user.issuer == who.identity.issuer
                 && user.subject == who.identity.subject
                 && who.account.is_none_or(|account| account == user.account)
-        }) && self.lock().jazz.is_some();
+        }) && self.lock().jazz.as_ref().is_some_and(Jazz::is_live);
         if same {
             // The same user keeps the same client.
             self.set(|snapshot| snapshot.status = SessionStatus::Ready);
             return Ok(());
         }
-        let Some(signed_in) = crate::backend::sign_in(&endpoint, app, &token).await? else {
+        let Some(_signed_in) = self
+            .unless_closing(crate::backend::sign_in(&endpoint, app, &token))
+            .await??
+        else {
             self.replace(None, None, SessionStatus::SignedOut).await;
             return Ok(());
         };
         self.transition();
-        let config = self
-            .user_config(signed_in.account)
-            .user(Auth::Bearer(bearer));
+        let config = self.user_config().user(Auth::Bearer(bearer));
         self.switch_to(config, None).await
     }
 
     async fn sign_in_device(&self, key: DeviceKey) -> Result<()> {
         self.transition();
-        let config = self
-            .user_config(key.account(self.inner.config.app_id))
-            .user(Auth::Device(key.clone()));
+        let config = self.user_config().user(Auth::Device(key.clone()));
         self.switch_to(config, Some(key)).await
     }
 
@@ -729,9 +782,11 @@ impl JazzSession {
         // Written beside the kept one first: a key that can't be kept fails
         // before the session changes.
         let next = path.with_file_name(format!(".{DEVICE_KEY_FILE}.{}.next", key.user_id()));
-        key.write_to(&next)?;
+        key.write_aside(&next)?;
         let created = self.sign_in_device(key).await.and_then(|()| {
-            std::fs::rename(&next, &path).map_err(|error| key_file_error(&path, error))
+            crate::auth::lock_to_replace(&path)
+                .and_then(|_lock| std::fs::rename(&next, &path))
+                .map_err(|error| key_file_error(&path, error))
         });
         if created.is_err() {
             let _ = std::fs::remove_file(&next);
@@ -756,9 +811,9 @@ impl JazzSession {
                 "linking needs the app's bearer (SessionConfig::bearer)".into(),
             ));
         };
-        let token = bearer
-            .token(TokenReason::Refresh)
-            .await?
+        let token = self
+            .unless_closing(bearer.token(TokenReason::Refresh))
+            .await??
             .ok_or(Error::SignedOut)?;
         drop(jazz);
         self.link_with(&bearer, &token).await
@@ -777,12 +832,10 @@ impl JazzSession {
         let session = jazz
             .session()
             .ok_or_else(|| Error::Config("the device account's client has no session".into()))?;
-        let user = session.link(token).await?;
+        self.unless_closing(session.link_account(token)).await??;
         drop(jazz);
         self.transition();
-        let config = self
-            .user_config(user.account)
-            .user(Auth::Bearer(bearer.clone()));
+        let config = self.user_config().user(Auth::Bearer(bearer.clone()));
         self.switch_to(config, None).await
     }
 
@@ -794,15 +847,27 @@ impl JazzSession {
     /// transition.
     async fn switch_to(&self, config: Config, device: Option<DeviceKey>) -> Result<()> {
         self.close_current().await;
-        let jazz = Jazz::open(self.inner.files.clone(), config).await;
+        // Not finished when the session closes, the opening stops itself:
+        // its thread ends once it has nobody to answer.
+        let (ended, opening) = tokio::sync::oneshot::channel();
+        self.lock().opening = Some(opening);
+        let jazz = self
+            .unless_closing(Jazz::open_tracked(self.inner.files.clone(), config, ended))
+            .await?;
+        self.lock().opening = None;
         match jazz {
             Ok(jazz) => {
+                // Before any handle of it is given out.
+                if let Some(session) = jazz.session() {
+                    session.mark_owned();
+                }
                 let user = jazz.session().map(|session| match session.state() {
                     SessionState::SignedIn { user } | SessionState::Expired { user, .. } => {
                         Some(user)
                     }
                     SessionState::SignedOut => None,
                 });
+                let states = jazz.session().map(|session| session.changes());
                 {
                     let mut current = self.lock();
                     current.jazz = Some(jazz);
@@ -813,6 +878,9 @@ impl JazzSession {
                     snapshot.status = SessionStatus::Ready;
                     snapshot.client_epoch += 1;
                 });
+                if let Some(states) = states {
+                    self.follow_end(states);
+                }
                 Ok(())
             }
             Err(Error::SignedOut) => {
@@ -832,6 +900,37 @@ impl JazzSession {
         }
     }
 
+    /// Follows the current client ending by itself (its credential names no
+    /// one any more): the session signs out with it, keeping a device key
+    /// to reopen. A client the session replaced or closed meanwhile is not
+    /// its current one, and changes nothing.
+    fn follow_end(&self, mut states: impl Stream<Item = SessionState> + Send + Unpin + 'static) {
+        let epoch = self.inner.state.borrow().client_epoch;
+        // Holds neither the session nor the client open.
+        let inner = Arc::downgrade(&self.inner);
+        self.inner.handle.spawn(async move {
+            // The stream ends when the client stops.
+            while let Some(state) = states.next().await {
+                if state == SessionState::SignedOut {
+                    break;
+                }
+            }
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            let this = Self { inner };
+            let _one = this.inner.one_at_a_time.lock().await;
+            if this.ensure_open().is_err() || this.inner.state.borrow().client_epoch != epoch {
+                return;
+            }
+            this.replace(None, None, SessionStatus::SignedOut).await;
+            this.set(|snapshot| {
+                snapshot.error = None;
+                snapshot.recovery = None;
+            });
+        });
+    }
+
     /// Ends the session's user and client, reading `status` after.
     async fn replace(&self, user: Option<User>, device: Option<DeviceKey>, status: SessionStatus) {
         self.close_current().await;
@@ -842,8 +941,9 @@ impl JazzSession {
         });
     }
 
-    /// Closes the signed-in user's client: calls on it fail with
-    /// [`Error::Replaced`] from now on.
+    /// Closes the signed-in user's client: calls on it fail from now on,
+    /// with [`Error::Replaced`] while the session goes on, and with
+    /// [`Error::Stopped`] once it closes.
     async fn close_current(&self) {
         let old = {
             let mut current = self.lock();
@@ -851,7 +951,7 @@ impl JazzSession {
             current.jazz.take()
         };
         if let Some(old) = old {
-            old.mark_replaced();
+            old.mark_replaced(self.inner.closing.subscribe());
             let _ = old.shutdown().await;
             self.set(|snapshot| snapshot.client_epoch += 1);
         }
@@ -867,11 +967,12 @@ impl JazzSession {
 
     /// A user's client config: their own store under the session's
     /// directory.
-    fn user_config(&self, account: AccountId) -> Config {
+    fn user_config(&self) -> Config {
         let config = &self.inner.config;
         let storage = match &config.storage {
             Storage::Memory => Storage::Memory,
-            Storage::Dir(dir) => Storage::Dir(dir.join(account.0.to_string())),
+            // The client keeps the account's store in `<dir>/<account>/`.
+            Storage::Dir(dir) => Storage::Dir(dir.clone()),
         };
         let mut user = Config::new(config.app_id)
             .server(self.endpoint())
@@ -917,8 +1018,13 @@ impl JazzSession {
                 Ok(key) => return Ok(key),
                 // There now: another's, kept meanwhile, or what can't be read.
                 Err(_) if !is_absent(&path) => return DeviceKey::load_or_create(&path),
+                // On Android creating needs only the lock that writing it
+                // as any other would wait for again, then replace blindly.
+                #[cfg(any(target_os = "android", all(test, target_os = "linux")))]
+                Err(error) => return Err(error),
                 // Still none: where there are no hard links to create it
-                // with (Android, jazz#6256), it is written as any other.
+                // with, it is written as any other.
+                #[cfg(not(any(target_os = "android", all(test, target_os = "linux"))))]
                 Err(_) => {}
             }
         }
@@ -945,4 +1051,203 @@ fn is_absent(path: &Path) -> bool {
 
 fn key_file_error(path: &Path, error: std::io::Error) -> Error {
     Error::Config(format!("device key at {}: {error}", path.display()))
+}
+
+/// Android's device-key lock through sessions, run on Linux: the lib's own
+/// tests keep keys as Android does (`auth`'s `cfg`s), as CI runs no Rust
+/// tests on Android. White-box for that reason; offline, so they need no
+/// server.
+#[cfg(all(test, target_os = "linux"))]
+mod android_key_lock_tests {
+    use std::fs::File;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// Longer than a creator's lock is waited for, shorter than twice that.
+    const BOUND: Duration = Duration::from_secs(8);
+    /// Set for the process that holds the lock in
+    /// `a_killed_creator_lets_a_sessions_restore_through`.
+    const HOLDER_DIR: &str = "JAZZ_DEVICE_KEY_HOLDER_DIR";
+
+    #[derive(Clone, Copy, Debug)]
+    enum Replace {
+        Restore,
+        Create,
+        CreateOverKept,
+    }
+
+    async fn session(dir: &Path, initial: Initial) -> JazzSession {
+        let files = include_bytes!("../tests/fixtures/todos/jazz.app.json");
+        let config = SessionConfig::new(AppId::from_name("device-key-lock"))
+            .server("http://127.0.0.1:9/jazz")
+            .allow_insecure_http()
+            .storage(Storage::Dir(dir.into()))
+            .initial(initial);
+        JazzSession::open(AppFiles::new(files.to_vec(), None), config)
+            .await
+            .unwrap()
+    }
+
+    fn creators_lock(dir: &Path) -> File {
+        let file = File::create(dir.join(".device.key.lock")).unwrap();
+        file.lock().unwrap();
+        file
+    }
+
+    fn new_key() -> String {
+        DeviceKey::generate().unwrap().to_string()
+    }
+
+    fn kept(dir: &Path) -> Option<String> {
+        std::fs::read_to_string(dir.join(DEVICE_KEY_FILE)).ok()
+    }
+
+    /// alice's first launch has looked and not yet renamed its key in, as
+    /// she restores or creates an account in another process:
+    ///
+    /// ```text
+    /// first launch ──lock──look──────────────rename──unlock
+    /// alice              └──restore/create──(waits)────────┴──rename──► kept
+    /// ```
+    ///
+    /// Told it worked, she finds that account kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_first_launch_never_overwrites_a_restored_or_created_key() {
+        for replace in [Replace::Restore, Replace::Create, Replace::CreateOverKept] {
+            let dir = tempfile::tempdir().unwrap();
+            if let Replace::CreateOverKept = replace {
+                std::fs::write(dir.path().join(DEVICE_KEY_FILE), new_key()).unwrap();
+            }
+            let alice = session(dir.path(), Initial::SignedOut).await;
+            let guests = dir.path().join("guest.tmp");
+            std::fs::write(&guests, new_key()).unwrap();
+
+            let first_launch = creators_lock(dir.path());
+            let replacing = tokio::spawn({
+                let alice = alice.clone();
+                async move {
+                    match replace {
+                        Replace::Restore => alice.restore_device_account(&new_key()).await,
+                        _ => alice.create_device_account().await,
+                    }
+                }
+            });
+            // Time to get as far as it can before the first launch is done.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            std::fs::rename(&guests, dir.path().join(DEVICE_KEY_FILE)).unwrap();
+            drop(first_launch);
+
+            replacing.await.unwrap().unwrap();
+            let signed_in = alice.export_device_key().unwrap();
+            assert_eq!(
+                kept(dir.path()),
+                Some(signed_in),
+                "{replace:?}: the first launch's key replaced alice's"
+            );
+            alice.close().await.unwrap();
+        }
+    }
+
+    /// A process of alice's is frozen holding the lock (Android freezes
+    /// cached apps): her restore and create fail without touching the kept
+    /// key, and `close` isn't stalled. Once it lets go, `retry` keeps the
+    /// same account.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_frozen_creator_stalls_neither_replacing_nor_close() {
+        for replace in [Replace::Restore, Replace::CreateOverKept] {
+            let dir = tempfile::tempdir().unwrap();
+            let before = new_key();
+            std::fs::write(dir.path().join(DEVICE_KEY_FILE), &before).unwrap();
+            let alice = session(dir.path(), Initial::SignedOut).await;
+            let frozen = creators_lock(dir.path());
+
+            let started = Instant::now();
+            let failed = match replace {
+                Replace::Restore => alice.restore_device_account(&new_key()).await,
+                _ => alice.create_device_account().await,
+            };
+            assert!(failed.is_err(), "{replace:?} didn't wait for the lock");
+            assert!(started.elapsed() < BOUND, "{replace:?}");
+            assert_eq!(kept(dir.path()), Some(before), "{replace:?}");
+
+            drop(frozen);
+            alice.retry().await.unwrap();
+            assert_eq!(
+                kept(dir.path()),
+                alice.export_device_key().ok(),
+                "{replace:?}"
+            );
+            alice.close().await.unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let alice = session(dir.path(), Initial::SignedOut).await;
+        let _frozen = creators_lock(dir.path());
+        let restoring = tokio::spawn({
+            let alice = alice.clone();
+            async move { alice.restore_device_account(&new_key()).await }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let closed = tokio::time::timeout(BOUND, alice.close()).await;
+        closed.expect("close stalled").unwrap();
+        assert!(
+            restoring.await.unwrap().is_err(),
+            "restore didn't wait for the lock"
+        );
+    }
+
+    /// alice's first launch meets a frozen creator: it opens in time, as an
+    /// error, and writes no key beside that creator's back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_first_launch_waits_for_a_frozen_creator_only_so_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let _frozen = creators_lock(dir.path());
+        let alice = tokio::time::timeout(BOUND, session(dir.path(), Initial::Device))
+            .await
+            .expect("open stalled");
+        assert_eq!(alice.snapshot().status, SessionStatus::Error);
+        assert_eq!(kept(dir.path()), None);
+        alice.close().await.unwrap();
+    }
+
+    /// A creator of alice's is killed holding the lock: the restore waiting
+    /// for it in another process goes through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_killed_creator_lets_a_sessions_restore_through() {
+        const NAME: &str = "jazz_session::android_key_lock_tests::a_killed_creator_lets_a_sessions_restore_through";
+        if let Some(dir) = std::env::var_os(HOLDER_DIR) {
+            let _held = creators_lock(Path::new(&dir));
+            std::fs::write(Path::new(&dir).join("held"), "").unwrap();
+            std::thread::sleep(Duration::from_secs(60));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let alice = session(dir.path(), Initial::SignedOut).await;
+        let mut creator = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([NAME, "--exact", "--test-threads=1"])
+            .env(HOLDER_DIR, dir.path())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !dir.path().join("held").exists() {
+            assert!(Instant::now() < deadline, "the creator never took the lock");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let key = new_key();
+        let restoring = tokio::spawn({
+            let (alice, key) = (alice.clone(), key.clone());
+            async move { alice.restore_device_account(&key).await }
+        });
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let waited = !restoring.is_finished();
+        creator.kill().unwrap();
+        creator.wait().unwrap();
+        restoring.await.unwrap().unwrap();
+        assert!(waited, "restore didn't wait for the lock");
+        assert_eq!(kept(dir.path()), Some(key));
+        alice.close().await.unwrap();
+    }
 }

@@ -1,5 +1,7 @@
 # create-jazz
 
+## 2.0.0-beta.1
+
 ## 2.0.0-beta.0
 
 ## 2.0.0-alpha.70

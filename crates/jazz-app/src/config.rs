@@ -130,7 +130,13 @@ impl Config {
 pub enum Storage {
     /// In memory, for the life of the process.
     Memory,
-    /// `jazz.sqlite` in this directory.
+    /// `jazz.sqlite` in this directory, for an app with no user, the app's
+    /// backend or a trusted backend client. An end user, or a scoped
+    /// backend client, keeps theirs in `<dir>/<account id>/`, so each user of
+    /// one directory has a store of their own. An app with no user refuses
+    /// a store at the directory itself that a signed-in user wrote (an
+    /// earlier version kept users' stores there): open it as that user, or
+    /// delete it.
     Dir(PathBuf),
 }
 

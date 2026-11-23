@@ -9,6 +9,7 @@
 //! are refused on latest-only tables), so the tests that pin it count the
 //! stored history rows in the SQLite file, as the storage tests do.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
@@ -73,7 +74,7 @@ fn open_with(node: u8, path: &Path, schema: JazzSchema) -> Db {
 
 fn authority_at(path: &Path) -> Db {
     let db = open_at(0, path);
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 
@@ -231,7 +232,7 @@ fn each_write_prunes_by_the_version_its_writer_runs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("authority.sqlite");
     let server = open_with(0, &path, schema_with(false));
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     block_on(server.admit_schema_with_lenses(schema(), &[])).unwrap();
     let lena = open_with(1, &dir.path().join("lena.sqlite"), schema());
     let fran = open_with(2, &dir.path().join("fran.sqlite"), schema_with(false));
@@ -274,7 +275,7 @@ fn each_write_prunes_by_the_version_its_writer_runs() {
     );
     drop(server);
     let server = open_with(0, &path, schema_with(false));
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     update(&server, "presence", row(1), "a", "9");
     drop(server);
     assert_eq!(history_rows(&path, "presence"), 6);
@@ -810,7 +811,7 @@ fn a_late_cross_shard_part_is_applied_not_taken_for_a_dropped_resend() {
         FileOptions::default(),
     ))
     .unwrap();
-    shard.set_authority();
+    jazz::db::block_on(shard.set_authority());
     assert!(shard.shard().is_shard());
     let alice = open_at(1, &dir.path().join("alice.sqlite"));
     let up = Rc::new(RefCell::new(VecDeque::new()));

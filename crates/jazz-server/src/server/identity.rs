@@ -101,8 +101,7 @@ pub fn open_store_identity(
     let mut identity = read_or_mint(&file, data_dir, how)?;
     // Only an earlier build of this release kept the secret in the table:
     // its file takes it over, then it leaves the table.
-    let in_table = file
-        .host_get(IDENTITY, TOKEN_SECRET)
+    let in_table = jazz::db::block_on(file.host_get(IDENTITY, TOKEN_SECRET))
         .map_err(storage)?
         .map(|kept| text(TOKEN_SECRET, kept))
         .transpose()?;
@@ -110,7 +109,7 @@ pub fn open_store_identity(
         identity.token_secret = Some(token_secret(data_dir, in_table.as_deref())?);
     }
     if in_table.is_some() {
-        file.host_delete(IDENTITY, TOKEN_SECRET).map_err(storage)?;
+        jazz::db::block_on(file.host_delete(IDENTITY, TOKEN_SECRET)).map_err(storage)?;
     }
     drop(file);
     // Only once the store holds them, so a crash leaves mirrors equal to it
@@ -192,8 +191,7 @@ pub fn detach_store_identity(data_dir: &Path) -> Result<(), String> {
     // What earlier releases' files say, first: none may bring the old id
     // back.
     import_legacy(&file, data_dir)?;
-    let blob_store = file
-        .host_get(IDENTITY, BLOB_STORE)
+    let blob_store = jazz::db::block_on(file.host_get(IDENTITY, BLOB_STORE))
         .map_err(storage)?
         .map(|kept| text(BLOB_STORE, kept))
         .transpose()?;
@@ -208,7 +206,7 @@ pub fn detach_store_identity(data_dir: &Path) -> Result<(), String> {
         remove_if_present(&data_dir.join(inside).join(super::builder::BLOB_OWNER_FILE))?;
     }
     for key in [STORE_ID, BLOB_STORE, TOKEN_SECRET] {
-        file.host_delete(IDENTITY, key).map_err(storage)?;
+        jazz::db::block_on(file.host_delete(IDENTITY, key)).map_err(storage)?;
     }
     Ok(())
 }
@@ -234,9 +232,11 @@ pub fn set_store_app_id(data_dir: &Path, app_id: &str) -> Result<(), String> {
     // which the next open makes again, never one that disagrees.
     let mirrored = data_dir.join(APP_ID_FILE).exists();
     remove_if_present(&data_dir.join(APP_ID_FILE))?;
-    file.host_put_many(IDENTITY, &[(APP_ID.to_vec(), app_id.as_bytes().to_vec())])
-        .map_err(storage)?;
-    file.host_delete(IDENTITY, TOKEN_SECRET).map_err(storage)?;
+    jazz::db::block_on(
+        file.host_put_many(IDENTITY, &[(APP_ID.to_vec(), app_id.as_bytes().to_vec())]),
+    )
+    .map_err(storage)?;
+    jazz::db::block_on(file.host_delete(IDENTITY, TOKEN_SECRET)).map_err(storage)?;
     drop(file);
     // An in-process store keeps the mirror; a server never had one.
     if mirrored {
@@ -257,13 +257,13 @@ fn blob_dir_inside(record: &str) -> Option<&str> {
 }
 
 fn open_file(data_dir: &Path) -> Result<StoreFile, String> {
-    StoreFile::open(
+    jazz::db::block_on(StoreFile::open(
         &data_dir.join(STORE_FILE),
         FileOptions {
             synchronous_full: true,
             ..FileOptions::default()
         },
-    )
+    ))
     .map_err(|error| format!("open server store: {error}"))
 }
 
@@ -278,8 +278,7 @@ fn import_legacy(file: &dyn HostTables, data_dir: &Path) -> Result<(), String> {
     // Until large values leave the file nothing claims the store id, so an
     // earlier release opened on the store may have minted another one: it
     // is the one that may have been claimed since.
-    let unclaimed = file
-        .host_get(IDENTITY, BLOB_STORE)
+    let unclaimed = jazz::db::block_on(file.host_get(IDENTITY, BLOB_STORE))
         .map_err(storage)?
         .is_none();
     for (key, name) in LEGACY_FILES {
@@ -287,7 +286,7 @@ fn import_legacy(file: &dyn HostTables, data_dir: &Path) -> Result<(), String> {
         let Some(legacy) = read_trimmed(&path)? else {
             continue;
         };
-        match file.host_get(IDENTITY, key).map_err(storage)? {
+        match jazz::db::block_on(file.host_get(IDENTITY, key)).map_err(storage)? {
             Some(kept) if kept == legacy.as_bytes() => {}
             Some(_) if key == STORE_ID && unclaimed => {
                 imports.push((key.to_vec(), legacy.into_bytes()));
@@ -305,7 +304,7 @@ fn import_legacy(file: &dyn HostTables, data_dir: &Path) -> Result<(), String> {
         }
     }
     if !imports.is_empty() {
-        file.host_put_many(IDENTITY, &imports).map_err(storage)?;
+        jazz::db::block_on(file.host_put_many(IDENTITY, &imports)).map_err(storage)?;
     }
     Ok(())
 }
@@ -318,8 +317,7 @@ fn read_or_mint(
     import_legacy(file, data_dir)?;
     let mint = |key: &[u8], value: String| -> Result<String, String> {
         Ok(
-            match file
-                .host_put_if_absent(IDENTITY, key, value.as_bytes())
+            match jazz::db::block_on(file.host_put_if_absent(IDENTITY, key, value.as_bytes()))
                 .map_err(storage)?
             {
                 Some(kept) => text(key, kept)?,
@@ -344,8 +342,7 @@ fn read_or_mint(
             dir = data_dir.display(),
         ));
     }
-    let blob_store = file
-        .host_get(IDENTITY, BLOB_STORE)
+    let blob_store = jazz::db::block_on(file.host_get(IDENTITY, BLOB_STORE))
         .map_err(storage)?
         .map(|kept| text(BLOB_STORE, kept))
         .transpose()?;
@@ -587,9 +584,10 @@ mod tests {
         open_store_identity(dir.path(), EMBEDDED).unwrap();
         std::fs::remove_file(dir.path().join(APP_ID_FILE)).unwrap();
         let store = open_file(dir.path()).unwrap();
-        store
-            .host_put_many(IDENTITY, &[(APP_ID.to_vec(), b"renamed".to_vec())])
-            .unwrap();
+        jazz::db::block_on(
+            store.host_put_many(IDENTITY, &[(APP_ID.to_vec(), b"renamed".to_vec())]),
+        )
+        .unwrap();
         drop(store);
         assert_eq!(
             open_store_identity(dir.path(), EMBEDDED).unwrap().app_id,
@@ -621,9 +619,10 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             open_store_identity(dir.path(), server("app")).unwrap();
             let store = open_file(dir.path()).unwrap();
-            store
-                .host_put_many(IDENTITY, &[(TOKEN_SECRET.to_vec(), b"old".to_vec())])
-                .unwrap();
+            jazz::db::block_on(
+                store.host_put_many(IDENTITY, &[(TOKEN_SECRET.to_vec(), b"old".to_vec())]),
+            )
+            .unwrap();
             drop(store);
             step(dir.path()).unwrap();
             let reader = HostReader::open(&dir.path().join(STORE_FILE), None).unwrap();
@@ -636,9 +635,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         open_store_identity(dir.path(), server("app")).unwrap();
         let store = open_file(dir.path()).unwrap();
-        store
-            .host_put_many(IDENTITY, &[(TOKEN_SECRET.to_vec(), b"old".to_vec())])
-            .unwrap();
+        jazz::db::block_on(
+            store.host_put_many(IDENTITY, &[(TOKEN_SECRET.to_vec(), b"old".to_vec())]),
+        )
+        .unwrap();
         drop(store);
         let how = IdentityOpen::Embedded {
             app_id: Some("app"),
@@ -726,7 +726,7 @@ mod tests {
         std::fs::copy(dir.path().join(STORE_FILE), old.path().join(STORE_FILE)).unwrap();
         // As if the table had no app id: a store an earlier release wrote.
         let blank = open_file(old.path()).unwrap();
-        blank.host_delete(IDENTITY, APP_ID).unwrap();
+        jazz::db::block_on(blank.host_delete(IDENTITY, APP_ID)).unwrap();
         drop(blank);
         detach_store_identity(old.path()).unwrap();
         assert_eq!(read_store_identity(old.path()).unwrap().app_id, None);

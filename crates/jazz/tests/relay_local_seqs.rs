@@ -4,6 +4,7 @@
 //! their own (between the accepted versions and the tab's), so the two
 //! numberings never collide in a tab's history.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 
@@ -146,8 +147,8 @@ impl Net {
         net.worker_online();
         for i in 0..tabs {
             let tab = open_in(schema(), WORKER + 1 + i as u8, tab_author.clone());
-            tab.set_non_durable_client();
-            tab.set_remote_link_hint(RemoteLinkHint::Live);
+            jazz::db::block_on(tab.set_non_durable_client());
+            jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
             let (client_side, server_side) = duplex();
             block_on(tab.connect_upstream(client_side));
             let sent = Rc::default();
@@ -172,13 +173,13 @@ impl Net {
         self.core
             .accept_subscriber(server_side, self.worker_as.clone())
             .unwrap();
-        self.worker.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(self.worker.set_remote_link_hint(RemoteLinkHint::Live));
     }
 
     fn worker_offline(&mut self) {
         let upstream = self.worker_up.take().expect("online");
         assert!(self.worker.detach_connection(&upstream));
-        self.worker.set_remote_link_hint(RemoteLinkHint::Failed);
+        jazz::db::block_on(self.worker.set_remote_link_hint(RemoteLinkHint::Failed));
     }
 
     fn tab(&self, i: usize) -> &Db {
@@ -344,8 +345,8 @@ fn a_tabs_unsettled_insert_stays_its_own_once_its_worker_stored_it() {
 #[test]
 fn a_tab_refuses_an_unsettled_version_with_no_writer() {
     let tab = open(WORKER + 1, author(WORKER));
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let (client_side, mut server_side) = duplex();
     block_on(tab.connect_upstream(client_side));
     server_side
@@ -377,10 +378,10 @@ fn a_tab_refuses_an_unsettled_version_with_no_writer() {
 #[test]
 fn a_tabs_transaction_over_its_own_commit_held_by_a_worker_without_a_server_commits() {
     let worker = open(WORKER, author(WORKER));
-    worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::NoServer));
     let tab = open(WORKER + 1, author(WORKER));
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let (client_side, server_side) = duplex();
     block_on(tab.connect_upstream(client_side));
     worker
@@ -426,8 +427,8 @@ fn a_tabs_high_water_moves_only_when_it_writes() {
     let floor = 2;
     let tab = open(WORKER + 1, author(WORKER));
     tab.seed_seq_floor(floor);
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     assert_eq!(tab.seq_high_water(), floor);
     let tx = block_on(tab.insert("notes", body("first"), Default::default()))
         .unwrap()
@@ -545,8 +546,8 @@ fn a_closed_tabs_pending_commit_uploads_after_its_worker_restarts() {
     };
     let attach_tab = |worker: &Db, node: u8| {
         let tab = open(node, author(WORKER));
-        tab.set_non_durable_client();
-        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(tab.set_non_durable_client());
+        jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
         let (client_side, server_side) = duplex();
         block_on(tab.connect_upstream(client_side));
         worker
@@ -587,7 +588,7 @@ fn a_closed_tabs_pending_commit_uploads_after_its_worker_restarts() {
             sent: Rc::clone(&uploads),
         })));
         core.accept_subscriber(server_side, author(WORKER)).unwrap();
-        worker.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
         up
     };
 
@@ -597,7 +598,7 @@ fn a_closed_tabs_pending_commit_uploads_after_its_worker_restarts() {
     let up = connect(&worker);
     pump(&[&worker, &core]);
     assert!(worker.detach_connection(&up));
-    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Failed));
     let tab = attach_tab(&worker, WORKER + 1);
     insert(&tab, "first");
     pump(&[&tab, &worker]);
@@ -649,11 +650,11 @@ fn a_closed_tabs_pending_commit_uploads_after_its_worker_restarts() {
 #[test]
 fn a_serverless_workers_tab_commits_stay_pending_until_a_server_is_added() {
     let worker = open(WORKER, author(WORKER));
-    worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::NoServer));
     let attach_tab = |node: u8| {
         let tab = open(node, author(WORKER));
-        tab.set_non_durable_client();
-        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(tab.set_non_durable_client());
+        jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
         let (client_side, server_side) = duplex();
         block_on(tab.connect_upstream(client_side));
         worker
@@ -712,7 +713,7 @@ fn a_serverless_workers_tab_commits_stay_pending_until_a_server_is_added() {
     let (client_side, server_side) = duplex();
     let _up = block_on(worker.connect_upstream(client_side));
     core.accept_subscriber(server_side, author(WORKER)).unwrap();
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     assert!(
         matches!(global(&writer, tab_tx), Some(Ok(_))),
         "the tab's lands"
@@ -733,11 +734,11 @@ fn a_serverless_workers_tab_commits_stay_pending_until_a_server_is_added() {
 fn tabs_converge_on_the_later_write_whatever_order_their_worker_gets_them() {
     let worker = open(WORKER, author(WORKER));
     worker.set_clock_for_test(Some(CLOCK));
-    worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::NoServer));
     let attach_tab = |node: u8| {
         let tab = open(node, author(WORKER));
-        tab.set_non_durable_client();
-        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(tab.set_non_durable_client());
+        jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
         let (client_side, server_side) = duplex();
         block_on(tab.connect_upstream(client_side));
         worker
@@ -905,7 +906,7 @@ fn a_relayed_refusal_counts_for_the_tab_that_wrote_it() {
 fn a_tab_drops_its_old_workers_unsettled_versions_when_its_upstream_changes() {
     for (same_node, same_store) in [(false, false), (true, false), (true, true)] {
         let worker = open(WORKER, author(WORKER));
-        worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+        jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::NoServer));
         let attach = |worker: &Db, tab: &Db| {
             let (client_side, server_side) = duplex();
             let up = block_on(tab.connect_upstream(client_side));
@@ -916,8 +917,8 @@ fn a_tab_drops_its_old_workers_unsettled_versions_when_its_upstream_changes() {
         };
         let new_tab = |node: u8| {
             let tab = open(node, author(WORKER));
-            tab.set_non_durable_client();
-            tab.set_remote_link_hint(RemoteLinkHint::Live);
+            jazz::db::block_on(tab.set_non_durable_client());
+            jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
             tab
         };
         let writer = new_tab(WORKER + 1);
@@ -959,7 +960,7 @@ fn a_tab_drops_its_old_workers_unsettled_versions_when_its_upstream_changes() {
             if same_node { WORKER } else { WORKER + 0x10 },
             author(WORKER),
         );
-        fresh.set_remote_link_hint(RemoteLinkHint::NoServer);
+        jazz::db::block_on(fresh.set_remote_link_hint(RemoteLinkHint::NoServer));
         block_on(fresh.insert("notes", body("new worker's"), Default::default())).unwrap();
         let _up = attach(&fresh, &reader);
         pump(&[&fresh, &reader]);
@@ -980,14 +981,14 @@ fn serverless(
 ) -> (Db, Vec<Db>, Vec<jazz::db::SubscriptionStream>) {
     let worker = open_in(schema(), WORKER, author(WORKER));
     worker.set_clock_for_test(Some(CLOCK));
-    worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::NoServer));
     let mut tabs = Vec::new();
     let mut watches = Vec::new();
     for &node in nodes {
         let tab = open_in(schema(), node, author(WORKER));
         tab.set_clock_for_test(Some(CLOCK));
-        tab.set_non_durable_client();
-        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(tab.set_non_durable_client());
+        jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
         let (client_side, server_side) = duplex();
         block_on(tab.connect_upstream(client_side));
         worker
@@ -1257,14 +1258,14 @@ fn a_workers_pending_commits_keep_their_order_across_a_restart() {
         ))
         .unwrap();
         worker.set_clock_for_test(Some(CLOCK));
-        worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+        jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::NoServer));
         worker
     };
     let attach = |worker: &Db, node: u8, clock: i64| {
         let tab = open(node, author(WORKER));
         tab.set_clock_for_test(Some(clock));
-        tab.set_non_durable_client();
-        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(tab.set_non_durable_client());
+        jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
         let (client_side, server_side) = duplex();
         block_on(tab.connect_upstream(client_side));
         worker
@@ -1323,7 +1324,7 @@ fn a_tab_clock_far_ahead_orders_no_further_than_the_bound_across_a_restart() {
         ))
         .unwrap();
         worker.set_clock_for_test(Some(clock));
-        worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+        jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::NoServer));
         worker
     };
     let worker = open_worker(CLOCK);
@@ -1332,8 +1333,8 @@ fn a_tab_clock_far_ahead_orders_no_further_than_the_bound_across_a_restart() {
         .row_uuid();
     let tab = open(WORKER + 1, author(WORKER));
     tab.set_clock_for_test(Some(CLOCK + 24 * 60 * 60 * 1000));
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let (client_side, server_side) = duplex();
     block_on(tab.connect_upstream(client_side));
     worker
@@ -1406,7 +1407,7 @@ fn a_row_shows_the_authoritys_order_once_its_versions_settle() {
     let (client_side, server_side) = duplex();
     let _up = block_on(worker.connect_upstream(client_side));
     core.accept_subscriber(server_side, author(WORKER)).unwrap();
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let all = [early, late, &worker, &core];
     for (db, tx) in [(early, early_tx), (late, late_tx)] {
         let mut wait = std::pin::pin!(db.wait_for_transaction(tx, DurabilityTier::Global));
@@ -1462,14 +1463,14 @@ fn an_upstreams_later_version_on_one_branch_leaves_a_tabs_write_on_another() {
     let todos = Query::from("todos");
     let worker = open_in(branched_schema(), WORKER, author(WORKER));
     worker.set_clock_for_test(Some(CLOCK));
-    worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::NoServer));
     let mut tabs = Vec::new();
     let mut watches = Vec::new();
     for node in [WORKER + 1, WORKER + 2] {
         let tab = open_in(branched_schema(), node, author(WORKER));
         tab.set_clock_for_test(Some(CLOCK));
-        tab.set_non_durable_client();
-        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(tab.set_non_durable_client());
+        jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
         let (client_side, server_side) = duplex();
         block_on(tab.connect_upstream(client_side));
         worker

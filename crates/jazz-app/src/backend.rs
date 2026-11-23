@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 fn http() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    jazz_native_transport::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(TIMEOUT)
         .build()

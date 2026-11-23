@@ -18,12 +18,35 @@
  * bundle ids), "noAccount" (jazz_for_user: the user has no account yet;
  * with "userId"), "replaced" (a session's handle after its user changed),
  * "noUser" (a session has no user; with "status")
- * and "unsynced" (jazz_close_within: writes left unsent; with "pending"))
+ * and "unsynced" (jazz_close_within, or "close" with a timeoutMs: writes
+ * left unsent; with "pending"))
  * (*err is set to NULL on success). Functions block until done. Calls on
- * one handle may come from any threads at once, except jazz_close: no call
- * on that handle may run concurrently with it or follow it. Likewise no
- * call may use a subscription concurrently with or after its
+ * one handle may come from any threads at once, except the ones that free
+ * it, jazz_close, jazz_close_within and jazz_session_close: no call on that
+ * handle (or session) may run concurrently with them or follow them.
+ * Likewise no call may use a subscription concurrently with or after its
  * jazz_unsubscribe.
+ *
+ * So a host whose calls may be in flight closes in two steps: the "close"
+ * method of jazz_call (or of jazz_session_call) closes without freeing, and
+ * may run beside any other call.
+ *   1. Call "close". It counts as a call in flight; keep its error
+ *      ("unsynced", say).
+ *   2. Start no more calls, and wait for every call in flight, other
+ *      "close"s included: close ended their waits.
+ *   3. Free with jazz_close (or jazz_session_close), which after a "close"
+ *      only frees.
+ *   4. Only then free the token callback's ctx.
+ * Closing waits for a token callback that is running, so make yours
+ * cancellable and cancel it as you close. From inside a token callback do
+ * step 1 only, and the rest later from another thread: waiting there
+ * deadlocks.
+ *
+ * One app at a time has a persistent store open: jazz_open of a dataDir
+ * another app has open, in this process or another, fails with kind
+ * "refused". An open that follows a close in this process waits up to 5 s
+ * for that to finish. Share the one handle (it takes calls from any
+ * thread), or give each app a dataDir of its own.
  */
 #ifndef JAZZ_FFI_H
 #define JAZZ_FFI_H
@@ -58,7 +81,9 @@ typedef void (*JazzCallback)(void *ctx, const char *kind, const char *json);
  * "storage"?: "memory"|"persistent", "contract"?: 2 }. Without "auth" it
  * opens as a local client; with a device key, as that end user syncing
  * through the app's /jazz. Bearer users and backend clients open with
- * jazz_open_user.
+ * jazz_open_user. An end user's (or scoped backend client's) store goes in
+ * dataDir/<account>/; an app without a user refuses a store in dataDir
+ * itself that a signed-in user wrote.
  */
 JazzHandle *jazz_open(const char *config_json, char **err);
 
@@ -87,8 +112,10 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *               "id"?, "row"?}                               -> true|false|null
  *              (advisory: true does not promise the write succeeds; null =
  *              unknown, e.g. no server; not available inside a transaction)
- *   "upsert"   {"table", "id", "row"}            -> the row (a new id: row has
- *              every required column; an existing row: the columns it names)
+ *   "upsert"   {"table", "id", "row", "tier"?}   -> the row (a new id: row has
+ *              every required column; an existing row: the columns it names).
+ *              With a tier it returns once the write got there, with the row
+ *              as written here.
  *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
  *   "uploadBegin"  {"table", "column", "kind"?, "id"?, "row"?} -> {"upload"}
  *   "uploadPush"   {"upload", "bytes": base64}                -> null
@@ -101,22 +128,53 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "link"     {"bearer"} -> the user (links a device account to the app's
  *                            own sign-in; the session becomes that user's)
  *   "signOut"  {}  -> null (signs out and closes the app)
+ *                     On a jazz_session_jazz handle "link" and "signOut"
+ *                     fail with notSupported, and it stays open: use
+ *                     jazz_session_call's "linkDeviceAccount" and "signOut".
+ *                     "session", "refresh", "link", "signOut" and watching
+ *                     "session" fail with notSupported on a for_user
+ *                     handle: the session is the backend client's it came
+ *                     from, shared by every user.
  *   "disconnect" {} -> null (leaves the server; local reads and writes go
  *                     on; TS's disconnect)
  *   "reconnect"  {} -> null (resumes sync after disconnect)
  *   "deleteClientStorage" {} -> null (closes the app and deletes its local
- *                     store; the next open starts empty. Refused while
- *                     another open app holds the same dataDir. Free the
- *                     handle with jazz_close after, as after signOut)
+ *                     store; the next open starts empty. Free the handle
+ *                     with jazz_close after, as after signOut)
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
+ *   "bundle"  {}  -> "<bundle id>" | null (the permissions bundle a
+ *                     backend published and is pinned to)
+ *   "close"   {"timeoutMs"?} -> null (closes without freeing: see the top)
+ *              May run beside any other call, and on a closed handle.
+ *              Closing again does nothing, and doesn't wait for a close
+ *              still running. Every later call fails "closed".
+ *              - First, with timeoutMs > 0, it waits up to that for the
+ *                writes the client holds to reach the server, as
+ *                jazz_close_within: writes left unsent fail it "unsynced",
+ *                and the app closes all the same. Absent or 0: no such
+ *                wait. A jazz_for_user or jazz_session_jazz handle never
+ *                waits: the client's own handle drains its writes.
+ *              - Then calls waiting on the server or the network
+ *                (waitForSync, a "global" tier, remote reads, refresh,
+ *                link, jazz_for_user) fail "closed". What they sent may
+ *                still apply.
+ *              - Local work already started finishes (30 s is its
+ *                backstop), and stream sessions get up to 2 s to end: so
+ *                timeoutMs 0 is not instant. Nor is that a hard limit:
+ *                work can't be interrupted while it runs, and closing also
+ *                waits for the store to close and for a host name lookup in
+ *                progress. Don't close on a UI thread.
+ *              - On a jazz_for_user or jazz_session_jazz handle only that
+ *                handle closes: its waits end at once, what it began is
+ *                rolled back, and its client lives on.
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run
  * inside that open transaction (its reads see its own writes), and "tier":
  * for reads "local" | "localFirst" (default) | "remote"; for writes and
  * txCommit "local" | "global", the durability to wait for. A write inside a
  * transaction takes no tier: give it to txCommit. Use a transaction from
  * one thread at a time. A transaction the host never ends stays open (and
- * holds its snapshot) until jazz_close, which rolls it back. A failed
+ * holds its snapshot) until the handle closes, which rolls it back. A failed
  * txCommit ends the transaction. "global" on an app without a server is
  * refused before anything is written. TS's "local-first" is accepted for
  * "localFirst".
@@ -142,7 +200,10 @@ JazzSubscription *jazz_subscribe(JazzHandle *handle, const char *query_json, Jaz
 void jazz_unsubscribe(JazzSubscription *subscription);
 
 /*
- * Closes the app and frees the handle. Each subscription still open gets a
+ * Closes the app (as "close" without a timeoutMs does, unless it already
+ * is) and frees the handle: no call on it may be in flight, so a host with
+ * calls in flight calls "close" first (see the top). When it returns no
+ * token callback is running or will run. Each subscription still open gets a
  * last "error" callback, {"kind":"closed",...}; free them with
  * jazz_unsubscribe, before or after this call.
  */
@@ -161,10 +222,11 @@ typedef int (*JazzTokenCallback)(void *ctx, const char *reason, char **token);
 /*
  * Opens an app as an end user signing in with the app's bearer
  * ("auth": {"bearer": true}); cb and ctx stay valid, from any thread, until
- * jazz_close (or a "signOut" call) returns: that waits for a fetch in
- * progress, and then the callback is never called again. Called from inside
- * the callback, jazz_close returns at once and the callback stops once that
- * call returns. ("auth": {"deviceKey": ...} opens with jazz_open.)
+ * jazz_close returns: that waits for a fetch in progress, and then the
+ * callback is never called again ("close", and "signOut" unless a close was
+ * already running, wait the same way). Called from inside the callback,
+ * these don't wait for that callback, so ctx must outlive it.
+ * ("auth": {"deviceKey": ...} opens with jazz_open.)
  *
  * A backend client (a machine syncing through the app's main backend, as
  * TS's createJazzClient with a credential) opens here with
@@ -189,7 +251,7 @@ typedef struct JazzWatch JazzWatch;
  * {"transaction", "message", "code", "reason", "denied", "serializable"}
  * (code and reason as TS's MutationErrorEvent); refusals from
  * before the first such watch come first. When the app closes (jazz_close,
- * signOut, deleteClientStorage), cb gets a last call with kind "error" and
+ * "close", signOut, deleteClientStorage), cb gets a last call with kind "error" and
  * {"kind":"closed",...}, after which no callback comes; free the watch
  * with jazz_unwatch, before or after.
  */
@@ -210,7 +272,8 @@ char *jazz_generate_device_key(char **err);
  * "permission" when the main backend refuses the identity (its 403),
  * "refused" on a scoped client or a jazz_for_user handle. Free it with
  * jazz_close, which leaves handle open; once handle closes, its calls fail
- * with kind "closed". Its writes are drained by handle's jazz_close_within.
+ * with kind "closed". Its writes are drained by handle's jazz_close_within
+ * or "close" with a timeoutMs.
  */
 JazzHandle *jazz_for_user(const JazzHandle *handle, const char *user_id,
                           const char *claims_json, char **err);
@@ -221,8 +284,10 @@ JazzHandle *jazz_for_user(const JazzHandle *handle, const char *user_id,
  * close({ timeoutMs }), 10000 by default there. Returns 0, or -1 with *err
  * set: kind "unsynced" with "pending" when writes are left unsent (memory
  * storage, where they are lost), or another failure. The handle is closed
- * and freed either way; timeout_ms 0 closes at once. The token callback
- * keeps answering while it drains.
+ * and freed either way; after a "close" it only frees. timeout_ms 0 waits
+ * for no writes, but is not instant: local work already started finishes,
+ * and stream sessions get up to 2 s to end (no hard limit: see "close").
+ * The token callback keeps answering while it drains.
  */
 int jazz_close_within(JazzHandle *handle, uint64_t timeout_ms, char **err);
 
@@ -253,6 +318,15 @@ JazzSession *jazz_session_open(const char *config_json, JazzTokenCallback token_
  *   | "restoreDeviceAccount" {"deviceKey"} | "linkDeviceAccount" {}
  *   | "signOut" {} (the session stays, signed out) | "retry" {} -> null
  *   "exportDeviceKey" {} -> "jazz-auth-v1:..."
+ *   "close" {} -> null (closes without freeing: see the top). May run
+ *              beside any other call, and on a closed session; closing
+ *              again does nothing. The operation in flight fails "closed"
+ *              without being waited for and installs no client (what it
+ *              sent may still apply), so do the waits of the session's
+ *              handles. "replaced" is only for a session that goes on:
+ *              closing is always "closed", and wins when both hold.
+ *              An open it interrupted gets up to 2 s to let go of its
+ *              store.
  */
 char *jazz_session_call(JazzSession *session, const char *method, const char *args_json,
                         char **err);
@@ -274,8 +348,9 @@ JazzHandle *jazz_session_jazz(JazzSession *session, char **err);
 JazzWatch *jazz_session_watch(JazzSession *session, JazzCallback cb, void *ctx, char **err);
 
 /*
- * Closes and frees the session: its handles fail with kind "closed" (free
- * them with jazz_close, before or after), its watches get their last call,
+ * Closes (unless "close" already did) and frees the session: its handles
+ * fail with kind "closed" (free them with jazz_close, before or after), its
+ * watches get their last call,
  * and the token callback never runs once this returns. No other call on
  * the session may run concurrently with or follow it.
  */
