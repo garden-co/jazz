@@ -135,7 +135,11 @@ function gatedLoader() {
 function pageStillLoading() {
   const events = { addEventListener() {}, removeEventListener() {} };
   vi.stubGlobal("document", { ...events, readyState: "loading", visibilityState: "visible" });
-  vi.stubGlobal("window", { ...events, document: globalThis.document });
+  vi.stubGlobal("window", {
+    ...events,
+    document: globalThis.document,
+    performance: globalThis.performance,
+  });
 }
 
 /** A thin session of an account the app signs in itself. */
@@ -257,17 +261,10 @@ describe("calls on a db.encryption handle taken while thin", () => {
     pageStillLoading();
     const gate = gatedLoader();
     const kept = db(await thinSession(host, gate.loader));
-    // Verification that has not finished when its time runs out, as for a device offline. It
-    // checks every 100 ms, so it gives up just after its deadline.
-    vi.spyOn(Encryption.prototype, "ready").mockImplementation(
-      (options = {}) =>
-        new Promise((_, reject) =>
-          setTimeout(
-            () => reject(new Error("not verified yet")),
-            (options.timeoutMs ?? 30_000) + 100,
-          ),
-        ),
-    );
+    // Verification that has not finished at the deadline, as for a device offline: it joins
+    // one already in flight, which can wait longer (on its own deadline, or on the app's
+    // account-secret provider), so it does not end by itself here.
+    vi.spyOn(Encryption.prototype, "ready").mockImplementation(() => new Promise(() => {}));
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let outcome: unknown = "pending";
     const call = kept.encryption.deviceId().then(
