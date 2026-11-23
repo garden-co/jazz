@@ -1,7 +1,9 @@
 /**
  * `jazz.app.json`'s `history` and `migrations` → `migrations/*.ts`
  * (`m.defineMigration`, the .64 stub shape) and `migrations/snapshots/*.json`
- * (the engine schema of each version, as `migrations create` writes them).
+ * (the engine schema of each version, as `migrations create` writes them),
+ * with `<snapshot>.encryption.json` beside the snapshot of each version that
+ * declares encryption: a snapshot holds only what is stored.
  */
 import type { AppJson, ColumnJson, MigrateOpJson, MigrationJson, TableJson } from "./app-json.js";
 import { jsLiteral, member, propKey } from "./names.js";
@@ -65,9 +67,11 @@ export async function printMigrations(
     version === undefined ? app.tables : versions[version]?.tables;
 
   for (const [name, snapshot] of [...snapshots, ["", current] as const]) {
-    void name;
-    files[`migrations/snapshots/${nextStamp()}-${shortHash(snapshot.hash)}.json`] =
-      JSON.stringify(snapshot.schema, null, 2) + "\n";
+    const file = `migrations/snapshots/${nextStamp()}-${shortHash(snapshot.hash)}`;
+    files[`${file}.json`] = JSON.stringify(snapshot.schema, null, 2) + "\n";
+    const entries = encryptionEntries(tablesOf(name || undefined)!);
+    if (Object.keys(entries).length > 0)
+      files[`${file}.encryption.json`] = JSON.stringify({ tables: entries }, null, 2) + "\n";
   }
 
   migrations.forEach((migration, index) => {
@@ -98,6 +102,20 @@ export async function printMigrations(
     );
   });
   return { files, unsupported };
+}
+
+/**
+ * A version's encryption entries, by table, as `migrations create` writes
+ * them beside its snapshot: the hash doesn't cover a plaintext type, so
+ * `migrations` refuses a version that has Jazz's system tables without them.
+ */
+function encryptionEntries(
+  tables: Record<string, TableJson>,
+): Record<string, NonNullable<TableJson["encryption"]>> {
+  const out: Record<string, NonNullable<TableJson["encryption"]>> = {};
+  for (const [name, table] of Object.entries(tables))
+    if (table.encryption !== undefined) out[name] = table.encryption;
+  return out;
 }
 
 function printStub(
