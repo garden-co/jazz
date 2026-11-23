@@ -215,9 +215,10 @@ export class Encryption {
    * device's first sync. Unlike {@link ready} it does not wait for the
    * account's verification, which can need the server. Rejects only when
    * the runtime can no longer answer. Through `db.encryption` on a browser
-   * Db that started thin, it first waits for the encryption runtime to load,
-   * so a returning device can be waiting for that alone, and it rejects if
-   * the runtime does not load.
+   * Db that started thin, it first waits for the encryption runtime to load
+   * and then for the account's verification (a failed verification does not
+   * reject it), so a returning device can be waiting for those alone, and it
+   * rejects if the runtime does not load in time.
    */
   async readable(): Promise<void> {
     for (;;) {
