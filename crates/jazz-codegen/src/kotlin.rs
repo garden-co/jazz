@@ -916,16 +916,7 @@ pub(crate) fn read(bindings: &str) -> Result<crate::bindings::Recorded, CodegenE
     }
     let app = App::load(file.as_bytes())
         .map_err(|error| unusable(&format!("its `APP` no longer loads ({error})")))?;
-    Ok(crate::bindings::Recorded {
-        source,
-        format,
-        current: app.compiled.current,
-        current_schema: app.compiled.current_schema().clone(),
-        encryption: crate::bindings::version_entries(
-            app.compiled.encryption.as_ref(),
-            &app.compiled.current,
-        ),
-    })
+    Ok(crate::bindings::Recorded::from_app(app, format))
 }
 
 /// A Kotlin string literal for `text`.

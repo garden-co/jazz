@@ -336,6 +336,78 @@ mod tests {
         dir
     }
 
+    /// Alice ships bindings after dropping notes.detail. Its old type is still
+    /// part of what shipped, even though no current column uses it.
+    fn check_recorded_history(lang: Lang) {
+        let shipped = r#"{
+            "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": { "notes": {
+                "columns": { "summary": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "summary": "string?" } }
+            } },
+            "history": { "v1": { "tables": { "notes": {
+                "columns": { "summary": "bytes", "detail": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "summary": "string?", "detail": "string" } }
+            } } } },
+            "migrations": [{ "from": "v1", "migrate": { "notes": {
+                "detail": { "drop": "bytes", "backwardsDefault": "" }
+            } } }]
+        }"#;
+        let dir = dir();
+        let langs = [lang.into()];
+        let app_path = dir.join(APP_FILE);
+        std::fs::write(&app_path, shipped).unwrap();
+        assert_eq!(
+            generate(&dir, &langs, false).unwrap().written,
+            [lang.file()]
+        );
+        assert_eq!(
+            generate(&dir, &langs, false).unwrap().current,
+            [lang.file()]
+        );
+        let bindings = dir.join(lang.file());
+        let original = std::fs::read(&bindings).unwrap();
+        let app = App::load(shipped.as_bytes()).unwrap();
+        let (history, _) = app
+            .compiled
+            .schemas
+            .iter()
+            .find(|(hash, _)| *hash != app.compiled.current)
+            .unwrap();
+
+        let edited = shipped.replace(r#""detail": "string""#, r#""detail": "int""#);
+        std::fs::write(&app_path, &edited).unwrap();
+        for error in [
+            generate(&dir, &langs, false)
+                .expect_err("generate must preserve the committed history"),
+            generate(&dir, &langs, true).expect_err("validation must refuse the edit"),
+            migrations_create(&dir, &langs, "edit-history")
+                .expect_err("migration creation must refuse the edit"),
+        ] {
+            assert!(
+                error.contains(&history.to_string()[..12])
+                    && error.contains("notes.detail")
+                    && error.contains("can't change"),
+                "{error}"
+            );
+        }
+        assert_eq!(std::fs::read(&bindings).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(app_path).unwrap(), edited);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Alice regenerates TypeScript bindings with a dropped column in their history.
+    #[test]
+    fn typescript_bindings_protect_recorded_history() {
+        check_recorded_history(Lang::TypeScript);
+    }
+
+    /// Alice regenerates Rust bindings with a dropped column in their history.
+    #[test]
+    fn rust_bindings_protect_recorded_history() {
+        check_recorded_history(Lang::Rust);
+    }
+
     /// Bindings headed as before alpha.66 still read: `--check` passes on
     /// them, and plain `generate` rewrites them with today's header.
     #[test]

@@ -4,6 +4,8 @@
 //! `tables` that needs a migration from one that doesn't, and how
 //! `migrations create` finds the version to migrate from.
 
+use std::collections::BTreeMap;
+
 use jazz::tools::deployment::artifact::encryption::{DeclaredEncryption, Entries};
 use jazz::tools::deployment::artifact::json::{self, Json};
 use jazz::tools::deployment::published::{PublishedSchema, parse_schema_hash};
@@ -26,39 +28,67 @@ pub struct Recorded {
     /// declares none): `migrations create` keeps them on the version it
     /// moves into `history`.
     pub encryption: Entries,
+    /// Includes versions that shipped with no encryption declarations.
+    history_encryption: BTreeMap<String, Entries>,
 }
 
-/// Refuse an app file that declares the version `recorded` was generated
-/// from (the same stored schema, so the same hash) with other encryption
-/// declarations than they recorded. An encrypted column is stored as bytes
-/// whatever its plaintext type, so a type edit alone keeps the hash, and
-/// regenerating would otherwise overwrite what that version shipped with.
+impl Recorded {
+    pub(crate) fn from_app(app: App, format: u32) -> Self {
+        let compiled = app.compiled;
+        let current_schema = compiled.current_schema().clone();
+        let (encryption, history_encryption) = recorded_entries(
+            compiled.schemas.iter().map(|(hash, _)| hash.to_string()),
+            compiled.current,
+            compiled.encryption,
+        );
+        Self {
+            source: app.source,
+            format,
+            current: compiled.current,
+            current_schema,
+            encryption,
+            history_encryption,
+        }
+    }
+}
+
+/// An encrypted column is stored as bytes whatever its plaintext type.
+/// Compare declarations for every shared schema hash before regeneration
+/// can overwrite what that version shipped with.
 pub(crate) fn check_recorded_declarations(
     app: &App,
     recorded: &Recorded,
 ) -> Result<(), CodegenError> {
-    if !app
-        .compiled
-        .schemas
-        .iter()
-        .any(|(h, _)| *h == recorded.current)
-    {
-        return Ok(());
+    let empty = Entries::new();
+    for (version, _) in &app.compiled.schemas {
+        let hash = version.to_string();
+        let before = if *version == recorded.current {
+            &recorded.encryption
+        } else if let Some(entries) = recorded.history_encryption.get(&hash) {
+            entries
+        } else {
+            continue;
+        };
+        let after = app
+            .compiled
+            .encryption
+            .as_ref()
+            .and_then(|declared| declared.entries(&hash))
+            .unwrap_or(&empty);
+        let changed = changed_declarations(before, after);
+        if !changed.is_empty() {
+            return Err(CodegenError::new(format!(
+                "{}: the encryption declarations of version {}, which your committed bindings were \
+                 generated from, can't change, and its stored columns are the same: {} changed. \
+                 Restore the declaration as that version shipped it. To change an encrypted column's \
+                 type, copy the data into a new encrypted table (docs/e2ee/encrypting-existing-data)",
+                jazz::tools::deployment::artifact::APP_FILE,
+                &hash[..12],
+                changed.join(", ")
+            )));
+        }
     }
-    let declared = version_entries(app.compiled.encryption.as_ref(), &recorded.current);
-    let changed = changed_declarations(&recorded.encryption, &declared);
-    if changed.is_empty() {
-        return Ok(());
-    }
-    Err(CodegenError::new(format!(
-        "{}: the encryption declarations of version {}, which your committed bindings were \
-         generated from, can't change, and its stored columns are the same: {} changed. \
-         Restore the declaration as that version shipped it. To change an encrypted column's \
-         type, copy the data into a new encrypted table (docs/e2ee/encrypting-existing-data)",
-        jazz::tools::deployment::artifact::APP_FILE,
-        &recorded.current.to_string()[..12],
-        changed.join(", ")
-    )))
+    Ok(())
 }
 
 /// The tables and columns whose declarations differ between `before` and
@@ -94,15 +124,20 @@ fn changed_declarations(before: &Entries, after: &Entries) -> Vec<String> {
     changed
 }
 
-/// The entries `encryption` declares for version `current`.
-pub(crate) fn version_entries(
-    encryption: Option<&DeclaredEncryption>,
-    current: &SchemaHash,
-) -> Entries {
-    encryption
-        .and_then(|declared| declared.entries(&current.to_string()))
-        .cloned()
-        .unwrap_or_default()
+fn recorded_entries(
+    versions: impl Iterator<Item = String>,
+    current: SchemaHash,
+    encryption: Option<DeclaredEncryption>,
+) -> (Entries, BTreeMap<String, Entries>) {
+    let mut entries = encryption.unwrap_or_default().versions;
+    let current = current.to_string();
+    let mut history = BTreeMap::new();
+    for hash in versions.filter(|hash| hash != &current) {
+        history
+            .entry(hash)
+            .or_insert_with_key(|hash| entries.remove(hash).unwrap_or_default());
+    }
+    (entries.remove(&current).unwrap_or_default(), history)
 }
 
 /// The digest of what the generator wrote that `lang`'s bindings record,
@@ -201,6 +236,16 @@ fn read_ts(bindings: &str) -> Result<Recorded, CodegenError> {
         .map(|s| serde_json::from_str(&json::print(s)))
         .ok_or_else(|| refuse("`schema.schemas` is missing"))?
         .map_err(|e| refuse(&format!("schema.schemas: {e}")))?;
+    let encryption = schema
+        .get("encryption")
+        .map(|e| serde_json::from_str::<DeclaredEncryption>(&json::print(e)))
+        .transpose()
+        .map_err(|e| refuse(&format!("schema.encryption: {e}")))?;
+    let (encryption, history_encryption) = recorded_entries(
+        schemas.iter().map(|schema| schema.hash.clone()),
+        current,
+        encryption,
+    );
     let current_schema = schemas
         .into_iter()
         .find(|s| parse_schema_hash(&s.hash).is_ok_and(|h| h == current))
@@ -209,17 +254,13 @@ fn read_ts(bindings: &str) -> Result<Recorded, CodegenError> {
     if SchemaHash::compute(&current_schema) != current {
         return Err(refuse("the current schema doesn't match its hash"));
     }
-    let encryption = schema
-        .get("encryption")
-        .map(|e| serde_json::from_str::<DeclaredEncryption>(&json::print(e)))
-        .transpose()
-        .map_err(|e| refuse(&format!("schema.encryption: {e}")))?;
     Ok(Recorded {
         format,
         source,
         current,
         current_schema,
-        encryption: version_entries(encryption.as_ref(), &current),
+        encryption,
+        history_encryption,
     })
 }
 
@@ -392,6 +433,7 @@ pub fn staleness(
         Ok(recorded) => recorded,
         Err(error) => return Ok(Some(Staleness::Unreadable(error.message().to_string()))),
     };
+    check_recorded_declarations(app, &recorded)?;
     if !app
         .compiled
         .schemas
@@ -405,7 +447,6 @@ pub fn staleness(
         }
         return Ok(Some(Staleness::SchemaChanged));
     }
-    check_recorded_declarations(app, &recorded)?;
     if recorded.source != app.source || recorded.format != lang.format() {
         return Ok(Some(Staleness::OutOfDate));
     }
