@@ -240,7 +240,7 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
         <Banner
           status="info"
           title={`${lockedCount} ${lockedCount === 1 ? "message is" : "messages are"} waiting for the room's key`}
-          description="Another member's device shares it with this browser. They show here once one is online."
+          description="It usually comes from another member's device once one that holds it is online. If no device holds it any more, these messages stay locked."
           container="section"
           collapsible={false}
         />
@@ -440,8 +440,9 @@ const KEY_ARRIVING_MS = 10_000;
 /**
  * Whether the messages this browser cannot read are only waiting for the
  * room's key: "arriving" for the first few seconds (the key, or the room's
- * key record, is usually still syncing), then "slow" while a member's device
- * has the key to share. `null` when something else keeps them locked: this
+ * key record, is usually still syncing), then "slow" while this account is a
+ * member still waiting for the key, which another member's device usually
+ * shares, though none may hold it any more. `null` when something else keeps them locked: this
  * browser waits for approval or holds no access, or after those seconds the
  * room still has no key record to share a key from.
  */
