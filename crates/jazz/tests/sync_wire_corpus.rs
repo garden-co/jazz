@@ -17,6 +17,7 @@
 //! needs a new wire version and corpus beside this one.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -706,13 +707,13 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     // claims: a backend over a trusted link writes for alice.
     let backend = open(0x55, AuthorSubject::SYSTEM, false);
     connect(&backend, &server, AuthorSubject::SYSTEM, &recorded);
-    backend.set_identity_claims(
+    jazz::db::block_on(backend.set_identity_claims(
         user(1),
         BTreeMap::from([(
             jazz::query::provider_claim_key("sub"),
             Value::String("alice".to_owned()),
         )]),
-    );
+    ));
     for identity in [
         WriteIdentity::Attribution(user(1)),
         WriteIdentity::Session(user(1)),
@@ -771,10 +772,10 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     // Rows (a relay's unsettled version): a worker with no server keeps
     // its own write pending, and ships it to its tab in its own band.
     let wendy = open(0x57, user(1), false);
-    wendy.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(wendy.set_remote_link_hint(RemoteLinkHint::NoServer));
     let tab = open(0x58, user(1), false);
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     connect(&tab, &wendy, user(1), &recorded);
     let tab_notes = tab.prepare_query(&Query::from("notes")).unwrap();
     // Read (once, fresh): the tab's first read has no checkpoint to resume.
@@ -840,7 +841,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let worker = open(0x53, user(1), false);
     connect(&worker, &server, user(1), &recorded);
     let tab = open(0x54, user(1), false);
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     connect(&tab, &worker, user(1), &recorded);
     let tabs = block_on(tab.insert("notes", note(1, vec![5]), InsertOptions::default()))
         .unwrap()
@@ -1075,7 +1076,7 @@ fn hidden_in_a_view(recorded: &Recorded) {
         .with_clock(|| CORPUS_NOW_MS)
     };
     let server = block_on(Db::open(config(0x61, AuthorSubject::SYSTEM))).unwrap();
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     let selector = |byte: u8| {
         BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
     };

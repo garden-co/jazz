@@ -6,6 +6,7 @@
 //! timestamped too far ahead of its clock.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -148,10 +149,10 @@ fn text(s: &str) -> Value {
 /// A user whose `claims.sub` is `sub`, as `db` knows them.
 fn user(db: &Db, n: u8, sub: &str) -> AuthorSubject {
     let author = AuthorSubject::for_test_bytes([0x60 + n; 16]);
-    db.set_identity_claims(
+    jazz::db::block_on(db.set_identity_claims(
         author,
         BTreeMap::from([(jazz::query::provider_claim_key("sub"), text(sub))]),
-    );
+    ));
     author
 }
 

@@ -169,22 +169,20 @@ fn delete_client_storage_empties_the_store() {
     .to_string();
     let jazz = JazzHandle::open(config.clone()).unwrap();
     jazz.insert("shows".into(), show(nil_uuid())).unwrap();
-    // Refused while another open app holds the store, which stays open.
+    // A second app is refused the store (one app at a time has it open),
+    // and the one that has it stays open.
     let other_dir = dir.with_extension("held");
     let _ = std::fs::remove_dir_all(&other_dir);
     let mut held = parse(&config);
     held["dataDir"] = json!(other_dir.to_str().unwrap());
     let holder = JazzHandle::open(held.to_string()).unwrap();
     let second = JazzHandle::open(held.to_string());
-    let second = second.expect("a second app on the same store opens");
     {
-        let refused = second.delete_client_storage();
         assert!(
-            matches!(refused, Err(JazzError::Refused { .. })),
-            "{refused:?}"
+            matches!(second, Err(JazzError::Refused { .. })),
+            "a second app opened the store"
         );
         assert!(holder.all(json!({ "table": "shows" }).to_string()).is_ok());
-        second.shutdown().unwrap();
     }
     holder.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(&other_dir);

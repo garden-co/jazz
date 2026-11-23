@@ -12,6 +12,37 @@ The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). It
 `suspend` functions, and subscriptions are `Flow`s. It runs on JDK 17 or later, and on Android
 (minSdk 24).
 
+<Callout type="warn" title="Known issue: close() can block for 30 seconds">
+  In every release up to and including 2.0.0-beta.1, `close()` (and the end of `use {}`) can block
+  for 30 seconds while a call is still waiting for the server: a write or `waitForSync` at `Global`,
+  or a `Remote` read. On Android's main thread that makes the app stop responding (ANR). Call it off
+  the main thread:
+
+```kotlin
+withContext(NonCancellable + Dispatchers.IO) { jazz.close() }
+```
+
+`NonCancellable` matters in a `finally`: without it, a cancelled coroutine skips the `close()`.
+With `use {}`, run the whole block in `withContext(Dispatchers.IO)`.
+
+</Callout>
+
+<Callout
+  type="warn"
+  title="Known issue: withTimeout doesn't interrupt a call that waits for the server"
+>
+  In every release up to and including 2.0.0-beta.1, `withTimeout` and cancellation don't interrupt
+  a call that waits for the server (a write or commit at `Global`, `waitForSync` at `Global`, or a
+  `Remote` read): it returns only when the server answers or the app closes. If you then see a
+  timeout, don't retry a write: it may have been accepted. To show sync state without waiting, write
+  at the default tier and watch `syncStatus`.
+</Callout>
+
+<Callout type="warn" title="Known issue: a bearer user can't open offline">
+  An app signed in with a bearer token signs in with your backend when it opens, so it can't open
+  while your backend is unreachable, even with a persistent store.
+</Callout>
+
 ## Install
 
 From `2.0.0-beta.1`, `jazz-kotlin` isn't published to Maven Central. Until it's in a Maven
@@ -53,7 +84,8 @@ dependencies {
 
 The jar has `libjazz_ffi` for Linux (x86-64, arm64), macOS (arm64, x86-64) and Windows (x86-64)
 inside, which JNA loads from it. With Maven, add the jar with `mvn install:install-file` and
-declare the same dependencies, with `-jvm` after the two kotlinx artifact IDs.
+declare the same dependencies, with `-jvm` after the two kotlinx artifact IDs, plus
+`org.jetbrains.kotlin:kotlin-stdlib:2.2.21` (without it, Maven picks kotlinx's older one).
 
 On Android, download the AAR into your app module's `libs/` (run this in `app/`), and check it the
 same way:
@@ -161,16 +193,15 @@ or as a user your backend signs in, with their bearer token:
 native core syncs on a thread of its own. Call `jazz.close()` (it's `AutoCloseable`) when you're
 done; closing ends open `watch`es and subscriptions with `JazzException.Closed`.
 
-`jazz.deleteClientStorage()` closes the app and deletes its local store. It throws
-`JazzException.Refused` while another open app uses the same `dataDir`. Whether your app is still
-open afterwards depends on where that other app runs:
+One `Jazz` at a time has a persistent `dataDir` open. Opening it again, in this process or another
+(a widget, a service in a process of its own), throws `JazzException.Refused`: the store has one
+writer, so share that `Jazz`, or use another directory. On Android, keep it somewhere that outlives
+a screen, such as your `Application`. Opening right after `close()` waits for it to finish.
 
-- **In the same process:** your app stays open, and so do its watches. Close the other app and call
-  it again.
-- **In another process:** that is only seen once your app has stopped, so your app is closed and
-  the store is left in place. Open the app again if you need it.
+An end user's persistent store goes in `dataDir/<account>/`, so each user of one directory has their own. An app without a user keeps its store in `dataDir` itself, and refuses one there that a signed-in user wrote (an earlier version kept users' stores there): open it as that user, or delete it.
 
-Any other failure closes your app too. Once it is closed, `jazz.session` reads `SignedOut`.
+`jazz.deleteClientStorage()` closes the app and deletes its local store. Once it is closed,
+`jazz.session` reads `SignedOut`.
 
 Writes are local-first: a write the server's permissions refuse doesn't fail the call, it rolls
 back once the server answers. Write at `WriteTier.Global` (or call `waitForSync`) to see the

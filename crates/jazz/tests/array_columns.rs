@@ -1,5 +1,6 @@
 //! Array columns: stored as JSON text, read back by their
 //! declared element type, compared whole and searched by element.
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 
 use crate::common;

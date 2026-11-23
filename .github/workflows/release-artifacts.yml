@@ -215,6 +215,9 @@ jobs:
           test "$(cat release-languages/libjazz_ffi-source.txt)" = "${SHA}"
           test -s "release-languages/jazz-kotlin-${VERSION}.jar"
           test -s "release-languages/jazz-kotlin-android-${VERSION}.aar"
+          # Two Gradle runs build these: what the GitHub release serves must be what the Maven tree publishes.
+          cmp "release-languages/jazz-kotlin-${VERSION}.jar" "release-maven/jazz-kotlin/${VERSION}/jazz-kotlin-${VERSION}.jar"
+          cmp "release-languages/jazz-kotlin-android-${VERSION}.aar" "release-maven/jazz-kotlin-android/${VERSION}/jazz-kotlin-android-${VERSION}.aar"
           (cd release-swift && echo "$(cat JazzFFI.xcframework.zip.checksum)  JazzFFI.xcframework.zip" | sha256sum -c -)
           grep -q "releases/download/v${VERSION}/JazzFFI.xcframework.zip" release-swift-mirror/Package.swift
           find . -type f | sort | sed 's|^\./||' | xargs sha256sum > "${RUNNER_TEMP}/all.txt"

@@ -184,6 +184,8 @@ enum Then {
     CloseHandle(Handle),
     /// Closes this handle once the test releases it.
     StallThenCloseHandle(Handle),
+    /// Signs this handle out once the test releases it.
+    StallThenSignOut(Handle),
     /// Closes this session from inside the callback.
     CloseSession(Session),
 }
@@ -284,6 +286,10 @@ unsafe extern "C" fn token_cb(
         Then::StallThenCloseHandle(handle) => {
             host.wait_released();
             Some(handle.call("close", json!({})))
+        }
+        Then::StallThenSignOut(handle) => {
+            host.wait_released();
+            Some(handle.call("signOut", json!({})))
         }
         Then::CloseSession(session) => Some(session.call("close", json!({}))),
     };
@@ -697,50 +703,27 @@ fn close_ends_a_session_handles_wait_at_once() {
     session.free();
 }
 
-/// A `link` ends with the session's handle it was called on, not just for
-/// its caller: the request is dropped, though the client lives on.
+/// A `link` on a session's handle is refused (the session links its own
+/// device account), at once and without a request, so nothing of it is
+/// left for close to end; the handle stays open until closed.
 #[test]
-fn close_ends_a_session_handles_link_on_the_client() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}/jazz", listener.local_addr().unwrap());
-    let (asked, hung_up) = (mpsc::channel(), mpsc::channel());
-    let (asked_tx, hung_up_tx) = (asked.0, hung_up.0);
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { return };
-            let (asked, hung_up) = (asked_tx.clone(), hung_up_tx.clone());
-            std::thread::spawn(move || {
-                let mut head = Vec::new();
-                let mut chunk = [0; 1024];
-                let mut linking = false;
-                while let Ok(read @ 1..) = stream.read(&mut chunk) {
-                    head.extend_from_slice(&chunk[..read]);
-                    if !linking && String::from_utf8_lossy(&head).contains("/accounts/backend-link")
-                    {
-                        linking = true;
-                        let _ = asked.send(());
-                    }
-                }
-                if linking {
-                    let _ = hung_up.send(());
-                }
-            });
-        }
-    });
-    let session = guest_session(&endpoint, None);
+fn a_session_handles_link_is_refused_and_close_still_closes_it() {
+    let session = guest_session(&unreachable(), None);
     let guest = session.jazz().unwrap();
-    let linking = Running::start(move || guest.call("link", json!({ "bearer": "token-alice" })));
-    asked.1.recv_timeout(PROMPT).expect("the link's request");
+    let linked = guest
+        .spawn("link", json!({ "bearer": "token-alice" }))
+        .within(PROMPT, "link");
+    assert_eq!(kind(&linked), "notSupported", "{linked:?}");
+    assert!(guest.call("account", json!({})).is_ok(), "still open");
     assert_eq!(
         guest.spawn("close", json!({})).within(PROMPT, "close"),
         Ok(Value::Null)
     );
-    assert_eq!(kind(&linking.within(PROMPT, "link")), "closed");
-    hung_up.1.recv_timeout(PROMPT).expect("the request dropped");
+    assert_eq!(kind(&guest.call("account", json!({}))), "closed");
     guest.free();
-    assert!(
-        session.jazz().map(Handle::free).is_ok(),
-        "the session goes on"
+    assert_eq!(
+        session.spawn("close").within(PROMPT, "close"),
+        Ok(Value::Null)
     );
     session.free();
 }
@@ -1177,4 +1160,31 @@ fn session_jazz_as_the_session_closes() {
         }
         session.free();
     }
+}
+
+/// The same with a sign-out from the callback a close waits for: the
+/// sign-out stops a client that is already stopping, and neither waits for
+/// the other (nor for the store's release, which needs neither).
+#[test]
+fn sign_out_from_the_callback_that_a_close_is_waiting_for() {
+    let app = App::start();
+    let host = Host::new("token-alice");
+    let alice = app.open(json!({ "bearer": true }), host);
+    host.then(Then::StallThenSignOut(alice));
+    let refreshing = alice.spawn("refresh", json!({}));
+    until("the callback", || !host.idle());
+    let closing = alice.spawn("close", json!({}));
+    closing.still_running("close, with a token callback running,");
+    host.release();
+    assert_eq!(closing.within(PROMPT, "close"), Ok(Value::Null));
+    let _ = refreshing.within(PROMPT, "refresh");
+    let signed_out = host.closed_inside.lock().unwrap().clone();
+    assert_eq!(signed_out.len(), 1, "{signed_out:?}");
+    assert!(
+        signed_out[0].is_ok() || kind(&signed_out[0]) == "closed",
+        "{signed_out:?}"
+    );
+    alice.free();
+    host.assert_freeable();
+    free_ctx(host);
 }

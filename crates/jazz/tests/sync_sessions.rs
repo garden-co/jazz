@@ -3,6 +3,7 @@
 //! not grow the server. Not ported from Jazz.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};

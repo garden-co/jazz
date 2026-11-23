@@ -32,7 +32,9 @@ compared with TypeScript.
     - cookie sessions renewed in place: a Rust client signs in with a bearer and reconnects with a
       fresh one;
     - the browser-only parts of TypeScript's session: focus and visibility re-checks, cross-tab
-      sign-out, `clearOnSignOut` and the thin-client upgrade.
+      sign-out, `clearOnSignOut` and the thin-client upgrade;
+    - servers with a certificate from a private certificate authority (CA), for now: sign-in and
+      other HTTPS requests trust only the standard public CAs.
 
   </Tab>
   <Tab value="Swift">
@@ -64,7 +66,10 @@ compared with TypeScript.
       relations or optional references;
     - payload enums, nested rows and other column types the bindings can't type;
     - non-finite floats (`NaN`, infinities), which read back as `null`;
-    - positions in subscription deltas.
+    - positions in subscription deltas;
+    - servers with a certificate from a private or user-installed certificate authority (CA): on
+      iOS, Jazz trusts only the standard public CAs. On macOS, for now, the same is true of sign-in
+      and other HTTPS requests.
 
   </Tab>
   <Tab value="Kotlin">
@@ -79,7 +84,10 @@ compared with TypeScript.
     - nested rows, catalogue enums and transaction-id columns in bindings;
     - Kotlin Multiplatform targets other than the JVM and Android;
     - non-finite doubles (`NaN`, infinities);
-    - `limit` and `offset` with `watch`: use them with `all`.
+    - `limit` and `offset` with `watch`: use them with `all`;
+    - servers with a certificate from a private or user-installed certificate authority (CA): on
+      Android, Jazz trusts only the standard public CAs. On desktop, for now, the same is true of
+      sign-in and other HTTPS requests.
 
   </Tab>
   <Tab value="Go">
@@ -97,7 +105,9 @@ compared with TypeScript.
       declare them;
     - non-finite doubles (`NaN`, `±Inf`): Jazz carries them as `null`, so a nullable `float` column
       reads them as `nil`, and reading a non-nullable one fails with a `*jazz.Error` that names the
-      column.
+      column;
+    - servers with a certificate from a private certificate authority (CA), for now: sign-in and
+      other HTTPS requests trust only the standard public CAs.
 
   </Tab>
 </Tabs>

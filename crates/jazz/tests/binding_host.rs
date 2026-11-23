@@ -3,6 +3,7 @@
 //! sync frames the host carries between two bindings.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::Cell;
 use std::future::Future;
@@ -49,7 +50,7 @@ fn identity(node: u8) -> DbIdentity {
 fn open(node: u8) -> Binding {
     let identity = identity(node);
     let db = block_on(Db::open(DbConfig::new(schema(), identity))).unwrap();
-    Binding::new(db, identity, false)
+    jazz::db::block_on(Binding::new(db, identity, false))
 }
 
 fn authority() -> Binding {
@@ -58,7 +59,7 @@ fn authority() -> Binding {
         author: AuthorSubject::SYSTEM,
     };
     let db = block_on(Db::open_history_complete(DbConfig::new(schema(), identity))).unwrap();
-    Binding::new(db, identity, true)
+    jazz::db::block_on(Binding::new(db, identity, true))
 }
 
 fn title(value: &str) -> Vec<u8> {
@@ -868,7 +869,7 @@ fn a_message_larger_than_one_wire_frame_travels_in_parts() {
 /// A browser tab over its worker: the worker is a replica whose own
 /// identity the tab connects as.
 fn tab_over(worker: &Binding, tab: Binding) -> (Binding, Link, Link) {
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     tab.set_remote_link_hint("live").unwrap();
     let up = tab.connect_upstream();
     let down = worker
@@ -883,7 +884,7 @@ fn a_worker_refuses_a_tab_of_another_identity() {
     // another user's tab would attribute that user's writes to it.
     let worker = open(0xb1);
     let other = open(0xb2);
-    match worker.accept_subscriber(other.author(), Default::default()) {
+    match block_on(worker.accept_subscriber(other.author(), Default::default())) {
         Err(HostError::Engine(error)) => {
             assert_eq!(error.code, ErrorCode::Protocol);
             assert_eq!(error.reason, Some(jazz::db::Reason::IdentityMismatch));
@@ -1002,7 +1003,7 @@ fn a_worker_serves_its_own_tabs_as_it_reads_itself() {
     let open = |node: u8| {
         let identity = identity(node);
         let db = block_on(Db::open(DbConfig::new(bare.clone(), identity))).unwrap();
-        Binding::new(db, identity, false)
+        jazz::db::block_on(Binding::new(db, identity, false))
     };
     let worker = open(0xb0);
     let (tab, up, down) = tab_over(&worker, open(0xb1));
@@ -1286,7 +1287,7 @@ fn a_tab_whose_write_the_server_refuses_reverts_to_the_servers_row() {
     let open = |node: u8| {
         let identity = identity(node);
         let db = block_on(Db::open(DbConfig::new(schema.clone(), identity))).unwrap();
-        Binding::new(db, identity, false)
+        jazz::db::block_on(Binding::new(db, identity, false))
     };
     let server = {
         let identity = DbIdentity {
@@ -1298,7 +1299,7 @@ fn a_tab_whose_write_the_server_refuses_reverts_to_the_servers_row() {
             identity,
         )))
         .unwrap();
-        Binding::new(db, identity, true)
+        jazz::db::block_on(Binding::new(db, identity, true))
     };
     let worker = open(0xf0);
     worker.set_remote_link_hint("live").unwrap();
@@ -1347,7 +1348,7 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
     let open = |node: u8| {
         let identity = identity(node);
         let db = block_on(Db::open(DbConfig::new(schema.clone(), identity))).unwrap();
-        Binding::new(db, identity, false)
+        jazz::db::block_on(Binding::new(db, identity, false))
     };
     let server = {
         let identity = DbIdentity {
@@ -1359,7 +1360,7 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
             identity,
         )))
         .unwrap();
-        Binding::new(db, identity, true)
+        jazz::db::block_on(Binding::new(db, identity, true))
     };
     let worker = open(0xe0);
     let refused = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -1431,14 +1432,14 @@ fn a_refusal_nobody_heard_is_kept_until_a_listener_takes_it() {
             identity,
         )))
         .unwrap();
-        Binding::new(db, identity, true)
+        jazz::db::block_on(Binding::new(db, identity, true))
     };
     let identity = identity(0xe2);
-    let client = Binding::new(
+    let client = jazz::db::block_on(Binding::new(
         block_on(Db::open(DbConfig::new(schema, identity))).unwrap(),
         identity,
         false,
-    );
+    ));
     let listening = std::rc::Rc::new(std::cell::Cell::new(false));
     let heard = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let (on, seen) = (std::rc::Rc::clone(&listening), std::rc::Rc::clone(&heard));
@@ -1854,7 +1855,7 @@ fn device_chain_subscribes_to_a_large_value(file: Option<&std::path::Path>) {
                 jazz::db::FileOptions::default(),
             ))
             .unwrap();
-            Binding::new(db, identity(node), false)
+            jazz::db::block_on(Binding::new(db, identity(node), false))
         }
         None => open(node),
     };
@@ -1873,7 +1874,7 @@ fn device_chain_subscribes_to_a_large_value(file: Option<&std::path::Path>) {
     let down = server
         .accept_subscriber(relay.author(), Default::default())
         .unwrap();
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let tab_up = tab.connect_upstream();
     let tab_down = relay
         .accept_subscriber(relay.author(), Default::default())
@@ -1951,7 +1952,7 @@ fn a_tabs_local_wait_the_worker_refuses_claims_the_refusal() {
     let open = |node: u8| {
         let identity = identity(node);
         let db = block_on(Db::open(DbConfig::new(schema.clone(), identity))).unwrap();
-        Binding::new(db, identity, false)
+        jazz::db::block_on(Binding::new(db, identity, false))
     };
     let server = {
         let identity = DbIdentity {
@@ -1963,7 +1964,7 @@ fn a_tabs_local_wait_the_worker_refuses_claims_the_refusal() {
             identity,
         )))
         .unwrap();
-        Binding::new(db, identity, true)
+        jazz::db::block_on(Binding::new(db, identity, true))
     };
     let worker = open(0xe0);
     worker.set_remote_link_hint("live").unwrap();
@@ -2122,7 +2123,7 @@ fn branched(node: u8, authority: bool) -> Binding {
         block_on(Db::open(config))
     }
     .unwrap();
-    Binding::new(db, identity, authority)
+    jazz::db::block_on(Binding::new(db, identity, authority))
 }
 
 fn branch(byte: u8) -> jazz::protocol::BranchSelector {

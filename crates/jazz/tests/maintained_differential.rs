@@ -32,6 +32,7 @@
 //! CI runs it bounded (seed 11; see the `rust-differential` partition in
 //! `dev/gates/local-ci-equivalent.mjs`).
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 mod common;
 
 #[path = "common/duplex_transport.rs"]

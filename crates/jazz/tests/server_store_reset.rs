@@ -11,6 +11,7 @@
 //! store is reset. A store restored from a backup keeps its namespace, so its
 //! replicas resume against it.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 
@@ -405,7 +406,7 @@ fn file_server(path: &std::path::Path) -> Db {
         jazz::db::FileOptions::default(),
     ))
     .expect("open file server");
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 

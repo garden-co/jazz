@@ -12,6 +12,7 @@
 //! the catalogue now carries each stored column's `ADD COLUMN` default.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -107,7 +108,7 @@ fn config(schema: JazzSchema, node: u8) -> DbConfig {
 
 fn authority_at(path: &Path) -> Db {
     let db = block_on(Db::open_at(config(v1(), 0), path, FileOptions::default())).unwrap();
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 

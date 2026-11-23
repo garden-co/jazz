@@ -6,6 +6,7 @@
 //! waiting for an answer no link will give. Its local-first reads read the
 //! relay's store, the foreground's local view, as when there is no server.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 
@@ -115,7 +116,7 @@ impl Device {
 
     fn over(relay: Db, schema: JazzSchema, table: &'static str) -> Self {
         let tab = block_on(Db::open(config(schema, 0x62))).expect("open tab");
-        tab.set_non_durable_client();
+        jazz::db::block_on(tab.set_non_durable_client());
         connect(&tab, &relay);
         Self { relay, tab, table }
     }
@@ -453,7 +454,7 @@ fn a_relay_that_cannot_mirror_its_servers_catalogue_refuses_the_tabs_remote_read
         config(head.clone(), 0x51).with_migrations(schemas, lenses),
     ))
     .unwrap();
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     let device = Device::new(head, "todos");
     let upstream = connect(&device.relay, &server);
     let refusal = tab_reads_through_a_refused_relay(&device, &server, &upstream, Some(0));
