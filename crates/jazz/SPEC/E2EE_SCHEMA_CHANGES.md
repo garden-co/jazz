@@ -20,9 +20,11 @@ app encrypts data it already stores. References: the
   the same identities without the row. Changing the domain, the table or
   column identity, the row or `T` makes old cells `invalid-ciphertext`.
   Changing the space is different: a cell that authenticates under a held key
-  of another space is read, returned and reported `stale-space`, and one that
-  does not is `invalid-ciphertext` once the row's space chain shows its epoch
-  is not one of its own (spec §4.3). The deploy refuses a space or scope
+  of another space is read, returned and reported `stale-space`. One that does
+  not is treated as a key the device lacks (`key-pending` while it fetches it,
+  `key-unavailable` if it cannot) until the row's space chain shows that the
+  cell's epoch is not one of its own; from then on it is `invalid-ciphertext`
+  (spec §4.3). The deploy refuses a space or scope
   change anyway (§3.2).
 - **Catalogue identities follow stored names** (ch. 10 §10.7). A rename lens
   keeps the stored table or column, and so its identity. A column whose stored
@@ -44,7 +46,8 @@ app encrypts data it already stores. References: the
   encrypted value needs a held key for the row's space; an update that
   touches only plain columns needs none, and a backend that holds no keys
   writes plain columns only (it is refused any encrypted column). A client's
-  insert seals the encrypted columns it leaves out, so it needs the key.
+  insert also seals each encrypted column it leaves out that is optional
+  (null) or declares a default, so such an insert needs the key.
   Creating a space needs Jazz read and update permission on the space row
   (spec R15, §3.2); the client does not evaluate it and creates
   optimistically, in the transaction of the first encrypted write that needs
@@ -57,12 +60,16 @@ app encrypts data it already stores. References: the
 - Every schema version records its tables' `encryption` entries: each
   `history` version in `jazz.app.json` carries them, as the current `tables`
   do, and the writer keeps them when it moves a version into `history`.
-- The loaders that deploy or serve the app (`load`, and `load_backend` from
-  generated bindings) return the declarations of every shipped version. The
-  client loader for an encrypted app (`load_client_encrypted`) returns only
-  the current version's, which its hooks seal and open by; the other client
-  loaders return none, and `load_client_current` refuses an app with Jazz's
-  system tables.
+- What each loader returns:
+  - `load` (the app files) and `load_backend` (generated bindings), which
+    deploy or serve the app: the declarations of every shipped version.
+  - `load_client_encrypted` (the app file) and `bound_declarations`
+    (generated bindings), from which a client builds its encryption hooks:
+    the current version's declarations only, or none when that version has
+    no system tables.
+  - `load_client`: schema versions and lenses, no declarations.
+  - `load_client_current`: no declarations; it refuses an app whose current
+    version has Jazz's system tables.
 - `generate`, `validate` and the deploy check every migration against the
   declarations of its two versions (§3). The deploy refuses a change even
   when the stored schema is unchanged, as it does for a plaintext type
@@ -96,13 +103,24 @@ app encrypts data it already stores. References: the
 
 ### 3.1 Each version's entries
 
-- An entry takes `space`, `scope`, `columns` and `equality`. A column is a
-  type string, or an object with `type` and, optionally, `default` and
-  `sealedType` (and `$comment` anywhere). The reader refuses any other key,
-  naming where it is and the keys that object takes; a raw deploy body with
-  one is refused when it is decoded. Only the retired conversion keys
-  (`from`, `to`, `convert`, `reverse`, `backfill`, `rehome` and `sweep`) also
-  get a pointer to the copy recipe (§5), in both places.
+- An entry takes `space`, `scope`, `columns` and `equality`. Each value in
+  `columns`, keyed by column name, is one of:
+  - a type string: `string`, `int`, `bigint`, `float`, `boolean`,
+    `timestamp`, `uuid` or `bytes`, with `?` appended for an optional column;
+  - a type object with exactly one of `type` (a type string), `enum` (an
+    array of variant names), `json` (`true`, or a JSON schema) and `array`
+    (the element type), and optionally `optional` (`true` or `false`) and
+    `default`;
+  - a declaration `{ "type": …, "sealedType": …, "default": … }`, where
+    `type` and `sealedType` are each a type string or a type object without
+    `default`, and `sealedType` and `default` are optional.
+
+  A type nested in `type` or `array` is a type string or an object with
+  exactly one of `type`, `enum`, `json` and `array`. Any of these objects may
+  also carry a string `$comment`; `columns` itself takes only column names.
+  The reader refuses any other key, naming the key and where it is; a raw
+  deploy body with one is refused when it is decoded.
+
 - The entry names a `space` (the column referencing the scope table, or `id`
   when the table is its own space table) and a `scope`, which is not one of
   Jazz's system tables. The space column and `id` stay plaintext: the server
@@ -114,14 +132,18 @@ app encrypts data it already stores. References: the
   default in the entry, where it is public; otherwise it is optional.
 - A declared `default` is a value of the column's declared type: `null` only
   when the column is optional; for an enum, one of its variants; for JSON,
-  text that parses as JSON and, when the column has a JSON schema, satisfies
-  it; for an array, an array whose elements each fit the element type; and
-  for any other type, a value of exactly that type. A transaction-ID column
-  takes no default other than `null`. The deploy, `generate` and the loaders
-  all check this. `sealedType` names only the stored type and
+  the JSON value itself (an object default is written as an object, not as
+  quoted text), which must satisfy the column's JSON schema if it has one;
+  for an array, an array whose elements each fit the element type; and for
+  any other type, a value of exactly that type. The deploy, `generate` and
+  the loaders all check this. `sealedType` names only the stored type and
   takes no `default`: the default is declared beside it.
+- Encrypted columns hold the types the type strings and objects above name.
+  Row and transaction-ID types, and arrays of them, are not supported:
+  clients refuse to seal or open them.
 - An equality column's tokens are stored in a required `bytes` column
-  `__e2ee_eq_<column>`. Equality is declared only on the types the equality
+  `__e2ee_eq_<column>`, whose stored default, if it declares one, is the
+  empty byte string. Equality is declared only on the types the equality
   format encodes: boolean, integer, bigint, timestamp, double, text, bytes,
   uuid, enum and JSON columns, and arrays of any of them (also nested); row
   and transaction-ID columns, and arrays of them, are refused. JSON is matched
@@ -179,8 +201,9 @@ version holds it.
   space identifier, so a change of `space` or `scope` that is not a rename
   would put every row in another space than the one its cells were sealed
   for. As §1 says, a device holding a key of the old space would still read
-  such a cell, reported `stale-space`; on any other device it would be
-  `invalid-ciphertext`.
+  such a cell, reported `stale-space`; on any other device it would read as
+  a missing key until the space chain shows the epoch is not the space's,
+  and as `invalid-ciphertext` from then on.
 - **Equality.** Rows older than a column have no equality token for it, and
   an index of tokens would miss them silently. So a column newly tagged in a
   table that existed in the previous version is refused, whether the
@@ -214,8 +237,12 @@ with another read rule therefore moves in two deploys:
    narrower readership or another space table. Nothing refuses member rows
    beyond the limit; the application keeps to it.
 2. Change the space table's read rule to `exists __e2ee_members(...)` (spec
-   §1.5) and add the encrypted table. Accounts without a member row lose read
-   access to the space row at this deploy. From then on, a client that
+   §1.5) and add the encrypted table. An account without a member row loses
+   read access to the space row once its session is pinned to the bundle
+   with this rule; a session pinned to an older bundle keeps the old rule
+   until the deployment serving that bundle is retired
+   ([lenses and migrations](10_lenses_migrations.md) `INV-LENS-7`,
+   [topology](9_topology.md) §9.7). From then on, a client that
    creates a space row adds its own first member row, in the same
    transaction, by the creator clause (spec §1.5, R12), and the space table's
    insert rule must not need a member row of the new row.
@@ -226,53 +253,65 @@ Jazz does not turn a plaintext column into an encrypted one. An app copies
 the data into a new encrypted table instead (the developer guide is
 `docs/content/docs/e2ee/encrypting-existing-data.mdx`):
 
+One rule governs it: nothing writes the old data (the old table and every
+old reference column) during the final copy and its check. The writers are
+stopped and known to be stopped, then the copy is made, checked from a
+backend, and the app switches. An app that cannot pause those writes, or
+cannot stop every writer as step 2 describes, is not covered.
+
 1. Add the new table to `jazz.app.json` with its `encryption` entry, its
    encrypted columns and its `equality`, and `createTables` it in the
    migration (after §4 if its space table needs it). In the same migration,
    every table with a reference to the old table gains a new reference
    column to the new table: a reference column names its target table, and
    the deploy refuses a migration that retargets an existing one ("Add a new
-   column referencing … and drop this one in a later release"). From this
-   version on, the app's writes set both columns to the same ID. A reference
+   column referencing … and drop this one in a later release"). A reference
    inside the old table is declared in the new table against the new table.
    Deploy and ship.
-2. Freeze the old table: a permissions revision whose insert, update and
-   delete rules on it are `false`, its read rule unchanged, kept in every
-   later version until the table is dropped. Writes to that data pause. The
-   freeze reaches a session only through its pin: the backend that opens a
-   session pins it to the bundle that backend publishes, whatever the
-   client's app version, and a client cannot pick its own ([topology](9_topology.md) §9.7).
-   Publishing a new bundle ends the sessions pinned to others, which
-   reconnect through whichever backend serves them now; a deployment still
-   serving an earlier bundle pins its sessions to it, and they can still
-   write the old table. So every such deployment is retired before the copy
-   starts. Writes made offline are checked on reconnection under the
-   reconnecting session's pin. The backend's system writes are unchecked, so
-   its jobs that write the old table stop too. (The alternative, writing to
-   both tables during the copy and reconciling them, changes every write
-   path.)
-3. In clients that hold a space's key, copy each old row of the space into
+2. Stop every writer. A permissions revision refuses insert, update and
+   delete on the old table and on every table holding an old reference, with
+   their read rules unchanged. It reaches a session only through its pin:
+   the backend that opens a session pins it to the bundle that backend
+   publishes, whatever the client's app version, and a client cannot pick
+   its own ([topology](9_topology.md) §9.7). Publishing a new bundle ends the
+   sessions pinned to others, which reconnect through whichever backend
+   serves them now; a deployment still serving an earlier bundle pins its
+   sessions to it, and they can still write. The writers have stopped once
+   every such deployment is retired; writes made offline are then checked
+   on reconnection under the new pin. The backend's system writes are
+   unchecked, so its jobs that write these tables stop too. A copy may run
+   before this step to shorten the pause, but only the copy after it counts.
+   An app that moves rows between spaces skips that early copy: a copy
+   cannot change its space (spec §5.1), and a delete followed by a write of
+   the same ID in another space is refused too.
+3. Copy. Clients that hold a space's key copy each old row of the space into
    the new table under the same row ID, with an upsert, so a second run
-   overwrites rather than duplicates; nothing is skipped for having been
-   copied before. When the space has no root yet, the first copy creates it
-   (spec §3.2), which needs a session that may read and update the space
-   row; the first encrypted rows and the space are accepted together. A space
-   whose key holders are all offline waits. Then the new reference columns
-   are filled: each row whose old reference is set gets the same ID in the
-   new one (the copies keep the IDs, so copying the value is enough), written
-   by the backend or a client that may update the row; the column is plain,
-   so the update needs no key (§1). Verify every space before step 4, reading
-   both tables at the `remote` tier (a local-first read can answer from a
-   partial sync, and two partial reads can agree): the set of IDs in the new
-   table equals the set in the old one, not merely the count, and no row has
-   an old reference without the new one. A space that fails is copied again.
-   If a write may have reached the old table after the copy started, the
-   whole copy runs again (its upserts update every copy) and copies of rows
-   since deleted are deleted.
-4. Ship the app version whose code, relations and permissions use the new
-   table and the new reference columns. IDs kept outside Jazz's relations,
-   such as in URLs, still resolve, because the copies keep their IDs.
-5. Drop the old table in a later migration, with the old reference columns
+   overwrites rather than duplicates. When the space has no root yet, the
+   first copy creates it (spec §3.2), which needs a session that may read
+   and update the space row; the first encrypted rows and the space are
+   accepted together. A space whose key holders are all offline waits. A
+   backend fills each new reference column with its row's old reference
+   (the copies keep the IDs, so the value is the same); the column is plain,
+   so the write needs no key (§1).
+4. Check from a backend. A client's reads, remote ones included, apply its
+   read permissions, so two lists it reads can agree while a row it cannot
+   see has no copy. A backend's own database reads every row whatever the
+   permissions, and needs no keys here: IDs, space columns and references are
+   plain. The check passes when, for every space: the old and new tables
+   hold the same set of IDs; each copy has its old row's space; and each
+   row's new reference equals its old one, null equal to null. Missing
+   copies name the spaces whose key holders have not copied yet; extra
+   copies (rows deleted after an early copy) are deleted, and references
+   filled again. A copy in another space than its old row's comes only from
+   an early copy of a row that moved later, and cannot be repaired under its
+   ID. The app switches only once the check passes with every writer
+   stopped.
+5. Switch: ship the app version whose code, relations and permissions use
+   the new table and the new reference columns. Its permissions give the
+   referencing tables their write rules back and keep the old table frozen.
+   IDs kept outside Jazz's relations, such as in URLs, still resolve,
+   because the copies keep their IDs.
+6. Drop the old table in a later migration, with the old reference columns
    in the same migration: a schema whose column references a table it does
    not have is refused.
 
