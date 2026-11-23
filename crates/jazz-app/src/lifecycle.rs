@@ -112,12 +112,14 @@ impl Jazz {
     /// A handle acting for a user ([`Jazz::for_user`] on a trusted backend
     /// client, or `Endpoint::for_user` with the `unstable-endpoint` feature)
     /// shares its trusted client with every other user: its link, store and
-    /// refusals are that client's, not this user's to manage or see.
-    fn refuse_for_user(&self, what: &str) -> Result<()> {
+    /// refusals are that client's, not this user's to manage or see, and so
+    /// is its session. For bindings too; not public API.
+    #[doc(hidden)]
+    pub fn refuse_for_user(&self, what: &str) -> Result<()> {
         if self.for_user {
             return Err(Error::Unsupported(format!(
                 "{what} is not supported on a handle acting for a user (for_user): it \
-                 shares its client's link and store with every other user; call it on the \
+                 shares its client's session, link and store with every other user; call it on the \
                  handle for_user was called on"
             )));
         }

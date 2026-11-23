@@ -107,6 +107,10 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "link"     {"bearer"} -> the user (links a device account to the app's
  *                            own sign-in; the session becomes that user's)
  *   "signOut"  {}  -> null (signs out and closes the app)
+ *                     "session", "refresh", "link", "signOut" and watching
+ *                     "session" fail with notSupported on a for_user
+ *                     handle: the session is the backend client's it came
+ *                     from, shared by every user.
  *   "disconnect" {} -> null (leaves the server; local reads and writes go
  *                     on; TS's disconnect)
  *   "reconnect"  {} -> null (resumes sync after disconnect)
