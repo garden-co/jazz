@@ -222,6 +222,69 @@ describe("the permissions printer", () => {
     expect({ format: 1, ...readableSchema(printed.schema) }).toEqual(original);
   });
 
+  // Deploy recognises the members rule with its conditions in any order
+  // (protocol R13), so the printer does too: each order prints isMember,
+  // which compiles back to the order isMember emits.
+  const MEMBER_CONDITIONS = [
+    "scopeId = table_id('rooms')",
+    "identifier = this.roomId",
+    "accountId = session.user",
+  ];
+  const orders = (items: string[]): string[][] =>
+    items.length <= 1
+      ? [items]
+      : items.flatMap((item, i) =>
+          orders(items.filter((_, j) => j !== i)).map((rest) => [item, ...rest]),
+        );
+  it.each(orders(MEMBER_CONDITIONS).map((order) => [order.join(", ")]))(
+    "prints isMember for the members rule as exists __e2ee_members(%s)",
+    (conditions) => {
+      const room = { rel: "rooms", column: "roomId" };
+      const original = app({
+        canvases: { columns: { roomId: "uuid" }, relations: { room } },
+        rooms: {
+          columns: { name: "bytes" },
+          encryption: { scope: "rooms", space: "id", columns: { name: "string" } },
+        },
+      });
+      const read = (body: string) => `exists __e2ee_members(${body})`;
+      const out = printSchemaTs(original, {
+        format: 1,
+        tables: { canvases: { read: read(conditions) }, rooms: {} },
+      });
+      expect(out.unsupported).toEqual([]);
+      expect(out.files["schema.ts"]).toContain('isMember("rooms", canvas.roomId)');
+      const printed: { permissions: unknown } = new Function(
+        "s",
+        out.files["schema.ts"]!.replace(/^import .*$/m, "").replaceAll("export const", "const") +
+          "\nreturn { schema, permissions };",
+      )(s);
+      expect(readablePermissions(printed.permissions)?.tables).toEqual({
+        canvases: { read: read(MEMBER_CONDITIONS.join(", ")) },
+        rooms: {},
+      });
+    },
+  );
+
+  it.each([
+    [
+      "a repeated column",
+      "scopeId = table_id('rooms'), identifier = this.roomId, scopeId = table_id('rooms')",
+    ],
+    ["another column", "scopeId = table_id('rooms'), identifier = this.roomId, id = session.user"],
+  ])("doesn't print isMember for three conditions with %s", (_, conditions) => {
+    const out = print(todos, {
+      todos: { read: `exists __e2ee_members(${conditions})` },
+    });
+    expect(out.unsupported).toEqual([
+      {
+        path: "tables.todos.read",
+        text: `exists __e2ee_members(${conditions})`,
+        reason: "Printing table_id outside isMember is not supported yet",
+      },
+    ]);
+  });
+
   it("reports table_id outside the members rule by JSON path", () => {
     const comparison = "ownerId = table_id('users')";
     const nearMiss =
