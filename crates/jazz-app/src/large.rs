@@ -58,7 +58,7 @@ impl Jazz {
     ///     Splice::text(5, 0, " wörld"),
     /// ]).await?;
     /// ```
-    pub async fn splice<T: Table, V: LargeColumn>(
+    pub async fn splice<T: Updatable, V: LargeColumn>(
         &self,
         id: ObjectId,
         column: Column<T, V>,
@@ -411,7 +411,7 @@ impl crate::transaction::Transaction {
 
     /// [`Jazz::splice`] staged in the transaction, in the same units (UTF-8
     /// bytes on a text column).
-    pub fn splice<T: Table, V: LargeColumn>(
+    pub fn splice<T: Updatable, V: LargeColumn>(
         &self,
         id: ObjectId,
         column: Column<T, V>,
