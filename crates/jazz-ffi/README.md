@@ -148,6 +148,9 @@ Linking reopens the account on the bearer: `clientEpoch` moves on.
   `retry()` (as `recovery` says); C `jazz_session_call(s, method, args)`.
 - `watch(listener)` / `jazz_session_watch`: each snapshot, the current one
   first, and a last `{"kind": "closed"}` when the session closes.
+- On a handle it gave, `sign_out` and `link` fail with kind `"notSupported"`
+  and leave the handle open: use the session's `sign_out` and
+  `link_device_account`.
 - `shutdown()` / `jazz_session_close`: closes the session; its handles fail
   `Closed`, its watches end, and no token callback runs after.
 
@@ -244,7 +247,7 @@ columns (`merge: "text"`) take plain string writes.
 - **Tiers:** reads and subscriptions take `"local"`, `"localFirst"`
   (default) or `"remote"`; writes and commits take `"local"` or `"global"`,
   the durability they wait for (`"edge"` is refused). UniFFI: `all_at`,
-  `one_at`, `insert_at`, `update_at`, `delete_at`, `subscribe_at`. C ABI:
+  `one_at`, `insert_at`, `update_at`, `delete_at`, `upsert_at`, `subscribe_at`. C ABI:
   `"tier"` in the args, or `{"query", "tier"}` for `jazz_subscribe`.
 - **waitForSync:** UniFFI `wait_for_sync(tier)`, C ABI `waitForSync {tier}`:
   returns once every write committed so far reaches `tier` (`local` returns
@@ -279,7 +282,9 @@ columns (`merge: "text"`) take plain string writes.
   `upsert {table, id, row}` write the row with this id: for a new id an
   insert (`row` then needs every required column, else `missing required
   field`), for an existing row the columns `row` names (a partial row
-  updates).
+  updates). At a tier (UniFFI `upsert_at(table, id, row, tier)`, C ABI
+  `"tier"`) they return once the write reached it, with the row as written
+  here: not as someone else may have changed it by then.
   `restore(table, id, patch?)` / `restore {table, id, patch?}` brings back a
   deleted row as it was, or with `patch` (a whole row) as its content; a
   patch naming another row's `id` is refused. Both

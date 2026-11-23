@@ -426,6 +426,9 @@ pub struct Session {
     commands: mpsc::UnboundedSender<Command>,
     /// A device account's, which can be linked.
     linking: Option<std::sync::Arc<Linking>>,
+    /// Set when a [`crate::JazzSession`] owns the client: its user is that
+    /// session's to change.
+    owned: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for Session {
@@ -473,8 +476,36 @@ impl Session {
     ///
     /// Fails with [`Error::SignedOut`] when the bearer names no one, and
     /// with [`Error::Refused`] when the backend refuses the link for good
-    /// (its user already has another account).
+    /// (its user already has another account). Refused with
+    /// [`Error::Unsupported`] on a [`crate::JazzSession`]'s client: use its
+    /// [`crate::JazzSession::link_device_account`].
     pub async fn link(&self, bearer: &str) -> Result<User> {
+        self.refuse_if_owned(
+            "link",
+            "linkDeviceAccount (JazzSession::link_device_account)",
+        )?;
+        self.link_account(bearer).await
+    }
+
+    /// The client's [`crate::JazzSession`] changes its user from now on.
+    pub(crate) fn mark_owned(&self) {
+        self.owned.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// A handle never ends or changes what it came from.
+    fn refuse_if_owned(&self, what: &str, instead: &str) -> Result<()> {
+        if self.owned.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(Error::Unsupported(format!(
+                "{what} is not supported on a session's handle: its user is the session's \
+                 to change; use the session's {instead}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// [`Self::link`], for the [`crate::JazzSession`] that owns the client
+    /// too.
+    pub(crate) async fn link_account(&self, bearer: &str) -> Result<User> {
         let linking = self.linking.as_ref().ok_or_else(|| {
             Error::Config("only a device account's session links (Auth::Device)".into())
         })?;
@@ -582,6 +613,7 @@ pub(crate) fn start(
         state: receiver,
         commands,
         linking,
+        owned: Default::default(),
     }
 }
 
@@ -931,6 +963,10 @@ impl crate::Jazz {
     /// (in [`crate::Storage::Dir`]) for when they sign in again; a device
     /// account's key is the app's to keep or forget.
     ///
+    /// Refused with [`Error::Unsupported`] on a handle from a
+    /// [`crate::JazzSession`], which stays open: use
+    /// [`crate::JazzSession::sign_out`].
+    ///
     /// Refused with [`Error::Unsupported`] on a handle acting for a user
     /// ([`crate::Jazz::for_user`]): the session is every user's.
     pub async fn sign_out(&self) -> Result<()> {
@@ -938,6 +974,7 @@ impl crate::Jazz {
         let session = self.session().ok_or_else(|| {
             Error::Config("only an end user's client signs out (Config::user)".into())
         })?;
+        session.refuse_if_owned("sign_out", "signOut (JazzSession::sign_out)")?;
         self.begin_stopping();
         session.sign_out().await;
         self.shutdown().await

@@ -179,6 +179,32 @@ class StagePlanTest {
     }
 
     @Test
+    fun upsert_at_global_waits_for_the_server_and_throws_its_refusal(): Unit = runBlocking {
+        val global = tools.jazz.WriteTier.Global
+        val taskId = java.util.UUID.randomUUID().toString()
+        val show = open("user-upsert").use { jazz ->
+            val show = showNamed(jazz, "Upserted")
+            val row = jazzapp.NewTask(showId = show.id, title = "Rig", status = TaskStatus.Todo, rank = 1.0)
+            assertEquals("Rig", jazz.upsert(Tasks, taskId, row, global).title)
+            // No waitForSync: the server has it when upsert returns.
+            assertEquals("Rig", jazz.one(Tasks.where(Tasks.id eq taskId), tools.jazz.ReadTier.Remote)?.title)
+            assertEquals("Rigging", jazz.upsert(Tasks, taskId, row.copy(title = "Rigging"), global).title)
+            assertEquals("Rigging", jazz.one(Tasks.where(Tasks.id eq taskId), tools.jazz.ReadTier.Remote)?.title)
+            show
+        }
+        // A second client, so nothing above is only local.
+        open("user-upsert").use { jazz ->
+            assertEquals(listOf("Rigging"), jazz.all(Tasks.where(Tasks.showId eq show.id), tools.jazz.ReadTier.Remote).map { it.title })
+        }
+        open("user-not-on-the-show").use { jazz ->
+            val row = jazzapp.NewTask(showId = show.id, title = "Sneaky", status = TaskStatus.Todo, rank = 2.0)
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Permission> {
+                jazz.upsert(Tasks, java.util.UUID.randomUUID().toString(), row, global)
+            }
+        }
+    }
+
+    @Test
     fun text_edits_and_permission_advice(): Unit = runBlocking {
         open("user-6").use { jazz ->
             val me = me(jazz)

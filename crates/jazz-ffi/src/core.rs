@@ -559,7 +559,8 @@ impl Core {
 
     /// Writes the row with this id: inserts it if there is none (then
     /// `row_json` is a whole row, as for an insert), otherwise sets the
-    /// columns `row_json` names (a partial row updates). Returns the row.
+    /// columns `row_json` names (a partial row updates). Returns the row as
+    /// written here, once it reached the tier.
     pub fn upsert(
         &self,
         table_name: &str,
@@ -580,8 +581,12 @@ impl Core {
             let client = client_for(client, tx)?;
             let committed = client.upsert(&name, *id.uuid(), cells.into_iter().collect())?;
             mark_wrote(tx);
+            // Read before the wait, as insert answers with what it wrote: by
+            // the time the server accepts it, someone may have deleted or
+            // changed the row. A refusal still wins over a failed read.
+            let written = read_back(&client, &table, &name, id).await;
             settle(&client, committed, tier).await?;
-            read_back(&client, &table, &name, id).await
+            written
         }))?;
         Ok(row.to_string())
     }
@@ -1162,7 +1167,8 @@ impl Core {
         Ok(serde_json::to_string(&user).unwrap_or_default())
     }
 
-    /// Signs the end user out and closes the app.
+    /// Signs the end user out and closes the app; a session's handle
+    /// refuses and stays open.
     pub fn sign_out(&self) -> Result<()> {
         let jazz = self.open_jazz()?;
         jazz.refuse_for_user("signOut")?;
