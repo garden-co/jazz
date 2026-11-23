@@ -148,7 +148,11 @@ pub(crate) enum SignIn {
     /// before a response, or timed out. Any HTTP answer, a `5xx` too, is
     /// not this: the server was reached.
     Unreachable(String),
-    /// The server answered with a `5xx`: reached, but failing for now.
+    /// The server refused the bearer (`403`).
+    Refused(Error),
+    /// Any other answer that signs no one in: a `5xx`, `429`, `404`, a
+    /// redirect, or a body that isn't a sign-in (a captive portal's page).
+    /// The server (or something) was reached; it may answer otherwise later.
     Failing(Error),
 }
 
@@ -165,7 +169,7 @@ pub(crate) async fn sign_in(
         SignIn::SignedIn(signed_in) => Ok(Some(signed_in)),
         SignIn::NoOne => Ok(None),
         SignIn::Unreachable(error) => Err(Error::Server(format!("signing in: {error}"))),
-        SignIn::Failing(error) => Err(error),
+        SignIn::Refused(error) | SignIn::Failing(error) => Err(error),
     }
 }
 
@@ -188,23 +192,27 @@ pub(crate) async fn try_sign_in(endpoint: &str, app_id: AppId, bearer: &str) -> 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Ok(SignIn::NoOne);
     }
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        return Ok(SignIn::Refused(refusal("signing in", response).await));
+    }
     if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Err(Error::Server(
+        return Ok(SignIn::Failing(Error::Server(
             "the server has no backend sign-in: Config::server must be the app's Jazz \
              endpoint (createJazz's handler, e.g. https://app.example/jazz), not the core"
                 .into(),
-        ));
-    }
-    if response.status().is_server_error() {
-        return Ok(SignIn::Failing(refusal("signing in", response).await));
+        )));
     }
     if !response.status().is_success() {
-        return Err(refusal("signing in", response).await);
+        return Ok(SignIn::Failing(refusal("signing in", response).await));
     }
-    let signed_in: SignedIn = response
-        .json()
-        .await
-        .map_err(|error| Error::Server(format!("signing in: {error}")))?;
+    let signed_in: SignedIn = match response.json().await {
+        Ok(signed_in) => signed_in,
+        Err(error) => {
+            return Ok(SignIn::Failing(Error::Server(format!(
+                "signing in: {error}"
+            ))));
+        }
+    };
     if signed_in.account.is_system() {
         return Err(Error::Server(
             "signing in returned the system account".into(),

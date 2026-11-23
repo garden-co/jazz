@@ -415,8 +415,8 @@ enum Verdict {
 const VERIFY_RETRY_CAP: Duration = Duration::from_secs(30);
 
 /// Signs the bearer of a session opened offline in, until the server
-/// answers: while it can't be reached (or fails, `5xx`), again with a
-/// backoff, with a fresh token from the provider each time.
+/// signs it in or says no (`401`, `403`): otherwise again with a backoff,
+/// with a fresh token from the provider each time.
 async fn verify(unverified: Unverified, provider: Bearer, mut token: String) -> Verdict {
     let mut attempt = 0;
     loop {
@@ -428,7 +428,12 @@ async fn verify(unverified: Unverified, provider: Bearer, mut token: String) -> 
                     root: unverified.root,
                 };
             }
-            Ok(crate::backend::SignIn::NoOne) | Err(_) => return Verdict::Refused,
+            // Only the server saying no to this bearer signs out: no one
+            // (`401`) or refused (`403`). Anything else (no answer, a `5xx`,
+            // a `429`, a captive portal's page) is tried again, held.
+            Ok(crate::backend::SignIn::NoOne | crate::backend::SignIn::Refused(_)) | Err(_) => {
+                return Verdict::Refused;
+            }
             Ok(crate::backend::SignIn::Unreachable(_) | crate::backend::SignIn::Failing(_)) => {}
         }
         tokio::time::sleep(auth_retry_delay(attempt).min(VERIFY_RETRY_CAP)).await;

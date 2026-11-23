@@ -1152,7 +1152,9 @@ async fn connect_user(
             let signed_in = match backend::try_sign_in(endpoint, app, &token).await? {
                 backend::SignIn::SignedIn(signed_in) => signed_in,
                 backend::SignIn::NoOne => return Err(Error::SignedOut),
-                backend::SignIn::Failing(error) => return Err(error),
+                backend::SignIn::Refused(error) | backend::SignIn::Failing(error) => {
+                    return Err(error);
+                }
                 backend::SignIn::Unreachable(error) => {
                     return open_offline(
                         context, connector, provider, token, endpoint, place, error,

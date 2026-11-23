@@ -148,6 +148,13 @@ struct Shared {
 #[derive(Default)]
 struct State {
     closed: bool,
+    /// Opened held ([`JazzClient::connect_with_native_transport_bearer_held`])
+    /// and not released yet: only [`JazzClient::release_held`] lets it reach
+    /// the server; `disconnect` and `reconnect` don't.
+    held: bool,
+    /// The host disconnected while held: released, the client stays off
+    /// the server until it reconnects.
+    disconnected_while_held: bool,
     upstream: Option<Upstream>,
     /// Open transactions and whether they staged a write.
     transactions: HashMap<OpenTransactionId, bool>,
@@ -779,7 +786,7 @@ struct LinkKeeper {
 }
 
 impl LinkKeeper {
-    /// `held`: offline until the host resumes it ([`JazzClient::reconnect`]).
+    /// `held`: offline until released ([`JazzClient::release_held`]).
     fn new(held: bool) -> Self {
         let seed = Uuid::new_v4().as_u64_pair().0;
         let mut keeper = Self {
@@ -912,7 +919,7 @@ impl JazzClient {
     }
 
     /// [`Self::connect_with_native_transport_bearer`], but nothing reaches
-    /// the server until [`Self::reconnect`]: for a session the server has not
+    /// the server until [`Self::release_held`]: for a session the server has not
     /// verified yet (one opened offline from what this device remembers), so
     /// no request is made, and nothing uploads, under it. Local reads and
     /// writes work meanwhile; writes queue for upload.
@@ -1040,7 +1047,10 @@ impl JazzClient {
                 || (context.backend_secret.is_some()
                     && context.backend_session.is_none()
                     && context.jwt_token.is_none()),
-            state: RefCell::new(State::default()),
+            state: RefCell::new(State {
+                held,
+                ..State::default()
+            }),
         });
 
         if connector.is_none() {
@@ -2520,6 +2530,14 @@ impl JazzClient {
         if self.shared.serverless {
             return false;
         }
+        {
+            let mut state = self.shared.state();
+            if state.held {
+                // Never attached; stays off the server once released too.
+                state.disconnected_while_held = true;
+                return false;
+            }
+        }
         self.shared.upstream_paused.send_replace(true);
         let detached = detach(&self.shared);
         crate::db::block_on(self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed));
@@ -2528,13 +2546,33 @@ impl JazzClient {
 
     /// Lets a client opened held
     /// ([`JazzClient::connect_with_native_transport_bearer_held`]) reach its
-    /// server, without waiting for the link: [`JazzClient::reconnect`] for a
-    /// host that can't wait.
+    /// server, without waiting for the link: once whoever opened it has
+    /// verified its session. The only way out of the hold:
+    /// [`JazzClient::reconnect`] does not release it. A host that
+    /// disconnected meanwhile stays disconnected until it reconnects.
     #[doc(hidden)]
     pub fn release_held(&self) {
-        if !self.shared.serverless {
+        if self.shared.serverless {
+            return;
+        }
+        let resume = {
+            let mut state = self.shared.state();
+            if !state.held {
+                return;
+            }
+            state.held = false;
+            !std::mem::take(&mut state.disconnected_while_held)
+        };
+        if resume {
             self.shared.upstream_paused.send_replace(false);
         }
+    }
+
+    /// Whether the client is held off its server, waiting for
+    /// [`JazzClient::release_held`].
+    #[doc(hidden)]
+    pub fn is_held(&self) -> bool {
+        self.shared.state.borrow().held
     }
 
     /// Resume sync after [`JazzClient::disconnect`], or restart a link
@@ -2545,6 +2583,15 @@ impl JazzClient {
     pub async fn reconnect(&self) -> Result<bool> {
         if self.shared.serverless {
             return Ok(false);
+        }
+        // Held: nothing reaches the server before the session is verified.
+        // The host's wish to be connected is kept for the release.
+        {
+            let mut state = self.shared.state();
+            if state.held {
+                state.disconnected_while_held = false;
+                return Ok(false);
+            }
         }
         // An attempt the keeper started before this call (a retry during an
         // outage) may still fail after it: only attempts started from here

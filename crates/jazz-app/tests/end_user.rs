@@ -1655,7 +1655,7 @@ async fn a_remembered_account_whose_store_is_gone_does_not_open_offline() {
 /// nothing. A server refusing the bearer does the same.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offline_then_another_account_or_a_refusal_signs_out_with_nothing_uploaded() {
-    for refusal in [false, true] {
+    for refusal in [None, Some(401), Some(403)] {
         let app = App::start().await;
         let dir = tempfile::tempdir().unwrap();
         alice_signed_in_once(&app, dir.path()).await;
@@ -1671,10 +1671,16 @@ async fn offline_then_another_account_or_a_refusal_signs_out_with_nothing_upload
         let session = alice.session().unwrap().clone();
         {
             let mut links = app.relay.links.lock().unwrap();
-            if refusal {
-                links.no_one.insert("alice".into());
-            } else {
-                links.sign_in_as.insert("alice".into(), "mallory".into());
+            match refusal {
+                Some(401) => {
+                    links.no_one.insert("alice".into());
+                }
+                Some(status) => {
+                    links.sign_in_status.insert("alice".into(), status);
+                }
+                None => {
+                    links.sign_in_as.insert("alice".into(), "mallory".into());
+                }
             }
         }
         app.relay.set_unreachable(false);
@@ -1687,14 +1693,82 @@ async fn offline_then_another_account_or_a_refusal_signs_out_with_nothing_upload
         assert_eq!(
             admitted_as(&app, "user:alice"),
             admitted,
-            "refusal: {refusal}"
+            "refusal: {refusal:?}"
         );
         assert_eq!(
             server_titles(&app, 1).await,
             ["synced"],
-            "refusal: {refusal}"
+            "refusal: {refusal:?}"
         );
         let _ = alice.shutdown().await;
         app.stop().await;
     }
+}
+
+fn sign_ins_of(app: &App, user: &str) -> usize {
+    let links = app.relay.links.lock().unwrap();
+    links.sign_ins.iter().filter(|who| *who == user).count()
+}
+
+/// Until the server has signed the bearer in again, nothing reaches it:
+/// not `reconnect` (nor `disconnect` then `reconnect`), and not while the
+/// server answers anything but a sign-in or a no (a `5xx`, a `429`, a
+/// `400`, a `404`), each tried again. Once it signs her in, the host's
+/// `reconnect` had no lasting effect, and her writes upload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nothing_reaches_the_server_before_it_signs_the_bearer_in_again() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    alice_signed_in_once(&app, dir.path()).await;
+    let admitted = admitted_as(&app, "user:alice");
+    let alice = Jazz::open(
+        client_files(),
+        app.user(bearer_of(relay::jwt("alice", 1)))
+            .storage(Storage::Dir(dir.path().into())),
+    )
+    .await
+    .expect("opens offline");
+    alice.insert(NewTodo::new("offline", false)).await.unwrap();
+    let session = alice.session().unwrap().clone();
+
+    for status in [503, 429, 400, 404] {
+        app.relay
+            .links
+            .lock()
+            .unwrap()
+            .sign_in_status
+            .insert("alice".into(), status);
+        app.relay.set_unreachable(false);
+        let before = sign_ins_of(&app, "alice");
+        alice.reconnect().await.expect("reconnect while held");
+        alice.disconnect().await.unwrap();
+        alice.reconnect().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while sign_ins_of(&app, "alice") == before {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the session tries again");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(admitted_as(&app, "user:alice"), admitted, "{status}");
+        assert!(
+            matches!(session.state(), SessionState::SignedIn { .. }),
+            "{status}: {:?}",
+            session.state()
+        );
+    }
+    assert_eq!(server_titles(&app, 1).await, ["synced"]);
+
+    app.relay.links.lock().unwrap().sign_in_status.clear();
+    tokio::time::timeout(Duration::from_secs(40), alice.wait_for_sync())
+        .await
+        .expect("verified within the backoff")
+        .expect("her queued writes upload");
+    assert_eq!(
+        server_titles(&app, 3).await,
+        ["offline", "synced", "unsent"]
+    );
+    alice.shutdown().await.unwrap();
+    app.stop().await;
 }

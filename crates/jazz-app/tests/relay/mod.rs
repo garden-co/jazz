@@ -76,6 +76,9 @@ pub struct Links {
     pub sign_in_as: HashMap<String, String>,
     /// `backend-sign-in` requests answered so far, by user.
     pub sign_ins: Vec<String>,
+    /// Users `backend-sign-in` answers with this status (and no sign-in),
+    /// every time.
+    pub sign_in_status: HashMap<String, u16>,
 }
 
 pub struct Relay {
@@ -427,11 +430,14 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
             },
         }
     } else if path.ends_with("/accounts/backend-sign-in") {
-        let (failing, no_one, user) = {
+        let (failing, no_one, status, user) = {
             let mut links = backend.links.lock().unwrap();
             if let Some(user) = &user {
                 links.sign_ins.push(user.clone());
             }
+            let status = user
+                .as_ref()
+                .and_then(|user| links.sign_in_status.get(user).copied());
             let failing = user
                 .as_ref()
                 .is_some_and(|user| links.fail_sign_in.remove(user));
@@ -439,9 +445,18 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
                 .as_ref()
                 .is_some_and(|user| links.no_one.contains(user));
             let user = user.map(|user| links.sign_in_as.get(&user).cloned().unwrap_or(user));
-            (failing, no_one, user)
+            (failing, no_one, status, user)
         };
+        let status_line = status.map(|status| match status {
+            400 => "400 Bad Request",
+            403 => "403 Forbidden",
+            404 => "404 Not Found",
+            429 => "429 Too Many Requests",
+            503 => "503 Service Unavailable",
+            _ => "500 Internal Server Error",
+        });
         match user {
+            Some(_) if status_line.is_some() => (status_line.unwrap(), "nope".to_owned()),
             None => ("401 Unauthorized", "signed_out".to_owned()),
             Some(_) if no_one => ("401 Unauthorized", "signed_out".to_owned()),
             Some(_) if failing => (
