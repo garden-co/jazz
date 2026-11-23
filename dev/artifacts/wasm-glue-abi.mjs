@@ -67,7 +67,10 @@ function generatedImportObject(glueSource) {
   return closing === -1 ? null : glueSource.slice(opening + 1, closing);
 }
 
-function hasCallableImport(importObject, name) {
+function callableImportNames(importObject) {
+  const names = new Set();
+  const callableProperty =
+    /([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?(?:function\b|(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>)/y;
   // wasm-bindgen emits object properties, not assignments. Scan only
   // top-level properties of its `import0` literal: a name in a comment, a
   // nested dead object, or a longer property name must not satisfy the ABI.
@@ -87,12 +90,12 @@ function hasCallableImport(importObject, name) {
     }
     if (character === "/" && next === "/") {
       index = importObject.indexOf("\n", index + 2);
-      if (index === -1) return false;
+      if (index === -1) break;
       continue;
     }
     if (character === "/" && next === "*") {
       index = importObject.indexOf("*/", index + 2);
-      if (index === -1) return false;
+      if (index === -1) break;
       index++;
       continue;
     }
@@ -104,30 +107,21 @@ function hasCallableImport(importObject, name) {
       depth--;
       continue;
     }
-    if (depth !== 0 || !importObject.startsWith(name, index)) continue;
-    const before = importObject[index - 1];
-    const after = importObject[index + name.length];
-    if ((before && /[A-Za-z0-9_$]/.test(before)) || (after && /[A-Za-z0-9_$]/.test(after)))
-      continue;
-    let cursor = index + name.length;
-    while (/\s/.test(importObject[cursor])) cursor++;
-    if (importObject[cursor] !== ":") continue;
-    cursor++;
-    while (/\s/.test(importObject[cursor])) cursor++;
-    if (
-      /^(?:async\s+)?(?:function\b|(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>)/.test(
-        importObject.slice(cursor),
-      )
-    )
-      return true;
+    if (depth === 0 && (index === 0 || !/[\w$]/.test(importObject[index - 1]))) {
+      callableProperty.lastIndex = index;
+      const match = callableProperty.exec(importObject);
+      if (match) names.add(match[1]);
+    }
   }
-  return false;
+  return names;
 }
 
-export function verifyWasmGlueAbi(wasmBytes, glueSource) {
+export function verifyWasmGlueAbi(wasm, glueSource) {
   let imports;
   try {
-    imports = WebAssembly.Module.imports(new WebAssembly.Module(wasmBytes));
+    imports = WebAssembly.Module.imports(
+      wasm instanceof WebAssembly.Module ? wasm : new WebAssembly.Module(wasm),
+    );
   } catch (error) {
     return `invalid WASM binary: ${error.message}`;
   }
@@ -135,19 +129,20 @@ export function verifyWasmGlueAbi(wasmBytes, glueSource) {
   const importObject = generatedImportObject(glueSource);
   if (!importObject) return "WASM glue does not expose wasm-bindgen's generated import object";
 
+  const callable = callableImportNames(importObject);
   const missing = imports
     .filter(
       (entry) =>
         entry.kind === "function" &&
         (entry.module === "wbg" || entry.module === "./jazz_wasm_bg.js") &&
-        !hasCallableImport(importObject, entry.name),
+        !callable.has(entry.name),
     )
     .map((entry) => `${entry.module}.${entry.name}`);
   return missing.length ? `WASM glue is missing required imports: ${missing.join(", ")}` : null;
 }
 
-export function assertWasmGlueAbi(wasmBytes, glueSource) {
-  const problem = verifyWasmGlueAbi(wasmBytes, glueSource);
+export function assertWasmGlueAbi(wasm, glueSource) {
+  const problem = verifyWasmGlueAbi(wasm, glueSource);
   if (problem) throw new Error(problem);
 }
 
@@ -157,13 +152,13 @@ export function assertWasmGlueAbi(wasmBytes, glueSource) {
  * binary. This is intentionally a build-time check: the source was just
  * emitted by esbuild and no application code has run yet.
  */
-export async function assertWasmGlueInstantiates(wasmBytes, glueSource) {
-  assertWasmGlueAbi(wasmBytes, glueSource);
+export async function assertWasmGlueInstantiates(wasm, glueSource) {
+  assertWasmGlueAbi(wasm, glueSource);
   try {
     const source = `${glueSource}\nexport { __wbg_get_imports as __jazz_wasm_imports };`;
     const url = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
     const worker = await import(url);
-    await WebAssembly.instantiate(wasmBytes, worker.__jazz_wasm_imports());
+    await WebAssembly.instantiate(wasm, worker.__jazz_wasm_imports());
   } catch (error) {
     throw new Error(`WASM glue could not instantiate its binary: ${error.message}`);
   }
