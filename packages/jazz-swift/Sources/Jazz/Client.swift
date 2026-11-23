@@ -71,6 +71,10 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         case .NoUser(_, let message): return JazzError.noUser(message)
         // A trusted backend client's: a Swift app never opens one.
         case .BundleMismatch(_, _, let message): return JazzError.refused(message)
+        // Only a call made through a `CallControl` view is interrupted,
+        // and this package makes none yet: when it does, `queued` gets
+        // its own case (`stillQueued`).
+        case .Interrupted: return JazzError.cancelled
         }
     }
 }

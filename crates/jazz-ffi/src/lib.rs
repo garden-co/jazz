@@ -33,7 +33,79 @@ type Result<T> = std::result::Result<T, JazzError>;
 /// from any thread; wrap them in the language's async.
 #[derive(uniffi::Object)]
 pub struct JazzHandle {
-    core: core::Core,
+    core: Arc<core::Core>,
+    /// A view's control (`controlled`): its calls obey it.
+    control: Option<jazz_app_support::CallControl>,
+}
+
+impl JazzHandle {
+    fn new(core: core::Core) -> Arc<Self> {
+        Arc::new(Self {
+            core: Arc::new(core),
+            control: None,
+        })
+    }
+
+    /// The handle's core, with its calls (until the end of the statement)
+    /// obeying this view's control.
+    fn core(&self) -> ControlledCore<'_> {
+        ControlledCore {
+            core: &self.core,
+            _control: core::Controlled::new(self.control.clone()),
+        }
+    }
+}
+
+/// [`JazzHandle::core`]: the core, with the view's control set.
+struct ControlledCore<'a> {
+    core: &'a core::Core,
+    _control: core::Controlled,
+}
+
+impl std::ops::Deref for ControlledCore<'_> {
+    type Target = core::Core;
+
+    fn deref(&self) -> &core::Core {
+        self.core
+    }
+}
+
+/// [`Session::core`]: the session's core, with the view's control set.
+struct ControlledSession<'a> {
+    core: &'a session::SessionCore,
+    _control: core::Controlled,
+}
+
+impl std::ops::Deref for ControlledSession<'_> {
+    type Target = session::SessionCore;
+
+    fn deref(&self) -> &session::SessionCore {
+        self.core
+    }
+}
+
+/// Ends the calls made through [`JazzHandle::controlled`] views: cancelled,
+/// or once `timeout_ms` passed since it was made. A binding makes one per
+/// suspending call and cancels it when its coroutine or task is cancelled.
+/// A call it ends fails `Interrupted`, with `queued` when the call
+/// committed a write locally (which may still apply); a call made once it
+/// ended does nothing.
+#[derive(uniffi::Object)]
+pub struct CallControl(jazz_app_support::CallControl);
+
+#[uniffi::export]
+impl CallControl {
+    #[uniffi::constructor]
+    pub fn new(timeout_ms: Option<u64>) -> Arc<Self> {
+        Arc::new(Self(jazz_app_support::CallControl::new(
+            timeout_ms.map(std::time::Duration::from_millis),
+        )))
+    }
+
+    /// Ends its calls' waits now.
+    pub fn cancel(&self) {
+        self.0.cancel();
+    }
 }
 
 #[uniffi::export]
@@ -50,7 +122,7 @@ impl JazzHandle {
             .unwrap_or(1);
         let core = core::Core::open(&config_json)
             .map_err(|error| JazzError::from(error).for_contract(contract))?;
-        Ok(Arc::new(Self { core }))
+        Ok(Self::new(core))
     }
 
     /// Opens an app as an end user who signs in with the app's bearer
@@ -71,24 +143,24 @@ impl JazzHandle {
         }));
         let core = core::Core::open_with_tokens(&config_json, Some(Arc::new(host)))
             .map_err(|error| JazzError::from(error).for_contract(contract))?;
-        Ok(Arc::new(Self { core }))
+        Ok(Self::new(core))
     }
 
     /// The end user's session as JSON: `{"status": "signedIn", "user":
     /// {...}}`, `{"status": "expired", ...}` or `{"status": "signedOut"}`;
     /// `None` for a local app.
     pub fn session_state(&self) -> Result<Option<String>> {
-        self.core.surface(self.core.session_state())
+        self.core().surface(self.core().session_state())
     }
 
     /// The connection's status as JSON: `{"link": ...}`.
     pub fn sync_status(&self) -> Result<String> {
-        self.core.surface(self.core.sync_status())
+        self.core().surface(self.core().sync_status())
     }
 
     /// Asks the token provider for a fresh token (reason `refresh`).
     pub fn refresh(&self) -> Result<()> {
-        self.core.surface(self.core.refresh())
+        self.core().surface(self.core().refresh())
     }
 
     /// Links this device account to the user's account with the app's own
@@ -96,13 +168,13 @@ impl JazzHandle {
     /// as JSON. Not supported on a session's handle: use
     /// `Session.linkDeviceAccount`.
     pub fn link(&self, bearer: String) -> Result<String> {
-        self.core.surface(self.core.link(&bearer))
+        self.core().surface(self.core().link(&bearer))
     }
 
     /// Signs the end user out and closes the app. Not supported on a
     /// session's handle, which stays open: use `Session.signOut`.
     pub fn sign_out(&self) -> Result<()> {
-        self.core.surface(self.core.sign_out())
+        self.core().surface(self.core().sign_out())
     }
 
     /// Calls `listener` with each session state, the current one first.
@@ -118,65 +190,65 @@ impl JazzHandle {
     /// Not part of the documented surface (the backend publish mode); `None`
     /// for every client.
     pub fn bundle(&self) -> Result<Option<String>> {
-        self.core.surface(self.core.bundle())
+        self.core().surface(self.core().bundle())
     }
 
     /// The account id of the user this handle acts as (an end user, a
     /// scoped backend client, a `for_user` handle); `None` for a local app
     /// or a trusted backend client (the system).
     pub fn account(&self) -> Result<Option<String>> {
-        self.core.surface(self.core.account())
+        self.core().surface(self.core().account())
     }
 
     /// Every row the query matches, as a JSON array.
     pub fn all(&self, query_json: String) -> Result<String> {
-        self.core
-            .surface(self.core.all(&query_json, &Default::default()))
+        self.core()
+            .surface(self.core().all(&query_json, &Default::default()))
     }
 
     /// [`Self::all`] read at `tier`: `"local"`, `"localFirst"` (the
     /// default) or `"remote"`.
     pub fn all_at(&self, query_json: String, tier: String) -> Result<String> {
-        self.core.surface(
-            self.core
-                .all(&query_json, &self.core.surface(read_opts(&tier))?),
+        self.core().surface(
+            self.core()
+                .all(&query_json, &self.core().surface(read_opts(&tier))?),
         )
     }
 
     /// The first row the query matches.
     pub fn one(&self, query_json: String) -> Result<Option<String>> {
-        self.core
-            .surface(self.core.one(&query_json, &Default::default()))
+        self.core()
+            .surface(self.core().one(&query_json, &Default::default()))
     }
 
     /// [`Self::one`] read at `tier`.
     pub fn one_at(&self, query_json: String, tier: String) -> Result<Option<String>> {
-        self.core.surface(
-            self.core
-                .one(&query_json, &self.core.surface(read_opts(&tier))?),
+        self.core().surface(
+            self.core()
+                .one(&query_json, &self.core().surface(read_opts(&tier))?),
         )
     }
 
     /// Inserts a row; returns it as stored, with its `id`.
     pub fn insert(&self, table: String, row_json: String) -> Result<String> {
-        self.core
-            .surface(self.core.insert(&table, &row_json, &Default::default()))
+        self.core()
+            .surface(self.core().insert(&table, &row_json, &Default::default()))
     }
 
     /// [`Self::insert`], returning once the write reaches `tier`:
     /// `"local"` or `"global"`.
     pub fn insert_at(&self, table: String, row_json: String, tier: String) -> Result<String> {
-        self.core.surface(self.core.insert(
+        self.core().surface(self.core().insert(
             &table,
             &row_json,
-            &self.core.surface(write_opts(&tier))?,
+            &self.core().surface(write_opts(&tier))?,
         ))
     }
 
     /// Sets the columns `patch_json` names on the row with this id.
     pub fn update(&self, table: String, id: String, patch_json: String) -> Result<()> {
-        self.core.surface(
-            self.core
+        self.core().surface(
+            self.core()
                 .update(&table, &id, &patch_json, &Default::default()),
         )
     }
@@ -189,32 +261,33 @@ impl JazzHandle {
         patch_json: String,
         tier: String,
     ) -> Result<()> {
-        self.core.surface(self.core.update(
+        self.core().surface(self.core().update(
             &table,
             &id,
             &patch_json,
-            &self.core.surface(write_opts(&tier))?,
+            &self.core().surface(write_opts(&tier))?,
         ))
     }
 
     pub fn delete(&self, table: String, id: String) -> Result<()> {
-        self.core
-            .surface(self.core.delete(&table, &id, &Default::default()))
+        self.core()
+            .surface(self.core().delete(&table, &id, &Default::default()))
     }
 
     /// [`Self::delete`], returning once the write reaches `tier`.
     pub fn delete_at(&self, table: String, id: String, tier: String) -> Result<()> {
-        self.core.surface(
-            self.core
-                .delete(&table, &id, &self.core.surface(write_opts(&tier))?),
-        )
+        self.core().surface(self.core().delete(
+            &table,
+            &id,
+            &self.core().surface(write_opts(&tier))?,
+        ))
     }
 
     /// Returns once every write committed so far reaches `tier`
     /// (`"local"` or `"global"`).
     pub fn wait_for_sync(&self, tier: String) -> Result<()> {
-        self.core
-            .surface(core::write_tier(&tier).and_then(|tier| self.core.wait_for_sync(tier)))
+        self.core()
+            .surface(core::write_tier(&tier).and_then(|tier| self.core().wait_for_sync(tier)))
     }
 
     /// Sets the text-merge column `column` to `text`, an edit of
@@ -229,8 +302,8 @@ impl JazzHandle {
         text: String,
     ) -> Result<()> {
         let edits = text_edit(column, edited_from, text);
-        self.core.surface(
-            self.core
+        self.core().surface(
+            self.core()
                 .edit(&table, &id, None, &edits, &Default::default()),
         )
     }
@@ -245,7 +318,7 @@ impl JazzHandle {
         patch_json: Option<String>,
         edits_json: String,
     ) -> Result<()> {
-        self.core.surface(self.core.edit(
+        self.core().surface(self.core().edit(
             &table,
             &id,
             patch_json.as_deref(),
@@ -259,14 +332,14 @@ impl JazzHandle {
     /// `false`, or `None` when no server can say. `args_json`: `{"id"}` for
     /// read and delete, `{"row"}` for insert, `{"id", "row"?}` for update.
     pub fn can(&self, table: String, op: String, args_json: String) -> Result<Option<bool>> {
-        self.core.surface((|| {
+        self.core().surface((|| {
             let args = convert_args(&args_json)?;
             let row = args
                 .get("row")
                 .filter(|r| !r.is_null())
                 .map(|r| r.to_string());
             let id = args.get("id").and_then(serde_json::Value::as_str);
-            self.core.can(&table, &op, id, row.as_deref())
+            self.core().can(&table, &op, id, row.as_deref())
         })())
     }
 
@@ -274,8 +347,8 @@ impl JazzHandle {
     /// every required column), an existing one sets the columns `row_json`
     /// names. Returns the row.
     pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
-        self.core.surface(
-            self.core
+        self.core().surface(
+            self.core()
                 .upsert(&table, &id, &row_json, &Default::default()),
         )
     }
@@ -301,7 +374,7 @@ impl JazzHandle {
     /// Brings back a deleted row, as it was or with `patch_json` (a whole
     /// row) as its new content. Returns the row.
     pub fn restore(&self, table: String, id: String, patch_json: Option<String>) -> Result<String> {
-        self.core.surface(self.core.restore(
+        self.core().surface(self.core().restore(
             &table,
             &id,
             patch_json.as_deref(),
@@ -320,8 +393,8 @@ impl JazzHandle {
         id: Option<String>,
         row_json: Option<String>,
     ) -> Result<Arc<Upload>> {
-        let upload = self.core.surface(
-            self.core
+        let upload = self.core().surface(
+            self.core()
                 .upload_begin(&table, &column, &kind, id.as_deref(), row_json.as_deref())
                 .and_then(|id| core::parse_tx(&id)),
         )?;
@@ -350,19 +423,19 @@ impl JazzHandle {
     /// with `reconnect` (TS's `disconnect`). Without a server it does
     /// nothing.
     pub fn disconnect(&self) -> Result<()> {
-        self.core.surface(self.core.disconnect())
+        self.core().surface(self.core().disconnect())
     }
 
     /// Resumes sync after `disconnect` (TS's `reconnect`).
     pub fn reconnect(&self) -> Result<()> {
-        self.core.surface(self.core.reconnect())
+        self.core().surface(self.core().reconnect())
     }
 
     /// Closes the app and deletes its local store (TS's
     /// `deleteClientStorage`): the next open starts empty and syncs again.
     /// Writes the server hasn't accepted yet are lost.
     pub fn delete_client_storage(&self) -> Result<()> {
-        self.core.surface(self.core.delete_client_storage())
+        self.core().surface(self.core().delete_client_storage())
     }
 
     /// Calls `listener` with each write the server refused that no durable
@@ -393,7 +466,7 @@ impl JazzHandle {
         tier: String,
         listener: Arc<dyn SubscriptionListener>,
     ) -> Result<Arc<Subscription>> {
-        self.subscribe_with(query_json, self.core.surface(read_opts(&tier))?, listener)
+        self.subscribe_with(query_json, self.core().surface(read_opts(&tier))?, listener)
     }
 
     /// Closes the app; later calls fail with `Closed`, and so do the calls
@@ -406,7 +479,7 @@ impl JazzHandle {
     /// `shutdown`, not `close`, which would clash with Kotlin's
     /// `AutoCloseable.close`.
     pub fn shutdown(&self) -> Result<()> {
-        self.core.surface(self.core.close())
+        self.core().surface(self.core().close())
     }
 
     /// [`Self::shutdown`], first waiting up to `timeout_ms` for the writes
@@ -418,8 +491,8 @@ impl JazzHandle {
     /// finishes, and stream sessions get up to 2 s to end (no hard limit:
     /// see [`Self::shutdown`]).
     pub fn shutdown_within(&self, timeout_ms: u64) -> Result<()> {
-        self.core.surface(
-            self.core
+        self.core().surface(
+            self.core()
                 .close_within(Some(std::time::Duration::from_millis(timeout_ms))),
         )
     }
@@ -428,8 +501,8 @@ impl JazzHandle {
     /// main backend decided it: `"trusted"` or `"scoped"`; `None` for any
     /// other app.
     pub fn backend_client(&self) -> Result<Option<String>> {
-        self.core
-            .surface(self.core.backend_client())
+        self.core()
+            .surface(self.core().backend_client())
             .map(|kind| kind.map(str::to_owned))
     }
 
@@ -443,16 +516,26 @@ impl JazzHandle {
     /// calls fail with `Closed`.
     pub fn for_user(&self, user_id: String, claims_json: String) -> Result<Arc<Self>> {
         let core = self
-            .core
-            .surface(self.core.for_user(&user_id, &claims_json))?;
-        Ok(Arc::new(Self { core }))
+            .core()
+            .surface(self.core().for_user(&user_id, &claims_json))?;
+        Ok(Self::new(core))
+    }
+
+    /// A view on the same app whose calls obey `control`: transactions and
+    /// uploads begun on either work on both. Freeing it frees only the
+    /// view; closing it closes the app, as this handle's close does.
+    pub fn controlled(&self, control: Arc<CallControl>) -> Arc<Self> {
+        Arc::new(Self {
+            core: self.core.clone(),
+            control: Some(control.0.clone()),
+        })
     }
 }
 
 impl JazzHandle {
     fn begin_with(self: Arc<Self>, serializable: bool) -> Result<Arc<Transaction>> {
-        let tx = self.core.surface(
-            self.core
+        let tx = self.core().surface(
+            self.core()
                 .tx_begin(serializable)
                 .and_then(|tx| core::parse_tx(&tx)),
         )?;
@@ -464,7 +547,7 @@ impl JazzHandle {
     }
 
     fn watch(&self, what: &str, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
-        let inner = self.core.surface(self.core.watch(
+        let inner = self.core().surface(self.core().watch(
             what,
             Box::new(move |state| {
                 listener.on_change(state.unwrap_or_else(|| CLOSED_STATE.to_owned()))
@@ -479,8 +562,8 @@ impl JazzHandle {
         opts: core::Opts,
         listener: Arc<dyn SubscriptionListener>,
     ) -> Result<Arc<Subscription>> {
-        let contract = self.core.contract;
-        let inner = self.core.surface(self.core.subscribe(
+        let contract = self.core().contract;
+        let inner = self.core().surface(self.core().subscribe(
             &query_json,
             &opts,
             Box::new(move |event| match event {
@@ -559,34 +642,35 @@ impl Transaction {
 impl Transaction {
     pub fn all(&self, query_json: String) -> Result<String> {
         self.handle
-            .core
-            .surface(self.handle.core.all(&query_json, &self.opts()))
+            .core()
+            .surface(self.handle.core().all(&query_json, &self.opts()))
     }
 
     pub fn one(&self, query_json: String) -> Result<Option<String>> {
         self.handle
-            .core
-            .surface(self.handle.core.one(&query_json, &self.opts()))
+            .core()
+            .surface(self.handle.core().one(&query_json, &self.opts()))
     }
 
     pub fn insert(&self, table: String, row_json: String) -> Result<String> {
         self.handle
-            .core
-            .surface(self.handle.core.insert(&table, &row_json, &self.opts()))
+            .core()
+            .surface(self.handle.core().insert(&table, &row_json, &self.opts()))
     }
 
     pub fn update(&self, table: String, id: String, patch_json: String) -> Result<()> {
-        self.handle.core.surface(
-            self.handle
-                .core
-                .update(&table, &id, &patch_json, &self.opts()),
-        )
+        self.handle.core().surface(self.handle.core().update(
+            &table,
+            &id,
+            &patch_json,
+            &self.opts(),
+        ))
     }
 
     pub fn delete(&self, table: String, id: String) -> Result<()> {
         self.handle
-            .core
-            .surface(self.handle.core.delete(&table, &id, &self.opts()))
+            .core()
+            .surface(self.handle.core().delete(&table, &id, &self.opts()))
     }
 
     pub fn edit_text(
@@ -598,9 +682,9 @@ impl Transaction {
         text: String,
     ) -> Result<()> {
         let edits = text_edit(column, edited_from, text);
-        self.handle.core.surface(
+        self.handle.core().surface(
             self.handle
-                .core
+                .core()
                 .edit(&table, &id, None, &edits, &self.opts()),
         )
     }
@@ -612,7 +696,7 @@ impl Transaction {
         patch_json: Option<String>,
         edits_json: String,
     ) -> Result<()> {
-        self.handle.core.surface(self.handle.core.edit(
+        self.handle.core().surface(self.handle.core().edit(
             &table,
             &id,
             patch_json.as_deref(),
@@ -622,15 +706,15 @@ impl Transaction {
     }
 
     pub fn upsert(&self, table: String, id: String, row_json: String) -> Result<String> {
-        self.handle.core.surface(
+        self.handle.core().surface(
             self.handle
-                .core
+                .core()
                 .upsert(&table, &id, &row_json, &self.opts()),
         )
     }
 
     pub fn restore(&self, table: String, id: String, patch_json: Option<String>) -> Result<String> {
-        self.handle.core.surface(self.handle.core.restore(
+        self.handle.core().surface(self.handle.core().restore(
             &table,
             &id,
             patch_json.as_deref(),
@@ -647,22 +731,22 @@ impl Transaction {
             .core
             .surface(tier.as_deref().map(core::write_tier).transpose())?;
         self.handle
-            .core
-            .surface(self.handle.core.tx_commit(self.tx, tier))
+            .core()
+            .surface(self.handle.core().tx_commit(self.tx, tier))
     }
 
     pub fn rollback(&self) -> Result<()> {
         self.end()?;
         self.handle
-            .core
-            .surface(self.handle.core.tx_rollback(self.tx))
+            .core()
+            .surface(self.handle.core().tx_rollback(self.tx))
     }
 }
 
 impl Drop for Transaction {
     fn drop(&mut self) {
         if self.open.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            let _ = self.handle.core.tx_rollback(self.tx);
+            let _ = self.handle.core().tx_rollback(self.tx);
         }
     }
 }
@@ -702,16 +786,27 @@ pub trait StateListener: Send + Sync {
 /// true}` and a token provider), `"device"` or `"signed-out"`.
 #[derive(uniffi::Object)]
 pub struct Session {
-    core: session::SessionCore,
+    core: Arc<session::SessionCore>,
+    /// A view's control (`controlled`): its operations obey it.
+    control: Option<jazz_app_support::CallControl>,
 }
 
 impl Session {
+    /// The session's core, with its operations (until the end of the
+    /// statement) obeying this view's control.
+    fn core(&self) -> ControlledSession<'_> {
+        ControlledSession {
+            core: &self.core,
+            _control: core::Controlled::new(self.control.clone()),
+        }
+    }
+
     fn surface<T>(&self, result: error::Result<T>) -> Result<T> {
-        result.map_err(|error| JazzError::from(error).for_contract(self.core.contract))
+        result.map_err(|error| JazzError::from(error).for_contract(self.core().contract))
     }
 
     fn call(&self, method: &str) -> Result<()> {
-        self.surface(self.core.call(method, &serde_json::Value::Null))
+        self.surface(self.core().call(method, &serde_json::Value::Null))
             .map(drop)
     }
 }
@@ -735,14 +830,17 @@ impl Session {
         });
         let core = session::SessionCore::open(&config_json, tokens)
             .map_err(|error| JazzError::from(error).for_contract(contract))?;
-        Ok(Arc::new(Self { core }))
+        Ok(Arc::new(Self {
+            core: Arc::new(core),
+            control: None,
+        }))
     }
 
     /// `{"status": "starting"|"ready"|"signed-out"|"transitioning"|"error"|
     /// "closed", "user"?, "clientEpoch", "error"?: {"kind", "message"},
     /// "recovery"?: "action"|"session"}`.
     pub fn snapshot(&self) -> Result<String> {
-        self.surface(self.core.snapshot())
+        self.surface(self.core().snapshot())
     }
 
     /// A handle acting for the user signed in now: `NoUser` (with the
@@ -750,8 +848,21 @@ impl Session {
     /// changes: one from before fails with `Replaced`. Its `shutdown`
     /// leaves the session open.
     pub fn jazz(&self) -> Result<Arc<JazzHandle>> {
-        let core = self.surface(self.core.jazz())?;
-        Ok(Arc::new(JazzHandle { core }))
+        let core = self.surface(self.core().jazz())?;
+        Ok(JazzHandle::new(core))
+    }
+
+    /// A view on the same session whose operations (refresh, sign-in,
+    /// link, signOut, retry) obey `control`: cut short, they fail
+    /// `Interrupted` (never `queued`; what they sent may still apply) and
+    /// the snapshot reports the failure. Freeing it frees only the view;
+    /// closing it closes the session. Handles it hands out (`jazz`) are
+    /// not controlled: make their calls through their own `controlled`.
+    pub fn controlled(&self, control: Arc<CallControl>) -> Arc<Self> {
+        Arc::new(Self {
+            core: self.core.clone(),
+            control: Some(control.0.clone()),
+        })
     }
 
     /// The app's auth changed: asks the bearer and the backend who is
@@ -766,7 +877,7 @@ impl Session {
 
     /// Signs in as the device account `device_key` (`jazz-auth-v1:…`).
     pub fn restore_device_account(&self, device_key: String) -> Result<()> {
-        self.surface(self.core.call(
+        self.surface(self.core().call(
             "restoreDeviceAccount",
             &serde_json::json!({ "deviceKey": device_key }),
         ))
@@ -785,7 +896,10 @@ impl Session {
 
     /// The device account's key (`jazz-auth-v1:…`): keep it as a password.
     pub fn export_device_key(&self) -> Result<String> {
-        let key = self.surface(self.core.call("exportDeviceKey", &serde_json::Value::Null))?;
+        let key = self.surface(
+            self.core()
+                .call("exportDeviceKey", &serde_json::Value::Null),
+        )?;
         Ok(key.as_str().unwrap_or_default().to_owned())
     }
 
@@ -802,7 +916,7 @@ impl Session {
     /// Calls `listener` with each snapshot, the current one first; when the
     /// session closes, a last `{"kind": "closed", "message"}`.
     pub fn watch(&self, listener: Arc<dyn StateListener>) -> Result<Arc<Watch>> {
-        let inner = self.surface(self.core.watch(Box::new(move |state| {
+        let inner = self.surface(self.core().watch(Box::new(move |state| {
             listener.on_change(state.unwrap_or_else(|| CLOSED_STATE.to_owned()))
         })))?;
         Ok(Arc::new(Watch { inner }))
@@ -813,7 +927,7 @@ impl Session {
     /// isn't waited for; watches end. As `JazzHandle.shutdown`, it has no
     /// hard time limit and doesn't wait for a token provider already asked.
     pub fn shutdown(&self) -> Result<()> {
-        self.surface(self.core.close())
+        self.surface(self.core().close())
     }
 }
 
@@ -845,7 +959,7 @@ pub struct Upload {
 impl Drop for Upload {
     fn drop(&mut self) {
         if self.open.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            let _ = self.handle.core.upload_abort(self.upload);
+            let _ = self.handle.core().upload_abort(self.upload);
         }
     }
 }
@@ -854,16 +968,16 @@ impl Drop for Upload {
 impl Upload {
     pub fn push(&self, bytes: Vec<u8>) -> Result<()> {
         self.handle
-            .core
-            .surface(self.handle.core.upload_push(self.upload, bytes))
+            .core()
+            .surface(self.handle.core().upload_push(self.upload, bytes))
     }
 
     /// Commits the row with its value; returns the row.
     pub fn finish(&self) -> Result<String> {
         self.open.store(false, std::sync::atomic::Ordering::Release);
-        self.handle.core.surface(
+        self.handle.core().surface(
             self.handle
-                .core
+                .core()
                 .upload_finish(self.upload, &Default::default()),
         )
     }
@@ -871,8 +985,8 @@ impl Upload {
     pub fn abort(&self) -> Result<()> {
         self.open.store(false, std::sync::atomic::Ordering::Release);
         self.handle
-            .core
-            .surface(self.handle.core.upload_abort(self.upload))
+            .core()
+            .surface(self.handle.core().upload_abort(self.upload))
     }
 }
 

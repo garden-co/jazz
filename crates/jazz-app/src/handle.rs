@@ -73,9 +73,11 @@ pub struct Jazz {
     /// The tier this handle's writes wait for ([`Jazz::durable`]); `None`
     /// returns once a write is committed locally.
     pub(crate) durability: Option<DurabilityTier>,
-    /// Ends this handle's calls' waits on the server once true
+    /// Ends this handle's calls' waits on the server once any reads true
     /// ([`Jazz::ending_waits_with`]).
-    pub(crate) waits_end: Option<watch::Receiver<bool>>,
+    pub(crate) waits_end: Vec<watch::Receiver<bool>>,
+    /// Cuts this handle's calls short ([`Jazz::controlled`]).
+    pub(crate) control: Option<crate::CallControl>,
 }
 
 #[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
@@ -305,7 +307,8 @@ impl Jazz {
             scope: None,
             for_user: false,
             durability: None,
-            waits_end: None,
+            waits_end: Vec::new(),
+            control: None,
         })
     }
 
@@ -334,6 +337,7 @@ impl Jazz {
             for_user: true,
             durability: self.durability,
             waits_end: self.waits_end.clone(),
+            control: self.control.clone(),
         }
     }
 
@@ -350,19 +354,32 @@ impl Jazz {
         Fut: Future<Output = Result<R>> + 'static,
         R: Send + 'static,
     {
+        let control = self.control.clone();
+        if let Some(reason) = control.as_ref().and_then(crate::CallControl::interruption) {
+            // Cut short before it started: it does nothing.
+            return Err(Error::Interrupted { reason });
+        }
         let (reply, answer) = oneshot::channel();
         let scope = self.scope.clone();
-        let waits_end = self.waits_end.clone();
+        // Dropping this call (as `tokio::time::timeout` drops it) ends its
+        // waits on the server on the client's thread: the job ends, what it
+        // wrote may still apply, and a refusal of it is still reported.
+        let (mut dropped, call_ends) = crate::control::EndOnDrop::new();
+        let mut waits_end = self.waits_end.clone();
+        waits_end.push(call_ends);
+        waits_end.extend(control.as_ref().map(crate::CallControl::signal));
+        let timer = control.clone();
         let job: Job = Box::new(move |client| {
             let client = match scope {
                 Some(session) => client.for_session((*session).clone()),
                 None => client,
             };
-            let client = match waits_end {
-                Some(ends) => client.ending_waits_with(ends),
-                None => client,
-            };
+            let client = waits_end
+                .into_iter()
+                .fold(client, |client, ends| client.ending_waits_with(ends));
             Box::pin(async move {
+                // The control's deadline, kept on this thread.
+                let timer = timer.map(|control| tokio::task::spawn_local(control.time_out()));
                 // A panic in the job is its caller's error, not the end of
                 // the client: the other jobs and the client run on.
                 // Calling `job` happens inside the guard too: a closure
@@ -375,20 +392,38 @@ impl Jazz {
                     )
                     .await
                     .unwrap_or_else(|panic| Err(Error::Panicked(panic_message(&*panic))));
+                if let Some(timer) = timer {
+                    timer.abort();
+                }
                 // A caller that stopped waiting didn't hear what its
                 // durable waits reported (`Heard`).
-                refusals.replied(reply.send(result).is_ok());
+                let committed = refusals.committed();
+                refusals.replied(reply.send((result, committed)).is_ok());
             })
         });
         self.commands
             .send(Command::Run(job))
             .map_err(|_| self.stopped())?;
-        match answer.await.map_err(|_| self.stopped())? {
+        let (answer, committed) = answer.await.map_err(|_| self.stopped())?;
+        dropped.disarm();
+        let interrupted = control.as_ref().and_then(crate::CallControl::interruption);
+        match (answer, interrupted) {
+            // A wait on the server, ended by the call's control.
+            (
+                Err(Error::Stopped | Error::Jazz(jazz::tools::JazzError::ChannelClosed)),
+                Some(reason),
+            ) => {
+                if committed {
+                    Err(Error::StillQueued { reason })
+                } else {
+                    Err(Error::Interrupted { reason })
+                }
+            }
             // A wait on the server, ended as the client (or handle) closes.
-            Err(Error::Stopped | Error::Jazz(jazz::tools::JazzError::ChannelClosed)) => {
+            (Err(Error::Stopped | Error::Jazz(jazz::tools::JazzError::ChannelClosed)), _) => {
                 Err(self.stopped())
             }
-            answer => answer,
+            (answer, _) => answer,
         }
     }
 
@@ -412,8 +447,19 @@ impl Jazz {
     /// lives on. Not public API.
     #[doc(hidden)]
     pub fn ending_waits_with(mut self, ends: watch::Receiver<bool>) -> Self {
-        self.waits_end = Some(ends);
+        self.waits_end.push(ends);
         self
+    }
+
+    /// This handle, with its calls cut short by `control`: cancelled, or
+    /// at its deadline. A view on the same app (its clones share the
+    /// control); a binding makes one per suspending call. See
+    /// [`crate::CallControl`].
+    pub fn controlled(&self, control: crate::CallControl) -> Jazz {
+        Jazz {
+            control: Some(control),
+            ..self.clone()
+        }
     }
 
     /// Whether an end user's client still runs: it didn't sign out, and
@@ -476,8 +522,13 @@ impl Jazz {
     /// Inserts a row. Returns it as stored, once committed locally (or, on
     /// a [`Jazz::durable`] handle, once it reached that tier).
     ///
-    /// Like every write, it is sent to the client's thread when called:
-    /// dropping the returned future doesn't undo or cancel it.
+    /// Like every write, it is sent to the client's thread when called.
+    /// Dropping the returned future (as `tokio::time::timeout` does) ends
+    /// its wait for a tier on that thread, but doesn't undo the write: once
+    /// committed locally it may still apply, and a refusal of it is
+    /// reported to [`Jazz::mutation_errors`] and the next
+    /// [`Jazz::wait_for_sync`]. To learn that a call was cut short, make it
+    /// through [`Jazz::controlled`] instead.
     pub async fn insert<N: Insert>(&self, new: N) -> Result<N::Row> {
         let implementations = self.info.implementations.clone();
         let settle = self.settler()?;

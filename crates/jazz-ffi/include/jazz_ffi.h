@@ -18,8 +18,11 @@
  * bundle ids), "noAccount" (jazz_for_user: the user has no account yet;
  * with "userId"), "replaced" (a session's handle after its user changed),
  * "noUser" (a session has no user; with "status")
- * and "unsynced" (jazz_close_within, or "close" with a timeoutMs: writes
- * left unsent; with "pending"))
+ * "unsynced" (jazz_close_within, or "close" with a timeoutMs: writes
+ * left unsent; with "pending") and, only for a call made with a "call"
+ * (see "callBegin"), "interrupted" (its control cut it short; with
+ * "reason": "cancelled" | "timeout", and "queued": true when it committed
+ * a write locally, which may still apply))
  * (*err is set to NULL on success). Functions block until done. Calls on
  * one handle may come from any threads at once, except the ones that free
  * it, jazz_close, jazz_close_within and jazz_session_close: no call on that
@@ -168,6 +171,21 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *              - On a jazz_for_user or jazz_session_jazz handle only that
  *                handle closes: its waits end at once, what it began is
  *                rolled back, and its client lives on.
+ *   "callBegin" {"timeoutMs"?} -> {"call"}: a control for one call. Pass
+ *              "call" in any call's args (and those of the calls it makes
+ *              for it, such as txCommit) and it obeys the control: once it
+ *              is cancelled, or timeoutMs after callBegin, its waits on the
+ *              server end at once and it fails "interrupted". A call made
+ *              once the control ended does nothing. What a cut-short call
+ *              committed may still apply ("queued": true): its refusal, if
+ *              one comes, reaches "mutationErrors" and the next
+ *              waitForSync. Roll back a transaction whose call was
+ *              cancelled before txCommit: txRollback (and uploadAbort)
+ *              ignore controls, so a clean-up always runs.
+ *   "cancel"  {"call"} -> null: ends the control's calls' waits now. May
+ *              run beside any other call, and on a closed handle.
+ *   "callEnd" {"call"} -> null: frees the control (jazz_close frees the
+ *              ones left). May run beside any other call.
  * Reads (all, one) and writes (insert, update, delete) also take "tx": run
  * inside that open transaction (its reads see its own writes), and "tier":
  * for reads "local" | "localFirst" (default) | "remote"; for writes and
@@ -327,6 +345,14 @@ JazzSession *jazz_session_open(const char *config_json, JazzTokenCallback token_
  *              closing is always "closed", and wins when both hold.
  *              An open it interrupted gets up to 2 s to let go of its
  *              store.
+ *   "callBegin" {"timeoutMs"?} -> {"call"} | "cancel" {"call"} |
+ *   "callEnd" {"call"}: a control for one operation, as jazz_call's. An
+ *              operation given "call" stops waiting on the app and the
+ *              network once it is cancelled or timed out, and fails
+ *              "interrupted" ("queued" false; what it sent may still
+ *              apply); the snapshot reports the failure, and "retry"
+ *              repeats it. Handles from jazz_session_jazz take controls of
+ *              their own, from their own callBegin.
  */
 char *jazz_session_call(JazzSession *session, const char *method, const char *args_json,
                         char **err);

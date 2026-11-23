@@ -115,6 +115,19 @@ pub enum Error {
     #[error("the Jazz client stopped")]
     Stopped,
 
+    /// A call made through [`crate::Jazz::controlled`] was cut short by its
+    /// [`crate::CallControl`]: cancelled or timed out before it started (it
+    /// did nothing), or while it waited with nothing written.
+    #[error("the call was interrupted ({reason})")]
+    Interrupted { reason: crate::Interruption },
+
+    /// A call made through [`crate::Jazz::controlled`] was cut short by its
+    /// [`crate::CallControl`] after it committed a write locally: the write
+    /// is queued, and may still apply. A refusal of it is reported as a
+    /// mutation error and by the next `wait_for_sync`.
+    #[error("the call was interrupted ({reason}); its write is queued and may still apply")]
+    StillQueued { reason: crate::Interruption },
+
     /// The client reported an error.
     #[error(transparent)]
     Jazz(JazzError),
