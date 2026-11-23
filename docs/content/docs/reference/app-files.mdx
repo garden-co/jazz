@@ -76,7 +76,9 @@ ignore file) to keep the two in step.
 - **History**: earlier versions your app ships (`history`, named by short schema hash, oldest
   first, each `{ "tables": … }` without relations) and the migrations between them
   (`migrations`, each `{ "name"?, "from", "to"?, "createTables"?, "dropTables"?, "renameTables"?, "migrate"? }`).
-  `jazz-tools migrations create` adds them; see [Migrations](/docs/schemas/migrations).
+  A migration without `to` targets the current `tables`. `jazz-tools migrations create` adds them,
+  and when it moves the current version into `history` it names that version as the `to` of each
+  migration that had none; see [Migrations](/docs/schemas/migrations).
 - **`"TODO: …"` strings**, outside `$comment`, are refused by every loader: `migrations create`
   writes them where only you can decide.
 
