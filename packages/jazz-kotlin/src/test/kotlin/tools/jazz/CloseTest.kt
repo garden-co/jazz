@@ -146,4 +146,27 @@ class CloseTest {
         withTimeout(5_000) { deletion.await() }
         assertTrue(deleted.get())
     }
+
+    private class Mine : Exception("mine")
+
+    @Test
+    fun a_transaction_that_closes_the_app_then_throws_still_rolls_back(): Unit = runBlocking {
+        val rolledBack = java.util.concurrent.atomic.AtomicBoolean(false)
+        val tx = object : NativeTransaction {
+            override fun all(queryJson: String): String = "[]"
+            override fun one(queryJson: String): String? = null
+            override fun insert(table: String, rowJson: String): String = rowJson
+            override fun update(table: String, id: String, patchJson: String) {}
+            override fun delete(table: String, id: String) {}
+            override fun commit(tier: String?) = error("must not commit")
+            override fun rollback() { rolledBack.set(true) }
+        }
+        val native = object : Native by FakeNative() {
+            override fun beginMergeable(): NativeTransaction = tx
+        }
+        Jazz.opener = Native.Opener { native }
+        val jazz = Jazz.open("{}", JazzConfig())
+        assertFailsWith<Mine> { jazz.transaction<Unit> { jazz.close(); throw Mine() } }
+        assertTrue(rolledBack.get(), "the rollback never reached the native core")
+    }
 }
