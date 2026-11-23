@@ -558,6 +558,62 @@ async fn adding_an_encrypted_column_requires_an_empty_lens_default() {
     }
 }
 
+/// Alice drops the last encrypted column and its token. Only empty bytes may be supplied to older clients.
+#[tokio::test]
+async fn dropping_encrypted_storage_requires_empty_backwards_defaults() {
+    let file = json!({
+        "$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"notes":{"columns":{"label":"string"}}},
+        "history":{"v1":{"tables":{"notes":{
+            "columns":{"label":"string","title":"bytes","__e2ee_eq_title":"bytes","digest":"bytes"},
+            "encryption":{"space":"id","scope":"notes","columns":{"title":"string"},"equality":["title"]}
+        }}}},
+        "migrations":[{"from":"v1","migrate":{"notes":{
+            "title":{"drop":"bytes","backwardsDefault":""},
+            "__e2ee_eq_title":{"drop":"bytes","backwardsDefault":""},
+            "digest":{"drop":"bytes","backwardsDefault":"AQ=="}
+        }}}]
+    });
+    let permissions =
+        br#"{"$schema":"https://jazz.tools/schemas/jazz.permissions.v1.json","tables":{"notes":{"read":"exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)"}}}"#;
+    let load = |file: &Value| artifact::load(file.to_string().as_bytes(), permissions);
+    let body = load(&file).unwrap().deployment_body(false);
+    let (status, response) = publish(&router().await, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    for column in ["title", "__e2ee_eq_title"] {
+        let mut invalid = file.clone();
+        invalid["migrations"][0]["migrate"]["notes"][column]["backwardsDefault"] = json!("AQ==");
+        let file_error = load(&invalid).err().map(|e| e.to_string());
+        let mut raw = body.clone();
+        let operations = raw["migrations"][0]["forward"][0]["operations"]
+            .as_array_mut()
+            .unwrap();
+        let drop = operations
+            .iter_mut()
+            .find(|op| op["column"] == column)
+            .unwrap();
+        drop["value"] = json!({"type":"Bytea","value":[1]});
+        let (status, response) = publish(&router().await, raw).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{column}: file error={file_error:?}, raw={response}"
+        );
+        for error in [
+            file_error.as_deref().unwrap(),
+            response["error"].as_str().unwrap(),
+        ] {
+            assert!(
+                error.contains(&format!("notes.{column}"))
+                    && error.contains("backwardsDefault")
+                    && error.contains("empty byte string"),
+                "{error}"
+            );
+        }
+    }
+}
+
 /// When a migration introduces token storage on an existing table, earlier rows cannot receive a token from its lens.
 #[tokio::test]
 async fn an_introduced_token_cannot_have_nonempty_stored_bytes() {

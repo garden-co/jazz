@@ -817,7 +817,7 @@ function refuseRequiredEncryptedAdditions(
     `${refused.join(", ")}: a new encrypted column on a table that already has rows in version ${version} ` +
       "must be optional or declare a default. Sealing a value for the rows stored before it needs their " +
       "spaces' keys, which a migration doesn't hold. Make it optional (those rows read it as null) or give " +
-      "it a default (they read the default), or wait for column conversion.",
+      "it a default (they read the default).",
   );
 }
 

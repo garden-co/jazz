@@ -498,22 +498,30 @@ pub fn check_transition(
         lens: lens_of(table),
     };
     for lens in &migration.forward {
-        let Some(entry) = new_entries.get(&lens.table) else {
-            continue;
-        };
         let was = lens.renamed_from.as_deref().unwrap_or(&lens.table);
-        if lens.added || !old_schema.contains_key(&TableName::from(was)) {
+        let old = old_entries.get(was);
+        let new = new_entries.get(&lens.table);
+        if (old.is_none() && new.is_none())
+            || lens.added
+            || !old_schema.contains_key(&TableName::from(was))
+        {
             continue;
         }
         for op in &lens.operations {
-            if let PublishLensOp::Introduce { column, value, .. } = op
-                && (entry.columns.contains_key(column)
-                    || is_equality_token_column(Some(entry), column))
-                && !is_empty_cell(value)
+            let (entry, column, value, field) = match op {
+                PublishLensOp::Introduce { column, value, .. } => (new, column, value, "default"),
+                PublishLensOp::Drop { column, value, .. } => {
+                    (old, column, value, "backwardsDefault")
+                }
+                PublishLensOp::Rename { .. } => continue,
+            };
+            if !is_empty_cell(value)
+                && (entry.is_some_and(|e| e.columns.contains_key(column))
+                    || is_equality_token_column(entry, column))
             {
                 return Err(format!(
-                    "{}.{}: the migration must supply an empty byte string for the stored cells of existing rows",
-                    lens.table, column
+                    "{}.{column}: the migration's {field} must be an empty byte string",
+                    lens.table
                 ));
             }
         }
