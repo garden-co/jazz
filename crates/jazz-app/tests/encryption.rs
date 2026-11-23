@@ -872,6 +872,27 @@ async fn typed_streams_round_trip_encrypted_bytes_and_store_them_sealed() {
 /// Alice's deploy refuses a nullability change and her original title stays readable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deploy_refuses_to_make_a_required_encrypted_column_optional() {
+    check_required_title(AppFiles::new(
+        include_bytes!("fixtures/encrypted/jazz.optional-title.app.json").as_slice(),
+        None,
+    ))
+    .await;
+}
+
+/// Alice's title keeps its encoding when a backend deploys another physical
+/// schema hash for the same stored column without a migration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_standalone_deploy_cannot_make_a_stored_encrypted_title_optional() {
+    let mut next: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/encrypted/jazz.app.json")).unwrap();
+    // Changing the physical column order gives this deployment a new hash.
+    next.sort_all_objects();
+    next["tables"]["tasks"]["encryption"]["columns"]["title"] =
+        json!({"type": "string?", "sealedType": "string"});
+    check_required_title(AppFiles::new(serde_json::to_vec(&next).unwrap(), None)).await;
+}
+
+async fn check_required_title(files: AppFiles) {
     let app = App::start().await;
     let alice = app.device().await;
     alice
@@ -883,10 +904,6 @@ async fn deploy_refuses_to_make_a_required_encrypted_column_optional() {
     add_task(&alice, &project, "original title").await.unwrap();
     assert_eq!(titles(&alice, 1).await, ["original title"]);
 
-    let files = AppFiles::new(
-        include_bytes!("fixtures/encrypted/jazz.optional-title.app.json").as_slice(),
-        None,
-    );
     let error = Jazz::open(
         files.with_permissions(
             include_bytes!("fixtures/encrypted/jazz.permissions.json").as_slice(),
