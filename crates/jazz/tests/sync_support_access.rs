@@ -4,6 +4,7 @@
 //! access returns).
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -323,7 +324,7 @@ fn a_remote_read_after_losing_access_evicts_the_cached_rows() {
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
         server.accept_subscriber(server_side, alice()).unwrap();
-        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
         for n in 1..=4 {
             block_on(client.insert(
                 "rooms",
@@ -412,12 +413,12 @@ fn a_remote_read_through_a_relay_after_losing_access_leaves_the_row_out() {
     let (relay_side, server_side) = duplex();
     let _relay_upstream = block_on(relay.connect_upstream(relay_side));
     server.accept_subscriber(server_side, alice()).unwrap();
-    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    jazz::db::block_on(relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     let client = open(1, alice());
     let (client_side, relay_client_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
     relay.accept_subscriber(relay_client_side, alice()).unwrap();
-    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     let pump_all = || {
         for _ in 0..4 {
             block_on(client.tick()).unwrap();
@@ -617,7 +618,7 @@ fn a_cold_remote_read_through_an_inherited_parent_ships_what_the_parent_policy_c
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
     server.accept_subscriber(server_side, alice()).unwrap();
-    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     let bytes = postcard::to_allocvec(&Query::from("messages")).unwrap();
     let read = client.all_serialized_query(
         &bytes,
@@ -750,7 +751,7 @@ fn a_backend_updates_for_its_user_through_an_inherited_parent_after_reading_the_
     server
         .accept_subscriber(server_side, AuthorSubject::SYSTEM)
         .unwrap();
-    backend.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    jazz::db::block_on(backend.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     // The handler reads the row for its user first, as an update needs the
     // current row; it never reads the room or the membership.
     let bytes = postcard::to_allocvec(&Query::from("messages")).unwrap();
@@ -844,12 +845,12 @@ impl Relayed {
         let (relay_side, server_side) = duplex();
         let relay_upstream = block_on(relay.connect_upstream(relay_side));
         server.accept_subscriber(server_side, alice()).unwrap();
-        relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        jazz::db::block_on(relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
         let client = open(1, alice());
         let (client_side, relay_client_side) = duplex();
         let client_upstream = block_on(client.connect_upstream(client_side));
         relay.accept_subscriber(relay_client_side, alice()).unwrap();
-        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
         Self {
             server,
             relay,

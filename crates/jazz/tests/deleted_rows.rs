@@ -8,6 +8,7 @@
 //! it holds).
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::collections::BTreeMap;
 
@@ -581,8 +582,10 @@ impl Synced {
         let (client_side, server_side) = duplex();
         self.upstream = Some(block_on(self.alice.connect_upstream(client_side)));
         self.server.accept_subscriber(server_side, alice()).unwrap();
-        self.alice
-            .set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        jazz::db::block_on(
+            self.alice
+                .set_remote_link_hint(jazz::db::RemoteLinkHint::Live),
+        );
     }
 
     fn disconnect(&mut self) {

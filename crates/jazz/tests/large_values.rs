@@ -4,6 +4,7 @@
 //! Queries compare it by cell, never by content (SPEC 19.5).
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -646,7 +647,7 @@ fn sqlite_rolling_back_an_append_keeps_the_committed_value() {
                 Default::default(),
             )
             .await?;
-        db.rollback_sqlite_transaction_for_test();
+        jazz::db::block_on(db.rollback_sqlite_transaction_for_test());
         Err(jazz::db::Error::new(
             jazz::db::ErrorCode::Storage,
             "disk I/O error".to_owned(),

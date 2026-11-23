@@ -6,6 +6,7 @@
 //! non-serializable commit.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -132,20 +133,22 @@ impl Net {
         let upstream = block_on(self.clients[i].0.connect_upstream(client_side));
         self.clients[i].1 = Some(upstream);
         self.core.accept_subscriber(server_side, author).unwrap();
-        self.clients[i].0.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(self.clients[i].0.set_remote_link_hint(RemoteLinkHint::Live));
     }
 
     fn go_offline(&mut self, i: usize) {
         let upstream = self.clients[i].1.take().expect("online");
         assert!(self.clients[i].0.detach_connection(&upstream));
-        self.clients[i]
-            .0
-            .set_remote_link_hint(RemoteLinkHint::Failed);
+        jazz::db::block_on(
+            self.clients[i]
+                .0
+                .set_remote_link_hint(RemoteLinkHint::Failed),
+        );
     }
 
     fn go_online(&mut self, i: usize) {
         self.connect(i);
-        self.clients[i].0.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(self.clients[i].0.set_remote_link_hint(RemoteLinkHint::Live));
     }
 
     fn pump(&self) {
@@ -878,7 +881,7 @@ fn an_offline_remote_read_in_a_transaction_waits_for_the_authority() {
     net.core
         .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x50; 16]))
         .unwrap();
-    db.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(db.set_remote_link_hint(RemoteLinkHint::Live));
     assert!(net.drive(read).unwrap().is_empty());
     db.abandon_transaction_handle(open).unwrap();
 }
@@ -1505,9 +1508,11 @@ fn a_group_only_aggregate_read_set_is_refused() {
     let upstream = block_on(net.clients[BACKEND].0.connect_upstream(rewriting));
     net.clients[BACKEND].1 = Some(upstream);
     net.core.accept_subscriber(server_side, author).unwrap();
-    net.clients[BACKEND]
-        .0
-        .set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(
+        net.clients[BACKEND]
+            .0
+            .set_remote_link_hint(RemoteLinkHint::Live),
+    );
     net.unrelated_receipt(BACKEND);
 
     let db = net.db(BACKEND);

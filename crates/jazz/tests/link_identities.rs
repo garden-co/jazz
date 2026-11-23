@@ -5,6 +5,7 @@
 //! the replica's identity when they authenticate it.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -86,12 +87,12 @@ fn a_relays_own_sessions_write_as_its_identity_at_the_core() {
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
     let tab = open(6, user(5));
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let (up, down) = duplex();
     let _relay_up = block_on(relay.connect_upstream(up));
     core.accept_subscriber(down, user(5)).unwrap();
-    relay.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(relay.set_remote_link_hint(RemoteLinkHint::Live));
     let (up, down) = duplex();
     let _tab_up = block_on(tab.connect_upstream(up));
     relay.accept_subscriber(down, user(5)).unwrap();

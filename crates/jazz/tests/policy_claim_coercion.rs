@@ -251,7 +251,7 @@ fn session_with(db: &Db, n: u8, name: &str, claim: &Claim) -> AuthorSubject {
             BTreeMap::from([(jazz::query::provider_claim_key(name), value.clone())])
         }
     };
-    db.set_identity_claims(author, claims);
+    jazz::db::block_on(db.set_identity_claims(author, claims));
     author
 }
 

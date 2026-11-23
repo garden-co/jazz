@@ -5,6 +5,7 @@
 //! schema current: the store installs it when it opens under it.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::collections::BTreeMap;
 
@@ -105,7 +106,7 @@ fn open_at(schema: JazzSchema, path: &std::path::Path) -> Db {
         FileOptions::default(),
     ))
     .unwrap();
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 

@@ -69,9 +69,8 @@ impl FastResumeFixture {
         let client = open(1);
         let (client_side, server_side, _) = pipe();
         let upstream = block_on(client.connect_upstream(client_side));
-        let subscriber = server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
+        let subscriber =
+            block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
         let prepared = client
             .prepare_query(&Query::from(TABLE))
             .expect("prepare BandChat message-history query");
@@ -94,10 +93,11 @@ impl FastResumeFixture {
         self.server.disconnect_subscriber(self.subscriber);
         let (client_side, server_side, shipped) = pipe();
         self.upstream = block_on(self.client.connect_upstream(client_side));
-        self.subscriber = self
-            .server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
+        self.subscriber = block_on(
+            self.server
+                .accept_subscriber(server_side, AuthorSubject::SYSTEM),
+        )
+        .unwrap();
         pump(&self.server, &self.client);
         let prepared = self
             .client

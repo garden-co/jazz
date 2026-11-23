@@ -14,6 +14,7 @@
 // Sync and fan-out bookkeeping keys maps by (table, row, branch) tuples;
 // naming each nesting would not make them clearer.
 #![allow(clippy::type_complexity)]
+#![deny(clippy::await_holding_refcell_ref)]
 
 // The layers below, under the paths this crate's code uses.
 use jazz_model::{query, schema, tx};

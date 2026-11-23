@@ -4,6 +4,7 @@
 //! row image carries that column.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -46,13 +47,13 @@ fn open(node: u8, author: AuthorSubject) -> Db {
 /// A worker connected to `core`, and one tab over it.
 fn device(core: &Db, node: u8, author: AuthorSubject) -> (Db, Db) {
     let worker = open(node, author.clone());
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let (client_side, server_side) = duplex();
     block_on(worker.connect_upstream(client_side));
     core.accept_subscriber(server_side, author.clone()).unwrap();
     let tab = open(node + 1, author.clone());
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let (client_side, server_side) = duplex();
     block_on(tab.connect_upstream(client_side));
     worker.accept_subscriber(server_side, author).unwrap();

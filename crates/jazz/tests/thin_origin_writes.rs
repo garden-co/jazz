@@ -4,6 +4,7 @@
 //! not written a second time.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -84,7 +85,7 @@ fn bodies(db: &Db) -> Vec<String> {
 }
 
 fn insert_as(db: &Db, n: u64, row: RowUuid, text: &str) -> OriginWrite {
-    block_on(db.write_as_origin(origin(n), &user(1), async || {
+    block_on(db.write_as_origin(origin(n), &user(1), async |db| {
         db.insert(
             "notes",
             body(text),
@@ -100,7 +101,7 @@ fn insert_as(db: &Db, n: u64, row: RowUuid, text: &str) -> OriginWrite {
 }
 
 fn update_as(db: &Db, n: u64, row: RowUuid, text: &str) -> Result<OriginWrite, jazz::db::Error> {
-    block_on(db.write_as_origin(origin(n), &user(1), async || {
+    block_on(db.write_as_origin(origin(n), &user(1), async |db| {
         db.update(
             "notes",
             row,
@@ -154,7 +155,7 @@ fn another_users_write_under_the_same_key_is_a_write_of_its_own() {
     let core = open(0);
     let row = RowUuid::from_bytes([1; 16]);
     insert_as(&core, 1, row, "draft");
-    let theirs = block_on(core.write_as_origin(origin(2), &user(2), async || {
+    let theirs = block_on(core.write_as_origin(origin(2), &user(2), async |core| {
         core.update(
             "notes",
             row,
@@ -182,7 +183,7 @@ fn a_failed_write_leaves_its_key_to_no_other_commit() {
     let (up, down) = duplex();
     let _link = block_on(replica.connect_upstream(up));
     core.accept_subscriber(down, AuthorSubject::SYSTEM).unwrap();
-    replica.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(replica.set_remote_link_hint(RemoteLinkHint::Live));
     let settle = || {
         for _ in 0..8 {
             for db in [&replica, &core] {
@@ -230,7 +231,7 @@ fn a_resend_through_another_server_gets_the_first_fate_from_the_authority() {
         let (up, down) = duplex();
         links.push(block_on(server.connect_upstream(up)));
         core.accept_subscriber(down, AuthorSubject::SYSTEM).unwrap();
-        server.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(server.set_remote_link_hint(RemoteLinkHint::Live));
     }
     let settle = || {
         for _ in 0..8 {
@@ -292,7 +293,7 @@ fn two_users_writing_under_one_key_through_two_servers_both_land() {
         let (up, down) = duplex();
         links.push(block_on(server.connect_upstream(up)));
         core.accept_subscriber(down, AuthorSubject::SYSTEM).unwrap();
-        server.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(server.set_remote_link_hint(RemoteLinkHint::Live));
     }
     let settle = || {
         for _ in 0..8 {
@@ -303,7 +304,7 @@ fn two_users_writing_under_one_key_through_two_servers_both_land() {
     };
     // The second user writes first, under the key the first user's write
     // will name, through another server: still both are written.
-    let theirs = block_on(second.write_as_origin(origin(1), &user(2), async || {
+    let theirs = block_on(second.write_as_origin(origin(1), &user(2), async |second| {
         second
             .insert(
                 "notes",
@@ -355,7 +356,7 @@ fn only_a_thin_clients_writer_node_is_refused_to_sessions() {
             let (up, down) = duplex();
             links.push(block_on(client.connect_upstream(up)));
             core.accept_subscriber(down, user(1)).unwrap();
-            client.set_remote_link_hint(RemoteLinkHint::Live);
+            jazz::db::block_on(client.set_remote_link_hint(RemoteLinkHint::Live));
             client
         })
         .collect();

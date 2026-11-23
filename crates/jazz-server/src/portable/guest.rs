@@ -220,7 +220,7 @@ pub fn bind_account(
 /// For a host that admits guests only on the app's backend credential,
 /// verified before (a Durable Object core): the audience is the one the
 /// backend `stated_audience`, or `app_id`.
-pub fn admit_guest(
+pub async fn admit_guest(
     storage: &Storage,
     token: &str,
     peer_identity: AuthorSubject,
@@ -234,9 +234,9 @@ pub fn admit_guest(
     let account = enrolled_account(peer_identity)?;
     let principal = principal_of(&session);
     if let Some(command) = founding_command(&principal, &audience) {
-        accounts::execute(storage, &command)?;
+        accounts::execute(storage, &command).await?;
     }
-    let assignment = accounts::login(storage, &principal)?;
+    let assignment = accounts::login(storage, &principal).await?;
     bind_account(&mut session, account, assignment.account)?;
     crate::portable::session::ws_validate_session_identity(&session, peer_identity)
         .map_err(GuestRefusal::Denied)?;
@@ -267,7 +267,7 @@ mod tests {
             ),
         ];
         for (_, storage) in &stores {
-            accounts::open(storage).unwrap();
+            jazz::db::block_on(accounts::open(storage)).unwrap();
         }
         stores
     }
@@ -327,14 +327,14 @@ mod tests {
             let guest = seed(1);
             let peer = peer(&guest, &app.to_string());
             for _ in 0..2 {
-                let session = admit_guest(
+                let session = jazz::db::block_on(admit_guest(
                     &storage,
                     &proof(&guest, &app.to_string()),
                     peer,
                     None,
                     app,
                     NOW,
-                )
+                ))
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
                 assert_eq!(session.account_id, peer.account_id(), "{name}");
                 assert_eq!(session.issuer, identity::DEVICE_ACCOUNT_ISSUER, "{name}");
@@ -347,7 +347,11 @@ mod tests {
                 subject: subject(&guest),
             };
             assert_eq!(
-                Some(accounts::login(&storage, &principal).unwrap().account),
+                Some(
+                    jazz::db::block_on(accounts::login(&storage, &principal))
+                        .unwrap()
+                        .account
+                ),
                 peer.account_id(),
                 "{name}: the founding is durable"
             );
@@ -362,23 +366,23 @@ mod tests {
             let app = app();
             let guest = seed(2);
             let peer = peer(&guest, &app.to_string());
-            accounts::found_device_account(
+            jazz::db::block_on(accounts::found_device_account(
                 &storage,
                 serde_json::from_value(serde_json::json!({
                     "identity": { "issuer": identity::DEVICE_ACCOUNT_ISSUER, "subject": subject(&guest) },
                 }))
                 .unwrap(),
                 *app.uuid(),
-            )
+            ))
             .unwrap();
-            let session = admit_guest(
+            let session = jazz::db::block_on(admit_guest(
                 &storage,
                 &proof(&guest, &app.to_string()),
                 peer,
                 None,
                 app,
                 NOW,
-            )
+            ))
             .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(session.account_id, peer.account_id(), "{name}");
         }
@@ -392,25 +396,25 @@ mod tests {
             let endpoint = "https://app.example/jazz";
             let guest = seed(3);
             let peer = peer(&guest, endpoint);
-            let session = admit_guest(
+            let session = jazz::db::block_on(admit_guest(
                 &storage,
                 &proof(&guest, endpoint),
                 peer,
                 Some(endpoint),
                 app(),
                 NOW,
-            )
+            ))
             .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(session.account_id, peer.account_id(), "{name}");
 
-            let refused = admit_guest(
+            let refused = jazz::db::block_on(admit_guest(
                 &storage,
                 &proof(&guest, endpoint),
                 peer,
                 Some("  "),
                 app(),
                 NOW,
-            )
+            ))
             .unwrap_err();
             assert_eq!(
                 unauthenticated(refused).message,
@@ -437,14 +441,16 @@ mod tests {
                 .to_owned();
             assert_ne!(signature, other_signature);
             let forged = format!("{signed}.{other_signature}");
-            let refused = admit_guest(&storage, &forged, peer, None, app, NOW).unwrap_err();
+            let refused = jazz::db::block_on(admit_guest(&storage, &forged, peer, None, app, NOW))
+                .unwrap_err();
             assert_eq!(
                 unauthenticated(refused).code,
                 UnauthenticatedCode::Invalid,
                 "{name}"
             );
 
-            let refused = admit_guest(&storage, "a.b.c", peer, None, app, NOW).unwrap_err();
+            let refused = jazz::db::block_on(admit_guest(&storage, "a.b.c", peer, None, app, NOW))
+                .unwrap_err();
             assert_eq!(
                 unauthenticated(refused),
                 external_jwt_refused(),
@@ -456,7 +462,7 @@ mod tests {
                 subject: subject(&guest),
             };
             assert!(
-                accounts::login(&storage, &principal).is_err(),
+                jazz::db::block_on(accounts::login(&storage, &principal)).is_err(),
                 "{name}: a refused proof founds nothing"
             );
         }
@@ -468,14 +474,14 @@ mod tests {
         for (name, storage) in stores() {
             let app = app();
             let guest = seed(6);
-            let refused = admit_guest(
+            let refused = jazz::db::block_on(admit_guest(
                 &storage,
                 &proof(&guest, &app.to_string()),
                 peer(&guest, &app.to_string()),
                 None,
                 app,
                 NOW + TTL + 1,
-            )
+            ))
             .unwrap_err();
             let refused = unauthenticated(refused);
             assert_eq!(refused.code, UnauthenticatedCode::Expired, "{name}");
@@ -491,14 +497,14 @@ mod tests {
             let app = app();
             let guest = seed(7);
             let other = AppId::from_name("another-app").to_string();
-            let refused = admit_guest(
+            let refused = jazz::db::block_on(admit_guest(
                 &storage,
                 &proof(&guest, &other),
                 peer(&guest, &other),
                 None,
                 app,
                 NOW,
-            )
+            ))
             .unwrap_err();
             assert_eq!(
                 unauthenticated(refused).code,
@@ -506,14 +512,14 @@ mod tests {
                 "{name}: another app"
             );
 
-            let refused = admit_guest(
+            let refused = jazz::db::block_on(admit_guest(
                 &storage,
                 &proof(&guest, "https://app.example/jazz"),
                 peer(&guest, "https://other.example/jazz"),
                 Some("https://other.example/jazz"),
                 app,
                 NOW,
-            )
+            ))
             .unwrap_err();
             assert_eq!(
                 unauthenticated(refused).code,
@@ -535,7 +541,9 @@ mod tests {
             let token = proof(&guest, &audience);
 
             let elsewhere = peer(&guest, "another-namespace");
-            let refused = admit_guest(&storage, &token, elsewhere, None, app, NOW).unwrap_err();
+            let refused =
+                jazz::db::block_on(admit_guest(&storage, &token, elsewhere, None, app, NOW))
+                    .unwrap_err();
             assert_eq!(
                 denied(refused),
                 "account does not match authenticated identity assignment",
@@ -543,7 +551,9 @@ mod tests {
             );
 
             let someone_else = peer(&seed(9), &audience);
-            let refused = admit_guest(&storage, &token, someone_else, None, app, NOW).unwrap_err();
+            let refused =
+                jazz::db::block_on(admit_guest(&storage, &token, someone_else, None, app, NOW))
+                    .unwrap_err();
             assert_eq!(
                 denied(refused),
                 "account does not match authenticated identity assignment",
@@ -552,7 +562,9 @@ mod tests {
 
             let unenrolled =
                 AuthorSubject::reserved(identity::DEVICE_ACCOUNT_ISSUER, &subject(&guest)).unwrap();
-            let refused = admit_guest(&storage, &token, unenrolled, None, app, NOW).unwrap_err();
+            let refused =
+                jazz::db::block_on(admit_guest(&storage, &token, unenrolled, None, app, NOW))
+                    .unwrap_err();
             assert_eq!(
                 denied(refused),
                 "public sessions require an enrolled account identity",
@@ -562,14 +574,14 @@ mod tests {
             // Founded under the app id above; a proof for another audience
             // cannot found it again elsewhere.
             let endpoint = "https://app.example/jazz";
-            let refused = admit_guest(
+            let refused = jazz::db::block_on(admit_guest(
                 &storage,
                 &proof(&guest, endpoint),
                 peer(&guest, endpoint),
                 Some(endpoint),
                 app,
                 NOW,
-            )
+            ))
             .unwrap_err();
             assert!(
                 matches!(
@@ -601,7 +613,8 @@ mod tests {
             let peer = AuthorSubject::reserved(identity::ANONYMOUS_ISSUER, &subject(&guest))
                 .unwrap()
                 .with_account(jazz::account_registry::AccountId(uuid::Uuid::from_u128(1)));
-            let refused = admit_guest(&storage, &token, peer, None, app, NOW).unwrap_err();
+            let refused = jazz::db::block_on(admit_guest(&storage, &token, peer, None, app, NOW))
+                .unwrap_err();
             assert!(
                 matches!(
                     refused,
