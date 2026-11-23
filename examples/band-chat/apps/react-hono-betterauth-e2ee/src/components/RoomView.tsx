@@ -89,9 +89,11 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   const directory = useDirectory();
   const { room, isCreator } = summary;
   const roomId = room.id;
+  // #region bandchat-locked-count
   const { data: newestFirst, unreadable, db } = useAll(roomMessagesQuery(roomId));
   // Messages this browser holds no key for yet are left out of the read.
   const lockedCount = unreadable.length;
+  // #endregion bandchat-locked-count
   const keyOnItsWay = useKeyOnItsWay(unreadable);
   // Undefined until the first result: "No messages yet" only for a room that has none.
   const isLoadingMessages = newestFirst === undefined;
@@ -434,6 +436,7 @@ function MessageGroup({
   );
 }
 
+// #region bandchat-key-on-its-way
 /** How long a key may be on its way before the room says it is waiting for one. */
 const KEY_ARRIVING_MS = 10_000;
 
@@ -468,3 +471,4 @@ function useKeyOnItsWay(unreadable: readonly { code: string }[]): "arriving" | "
     ? "slow"
     : null;
 }
+// #endregion bandchat-key-on-its-way

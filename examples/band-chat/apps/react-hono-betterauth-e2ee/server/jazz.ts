@@ -10,6 +10,7 @@ let instance: Promise<Jazz> | undefined;
  * `/jazz`. It holds no encryption keys: it relays and stores the encrypted
  * columns as ciphertext and reads only the plain ones.
  */
+// #region bandchat-server-jazz
 export function jazz(): Promise<Jazz> {
   // Throws (fails closed) on an incomplete configuration.
   const config = assertConfiguration();
@@ -39,6 +40,7 @@ export function jazz(): Promise<Jazz> {
   });
   return pending;
 }
+// #endregion bandchat-server-jazz
 
 /**
  * Ends every sign-in of `userId` except the session `keepToken`: deletes the
