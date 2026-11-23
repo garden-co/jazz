@@ -30,7 +30,12 @@ teardown() {
   [ -n "$url" ] && [ "$url" = "${T4_BASE_URL:-}" ] && { echo "FAIL teardown: refusing to delete the production URL"; FAIL=1; url=; }
   case "$url" in https://jazz-eval-*.vercel.app) ;; "") ;; *) echo "FAIL teardown: refusing to delete deployment '$url'"; FAIL=1; url=;; esac
   if [ -n "$url" ]; then
-    t4_vercel rm --yes "$url" >> "$T4_WORK/teardown.log" 2>&1 && echo "PASS teardown: deployment $url removed" || { echo "FAIL teardown: deployment $url not removed (see teardown.log)"; FAIL=1; }
+    # `vercel rm` returns before the deployment stops serving ("0 of 1 done"), and while it serves, a request (or a
+    # warm instance) resumes the core. Wait until it answers 404 before stopping the core (up to 3 min).
+    if t4_vercel rm --yes "$url" >> "$T4_WORK/teardown.log" 2>&1; then
+      for i in $(seq 36); do [ "$(t4_curl -s -o /dev/null -w '%{http_code}' "$url/")" = 404 ] && break; sleep 5; done
+      [ "$(t4_curl -s -o /dev/null -w '%{http_code}' "$url/")" = 404 ] && echo "PASS teardown: deployment $url removed" || { echo "FAIL teardown: deployment $url still answers 3 min after removal"; FAIL=1; }
+    else echo "FAIL teardown: deployment $url not removed (see teardown.log)"; FAIL=1; fi
   fi
   if [ -n "$core" ]; then
     # `sandbox rm` returns before a running session ends: the session runs on, holds the Drive and snapshots itself
@@ -38,12 +43,15 @@ teardown() {
     # gone and the Drive detached. Every wait is bounded (3 min) and a leftover still FAILs.
     gone() { ! t4_vercel sandbox ls --all --project "$VERCEL_PROJECT_ID" 2>/dev/null | grep -q "^$core "; }
     drive() { t4_vercel sandbox drives ls --project "$VERCEL_PROJECT_ID" --name-prefix "$core-data" 2>/dev/null | grep "^$core-data "; }
-    if ! gone; then
+    # A core something resumed after its removal comes back listed (RC 45103746609 and proof run 45105741147): so
+    # remove, wait until it's gone, and check it stays gone for 30 s. At most 3 rounds.
+    for round in 1 2 3; do
+      gone && { sleep 30; gone && break; }
       t4_vercel sandbox stop --project "$VERCEL_PROJECT_ID" "$core" >> "$T4_WORK/teardown.log" 2>&1 || true
       t4_vercel sandbox rm --project "$VERCEL_PROJECT_ID" "$core" >> "$T4_WORK/teardown.log" 2>&1 || true
-      for i in $(seq 36); do gone && break; sleep 5; done
-      gone && echo "PASS teardown: sandbox $core removed" || { echo "FAIL teardown: sandbox $core still listed 3 min after stop and remove (see teardown.log)"; FAIL=1; }
-    fi
+      for i in $(seq 24); do gone && break; sleep 5; done
+    done
+    gone && echo "PASS teardown: sandbox $core removed, and still gone 30 s later" || { echo "FAIL teardown: sandbox $core still listed after 3 rounds of stop and remove (see teardown.log)"; FAIL=1; }
     # A Drive can't be deleted while a session holds it: wait until it shows neither an attached sandbox nor session.
     row=$(drive)
     for i in $(seq 36); do [ -z "$row" ] || [ "$(echo "$row" | awk '{print $(NF-1) $NF}')" = -- ] && break; sleep 5; row=$(drive); done
