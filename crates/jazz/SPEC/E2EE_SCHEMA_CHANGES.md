@@ -40,11 +40,15 @@ app encrypts data it already stores. References: the
   plaintext is encrypted like any other value. The empty byte string is never
   ciphertext: it means "never written" and reads as the declared default
   (when stored rather than lens-supplied it is also reported `empty-cell`).
-- **Writes cannot move a row between spaces** (spec §5.1), and a write needs a
-  held key for the row's space. Creating a space needs Jazz read and update
-  permission on the space row (spec R15, §3.2); the client does not evaluate
-  it and creates optimistically, in the transaction of the first encrypted
-  write that needs the space.
+- **Writes cannot move a row between spaces** (spec §5.1). Writing an
+  encrypted value needs a held key for the row's space; an update that
+  touches only plain columns needs none, and a backend that holds no keys
+  writes plain columns only (it is refused any encrypted column). A client's
+  insert seals the encrypted columns it leaves out, so it needs the key.
+  Creating a space needs Jazz read and update permission on the space row
+  (spec R15, §3.2); the client does not evaluate it and creates
+  optimistically, in the transaction of the first encrypted write that needs
+  the space.
 - **Keys go to members only** (spec §1.3, R13). A space table's read rule
   must come from the members table (§4).
 
@@ -53,7 +57,12 @@ app encrypts data it already stores. References: the
 - Every schema version records its tables' `encryption` entries: each
   `history` version in `jazz.app.json` carries them, as the current `tables`
   do, and the writer keeps them when it moves a version into `history`.
-- Loaders return the declarations of every shipped version.
+- The loaders that deploy or serve the app (`load`, and `load_backend` from
+  generated bindings) return the declarations of every shipped version. The
+  client loader for an encrypted app (`load_client_encrypted`) returns only
+  the current version's, which its hooks seal and open by; the other client
+  loaders return none, and `load_client_current` refuses an app with Jazz's
+  system tables.
 - `generate`, `validate` and the deploy check every migration against the
   declarations of its two versions (§3). The deploy refuses a change even
   when the stored schema is unchanged, as it does for a plaintext type
@@ -152,24 +161,26 @@ version holds it.
   record which `T` it used, so each encrypted stored column keeps one `T` for
   life. A migration can append enum variants in place because encrypted enums
   store their variant names; the entry then pins the type the column was
-  introduced with as `sealedType`. Only a version that descends from another
-  along a chain of migrations may declare more variants than it, and then
-  only by appending to that version's list. Versions where neither descends
-  from the other (siblings) must declare identical variants: `[a]` beside
-  `[a, b]` is refused, as is `[a, b]` beside `[a, c]`, in whichever order
-  they arrive and whether they are deployed together or separately. All
-  declarations of a stored
-  column have the same nullability: an optional value carries a presence
-  byte, so changing nullability in either direction would leave old cells
-  unreadable. A JSON schema change, even loosening a constraint, also needs a
-  new column.
+  introduced with as `sealedType`. The variant lists of any two declarations
+  of that stored column, including ones on another branch, lie on one
+  append-only sequence: one is a prefix of the other. `[a]` beside `[a, b]`
+  is accepted, and two versions that append different variants after the
+  same prefix, such as `[a, b]` beside `[a, c]`, are refused, in whichever
+  order they arrive and whether they are deployed together or separately. All
+  declarations of a stored column have the same nullability: an optional
+  value carries a presence byte, so changing nullability in either direction
+  would leave old cells unreadable. A JSON schema change, even loosening a
+  constraint, also needs a new column.
 - **Defaults.** Rows stored before a column existed read its declared default,
   so another default would read them differently on clients of each version.
   Every declaration of a stored column therefore has the same default, or
   none in all of them; each must also be a value of its type (§3.1).
 - **Space and scope.** The context binds the scope table's identity and the
   space identifier, so a change of `space` or `scope` that is not a rename
-  would leave every cell unreadable.
+  would put every row in another space than the one its cells were sealed
+  for. As §1 says, a device holding a key of the old space would still read
+  such a cell, reported `stale-space`; on any other device it would be
+  `invalid-ciphertext`.
 - **Equality.** Rows older than a column have no equality token for it, and
   an index of tokens would miss them silently. So a column newly tagged in a
   table that existed in the previous version is refused, whether the
@@ -249,8 +260,8 @@ the data into a new encrypted table instead (the developer guide is
    whose key holders are all offline waits. Then the new reference columns
    are filled: each row whose old reference is set gets the same ID in the
    new one (the copies keep the IDs, so copying the value is enough), written
-   by a client or backend that may update the row, and in an encrypted table
-   by a holder of its space key. Verify every space before step 4, reading
+   by the backend or a client that may update the row; the column is plain,
+   so the update needs no key (§1). Verify every space before step 4, reading
    both tables at the `remote` tier (a local-first read can answer from a
    partial sync, and two partial reads can agree): the set of IDs in the new
    table equals the set in the old one, not merely the count, and no row has

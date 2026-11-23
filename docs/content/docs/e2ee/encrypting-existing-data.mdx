@@ -94,9 +94,9 @@ again overwrites the copy instead of adding another. Never skip a row because it
 copy it again.
 
 Then fill the new reference columns: for every row whose old reference is set, write the same ID
-into the new column. Rows written before your app set both columns need this. A client or your
-backend allowed to update those rows can do it; in an encrypted table, that is a client holding
-the row's space key.
+into the new column. Rows written before your app set both columns need this. Your backend can do
+it, or any client allowed to update those rows: a reference column is plain, so writing only it
+needs no key, even in an encrypted table.
 
 A sketch of a copying client (not a drop-in function). `tasks` is the old table and `secureTasks`
 the new one, with an encrypted `title`:
