@@ -579,6 +579,21 @@ pub(crate) struct MemberWatch {
     pub by_account: BTreeMap<(&'static str, String), BTreeSet<SpaceAddress>>,
 }
 
+impl MemberWatch {
+    /// After a gap in coverage, a watched space needs fresh evidence before its next write.
+    pub(crate) fn invalidate_coverage(&mut self, keys: &mut KeyState) {
+        self.covered.clear();
+        for (space, deps) in &mut self.spaces {
+            deps.version = None;
+            if let Ok(address) = crate::spaces::protocol_address(space) {
+                keys.rotation_evaluated.remove(&address);
+                keys.space_removals.remove(&address);
+            }
+            self.changed.insert(space.clone());
+        }
+    }
+}
+
 /// This device's creations of spaces in this run (protocol §3.2, §5.4).
 #[derive(Default)]
 pub(crate) struct Creations {
@@ -720,17 +735,15 @@ impl Shared {
             }
             affected.extend(spaces);
         }
-        if lost_watch {
-            affected.extend(watch.spaces.keys().cloned());
-            chain_changed.extend(watch.spaces.keys().cloned());
-            watch.covered.clear();
-        }
         for space in chain_changed {
             if let Some(deps) = watch.spaces.get_mut(&space) {
                 deps.version = None;
             }
         }
         let mut keys = self.keys.borrow_mut();
+        if lost_watch {
+            watch.invalidate_coverage(&mut keys);
+        }
         for space in affected {
             if let Ok(address) = crate::spaces::protocol_address(&space) {
                 keys.rotation_evaluated.remove(&address);
