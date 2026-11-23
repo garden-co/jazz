@@ -544,6 +544,11 @@ With `clearOnSignOut`, the key is forgotten and the data wiped.
 sign-out failed offline, say), Jazz signs them back in on its next answer from your backend: sign
 out of your auth first, then call `refresh()`.
 
+`signOut()` waits for the account's writes to upload. When they can't yet (offline), it rejects and
+the tab stays signed in, so you can call it again. The device already counts the account as signed
+out: a reload opens no one, and the next sign-in gets its own account. The account's key and
+unsynced writes stay on the device, and upload when it signs in again.
+
 Closing a client keeps local data on the device and works offline, but doesn't guarantee that sync
 completes. Changing accounts does.
 

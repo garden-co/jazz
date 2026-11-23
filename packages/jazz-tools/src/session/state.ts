@@ -113,6 +113,18 @@ type ClientReplacer = (
 ) => Promise<void>;
 const replacers = new WeakMap<object, ClientReplacer>();
 const switchers = new WeakMap<object, (from: AccountHandle) => Promise<boolean>>();
+const leavingAccounts = new WeakMap<object, () => AccountHandle | undefined>();
+
+/**
+ * @internal The selected account when its sign-out began and couldn't
+ * finish (writes that can't upload yet): the session still runs it, so the
+ * app can retry, but it is signed out on this device (see
+ * `AccountSelectionDurability.signOutRequested`), and nothing may hand it
+ * to whoever signs in next.
+ */
+export function signOutPendingAccount(session: object): AccountHandle | undefined {
+  return leavingAccounts.get(session)?.();
+}
 const upgradeListeners = new WeakMap<object, Set<() => void>>();
 
 /**
@@ -232,6 +244,8 @@ export async function createJazzSessionOwner<
 }): Promise<SessionCore<Client> & Extra> {
   const { accounts, openClient } = options;
   let selected = accounts.getLoggedIn();
+  // The account a sign-out of which failed while it stayed usable.
+  let leaving: AccountHandle | undefined;
   if (!selected && options.initial === "local-first") {
     const missing = deviceAccountStoreMissing(accounts, 'initial: "device"');
     if (missing) throw missing;
@@ -371,6 +385,7 @@ export async function createJazzSessionOwner<
         // The step failed before the client's teardown began (offline, a
         // storage delete the worker couldn't start): it keeps working, and
         // the app may try the operation again.
+        if (operation === "logout") leaving = selected;
         publish({
           status: "ready",
           account: selected,
@@ -522,6 +537,10 @@ export async function createJazzSessionOwner<
         await barrier.done;
         await pending?.catch(() => {});
         if (token !== generation) throw superseded();
+        // Recorded before the client closes, so a sign-out it can't finish
+        // still holds across reloads.
+        if (selected) await accounts.requestSignOut?.();
+        if (token !== generation) throw superseded();
         await perform(
           "logout",
           () => {
@@ -558,6 +577,9 @@ export async function createJazzSessionOwner<
       return closing;
     },
   };
+  leavingAccounts.set(session, () =>
+    leaving !== undefined && leaving === selected ? leaving : undefined,
+  );
   switchers.set(session, async (from) => {
     // An operation that published its outcome may still be finishing.
     while (busy || loggingOut) {

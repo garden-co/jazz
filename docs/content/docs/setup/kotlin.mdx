@@ -12,11 +12,11 @@ The `jazz-kotlin` library wraps Jazz's native core (`jazz-ffi`, through JNA). It
 `suspend` functions, and subscriptions are `Flow`s. It runs on JDK 17 or later, and on Android
 (minSdk 24).
 
-<Callout type="warn" title="Known issue: close() can block for 30 seconds">
-  In every release up to and including 2.0.0-beta.1, `close()` (and the end of `use {}`) can block
-  for 30 seconds while a call is still waiting for the server: a write or `waitForSync` at `Global`,
-  or a `Remote` read. On Android's main thread that makes the app stop responding (ANR). Call it off
-  the main thread:
+<Callout type="warn" title="Before 2.0.0-beta.2: close() can block for 30 seconds">
+  Up to and including 2.0.0-beta.1, `close()` (and the end of `use {}`) can block for 30 seconds
+  while a call is still waiting for the server: a write or `waitForSync` at `Global`, or a `Remote`
+  read. On Android's main thread that makes the app stop responding (ANR). On those releases, call it
+  off the main thread:
 
 ```kotlin
 withContext(NonCancellable + Dispatchers.IO) { jazz.close() }
@@ -24,6 +24,8 @@ withContext(NonCancellable + Dispatchers.IO) { jazz.close() }
 
 `NonCancellable` matters in a `finally`: without it, a cancelled coroutine skips the `close()`.
 With `use {}`, run the whole block in `withContext(Dispatchers.IO)`.
+
+From 2.0.0-beta.2, `close()` returns at once, and `closeAndWait()` waits for the teardown.
 
 </Callout>
 
@@ -38,9 +40,13 @@ With `use {}`, run the whole block in `withContext(Dispatchers.IO)`.
   at the default tier and watch `syncStatus`.
 </Callout>
 
-<Callout type="warn" title="Known issue: a bearer user can't open offline">
-  An app signed in with a bearer token signs in with your backend when it opens, so it can't open
-  while your backend is unreachable, even with a persistent store.
+<Callout title="Opening offline with a bearer">
+  An app signed in with a JWT bearer token opens its persistent store when your backend can't be
+  reached, if that user signed in on this device before. Until your backend signs them in again as
+  the same account, the client makes no request and uploads nothing; their writes queue locally. If
+  the backend names another account or refuses the token, the client stops and the session reads
+  signed out; writes made offline stay in that account's store for its next sign-in. An opaque
+  token, or a user who never signed in on this device, still needs the backend to open.
 </Callout>
 
 ## Install

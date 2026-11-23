@@ -778,10 +778,28 @@ impl JazzSession {
             .unless_closing(bearer.token(TokenReason::Refresh))
             .await??;
         let who = match &token {
-            Some(token) => {
-                self.unless_closing(crate::backend::backend_user(&endpoint, app, token))
-                    .await??
-            }
+            Some(token) => match self
+                .unless_closing(crate::backend::backend_user(&endpoint, app, token))
+                .await?
+            {
+                Ok(who) => who,
+                // The backend can't be reached. A client already open goes
+                // on; otherwise the bearer's user opens offline, if they
+                // signed in on this device before (the open says if not).
+                Err(crate::backend::Unanswered::Unreachable(error)) => {
+                    if self.lock().jazz.is_some() {
+                        self.set(|snapshot| snapshot.status = SessionStatus::Ready);
+                        return Ok(());
+                    }
+                    if guest {
+                        return Err(Error::Server(error));
+                    }
+                    self.transition();
+                    let config = self.user_config().user(Auth::Bearer(bearer));
+                    return self.switch_to(config, None).await;
+                }
+                Err(crate::backend::Unanswered::Failed(error)) => return Err(error),
+            },
             None => None,
         };
         let (Some(token), Some(who)) = (token, who) else {

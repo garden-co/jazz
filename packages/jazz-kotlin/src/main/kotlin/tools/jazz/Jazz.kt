@@ -6,6 +6,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.channels.Channel
@@ -91,6 +93,10 @@ public class Jazz internal constructor(
     private val implementations: Any? = null,
     /** Where blocking native calls run ([JazzConfig.dispatcher]). */
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /** The persistent store's directory, canonical, so a reopen waits for this app's teardown. */
+    private val store: String? = null,
+    /** Set by [close]; also stops the bearer provider being asked. */
+    private val closedFlag: java.util.concurrent.atomic.AtomicBoolean = java.util.concurrent.atomic.AtomicBoolean(false),
 ) : AutoCloseable {
     public companion object {
         /** How [open] reaches jazz-ffi; replace it to open through something else. */
@@ -102,9 +108,33 @@ public class Jazz internal constructor(
                 openReflectively("tools.jazz.UniffiNative", configJson, tokens)
         }
 
+        /**
+         * Teardowns still running, by store directory: [close] returns before
+         * the native core has let go of the store, and an open of the same
+         * directory waits for that instead of sharing the store with it.
+         */
+        private val teardowns = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<Unit>>()
+
+        /** Waits for a closed app's teardown on [store], if one is running. */
+        private suspend fun awaitTeardown(store: String) {
+            val teardown = teardowns[store] ?: return
+            try {
+                teardown.await()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // Its shutdown failed: the store is let go of all the same.
+            }
+        }
+
         /** Opens the app [app] (the text of its `jazz.app.json`), as generated bindings' `open` does. */
-        public suspend fun open(app: String, config: JazzConfig, implementations: Any? = null): Jazz =
-            startHandle(config.dispatcher, giveBack = { it.close() }) {
+        public suspend fun open(app: String, config: JazzConfig, implementations: Any? = null): Jazz {
+            val store = if (config.storage == Storage.Persistent) config.dataDir?.let { java.io.File(it).canonicalPath } else null
+            // A previous app on this directory may still be tearing down.
+            store?.let { awaitTeardown(it) }
+            val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+            // Given back already off the caller's thread: close it there, not in the background.
+            return startHandle(config.dispatcher, giveBack = { it.startClose(inline = true) }) {
                 if (config.serverUrl != null && config.auth == null) {
                     throw JazzException.Refused(
                         "connecting to ${config.serverUrl} needs JazzConfig.auth (a device account, or your backend's sign-in). " +
@@ -115,12 +145,15 @@ public class Jazz internal constructor(
                 val native = when (val auth = config.auth) {
                     // The native core asks on a thread of its own: blocking there is fine.
                     is JazzAuth.Bearer -> opener.openWithTokens(json) { reason ->
+                        // Once closed, the provider isn't asked any more: a failed fetch, never a sign-out.
+                        if (closed.get()) throw JazzException.Closed()
                         runBlocking { auth.token(TokenReason.of(reason)) }
                     }
                     else -> opener.open(json)
                 }
-                Jazz(native, implementations, config.dispatcher)
+                Jazz(native, implementations, config.dispatcher, store, closed)
             }
+        }
     }
 
     /**
@@ -142,6 +175,7 @@ public class Jazz internal constructor(
     private val watches = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
 
     private fun <T> stateFlow(sync: Boolean, initial: T, parse: (String) -> T): MutableStateFlow<T> {
+        checkOpen()
         val flow = MutableStateFlow(initial)
         watches += native.watch(sync) { json ->
             // A closing app ends each watch with {"kind":"closed"}: not a state.
@@ -163,7 +197,13 @@ public class Jazz internal constructor(
      * ([JazzException.Refused]) with the app still open. Closed, [session]
      * reads `SignedOut`.
      */
-    public suspend fun deleteClientStorage(): Unit = io {
+    public suspend fun deleteClientStorage() {
+        // Another app on this store that was just closed may still be letting go of it.
+        store?.let { awaitTeardown(it) }
+        deleteNow()
+    }
+
+    private suspend fun deleteNow(): Unit = io {
         // Inside io: a cancelled caller gets no result back, and the handle is gone all the same.
         try {
             native.deleteClientStorage()
@@ -184,6 +224,7 @@ public class Jazz internal constructor(
      */
     public val mutationErrors: Flow<MutationError> get() = callbackFlow {
         val cancel = startHandle(dispatcher, giveBack = { it() }) {
+            checkOpen()
             native.watchMutationErrors { json ->
                 // The app closing ends the watch: the Flow completes.
                 if (isClosedNotice(json)) close() else trySend(MutationError.parse(json))
@@ -285,12 +326,13 @@ public class Jazz internal constructor(
         row: String?,
         data: Flow<ByteArray>,
     ): Row {
-        val upload = startHandle(dispatcher, giveBack = { it.abort() }) { native.beginUpload(table.tableName, column.name, kind, id, row) }
+        val upload = startHandle(dispatcher, giveBack = { it.abort() }) { checkOpen(); native.beginUpload(table.tableName, column.name, kind, id, row) }
         try {
             data.collect { chunk -> io { upload.push(chunk) } }
             return decodeStored(table, io { upload.finish() })
         } catch (e: Throwable) {
-            withContext(NonCancellable) { io { runCatching { upload.abort() } } }
+            // Even once the app is closed: aborting gives the upload back.
+            withContext(NonCancellable) { ioAlways { runCatching { upload.abort() } } }
             throw e
         }
     }
@@ -397,9 +439,9 @@ public class Jazz internal constructor(
      * with a concurrent one throws [JazzException.Conflict] instead. It commits when [block] returns (at [tier]:
      * with [WriteTier.Global] it returns once the server accepted it) and
      * rolls back when [block] throws, rethrowing. Returns [block]'s value.
-     * If cancellation makes [block] throw, it rolls back. Once [block] has
-     * returned it commits, even if the caller was cancelled, and cancelling
-     * doesn't undo that.
+     * If the caller is cancelled before the commit starts (while [block]
+     * runs, or as it returns), it rolls back and throws the cancellation.
+     * Once the commit has started it stands, and this returns [block]'s value.
      *
      * ```kotlin
      * val moved = jazz.transaction { tx ->
@@ -414,10 +456,11 @@ public class Jazz internal constructor(
         serializable: Boolean = false,
         block: suspend (Transaction) -> T,
     ): T {
-        val native = startHandle(dispatcher, giveBack = { it.rollback() }) { if (serializable) native.begin() else native.beginMergeable() }
+        val native = startHandle(dispatcher, giveBack = { it.rollback() }) { checkOpen(); if (serializable) native.begin() else native.beginMergeable() }
         val tx = Transaction(native)
         val result = try {
-            block(tx)
+            // Checked here, so a cancellation rolls back too.
+            block(tx).also { currentCoroutineContext().ensureActive() }
         } catch (e: Throwable) {
             withContext(NonCancellable) { tx.end { runCatching { native.rollback() } } }
             throw e
@@ -440,9 +483,11 @@ public class Jazz internal constructor(
             io(block)
         }
 
-        internal suspend fun end(block: () -> Unit): Unit = run {
+        /** Commits or rolls back: even once the app is closed, so a rollback after [close] still reaches the native core. */
+        internal suspend fun end(block: () -> Unit): Unit = lock.withLock {
+            if (ended) throw JazzException.Closed()
             ended = true
-            block()
+            ioAlways(block)
         }
 
         public suspend fun <Row : Any> all(query: Query<Row>): List<Row> = run { decodeAll(query, tx.all(query.toJson())) }
@@ -550,6 +595,8 @@ public class Jazz internal constructor(
         // subscribing (withContext then throws) still unsubscribes.
         var cancel: (() -> Unit)? = null
         try {
+            // A caller cancelled already subscribes to nothing.
+            ensureActive()
             withContext(dispatcher + NonCancellable) {
                 cancel = subscribeNative(
                 query.toJson(),
@@ -584,24 +631,68 @@ public class Jazz internal constructor(
         tier: ReadTier?,
         onDelta: (String) -> Unit,
         onError: (kind: String, message: String) -> Unit,
-    ): () -> Unit =
-        if (tier == null) native.subscribe(query, onDelta, onError) else native.subscribeAt(query, tier.wire, onDelta, onError)
+    ): () -> Unit {
+        checkOpen()
+        return if (tier == null) native.subscribe(query, onDelta, onError) else native.subscribeAt(query, tier.wire, onDelta, onError)
+    }
 
     private fun <Row : Any> decode(query: Query<Row>, row: JsonObject): Row =
         jazzJson.decodeFromJsonElement(query.rowSerializer, prepareRow(query.source, query.includes, row, implementations))
 
+    /** The background teardown [close] started, once started. */
+    private val closing = java.util.concurrent.atomic.AtomicReference<kotlinx.coroutines.CompletableDeferred<Unit>?>(null)
+
     /**
-     * Closes the app: open subscriptions (and `watch`es) end with
-     * [JazzException.Closed], and so do later calls. Closing again does
-     * nothing, so `use {}` and an explicit `close()` mix. If it throws, the
-     * app is closed all the same.
+     * Closes the app, and returns at once, so it's safe on Android's main
+     * thread and at the end of `use {}`. From when it returns, new calls
+     * throw [JazzException.Closed], open subscriptions (and `watch`es) end
+     * with it, the session reads `SignedOut`, and a [JazzAuth.Bearer]
+     * provider isn't asked again. Calls already running end with
+     * [JazzException.Closed] as the native core shuts down, which finishes
+     * in the background (it may still wait for local work in progress):
+     * [closeAndWait] waits for that, and opening the same `dataDir` in this
+     * process, or deleting it, waits for it by itself (another process may
+     * be refused until the teardown ends). Closing again does nothing, so
+     * `use {}` and an explicit `close()` mix. It never throws: a failed
+     * shutdown reaches [closeAndWait], and the app is closed all the same.
      */
     override fun close() {
-        try {
-            native.close()
-        } finally {
-            endWatches()
+        startClose()
+    }
+
+    /**
+     * [close], then waits until the native core has shut down and let go of
+     * the store, and throws what that shutdown threw. Cancelling the wait
+     * doesn't stop the shutdown.
+     */
+    public suspend fun closeAndWait() {
+        startClose().await()
+    }
+
+    private fun startClose(inline: Boolean = false): kotlinx.coroutines.CompletableDeferred<Unit> {
+        val mine = kotlinx.coroutines.CompletableDeferred<Unit>()
+        if (!closing.compareAndSet(null, mine)) return closing.get()!!
+        closedFlag.set(true)
+        store?.let { teardowns[it] = mine }
+        endWatches()
+        val shutDown = {
+            try {
+                native.close()
+                mine.complete(Unit)
+            } catch (e: Throwable) {
+                mine.completeExceptionally(e)
+            } finally {
+                store?.let { teardowns.remove(it, mine) }
+            }
         }
+        // Not a daemon thread: a JVM program that ends right after close()
+        // still lets the store shut down cleanly.
+        if (inline) shutDown() else Thread({ shutDown() }, "jazz-close").apply { isDaemon = false }.start()
+        return mine
+    }
+
+    private fun checkOpen() {
+        if (closedFlag.get()) throw JazzException.Closed()
     }
 
     /** The app closed: stop watching, and an end user's session reads as signed out. */
@@ -618,6 +709,7 @@ public class Jazz internal constructor(
      * even past a cancellation: it may still reach the server.
      */
     private suspend fun <T> io(block: () -> T): T {
+        checkOpen()
         val call = native.newCall() ?: return withContext(dispatcher) { block() }
         var cancelledBy: CancellationException? = null
         try {
@@ -639,4 +731,7 @@ public class Jazz internal constructor(
             throw e
         }
     }
+
+    /** [io] without the closed check, nor a control: for what gives a handle back (rollback, abort), which ignores controls anyway. */
+    private suspend fun <T> ioAlways(block: () -> T): T = withContext(dispatcher) { block() }
 }

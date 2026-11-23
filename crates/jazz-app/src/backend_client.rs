@@ -149,6 +149,7 @@ pub(crate) async fn connect(
         let credential = Credential::Bearer {
             provider: credential,
             token: first,
+            unverified: None,
         };
         return Ok((client, user, credential, link));
     }
@@ -181,6 +182,7 @@ pub(crate) async fn connect(
     let credential = Credential::Bearer {
         provider: credential,
         token: first,
+        unverified: None,
     };
     Ok((client, user, credential, link))
 }

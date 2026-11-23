@@ -34,7 +34,9 @@ const (
 
 // TokenProvider gets the signed-in user's token: "" when no one is
 // signed in (the app then signs out). An error (a network blip at your
-// auth provider) keeps the session: Jazz asks again later.
+// auth provider) keeps the session: Jazz asks again later. ctx is
+// cancelled when the DB or Session closes, which waits for the provider to
+// return.
 type TokenProvider func(ctx context.Context, reason TokenReason) (string, error)
 
 type tokenAuth struct {
@@ -257,7 +259,18 @@ func onToken(ctx, reason, token uintptr) (status int32) {
 	}
 	c, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+	fetching := fetchesOf(uint64(ctx))
+	fetch, ok := fetching.begin(cancel)
+	if !ok {
+		*out = mallocString("the app is closing")
+		return 1
+	}
+	defer fetching.done(fetch)
 	t, err := value.(TokenProvider)(c, TokenReason(goString(reason)))
+	if err == nil && t == "" && fetching.isClosing() {
+		// Cancelled by closing: a failed fetch, not a sign-out.
+		err = context.Canceled
+	}
 	if err != nil {
 		// A failed fetch: the session stays, and Jazz asks again.
 		*out = mallocString(err.Error()) // jazz-ffi frees it
@@ -269,13 +282,12 @@ func onToken(ctx, reason, token uintptr) (status int32) {
 	return 0 // "" signs the user out
 }
 
-func openUser(config string, provider TokenProvider) (uintptr, uint64, error) {
-	id := nextProvider.Add(1)
+func openUser(config string, id uint64, provider TokenProvider) (uintptr, uint64, error) {
 	providers.Store(id, provider)
 	var cerr uintptr
 	h := ffi.openUser(cstr(config), ffi.tokenCallback, uintptr(id), &cerr)
 	if err := takeError(cerr); err != nil || h == 0 {
-		providers.Delete(id)
+		releaseProvider(id)
 		if err == nil {
 			err = &Error{Kind: KindRefused, Message: "open failed"}
 		}
@@ -360,14 +372,15 @@ func (db *DB) Refresh(ctx context.Context) error {
 	return db.call(ctx, "refresh", map[string]any{}, nil)
 }
 
-// SignOut signs the end user out and closes the app. On a DB from a
-// Session it is ErrNotSupported, and the DB stays open: use the Session's
-// SignOut.
+// SignOut signs the end user out and closes the app. When ctx ends first
+// it returns ctx.Err(), and the app is freed once signed out. On a DB from
+// a Session it is ErrNotSupported, and the DB stays open: use the
+// Session's SignOut.
 // A refused SignOut leaves the app open, as on a DB ForUser returned,
 // where it is ErrNotSupported: the session is the backend client's,
 // shared by every user. Close that DB instead.
 func (db *DB) SignOut(ctx context.Context) error {
-	if err := db.call(ctx, "signOut", map[string]any{}, nil); err != nil {
+	if err := db.callOr(ctx, "signOut", map[string]any{}, nil, db.closeAfter); err != nil {
 		return err
 	}
 	db.settleStreams()
