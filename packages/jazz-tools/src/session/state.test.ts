@@ -212,7 +212,7 @@ describe("Jazz session lifecycle", () => {
     });
     const failure = new GracefulShutdownSyncError(new Error("sync failed"));
     const client = {
-      shutdown: vi.fn(async () => {
+      shutdown: vi.fn(async (): Promise<void> => {
         order.push("shutdown");
         throw failure;
       }),
