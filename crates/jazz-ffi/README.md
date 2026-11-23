@@ -50,6 +50,13 @@ with small smoke programs ([`tests/kotlin`](tests/kotlin),
   "storage": "memory" | "persistent", "dataDir": "./data", "contract": 2 }
 ```
 
+An end user's persistent store, or a scoped backend client's, goes in
+`dataDir/<account>/`, so each user of one directory has their own. An app
+without a user, and a trusted backend client, keep theirs in `dataDir`
+itself. An app without a user refuses a store there that a signed-in user
+wrote (an earlier version kept users' stores there): open it as that user,
+or delete it.
+
 **Backend clients** (Go and Rust servers; TS's `createJazzClient` with a
 `credential`, see `docs/content/docs/setup/backend-client.mdx`): a trusted
 machine that syncs through the app's main backend, the TS `createJazz` that

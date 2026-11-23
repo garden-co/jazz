@@ -282,6 +282,7 @@ impl Jazz {
             backend,
             backend_client,
             memory,
+            storage_dir,
         } = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
             commands,
@@ -724,23 +725,13 @@ fn run(
     link: Link,
     storage_dir: Option<std::path::PathBuf>,
     mut commands: mpsc::UnboundedReceiver<Command>,
-    mut ready: oneshot::Sender<Result<Opened>>,
+    ready: oneshot::Sender<Result<Opened>>,
     stopper: Stopper,
 ) {
-    // Before anything reads the store's node id or opens SQLite.
-    let store = match storage_dir
-        .as_deref()
-        .map(|dir| crate::lifecycle::StoreDir::hold(dir, &stopper.life, || ready.is_closed()))
-    {
-        None => None,
-        Some(Ok(Some(store))) => Some(store),
-        // Nobody waits for the open any more.
-        Some(Ok(None)) => return,
-        Some(Err(error)) => {
-            let _ = ready.send(Err(error));
-            return;
-        }
-    };
+    // Held by `connect` once it knows whose store it opens, before anything
+    // reads the store's node id or opens SQLite; let go of after the
+    // runtime.
+    let store = std::rc::Rc::new(std::cell::RefCell::new(None::<crate::lifecycle::StoreDir>));
     let life = stopper.life.clone();
     let client_serverless = config.server_url.is_none();
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -757,12 +748,24 @@ fn run(
         }
     };
     let local = tokio::task::LocalSet::new();
+    let held = store.clone();
     let stopped = local.block_on(&runtime, async move {
         // Clients of a main backend may sync over its HTTP stream, whose
         // sessions end with a request on this runtime: shutdown waits for
         // it (`settle`), before the runtime goes.
         let endpoint_connector =
             Arc::new(jazz_native_transport::HttpStreamFallbackConnector::new());
+        // Borrowed only while polled: the hold's check and the select's
+        // both read it.
+        let ready = std::cell::RefCell::new(ready);
+        let abandoned = || ready.borrow().is_closed();
+        let place = Place {
+            root: storage_dir,
+            life: &life,
+            abandoned: &abandoned,
+            store: &held,
+            dir: None,
+        };
         let connected = tokio::select! {
             biased;
             connected = connect(
@@ -771,12 +774,16 @@ fn run(
                 link,
                 stopper,
                 Arc::clone(&endpoint_connector),
+                place,
             ) => connected,
             // Nobody waits for the open any more (its session closed): it
             // asks the provider and the network nothing further, and lets
             // go of the store.
-            () = ready.closed() => return End::Abandoned,
+            () = std::future::poll_fn(|cx| ready.borrow_mut().poll_closed(cx)) => {
+                return End::Abandoned;
+            }
         };
+        let ready = ready.into_inner();
         let (client, opened) = match connected {
             Ok(opened) => opened,
             // Answered below, with the store let go of.
@@ -907,6 +914,8 @@ struct Opened {
     backend: Option<BackendLink>,
     backend_client: Option<crate::backend_client::BackendClientLink>,
     memory: bool,
+    /// The dir of the store held (`<dir>/<account>/` for a user).
+    storage_dir: Option<std::path::PathBuf>,
 }
 
 async fn connect(
@@ -917,6 +926,7 @@ async fn connect(
     // A main backend (TS `createJazz`) may not upgrade sockets where it is
     // hosted: its clients fall back to its HTTP stream, as TS clients do.
     endpoint_connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
+    mut place: Place<'_>,
 ) -> Result<(JazzClient, Opened)> {
     let mut loaded = files.load()?;
     // The endpoint's client evaluates the sessions it acts for locally too:
@@ -993,6 +1003,7 @@ async fn connect(
                 credential,
                 endpoint,
                 own_bundle,
+                &mut place,
             )
             .await?;
             if !user.account.is_system() {
@@ -1003,15 +1014,24 @@ async fn connect(
         }
         (Some(auth), Some(endpoint)) => {
             let (client, user, credential) =
-                connect_user(context, endpoint_connector, auth, endpoint).await?;
+                connect_user(context, endpoint_connector, auth, endpoint, &mut place).await?;
             admitted = Some(user.account);
             (client, Some((user, credential)))
         }
-        _ if context.server_url.is_empty() => (JazzClient::connect(context).await?, None),
-        _ => (
-            JazzClient::connect_with_native_transport(context, connector).await?,
-            None,
-        ),
+        // An app with no user: its store at the dir, which mustn't be a
+        // user's an earlier version kept there.
+        _ if context.server_url.is_empty() => {
+            place.hold(&mut context, Owner::Nobody)?;
+            (JazzClient::connect(context).await?, None)
+        }
+        // The app's backend.
+        _ => {
+            place.hold(&mut context, Owner::Machine)?;
+            (
+                JazzClient::connect_with_native_transport(context, connector).await?,
+                None,
+            )
+        }
     };
     let sync = user_session::watch_sync(client.clone());
     let session = user.map(|(user, credential)| {
@@ -1041,8 +1061,57 @@ async fn connect(
             backend: link,
             backend_client,
             memory,
+            storage_dir: place.dir,
         },
     ))
+}
+
+/// Whose store an open holds.
+pub(crate) enum Owner {
+    /// An app with no user and no server.
+    Nobody,
+    /// The app's backend, or a trusted backend client: the dir itself.
+    Machine,
+    /// An end user or a scoped backend client: `<dir>/<account>/`.
+    Account(AccountId),
+}
+
+/// Where the store goes, held once the open knows whose it is.
+pub(crate) struct Place<'a> {
+    /// `Storage::Dir`'s dir; `None` for memory.
+    root: Option<std::path::PathBuf>,
+    life: &'a Arc<crate::lifecycle::Life>,
+    abandoned: &'a dyn Fn() -> bool,
+    store: &'a std::cell::RefCell<Option<crate::lifecycle::StoreDir>>,
+    /// The dir held.
+    dir: Option<std::path::PathBuf>,
+}
+
+impl Place<'_> {
+    /// Holds `owner`'s store and points `context` at it. Each account keeps
+    /// its own: a client never reads another user's rows, nor uploads their
+    /// pending writes as its own. A store an earlier version kept at the
+    /// dir itself is left as it is.
+    pub(crate) fn hold(&mut self, context: &mut AppContext, owner: Owner) -> Result<()> {
+        let Some(root) = &self.root else {
+            return Ok(());
+        };
+        let dir = match &owner {
+            Owner::Account(account) => root.join(account.0.to_string()),
+            Owner::Nobody | Owner::Machine => root.clone(),
+        };
+        let Some(store) = crate::lifecycle::StoreDir::hold(&dir, self.life, self.abandoned)? else {
+            // Nobody waits for the open any more.
+            return Err(Error::Stopped);
+        };
+        *self.store.borrow_mut() = Some(store);
+        if matches!(owner, Owner::Nobody) {
+            crate::lifecycle::refuse_a_users_store(&dir)?;
+        }
+        context.data_dir = dir.clone();
+        self.dir = Some(dir);
+        Ok(())
+    }
 }
 
 /// Connects as an end user through the app's Jazz endpoint, as a browser
@@ -1054,11 +1123,13 @@ async fn connect_user(
     connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
     auth: Auth,
     endpoint: &str,
+    place: &mut Place<'_>,
 ) -> Result<(JazzClient, User, Credential)> {
     let app = context.app_id;
     match auth {
         Auth::Device(key) => {
             let account = key.account(app);
+            place.hold(&mut context, Owner::Account(account))?;
             context.jwt_token = Some(key.mint(app, DEVICE_TOKEN_TTL_SECS)?);
             context.account_id = Some(account);
             let client = JazzClient::connect_with_native_transport(context, connector).await?;
@@ -1085,6 +1156,7 @@ async fn connect_user(
             session.account_id = Some(signed_in.account);
             context.account_id = Some(signed_in.account);
             context.backend_session = Some(session);
+            place.hold(&mut context, Owner::Account(signed_in.account))?;
             let client =
                 JazzClient::connect_with_native_transport_bearer(context, connector, token.clone())
                     .await?;
