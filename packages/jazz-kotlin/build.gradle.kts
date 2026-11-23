@@ -42,6 +42,13 @@ kotlin {
     compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
 
+// The same classes and natives give the same bytes: the GitHub release's jar and the Maven
+// repository's are built by two Gradle runs.
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
 val withFfi = (findProperty("jazzFfi") as String?) != "skip"
 val cargoProfile = (findProperty("cargoProfile") as String?) ?: "debug"
 val ffiLib = repo.resolve(
