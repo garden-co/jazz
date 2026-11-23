@@ -29,6 +29,13 @@ export interface AccountSelectionDurability {
   /** Queue this selection before returning; a synchronous failure is retried explicitly. */
   selectionChanged(account: AccountHandle | undefined): void;
   settle(retry: boolean): Promise<void>;
+  /**
+   * A sign-out of `account` (the selection) begins. A host that keeps the
+   * selection records the sign-out now, before the client closes, so one
+   * the client can't finish (writes that can't upload yet) still holds
+   * across reloads. The selection itself changes only once it finishes.
+   */
+  signOutRequested?(account: AccountHandle): Promise<void> | void;
 }
 
 /** @internal Enrollment boundary implemented by first-party account adapters. */
@@ -164,6 +171,12 @@ export class AccountManager<Auth> {
         throw new Error("Backend sign-in is unavailable on this host");
       return this.enrollment.linkWithBackend(account);
     });
+  }
+
+  /** @internal A sign-out of the selected account begins (see `AccountSelectionDurability.signOutRequested`). */
+  async requestSignOut(): Promise<void> {
+    const account = this.snapshot.account;
+    if (account) await this.selectionDurability?.signOutRequested?.(account);
   }
 
   logout(): void {
