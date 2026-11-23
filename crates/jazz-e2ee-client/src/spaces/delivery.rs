@@ -150,6 +150,9 @@ impl E2eeClient {
                     Err(_) => true,
                 });
             let mut keys = self.shared.keys.borrow_mut();
+            // Only a watched space keeps this answer, since only its watch
+            // reports later removals; the first-write and 60 s re-checks in
+            // `note_write` also make an unwatched space's write re-read it.
             if self.shared.member_watch.borrow().spaces.contains_key(space) {
                 keys.rotation_evaluated.insert(address.clone());
                 keys.space_removals.insert(address.clone(), removals);
@@ -406,7 +409,8 @@ impl E2eeClient {
             let mut keys = self.shared.keys.borrow_mut();
             keys.rotation_pending.remove(&address);
             // The new version is sealed to the members' current account
-            // epochs: nothing a removal superseded holds it.
+            // epochs: nothing a removal superseded holds it. As above, only a
+            // watched space keeps this answer.
             if self.shared.member_watch.borrow().spaces.contains_key(space) {
                 keys.rotation_evaluated.insert(address.clone());
             }

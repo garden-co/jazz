@@ -760,6 +760,39 @@ fn a_closed_read_before_the_first_write_keeps_the_member_watch() {
     within(|| reopen_and_write(BeforeWrite::Read));
 }
 
+/// Alice writes to a space she wrote to a moment ago, right after her
+/// runtime learns that bob was removed from it by someone else, before any
+/// pass runs on it: the change she was sent makes the write read the space
+/// first, so it rotates rather than seal under the version bob holds.
+#[test]
+fn a_write_right_after_a_member_leaves_the_space_rotates_first() {
+    within(|| {
+        let mut shared = SharedSpace::new();
+        let address = space_address(&shared.alice, shared.space);
+        shared.alice_writes("before");
+        shared.turns();
+        assert!(!shared.alice.client.needs_rotation(&address).unwrap());
+        let before = count(&shared.server, "__e2ee_space_successors");
+        let bob = Value::Uuid(uuid::Uuid::parse_str(&account_id(account(0xb0))).unwrap());
+        let member = all(&shared.server, Query::from("__e2ee_members"))
+            .unwrap()
+            .into_iter()
+            .find(|row| row.cell("accountId") == Some(bob.clone()))
+            .expect("bob's member row")
+            .row_uuid();
+        block_on(
+            shared
+                .server
+                .delete("__e2ee_members", member, Default::default()),
+        )
+        .unwrap();
+        // Alice's runtime receives the change; no watch sync runs before the write.
+        pump(&shared.server, &shared.alice.db);
+        shared.alice_writes("after");
+        assert_eq!(count(&shared.server, "__e2ee_space_successors"), before + 1);
+    });
+}
+
 /// Alice stops watching an idle room, then checks its members on first reuse.
 /// Bob removes his second device during the idle period.
 #[test]
