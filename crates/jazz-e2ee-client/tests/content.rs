@@ -66,6 +66,55 @@ fn missing_required_stream_sibling_leaves_the_attachment_unread() {
     }
 }
 
+/// A streamed upsert of a row this store does not hold is an insert: a
+/// missing required sibling is refused before the source is read. Upserting
+/// a held row without that sibling still updates it.
+#[test]
+fn upsert_of_an_absent_row_checks_required_siblings_before_reading() {
+    use jazz::db::StreamingMutationKind::Upsert;
+
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (db, _link, _) = online(&client, &server, None);
+    let space = project(&db, "plans");
+    hold_new_space(&client, &db, space);
+    let mut cells = note(space, SECRET);
+    cells.remove("title");
+    let absent = jazz::ids::RowUuid(uuid::Uuid::now_v7());
+    let error = block_on(db.write_streaming_value_with_id(
+        Upsert,
+        "notes",
+        absent,
+        cells.clone(),
+        "attachment",
+        Unread,
+        None,
+        None,
+        None,
+        None,
+    ))
+    .unwrap_err();
+    assert_eq!(error.reason, Some(jazz::db::Reason::MissingRequired));
+    assert_eq!(error.message, "missing required field `title` in `notes`");
+
+    let held = block_on(db.insert("notes", note(space, SECRET), Default::default()))
+        .unwrap()
+        .row_uuid();
+    block_on(db.write_streaming_value_with_id(
+        Upsert,
+        "notes",
+        held,
+        cells,
+        "attachment",
+        &b"new attachment"[..],
+        None,
+        None,
+        None,
+        None,
+    ))
+    .expect("upserting a held row needs no required sibling");
+}
+
 /// Rowless begin checks the kinds of plain siblings on an encrypted table.
 #[test]
 fn invalid_plain_stream_sibling_is_rejected_at_rowless_begin() {
@@ -118,12 +167,9 @@ fn refuses_invalid_stream_metadata(kind: jazz::db::StreamingMutationKind) {
         assert!(error.message.contains("plaintext type"), "{error}");
         if kind != jazz::db::StreamingMutationKind::Update {
             cells.remove("body");
+            // The row is new, so an upsert inserts it: both refuse the missing field.
             let error = write(cells.clone()).unwrap_err();
-            if kind == jazz::db::StreamingMutationKind::Insert {
-                assert_eq!(error.reason, Some(jazz::db::Reason::MissingRequired));
-            } else {
-                assert!(error.message.contains("notes.body"), "{error}");
-            }
+            assert_eq!(error.reason, Some(jazz::db::Reason::MissingRequired));
         }
     }
 }
