@@ -18835,4 +18835,50 @@ mod tests {
         assert!(!live.answered(2, true));
         assert!(!live.signal.confirmed_globally());
     }
+
+    /// Alice's store writes the authority namespace inside a savepoint that
+    /// rolls back: the file holds none, so the store must remember none, or
+    /// policies would compile stored identities for a namespace that was
+    /// never kept. Kept, it is remembered.
+    ///
+    /// A unit test: no public call rolls back a savepoint after the
+    /// namespace is written in it, so this drives the store's own
+    /// savepoint and reads the namespace it keeps in memory.
+    #[test]
+    fn a_rolled_back_savepoint_forgets_the_namespace_it_wrote() {
+        use crate::db::{Db, DbConfig, DbIdentity};
+        use crate::ids::{AuthorSubject, NodeUuid};
+        use crate::options::block_on;
+        use crate::storage::Scoped;
+        use jazz_model::model::public_schema::SchemaBuilder;
+
+        let schema = crate::schema::JazzSchema::new(&SchemaBuilder::new().build()).unwrap();
+        let alice = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([1; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let store = alice.inner.as_ref();
+        assert_eq!(store.known_namespace.get(), None);
+
+        block_on(store.conn.db_scope_then("namespace", async || {
+            store.persist_namespace([7; 16]).await.unwrap();
+            assert_eq!(store.known_namespace.get(), Some([7; 16]));
+            Scoped::Undo(())
+        }))
+        .unwrap();
+        assert_eq!(block_on(store.stored_namespace()).unwrap(), None);
+        assert_eq!(store.known_namespace.get(), None);
+
+        block_on(store.conn.db_scope_then("namespace", async || {
+            store.persist_namespace([8; 16]).await.unwrap();
+            Scoped::Keep(())
+        }))
+        .unwrap();
+        assert_eq!(store.known_namespace.get(), Some([8; 16]));
+        assert_eq!(block_on(store.stored_namespace()).unwrap(), Some([8; 16]));
+    }
 }
