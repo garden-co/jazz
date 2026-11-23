@@ -37,7 +37,7 @@
 //! An authority's server writes these in the same transaction as the
 //! admission they describe, so a deploy is never half written.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
@@ -690,6 +690,28 @@ pub(crate) fn schema(conn: &Storage, hash: &SchemaHash) -> Result<Option<PublicS
         ));
     }
     Ok(Some(schema))
+}
+
+/// Every schema reachable from `source` by a forward migration.
+pub(crate) fn descendants(
+    conn: &Storage,
+    source: &SchemaHash,
+) -> Result<HashSet<SchemaHash>, Error> {
+    let mut statement = conn
+        .prepare_cached(
+            "WITH RECURSIVE descendants(hash) AS (
+             SELECT target FROM _jazz_lenses WHERE source = ?1
+             UNION SELECT l.target FROM _jazz_lenses l JOIN descendants d ON l.source = d.hash
+         ) SELECT hash FROM descendants",
+        )
+        .map_err(storage)?;
+    statement
+        .query_map([source.as_bytes().as_slice()], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .map_err(storage)?
+        .map(|row| hash_of(row.map_err(storage)?, "_jazz_lenses"))
+        .collect()
 }
 
 /// The admitted versions' schemas, in admission order, each checked to

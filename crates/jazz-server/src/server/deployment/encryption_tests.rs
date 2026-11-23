@@ -222,6 +222,7 @@ async fn a_redeployment_cannot_change_an_encrypted_columns_type_or_nullability()
     );
 }
 
+/// On her first deploy Alice can pin the declared type, including its nullability.
 #[tokio::test]
 async fn a_first_declaration_can_pin_only_the_columns_declared_type() {
     let router = router().await;
@@ -306,6 +307,7 @@ async fn refuses_standalone_change(edit: impl FnOnce(&mut Value), reason: &str) 
     );
 }
 
+/// Alice cannot redirect existing ciphertext to another project by deploying a standalone version.
 #[tokio::test]
 async fn standalone_encryption_preserves_the_stored_space() {
     refuses_standalone_change(
@@ -315,6 +317,7 @@ async fn standalone_encryption_preserves_the_stored_space() {
     .await;
 }
 
+/// Alice must keep a stored ciphertext column declared or name a conversion.
 #[tokio::test]
 async fn standalone_encryption_keeps_ciphertext_columns_declared() {
     refuses_standalone_change(
@@ -327,11 +330,13 @@ async fn standalone_encryption_keeps_ciphertext_columns_declared() {
     .await;
 }
 
+/// When Alice keeps the stored equality token column, its writers must still populate it.
 #[tokio::test]
 async fn standalone_encryption_keeps_equality_while_the_token_column_remains() {
     refuses_standalone_change(|e| e["equality"] = json!([]), "token column").await;
 }
 
+/// A standalone decrypt publishes only after Alice confirms its source column.
 #[tokio::test]
 async fn a_standalone_decrypt_requires_confirmation_for_the_source_column() {
     let router = router().await;
@@ -355,6 +360,7 @@ async fn a_standalone_decrypt_requires_confirmation_for_the_source_column() {
     assert_eq!(status, StatusCode::OK, "{response}");
 }
 
+/// Alice renames the project reference. The same stored column still selects the space.
 #[tokio::test]
 async fn a_renamed_space_column_keeps_its_stored_identity() {
     let router = router().await;
@@ -377,6 +383,7 @@ async fn a_renamed_space_column_keeps_its_stored_identity() {
     assert_eq!(status, StatusCode::OK, "{response}");
 }
 
+/// Alice can declare a re-home from the old title into a new encrypted caption on either path.
 #[tokio::test]
 async fn an_explicit_rehome_is_accepted_with_or_without_a_migration() {
     let (first, next) = standalone_tasks();
@@ -400,6 +407,57 @@ async fn an_explicit_rehome_is_accepted_with_or_without_a_migration() {
         assert_eq!(status, StatusCode::OK, "{response}");
         let (status, response) = publish(&router, candidate).await;
         assert_eq!(status, StatusCode::OK, "{response}");
+    }
+}
+
+/// Alice publishes two branches of the same enum. Either can be the target and either can widen it.
+#[tokio::test]
+async fn sibling_versions_check_their_common_source_in_either_submission_order() {
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let root_type = r#""title": {"enum":["a"]}"#;
+    let load = |s: &str| artifact::load(s.as_bytes(), permissions.as_bytes()).unwrap();
+    let root = load(&APP.replace(r#""title": "string""#, root_type));
+    let sibling = |column: &str, wide: bool| {
+        let source = APP_V2.replace("done", column);
+        let (current, history) = source.split_once(r#""history":"#).unwrap();
+        let new_type = if wide {
+            r#""title": {"type":{"enum":["a","b"]},"sealedType":{"enum":["a"]}}"#
+        } else {
+            root_type
+        };
+        let current = current.replace(r#""title": "string""#, new_type);
+        let history = history.replace(r#""title": "string""#, root_type);
+        load(&format!(r#"{current}"history":{history}"#))
+    };
+
+    for left_widens in [true, false] {
+        let left = sibling("completed", left_widens);
+        let right = sibling("archived", !left_widens);
+        for (target, other) in [(&left, &right), (&right, &left)] {
+            let router = router().await;
+            let (status, response) = publish(&router, root.deployment_body(false)).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            let mut body = target.deployment_body(false);
+            let other_hash = other.current_hash().to_string();
+            let other = other.deployment_body(false);
+            body["schemas"].as_array_mut().unwrap().push(
+                other["schemas"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|schema| schema["hash"] == other_hash)
+                    .unwrap()
+                    .clone(),
+            );
+            body["encryption"]["versions"][&other_hash] =
+                other["encryption"]["versions"][&other_hash].clone();
+            body["migrations"]
+                .as_array_mut()
+                .unwrap()
+                .push(other["migrations"][0].clone());
+            let (status, response) = publish(&router, body).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+        }
     }
 }
 

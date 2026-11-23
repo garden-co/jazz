@@ -4482,6 +4482,14 @@ impl Db {
         crate::catalogue::read(&self.inner().conn)
     }
 
+    /// The schemas reachable from this hash through published forward migrations.
+    pub fn catalogue_descendants(
+        &self,
+        hash: &jazz_model::model::public_schema::SchemaHash,
+    ) -> Result<HashSet<jazz_model::model::public_schema::SchemaHash>, Error> {
+        crate::catalogue::descendants(&self.inner().conn, hash)
+    }
+
     /// The admitted table and column names used for storage by a published
     /// schema hash, including hashes that share a runtime schema version.
     pub fn catalogue_stored_names(

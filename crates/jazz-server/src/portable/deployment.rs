@@ -3,7 +3,7 @@
 //! the change that admits them into a runtime's catalogue. Locking,
 //! committing, and starting or reaching the runtime stay with each host.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use http::StatusCode;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
@@ -116,11 +116,15 @@ pub(crate) fn check_stored_columns(
             let hash = key.as_slice().try_into().map_err(|_| {
                 invalid("invalid schema hash in new encryption declarations".into())
             })?;
-            new.push(DeclaredVersion::read(
-                db,
-                SchemaHash(hash),
-                encryption::decode_stored(bytes).map_err(invalid)?,
-            )?);
+            let hash = SchemaHash(hash);
+            new.push((
+                hash,
+                DeclaredVersion::read(
+                    db,
+                    hash,
+                    encryption::decode_stored(bytes).map_err(invalid)?,
+                )?,
+            ));
         }
     }
     if new.is_empty() {
@@ -136,13 +140,21 @@ pub(crate) fn check_stored_columns(
             history.push(DeclaredVersion::read(db, SchemaHash(hash), entries)?);
         }
     }
-    // New versions in the same publication arrive in migration order.
-    for next in new {
-        next.check_sealed_types(history.iter()).map_err(invalid)?;
-        for old in &history {
-            old.check_transition_to(&next).map_err(invalid)?;
+    // Among versions first published together, compare each version to
+    // its ancestors. Siblings have no migration from one to the other.
+    let mut submitted: Vec<(&DeclaredVersion, HashSet<SchemaHash>)> = Vec::new();
+    for (i, (hash, next)) in new.iter().enumerate() {
+        let ancestors = submitted
+            .iter()
+            .filter_map(|(version, descendants)| descendants.contains(hash).then_some(*version));
+        let previous = history.iter().chain(ancestors);
+        next.check_sealed_types(previous.clone()).map_err(invalid)?;
+        for old in previous {
+            old.check_transition_to(next).map_err(invalid)?;
         }
-        history.push(next);
+        if i + 1 < new.len() {
+            submitted.push((next, db.catalogue_descendants(hash)?));
+        }
     }
     Ok(())
 }
