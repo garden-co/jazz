@@ -1039,12 +1039,12 @@ impl Db {
         };
         let cells = BTreeMap::from([(column.to_owned(), value)]);
         // The outer edit already owns chunk-fetch retries.
-        let result = (async {
-            let prepared =
-                self.prepare_write(StagedOp::Update(table.to_owned(), row, cells, opts.clone()))?;
-            self.write_prepared(prepared, who(opts.identity)).await
-        })
-        .await;
+        let result = self
+            .write_edited(
+                StagedOp::Update(table.to_owned(), row, cells, opts.clone()),
+                who(opts.identity),
+            )
+            .await;
         self.inner.without_overlay().clear_derived();
         result
     }
@@ -1092,14 +1092,26 @@ impl Db {
             return Err(error);
         }
         // The outer edit already owns chunk-fetch retries.
-        let result = (async {
-            let prepared =
-                self.prepare_write(StagedOp::Update(table.to_owned(), row, patch, opts.clone()))?;
-            self.write_prepared(prepared, who(opts.identity)).await
-        })
-        .await;
+        let result = self
+            .write_edited(
+                StagedOp::Update(table.to_owned(), row, patch, opts.clone()),
+                who(opts.identity),
+            )
+            .await;
         self.inner.without_overlay().clear_derived();
         result
+    }
+
+    /// Write `op`, an update an edit built, as its caller named it: with
+    /// encryption hooks it is sealed like any update, its encrypted cells
+    /// sealed and its space checked before anything stores it.
+    async fn write_edited(&self, op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        #[cfg(feature = "e2ee-client")]
+        if self.inner.e2ee.is_some() {
+            return self.write_sealed(op, who, None).await;
+        }
+        let prepared = self.prepare_write(op)?;
+        self.write_prepared(prepared, who).await
     }
 
     /// Insert a row whose `column` is read from `reader`, chunked as it

@@ -4251,9 +4251,10 @@ impl Db {
                             })
                             .collect();
                         // What the caller derived for the write (a streamed
-                        // value's descriptor) is the write's, not its
-                        // companions', whose applies clear what they derive.
-                        let given = inner.derived.take();
+                        // value's descriptor, an edit's tree and the nodes
+                        // it built) is the write's, not its companions',
+                        // whose applies clear what they derive.
+                        let given = (inner.derived.take(), inner.pending_nodes.take());
                         for companion in staged {
                             let mut companion = inner.prepare_write(schema.clone(), companion)?;
                             inner
@@ -4261,7 +4262,8 @@ impl Db {
                                 .await?;
                             ops.push(companion);
                         }
-                        inner.derived.borrow_mut().extend(given);
+                        inner.derived.borrow_mut().extend(given.0);
+                        inner.pending_nodes.borrow_mut().extend(given.1);
                         let mut op = inner.prepare_write(schema.clone(), op)?;
                         let applied = inner.apply_authored(&mut op, who, seq, origin).await;
                         ops.push(op);

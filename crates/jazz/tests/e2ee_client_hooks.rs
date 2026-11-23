@@ -1292,6 +1292,255 @@ fn encrypted_columns_are_only_read_and_written_whole() {
     assert_eq!(bodies(&all(&alice, "notes")), [text(SECRET)]);
 }
 
+/// A splice of `title` that turns "title" into "edited-title".
+fn title_edit() -> jazz::db::LargeValueUpdate {
+    jazz::db::LargeValueUpdate::Splice {
+        column: "title".to_owned(),
+        within: jazz::db::LargeValueUpdatePage::TextUtf8 { from: 0, to: 5 },
+        splices: vec![jazz::db::LargeValueUpdateSplice {
+            at: 0,
+            delete: 0,
+            insert: b"edited-".to_vec(),
+        }],
+    }
+}
+
+/// Contract: a partial large-value update's patch is sealed like any
+/// update's. Alice patches encrypted `body` (text) and `attachment`
+/// (bytes) next to an edit of plain `title`: her store, the wire and the
+/// server hold only sealed cells, and she reads the plaintext back.
+///
+/// ```text
+/// alice ──patch + edit──seal──► her store ──upload──► server
+/// ```
+#[test]
+fn a_partial_large_value_update_seals_its_patch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice.sqlite");
+    let hooks = Fake::new();
+    let alice = client_at(&hooks, &path);
+    let server = block_on(Db::open(DbConfig::new(schema(), identity(0)))).unwrap();
+    jazz::db::block_on(server.set_authority()).unwrap();
+    let (_link, wire) = link(&alice, &server);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    let row = block_on(alice.insert("notes", note(space, "first"), Default::default()))
+        .unwrap()
+        .row_uuid();
+
+    block_on(alice.update_with_large_value_mutations(
+        "notes",
+        row,
+        BTreeMap::from([
+            ("body".to_owned(), text(&format!("{SECRET}-body"))),
+            (
+                "attachment".to_owned(),
+                Value::Bytes(format!("{SECRET}-attachment").into_bytes()),
+            ),
+        ]),
+        vec![title_edit()],
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &alice);
+
+    let read = all(&alice, "notes");
+    assert_eq!(read[0].cell("body"), Some(text(&format!("{SECRET}-body"))));
+    assert_eq!(
+        read[0].cell("attachment"),
+        Some(Value::Bytes(format!("{SECRET}-attachment").into_bytes()))
+    );
+    assert_eq!(read[0].cell("title"), Some(text("edited-title")));
+    let stored = all(&server, "notes");
+    assert_eq!(stored[0].cell("title"), Some(text("edited-title")));
+    for column in ["body", "attachment"] {
+        let cell = match stored[0].cell(column) {
+            Some(Value::Bytes(cell)) => cell,
+            Some(Value::Nullable(Some(cell))) => match *cell {
+                Value::Bytes(cell) => cell,
+                other => panic!("the server stores a sealed `{column}`, not {other:?}"),
+            },
+            other => panic!("the server stores a sealed `{column}`, not {other:?}"),
+        };
+        assert!(cell.starts_with(b"ct") && !contains(&cell, SECRET.as_bytes()));
+    }
+    assert!(
+        !contains(&wire.borrow(), SECRET.as_bytes()),
+        "plaintext on the wire"
+    );
+    drop(alice);
+    assert!(
+        !contains(&stored_bytes(&path), SECRET.as_bytes()),
+        "plaintext in alice's store"
+    );
+}
+
+/// Contract: when sealing a partial large-value update stages a companion
+/// row, the nodes the edit built still reach the store with the write.
+/// Alice's edit of her chunked `title` outgrows its epoch, so it builds a
+/// new tree; after she reopens her store, the whole edited value reads back.
+///
+/// ```text
+/// alice ──edit (new tree) + sealed patch──► companion, then the row ──► reopen ──► read
+/// ```
+#[test]
+fn a_sealed_partial_update_keeps_the_nodes_its_edit_built() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice.sqlite");
+    let hooks = Fake::new();
+    let alice = client_at(&hooks, &path);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    let title: String = (0..256 * 1024)
+        .map(|i| char::from(b'a' + (i * 7 % 26) as u8))
+        .collect();
+    let mut cells = note(space, "first");
+    cells.insert("title".to_owned(), text(&title));
+    let row = block_on(alice.insert("notes", cells, Default::default()))
+        .unwrap()
+        .row_uuid();
+    let companion = RowUuid(uuid::Uuid::new_v4());
+    *hooks.companion_project.borrow_mut() = Some((companion, "companion".to_owned()));
+    let grown = "x".repeat(jazz::large_values::epoch::EPOCH_EDIT_BYTES + 1024);
+    let end = title.len() as u64;
+
+    block_on(alice.update_with_large_value_mutations(
+        "notes",
+        row,
+        BTreeMap::from([("body".to_owned(), text("second"))]),
+        vec![jazz::db::LargeValueUpdate::Splice {
+            column: "title".to_owned(),
+            within: jazz::db::LargeValueUpdatePage::TextUtf8 { from: end, to: end },
+            splices: vec![jazz::db::LargeValueUpdateSplice {
+                at: 0,
+                delete: 0,
+                insert: grown.clone().into_bytes(),
+            }],
+        }],
+        Default::default(),
+    ))
+    .unwrap();
+    drop(alice);
+
+    let alice = client_at(&hooks, &path);
+    let rows = all(&alice, "notes");
+    assert_eq!(
+        rows[0].cell("title"),
+        Some(text(&format!("{title}{grown}")))
+    );
+    assert_eq!(rows[0].cell("body"), Some(text("second")));
+    assert_eq!(all(&alice, "projects").len(), 1, "the companion committed");
+}
+
+/// Contract: an append or splice of a plain column of an encrypted row is
+/// an update the hooks seal, with the space the row is stored in; of an
+/// encrypted column it is refused (its cell is sealed whole).
+#[test]
+fn appends_and_splices_of_an_encrypted_row_are_sealed() {
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    let row = block_on(alice.insert("notes", note(space, SECRET), Default::default()))
+        .unwrap()
+        .row_uuid();
+    let appended = block_on(alice.append_value("notes", row, "body", b"more".to_vec()));
+    assert_eq!(appended.unwrap_err().code, ErrorCode::Query);
+
+    block_on(alice.append_value("notes", row, "title", b"-appended".to_vec())).unwrap();
+    block_on(alice.splice_value(
+        "notes",
+        row,
+        "title",
+        jazz::db::LargeValueUpdateSplice {
+            at: 0,
+            delete: 0,
+            insert: b"spliced-".to_vec(),
+        },
+        Default::default(),
+    ))
+    .unwrap();
+
+    assert_eq!(
+        hooks.writes.borrow()[1..],
+        [
+            (WriteKind::Update, Some(Value::Uuid(space))),
+            (WriteKind::Update, Some(Value::Uuid(space))),
+        ]
+    );
+    let rows = all(&alice, "notes");
+    assert_eq!(rows[0].cell("title"), Some(text("spliced-title-appended")));
+    assert_eq!(rows[0].cell("body"), Some(text(SECRET)));
+}
+
+/// Contract: a partial large-value update cannot move an encrypted row to
+/// another space, as a plain update cannot: refused, nothing applied.
+#[test]
+fn a_partial_large_value_update_cannot_move_an_encrypted_row() {
+    let hooks = Fake::new();
+    let alice = client(&hooks);
+    let (from, to) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    hooks.hold(from);
+    hooks.hold(to);
+    let row = block_on(alice.insert("notes", note(from, SECRET), Default::default()))
+        .unwrap()
+        .row_uuid();
+
+    let moved = block_on(alice.update_with_large_value_mutations(
+        "notes",
+        row,
+        BTreeMap::from([("projectId".to_owned(), Value::Uuid(to))]),
+        vec![title_edit()],
+        Default::default(),
+    ));
+
+    assert_eq!(moved.unwrap_err().code, ErrorCode::WriteRejected);
+    let rows = all(&alice, "notes");
+    assert_eq!(rows[0].cell("projectId"), Some(Value::Uuid(from)));
+    assert_eq!(rows[0].cell("title"), Some(text("title")));
+}
+
+/// Contract: a binding's partial large-value update seals its patch: the
+/// plaintext alice's binding wrote never reaches her store, and her
+/// binding reads it back.
+#[test]
+fn a_bindings_partial_large_value_update_seals_its_patch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice.sqlite");
+    let hooks = Fake::new();
+    let alice = client_at(&hooks, &path);
+    let space = uuid::Uuid::new_v4();
+    hooks.hold(space);
+    let row = block_on(alice.insert("notes", note(space, "first"), Default::default()))
+        .unwrap()
+        .row_uuid();
+    let binding = block_on(jazz::binding_host::Binding::new(alice, identity(1), false));
+    let descriptor =
+        jazz::records::RecordDescriptor::new([("attachment", jazz::records::ValueType::Bytes)]);
+    let patch = jazz::records::OwnedRecord::new(
+        descriptor
+            .create(&[Value::Bytes(SECRET.as_bytes().to_vec())])
+            .unwrap(),
+        descriptor,
+    );
+    let patch = jazz::binding_codec::encode_named_cells(&patch).unwrap();
+
+    binding
+        .update_large_values("notes", row.0.as_bytes(), &patch, vec![title_edit()], None)
+        .unwrap();
+
+    let read = binding
+        .local_current_row("notes", row.0.as_bytes())
+        .unwrap();
+    assert!(contains(&read, SECRET.as_bytes()), "alice reads it back");
+    assert!(contains(&read, b"edited-title"));
+    drop(binding);
+    assert!(
+        !contains(&stored_bytes(&path), SECRET.as_bytes()),
+        "plaintext in alice's store"
+    );
+}
+
 /// Contract: Alice's database returns a protocol error when asked to
 /// serve as the authority with encryption hooks installed.
 #[test]
