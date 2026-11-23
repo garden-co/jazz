@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{Db, Error, ErrorCode};
 use jazz::e2ee::{E2eeRefusal, SpaceAddress, Unreadable, UnreadableCode};
-use jazz::query::{Query, col, eq, lit};
+use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::account::{AccountFloor, PublicAccountLedger};
 use jazz_e2ee::protocol::content::{HeldSpace, KeyMark, MissingKey};
@@ -292,9 +292,10 @@ impl E2eeClient {
                         if missing.is_empty() {
                             acquisition = Some(acquired);
                         } else {
-                            // Read this account's deliveries for the room in one round trip.
+                            // Epoch order lets the room-and-recipient index serve the whole read.
                             let query = of_space(rows::SPACE_DELIVERIES)
-                                .filter(eq(col("recipientAccountId"), lit(account.clone())));
+                                .filter(eq(col("recipientAccountId"), lit(account.clone())))
+                                .order_by("keyEpochId", OrderDirection::Asc);
                             let (own_deliveries, _) = self
                                 .read_rows::<SpaceDelivery>(db, tx, &skipped, query)
                                 .await?;
