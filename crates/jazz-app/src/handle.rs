@@ -551,8 +551,8 @@ impl Jazz {
     /// writes are flushed and the store closed.
     ///
     /// The 30 seconds are not a hard limit: work that doesn't yield isn't
-    /// interrupted, and shutdown also waits for the store to close and for
-    /// a host name lookup in progress. It doesn't wait for the token
+    /// interrupted, and shutdown also waits for the store to close. It
+    /// doesn't wait for a host name lookup in progress, nor for the token
     /// provider's own threads or tasks.
     ///
     /// On a handle acting for a user ([`Jazz::for_user`], or
@@ -868,7 +868,9 @@ fn run(
     // gone is the store closed, for `delete_client_storage` to remove (a
     // file it unlinks while SQLite still maps it is a SIGBUS).
     drop(local);
-    drop(runtime);
+    // Without waiting for its blocking tasks: a host name lookup has no
+    // timeout, and none of them holds the store.
+    runtime.shutdown_background();
     drop(store);
     let (result, stopped) = match stopped {
         End::Stopped(result, replies) => (result, replies),

@@ -746,3 +746,34 @@ async fn shutdown_with_open_mergeable_transaction() {
     assert_eq!(titles, ["kept"]);
     jazz.shutdown().await.unwrap();
 }
+
+/// Shutdown doesn't wait for a blocking task the client's runtime still
+/// runs (a host name lookup, say, which no timeout ends), and still lets go
+/// of a persistent store: it reopens at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_doesnt_wait_for_a_blocking_task_left_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let app_id = AppId::random();
+    let config = || Config::new(app_id).storage(Storage::Dir(dir.path().to_owned()));
+    let jazz = bindings::open(config()).await.unwrap();
+    jazz.insert(new_todo("kept")).await.unwrap();
+    jazz.with_client(|_| async {
+        // Left running, as a lookup the client stopped waiting for is.
+        drop(tokio::task::spawn_blocking(|| {
+            std::thread::sleep(Duration::from_secs(20))
+        }));
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let started = std::time::Instant::now();
+    jazz.shutdown().await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "shutdown took {:?}",
+        started.elapsed()
+    );
+    let again = bindings::open(config()).await.expect("the store reopens");
+    assert_eq!(again.all(todos::query()).await.unwrap().len(), 1);
+    again.shutdown().await.unwrap();
+}

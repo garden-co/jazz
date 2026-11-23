@@ -100,9 +100,9 @@ does.
 
 - `jazz.shutdown()` stops the client. Calls waiting on the server fail with `Error::Stopped` at
   once (what they sent may still apply); local work already started finishes (for up to 30
-  seconds, though work that doesn't yield can't be cut short), then subscriptions end. It also
-  waits for a host name lookup in progress, so it has no hard time limit. Call it before exiting
-  with `Storage::Dir`, so the store is flushed and closed.
+  seconds, though work that doesn't yield can't be cut short, so it has no hard time limit), then
+  subscriptions end. Call it before exiting with `Storage::Dir`, so the store is flushed and
+  closed.
 - `jazz.close(timeout)` first waits up to `timeout` (`CLOSE_TIMEOUT` is 10 seconds) for queued
   writes to reach the server, then shuts down. With `Storage::Memory`, writes that never arrived are
   lost and reported as `Error::Unsynced { pending }`; `Duration::ZERO` doesn't wait for them and
