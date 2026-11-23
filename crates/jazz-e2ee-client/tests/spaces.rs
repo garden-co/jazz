@@ -242,6 +242,40 @@ fn alice_with_a_note(server: &Db) -> (uuid::Uuid, MemoryStore) {
     (space, store)
 }
 
+/// Alice adds Bob after rotating each room. While he waits for a delivery,
+/// each acquisition reads the current epoch and checks his older deliveries once.
+#[test]
+fn a_keyless_members_delivery_queries_stay_constant_across_rotations() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let bob = device(&server, account(0xb0), MemoryStore::new(), 2);
+        bob.activate(&server);
+        let mut counts = Vec::new();
+        for rotations in [1, 6] {
+            let space = new_project(&server, &alice, "plans");
+            write_note(&server, &alice, space, SECRET).unwrap();
+            pump(&server, &alice.db);
+            let address = space_address(&alice, space);
+            for _ in 0..rotations {
+                drive(
+                    &server,
+                    &[&alice.db],
+                    alice.client.rotate(&alice.db, &address),
+                )
+                .unwrap();
+            }
+            add_member(&server, &alice, space, &bob.id());
+            bob.client.take_delivery_reads();
+            let state = drive(&server, &[&bob.db], bob.client.acquire(&bob.db, &address)).unwrap();
+            assert_eq!(state, SpaceKeyState::KeyPending);
+            counts.push(bob.client.take_delivery_reads().2);
+        }
+        assert_eq!(counts, [2, 2]);
+    });
+}
+
 /// Contract: a device that lost its held keys gets the space's key back
 /// from the rows the server holds (its own account envelope in the root),
 /// whichever way it first needs it: a read that left rows out, an equality
