@@ -8,7 +8,7 @@
 use crate::common;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
@@ -3324,8 +3324,10 @@ fn a_store_without_held_sets_forgets_closed_points_on_any_access_loss() {
         let (upstream, _messages) = a_closed_rooms_point_beside_an_access_loss(&server, &client);
         assert!(client.detach_connection(&upstream));
     }
-    // As a build that predates the table left it.
+    // As a build that predates the tables left it.
     let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("DROP TABLE _jazz_read_holds_points", [])
+        .unwrap();
     conn.execute("DROP TABLE _jazz_read_holds", []).unwrap();
     drop(conn);
 
@@ -3384,7 +3386,8 @@ fn another_identity_takes_no_stored_held_set() {
 fn read_holds_cost() {
     use std::time::{Duration, Instant};
     let rows: u32 = std::env::var("ROWS").map_or(10_000, |rows| rows.parse().unwrap());
-    let changes = 50;
+    let batches = [1u32, 10, 100];
+    let rounds = 20u32;
     let server = open(0, AuthorSubject::SYSTEM);
     let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
         jazz::db::block_on(server.insert(
@@ -3438,7 +3441,7 @@ fn read_holds_cost() {
     let path = dir.store();
     let query = Query::from("messages");
     let opening;
-    let mut per_change = Vec::new();
+    let mut per_batch: Vec<(u32, Vec<Duration>)> = Vec::new();
     {
         let client = open_durable(&path, alice());
         let (client_side, server_side, _) = pipe();
@@ -3447,27 +3450,31 @@ fn read_holds_cost() {
         let prepared = client.prepare_query(&query).unwrap();
         let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
         opening = timed_pump(&client);
-        for n in 0..changes {
-            seed(
-                "messages",
-                id(4, n),
-                cells(&[
-                    ("room", Value::Uuid(id(1, 0).0)),
-                    ("body", Value::String(format!("new {n}"))),
-                ]),
-            );
-            per_change.push(timed_pump(&client));
+        let mut next = 0u32;
+        for batch in batches {
+            let mut times = Vec::new();
+            for _ in 0..rounds {
+                for _ in 0..batch {
+                    seed(
+                        "messages",
+                        id(4, next),
+                        cells(&[
+                            ("room", Value::Uuid(id(1, 0).0)),
+                            ("body", Value::String(format!("new {next}"))),
+                        ]),
+                    );
+                    next += 1;
+                }
+                times.push(timed_pump(&client));
+            }
+            times.sort();
+            per_batch.push((batch, times));
         }
         assert!(client.detach_connection(&upstream));
     }
-    per_change.sort();
     let conn = rusqlite::Connection::open(&path).unwrap();
-    let stored: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT count(*), coalesce(sum(length(holds)), 0) FROM _jazz_read_holds",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+    let stored: Option<i64> = conn
+        .query_row("SELECT count(*) FROM _jazz_read_holds", [], |r| r.get(0))
         .ok();
     drop(conn);
     let file = std::fs::metadata(&path).unwrap().len();
@@ -3478,6 +3485,8 @@ fn read_holds_cost() {
     std::fs::copy(&path, &without).unwrap();
     if stored.is_some() {
         let conn = rusqlite::Connection::open(&without).unwrap();
+        conn.execute("DROP TABLE _jazz_read_holds_points", [])
+            .unwrap();
         conn.execute("DROP TABLE _jazz_read_holds", []).unwrap();
     }
     let mut report = Vec::new();
@@ -3501,13 +3510,216 @@ fn read_holds_cost() {
         ));
     }
     eprintln!(
-        "read holds, {rows} rows: opening (client ticks) {opening:?}; one-row change \
-         (client ticks) median {:?}, p90 {:?}; stored sets {stored:?} (count, bytes); \
-         store file {file} bytes",
-        per_change[per_change.len() / 2],
-        per_change[per_change.len() * 9 / 10],
+        "read holds, {rows} rows: opening (client ticks) {opening:?}; stored rows {stored:?}; \
+         store file {file} bytes"
     );
+    for (batch, times) in &per_batch {
+        eprintln!(
+            "  {batch}-row change (client ticks): median {:?}, p90 {:?}",
+            times[times.len() / 2],
+            times[times.len() * 9 / 10],
+        );
+    }
     for line in report {
         eprintln!("{line}");
     }
+}
+
+/// `jazz.read-holds.v1` as a store holds it: the two tables as declared,
+/// one header per point matching its watermark row (layout version 1, the
+/// same `through` and read context), and one row per held row, by stored
+/// table and 16-byte id. A one-row change moves the header and adds just
+/// that row.
+#[test]
+fn held_sets_are_stored_as_jazz_read_holds_v1() {
+    let server = seeded(3);
+    let dir = StoreDir::new("read-holds-layout");
+    let path = dir.store();
+    let client = open_durable(&path, alice());
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let messages = client.prepare_query(&Query::from("messages")).unwrap();
+    let _messages = block_on(client.subscribe(&messages, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+
+    let stored = |path: &std::path::Path| {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let ddl: Vec<String> = conn
+            .prepare(
+                "SELECT sql FROM sqlite_master WHERE name LIKE '_jazz_read_holds%' ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let header: (Vec<u8>, i64, i64, Option<Vec<u8>>) = conn
+            .query_row(
+                "SELECT key, version, through, context FROM _jazz_read_holds_points",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        let point: (i64, Option<Vec<u8>>) = conn
+            .query_row(
+                "SELECT through, context FROM _jazz_watermarks WHERE key = ?1",
+                [&header.0],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let rows: Vec<(String, Vec<u8>)> = conn
+            .prepare("SELECT tbl, id FROM _jazz_read_holds WHERE key = ?1 ORDER BY tbl, id")
+            .unwrap()
+            .query_map([&header.0], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        (ddl, header, point, rows)
+    };
+    let (ddl, header, point, rows) = stored(&path);
+    assert_eq!(
+        ddl,
+        [
+            "CREATE TABLE _jazz_read_holds (key BLOB NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, \
+             PRIMARY KEY (key, tbl, id)) WITHOUT ROWID",
+            "CREATE TABLE _jazz_read_holds_points (key BLOB PRIMARY KEY, version INTEGER NOT NULL, \
+             through INTEGER NOT NULL, context BLOB) WITHOUT ROWID",
+            "CREATE INDEX _jazz_read_holds_row ON _jazz_read_holds (tbl, id)",
+        ]
+    );
+    assert_eq!(header.0.len(), 32, "keyed by the watermark key");
+    assert_eq!(header.1, 1, "layout version 1");
+    assert_eq!(
+        (header.2, header.3.clone()),
+        point,
+        "the header is its point's"
+    );
+    // Room 0's three messages and the membership they rest on.
+    let ids: BTreeSet<Vec<u8>> = rows.iter().map(|(_, id)| id.clone()).collect();
+    let expected: BTreeSet<Vec<u8>> = [id(3, 0), id(3, 2), id(3, 4), id(2, 0)]
+        .iter()
+        .map(|row| row.0.as_bytes().to_vec())
+        .collect();
+    assert_eq!(ids, expected, "{rows:?}");
+    assert_eq!(rows.len(), 4);
+
+    // One more message: the header moves with the point, one row is added.
+    jazz::db::block_on(server.insert(
+        "messages",
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("body", Value::String("new".into())),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(3, 900)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &client);
+    let (_, moved, point, after) = stored(&path);
+    assert!(moved.2 > header.2, "the point moved");
+    assert_eq!((moved.2, moved.3), point);
+    assert_eq!(after.len(), 5);
+    assert!(
+        after
+            .iter()
+            .any(|(_, row)| *row == id(3, 900).0.as_bytes().to_vec())
+    );
+}
+
+/// What resuming a closed read costs after an unrelated access loss, for
+/// the record (run like `read_holds_cost`, here and on the base revision).
+/// Alice's closed read of room 0's messages (`ROWS` of them) and her open
+/// read of room 1's; her room 1 membership is deleted, so room 1's
+/// messages are lost, none of which the closed read held. Reopening the
+/// closed read then resumes (with held sets) or opens fresh (without).
+#[test]
+#[ignore = "a measurement, not a check"]
+fn access_loss_resume_cost() {
+    use std::time::Instant;
+    let rows: u32 = std::env::var("ROWS").map_or(10_000, |rows| rows.parse().unwrap());
+    let server = open(0, AuthorSubject::SYSTEM);
+    let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+        jazz::db::block_on(server.insert(
+            table,
+            values,
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    };
+    for room in 0..2 {
+        seed(
+            "rooms",
+            id(1, room),
+            cells(&[("name", Value::String(format!("room {room}")))]),
+        );
+        seed(
+            "memberships",
+            id(2, room),
+            cells(&[
+                ("room", Value::Uuid(id(1, room).0)),
+                ("member", Value::String(subject())),
+            ]),
+        );
+    }
+    for n in 0..rows {
+        seed(
+            "messages",
+            id(3, n),
+            cells(&[
+                ("room", Value::Uuid(id(1, 0).0)),
+                ("body", Value::String(format!("m{n}"))),
+            ]),
+        );
+    }
+    for n in 0..10 {
+        seed(
+            "messages",
+            id(5, n),
+            cells(&[
+                ("room", Value::Uuid(id(1, 1).0)),
+                ("body", Value::String(format!("r1 {n}"))),
+            ]),
+        );
+    }
+    let in_room = |room: u32| {
+        Query::from("messages").filter(eq(col("room"), lit(Value::Uuid(id(1, room).0))))
+    };
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let room0 = client.prepare_query(&in_room(0)).unwrap();
+    let closed = block_on(client.subscribe(&room0, ReadOpts::default())).unwrap();
+    let room1 = client.prepare_query(&in_room(1)).unwrap();
+    let _open = block_on(client.subscribe(&room1, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    drop(closed);
+    pump(&server, &client);
+    block_on(server.delete("memberships", id(2, 1), Default::default())).unwrap();
+    pump(&server, &client);
+    assert!(client.detach_connection(&upstream));
+
+    let (client_side, server_side, shipped, resumes) = watched_pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    pump(&server, &client);
+    let before_images = *shipped.borrow();
+    let before_reads = resumes.borrow().len();
+    let started = Instant::now();
+    let _reopened = block_on(client.subscribe(&room0, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    eprintln!(
+        "closed {rows}-row read after an unrelated access loss: reopen {:?}, {} images, resumed {}",
+        started.elapsed(),
+        *shipped.borrow() - before_images,
+        resumes.borrow()[before_reads]
+    );
 }
