@@ -55,7 +55,7 @@ changes that touch encrypted data when the app files (`jazz.app.json`,
 | Rename an encrypted column                                 | Unchanged                       | Lens rename of the column **and** its `__e2ee_eq_` column    |
 | Rename an encrypted table, its scope table or space column | Unchanged                       | Lens rename; identities kept                                 |
 | Drop equality tagging                                      | Unchanged                       | Lens drop of the tag column                                  |
-| Encoding-compatible type widening                          | Unchanged                       | Pinned `sealedType` (§4.3); no rewrite                       |
+| Append variants to an encrypted enum                       | Unchanged                       | Pinned `sealedType` (§4.3); no rewrite                       |
 | Other plaintext type change                                | Rewrite                         | Re-encrypt into a new column                                 |
 | Add equality tagging                                       | Cells unchanged; tokens written | Tag backfill                                                 |
 | Encrypt a plaintext column / table                         | Rewrite                         | Encrypt conversion                                           |
@@ -84,8 +84,10 @@ columns and a client-run rewrite between them.
   carries every version's declarations so the server can check them.
 - **Known limits: hosts that keep no declarations.** A server keeps the
   declarations a version was first deployed with in a host table of its
-  store; a version's later declarations are judged against them. Two hosts
-  keep none:
+  store. A redeploy of the same physical schema hash must send the same
+  declarations, even for an enum append. Appending variants needs a new
+  schema version and a migration from the previous version. Two hosts keep
+  no declarations:
   - A host whose deploy path takes no declarations (the Durable Object host)
     refuses every schema that has Jazz's system tables, with "has Jazz's
     system tables but declares no encryption", so an encrypted app cannot
@@ -437,12 +439,15 @@ backend), because the server and every replica then hold the plaintext. Rows in 
 - **Type change.** `T` is part of every cell's context, and the cell does not
   record which `T` it used. Each encrypted stored column therefore keeps one
   `T` for life: the type it was introduced with, recorded as `sealedType` in
-  the entry whenever the current `type` differs. A change is allowed in place
-  only when every old value's native encoding decodes to the same value under
-  the new type: making the column optional, appending enum variants, and
-  loosening a JSON schema, subject to core confirming that the native encoding
-  is unchanged in each case. Any other change is a re-encrypt into a new
-  column, with `convert` when the conversion is not the identity.
+  the entry whenever the current `type` differs. A migration can append enum
+  variants in place because encrypted enums store their variant names. Each
+  version must retain every variant of the immediately preceding declaration
+  in order, including variants added after `sealedType` was pinned. Both
+  versions must have the same nullability. An optional value carries a
+  presence byte, so changing nullability in either direction requires
+  re-encryption into a new column. The deploy also requires a new column for
+  JSON schema changes, including loosening a constraint. Use `from` for
+  re-encryption and `convert` when the values change.
 - **Adding equality tagging.** The lens adds `__e2ee_eq_<column>` with default
   `""`, and the column is listed in `backfill`; the deploy refuses an equality
   column added to cells that exist without it. Sweepers decrypt each cell and
@@ -559,7 +564,7 @@ table (§5.1).
 | Sweep task, activation gate, status API                                                                | Client runtime above `Db`, beside deliveries (H11)                       |
 | The client can read the authority's active schema version                                              | Core catalogue API (new)                                                 |
 | Lens: rename plus optionality widening on one stored column, with a backward default for null          | Core lens (to confirm)                                                   |
-| Native encoding unchanged under each allowed widening                                                  | Core values (to confirm)                                                 |
+| Appending enum variants preserves their encoded names. Optional values have a presence byte.           | Verified by native encoding fixtures and tests of accepted type changes  |
 | Pending-row counts per table and space                                                                 | Server admin read; CLI `migrations status`                               |
 | Optional write floor: the authority refuses commits to a table authored below a version                | Core sync admission; an explicit exception to `INV-LENS-16`              |
 | Conversion functions named by `convert` and `reverse`, implemented in every language                   | Bindings, like `computed`                                                |
@@ -601,8 +606,10 @@ cache its position in memory; it is never authoritative.
    schema, through a client-visible active-schema API.
 4. The seal is a permissions revision that tooling proposes and the developer
    applies.
-5. Encoding-compatible widenings keep a pinned `sealedType`; every other type
-   change re-encrypts into a new column.
+5. An encrypted enum may append variants while keeping its original
+   `sealedType` and all variants from the preceding version. Changing
+   nullability in either direction, changing a JSON schema, or otherwise
+   changing the type requires re-encryption into a new column.
 6. Equality tags are backfilled in place, with an opt-in core write floor per
    table.
 7. Rows move between spaces through a serializable, online-only `move` write;

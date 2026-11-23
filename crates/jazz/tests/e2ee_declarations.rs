@@ -330,14 +330,17 @@ fn migrations_are_checked_against_both_versions_declarations() {
         error.contains("the encrypted column's type changes"),
         "{error}"
     );
-    load_app(
+    let error = refusal(load_app(
         with_history(
             r#"{ "type": "string?", "sealedType": "string" }"#,
             "\"string\"",
         )
         .as_bytes(),
-    )
-    .unwrap_or_else(|e| panic!("making a column optional keeps its sealed type: {e}"));
+    ));
+    assert!(
+        error.contains("re-encrypt") && error.contains("from"),
+        "{error}"
+    );
 
     // Encrypting a column that was an optional plaintext column in place.
     let encrypt = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",

@@ -2349,10 +2349,11 @@ rowId, column: columnId, epoch: epochId}, cellType]`, where `tableId` and
 `columnId` are Jazz's stable catalogue identities and `cellType` is the
 canonical JSON of the column's **sealed type**: the logical column type
 (including nullability, enum variants and JSON schema) it was introduced with.
-When a later schema widens the type in an encoding-compatible way, the
-declaration pins the original as `sealedType` and `cellType` stays that
-([migrations](E2EE_MIGRATIONS.md) §4.3); otherwise the sealed type is the
-declared type. Changing any of these otherwise makes old cells unreadable.
+When an encrypted enum appends variants, the declaration pins the original
+type as `sealedType` and the cipher continues to use it as `cellType`.
+Each version retains all variants of its predecessor in order. Other type
+changes, including changing nullability in either direction or changing a
+JSON schema, require re-encryption into a new column ([migrations](E2EE_MIGRATIONS.md) §4.3).
 Plaintext is Jazz's native encoding of the single value.
 
 **Short values.** A stored encrypted value is never ciphertext when it is

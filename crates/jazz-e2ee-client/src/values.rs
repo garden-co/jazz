@@ -450,27 +450,225 @@ mod tests {
         assert!(cell_type("c", &fraction).is_err());
     }
 
+    // These tests guard stored encrypted cells across schema changes. The native
+    // bytes are pinned for each type, and any type change accepted at deploy
+    // must let the next client read what the previous client wrote.
+    fn native_examples() -> Vec<(ColumnType, Value, &'static str, &'static str)> {
+        // Required value bytes and the bytes of an optional null, respectively.
+        vec![
+            (ColumnType::Integer, Value::I32(7), "07000000", "0000000000"),
+            (
+                ColumnType::BigInt,
+                Value::I64(-2),
+                "feffffffffffffff",
+                "000000000000000000",
+            ),
+            (ColumnType::Boolean, Value::Bool(true), "01", "0000"),
+            (ColumnType::Text, Value::String("hi".into()), "006869", "00"),
+            (
+                ColumnType::Timestamp,
+                Value::U64(258),
+                "0201000000000000",
+                "000000000000000000",
+            ),
+            (
+                ColumnType::Double,
+                Value::F64(1.5),
+                "000000000000f83f",
+                "000000000000000000",
+            ),
+            (
+                ColumnType::Uuid,
+                Value::Uuid(uuid::Uuid::from_u128(0x00112233445566778899aabbccddeeff)),
+                "00112233445566778899aabbccddeeff",
+                "0000000000000000000000000000000000",
+            ),
+            (
+                ColumnType::Bytea,
+                Value::Bytes(vec![0, 255]),
+                "0000ff",
+                "00",
+            ),
+            (enum_type(&["a"]), Value::String("a".into()), "0061", "00"),
+            (
+                ColumnType::Json { schema: None },
+                Value::String("{}".into()),
+                "007b7d",
+                "00",
+            ),
+            (
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Integer),
+                },
+                Value::Array(vec![Value::I32(1), Value::I32(-2)]),
+                "01000000feffffff",
+                "00",
+            ),
+            (
+                ColumnType::Array {
+                    element: Box::new(enum_type(&["a", "b"])),
+                },
+                Value::Array(vec![Value::String("b".into()), Value::String("a".into())]),
+                "020000000a00000000620061",
+                "00",
+            ),
+        ]
+    }
+
+    fn enum_type(names: &[&str]) -> ColumnType {
+        ColumnType::Enum {
+            variants: names.iter().map(|name| (*name).to_owned()).collect(),
+        }
+    }
+
     #[test]
     fn native_encodings_are_pinned_and_strict() {
-        let text = codec(ColumnType::Text, false, true);
-        let encoded = text.encode(&Value::String("hi".into())).unwrap();
-        assert_eq!(hex(&encoded), "006869");
-        assert_eq!(text.decode(&encoded), Some(Value::String("hi".into())));
-        assert_eq!(text.encode(&Value::I32(1)), None);
-
-        let rank = codec(ColumnType::Integer, true, false);
-        let some = rank.encode(&Value::I32(7)).unwrap();
-        let none = rank.encode(&Value::Nullable(None)).unwrap();
-        assert_eq!(hex(&some), "0107000000");
-        assert_eq!(hex(&none), "0000000000");
-        assert_eq!(
-            rank.decode(&some),
-            Some(Value::Nullable(Some(Box::new(Value::I32(7)))))
+        for (ty, value, required, null) in native_examples() {
+            for nullable in [false, true] {
+                let codec = codec(ty.clone(), nullable, false);
+                let bytes = codec.encode(&value).unwrap();
+                let (expected, decoded) = if nullable {
+                    let none = Value::Nullable(None);
+                    let encoded = codec.encode(&none).unwrap();
+                    assert_eq!(hex(&encoded), null, "{ty:?} null");
+                    assert_eq!(codec.decode(&encoded), Some(none));
+                    (
+                        format!("01{required}"),
+                        Value::Nullable(Some(Box::new(value.clone()))),
+                    )
+                } else {
+                    (required.to_owned(), value.clone())
+                };
+                assert_eq!(hex(&bytes), expected, "{ty:?}, nullable={nullable}");
+                assert_eq!(codec.decode(&bytes), Some(decoded));
+            }
+        }
+        assert!(
+            codec(ColumnType::Text, false, true)
+                .encode(&Value::I32(1))
+                .is_none()
         );
-        assert_eq!(rank.decode(&none), Some(Value::Nullable(None)));
-        let mut trailing = some.clone();
+        let rank = codec(ColumnType::Integer, true, false);
+        let mut trailing = rank.encode(&Value::I32(7)).unwrap();
         trailing.push(0);
         assert_eq!(rank.decode(&trailing), None);
+    }
+
+    /// Run the deploy's transition check with the same physical bytes column
+    /// in both versions and the column's original type pinned in both.
+    fn transition(
+        original: &PlainType,
+        before: &PlainType,
+        after: &PlainType,
+    ) -> Result<(), String> {
+        use jazz::tools::deployment::artifact::encryption::{Entries, check_transition};
+        use jazz::tools::deployment::published::PublishMigrationRequest;
+        use jazz::tools::{SchemaBuilder, TableSchemaBuilder};
+
+        let entries = |plain: &PlainType| -> Entries {
+            serde_json::from_value(serde_json::json!({
+                "notes": { "scope": "notes", "space": "id", "columns": {
+                    "value": { "type": plain, "sealedType": original }
+                } }
+            }))
+            .unwrap()
+        };
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("notes").column("value", ColumnType::Bytea))
+            .build();
+        check_transition(
+            (&schema, Some(&entries(before))),
+            (&schema, Some(&entries(after))),
+            &PublishMigrationRequest {
+                from_hash: String::new(),
+                to_hash: String::new(),
+                forward: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn every_accepted_transition_reads_the_previous_value() {
+        let mut examples = native_examples();
+        examples.push((
+            enum_type(&["a", "b"]),
+            Value::String("b".into()),
+            "0062",
+            "00",
+        ));
+        for (old, value, _, _) in &examples {
+            for nullable in [false, true] {
+                let before = PlainType::new(old.clone(), nullable);
+                let writer = ColumnCodec::new("value", &before, &before, false).unwrap();
+                let mut values = vec![value.clone()];
+                if nullable {
+                    values.push(Value::Nullable(None));
+                }
+                for (new, _, _, _) in &examples {
+                    for next_nullable in [false, true] {
+                        let after = PlainType::new(new.clone(), next_nullable);
+                        let accepted = transition(&before, &before, &after);
+                        if before == after {
+                            assert!(
+                                accepted.is_ok(),
+                                "identical declaration {before:?}: {accepted:?}"
+                            );
+                        }
+                        if accepted.is_err() {
+                            continue;
+                        }
+                        let reader = ColumnCodec::new("value", &after, &before, false).unwrap();
+                        assert_eq!(writer.cell_type, reader.cell_type);
+                        for value in &values {
+                            let bytes = writer.encode(value).unwrap();
+                            let expected = writer.decode(&bytes).unwrap();
+                            assert_eq!(
+                                reader.decode(&bytes),
+                                Some(expected),
+                                "{before:?} -> {after:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn encrypted_enums_keep_every_previously_declared_variant() {
+        for nullable in [false, true] {
+            let first = PlainType::new(enum_type(&["a"]), nullable);
+            let second = PlainType::new(enum_type(&["a", "b"]), nullable);
+            let third = PlainType::new(enum_type(&["a", "b", "c"]), nullable);
+            transition(&first, &first, &second).unwrap();
+            transition(&first, &second, &third).unwrap();
+            let error = transition(&first, &second, &first).unwrap_err();
+            assert!(error.contains("re-encrypt"), "{error}");
+
+            let latest = ColumnCodec::new("value", &third, &first, false).unwrap();
+            for (declared, name) in [(&first, "a"), (&second, "b"), (&third, "c")] {
+                let writer = ColumnCodec::new("value", declared, &first, false).unwrap();
+                let name = Value::String(name.into());
+                let bytes = writer.encode(&name).unwrap();
+                assert_eq!(latest.decode(&bytes), writer.typed(&name));
+            }
+        }
+    }
+
+    #[test]
+    fn loosening_an_encrypted_json_schema_requires_a_new_column() {
+        let restricted = PlainType::new(
+            ColumnType::Json {
+                schema: Some(serde_json::json!({"type": "object"})),
+            },
+            false,
+        );
+        let loose = PlainType::new(ColumnType::Json { schema: None }, false);
+        let error = transition(&restricted, &restricted, &loose).unwrap_err();
+        assert!(
+            error.contains("re-encrypt") && error.contains("from"),
+            "{error}"
+        );
     }
 
     #[test]

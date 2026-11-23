@@ -650,12 +650,12 @@ pub fn check_transition(
                              (`\"from\"`) to change it"
                         ));
                     }
-                    if !declared.plain.same_type(declared.cell_type())
-                        && !widens(declared.cell_type(), &declared.plain)
+                    if !widens(declared.cell_type(), &declared.plain)
+                        || !widens(&previous.plain, &declared.plain)
                     {
                         return Err(format!(
-                            "{path}: only making a column optional or appending enum variants \
-                             keeps its sealed type; re-encrypt it into a new column"
+                            "{path}: only appending enum variants preserves existing encrypted values in place; \
+                             re-encrypt other type changes into a new column with \"from\""
                         ));
                     }
                     let tagged_before = old.is_some_and(|o| o.equality.contains(&old_name));
@@ -713,8 +713,7 @@ pub fn check_transition(
     Ok(())
 }
 
-/// Whether `to` reads every value of `from` unchanged: the same type made
-/// optional, or an enum with variants appended.
+/// The same native encoding and nullability, allowing new enum names at the end.
 fn widens(
     from: &crate::tools::public_schema::PlainType,
     to: &crate::tools::public_schema::PlainType,
@@ -723,7 +722,7 @@ fn widens(
         (ColumnType::Enum { variants: a }, ColumnType::Enum { variants: b }) => b.starts_with(a),
         (a, b) => a == b,
     };
-    types && (to.nullable || !from.nullable)
+    types && from.nullable == to.nullable
 }
 
 // ---------------------------------------------------------------------------
@@ -1265,16 +1264,16 @@ pub fn decode_stored(bytes: &[u8]) -> Result<Entries, String> {
         .map_err(|error| format!("stored encryption declarations don't read: {error}"))
 }
 
-/// Refuse declarations `given` for a schema version deployed before with
-/// `stored`, unless the change is one a migration could make without a
-/// conversion (migrations §2, §4.3): the schema is the same, so every
-/// encrypted column keeps the type its cells were sealed under, its scope
-/// and its space, or pins its old type as `sealedType` for a widening.
+/// A deployed version keeps its first encryption declarations. When a change
+/// would also invalidate existing cells, report the column and the remedy.
 pub fn check_redeclaration(
     schema: &Schema,
     stored: &Entries,
     given: &Entries,
 ) -> Result<(), String> {
+    if stored == given {
+        return Ok(());
+    }
     let same_version = PublishMigrationRequest {
         from_hash: String::new(),
         to_hash: String::new(),
@@ -1293,7 +1292,8 @@ pub fn check_redeclaration(
                 )
             }
         },
-    )
+    )?;
+    Err("the encryption declarations of a deployed schema version are immutable; deploy a new schema version to change them".to_owned())
 }
 
 /// The decrypt conversions (`to`) in `given` that `stored` (the version's

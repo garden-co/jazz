@@ -180,12 +180,9 @@ async fn a_wrong_space_read_rule_is_refused() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
 }
 
-/// The server keeps each version's declarations from its first
-/// deployment: editing an encrypted column's type in place, with the
-/// schema unchanged, is refused, while pinning the old type for a
-/// widening is not (migrations §3.1, §4.3).
+/// An encrypted column keeps its type and nullability on redeploy.
 #[tokio::test]
-async fn a_deployed_versions_declarations_change_only_compatibly() {
+async fn a_redeployment_cannot_change_an_encrypted_columns_type_or_nullability() {
     let router = router().await;
     let app = loaded("ownerId = session.user");
     let (status, body) = publish(&router, app.deployment_body(false)).await;
@@ -217,8 +214,38 @@ async fn a_deployed_versions_declarations_change_only_compatibly() {
         permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
     )
     .unwrap();
-    let (status, body) = publish(&router, widened.deployment_body(false)).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, refusal) = publish(&router, widened.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"].as_str().unwrap().contains("tasks.title"),
+        "{refusal}"
+    );
+}
+
+#[tokio::test]
+async fn a_redeployment_cannot_append_an_encrypted_enum_variant_to_the_same_schema_hash() {
+    let router = router().await;
+    let app = loaded("ownerId = session.user");
+    let hash = app.current_hash().to_string();
+    let mut body = app.deployment_body(false);
+    let original =
+        json!({ "columnType": { "type": "Enum", "variants": ["a"] }, "nullable": false });
+    body["encryption"]["versions"][&hash]["tasks"]["columns"]["title"] =
+        json!({ "type": original });
+    let (status, response) = publish(&router, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let (status, response) = publish(&router, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    let title = &mut body["encryption"]["versions"][&hash]["tasks"]["columns"]["title"];
+    title["sealedType"] = original;
+    title["type"]["columnType"]["variants"] = json!(["a", "b"]);
+    let (status, refusal) = publish(&router, body).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"].as_str().unwrap().contains("immutable"),
+        "{refusal}"
+    );
 }
 
 /// The server's kept declarations judge a redeployed version like a
