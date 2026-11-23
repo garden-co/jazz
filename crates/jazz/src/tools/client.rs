@@ -148,6 +148,13 @@ struct Shared {
 #[derive(Default)]
 struct State {
     closed: bool,
+    /// Opened held ([`JazzClient::connect_with_native_transport_bearer_held`])
+    /// and not released yet: only [`JazzClient::release_held`] lets it reach
+    /// the server; `disconnect` and `reconnect` don't.
+    held: bool,
+    /// The host disconnected while held: released, the client stays off
+    /// the server until it reconnects.
+    disconnected_while_held: bool,
     upstream: Option<Upstream>,
     /// Open transactions and whether they staged a write.
     transactions: HashMap<OpenTransactionId, bool>,
@@ -779,7 +786,8 @@ struct LinkKeeper {
 }
 
 impl LinkKeeper {
-    fn new() -> Self {
+    /// `held`: offline until released ([`JazzClient::release_held`]).
+    fn new(held: bool) -> Self {
         let seed = Uuid::new_v4().as_u64_pair().0;
         let mut keeper = Self {
             link: UpstreamLink::new(LinkPolicy::default(), seed),
@@ -787,6 +795,9 @@ impl LinkKeeper {
             actions: Vec::new(),
             live: None,
         };
+        if held {
+            keeper.handle(LinkInput::SetOffline(true));
+        }
         keeper.handle(LinkInput::ServerConfigured(true));
         keeper
     }
@@ -881,7 +892,7 @@ impl JazzClient {
     /// use [`Self::connect_with_native_transport`] from their process or
     /// binding composition crate.
     pub async fn connect(context: AppContext) -> Result<Self> {
-        Self::connect_inner(context, None, None).await
+        Self::connect_inner(context, None, None, false).await
     }
 
     /// Connect using a transport selected at a native composition point.
@@ -889,7 +900,7 @@ impl JazzClient {
         context: AppContext,
         connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<Self> {
-        Self::connect_inner(context, Some(connector), None).await
+        Self::connect_inner(context, Some(connector), None, false).await
     }
 
     /// Connect as a user of an app whose backend (`createJazz`) signs its
@@ -904,6 +915,28 @@ impl JazzClient {
         connector: Arc<dyn NativeTransportConnector>,
         bearer: String,
     ) -> Result<Self> {
+        Self::connect_bearer(context, connector, bearer, false).await
+    }
+
+    /// [`Self::connect_with_native_transport_bearer`], but nothing reaches
+    /// the server until [`Self::release_held`]: for a session the server has not
+    /// verified yet (one opened offline from what this device remembers), so
+    /// no request is made, and nothing uploads, under it. Local reads and
+    /// writes work meanwhile; writes queue for upload.
+    pub async fn connect_with_native_transport_bearer_held(
+        context: AppContext,
+        connector: Arc<dyn NativeTransportConnector>,
+        bearer: String,
+    ) -> Result<Self> {
+        Self::connect_bearer(context, connector, bearer, true).await
+    }
+
+    async fn connect_bearer(
+        context: AppContext,
+        connector: Arc<dyn NativeTransportConnector>,
+        bearer: String,
+        held: bool,
+    ) -> Result<Self> {
         // A trusted backend client states a stand-in secret its credential
         // on the upgrade vouches for, and the backend replaces with its own.
         let trusted = context.backend_secret.is_some() && context.backend_session.is_none();
@@ -914,13 +947,20 @@ impl JazzClient {
                     .to_owned(),
             ));
         }
-        Self::connect_inner(context, Some(connector), Some(format!("Bearer {bearer}"))).await
+        Self::connect_inner(
+            context,
+            Some(connector),
+            Some(format!("Bearer {bearer}")),
+            held,
+        )
+        .await
     }
 
     async fn connect_inner(
         context: AppContext,
         connector: Option<Arc<dyn NativeTransportConnector>>,
         authorization: Option<String>,
+        held: bool,
     ) -> Result<Self> {
         let has_server = !context.server_url.is_empty();
         let connector = match (has_server, connector) {
@@ -985,7 +1025,7 @@ impl JazzClient {
             work: work.clone(),
             progress,
             waits_ended: watch::Sender::new(false),
-            upstream_paused: watch::channel(false).0,
+            upstream_paused: watch::channel(held).0,
             credentials: watch::channel(Credentials {
                 auth: AuthConfig {
                     // With the backend secret, a client's own proof is the
@@ -1007,7 +1047,10 @@ impl JazzClient {
                 || (context.backend_secret.is_some()
                     && context.backend_session.is_none()
                     && context.jwt_token.is_none()),
-            state: RefCell::new(State::default()),
+            state: RefCell::new(State {
+                held,
+                ..State::default()
+            }),
         });
 
         if connector.is_none() {
@@ -1034,7 +1077,7 @@ impl JazzClient {
             // attempt runs in the keeper like every later one, so a refusal
             // reaches the link's status (and ends waits it makes hopeless)
             // however fast or slow the server answers it.
-            let mut keeper = LinkKeeper::new();
+            let mut keeper = LinkKeeper::new(held);
             keeper.publish(&shared);
             let keeper = tokio::task::spawn_local(keep_upstream(
                 Rc::downgrade(&shared),
@@ -2531,10 +2574,49 @@ impl JazzClient {
         if self.shared.serverless {
             return false;
         }
+        {
+            let mut state = self.shared.state();
+            if state.held {
+                // Never attached; stays off the server once released too.
+                state.disconnected_while_held = true;
+                return false;
+            }
+        }
         self.shared.upstream_paused.send_replace(true);
         let detached = detach(&self.shared);
         crate::db::block_on(self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed));
         detached
+    }
+
+    /// Lets a client opened held
+    /// ([`JazzClient::connect_with_native_transport_bearer_held`]) reach its
+    /// server, without waiting for the link: once whoever opened it has
+    /// verified its session. The only way out of the hold:
+    /// [`JazzClient::reconnect`] does not release it. A host that
+    /// disconnected meanwhile stays disconnected until it reconnects.
+    #[doc(hidden)]
+    pub fn release_held(&self) {
+        if self.shared.serverless {
+            return;
+        }
+        let resume = {
+            let mut state = self.shared.state();
+            if !state.held {
+                return;
+            }
+            state.held = false;
+            !std::mem::take(&mut state.disconnected_while_held)
+        };
+        if resume {
+            self.shared.upstream_paused.send_replace(false);
+        }
+    }
+
+    /// Whether the client is held off its server, waiting for
+    /// [`JazzClient::release_held`].
+    #[doc(hidden)]
+    pub fn is_held(&self) -> bool {
+        self.shared.state.borrow().held
     }
 
     /// Resume sync after [`JazzClient::disconnect`], or restart a link
@@ -2545,6 +2627,15 @@ impl JazzClient {
     pub async fn reconnect(&self) -> Result<bool> {
         if self.shared.serverless {
             return Ok(false);
+        }
+        // Held: nothing reaches the server before the session is verified.
+        // The host's wish to be connected is kept for the release.
+        {
+            let mut state = self.shared.state();
+            if state.held {
+                state.disconnected_while_held = false;
+                return Ok(false);
+            }
         }
         // An attempt the keeper started before this call (a retry during an
         // outage) may still fail after it: only attempts started from here

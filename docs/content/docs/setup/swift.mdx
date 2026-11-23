@@ -15,9 +15,13 @@ Jazz for Swift is for macOS and iOS apps (Swift 6.0 or newer, Xcode 16 or newer;
 prebuilt core, and the StagePlan SwiftUI example (`examples/stage-plan/apps/swiftui`) is built for
 macOS and UI-tested on the iPhone simulator.
 
-<Callout type="warn" title="Known issue: a bearer user can't open offline">
-  An app signed in with a bearer token signs in with your backend when it opens, so it can't open
-  while your backend is unreachable, even with a persistent store.
+<Callout title="Opening offline with a bearer">
+  An app signed in with a JWT bearer token opens its persistent store when your backend can't be
+  reached, if that user signed in on this device before. Until your backend signs them in again as
+  the same account, the client makes no request and uploads nothing; their writes queue locally. If
+  the backend names another account or refuses the token, the client stops and the session reads
+  signed out; writes made offline stay in that account's store for its next sign-in. An opaque
+  token, or a user who never signed in on this device, still needs the backend to open.
 </Callout>
 
 ## Install
