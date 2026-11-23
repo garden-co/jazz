@@ -15,12 +15,6 @@ Jazz for Swift is for macOS and iOS apps (Swift 6.0 or newer, Xcode 16 or newer;
 prebuilt core, and the StagePlan SwiftUI example (`examples/stage-plan/apps/swiftui`) is built for
 macOS and UI-tested on the iPhone simulator.
 
-<Callout type="warn" title="Known issue: open one app per dataDir">
-  Open one app per `dataDir`. A second app open on the same persistent store can make writes fail
-  with `database is locked`, lose writes, and stop that client's sync until it reopens. When
-  reopening, wait for the previous `close()` to return.
-</Callout>
-
 <Callout type="warn" title="Known issue: a bearer user can't open offline">
   An app signed in with a bearer token signs in with your backend when it opens, so it can't open
   while your backend is unreachable, even with a persistent store.

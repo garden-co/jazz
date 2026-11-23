@@ -9,12 +9,6 @@ mobile app, or it acts as a [backend client](/docs/setup/backend-client) with a 
 credential. Like every other language, it works from your app's TypeScript schema and permissions:
 `npx jazz-tools generate` writes its typed bindings from them.
 
-<Callout type="warn" title="Known issue: open one app per store directory">
-  Open one app per `Storage::Dir` directory. A second app open on the same store can make writes
-  fail with `database is locked`, lose writes, and stop that client's sync until it reopens. When
-  reopening, wait for the previous `close(timeout)` or `shutdown()` to return.
-</Callout>
-
 <Callout type="warn" title="Known issue: a bearer user can't open offline">
   An app signed in with a bearer token signs in with your backend when it opens, so it can't open
   while your backend is unreachable, even with a persistent store.

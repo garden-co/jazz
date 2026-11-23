@@ -11,12 +11,6 @@ and permissions: `npx jazz-tools generate` writes its typed bindings from them.
 The Go module, `github.com/garden-co/jazz/packages/jazz-go/v2`, needs no cgo; its only dependency
 is purego. It uses `context` for every call and channels for subscriptions.
 
-<Callout type="warn" title="Known issue: open one DB per DataDir">
-  Open one `*jazz.DB` per `DataDir`. A second one open on the same persistent store can make writes
-  fail with `database is locked`, lose writes, and stop that client's sync until it reopens. When
-  reopening, wait for the previous `db.Close()` to return.
-</Callout>
-
 <Callout type="warn" title="Known issue: a bearer user can't open offline">
   An app signed in with a bearer token signs in with your backend when it opens, so it can't open
   while your backend is unreachable, even with a persistent store.

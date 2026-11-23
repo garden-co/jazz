@@ -38,12 +38,6 @@ With `use {}`, run the whole block in `withContext(Dispatchers.IO)`.
   at the default tier and watch `syncStatus`.
 </Callout>
 
-<Callout type="warn" title="Known issue: open one Jazz per dataDir">
-  Open one `Jazz` per `dataDir`. A second app open on the same persistent store can make writes fail
-  with `database is locked`, lose writes, and stop that client's sync until it reopens. When
-  reopening, wait for the previous `close()` to return.
-</Callout>
-
 <Callout type="warn" title="Known issue: a bearer user can't open offline">
   An app signed in with a bearer token signs in with your backend when it opens, so it can't open
   while your backend is unreachable, even with a persistent store.
