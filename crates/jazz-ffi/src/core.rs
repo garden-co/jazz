@@ -1099,6 +1099,7 @@ impl Core {
             open.check()?;
             let upload =
                 client.begin_streaming_upload(&name, cells.into_iter().collect(), &column)?;
+            clean_up_before_stop();
             UPLOADS.with(|u| {
                 u.borrow_mut().0.insert(
                     upload_id,
@@ -1195,6 +1196,7 @@ impl Core {
             } else {
                 client.begin_mergeable_transaction()?
             };
+            clean_up_before_stop();
             TRANSACTIONS.with(|t| t.borrow_mut().0.insert(tx, (transaction, false)));
             open.owned().insert(tx);
             Ok(())
@@ -1386,14 +1388,8 @@ impl Core {
                 "delete_client_storage on a for_user or session handle: delete through the app that owns the store (not supported yet for a session's account)",
             ));
         }
-        // Open transactions roll back while their client still runs.
-        let _ = block_on(jazz.with_client(|_| async {
-            let open = TRANSACTIONS.with(|t| std::mem::take(&mut t.borrow_mut().0));
-            for (transaction, _) in open.into_values() {
-                let _ = transaction.rollback();
-            }
-            Ok(())
-        }));
+        // What is open rolls back and aborts as the client stops; a delete
+        // refused with the app running on leaves it be.
         let deleted = block_on(jazz.delete_client_storage());
         // Refused as held, only an app that had stopped already is stopped:
         // while it runs nothing else can hold its store.
@@ -1571,16 +1567,28 @@ impl Core {
 /// runs (its tables only forget at the thread's exit).
 pub(crate) fn clean_up(jazz: &Jazz) {
     let _ = block_on(jazz.with_client(|client| async move {
-        let open = TRANSACTIONS.with(|t| std::mem::take(&mut t.borrow_mut().0));
-        for (transaction, _) in open.into_values() {
-            let _ = transaction.rollback();
-        }
-        let uploads = UPLOADS.with(|u| std::mem::take(&mut u.borrow_mut().0));
-        for entry in uploads.into_values() {
-            let _ = client.abort_streaming_upload(entry.upload).await;
-        }
+        clean_up_open(client).await;
         Ok(())
     }));
+}
+
+/// [`clean_up`], on the client's thread.
+async fn clean_up_open(client: JazzClient) {
+    let open = TRANSACTIONS.with(|t| std::mem::take(&mut t.borrow_mut().0));
+    for (transaction, _) in open.into_values() {
+        let _ = transaction.rollback();
+    }
+    let uploads = UPLOADS.with(|u| std::mem::take(&mut u.borrow_mut().0));
+    for entry in uploads.into_values() {
+        let _ = client.abort_streaming_upload(entry.upload).await;
+    }
+}
+
+/// Called as a transaction or upload begins: whatever stops the client (a
+/// sign-out, a change of user, deleteClientStorage, the session itself)
+/// cleans it up first.
+fn clean_up_before_stop() {
+    jazz_app_support::before_client_stops(|client| Box::pin(clean_up_open(client)));
 }
 
 /// `for_user`'s errors: the main backend refusing the identity (its 403,
@@ -2379,6 +2387,95 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(forgotten.entries.load(Ordering::SeqCst), 0);
+    }
+
+    const ONE_TABLE: &str =
+        r#"{"format": 1, "tables": {"todos": {"columns": {"title": "string"}}}}"#;
+
+    /// No server answers there: a device account works offline.
+    const NOWHERE: &str = "http://127.0.0.1:9/jazz";
+
+    /// Begins a transaction and an upload on `core`, ends its client with
+    /// `end`, and counts what the client's thread was left to forget.
+    fn left_open(core: &Core, end: impl FnOnce()) -> u64 {
+        core.tx_begin(true).unwrap();
+        core.upload_begin("todos", "title", "insert", None, None)
+            .unwrap();
+        let forgotten: &'static Forgotten = Box::leak(Box::default());
+        block_on(core.jazz.with_client(move |_| async move {
+            FORGOTTEN.set(Some(forgotten));
+            Ok(())
+        }))
+        .unwrap();
+        end();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while forgotten.tables.load(Ordering::SeqCst) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the client's thread runs on"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        forgotten.entries.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn deleting_client_storage_cleans_up_transactions_and_uploads() {
+        let root = todos();
+        let left = left_open(&root, || root.delete_client_storage().unwrap());
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn signing_out_cleans_up_transactions_and_uploads() {
+        let key = jazz_app_support::DeviceKey::generate().unwrap().to_string();
+        let root = Core::open(
+            &serde_json::json!({ "app": ONE_TABLE, "appId": AppId::random().to_string(),
+                "serverUrl": NOWHERE, "auth": { "deviceKey": key }, "contract": 2 })
+            .to_string(),
+        )
+        .unwrap();
+        let left = left_open(&root, || root.sign_out().unwrap());
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn a_session_ending_its_client_cleans_up_its_handles() {
+        #[derive(Debug)]
+        enum Ends {
+            SignOut,
+            ChangeOfUser,
+        }
+        for ends in [Ends::SignOut, Ends::ChangeOfUser] {
+            let session = block_on(jazz_app_support::JazzSession::open(
+                AppFiles::new(ONE_TABLE.as_bytes().to_vec(), None),
+                jazz_app_support::SessionConfig::new(AppId::random())
+                    .server(NOWHERE)
+                    .initial(jazz_app_support::Initial::Device),
+            ))
+            .unwrap();
+            let jazz = session.jazz().unwrap();
+            let schema =
+                block_on(jazz.with_client(|client| async move { Ok(client.schema()?) })).unwrap();
+            let handle = Core::for_session(
+                jazz,
+                Arc::new(schema),
+                convert::Relations::read(ONE_TABLE).unwrap(),
+                2,
+                Closed::new(),
+                Arc::new(AtomicU64::new(1)),
+                Box::new(|| false),
+            );
+            let left = left_open(&handle, || {
+                match ends {
+                    Ends::SignOut => block_on(session.sign_out()),
+                    Ends::ChangeOfUser => block_on(session.create_device_account()),
+                }
+                .unwrap();
+            });
+            assert_eq!(left, 0, "{ends:?}");
+            block_on(session.close()).unwrap();
+        }
     }
 
     /// The relay stand-in can't make the core answer 403, so the mapping is

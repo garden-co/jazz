@@ -858,6 +858,7 @@ fn run(
         // No job is left: roll back the transactions still open while the
         // client runs, so none is dropped with the thread's locals.
         crate::transaction::roll_back_parked();
+        crate::lifecycle::run_before_stop(&client).await;
         let result = client.shutdown().await;
         endpoint_connector.settle(session_end).await;
         End::Stopped(result, stopped)
