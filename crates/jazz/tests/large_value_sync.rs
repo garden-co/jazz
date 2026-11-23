@@ -4,6 +4,7 @@
 //! commit that references them (`SPEC/19_large_values.md`).
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1772,7 +1773,7 @@ fn a_small_streamed_upload_reaches_the_server() {
 fn a_small_value_streamed_before_connecting_reaches_the_server() {
     let server = open(0, AuthorSubject::SYSTEM);
     let alice = open(1, user(1));
-    alice.become_replica();
+    jazz::db::block_on(alice.become_replica());
     block_on(alice.insert_streaming_value_with_id(
         "docs",
         row(1),
@@ -2022,7 +2023,7 @@ fn reads_reaching_a_held_table_through_policies_or_includes_wait() {
 fn a_snapshot_read_naming_a_held_commit_waits_for_it() {
     let (server, alice, (_log, up, down)) = held_upload();
     // Captured offline, the reference names the unsettled upload.
-    alice.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Failed));
     let snapshot = block_on(alice.capture_snapshot()).unwrap();
     assert!(
         !snapshot.dots.is_empty(),

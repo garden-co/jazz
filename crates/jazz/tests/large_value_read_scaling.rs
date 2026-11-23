@@ -15,6 +15,7 @@
 //! precisely the work those rows do not show. Every other assertion is on
 //! public results.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 
 use crate::common;

@@ -108,16 +108,41 @@ impl Stream for MutationErrors {
     }
 }
 
+/// What a binding cleans up on the client's thread before its client stops.
+type BeforeStop = fn(JazzClient) -> Pin<Box<dyn std::future::Future<Output = ()>>>;
+
+thread_local! {
+    static BEFORE_STOP: std::cell::Cell<Option<BeforeStop>> = const { std::cell::Cell::new(None) };
+}
+
+/// For a binding, called from a [`Jazz::with_client`] job: `clean_up` runs
+/// on this client's thread once its jobs are done and before it stops,
+/// however it comes to stop (closed, signed out, replaced, deleted). One
+/// per client; not public API.
+#[doc(hidden)]
+pub fn before_client_stops(clean_up: BeforeStop) {
+    BEFORE_STOP.set(Some(clean_up));
+}
+
+/// Runs what [`before_client_stops`] left.
+pub(crate) async fn run_before_stop(client: &JazzClient) {
+    if let Some(clean_up) = BEFORE_STOP.take() {
+        clean_up(client.clone()).await;
+    }
+}
+
 impl Jazz {
     /// A handle acting for a user ([`Jazz::for_user`] on a trusted backend
     /// client, or `Endpoint::for_user` with the `unstable-endpoint` feature)
     /// shares its trusted client with every other user: its link, store and
-    /// refusals are that client's, not this user's to manage or see.
-    fn refuse_for_user(&self, what: &str) -> Result<()> {
+    /// refusals are that client's, not this user's to manage or see, and so
+    /// is its session. For bindings too; not public API.
+    #[doc(hidden)]
+    pub fn refuse_for_user(&self, what: &str) -> Result<()> {
         if self.for_user {
             return Err(Error::Unsupported(format!(
                 "{what} is not supported on a handle acting for a user (for_user): it \
-                 shares its client's link and store with every other user; call it on the \
+                 shares its client's session, link and store with every other user; call it on the \
                  handle for_user was called on"
             )));
         }
@@ -408,9 +433,10 @@ use flock::try_lock;
 /// Remove this once the pinned toolchain's std implements file locks for
 /// Android.
 #[cfg(any(target_os = "android", all(test, target_os = "linux")))]
-mod flock {
+pub(crate) mod flock {
     use std::io::{Error, ErrorKind, Result};
     use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
 
     use super::{File, Lock};
 
@@ -421,17 +447,43 @@ mod flock {
             Lock::Shared => libc::LOCK_SH,
             Lock::Exclusive => libc::LOCK_EX,
         } | libc::LOCK_NB;
+        match flock(file, operation) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// How often a lock that is waited for is tried again.
+    const RETRY: Duration = Duration::from_millis(5);
+
+    /// Takes the exclusive lock, waiting up to `wait` for whoever holds it
+    /// (`TimedOut` after): not `File::lock`'s endless wait, as the holder
+    /// may be a process Android froze.
+    pub(crate) fn lock(file: &File, wait: Duration) -> Result<()> {
+        let deadline = Instant::now() + wait;
+        while !try_lock(file, Lock::Exclusive)? {
+            if Instant::now() >= deadline {
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "another process held its lock for too long",
+                ));
+            }
+            std::thread::sleep(RETRY);
+        }
+        Ok(())
+    }
+
+    fn flock(file: &File, operation: libc::c_int) -> Result<()> {
         loop {
             // SAFETY: `file` is borrowed for the call, so its descriptor is
             // open, and flock takes no pointers.
             if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
-                return Ok(true);
+                return Ok(());
             }
             let error = Error::last_os_error();
-            match error.kind() {
-                ErrorKind::Interrupted => {}
-                ErrorKind::WouldBlock => return Ok(false),
-                _ => return Err(error),
+            if error.kind() != ErrorKind::Interrupted {
+                return Err(error);
             }
         }
     }

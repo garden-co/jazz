@@ -206,6 +206,24 @@ export type BrowserWebSocket = {
 };
 
 /**
+ * A socket that does work of its own before it connects to the server, such
+ * as `vercel()`'s socket, which first wakes the core and only then knows
+ * where to connect. It emits `connecting` each time it starts a connection
+ * to the server, and `waking` when it stops one that never opened to do that
+ * work again. The handshake timeout bounds the server's silence, so it runs
+ * only while a connection is under way: the work before has its own deadline
+ * and ends in an error of its own (#6294).
+ */
+export type DeferredConnectWebSocket = BrowserWebSocket & {
+  readonly defersConnect: true;
+  addEventListener(type: "connecting" | "waking", listener: () => void): void;
+};
+
+function defersConnect(socket: BrowserWebSocket): socket is DeferredConnectWebSocket {
+  return (socket as Partial<DeferredConnectWebSocket>).defersConnect === true;
+}
+
+/**
  * The sole Jazz wire-protocol version. This is distinct from independently
  * versioned v1 storage, catalogue, and binding formats.
  */
@@ -462,7 +480,13 @@ export class WebSocketCarrier {
     assertWireFeatures(this.localFeatures, "client wire features");
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
-    this.watchHandshake(options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS);
+    const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
+    if (defersConnect(this.socket)) {
+      this.socket.addEventListener("connecting", () => this.watchHandshake(handshakeTimeoutMs));
+      this.socket.addEventListener("waking", () => clearTimeout(this.handshakeTimer));
+    } else {
+      this.watchHandshake(handshakeTimeoutMs);
+    }
     this.opened = new Promise<WebSocketNegotiation>((resolve, reject) => {
       this.resolveNegotiation = resolve;
       this.rejectNegotiation = reject;
@@ -642,9 +666,12 @@ export class WebSocketCarrier {
    * `timeoutMs`, as a dropped socket (`websocket_silent`), so the link
    * retries and, past its reporting window, publishes the outage. The
    * timeout is confirmed a moment later, so a hello that a frozen page held
-   * back is delivered before it counts.
+   * back is delivered before it counts. Starting it again (a socket that
+   * defers its connection starts another) restarts the window.
    */
   private watchHandshake(timeoutMs: number): void {
+    clearTimeout(this.handshakeTimer);
+    if (this.negotiated || this.terminated) return;
     this.handshakeTimer = setTimeout(() => {
       this.handshakeTimer = setTimeout(() => {
         if (this.negotiated || this.terminated) return;

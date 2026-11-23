@@ -3,6 +3,7 @@
 //! to send only messages the server serves, to write under policies a
 //! sequence of its own writes would skip, or to send cells of other types.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
@@ -474,7 +475,7 @@ fn a_handed_over_node_stays_handed_over_after_a_restart() {
             jazz::db::FileOptions::default(),
         ))
         .unwrap();
-        server.set_authority();
+        jazz::db::block_on(server.set_authority());
         server.track_closed_subscribers();
         server
     };
@@ -727,7 +728,7 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
             FileOptions::default(),
         ))
         .unwrap();
-        db.set_authority();
+        jazz::db::block_on(db.set_authority());
         db
     };
     let server = open();

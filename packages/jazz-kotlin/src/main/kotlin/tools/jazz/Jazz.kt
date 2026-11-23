@@ -47,6 +47,21 @@ internal fun openReflectively(className: String, config: String, tokens: ((Strin
     }
 }
 
+/**
+ * What [start] returns on [dispatcher], for a handle someone must give back:
+ * withContext drops its result when the caller was cancelled meanwhile, so
+ * [giveBack] gets the handle then.
+ */
+private suspend fun <T : Any> startHandle(dispatcher: CoroutineDispatcher, giveBack: (T) -> Unit, start: () -> T): T {
+    var started: T? = null
+    try {
+        return withContext(dispatcher) { start().also { started = it } }
+    } catch (e: Throwable) {
+        started?.let { handle -> withContext(dispatcher + NonCancellable) { runCatching { giveBack(handle) } } }
+        throw e
+    }
+}
+
 /** The JSON settings rows, inserts and patches go through. */
 public val jazzJson: Json = Json {
     ignoreUnknownKeys = true
@@ -86,7 +101,7 @@ public class Jazz internal constructor(
 
         /** Opens the app [app] (the text of its `jazz.app.json`), as generated bindings' `open` does. */
         public suspend fun open(app: String, config: JazzConfig, implementations: Any? = null): Jazz =
-            withContext(config.dispatcher) {
+            startHandle(config.dispatcher, giveBack = { it.close() }) {
                 if (config.serverUrl != null && config.auth == null) {
                     throw JazzException.Refused(
                         "connecting to ${config.serverUrl} needs JazzConfig.auth (a device account, or your backend's sign-in). " +
@@ -165,7 +180,7 @@ public class Jazz internal constructor(
      * Collecting starts watching.
      */
     public val mutationErrors: Flow<MutationError> get() = callbackFlow {
-        val cancel = withContext(dispatcher) {
+        val cancel = startHandle(dispatcher, giveBack = { it() }) {
             native.watchMutationErrors { json ->
                 // The app closing ends the watch: the Flow completes.
                 if (isClosedNotice(json)) close() else trySend(MutationError.parse(json))
@@ -204,14 +219,32 @@ public class Jazz internal constructor(
         (SessionState.parse("""{"status":"signedIn","user":${native.link(bearer)}}""") as SessionState.SignedIn).user
     }
 
-    /** Inserts row [id] as [row], or replaces it whole if it exists; returns it. */
+    /**
+     * Inserts row [id] as [row], or sets the columns [row] gives if it exists;
+     * returns it as written. With [tier] [WriteTier.Global] it returns once the
+     * sync server accepted it, and a refusal throws ([JazzException.Permission]).
+     */
+    public suspend fun <Row : Any, Insert : Any, P : Patch> upsert(
+        table: Table<Row, Insert, P>,
+        id: String,
+        row: Insert,
+        tier: WriteTier? = null,
+    ): Row = io {
+        val json = insertJson(table, row)
+        val stored = if (tier == null) native.upsert(table.tableName, id, json) else native.upsertAt(table.tableName, id, json, tier.wire)
+        decodeStored(table, stored)
+    }
+
+    /** The signature before `tier`, for code compiled against it. */
+    @Deprecated("Binary compatibility", level = DeprecationLevel.HIDDEN)
     public suspend fun <Row : Any, Insert : Any, P : Patch> upsert(table: Table<Row, Insert, P>, id: String, row: Insert): Row =
-        io { decodeStored(table, native.upsert(table.tableName, id, insertJson(table, row))) }
+        upsert(table, id, row, null)
 
     /**
      * Inserts [row] with [column]'s value streamed from [data] (e.g. a file:
      * `jazz.insertStreaming(Files, NewFile(name = "a.mov"), Files.content, file.inputStream().chunks())`).
-     * Nothing is written if [data] fails or the call is cancelled.
+     * Nothing is written if [data] fails or the call is cancelled before [data]
+     * completes; a cancellation after that may still write it.
      */
     public suspend fun <Row : Any, Insert : Any, P : Patch> insertStreaming(
         table: Table<Row, Insert, P>,
@@ -220,11 +253,19 @@ public class Jazz internal constructor(
         data: Flow<ByteArray>,
     ): Row = stream(table, column, "insert", null, insertJson(table, row), data)
 
-    /** Replaces [column] of row [id] with a value streamed from [data]. */
+    /**
+     * Replaces [column] of row [id] with a value streamed from [data].
+     * Nothing is written if [data] fails or the call is cancelled before [data]
+     * completes; a cancellation after that may still write it.
+     */
     public suspend fun <Row : Any> updateStreaming(table: Table<Row, *, *>, id: String, column: Column<*>, data: Flow<ByteArray>): Row =
         stream(table, column, "update", id, null, data)
 
-    /** [upsert], with [column]'s value streamed from [data]. */
+    /**
+     * [upsert], with [column]'s value streamed from [data].
+     * Nothing is written if [data] fails or the call is cancelled before [data]
+     * completes; a cancellation after that may still write it.
+     */
     public suspend fun <Row : Any, Insert : Any, P : Patch> upsertStreaming(
         table: Table<Row, Insert, P>,
         id: String,
@@ -241,7 +282,7 @@ public class Jazz internal constructor(
         row: String?,
         data: Flow<ByteArray>,
     ): Row {
-        val upload = io { native.beginUpload(table.tableName, column.name, kind, id, row) }
+        val upload = startHandle(dispatcher, giveBack = { it.abort() }) { native.beginUpload(table.tableName, column.name, kind, id, row) }
         try {
             data.collect { chunk -> io { upload.push(chunk) } }
             return decodeStored(table, io { upload.finish() })
@@ -349,6 +390,9 @@ public class Jazz internal constructor(
      * with a concurrent one throws [JazzException.Conflict] instead. It commits when [block] returns (at [tier]:
      * with [WriteTier.Global] it returns once the server accepted it) and
      * rolls back when [block] throws, rethrowing. Returns [block]'s value.
+     * If cancellation makes [block] throw, it rolls back. Once [block] has
+     * returned it commits, even if the caller was cancelled, and cancelling
+     * doesn't undo that.
      *
      * ```kotlin
      * val moved = jazz.transaction { tx ->
@@ -363,7 +407,7 @@ public class Jazz internal constructor(
         serializable: Boolean = false,
         block: suspend (Transaction) -> T,
     ): T {
-        val native = io { if (serializable) native.begin() else native.beginMergeable() }
+        val native = startHandle(dispatcher, giveBack = { it.rollback() }) { if (serializable) native.begin() else native.beginMergeable() }
         val tx = Transaction(native)
         val result = try {
             block(tx)

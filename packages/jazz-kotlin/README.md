@@ -32,5 +32,7 @@ gradle -p packages/jazz-kotlin-android assembleRelease   # -PcargoProfile=dev fo
 ```
 
 The AAR is `packages/jazz-kotlin-android/build/outputs/aar/jazz-kotlin-android-release.aar`.
-CI only checks that it builds (the `kotlin-android` partition); there are no emulator or
-device tests yet.
+CI builds it (the `kotlin-android` partition) and runs it: an app of the AAR, minified with R8,
+opens, writes, reads and syncs on an x86-64 emulator (`dev/scripts/test-kotlin-android-emulator.sh`,
+which needs `/dev/kvm`), in full-suite runs and, on the AAR that ships, in release candidates.
+No physical device or arm64 is tested.

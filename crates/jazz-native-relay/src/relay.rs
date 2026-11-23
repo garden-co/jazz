@@ -515,7 +515,7 @@ impl NativeRelay {
     pub(crate) fn set_remote_link_hint(&self, hint: RemoteLinkHint) -> Result<(), RelayError> {
         self.run(move |worker| {
             worker.remote_link_hint = Some(hint);
-            worker.persistent.db.set_remote_link_hint(hint);
+            block_on(worker.persistent.db.set_remote_link_hint(hint));
             worker.persistent.hooks.progress.wake_all();
             worker.persistent_dirty.set(true);
             Ok(())
@@ -1011,7 +1011,7 @@ impl RelayWorker {
             FileOptions::default(),
         ))
         .map_err(|error| RelayError::Host(error.into()))?;
-        let persistent = Binding::new(db, config.identity, false);
+        let persistent = block_on(Binding::new(db, config.identity, false));
         let persistent_dirty = hook(&persistent);
         Ok(Self {
             schema: config.schema,
@@ -1128,9 +1128,9 @@ impl RelayWorker {
         if high_water > 0 {
             db.seed_seq_floor(high_water);
         }
-        db.set_identity_claims(identity.author, claims.clone());
-        let binding = Binding::new(db, identity, false);
-        binding.set_non_durable_client();
+        block_on(db.set_identity_claims(identity.author, claims.clone()));
+        let binding = block_on(Binding::new(db, identity, false));
+        block_on(binding.set_non_durable_client());
         let dirty = hook(&binding);
         let mutation_errors = Rc::new(RefCell::new(Vec::new()));
         let reports = Rc::clone(&mutation_errors);
@@ -1142,13 +1142,13 @@ impl RelayWorker {
                 });
                 true
             }));
-        self.persistent
-            .db
-            .set_identity_claims(identity.author, claims.clone());
+        block_on(
+            self.persistent
+                .db
+                .set_identity_claims(identity.author, claims.clone()),
+        );
         self.claims = Some(claims.clone());
-        let served = self
-            .persistent
-            .accept_subscriber(identity.author, claims)
+        let served = block_on(self.persistent.accept_subscriber(identity.author, claims))
             .map_err(RelayError::Host)?;
         let link = binding.connect_upstream();
         // The foreground store and this relay run the same build.
@@ -1193,16 +1193,20 @@ impl RelayWorker {
 
     fn refresh_claims(&mut self, author: AuthorSubject, claims: BTreeMap<String, Value>) {
         self.claims = Some(claims.clone());
-        self.persistent
-            .db
-            .set_identity_claims(author, claims.clone());
+        block_on(
+            self.persistent
+                .db
+                .set_identity_claims(author, claims.clone()),
+        );
         self.persistent.hooks.progress.wake_all();
         self.persistent_dirty.set(true);
         for client in self.clients.values() {
-            client
-                .binding
-                .db
-                .set_identity_claims(author, claims.clone());
+            block_on(
+                client
+                    .binding
+                    .db
+                    .set_identity_claims(author, claims.clone()),
+            );
             client.binding.hooks.progress.wake_all();
             client.dirty.set(true);
         }
@@ -1324,10 +1328,10 @@ impl RelayWorker {
             || self.persistent.pending_upload_count() > 0
             // Refused commits kept for the app's listeners or a retry are
             // its writes too: a store holding any is not rebuilt.
-            || self
+            || block_on(self
                 .persistent
                 .db
-                .rejected_transactions()
+                .rejected_transactions())
                 .map_or(true, |rejected| !rejected.is_empty())
             || self
                 .clients
@@ -1382,18 +1386,16 @@ impl RelayWorker {
         // Statuses compare by revision: the new store continues the old's.
         db.seed_pending_revision(revision);
         if let Some(hint) = self.remote_link_hint {
-            db.set_remote_link_hint(hint);
+            block_on(db.set_remote_link_hint(hint));
         }
         let author = self.identity.author;
         let claims = self.claims.clone().unwrap_or_default();
-        db.set_identity_claims(author, claims.clone());
-        self.persistent = Binding::new(db, self.identity, false);
+        block_on(db.set_identity_claims(author, claims.clone()));
+        self.persistent = block_on(Binding::new(db, self.identity, false));
         self.persistent_dirty = hook(&self.persistent);
         for client in self.clients.values_mut() {
             client.authority = self.persistent.clone();
-            client.served = self
-                .persistent
-                .accept_subscriber(author, claims.clone())
+            client.served = block_on(self.persistent.accept_subscriber(author, claims.clone()))
                 .map_err(|error| error.to_string())?;
             client.link = client.binding.connect_upstream();
             client

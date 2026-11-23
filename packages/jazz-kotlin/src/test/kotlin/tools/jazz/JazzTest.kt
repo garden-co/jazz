@@ -383,6 +383,40 @@ class JazzTest {
     }
 
     @Test
+    fun upsert_keeps_the_jvm_signature_from_before_it_took_a_tier() {
+        // Code compiled against it calls it by this exact descriptor.
+        Jazz::class.java.getMethod(
+            "upsert",
+            Table::class.java,
+            String::class.java,
+            Any::class.java,
+            kotlin.coroutines.Continuation::class.java,
+        )
+    }
+
+    @Test
+    fun upsert_passes_its_tier(): Unit = runBlocking {
+        val tiers = ArrayList<String?>()
+        val native = object : Native by FakeNative() {
+            override fun upsert(table: String, id: String, rowJson: String): String {
+                tiers += null
+                return """{"id":"$id","title":"t","rank":1,"kind":"c"}"""
+            }
+            override fun upsertAt(table: String, id: String, rowJson: String, tier: String): String {
+                tiers += tier
+                return """{"id":"$id","title":"t","rank":1,"kind":"c"}"""
+            }
+        }
+        Jazz.opener = Native.Opener { native }
+        val jazz = Jazz.open("{}", JazzConfig())
+        val row = ItemInsert(title = "t", rank = 1.0, kind = ItemKind.C)
+        jazz.upsert(Items, "i", row)
+        jazz.upsert(Items, "i", row, WriteTier.Local)
+        jazz.upsert(Items, "i", row, WriteTier.Global)
+        assertEquals(listOf(null, "local", "global"), tiers)
+    }
+
+    @Test
     fun text_positions_are_utf16_by_default(): Unit = runBlocking {
         // Kotlin's String indices (as an EditText selection) are UTF-16 code units.
         val edits = Edits().apply { splice(Items.title, 0, 2, Splice.text(0, 2, "é")) }.edits

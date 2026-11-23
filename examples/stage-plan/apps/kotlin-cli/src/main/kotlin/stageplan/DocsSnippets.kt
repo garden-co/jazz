@@ -102,7 +102,8 @@ object DocsSnippets {
     suspend fun largeValues(jazz: Jazz, taskId: String, notes: java.io.InputStream): String? {
         // #region writing-streaming-upload-kotlin
         // Stream a large value in, chunk by chunk, without holding it in memory:
-        // nothing is written if the stream fails or the call is cancelled.
+        // nothing is written if the stream fails or the call is cancelled before
+        // the stream completes; a cancellation after that may still write it.
         jazz.updateStreaming(Tasks, taskId, Tasks.notes, notes.chunks())
         // #endregion writing-streaming-upload-kotlin
         // #region reading-partial-value-kotlin
