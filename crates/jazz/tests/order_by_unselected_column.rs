@@ -3,6 +3,7 @@
 //! SQL semantics: an order key orders the result whether or not it is
 //! selected, and it is not returned when it isn't selected.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 
 use crate::common;

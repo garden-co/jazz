@@ -29,6 +29,30 @@ struct Backend {
     /// Link challenges issued, with the user each is for.
     challenges: Arc<Mutex<std::collections::HashMap<String, String>>>,
     links: Arc<Mutex<Links>>,
+    events: Events,
+}
+
+/// What the relay saw, with the time since it started: for a test to show
+/// when it fails ([`Relay::event_log`]).
+#[derive(Clone)]
+struct Events(Arc<(std::time::Instant, Mutex<Vec<String>>)>);
+
+impl Events {
+    fn new() -> Self {
+        Self(Arc::new((
+            std::time::Instant::now(),
+            Mutex::new(Vec::new()),
+        )))
+    }
+
+    fn log(&self, what: impl std::fmt::Display) {
+        let at = self.0.0.elapsed();
+        self.0
+            .1
+            .lock()
+            .unwrap()
+            .push(format!("{:>9.3?} {what}", at));
+    }
 }
 
 /// How `backend-link` behaves, beyond the core's own answer.
@@ -64,12 +88,27 @@ pub struct Relay {
     /// unreachable.
     unreachable: Arc<std::sync::atomic::AtomicBool>,
     task: tokio::task::JoinHandle<()>,
+    events: Events,
 }
 
 impl Relay {
+    /// What the relay saw, one line each with the time since it started
+    /// (connections accepted, socket preludes passed on or refused, sockets
+    /// admitted and ended, kicks), readable from any thread, at any time:
+    /// for a test to show when it fails.
+    #[allow(dead_code)]
+    pub fn event_log(&self) -> impl Fn() -> Vec<String> + Send + 'static {
+        let events = self.events.clone();
+        move || events.0.1.lock().unwrap().clone()
+    }
+
     /// Drops every open connection, as a backend restart would.
     pub fn kick(&self) {
-        for connection in self.connections.lock().unwrap().drain(..) {
+        // Counted under the same lock as the drain: what was kicked.
+        let mut connections = self.connections.lock().unwrap();
+        self.events
+            .log(format_args!("kick: {} connection(s)", connections.len()));
+        for connection in connections.drain(..) {
             connection.abort();
         }
     }
@@ -116,7 +155,9 @@ pub async fn start(
         bundle: bundle.to_owned(),
         challenges: Arc::default(),
         links: Arc::default(),
+        events: Events::new(),
     };
+    let events = backend.events.clone();
     let links = backend.links.clone();
     let admitted = Arc::new(Mutex::new(Vec::new()));
     let refusing = Arc::new(Mutex::new(HashMap::new()));
@@ -129,6 +170,7 @@ pub async fn start(
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
+            backend.events.log("accepted a connection");
             // Checked and registered under `kick`'s lock: a connection is
             // either there to be dropped, or sees the backend unreachable.
             let mut open = open.lock().unwrap();
@@ -154,6 +196,7 @@ pub async fn start(
         links,
         unreachable,
         task,
+        events,
     }
 }
 
@@ -492,6 +535,15 @@ async fn relay_socket(
         .as_deref()
         .and_then(|header| header.strip_prefix("Bearer "))
         .and_then(|bearer| refusing.lock().unwrap().get(bearer).cloned());
+    backend.events.log(format_args!(
+        "socket prelude for {:?}: {}",
+        authorization.as_deref().unwrap_or("no authorization"),
+        if refusal.is_some() {
+            "refused"
+        } else {
+            "passed on"
+        }
+    ));
     if let Some(message) = refusal {
         use jazz_app_support::jazz::wire::{
             WireError, WireErrorCode, WireFrame, WireRetry, encode_frame,
@@ -505,9 +557,13 @@ async fn relay_socket(
         return;
     }
     let Some((prelude, who)) = admit(&backend, &prelude, authorization.as_deref()).await else {
+        backend.events.log("socket: not admitted");
         let _ = client.close(None).await;
         return;
     };
+    backend
+        .events
+        .log(format_args!("socket admitted for {who}"));
     admitted.lock().unwrap().push(who);
     let url = format!(
         "{}/apps/{}/ws",
@@ -515,6 +571,9 @@ async fn relay_socket(
         backend.app
     );
     let Ok((mut core, _)) = tokio_tungstenite::connect_async(url).await else {
+        backend
+            .events
+            .log("socket: the core refused the connection");
         return;
     };
     if core.send(Message::Binary(prelude.into())).await.is_err() {
@@ -544,8 +603,8 @@ async fn relay_socket(
         let _ = to_client.close().await;
     };
     tokio::select! {
-        () = up => {}
-        () = down => {}
+        () = up => backend.events.log("socket ended by the client"),
+        () = down => backend.events.log("socket ended by the core"),
     }
 }
 

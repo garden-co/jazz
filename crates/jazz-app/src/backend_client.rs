@@ -63,7 +63,7 @@ pub(crate) struct BackendClientLink {
 const BUNDLE_HEADER: &str = "x-jazz-bundle";
 
 fn http() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    jazz_native_transport::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()
@@ -117,6 +117,7 @@ pub(crate) async fn connect(
     credential: Bearer,
     endpoint: &str,
     own_bundle: Option<String>,
+    place: &mut crate::handle::Place<'_>,
 ) -> Result<(JazzClient, User, Credential, BackendClientLink)> {
     let app = context.app_id;
     let first = token(&credential, TokenReason::Connect).await?;
@@ -133,6 +134,7 @@ pub(crate) async fn connect(
             _ => None,
         };
         context.backend_secret = Some(STAND_IN_SECRET.to_owned());
+        place.hold(&mut context, crate::handle::Owner::Machine)?;
         let client =
             JazzClient::connect_with_native_transport_bearer(context, connector, first.clone())
                 .await?;
@@ -162,6 +164,10 @@ pub(crate) async fn connect(
     session.account_id = Some(signed_in.account);
     context.account_id = Some(signed_in.account);
     context.backend_session = Some(session);
+    place.hold(
+        &mut context,
+        crate::handle::Owner::Account(signed_in.account),
+    )?;
     let client =
         JazzClient::connect_with_native_transport_bearer(context, connector, first.clone()).await?;
     let user = User {
@@ -322,6 +328,8 @@ impl Jazz {
         if self.for_user {
             return Ok(());
         }
+        // An open of its store waits for this close rather than being refused.
+        self.begin_stopping();
         let started = std::time::Instant::now();
         let drains = !self.info.serverless && !timeout.is_zero();
         // Once begun, the close runs on the client's thread to its end, even
@@ -376,8 +384,13 @@ impl Jazz {
                 0
             }
         };
-        // Stopped already (nothing took the shutdown): nothing to report.
-        stopped.await.unwrap_or(Ok(()))?;
+        match stopped.await {
+            Ok(result) => result?,
+            // Nothing took the shutdown: another caller's stop, or the
+            // client's own. As `shutdown`, return once the store is let go
+            // of.
+            Err(_) => self.info.life.ended().await,
+        }
         if pending > 0 && self.info.memory && !self.info.serverless && !timeout.is_zero() {
             return Err(Error::Unsynced { pending });
         }

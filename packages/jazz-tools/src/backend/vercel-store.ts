@@ -25,7 +25,7 @@ import {
   registerInProcessTransport,
 } from "../runtime/in-process-transport.js";
 import type {
-  BrowserWebSocket,
+  DeferredConnectWebSocket,
   WebSocketConstructor,
 } from "../runtime/native-runtime/websocket.js";
 import { backendNative } from "./backend-native.js";
@@ -1603,7 +1603,9 @@ function wakingWebSocket(
   resolveOrigin: () => Promise<string>,
   hooks: { dropped: () => void; unreached: () => void; reached: () => void },
 ): WebSocketConstructor {
-  return class WakingSocket implements BrowserWebSocket {
+  return class WakingSocket implements DeferredConnectWebSocket {
+    /** The client's handshake timeout runs only while a connection to the core is under way. */
+    readonly defersConnect = true;
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
     readyState = 0;
     private socket: WebSocket | undefined;
@@ -1628,6 +1630,7 @@ function wakingWebSocket(
           socket.binaryType = "arraybuffer";
           this.socket = socket;
           this.tried = true;
+          this.emit("connecting");
           socket.addEventListener("open", () => {
             if (this.socket !== socket || this.readyState !== 0) return;
             this.readyState = 1;
@@ -1659,6 +1662,8 @@ function wakingWebSocket(
     private retry(): boolean {
       if (performance.now() + this.pause > this.deadline) return false;
       this.socket = undefined;
+      // Waking again, under the wake deadline rather than the handshake timeout.
+      this.emit("waking");
       setTimeout(() => {
         if (this.readyState === 0) this.connect();
       }, this.pause);

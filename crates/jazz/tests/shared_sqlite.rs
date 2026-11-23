@@ -8,6 +8,7 @@ use jazz::{
     schema::JazzSchema,
     tools::{ColumnType, SchemaBuilder, TableSchemaBuilder},
 };
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::{collections::BTreeMap, path::Path};
 
 fn schema(tables: &[&str]) -> JazzSchema {
@@ -262,16 +263,18 @@ fn managed_storage_preserves_unrelated_tables() {
     let db = block_on(Db::open_storage(config(schema(&["notes"])), storage)).unwrap();
     insert(&db, "notes", "alice");
     assert_eq!(bodies(&db, "notes"), ["alice"]);
-    db.host_sql(&mut |storage| {
+    db.host_sql(&mut async |storage: &jazz::storage::Storage| {
         assert_eq!(
             storage
                 .query_row("SELECT v FROM foreign_data", [], |r| r.get::<_, String>(0))
+                .await
                 .unwrap(),
             "bob"
         );
         assert_eq!(
             storage
                 .query_row("SELECT v FROM _cf_metadata", [], |r| r.get::<_, String>(0))
+                .await
                 .unwrap(),
             "host"
         );
@@ -583,7 +586,7 @@ fn rejected_initialization_leaves_no_jazz_objects() {
                         ))
                     })
                     .unwrap()
-                    .collect::<Result<Vec<_>, _>>()
+                    .collect::<Vec<_>>()
                     .unwrap()
             };
             let before = objects();
@@ -653,8 +656,9 @@ fn host_store_stamps_only_with_a_committed_write() {
         assert_eq!(count(), 0);
         assert!(file.catalogue().unwrap().schemas.is_empty());
         assert!(
-            file.host_sql(&mut |conn| {
+            file.host_sql(&mut async |conn: &jazz::storage::Storage| {
                 conn.execute_batch("CREATE TABLE _jazz_host_failed (v TEXT)")
+                    .await
                     .unwrap();
                 Err(jazz::db::Error::new(ErrorCode::Storage, "injected failure"))
             })
@@ -696,14 +700,14 @@ fn first_deployment_rolls_back_initialization_and_can_retry() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    let result = Db::open_file_with_catalogue(
+    let result = jazz::db::block_on(Db::open_file_with_catalogue(
         config(schema(&["notes"])),
         file,
         jazz::catalogue::CatalogueChange {
             admit: vec![(schema(&["notes", "tasks"]), vec![])],
             ..Default::default()
         },
-    );
+    ));
     assert!(result.is_err());
     drop(result);
     let after: Vec<(String, Option<String>)> = other

@@ -402,10 +402,10 @@ impl ChatFixture {
             // A uuid claim: a relation-style policy compares it with
             // `users.id` as stored, and a uuid in text form would not match
             // there (the legacy `EXISTS` accepts either).
-            db.set_identity_claims(
+            block_on(db.set_identity_claims(
                 member(u),
                 BTreeMap::from([("\0claims:userId".to_owned(), Value::Uuid(id(USER, u).0))]),
-            );
+            ));
         }
         for c in 0..members {
             let chat = uuid(id(CHAT, c));

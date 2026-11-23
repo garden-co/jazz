@@ -3,6 +3,7 @@
 //! name, kept by history, and never writable by the app.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::collections::BTreeMap;
 
@@ -229,7 +230,7 @@ fn authors_are_interned_once_and_read_back_by_identity() {
         block_on(db.update("notes", row(n), body("y"), Default::default())).unwrap();
     }
     assert_eq!(
-        db.interned_authors_for_test(),
+        block_on(db.interned_authors_for_test()),
         3,
         "two writers and the database"
     );
@@ -416,7 +417,7 @@ fn author_provenance_carries_the_account() {
         ))),
         1
     );
-    assert_eq!(db.interned_authors_for_test(), 2);
+    assert_eq!(block_on(db.interned_authors_for_test()), 2);
 }
 
 /// A live query filtered by a provenance part (`$createdBy...`) sees the

@@ -44,6 +44,12 @@
  * cancellable and cancel it as you close. From inside a token callback do
  * step 1 only, and the rest later from another thread: waiting there
  * deadlocks.
+ *
+ * One app at a time has a persistent store open: jazz_open of a dataDir
+ * another app has open, in this process or another, fails with kind
+ * "refused". An open that follows a close in this process waits up to 5 s
+ * for that to finish. Share the one handle (it takes calls from any
+ * thread), or give each app a dataDir of its own.
  */
 #ifndef JAZZ_FFI_H
 #define JAZZ_FFI_H
@@ -78,7 +84,9 @@ typedef void (*JazzCallback)(void *ctx, const char *kind, const char *json);
  * "storage"?: "memory"|"persistent", "contract"?: 2 }. Without "auth" it
  * opens as a local client; with a device key, as that end user syncing
  * through the app's /jazz. Bearer users and backend clients open with
- * jazz_open_user.
+ * jazz_open_user. An end user's (or scoped backend client's) store goes in
+ * dataDir/<account>/; an app without a user refuses a store in dataDir
+ * itself that a signed-in user wrote.
  */
 JazzHandle *jazz_open(const char *config_json, char **err);
 
@@ -107,8 +115,10 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *               "id"?, "row"?}                               -> true|false|null
  *              (advisory: true does not promise the write succeeds; null =
  *              unknown, e.g. no server; not available inside a transaction)
- *   "upsert"   {"table", "id", "row"}            -> the row (a new id: row has
- *              every required column; an existing row: the columns it names)
+ *   "upsert"   {"table", "id", "row", "tier"?}   -> the row (a new id: row has
+ *              every required column; an existing row: the columns it names).
+ *              With a tier it returns once the write got there, with the row
+ *              as written here.
  *   "restore"  {"table", "id", "patch"?}         -> the row (patch: a whole row)
  *   "uploadBegin"  {"table", "column", "kind"?, "id"?, "row"?} -> {"upload"}
  *   "uploadPush"   {"upload", "bytes": base64}                -> null
@@ -121,13 +131,19 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *   "link"     {"bearer"} -> the user (links a device account to the app's
  *                            own sign-in; the session becomes that user's)
  *   "signOut"  {}  -> null (signs out and closes the app)
+ *                     On a jazz_session_jazz handle "link" and "signOut"
+ *                     fail with notSupported, and it stays open: use
+ *                     jazz_session_call's "linkDeviceAccount" and "signOut".
+ *                     "session", "refresh", "link", "signOut" and watching
+ *                     "session" fail with notSupported on a for_user
+ *                     handle: the session is the backend client's it came
+ *                     from, shared by every user.
  *   "disconnect" {} -> null (leaves the server; local reads and writes go
  *                     on; TS's disconnect)
  *   "reconnect"  {} -> null (resumes sync after disconnect)
  *   "deleteClientStorage" {} -> null (closes the app and deletes its local
- *                     store; the next open starts empty. Refused while
- *                     another open app holds the same dataDir. Free the
- *                     handle with jazz_close after, as after signOut)
+ *                     store; the next open starts empty. Free the handle
+ *                     with jazz_close after, as after signOut)
  *   "waitForSync" {"tier"}                    -> null, once every write so
  *                                                far reaches "local"|"global"
  *   "bundle"  {}  -> "<bundle id>" | null (the permissions bundle a

@@ -514,6 +514,11 @@ void uniffi_jazz_ffi_fn_method_jazzhandle_update_at(uint64_t ptr, RustBuffer tab
 RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_upsert(uint64_t ptr, RustBuffer table, RustBuffer id, RustBuffer row_json, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_UPSERT_AT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_UPSERT_AT
+RustBuffer uniffi_jazz_ffi_fn_method_jazzhandle_upsert_at(uint64_t ptr, RustBuffer table, RustBuffer id, RustBuffer row_json, RustBuffer tier, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WAIT_FOR_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_FN_METHOD_JAZZHANDLE_WAIT_FOR_SYNC
 void uniffi_jazz_ffi_fn_method_jazzhandle_wait_for_sync(uint64_t ptr, RustBuffer tier, RustCallStatus *_Nonnull out_status
@@ -1284,6 +1289,12 @@ uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_update_at(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_UPSERT
 #define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_UPSERT
 uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_upsert(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_UPSERT_AT
+#define UNIFFI_FFIDEF_UNIFFI_JAZZ_FFI_CHECKSUM_METHOD_JAZZHANDLE_UPSERT_AT
+uint16_t uniffi_jazz_ffi_checksum_method_jazzhandle_upsert_at(void
     
 );
 #endif

@@ -336,6 +336,8 @@ unsafe extern "C" fn machine_cb(
     0
 }
 
+unsafe extern "C" fn ignore_cb(_: *mut c_void, _: *const c_char, _: *const c_char) {}
+
 fn c(text: &str) -> CString {
     CString::new(text).unwrap()
 }
@@ -424,6 +426,33 @@ async fn a_c_host_opens_a_trusted_backend_client_and_acts_for_a_user() {
             json!({ "table": "shows", "row": parse(&show(account.as_str().unwrap())) }),
         )
         .unwrap();
+        // The session is the job's, shared by every user: not a user's
+        // handle's to read, renew, link or end.
+        for (method, args) in [
+            ("signOut", json!({})),
+            ("refresh", json!({})),
+            ("link", json!({ "bearer": "token-alice" })),
+            ("session", json!({})),
+        ] {
+            let refused = call(as_alice, method, args);
+            let state = call(job, "session", json!({})).unwrap();
+            assert_eq!(state["status"], "signedIn", "after {method}: {state}");
+            assert_eq!(
+                refused.expect_err(method)["kind"],
+                "notSupported",
+                "{method}"
+            );
+        }
+        let watch = jazz_ffi::c_abi::jazz_watch(
+            as_alice,
+            c("session").as_ptr(),
+            Some(ignore_cb),
+            ptr::null_mut(),
+            &mut err,
+        );
+        assert!(watch.is_null(), "watching the job's session");
+        assert_eq!(take(err)["kind"], "notSupported");
+        call(job, "refresh", json!({})).expect("the job still renews");
         // A transaction id works only on the handle that began it: a user's
         // handle can't write in the system's transaction, nor the system in
         // the user's.

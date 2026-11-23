@@ -38,7 +38,7 @@ fn open() -> Db {
         },
     )))
     .unwrap();
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     jazz::db::block_on(db.insert(
         "notes",
         BTreeMap::from([("body".into(), Value::String("secret".into()))]),
@@ -103,7 +103,7 @@ fn count(stream: &mut SubscriptionStream, mut n: usize) -> usize {
 fn registry_and_fixed_claims_do_not_share_across_registry_change() {
     for fixed_first in [true, false] {
         let db = open();
-        db.set_identity_claims(alice(), claims("secret"));
+        jazz::db::block_on(db.set_identity_claims(alice(), claims("secret")));
         let registry = by_claim(&db);
         let fixed = by_claim(&db).with_identity_claims(alice(), claims("secret"));
         let (mut registry_stream, mut fixed_stream) = if fixed_first {
@@ -116,7 +116,7 @@ fn registry_and_fixed_claims_do_not_share_across_registry_change() {
         assert_eq!(count(&mut registry_stream, 0), 1);
         assert_eq!(count(&mut fixed_stream, 0), 1);
 
-        db.set_identity_claims(alice(), claims("revoked"));
+        jazz::db::block_on(db.set_identity_claims(alice(), claims("revoked")));
         assert_eq!(oracle(&db, &registry), 0);
         assert_eq!(oracle(&db, &fixed), 1);
         assert_eq!(
@@ -138,12 +138,12 @@ fn registry_and_fixed_claims_do_not_share_across_registry_change() {
 #[test]
 fn refreshed_group_is_not_joined_by_its_stale_key() {
     let db = open();
-    db.set_identity_claims(alice(), claims("other"));
+    jazz::db::block_on(db.set_identity_claims(alice(), claims("other")));
     let registry = by_claim(&db);
     let mut registry_stream = subscribe(&db, &registry);
     assert_eq!(count(&mut registry_stream, 0), 0);
 
-    db.set_identity_claims(alice(), claims("secret"));
+    jazz::db::block_on(db.set_identity_claims(alice(), claims("secret")));
     assert_eq!(count(&mut registry_stream, 0), 1);
 
     let fixed = by_claim(&db).with_identity_claims(alice(), claims("other"));
@@ -177,7 +177,7 @@ fn claim_scopes_in_one_store_follow_their_own_source() {
             },
         )))
         .unwrap();
-        db.set_authority();
+        jazz::db::block_on(db.set_authority());
         jazz::db::block_on(db.insert(
             "notes",
             BTreeMap::from([("body".into(), Value::String("secret".into()))]),
@@ -188,7 +188,7 @@ fn claim_scopes_in_one_store_follow_their_own_source() {
             },
         ))
         .unwrap();
-        db.set_identity_claims(alice(), claims("secret"));
+        jazz::db::block_on(db.set_identity_claims(alice(), claims("secret")));
         let base = by_claim(&db);
         let queries = [
             base.clone(),
@@ -218,8 +218,8 @@ fn claim_scopes_in_one_store_follow_their_own_source() {
             counts[i] = count(&mut streams[i], 0);
             assert_eq!(counts[i], expected, "default={default_author}, scope={i}");
         }
-        db.set_identity_claims(bob, claims("secret"));
-        db.set_identity_claims(alice(), claims("revoked"));
+        jazz::db::block_on(db.set_identity_claims(bob, claims("secret")));
+        jazz::db::block_on(db.set_identity_claims(alice(), claims("revoked")));
         for (i, expected) in [0, 0, 1, 0].into_iter().enumerate() {
             assert_eq!(read(&queries[i]), expected);
             assert_eq!(

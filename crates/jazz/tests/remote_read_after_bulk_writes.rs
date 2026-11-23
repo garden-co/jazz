@@ -9,6 +9,7 @@
 //! a slow server is a deterministic state rather than a race.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
