@@ -60,8 +60,8 @@ tokio-tungstenite = { version = "0.29", optional = true, default-features = fals
 # Only for the `test-relay` feature (the `jazz-app-test-relay` bin).
 futures = { version = "0.3", optional = true }
 
-# The store's lock on Android, where std's file locks are "not supported"
-# (`lifecycle::flock`).
+# The store's and a new device key's locks on Android, where std's file
+# locks are "not supported" (`lifecycle::flock`).
 [target.'cfg(target_os = "android")'.dependencies]
 libc = "0.2"
 

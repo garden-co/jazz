@@ -328,9 +328,11 @@ public final class Client: Sendable {
     /// and rolls back when it throws, rethrowing that error. Inside, reads
     /// see the transaction's own writes. Its writes commit together and
     /// merge with concurrent ones, so its commit is never a conflict; it
-    /// works offline. Don't let `tx` escape `body`.
+    /// works offline. `body` runs on the caller's actor, so it can be
+    /// main-actor code. Don't let `tx` escape `body`.
     public func transaction<T: Sendable>(
-        commit tier: WriteTier? = nil, _ body: (Transaction) async throws -> T
+        commit tier: WriteTier? = nil, isolation: isolated (any Actor)? = #isolation,
+        _ body: (Transaction) async throws -> T
     ) async throws -> T {
         try await run(transaction: { try self.handle.beginMergeable() }, commit: tier, body)
     }
@@ -341,16 +343,22 @@ public final class Client: Sendable {
     /// `JazzError.conflict` means another write won: running the
     /// transaction again may succeed.
     public func serializableTransaction<T: Sendable>(
-        commit tier: WriteTier? = nil, _ body: (Transaction) async throws -> T
+        commit tier: WriteTier? = nil, isolation: isolated (any Actor)? = #isolation,
+        _ body: (Transaction) async throws -> T
     ) async throws -> T {
         try await run(transaction: { try self.handle.begin() }, commit: tier, body)
     }
 
+    /// Runs on the caller's actor (`isolation`), so `body` may be a closure
+    /// of main-actor code, as in a SwiftUI view.
     func run<T: Sendable>(
         transaction begin: @escaping @Sendable () throws -> JazzFFI.Transaction,
-        commit tier: WriteTier?, _ body: (Transaction) async throws -> T
+        commit tier: WriteTier?, isolation: isolated (any Actor)? = #isolation,
+        _ body: (Transaction) async throws -> T
     ) async throws -> T {
-        let ffi = try await Self.typed { try await Self.run(begin) }
+        // Not `typed`: its closure would leave the caller's actor.
+        let ffi: JazzFFI.Transaction
+        do { ffi = try await Self.run(begin) } catch { throw JazzError.wrap(error) }
         let tx = Transaction(ffi, implementations: implementations)
         let result: T
         do {
@@ -359,7 +367,11 @@ public final class Client: Sendable {
             try? await Self.run { try ffi.rollback() }
             throw error
         }
-        try await Self.typed { try await Self.run { try ffi.commit(tier: tier?.rawValue) } }
+        do {
+            try await Self.run { try ffi.commit(tier: tier?.rawValue) }
+        } catch {
+            throw JazzError.wrap(error)
+        }
         return result
     }
 

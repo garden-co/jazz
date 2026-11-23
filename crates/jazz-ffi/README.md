@@ -79,6 +79,9 @@ backend decides what the client is, reported by `backend_client()` /
   two bundle ids) when the client's `permissions` aren't the ones the main
   backend serves: reopen it with the app's published
   `jazz.permissions.json`. Closing such a handle leaves its parent open.
+  The session is the parent's, shared by every user: `session_state`,
+  `refresh`, `link`, `sign_out` and watching the session fail with kind
+  `"notSupported"` on such a handle.
 - `"scoped"`: it acts as its one user; `for_user` is refused (`Refused`,
   kind `"refused"`), as on a `for_user` handle or any other app.
 
@@ -135,6 +138,9 @@ Linking reopens the account on the bearer: `clientEpoch` moves on.
   `"replaced"`; `Closed` without contract 2): fetch the new one when
   `clientEpoch` changes. Its `shutdown` / `jazz_close` leaves the session
   open.
+- A client that ends by itself (its bearer names no one at a renewal or a
+  handle's `refresh`) signs the session out: `signed-out`, a new
+  `clientEpoch`, and the old handles `Replaced`.
 - `refresh()` (the app's auth changed: ask the bearer and follow),
   `create_device_account()`, `restore_device_account(key)`,
   `reopen_device_account()`, `link_device_account()`,
