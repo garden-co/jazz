@@ -56,6 +56,16 @@ function operatorsForColumn(
         break;
       case "Row":
         break;
+      case "Vector":
+        // Whole values, bit for bit, like bytes (SPEC 6.1.1); nearest-neighbour
+        // search goes through a vector index (SPEC 20.4).
+        operators.push("eq", "ne", "in", "notIn");
+        break;
+      case "Point":
+        // Whole values, bit for bit (SPEC 6.1.1); "near" and "inside" go
+        // through a geo index (SPEC 20.4).
+        operators.push("eq", "ne", "in", "notIn");
+        break;
     }
   }
 

@@ -1,0 +1,181 @@
+# jazz-ix-text/1 query terms (SPEC 20.5, 20.10.1). Per case: `analyzer`,
+# `query <prefix 0|1> <utf8 hex>`, then `term <utf8 hex>` per exact slot and
+# `prefix <exact hex> <lo hex> <hi hex or ->`, or `error <empty|too-long|too-many-terms>`.
+
+analyzer jazz-text/1:en
+query 0 4a617a7a206a617a7a2072756e6e696e67  # "Jazz jazz running"
+term 6a617a7a  # "jazz"
+term 72756e  # "run"
+
+analyzer jazz-text/1:en
+query 1 6a617a7a2052756e6e69  # "jazz Runni"
+term 6a617a7a  # "jazz"
+prefix 72756e6e69 72756e6e69 72756e6e6a  # "runni" "runni"
+
+analyzer jazz-text/1:en
+query 1 52756e6e696e67  # "Running"
+prefix 72756e 72756e6e696e67 72756e6e696e68  # "run" "running"
+
+analyzer jazz-text/1:en
+query 1 436166c3a9cc81  # "Café\u{301}"
+prefix 63616665 63616665 63616666  # "cafe" "cafe"
+
+analyzer jazz-text/1:en
+query 1 e69db1e4baac  # "東京"
+term e69db1  # "東"
+term e4baac  # "京"
+
+analyzer jazz-text/1:en
+query 0 f09f8eb720e28094202121  # "🎷 — !!"
+error empty
+
+analyzer jazz-text/1:en
+query 1 202020  # "   "
+error empty
+
+analyzer jazz-text/1:en
+query 1 6a617a7a2062  # "jazz b"
+term 6a617a7a  # "jazz"
+term 62  # "b"
+
+analyzer jazz-text/1:en
+query 1 6162  # "ab"
+prefix 6162 6162 6163  # "ab" "ab"
+
+analyzer jazz-text/1:en
+query 1 72756e2072756e  # "run run"
+term 72756e  # "run"
+prefix 72756e 72756e 72756f  # "run" "run"
+
+analyzer jazz-text/1:en
+query 1 6a617a7a2072756e6e696e672072756e  # "jazz running run"
+term 6a617a7a  # "jazz"
+term 72756e  # "run"
+prefix 72756e 72756e 72756f  # "run" "run"
+
+analyzer jazz-text/1:en
+query 0 6120622063206420652066206720682069206a206b206c206d206e206f2070207120722073207420752076207720782079207a20412042204320312032203320342035  # "a b c d e f g h i j k l m n o p q r s t u v w x y z A B C 1 2 3 4 5"
+term 61  # "a"
+term 62  # "b"
+term 63  # "c"
+term 64  # "d"
+term 65  # "e"
+term 66  # "f"
+term 67  # "g"
+term 68  # "h"
+term 69  # "i"
+term 6a  # "j"
+term 6b  # "k"
+term 6c  # "l"
+term 6d  # "m"
+term 6e  # "n"
+term 6f  # "o"
+term 70  # "p"
+term 71  # "q"
+term 72  # "r"
+term 73  # "s"
+term 74  # "t"
+term 75  # "u"
+term 76  # "v"
+term 77  # "w"
+term 78  # "x"
+term 79  # "y"
+term 7a  # "z"
+term 31  # "1"
+term 32  # "2"
+term 33  # "3"
+term 34  # "4"
+term 35  # "5"
+
+analyzer jazz-text/1:en
+query 0 6120622063206420652066206720682069206a206b206c206d206e206f2070207120722073207420752076207720782079207a2031203220332034203520362037  # "a b c d e f g h i j k l m n o p q r s t u v w x y z 1 2 3 4 5 6 7"
+error too-many-terms
+
+analyzer jazz-text/1:simple
+query 0 4a617a7a206a617a7a2072756e6e696e67  # "Jazz jazz running"
+term 6a617a7a  # "jazz"
+term 72756e6e696e67  # "running"
+
+analyzer jazz-text/1:simple
+query 1 6a617a7a2052756e6e69  # "jazz Runni"
+term 6a617a7a  # "jazz"
+prefix 72756e6e69 72756e6e69 72756e6e6a  # "runni" "runni"
+
+analyzer jazz-text/1:simple
+query 1 52756e6e696e67  # "Running"
+prefix 72756e6e696e67 72756e6e696e67 72756e6e696e68  # "running" "running"
+
+analyzer jazz-text/1:simple
+query 1 436166c3a9cc81  # "Café\u{301}"
+prefix 63616665 63616665 63616666  # "cafe" "cafe"
+
+analyzer jazz-text/1:simple
+query 1 e69db1e4baac  # "東京"
+term e69db1  # "東"
+term e4baac  # "京"
+
+analyzer jazz-text/1:simple
+query 0 f09f8eb720e28094202121  # "🎷 — !!"
+error empty
+
+analyzer jazz-text/1:simple
+query 1 202020  # "   "
+error empty
+
+analyzer jazz-text/1:simple
+query 1 6a617a7a2062  # "jazz b"
+term 6a617a7a  # "jazz"
+term 62  # "b"
+
+analyzer jazz-text/1:simple
+query 1 6162  # "ab"
+prefix 6162 6162 6163  # "ab" "ab"
+
+analyzer jazz-text/1:simple
+query 1 72756e2072756e  # "run run"
+term 72756e  # "run"
+prefix 72756e 72756e 72756f  # "run" "run"
+
+analyzer jazz-text/1:simple
+query 1 6a617a7a2072756e6e696e672072756e  # "jazz running run"
+term 6a617a7a  # "jazz"
+term 72756e6e696e67  # "running"
+prefix 72756e 72756e 72756f  # "run" "run"
+
+analyzer jazz-text/1:simple
+query 0 6120622063206420652066206720682069206a206b206c206d206e206f2070207120722073207420752076207720782079207a20412042204320312032203320342035  # "a b c d e f g h i j k l m n o p q r s t u v w x y z A B C 1 2 3 4 5"
+term 61  # "a"
+term 62  # "b"
+term 63  # "c"
+term 64  # "d"
+term 65  # "e"
+term 66  # "f"
+term 67  # "g"
+term 68  # "h"
+term 69  # "i"
+term 6a  # "j"
+term 6b  # "k"
+term 6c  # "l"
+term 6d  # "m"
+term 6e  # "n"
+term 6f  # "o"
+term 70  # "p"
+term 71  # "q"
+term 72  # "r"
+term 73  # "s"
+term 74  # "t"
+term 75  # "u"
+term 76  # "v"
+term 77  # "w"
+term 78  # "x"
+term 79  # "y"
+term 7a  # "z"
+term 31  # "1"
+term 32  # "2"
+term 33  # "3"
+term 34  # "4"
+term 35  # "5"
+
+analyzer jazz-text/1:simple
+query 0 6120622063206420652066206720682069206a206b206c206d206e206f2070207120722073207420752076207720782079207a2031203220332034203520362037  # "a b c d e f g h i j k l m n o p q r s t u v w x y z 1 2 3 4 5 6 7"
+error too-many-terms

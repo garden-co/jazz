@@ -2321,6 +2321,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-index"
+version = "2.0.0-beta.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "jazz-model"
 version = "2.0.0-beta.0"
 dependencies = [
