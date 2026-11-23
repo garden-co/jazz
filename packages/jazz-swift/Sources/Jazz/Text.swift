@@ -70,7 +70,7 @@ public struct Splice: Sendable {
 /// Edits run one at a time. `current` is the text as last written here or,
 /// once this handle's own writes have come back, as `changes` last
 /// delivered it.
-public final class JazzText<R: Row>: @unchecked Sendable {
+public final class JazzText<R: Updatable>: @unchecked Sendable {
     let jazz: Client
     public let id: Jazz.ID
     public let column: String
@@ -259,7 +259,7 @@ final class AsyncMutex: @unchecked Sendable {
 extension Client {
     /// Sets text-merge column `column` of row `id` to `text`, an edit of
     /// `base`: changes others made since `base` are kept.
-    public func editText<R: Row>(
+    public func editText<R: Updatable>(
         _ type: R.Type, id: Jazz.ID, column: String, from base: String, to text: String
     ) async throws {
         try await Self.typed {
@@ -270,7 +270,7 @@ extension Client {
     }
 
     /// Partial edits of row `id` of `R`'s table, as one write.
-    public func edit<R: Row>(_ type: R.Type, id: Jazz.ID, edits: [Edit]) async throws {
+    public func edit<R: Updatable>(_ type: R.Type, id: Jazz.ID, edits: [Edit]) async throws {
         try await edit(R.table, id: id, patchJSON: nil, edits: edits)
     }
 
@@ -291,7 +291,7 @@ extension Client {
     }
 
     /// A handle editing text-merge `column` of `row` by merges.
-    public func text<R: Row>(_ row: R, _ column: Column<R, String?>) async throws -> JazzText<R> {
+    public func text<R: Updatable>(_ row: R, _ column: Column<R, String?>) async throws -> JazzText<R> {
         do {
             return try await textHandle(row, column: column.name)
         } catch {
@@ -300,7 +300,7 @@ extension Client {
     }
 
     /// A handle editing text-merge `column` of `row` by merges.
-    public func text<R: Row>(_ row: R, _ column: Column<R, String>) async throws -> JazzText<R> {
+    public func text<R: Updatable>(_ row: R, _ column: Column<R, String>) async throws -> JazzText<R> {
         do {
             return try await textHandle(row, column: column.name)
         } catch {
@@ -310,7 +310,7 @@ extension Client {
 
     // Untyped and named apart: Xcode 16's Swift (6.1) crashed emitting the
     // typed-throws overloads calling a same-named generic helper.
-    func textHandle<R: Row>(_ row: R, column name: String) async throws -> JazzText<R> {
+    func textHandle<R: Updatable>(_ row: R, column name: String) async throws -> JazzText<R> {
         let json = try Query<R>().where(Column<R, Jazz.ID>("id").eq(row.id)).json()
         guard let found = try await Self.run({ try self.handle.one(queryJson: json) }) else {
             throw JazzError.refused("no row \(row.id) in \(R.table)")
@@ -346,7 +346,7 @@ extension Client {
 
 extension Transaction {
     /// `Client.editText` inside the transaction.
-    public func editText<R: Row>(
+    public func editText<R: Updatable>(
         _ type: R.Type, id: Jazz.ID, column: String, from base: String, to text: String
     ) async throws {
         try await Client.typed {
