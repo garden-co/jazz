@@ -210,6 +210,15 @@ test("the verdict fails closed", () => {
   const gap = verdict((results) => (results.get("go").results[1].status = "NOT_COVERED"));
   assert.match(gap.stdout, /VERDICT c INCOMPLETE/, "a gap no rule declares");
 
+  // A known issue's FAIL blocks nothing; any other FAIL does.
+  const knownIndex = RULES.findIndex((rule) => rule.id === "close.ends-waits");
+  const knownFail = verdict((results) => (results.get("go").results[knownIndex].status = "FAIL"));
+  assert.match(knownFail.stdout, /KNOWN_ISSUE c go close\.ends-waits/);
+  assert.match(knownFail.stdout, /BLOCKING c 0: none/);
+  assert.equal(knownFail.status, 0);
+  const otherIndex = RULES.findIndex((rule) => rule.id === "persist.sigkill");
+  assert.equal(verdict((results) => (results.get("go").results[otherIndex].status = "FAIL")).status, 1);
+
   const undecided = RULES.findIndex((rule) => rule.basis === "pending");
   const incomplete = verdict((results) => (results.get("go").results[undecided].status = "NOT_COVERED"));
   assert.equal(incomplete.status, 1);

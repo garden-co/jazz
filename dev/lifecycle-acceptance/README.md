@@ -48,6 +48,8 @@ candidate's own `jazz-tools generate`.
   awaiting Anselm and report what they observed.
 - Android: one line per rule from jazz#6246's test at `android.json`'s pin (marked unreviewed
   until it is). `BLOCKED` is a FAIL. Its store rules report what they observed while awaiting a decision.
+- `KNOWN_ISSUE`: a FAIL of a rule `known-issues.json` lists (a release decision). Reported apart; it
+  blocks nothing. `BLOCKING` lists what does.
 - `CONTROL_BROKEN`: a candidate in `candidates.json` known to break a rule (`mustFail`) didn't. The
   harness is then broken, whatever else it says.
 

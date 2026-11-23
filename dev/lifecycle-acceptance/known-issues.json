@@ -1,0 +1,4 @@
+{
+  "decided": "Anselm, 2026-11-23 00:59 UTC: beta.1 ships with these as known issues (relayed by #adopter-evals 01:06 UTC)",
+  "rules": ["cancel.*", "offline.bearer-open", "android.offline.bearer-open", "close.ends-waits", "close.drain", "close.session"]
+}

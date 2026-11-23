@@ -9,6 +9,9 @@ import { ANDROID_RULES } from "./suite/android-rules.mjs";
 import { RULES } from "./suite/rules/index.mjs";
 
 const dir = process.argv[2];
+// Rules a release ships failing, by decision: their FAILs are reported apart, and block nothing.
+const known = JSON.parse(readFileSync(new URL("known-issues.json", import.meta.url), "utf8"));
+const isKnown = (id) => known.rules.some((rule) => (rule.endsWith(".*") ? id.startsWith(rule.slice(0, -1)) : id === rule));
 const candidates = JSON.parse(process.env.CANDIDATES ?? "[]");
 if (!dir || !candidates.length) {
   console.log("FAIL verdict: no results dir or no candidates");
@@ -27,6 +30,8 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
   }
   let open = 0; // rules nobody has decided or covered yet: no PASS over them
   const totals = { PASS: 0, FAIL: 0, NOT_COVERED: 0 };
+  const knownFails = [];
+  const blocking = [];
   const rows = [];
   const reasons = [];
   const status = {};
@@ -44,6 +49,7 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
       status[`${rule.id} ${lang}`] = got?.observed ?? is;
       if (!got) {
         console.log(`FAIL ${name} ${lang} ${rule.id}: no result (setup broke, see the job)`);
+        blocking.push(`${rule.id} ${lang} (no result)`);
         return "FAIL (no result)";
       }
       const count = is === "NOT_COVERED" ? "" : ` ${got.passed}/${got.rounds}`;
@@ -53,9 +59,12 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
         : is === "FAIL" && worst
           ? `${worst[1].count}x ${worst[0]}`
           : got.why;
-      console.log(`${is} ${name} ${lang} ${rule.id}${count}${why ? `: ${why}` : ""}`);
+      const label = is === "FAIL" && isKnown(rule.id) ? "KNOWN_ISSUE" : is;
+      if (label === "KNOWN_ISSUE") knownFails.push(`${rule.id} ${lang}`);
+      else if (is === "FAIL") blocking.push(`${rule.id} ${lang}`);
+      console.log(`${label} ${name} ${lang} ${rule.id}${count}${why ? `: ${why}` : ""}`);
       if (why && is !== "PASS") reasons.push(`- \`${rule.id}\` ${lang} ${is}: ${why.replace(/\s+/g, " ").slice(0, 300)}`);
-      return `${is}${count}`;
+      return `${label}${count}`;
     });
     rows.push(`| \`${rule.id}\` (${rule.basis}) | ${cells.join(" | ")} |`);
   }
@@ -69,9 +78,12 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
     totals[is]++;
     if (is === "NOT_COVERED") open++;
     status[`${id} android`] = got?.observed ?? is;
-    console.log(`${is} ${name} android ${id}${why ? `: ${why}` : ""}`);
+    const label = is === "FAIL" && got && isKnown(id) ? "KNOWN_ISSUE" : is;
+    if (label === "KNOWN_ISSUE") knownFails.push(`${id} android`);
+    else if (is === "FAIL") blocking.push(`${id} android`);
+    console.log(`${label} ${name} android ${id}${why ? `: ${why}` : ""}`);
     if (why && is !== "PASS") reasons.push(`- \`${id}\` android ${is}: ${why}`);
-    return `\`${id}\` ${is}`;
+    return `\`${id}\` ${label}`;
   });
 
   // The negative control: a harness that passes a candidate known to break a rule is itself broken.
@@ -87,12 +99,15 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
       console.log(`CONTROL_BROKEN ${name} ${lang} ${id} is ${result ? is : "without a result"}, it must FAIL`);
       reasons.unshift(`- **control broken:** \`${id}\` ${lang} must FAIL on this candidate`);
       totals.FAIL++;
+      blocking.unshift(`control ${id} ${lang}`);
     }
   }
 
-  const verdict = totals.FAIL ? "FAIL" : open ? "INCOMPLETE" : "PASS";
+  const verdict = blocking.length ? "FAIL" : open ? "INCOMPLETE" : "PASS";
+  console.log(`BLOCKING ${name} ${blocking.length}: ${blocking.join(", ") || "none"}`);
+  console.log(`KNOWN_ISSUES ${name} ${knownFails.length}: ${knownFails.join(", ") || "none"}`);
   green &&= verdict === "PASS";
-  const line = `VERDICT ${name} ${verdict}: ${totals.PASS} PASS, ${totals.FAIL} FAIL, ${totals.NOT_COVERED} NOT_COVERED, ${open} of them open (sha ${sha}, run ${run})`;
+  const line = `VERDICT ${name} ${verdict}: ${totals.PASS} PASS, ${blocking.length} blocking FAIL, ${knownFails.length} known-issue FAIL, ${totals.NOT_COVERED} NOT_COVERED, ${open} of them open (sha ${sha}, run ${run})`;
   console.log(line);
   const times = LANGS.map((lang) => (byLang[lang] ? `${lang} ${(byLang[lang].ms / 1000).toFixed(0)} s` : `${lang} none`));
   summary.push(
