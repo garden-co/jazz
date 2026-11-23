@@ -3,7 +3,6 @@ package jazz
 import (
 	"context"
 	"encoding/json"
-	"sync"
 )
 
 // A Session follows who is signed in to the app, as TS's JazzSession: the
@@ -67,11 +66,8 @@ type SessionOptions struct {
 // Session is an open user-following session. It is safe for concurrent
 // use.
 type Session struct {
-	mu       sync.RWMutex
-	handle   uintptr
-	app      any
-	provider uint64
-	// owner holds the session's watches, ended on Close.
+	app any
+	// owner holds the session's handle, calls in flight and watches.
 	owner *DB
 }
 
@@ -133,7 +129,7 @@ func OpenSession(ctx context.Context, cfg Config, opts SessionOptions) (*Session
 			err = &Error{Kind: KindRefused, Message: "session open failed"}
 		}
 		if err != nil {
-			providers.Delete(id)
+			releaseProvider(id)
 		}
 		done <- opened{h, id, err}
 	}()
@@ -142,13 +138,13 @@ func OpenSession(ctx context.Context, cfg Config, opts SessionOptions) (*Session
 		if o.err != nil {
 			return nil, o.err
 		}
-		return &Session{handle: o.h, app: cfg.Computed, provider: o.provider,
-			owner: &DB{handle: o.h, app: cfg.Computed}}, nil
+		return &Session{app: cfg.Computed,
+			owner: &DB{handle: o.h, app: cfg.Computed, provider: o.provider}}, nil
 	case <-ctx.Done():
 		go func() {
 			if o := <-done; o.h != 0 {
 				ffi.sessionClose(o.h)
-				providers.Delete(o.provider)
+				releaseProvider(o.provider)
 			}
 		}()
 		return nil, ctx.Err()
@@ -170,14 +166,14 @@ func (s *Session) call(ctx context.Context, method string, args map[string]any, 
 	}
 	done := make(chan result, 1)
 	go func() {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		if s.handle == 0 {
-			done <- result{err: &Error{Kind: KindClosed, Message: "closed"}}
+		h, release, err := s.owner.acquire(nil)
+		if err != nil {
+			done <- result{err: err}
 			return
 		}
+		defer release()
 		var cerr uintptr
-		res := ffi.sessionCall(s.handle, cstr(method), cstr(string(argsJSON)), &cerr)
+		res := ffi.sessionCall(h, cstr(method), cstr(string(argsJSON)), &cerr)
 		var r result
 		r.text, _ = takeString(res)
 		r.err = takeError(cerr)
@@ -209,13 +205,13 @@ func (s *Session) DB(ctx context.Context) (*DB, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.handle == 0 {
-		return nil, &Error{Kind: KindClosed, Message: "closed"}
+	session, release, err := s.owner.acquire(nil)
+	if err != nil {
+		return nil, err
 	}
+	defer release()
 	var cerr uintptr
-	h := ffi.sessionJazz(s.handle, &cerr)
+	h := ffi.sessionJazz(session, &cerr)
 	if err := takeError(cerr); err != nil {
 		return nil, err
 	}
@@ -283,7 +279,7 @@ func (s *Session) Watch(ctx context.Context) (<-chan SessionSnapshot, error) {
 	}
 	return stream(ctx, s.owner, decode, func(id uint64) (func(), error) {
 		var cerr uintptr
-		w := ffi.sessionWatch(s.handle, ffi.subscriptionCallback, uintptr(id), &cerr)
+		w := ffi.sessionWatch(s.owner.handle, ffi.subscriptionCallback, uintptr(id), &cerr)
 		if err := takeError(cerr); err != nil || w == 0 {
 			if err == nil {
 				err = &Error{Kind: KindRefused, Message: "watch failed"}
@@ -294,19 +290,14 @@ func (s *Session) Watch(ctx context.Context) (<-chan SessionSnapshot, error) {
 	})
 }
 
-// Close closes the session: its DBs' calls fail with ErrClosed (close
-// them too), and its watches end.
+// Close closes the session without waiting for an operation in flight:
+// it and its DBs' calls end with ErrClosed (close the DBs too), and its
+// watches end; an open it interrupts gets up to 2 seconds to let go of its
+// store. As with DB.Close, it cancels the Token provider's ctx and
+// waits for the provider to return, and the provider may call it. An error
+// says what failed as it closed: the session is closed all the same.
 func (s *Session) Close() error {
-	s.owner.endStreams()
-	s.owner.mu.Lock()
-	s.owner.handle = 0
-	s.owner.mu.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.handle != 0 {
-		ffi.sessionClose(s.handle)
-		s.handle = 0
-		providers.Delete(s.provider)
-	}
-	return nil
+	return s.owner.closeAndFree(0,
+		func(h uintptr) error { return callClose(ffi.sessionCall, h, "{}") },
+		ffi.sessionClose)
 }
