@@ -342,6 +342,88 @@ async fn mutation_errors_report_unwaited_refusals() {
     server.shutdown().await;
 }
 
+/// A durable wait cut short by its handle's closing isn't the one that
+/// handles the write's refusal: the refusal is a mutation error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_wait_leaves_its_refusal_to_mutation_errors() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    connected(&jazz).await;
+    let mut errors = jazz.mutation_errors().await.unwrap();
+    jazz.disconnect().await.unwrap();
+    let (close, closed) = tokio::sync::watch::channel(false);
+    let handle = jazz
+        .durable(DurabilityTier::GlobalServer)
+        .ending_waits_with(closed);
+    let writing = tokio::spawn(async move {
+        handle
+            .insert(NewNote::new(ObjectId::new(), "interrupted"))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!writing.is_finished(), "nothing to wait for");
+    close.send(true).unwrap();
+    let written = tokio::time::timeout(Duration::from_secs(5), writing)
+        .await
+        .expect("the wait ends with its handle")
+        .unwrap();
+    assert!(
+        matches!(written, Err(jazz_app_support::Error::Stopped)),
+        "{written:?}"
+    );
+    jazz.reconnect().await.unwrap();
+    assert!(next_error(&mut errors).await.denied);
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// `shutdown` ends the waits on the server at once, rather than draining
+/// them for 30 seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_ends_waits_on_the_server() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    connected(&jazz).await;
+    jazz.disconnect().await.unwrap();
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    jazz.insert(NewNote::new(me, "unsent")).await.unwrap();
+    let syncing = tokio::spawn({
+        let jazz = jazz.clone();
+        async move { jazz.wait_for_sync().await }
+    });
+    let writing = tokio::spawn({
+        let durable = jazz.durable(DurabilityTier::GlobalServer);
+        async move { durable.insert(NewNote::new(me, "durable")).await.map(drop) }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !syncing.is_finished() && !writing.is_finished(),
+        "nothing to wait for"
+    );
+    tokio::time::timeout(Duration::from_secs(8), jazz.shutdown())
+        .await
+        .expect("shutdown doesn't drain the waits")
+        .unwrap();
+    for wait in [syncing, writing] {
+        let ended = wait.await.unwrap();
+        assert!(
+            matches!(ended, Err(jazz_app_support::Error::Stopped)),
+            "{ended:?}"
+        );
+    }
+    server.shutdown().await;
+}
+
 /// Disconnecting keeps local work going and stops sync: another client
 /// doesn't see the write until reconnecting syncs it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

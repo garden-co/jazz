@@ -516,11 +516,15 @@ impl Session {
                 crate::backend::link(&linking.endpoint, linking.app, &bearer, &linking.key).await
             }
         };
-        let linked = linking
-            .runtime
-            .spawn(request)
-            .await
-            .map_err(|_| Error::Stopped)??;
+        // Dropped with this call, which aborts the request.
+        let mut requesting = tokio::task::JoinSet::new();
+        requesting.spawn_on(request, &linking.runtime);
+        let linked = tokio::select! {
+            biased;
+            Some(linked) = requesting.join_next() => linked.map_err(|_| Error::Stopped)??,
+            // The session ended (the client is stopping, or signed out).
+            () = self.commands.closed() => return Err(Error::Stopped),
+        };
         if linked.account != device {
             // The backend has linked the user by now: say so, as the
             // session stays the device's.
@@ -677,9 +681,15 @@ impl Machine {
         mut inbox: mpsc::UnboundedReceiver<Command>,
     ) {
         self.schedule_ahead();
+        let client = self.client.clone();
+        let stopping = client.waits_ended();
+        tokio::pin!(stopping);
         loop {
             let at = self.renewal.as_ref().map(|renewal| renewal.at);
             let flow = tokio::select! {
+                // The client is stopping: nothing more to renew, and who
+                // waits for a renewal hears `Stopped`.
+                () = &mut stopping => ControlFlow::Break(()),
                 changed = sync.changed() => {
                     if changed.is_err() {
                         return;

@@ -48,7 +48,7 @@ export JAZZ_TOKEN_FILE=/var/run/secrets/tokens/jazz  # or JAZZ_TOKEN / JAZZ_TOKE
 cargo run -p todo-server
 ```
 
-On Ctrl-C or SIGTERM it stops accepting requests, ends the `/todos/live` streams and lets the requests in flight finish (for up to 10 seconds). Then it calls `jazz.close(CLOSE_TIMEOUT)`, which waits up to 10 seconds for writes to reach the main backend. With a persistent store, call `shutdown` before the process exits, so that the calls already made finish and the store closes.
+On Ctrl-C or SIGTERM it stops accepting requests, ends the `/todos/live` streams and lets the requests in flight finish (for up to 10 seconds). Then it calls `jazz.close(CLOSE_TIMEOUT)`, which waits up to 10 seconds for writes to reach the main backend. With a persistent store, call `shutdown` before the process exits, so that local work already started finishes and the store closes: calls still waiting on the server fail with `Error::Stopped`.
 
 The service runs as the one identity its credential is trusted as. HTTP requests don't select separate Jazz identities, and its HTTP API has no sign-in of its own, so serve it only where your own infrastructure authenticates callers.
 
