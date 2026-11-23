@@ -59,6 +59,71 @@ fn refusal(result: Result<impl std::fmt::Debug, ArtifactError>) -> String {
     result.expect_err("refused").to_string()
 }
 
+/// Alice gets the exact location of an overflowing number in either kind of JSON schema.
+#[test]
+fn overflowing_json_schema_numbers_are_refused_on_load() {
+    let huge = format!("1{}", "0".repeat(309));
+    let declaration = format!(r#"{{ "json": {{ "enum": [{huge}] }} }}"#);
+    let encrypted = app(&tasks_entry().replace(
+        r#""notes": "string?""#,
+        &format!(r#""notes": {declaration}"#),
+    ));
+    let plain = format!(
+        r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": {{ "tasks": {{ "columns": {{ "notes": {declaration} }} }} }} }}"#
+    );
+    for (file, path) in [
+        (
+            encrypted,
+            "tables.tasks.encryption.columns.notes.json.enum[0]",
+        ),
+        (plain, "tables.tasks.columns.notes.json.enum[0]"),
+    ] {
+        let error = refusal(load_app(file.as_bytes()));
+        assert!(
+            error.contains(path) && error.contains("out of range"),
+            "{error}"
+        );
+    }
+}
+
+/// Alice ships ordinary integers and both integer bounds verbatim in her encrypted schema.
+#[test]
+fn encrypted_json_schema_integer_bounds_survive_deployment() {
+    let values = serde_json::json!([i64::MIN, 42, i64::MAX, u64::MAX]);
+    let entry = tasks_entry().replace(
+        r#""notes": "string?""#,
+        &format!(r#""notes": {{ "json": {{ "enum": {values} }} }}"#),
+    );
+    let loaded = load(app(&entry).as_bytes(), permissions(MEMBERS_RULE).as_bytes()).unwrap();
+    let body = loaded.deployment_body(false);
+    let version = &body["encryption"]["versions"][loaded.current_hash().to_string()];
+    let declared = &version["tasks"]["columns"]["notes"]["type"]["columnType"];
+    assert_eq!(declared["schema"]["enum"], values);
+
+    for outside in ["-9223372036854775809", "18446744073709551616"] {
+        let error = refusal(load_app(
+            app(&entry.replace(&values.to_string(), &format!("[{outside}]"))).as_bytes(),
+        ));
+        assert!(error.contains("non-integer"), "{error}");
+    }
+}
+
+/// Alice can still load finite floating-point numbers in a plain JSON schema.
+#[test]
+fn plain_json_schemas_keep_finite_floats() {
+    let file = br#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "tasks": { "columns": { "notes": { "json": { "enum": [0.125, 1e80, 18446744073709551616] } } } } } }"#;
+    let loaded = load_app(file).unwrap();
+    let table = &loaded.current_schema()[&TableName::from("tasks")];
+    assert_eq!(
+        table.columns.columns[0].column_type,
+        ColumnType::Json {
+            schema: Some(serde_json::json!({"enum": [0.125, 1e80, 18446744073709551616.0]})),
+        }
+    );
+}
+
 /// An app that declares encryption loads with Jazz's system tables in its
 /// schema, its declarations returned beside it, and its files rewrite to
 /// the same text, the system tables left out.
