@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { acceptDeviceAccounts, createJazz, sqlite } from "../backend/index.js";
 import type { AccountStore } from "../accounts/persistence.js";
-import { memoryPrivateStore } from "../encryption/index.js";
+import { Encryption, memoryPrivateStore } from "../encryption/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import type { Db } from "../runtime/db.js";
 import { EncryptionNeedsLocalFirstError } from "../runtime/encryption-needs-local-first.js";
@@ -251,6 +251,37 @@ describe("calls on a db.encryption handle taken while thin", () => {
     expect(Date.now() - started).toBeLessThan(10_000);
     expect(isThinDb(kept)).toBe(true);
   }, 30_000);
+
+  it("goes ahead after a load when the account's verification is still pending at the deadline", async () => {
+    const host = await serve();
+    pageStillLoading();
+    const gate = gatedLoader();
+    const kept = db(await thinSession(host, gate.loader));
+    // Verification that has not finished when its time runs out, as for a device offline. It
+    // checks every 100 ms, so it gives up just after its deadline.
+    vi.spyOn(Encryption.prototype, "ready").mockImplementation(
+      (options = {}) =>
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error("not verified yet")),
+            (options.timeoutMs ?? 30_000) + 100,
+          ),
+        ),
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let outcome: unknown = "pending";
+    const call = kept.encryption.deviceId().then(
+      (id) => (outcome = { id }),
+      (error: unknown) => (outcome = error),
+    );
+    await vi.waitFor(() => expect(gate.calls).toBe(1));
+    gate.release();
+    await vi.waitFor(() => expect(isThinDb(kept)).toBe(false));
+    await vi.advanceTimersByTimeAsync(31_000);
+    await call;
+    vi.useRealTimers();
+    expect(outcome).toEqual({ id: expect.any(String) });
+  }, 90_000);
 
   it("ends a call at a stalled load at the deadline, and at sign-out", async () => {
     const host = await serve();
