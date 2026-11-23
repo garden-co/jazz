@@ -294,3 +294,5 @@ store (writes the server hasn't accepted are lost). One app at a time has a `dat
 again, in this process or another (an app extension, say), throws `JazzError.refused`, so share the
 one client. An open right after `close()` waits for it to finish. The `session`, `syncChanges` and `mutationErrors` streams end with
 `JazzError.closed` when the app closes.
+
+An end user's persistent store goes in `dataDir/<account>/`, so each user of one directory has their own. An app without a user keeps its store in `dataDir` itself, and refuses one there that a signed-in user wrote (an earlier version kept users' stores there): open it as that user, or delete it.
