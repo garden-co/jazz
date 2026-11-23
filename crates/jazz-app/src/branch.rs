@@ -428,19 +428,22 @@ impl OnBranch {
     }
 
     /// Brings back the row of `T` the head branch deleted, as it was.
-    pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
+    pub async fn restore<T: Updatable>(&self, id: ObjectId) -> Result<T> {
         self.restore_cells::<T>(id, None).await
     }
 
     /// Brings back the row the head branch deleted, with `new`'s values, as
     /// [`Jazz::restore_with`].
-    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         let cells = new.into_cells(&self.jazz.info.implementations)?;
         self.restore_cells::<N::Row>(id, Some(cells.into_iter().collect()))
             .await
     }
 
-    async fn restore_cells<T: Table>(
+    async fn restore_cells<T: Updatable>(
         &self,
         id: ObjectId,
         cells: Option<Vec<(String, Value)>>,
