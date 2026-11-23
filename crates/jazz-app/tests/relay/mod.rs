@@ -104,17 +104,18 @@ impl Relay {
 
     /// Drops every open connection, as a backend restart would.
     pub fn kick(&self) {
-        self.events.log(format_args!(
-            "kick: {} connection(s)",
-            self.connections.lock().unwrap().len()
-        ));
-        for connection in self.connections.lock().unwrap().drain(..) {
+        // Counted under the same lock as the drain: what was kicked.
+        let mut connections = self.connections.lock().unwrap();
+        self.events
+            .log(format_args!("kick: {} connection(s)", connections.len()));
+        for connection in connections.drain(..) {
             connection.abort();
         }
     }
 
     /// Makes the backend unreachable (`true`: open connections drop, new
-    /// ones are closed at once) or reachable again.
+    /// ones are closed at once) or reachable again. Nothing a client sends
+    /// after this returns reaches the core while it is unreachable.
     pub fn set_unreachable(&self, unreachable: bool) {
         self.unreachable
             .store(unreachable, std::sync::atomic::Ordering::SeqCst);
@@ -170,13 +171,21 @@ pub async fn start(
                 return;
             };
             backend.events.log("accepted a connection");
+            // Checked and registered under `kick`'s lock: a connection is
+            // either there to be dropped, or sees the backend unreachable.
+            let mut open = open.lock().unwrap();
             if down.load(std::sync::atomic::Ordering::SeqCst) {
                 drop(stream);
                 continue;
             }
-            let connection =
-                tokio::spawn(serve(stream, backend.clone(), log.clone(), refused.clone()));
-            open.lock().unwrap().push(connection.abort_handle());
+            let connection = tokio::spawn(serve(
+                stream,
+                backend.clone(),
+                log.clone(),
+                refused.clone(),
+                down.clone(),
+            ));
+            open.push(connection.abort_handle());
         }
     });
     Relay {
@@ -233,6 +242,7 @@ async fn serve(
     backend: Backend,
     admitted: Arc<Mutex<Vec<String>>>,
     refusing: Arc<Mutex<HashMap<String, String>>>,
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut head = vec![0; 8192];
     let n = loop {
@@ -247,7 +257,7 @@ async fn serve(
     };
     let text = String::from_utf8_lossy(&head[..n]).to_string();
     if text.to_ascii_lowercase().contains("upgrade: websocket") {
-        relay_socket(stream, backend, admitted, refusing).await;
+        relay_socket(stream, backend, admitted, refusing, unreachable).await;
     } else {
         http(stream, &text, backend).await;
     }
@@ -498,6 +508,7 @@ async fn relay_socket(
     backend: Backend,
     admitted: Arc<Mutex<Vec<String>>>,
     refusing: Arc<Mutex<HashMap<String, String>>>,
+    unreachable: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let authorization = Arc::new(Mutex::new(None::<String>));
     let seen = authorization.clone();
@@ -572,6 +583,11 @@ async fn relay_socket(
     let (mut to_core, mut from_core) = core.split();
     let up = async {
         while let Some(Ok(message)) = from_client.next().await {
+            // An aborted task runs on until it next waits: it passes
+            // nothing on meanwhile.
+            if unreachable.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             if to_core.send(message).await.is_err() {
                 break;
             }
