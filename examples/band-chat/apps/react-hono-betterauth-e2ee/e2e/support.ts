@@ -306,8 +306,12 @@ export function signInHeading(page: Page): Locator {
 }
 
 export async function signOut(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "Account" }).click();
-  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  // The menu closes if the side bar re-renders while it is open; open it again.
+  await expect(async () => {
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Account" }).click();
+    await page.getByRole("menuitem", { name: "Sign out" }).click({ timeout: 2000 });
+  }).toPass({ timeout: T });
   await expect(signInHeading(page)).toBeVisible({ timeout: T });
 }
 
