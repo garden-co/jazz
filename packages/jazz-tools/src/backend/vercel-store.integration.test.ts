@@ -1191,6 +1191,50 @@ describe("vercel() store", () => {
     expect(fake.calls.some((call) => call.startsWith("create"))).toBe(false);
   }, 60_000);
 
+  it("logs how long each wake took, and nothing for a core that was already answering", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel({ ...core, appId });
+    fake.state.exists = true;
+    fake.state.drive = true;
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const info = vi.spyOn(console, "info");
+    cleanups.push(async () => info.mockRestore());
+    const wakes = () =>
+      info.mock.calls.map(([line]) => String(line)).filter((line) => line.includes(" woke in "));
+
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: vercel({
+        namespace: legacyNamespace,
+        region: "iad1",
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    expect(wakes()).toEqual([
+      expect.stringMatching(
+        /^jazz: vercel\(\): core jazz-prj-test-production woke in \d+ ms \(resumed\)$/,
+      ),
+    ]);
+
+    // Another instance finds it running and answering: no wake to report.
+    const again = await createJazz({
+      app,
+      permissions,
+      store: vercel({
+        namespace: legacyNamespace,
+        region: "iad1",
+        sdk: fake.sdk,
+        backendCredential: core.credential,
+      }),
+    }).ready();
+    cleanups.push(() => again.close());
+    expect(wakes()).toHaveLength(1);
+  }, 60_000);
+
   it("runs its local store outside a Vercel deployment", async () => {
     const appId = randomUUID();
     const fake = fakeVercel({ appId, url: "http://unused.invalid" });
