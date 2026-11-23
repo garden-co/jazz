@@ -772,6 +772,59 @@ fn uploaded_ops(sent_up: &Log) -> Vec<WireOp> {
         .expect("the writer uploaded its commit")
 }
 
+/// A store that held parts before holds kept their part's data has the
+/// older `_jazz_shard_holds`, without its `part` column: it gains the
+/// column, so its old hold still stands (with no data) and new holds keep
+/// theirs.
+#[test]
+fn holds_from_before_parts_were_kept_upgrade_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shard.sqlite");
+    let now = Rc::new(Cell::new(NOW));
+    let db = shard_at(&path, &now);
+    insert(&db, "before");
+    let served = db.shard().served_through();
+    drop(db);
+    let old = CommitRef {
+        node: [9; 16],
+        tx: 1,
+    };
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE _jazz_shard_holds (at INTEGER PRIMARY KEY, node BLOB NOT NULL, tx INTEGER NOT NULL, fixed INTEGER, UNIQUE (node, tx));\
+             CREATE TABLE _jazz_shard_held_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, PRIMARY KEY (tbl, id));",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO _jazz_shard_holds (at, node, tx, fixed) VALUES (?1, ?2, ?3, NULL)",
+            rusqlite::params![(served + 1) as i64, old.node.to_vec(), old.tx as i64],
+        )
+        .unwrap();
+    }
+    let db = shard_at(&path, &now);
+    assert_eq!(
+        db.shard().lowest_hold(),
+        Some(served + 1),
+        "the old hold stands"
+    );
+    assert_eq!(
+        db.shard().part(old).unwrap().as_deref(),
+        Some(&b""[..]),
+        "with no data"
+    );
+    let new = CommitRef {
+        node: [9; 16],
+        tx: 2,
+    };
+    held_at(&db, new, &[]);
+    assert_eq!(
+        db.shard().part(new).unwrap().as_deref(),
+        Some(&b"the part"[..]),
+        "a new hold keeps its part"
+    );
+}
+
 /// A queued hold released before it was granted stays released across a
 /// reopen: the shard forgets its durable record too, so nothing grants it
 /// later and blocks its rows for good (INV-SHARD-24).
