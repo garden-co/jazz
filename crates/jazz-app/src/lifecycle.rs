@@ -108,6 +108,29 @@ impl Stream for MutationErrors {
     }
 }
 
+/// What a binding cleans up on the client's thread before its client stops.
+type BeforeStop = fn(JazzClient) -> Pin<Box<dyn std::future::Future<Output = ()>>>;
+
+thread_local! {
+    static BEFORE_STOP: std::cell::Cell<Option<BeforeStop>> = const { std::cell::Cell::new(None) };
+}
+
+/// For a binding, called from a [`Jazz::with_client`] job: `clean_up` runs
+/// on this client's thread once its jobs are done and before it stops,
+/// however it comes to stop (closed, signed out, replaced, deleted). One
+/// per client; not public API.
+#[doc(hidden)]
+pub fn before_client_stops(clean_up: BeforeStop) {
+    BEFORE_STOP.set(Some(clean_up));
+}
+
+/// Runs what [`before_client_stops`] left.
+pub(crate) async fn run_before_stop(client: &JazzClient) {
+    if let Some(clean_up) = BEFORE_STOP.take() {
+        clean_up(client.clone()).await;
+    }
+}
+
 impl Jazz {
     /// A handle acting for a user ([`Jazz::for_user`] on a trusted backend
     /// client, or `Endpoint::for_user` with the `unstable-endpoint` feature)
