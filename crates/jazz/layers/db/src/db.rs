@@ -2106,6 +2106,7 @@ impl Db {
                 prior_ack_point: Cell::default(),
                 released_reads: RefCell::default(),
                 published_schema: RefCell::new(owner.clone()),
+                write_layouts: RefCell::default(),
                 published_versions: RefCell::default(),
                 validated_shapes: RefCell::default(),
                 upload_cleanup: Rc::default(),
@@ -9647,6 +9648,12 @@ struct WriteTable {
     stored_names: bool,
 }
 
+struct WriteLayouts {
+    schema: Rc<Schema>,
+    version: crate::ids::SchemaVersionId,
+    tables: HashMap<String, Rc<WriteTable>>,
+}
+
 #[derive(Clone)]
 struct PreparedWrite {
     layout: Rc<WriteTable>,
@@ -10481,6 +10488,9 @@ struct Store {
     released_reads: RefCell<Vec<sync::ReadCleanup>>,
     /// Schema available to synchronous callers while execution is suspended.
     published_schema: RefCell<Rc<Schema>>,
+    /// Resolved tables for the most recently used write schema. Staged operations
+    /// retain their own layout when a different view or policy bundle is used.
+    write_layouts: RefCell<Option<WriteLayouts>>,
     published_versions: RefCell<HashMap<crate::ids::SchemaVersionId, Rc<Schema>>>,
     /// Query shapes (with their binding) `prepare` has already validated
     /// against this schema version: it validates each once. Cleared when
@@ -11154,31 +11164,49 @@ impl Store {
                 cells.iter().map(|(name, value)| (name.as_str(), value)),
             )?;
         }
-        let mut table = source.physical();
-        if table.branch_key_names.is_empty() {
-            table.branch_key_names = source.branch_by.clone();
-        }
+        let layout = self.write_layout(&schema, source);
         let op = if schema.stored_names {
             op
         } else {
             op.by_stored_names(source)
         };
-        let source = source.clone();
-        let version = if Rc::ptr_eq(&schema, &self.owner()) {
+        Ok(PreparedWrite { op, layout })
+    }
+
+    fn write_layout(&self, schema: &Rc<Schema>, source: &Table) -> Rc<WriteTable> {
+        let version = if Rc::ptr_eq(schema, &self.owner()) {
             self.owner_version.get()
         } else {
             schema.version
         };
-        Ok(PreparedWrite {
-            op,
-            layout: Rc::new(WriteTable {
-                table,
-                source,
+        let mut cached = self.write_layouts.borrow_mut();
+        // Two views with the same structural version can have different permissions.
+        let layouts = match &mut *cached {
+            Some(layouts) if Rc::ptr_eq(&layouts.schema, schema) && layouts.version == version => {
+                layouts
+            }
+            other => other.insert(WriteLayouts {
+                schema: schema.clone(),
                 version,
-                stored_names: schema.stored_names,
-                policies: schema,
+                tables: HashMap::new(),
             }),
-        })
+        };
+        if let Some(layout) = layouts.tables.get(&source.name) {
+            return layout.clone();
+        }
+        let mut table = source.physical();
+        if table.branch_key_names.is_empty() {
+            table.branch_key_names = source.branch_by.clone();
+        }
+        let layout = Rc::new(WriteTable {
+            table,
+            source: source.clone(),
+            version,
+            stored_names: schema.stored_names,
+            policies: schema.clone(),
+        });
+        layouts.tables.insert(source.name.clone(), layout.clone());
+        layout
     }
 
     /// Received and persisted commits already name storage identities and
