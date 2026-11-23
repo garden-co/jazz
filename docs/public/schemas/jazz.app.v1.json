@@ -242,31 +242,7 @@
           "type": "object",
           "description": "The encrypted columns and the plaintext types code reads and writes. A column may declare a `default`, e.g. { \"type\": \"string\", \"default\": \"untitled\" }: what a cell never written reads as, such as on rows older than the column. A default is stored and deployed in plain text, visible to the server, so it must not be secret.",
           "additionalProperties": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/columnType"
-              },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["type"],
-                "properties": {
-                  "type": {
-                    "$ref": "#/$defs/columnType"
-                  },
-                  "sealedType": {
-                    "$ref": "#/$defs/columnType"
-                  },
-                  "default": {
-                    "description": "What a cell never written reads as. Stored and deployed in plain text: not secret."
-                  },
-                  "$comment": {
-                    "type": "string"
-                  }
-                },
-                "description": "A column with a `default`, or with `sealedType` pinning the type it was introduced with when an encrypted enum appends variants."
-              }
-            ]
+            "$ref": "#/$defs/encryptedColumn"
           }
         },
         "equality": {
@@ -280,6 +256,178 @@
           "type": "string"
         }
       }
+    },
+    "encryptedColumn": {
+      "description": "An encrypted column: a type string; a type object with `optional` and `default`; or `{ \"type\": …, \"sealedType\": …, \"default\": … }`, which pins the type its cells were sealed under when an encrypted enum appends variants.",
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+            },
+            "enum": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "optional": {
+              "type": "boolean"
+            },
+            "default": {
+              "description": "What a cell never written reads as. Stored and deployed in plain text: not secret."
+            },
+            "$comment": {
+              "type": "string"
+            }
+          },
+          "oneOf": [
+            {
+              "required": ["type"]
+            },
+            {
+              "required": ["enum"]
+            },
+            {
+              "required": ["json"]
+            },
+            {
+              "required": ["array"]
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "$ref": "#/$defs/encryptedPlainType"
+            },
+            "sealedType": {
+              "$ref": "#/$defs/encryptedPlainType"
+            },
+            "default": {
+              "description": "What a cell never written reads as. Stored and deployed in plain text: not secret."
+            },
+            "$comment": {
+              "type": "string"
+            }
+          },
+          "anyOf": [
+            {
+              "required": ["sealedType"]
+            },
+            {
+              "properties": {
+                "type": {
+                  "type": "object"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "encryptedPlainType": {
+      "description": "The declared or sealed type of an encrypted column: a type string, or a type object with `optional` and nothing else.",
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "enum": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "optional": {
+              "type": "boolean"
+            },
+            "$comment": {
+              "type": "string"
+            }
+          },
+          "oneOf": [
+            {
+              "required": ["type"]
+            },
+            {
+              "required": ["enum"]
+            },
+            {
+              "required": ["json"]
+            },
+            {
+              "required": ["array"]
+            }
+          ]
+        }
+      ]
+    },
+    "encryptedTypeExpression": {
+      "description": "A type nested in `type` or `array`: a type string, or an object with exactly one of `type`, `enum`, `json`, `array`.",
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "enum": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            }
+          },
+          "oneOf": [
+            {
+              "required": ["type"]
+            },
+            {
+              "required": ["enum"]
+            },
+            {
+              "required": ["json"]
+            },
+            {
+              "required": ["array"]
+            }
+          ]
+        }
+      ]
     },
     "column": {
       "description": "A type string (\"string\", \"uuid?\", …) or an object with one of type / enum / json / array and options.",

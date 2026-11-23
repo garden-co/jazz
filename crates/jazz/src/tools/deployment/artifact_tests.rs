@@ -3403,3 +3403,69 @@ fn the_removed_local_first_auth_mode_is_refused_by_name() {
     // A claim may still hold the text: only `session.authMode` changed.
     read_policy("todos", "session.claims.mode = 'local-first'").unwrap();
 }
+
+/// The app file's JSON Schema takes an encrypted column's declaration
+/// exactly when the reader does (`load`, what `loadAppArtifact` calls): each
+/// declaration below sits in an otherwise valid encrypted app, and the 2020-12
+/// validator and the reader must both accept it or both refuse it.
+#[test]
+fn the_json_schema_takes_exactly_the_encrypted_columns_the_reader_takes() {
+    let validator = jsonschema::validator_for(&json_schema("jazz.app.v1.json")).unwrap();
+    let permissions = br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let app = |declaration: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ "notes": {{ "columns": {{ "title": "bytes" }},
+                "encryption": {{ "space": "id", "scope": "notes", "columns": {{ "title": {declaration} }} }} }} }} }}"#
+        )
+    };
+    let accepted = [
+        r#""string""#,
+        r#""string?""#,
+        r#"{ "type": "string" }"#,
+        r#"{ "type": "string", "default": "untitled" }"#,
+        r#"{ "type": "string", "optional": true }"#,
+        r#"{ "enum": ["low", "high"] }"#,
+        r#"{ "enum": ["low", "high"], "default": "low" }"#,
+        r#"{ "json": true }"#,
+        r#"{ "array": "string" }"#,
+        r#"{ "array": { "enum": ["low", "high"] } }"#,
+        r#"{ "type": { "enum": ["low", "high"] } }"#,
+        r#"{ "type": { "enum": ["low", "high"] }, "default": "low" }"#,
+        r#"{ "type": { "enum": ["low", "high", "top"] }, "sealedType": { "enum": ["low", "high"] } }"#,
+        r#"{ "type": "string", "$comment": "a note" }"#,
+    ];
+    let refused = [
+        r#"42"#,
+        r#"{}"#,
+        r#""strng""#,
+        r#"{ "type": "string", "from": "etc" }"#,
+        r#"{ "type": "string", "anything": 1 }"#,
+        r#"{ "type": "string", "enum": ["low"] }"#,
+        r#"{ "type": "string", "merge": "counter" }"#,
+        r#"{ "type": "string", "references": "notes" }"#,
+        r#"{ "type": "string", "transform": "upper" }"#,
+        r#"{ "sealedType": "string" }"#,
+        r#"{ "type": "string", "sealedType": {} }"#,
+        r#"{ "type": "string", "sealedType": { "enum": ["low"], "anything": 1 } }"#,
+        r#"{ "type": "string", "sealedType": { "type": "string", "enum": ["low"] } }"#,
+        r#"{ "type": { "enum": ["low"] }, "optional": true }"#,
+        r#"{ "type": { "enum": ["low"], "default": "low" }, "sealedType": { "enum": ["low"] } }"#,
+        r#"{ "type": { "enum": ["low"] }, "sealedType": { "enum": ["low"] }, "from": "etc" }"#,
+    ];
+    for (declarations, expected) in [(&accepted[..], true), (&refused[..], false)] {
+        for declaration in declarations {
+            let text = app(declaration);
+            let instance: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let by_schema = validator.is_valid(&instance);
+            let by_reader = load(text.as_bytes(), permissions);
+            assert_eq!(
+                (by_schema, by_reader.is_ok()),
+                (expected, expected),
+                "{declaration}: schema {by_schema}, reader {:?}",
+                by_reader.err().map(|e| e.to_string())
+            );
+        }
+    }
+}
