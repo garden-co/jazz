@@ -276,6 +276,41 @@ fn a_keyless_members_delivery_queries_stay_constant_across_rotations() {
     });
 }
 
+/// Bob received the root key but had not opened it when Alice removed him
+/// and rotated. Rejoining lets him recover the first note from his old
+/// delivery while he still waits for a delivery of the new key.
+#[test]
+fn a_rejoining_member_opens_an_older_delivery_while_waiting_for_the_current_key() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = shared_space(&server);
+        assert_eq!(deliver(&server, &alice, &[], space), 1);
+        block_on(server.delete(MEMBERS, member_row(&server, &bob.id()), Default::default()))
+            .unwrap();
+        let address = space_address(&alice, space);
+        drive(
+            &server,
+            &[&alice.db],
+            alice.client.rotate(&alice.db, &address),
+        )
+        .unwrap();
+        write_note(&server, &alice, space, "while Bob was away").unwrap();
+        pump(&server, &alice.db);
+        server_member(&server, &alice, space, &bob.id());
+        pump(&server, &bob.db);
+
+        assert!(marks(&bob, space).is_empty());
+        assert_eq!(
+            drive(&server, &[&bob.db], bob.client.acquire(&bob.db, &address)).unwrap(),
+            SpaceKeyState::KeyPending
+        );
+        assert_eq!(marks(&bob, space), [KeyMark::Published]);
+        let rows = read_notes(&server, &bob, space).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cell("body"), Some(text(SECRET)));
+    });
+}
+
 /// Contract: a device that lost its held keys gets the space's key back
 /// from the rows the server holds (its own account envelope in the root),
 /// whichever way it first needs it: a read that left rows out, an equality

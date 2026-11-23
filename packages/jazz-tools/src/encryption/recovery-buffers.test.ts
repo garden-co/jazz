@@ -3,6 +3,15 @@ import { BrowserPasskeyBackup } from "../local-first-auth/passkey.js";
 import { formatSecret } from "../local-first-auth/secret.js";
 import { Encryption, type EncryptionNative } from "./index.js";
 
+const parsed = vi.hoisted(() => ({ last: undefined as Uint8Array | undefined }));
+vi.mock("../local-first-auth/secret.js", async (load) => {
+  const actual = await load<typeof import("../local-first-auth/secret.js")>();
+  return {
+    ...actual,
+    parseSecret: (secret: string) => (parsed.last = actual.parseSecret(secret)),
+  };
+});
+
 afterEach(() => vi.unstubAllGlobals());
 
 it.each([false, true])(
@@ -60,3 +69,24 @@ it.each([false, true])(
     expect(userId).toEqual(new Uint8Array(32));
   },
 );
+
+it("clears the decoded secret when the passkey challenge cannot be generated", async () => {
+  vi.stubGlobal("crypto", {
+    getRandomValues() {
+      throw new Error("no randomness");
+    },
+  });
+  const create = vi.fn();
+  vi.stubGlobal("navigator", { credentials: { create } });
+  const result = new BrowserPasskeyBackup({ appName: "App" }).backup(
+    formatSecret(new Uint8Array(32).fill(7)),
+    "alice",
+  );
+  const failure = await result.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  expect(parsed.last).toEqual(new Uint8Array(32));
+  expect(create).not.toHaveBeenCalled();
+  expect(failure).toMatchObject({ code: "create-failed" });
+});
