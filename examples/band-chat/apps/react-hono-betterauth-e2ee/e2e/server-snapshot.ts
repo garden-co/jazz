@@ -55,8 +55,10 @@ export async function serverRead<R>(read: (backend: Backend) => Promise<R>): Pro
 }
 
 async function openSnapshot(path: string) {
-  const { createJazz, sqlite } = await import("jazz-tools/backend");
-  const { app } = await import("../jazz.generated");
+  const { createJazz, keyless, sqlite } = await import("jazz-tools/backend");
+  const { app: clientApp } = await import("../jazz.generated");
+  // The app typed as the backend reads it: its encrypted columns are absent.
+  const app = keyless(clientApp);
   const permissions = (await import("../jazz.permissions.json", { with: { type: "json" } }))
     .default;
   const jazz = await createJazz({
