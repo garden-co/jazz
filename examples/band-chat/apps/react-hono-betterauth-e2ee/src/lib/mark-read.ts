@@ -78,6 +78,12 @@ export function useMarkRead({
   // The marker this hook inserted, until this reader's query shows it: a newer message can
   // arrive first, and must move that marker rather than insert a second one.
   const inserted = useRef<{ key: string; id: string } | null>(null);
+  // Once the query shows it, the query is the record: if the marker is later deleted (leaving
+  // the room deletes it), the next write inserts a new one.
+  useEffect(() => {
+    const id = inserted.current?.id;
+    if (id && markers?.some((marker) => marker.id === id)) inserted.current = null;
+  }, [markers]);
   const write = isVisible
     ? markerToWrite({ newest, decryptedIds, markers, markersUnreadable })
     : null;

@@ -92,6 +92,18 @@ describe("read marker writes", () => {
     expect(db.update.mock.calls[0]![1]).toBe(id);
   });
 
+  it("inserts a new marker after the one it inserted was shown and then deleted", () => {
+    const view = render(<Reader {...props({})} />);
+    const id = (db.insert.mock.calls[0]![2] as { id: string }).id;
+    const shown = [{ id, lastReadAt: newest.$createdAt }];
+    view.rerender(<Reader {...props({ markers: shown })} />);
+    // Leaving the room deleted it; a newer message then arrives.
+    const later = { id: "m4", $createdAt: new Date("2026-01-04T00:00:00Z") };
+    view.rerender(<Reader {...props({ newest: later, decryptedIds: new Set(["m4"]) })} />);
+    expect(db.update).not.toHaveBeenCalled();
+    expect(db.insert).toHaveBeenCalledTimes(2);
+  });
+
   it("does not retry a refused write until a newer message arrives", async () => {
     db.insert.mockImplementation(() => ({
       wait: async () => Promise.reject(new Error("refused")),
