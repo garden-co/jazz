@@ -17,8 +17,13 @@ app encrypts data it already stores. References: the
   the space identifier, the table and column catalogue identities, the row,
   the epoch, and `T`, the canonical JSON of the logical plaintext type
   (including nullability, enum variants and JSON schema). Equality tokens bind
-  the same identities without the row. Changing any of these makes old cells
-  `invalid-ciphertext`.
+  the same identities without the row. Changing the domain, the table or
+  column identity, the row or `T` makes old cells `invalid-ciphertext`.
+  Changing the space is different: a cell that authenticates under a held key
+  of another space is read, returned and reported `stale-space`, and one that
+  does not is `invalid-ciphertext` once the row's space chain shows its epoch
+  is not one of its own (spec §4.3). The deploy refuses a space or scope
+  change anyway (§3.2).
 - **Catalogue identities follow stored names** (ch. 10 §10.7). A rename lens
   keeps the stored table or column, and so its identity. A column whose stored
   value type changes, or which a lens adds, is a new stored column with a new
@@ -73,9 +78,10 @@ app encrypts data it already stores. References: the
     refuses every schema that has Jazz's system tables, with "has Jazz's
     system tables but declares no encryption", so an encrypted app cannot
     deploy there.
-  - A server running without a store (a runtime only) accepts the
-    declarations in each deploy body but remembers none, so it cannot refuse
-    a later deploy that changes a version's declarations.
+  - A server running without a store (a runtime only) has no account
+    registry, which an encrypted app needs, so it refuses every deploy that
+    brings Jazz's system tables, with "this app encrypts columns, which needs
+    the account registry of an app's store", before anything is applied.
 
 ## 3. The deploy's rules on encrypted columns
 
