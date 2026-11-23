@@ -431,6 +431,51 @@ async fn an_explicit_rehome_is_refused_with_or_without_a_migration() {
     }
 }
 
+/// A later version can reuse the public name of a dropped token as an ordinary bytes column.
+#[tokio::test]
+async fn a_token_dropped_with_equality_can_be_replaced_by_an_unindexed_column() {
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": { "columns": { "title": "bytes", "__e2ee_eq_title": "bytes", "done": "boolean" },
+            "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } },
+        "history": {
+            "v1": { "tables": { "notes": {
+                "columns": { "title": "bytes", "__e2ee_eq_title": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" }, "equality": ["title"] } } } },
+            "v2": { "tables": { "notes": {
+                "columns": { "title": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } } },
+        "migrations": [
+            { "from": "v1", "to": "v2", "migrate": { "notes": { "__e2ee_eq_title": { "drop": "bytes", "backwardsDefault": "" } } } },
+            { "from": "v2", "migrate": { "notes": { "__e2ee_eq_title": { "add": "bytes", "default": "" }, "done": { "add": "boolean", "default": false } } } }] }"#;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let app = artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap();
+    let (status, response) = publish(&router().await, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+}
+
+fn with_sibling(target: &LoadedApp, other: &LoadedApp) -> Value {
+    let mut body = target.deployment_body(false);
+    let other_hash = other.current_hash().to_string();
+    let other = other.deployment_body(false);
+    body["schemas"].as_array_mut().unwrap().push(
+        other["schemas"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|schema| schema["hash"] == other_hash)
+            .unwrap()
+            .clone(),
+    );
+    body["encryption"]["versions"][&other_hash] =
+        other["encryption"]["versions"][&other_hash].clone();
+    body["migrations"]
+        .as_array_mut()
+        .unwrap()
+        .push(other["migrations"][0].clone());
+    body
+}
+
 /// Alice publishes two branches of the same enum. Either can be the target and either can widen it.
 #[tokio::test]
 async fn sibling_versions_check_their_common_source_in_either_submission_order() {
@@ -438,48 +483,145 @@ async fn sibling_versions_check_their_common_source_in_either_submission_order()
     let root_type = r#""title": {"enum":["a"]}"#;
     let load = |s: &str| artifact::load(s.as_bytes(), permissions.as_bytes()).unwrap();
     let root = load(&APP.replace(r#""title": "string""#, root_type));
-    let sibling = |column: &str, wide: bool| {
+    let sibling = |column: &str, variants: &[&str]| {
         let source = APP_V2.replace("done", column);
         let (current, history) = source.split_once(r#""history":"#).unwrap();
-        let new_type = if wide {
-            r#""title": {"type":{"enum":["a","b"]},"sealedType":{"enum":["a"]}}"#
-        } else {
-            root_type
-        };
-        let current = current.replace(r#""title": "string""#, new_type);
+        let variants = serde_json::to_string(variants).unwrap();
+        let new_type =
+            format!(r#""title": {{"type":{{"enum":{variants}}},"sealedType":{{"enum":["a"]}}}}"#);
+        let current = current.replace(r#""title": "string""#, &new_type);
         let history = history.replace(r#""title": "string""#, root_type);
         load(&format!(r#"{current}"history":{history}"#))
     };
 
-    for left_widens in [true, false] {
-        let left = sibling("completed", left_widens);
-        let right = sibling("archived", !left_widens);
+    for (left_variants, right_variants, expected) in [
+        (&["a", "b"][..], &["a"][..], StatusCode::OK),
+        (&["a"][..], &["a", "b"][..], StatusCode::OK),
+        (
+            &["a", "b"][..],
+            &["a", "c"][..],
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let left = sibling("completed", left_variants);
+        let right = sibling("archived", right_variants);
         for (target, other) in [(&left, &right), (&right, &left)] {
             let router = router().await;
             let (status, response) = publish(&router, root.deployment_body(false)).await;
             assert_eq!(status, StatusCode::OK, "{response}");
-            let mut body = target.deployment_body(false);
-            let other_hash = other.current_hash().to_string();
-            let other = other.deployment_body(false);
-            body["schemas"].as_array_mut().unwrap().push(
-                other["schemas"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|schema| schema["hash"] == other_hash)
-                    .unwrap()
-                    .clone(),
-            );
-            body["encryption"]["versions"][&other_hash] =
-                other["encryption"]["versions"][&other_hash].clone();
-            body["migrations"]
-                .as_array_mut()
-                .unwrap()
-                .push(other["migrations"][0].clone());
+            let body = with_sibling(target, other);
             let (status, response) = publish(&router, body).await;
-            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(status, expected, "{response}");
+            if expected == StatusCode::UNPROCESSABLE_ENTITY {
+                assert!(
+                    response["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("appending enum"),
+                    "{response}"
+                );
+                let (status, response) = publish(&router, target.deployment_body(false)).await;
+                assert_eq!(status, StatusCode::OK, "{response}");
+                let (status, response) = publish(&router, other.deployment_body(false)).await;
+                assert_eq!(status, expected, "{response}");
+                assert!(
+                    response["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("appending enum"),
+                    "{response}"
+                );
+            }
         }
     }
+}
+
+/// The version that drops a column cannot erase the declarations of versions that still store it.
+#[tokio::test]
+async fn a_branch_cannot_narrow_an_enum_after_another_branch_dropped_it() {
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let load = |file: &str| artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap();
+    let root_type = r#""title": {"enum":["a"]}"#;
+    let wide_type = r#""title": {"type":{"enum":["a","b"]},"sealedType":{"enum":["a"]}}"#;
+    let (tables, history) = APP_V2.split_once(r#""history":"#).unwrap();
+    let history = history.replace(r#""title": "string""#, root_type);
+    let wide = load(&format!(
+        r#"{}"history":{history}"#,
+        tables.replace(r#""title": "string""#, wide_type)
+    ));
+    let router = router().await;
+    let (status, response) = publish(&router, wide.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    let dropped = load(
+        r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": {
+            "projects":{"columns":{"name":"string","ownerId":"uuid"}},
+            "tasks":{"columns":{"projectId":"uuid","done":"boolean"},
+                "relations":{"project":{"rel":"projects","column":"projectId"}},
+                "encryption":{"space":"projectId","scope":"projects","columns":{}}}
+        },
+        "history":{"wide":{"tables":{
+            "projects":{"columns":{"name":"string","ownerId":"uuid"}},
+            "tasks":{"columns":{"projectId":{"type":"uuid","references":"projects"},
+                        "title":"bytes","__e2ee_eq_title":"bytes","done":"boolean"},
+                "encryption":{"space":"projectId","scope":"projects","columns":{
+                    "title":{"type":{"enum":["a","b"]},"sealedType":{"enum":["a"]}}
+                },"equality":["title"]}}
+        }}},
+        "migrations":[{"from":"wide","migrate":{"tasks":{
+            "title":{"drop":"bytes","backwardsDefault":""},
+            "__e2ee_eq_title":{"drop":"bytes","backwardsDefault":""}
+        }}}] }"#,
+    );
+    let (status, response) = publish(&router, dropped.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    // This sibling still uses the original stored title. Its own migration starts at ["a"].
+    let narrow = load(
+        &APP_V2
+            .replace("done", "archived")
+            .replace(r#""title": "string""#, root_type),
+    );
+    let (status, response) = publish(&router, narrow.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    let reason = response["error"].as_str().unwrap();
+    assert!(
+        reason.contains("tasks.title") && reason.contains("appending enum"),
+        "{response}"
+    );
+}
+
+/// Endpoints that agree cannot conceal a different ciphertext encoding in the middle version.
+#[tokio::test]
+async fn encryption_refuses_a_nullability_flip_flop_in_one_deployment() {
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": {"notes":{"columns":{"title":"bytes","done":"boolean","pinned":"boolean"},
+            "encryption":{"space":"id","scope":"notes","columns":{"title":"string"}}}},
+        "history": {
+            "first":{"tables":{"notes":{"columns":{"title":"bytes"},
+                "encryption":{"space":"id","scope":"notes","columns":{"title":"string"}}}}},
+            "middle":{"tables":{"notes":{"columns":{"title":"bytes","done":"boolean"},
+                "encryption":{"space":"id","scope":"notes","columns":{"title":"string"}}}}}
+        },
+        "migrations": [
+            {"from":"first","to":"middle","migrate":{"notes":{"done":{"add":"boolean","default":false}}}},
+            {"from":"middle","migrate":{"notes":{"pinned":{"add":"boolean","default":false}}}}
+        ] }"#;
+    let policy = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let app = artifact::load(file.as_bytes(), policy.as_bytes()).unwrap();
+    let mut body = app.deployment_body(false);
+    let middle = body["migrations"][0]["toHash"].as_str().unwrap().to_owned();
+    assert_ne!(middle, app.current_hash().to_string());
+    body["encryption"]["versions"][&middle]["notes"]["columns"]["title"]["type"]["nullable"] =
+        json!(true);
+    let (status, refusal) = publish(&router().await, body).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"].as_str().unwrap().contains("notes.title"),
+        "{refusal}"
+    );
 }
 
 /// Alice appends an enum variant on a standalone version. A migration from

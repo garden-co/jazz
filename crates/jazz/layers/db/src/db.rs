@@ -4482,6 +4482,14 @@ impl Db {
         crate::catalogue::read(&self.inner().conn)
     }
 
+    /// The direct targets of this schema's published forward migrations.
+    pub fn catalogue_successors(
+        &self,
+        hash: &jazz_model::model::public_schema::SchemaHash,
+    ) -> Result<HashSet<jazz_model::model::public_schema::SchemaHash>, Error> {
+        crate::catalogue::successors(&self.inner().conn, hash)
+    }
+
     /// The schemas reachable from this hash through published forward migrations.
     pub fn catalogue_descendants(
         &self,

@@ -31,6 +31,7 @@ struct DeclaredVersion {
     entries: encryption::Entries,
     stored: Names,
     public: Names,
+    successors: HashSet<SchemaHash>,
 }
 
 impl DeclaredVersion {
@@ -52,6 +53,7 @@ impl DeclaredVersion {
             entries,
             stored,
             public,
+            successors: db.catalogue_successors(&hash)?,
         })
     }
 
@@ -85,6 +87,42 @@ impl DeclaredVersion {
                         "{table}.{name}: sealedType only pins an earlier type; on its first \
                          declaration it must match the declared type, including nullability"
                     ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // A column's sealed encoding binds every version that shares its storage identity.
+    fn check_stored_types_and_spaces(&self, next: &Self, siblings: bool) -> Result<(), String> {
+        for (table, new) in &next.entries {
+            let Some(was) = next.table_in(self, table) else {
+                continue;
+            };
+            let Some(old) = self.entries.get(&was) else {
+                continue;
+            };
+            encryption::check_stored_space(
+                table,
+                old,
+                new,
+                self.table_in(next, &old.scope),
+                self.column_in(next, &was, &old.space),
+            )?;
+            for (name, declared) in &new.columns {
+                let Some(previous) = next
+                    .column_in(self, table, name)
+                    .and_then(|column| old.columns.get(&column))
+                else {
+                    continue;
+                };
+                let path = format!("{table}.{name}");
+                let check = encryption::check_stored_column_type(&path, previous, declared);
+                // Siblings can have different lengths of the same sequence of enum variants.
+                if siblings && check.is_err() {
+                    encryption::check_stored_column_type(&path, declared, previous)?;
+                } else {
+                    check?;
                 }
             }
         }
@@ -137,20 +175,29 @@ pub(crate) fn check_stored_columns(
         if let Ok(hash) = key.as_slice().try_into() {
             let entries = encryption::decode_stored(&bytes)
                 .map_err(|error| Error::new(ErrorCode::Storage, error))?;
-            history.push(DeclaredVersion::read(db, SchemaHash(hash), entries)?);
+            let hash = SchemaHash(hash);
+            history.push(DeclaredVersion::read(db, hash, entries)?);
         }
     }
-    // Among versions first published together, compare each version to
-    // its ancestors. Siblings have no migration from one to the other.
     let mut submitted: Vec<(&DeclaredVersion, HashSet<SchemaHash>)> = Vec::new();
     for (i, (hash, next)) in new.iter().enumerate() {
         let ancestors = submitted
             .iter()
             .filter_map(|(version, descendants)| descendants.contains(hash).then_some(*version));
-        let previous = history.iter().chain(ancestors);
-        next.check_sealed_types(previous.clone()).map_err(invalid)?;
-        for old in previous {
-            old.check_transition_to(next).map_err(invalid)?;
+        next.check_sealed_types(history.iter().chain(ancestors))
+            .map_err(invalid)?;
+        let previous = history.iter().map(|old| (old, false)).chain(
+            submitted
+                .iter()
+                .map(|(old, descendants)| (*old, !descendants.contains(hash))),
+        );
+        for (old, siblings) in previous {
+            if old.successors.contains(hash) {
+                old.check_transition_to(next)
+            } else {
+                old.check_stored_types_and_spaces(next, siblings)
+            }
+            .map_err(invalid)?;
         }
         if i + 1 < new.len() {
             submitted.push((next, db.catalogue_descendants(hash)?));

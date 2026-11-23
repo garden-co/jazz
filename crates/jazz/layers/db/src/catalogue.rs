@@ -692,6 +692,23 @@ pub(crate) fn schema(conn: &Storage, hash: &SchemaHash) -> Result<Option<PublicS
     Ok(Some(schema))
 }
 
+/// The targets of the forward migrations starting at this schema.
+pub(crate) fn successors(
+    conn: &Storage,
+    source: &SchemaHash,
+) -> Result<HashSet<SchemaHash>, Error> {
+    let mut statement = conn
+        .prepare_cached("SELECT target FROM _jazz_lenses WHERE source = ?1")
+        .map_err(storage)?;
+    statement
+        .query_map([source.as_bytes().as_slice()], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .map_err(storage)?
+        .map(|row| hash_of(row.map_err(storage)?, "_jazz_lenses"))
+        .collect()
+}
+
 /// Every schema reachable from `source` by a forward migration.
 pub(crate) fn descendants(
     conn: &Storage,
