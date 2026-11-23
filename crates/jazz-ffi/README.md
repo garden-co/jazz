@@ -50,6 +50,13 @@ with small smoke programs ([`tests/kotlin`](tests/kotlin),
   "storage": "memory" | "persistent", "dataDir": "./data", "contract": 2 }
 ```
 
+An end user's persistent store, or a scoped backend client's, goes in
+`dataDir/<account>/`, so each user of one directory has their own. An app
+without a user, and a trusted backend client, keep theirs in `dataDir`
+itself. An app without a user refuses a store there that a signed-in user
+wrote (an earlier version kept users' stores there): open it as that user,
+or delete it.
+
 **Backend clients** (Go and Rust servers; TS's `createJazzClient` with a
 `credential`, see `docs/content/docs/setup/backend-client.mdx`): a trusted
 machine that syncs through the app's main backend, the TS `createJazz` that
@@ -72,6 +79,9 @@ backend decides what the client is, reported by `backend_client()` /
   two bundle ids) when the client's `permissions` aren't the ones the main
   backend serves: reopen it with the app's published
   `jazz.permissions.json`. Closing such a handle leaves its parent open.
+  The session is the parent's, shared by every user: `session_state`,
+  `refresh`, `link`, `sign_out` and watching the session fail with kind
+  `"notSupported"` on such a handle.
 - `"scoped"`: it acts as its one user; `for_user` is refused (`Refused`,
   kind `"refused"`), as on a `for_user` handle or any other app.
 
@@ -80,7 +90,8 @@ A token trusted neither way fails the open with `Refused`.
 writes the client holds (its `for_user` handles' too) to reach the backend,
 as TS's `close({ timeoutMs })` (10 000 there by default): with memory
 storage, writes still unsent fail it with `Unsynced { pending }` (kind
-`"unsynced"`), and the app closes all the same; `0` closes at once.
+`"unsynced"`), and the app closes all the same. `0` waits for no writes; it
+isn't instant (see "Closing").
 
 **End users** (contract v2): `"serverUrl"` is the app's Jazz endpoint (its
 backend's `createJazz` handler, never the core) and `"auth"` says who signs
@@ -128,6 +139,9 @@ Linking reopens the account on the bearer: `clientEpoch` moves on.
   `"replaced"`; `Closed` without contract 2): fetch the new one when
   `clientEpoch` changes. Its `shutdown` / `jazz_close` leaves the session
   open.
+- A client that ends by itself (its bearer names no one at a renewal or a
+  handle's `refresh`) signs the session out: `signed-out`, a new
+  `clientEpoch`, and the old handles `Replaced`.
 - `refresh()` (the app's auth changed: ask the bearer and follow),
   `create_device_account()`, `restore_device_account(key)`,
   `reopen_device_account()`, `link_device_account()`,
@@ -135,10 +149,54 @@ Linking reopens the account on the bearer: `clientEpoch` moves on.
   `retry()` (as `recovery` says); C `jazz_session_call(s, method, args)`.
 - `watch(listener)` / `jazz_session_watch`: each snapshot, the current one
   first, and a last `{"kind": "closed"}` when the session closes.
+- On a handle it gave, `sign_out` and `link` fail with kind `"notSupported"`
+  and leave the handle open: use the session's `sign_out` and
+  `link_device_account`.
 - `shutdown()` / `jazz_session_close`: closes the session; its handles fail
-  `Closed`, its watches end, and no token callback runs after.
+  `Closed` and its watches end. No C token callback runs after; a Swift or
+  Kotlin token provider already asked may outlive it (see "Closing").
 
 Not yet: deleting a session account's store through its handle (refused).
+
+## Closing
+
+Every close (`shutdown`, `shutdown_within`, C `"close"` and the functions
+that free) gives the calls in flight the same guarantees:
+
+- Calls waiting on the server or the network (`wait_for_sync`, a global
+  tier, remote reads, `for_user`, `link`, `refresh`) fail `Closed`: when the
+  write drain (`timeout_ms`) ends on a root handle, at once with `0` and on
+  a `for_user` or session handle. What they sent may still apply, and a
+  later refusal of it is still reported.
+- Local work already started finishes, with 30 s as its backstop, and
+  stream sessions get up to 2 s to end. So closing takes about `timeout_ms`,
+  plus that: `0` is not instant. Nor is that a hard limit: work can't be
+  interrupted while it runs, and closing also waits for the store to close
+  and for a host name lookup in progress. Don't close on a UI thread.
+- A `for_user` or session handle closes only itself, and rolls back what it
+  began.
+- A session doesn't wait for the operation in flight, which fails `Closed`
+  and installs no client; an open it interrupted gets up to 2 s to let go of
+  its store. `Replaced` is only for a session that goes on: closing is
+  always `Closed`, and wins when both hold.
+- On the C ABI, closing waits for a token callback that is running, as the
+  host frees its `ctx` after: hosts make theirs cancellable. Through UniFFI
+  (Swift, Kotlin) it doesn't wait: a token provider already asked may still
+  run after `shutdown` returns, and what it gives is dropped.
+
+On the C ABI, `jazz_close`, `jazz_close_within` and `jazz_session_close`
+free, so nothing may run beside them. To close with calls in flight:
+
+1. `jazz_call(h, "close", {"timeoutMs"?})`, or
+   `jazz_session_call(s, "close", {})`: closes without freeing, beside any
+   other call, and again if need be. Keep its error (`unsynced`, say).
+2. Start no more calls, and wait for every call in flight, other closes
+   included.
+3. Free with `jazz_close` or `jazz_session_close`.
+4. Only then free the token callback's `ctx`.
+
+From inside a token callback do step 1 only and the rest later from
+another thread: waiting there deadlocks.
 
 ## Lifecycle (as TS's)
 
@@ -146,11 +204,17 @@ Not yet: deleting a session account's store through its handle (refused).
   transaction (TS's default `transaction`). Its writes commit together and
   merge with concurrent ones, and its commit is never refused as a
   conflict. `begin()` / `txBegin {}` stays serializable.
+- **One open app per `dataDir`:** opening a persistent store another app
+  has open, in this process or another, is refused (kind `"refused"`): the
+  engine is its file's only writer. An open that follows a close, sign-out
+  or last drop in this process waits up to 5 s for it to finish. Share the
+  one handle, or give each app a `dataDir` of its own.
 - `disconnect()` / `reconnect()` (C `"disconnect"`, `"reconnect"`): leave
   the server, with local reads and writes going on, then resume sync.
 - `delete_client_storage()` / `"deleteClientStorage"`: closes the app and
-  deletes its local store, so the next open starts empty. It is refused,
-  and the app left open, while another open app holds the same `dataDir`.
+  deletes its local store, so the next open starts empty; open transactions
+  roll back and uploads abort first. The store stays locked until it is
+  gone.
   On the C ABI, free the handle with `jazz_close` afterwards, as after
   `signOut`.
 - `watch_mutation_errors(listener)` / `jazz_watch(h, "mutationErrors", …)`:
@@ -226,7 +290,7 @@ columns (`merge: "text"`) take plain string writes.
 - **Tiers:** reads and subscriptions take `"local"`, `"localFirst"`
   (default) or `"remote"`; writes and commits take `"local"` or `"global"`,
   the durability they wait for (`"edge"` is refused). UniFFI: `all_at`,
-  `one_at`, `insert_at`, `update_at`, `delete_at`, `subscribe_at`. C ABI:
+  `one_at`, `insert_at`, `update_at`, `delete_at`, `upsert_at`, `subscribe_at`. C ABI:
   `"tier"` in the args, or `{"query", "tier"}` for `jazz_subscribe`.
 - **waitForSync:** UniFFI `wait_for_sync(tier)`, C ABI `waitForSync {tier}`:
   returns once every write committed so far reaches `tier` (`local` returns
@@ -261,7 +325,9 @@ columns (`merge: "text"`) take plain string writes.
   `upsert {table, id, row}` write the row with this id: for a new id an
   insert (`row` then needs every required column, else `missing required
   field`), for an existing row the columns `row` names (a partial row
-  updates).
+  updates). At a tier (UniFFI `upsert_at(table, id, row, tier)`, C ABI
+  `"tier"`) they return once the write reached it, with the row as written
+  here: not as someone else may have changed it by then.
   `restore(table, id, patch?)` / `restore {table, id, patch?}` brings back a
   deleted row as it was, or with `patch` (a whole row) as its content; a
   patch naming another row's `id` is refused. Both
@@ -329,7 +395,7 @@ closes, each open subscription gets one last error, `Closed`
 callback is running, so the host may free `ctx` right after. Called from
 inside the callback, it doesn't wait. A subscription may be freed before or
 after `jazz_close`. No call on a handle may run concurrently with, or follow,
-its `jazz_close`.
+its `jazz_close`: with calls in flight, use `"close"` first (see "Closing").
 
 Listeners run on a thread owned by the subscription, so they may call back
 into the handle. Every method blocks and is safe to call from any thread.

@@ -3,6 +3,7 @@
 //! is over the column's 4 KiB inline threshold; and when two people type at
 //! once, the authority's merges travel as edits too.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;

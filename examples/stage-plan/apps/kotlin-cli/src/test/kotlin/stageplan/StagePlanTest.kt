@@ -179,6 +179,32 @@ class StagePlanTest {
     }
 
     @Test
+    fun upsert_at_global_waits_for_the_server_and_throws_its_refusal(): Unit = runBlocking {
+        val global = tools.jazz.WriteTier.Global
+        val taskId = java.util.UUID.randomUUID().toString()
+        val show = open("user-upsert").use { jazz ->
+            val show = showNamed(jazz, "Upserted")
+            val row = jazzapp.NewTask(showId = show.id, title = "Rig", status = TaskStatus.Todo, rank = 1.0)
+            assertEquals("Rig", jazz.upsert(Tasks, taskId, row, global).title)
+            // No waitForSync: the server has it when upsert returns.
+            assertEquals("Rig", jazz.one(Tasks.where(Tasks.id eq taskId), tools.jazz.ReadTier.Remote)?.title)
+            assertEquals("Rigging", jazz.upsert(Tasks, taskId, row.copy(title = "Rigging"), global).title)
+            assertEquals("Rigging", jazz.one(Tasks.where(Tasks.id eq taskId), tools.jazz.ReadTier.Remote)?.title)
+            show
+        }
+        // A second client, so nothing above is only local.
+        open("user-upsert").use { jazz ->
+            assertEquals(listOf("Rigging"), jazz.all(Tasks.where(Tasks.showId eq show.id), tools.jazz.ReadTier.Remote).map { it.title })
+        }
+        open("user-not-on-the-show").use { jazz ->
+            val row = jazzapp.NewTask(showId = show.id, title = "Sneaky", status = TaskStatus.Todo, rank = 2.0)
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Permission> {
+                jazz.upsert(Tasks, java.util.UUID.randomUUID().toString(), row, global)
+            }
+        }
+    }
+
+    @Test
     fun text_edits_and_permission_advice(): Unit = runBlocking {
         open("user-6").use { jazz ->
             val me = me(jazz)
@@ -374,58 +400,68 @@ class StagePlanTest {
         showNamed(jazz, "Lifecycle")
         jazz.deleteClientStorage()
         kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { tasksOf(jazz, jazzapp.Show("x", "x", "x", "x", "x", me)) }
-        // The store is gone (an empty lock file may stay behind).
-        val left = dir.listFiles()?.filter { it.name != "jazz.lock" }.orEmpty()
+        // The store is gone (an empty lock file may stay behind), from the
+        // user's dataDir/<account>/.
+        val left = dir.walkTopDown().filter { it.isFile && it.name != "jazz.lock" }.toList()
         kotlin.test.assertTrue(left.isEmpty(), "$left")
     }
 
     @Test
-    fun delete_client_storage_is_refused_while_a_second_app_holds_the_store(): Unit = runBlocking {
+    fun a_second_app_is_refused_the_store_and_the_first_runs_on(): Unit = runBlocking {
         val dir = kotlin.io.path.createTempDirectory("jazz-held").toFile()
         val auth = tools.jazz.JazzAuth.Bearer { "token-user-held" }
-        openAsUser(endpoint, appId, auth, dir.path).use { deleting ->
-            openAsUser(endpoint, appId, auth, dir.path).use { holder ->
-                val show = showNamed(deleting, "Held")
-                kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(deleting.session.value)
-                val titles = kotlinx.coroutines.channels.Channel<List<String>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-                val watching = launch {
-                    deleting.watch(Tasks.where(Tasks.showId eq show.id)).collect { rows -> titles.send(rows.map { it.title }) }
-                }
-                assertEquals(emptyList(), kotlinx.coroutines.withTimeout(30_000) { titles.receive() })
-
-                kotlin.test.assertFailsWith<tools.jazz.JazzException.Refused> { deleting.deleteClientStorage() }
-
-                // Both apps are still open, and the watch from before still delivers.
-                addTask(deleting, show, "After the refusal")
-                kotlinx.coroutines.withTimeout(30_000) { while (titles.receive() != listOf("After the refusal")) Unit }
-                kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(deleting.session.value)
-                assertEquals(show.id, showById(holder, show.id)?.id)
-                watching.cancel()
+        openAsUser(endpoint, appId, auth, dir.path).use { first ->
+            val show = showNamed(first, "Held")
+            kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(first.session.value)
+            val titles = kotlinx.coroutines.channels.Channel<List<String>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            val watching = launch {
+                first.watch(Tasks.where(Tasks.showId eq show.id)).collect { rows -> titles.send(rows.map { it.title }) }
             }
-            // The other app closed: now it deletes.
-            deleting.deleteClientStorage()
-            assertEquals(tools.jazz.SessionState.SignedOut, deleting.session.value)
+            assertEquals(emptyList(), kotlinx.coroutines.withTimeout(30_000) { titles.receive() })
+
+            // One app at a time has a store open.
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Refused> { openAsUser(endpoint, appId, auth, dir.path) }
+
+            // The first is untouched: it writes, reads the server, and the watch from before still delivers.
+            addTask(first, show, "After the refusal")
+            kotlinx.coroutines.withTimeout(30_000) { while (titles.receive() != listOf("After the refusal")) Unit }
+            kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(first.session.value)
+            assertEquals(show.id, showById(first, show.id)?.id)
+            watching.cancel()
+            // And deletes its store: no one else can be holding it.
+            first.deleteClientStorage()
+            assertEquals(tools.jazz.SessionState.SignedOut, first.session.value)
         }
     }
 
     @Test
-    fun delete_client_storage_refused_by_another_process_closes_the_app(): Unit = runBlocking {
-        // flock(1), standing in for another process's app: the same shared lock on the store's lock file.
+    fun an_open_is_refused_while_another_process_holds_the_store(): Unit = runBlocking {
+        // flock(1), standing in for another process's app: the same exclusive lock on the store's lock file.
         if (!System.getProperty("os.name").startsWith("Linux")) return@runBlocking
         val dir = kotlin.io.path.createTempDirectory("jazz-held-process").toFile()
-        openAsUser(endpoint, appId, tools.jazz.JazzAuth.Bearer { "token-user-other" }, dir.path).use { jazz ->
+        val auth = tools.jazz.JazzAuth.Bearer { "token-user-other" }
+        // A user's store is in dataDir/<account>/.
+        val account = openAsUser(endpoint, appId, auth, dir.path).use { me(it) }
+        val lock = java.io.File(java.io.File(dir, account), "jazz.lock")
+        // One process holds it, this test's own child: the shell opens the file,
+        // flock locks that open file and exits, and sleep inherits it. It is
+        // killed with SIGKILL, as a killed app would be: a host that ignores
+        // SIGTERM passes that on to its children, which then never exit.
+        val holder = ProcessBuilder(
+            "sh", "-c", "exec 9>>\"$1\" && flock --exclusive 9 && echo held && exec sleep 60", "sh", lock.path,
+        ).start()
+        try {
+            assertEquals("held", holder.inputStream.bufferedReader().readLine())
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Refused> { openAsUser(endpoint, appId, auth, dir.path) }
+        } finally {
+            holder.destroyForcibly()
+            kotlin.test.assertTrue(holder.waitFor(30, java.util.concurrent.TimeUnit.SECONDS), "the lock's holder didn't exit")
+        }
+        openAsUser(endpoint, appId, auth, dir.path).use { jazz ->
             kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(jazz.session.value)
-            val lock = dir.walk().single { it.name == "jazz.lock" }
-            val holder = ProcessBuilder("flock", "--shared", lock.path, "sh", "-c", "echo held; exec sleep 60").start()
-            try {
-                assertEquals("held", holder.inputStream.bufferedReader().readLine())
-                kotlin.test.assertFailsWith<tools.jazz.JazzException.Refused> { jazz.deleteClientStorage() }
-                assertEquals(tools.jazz.SessionState.SignedOut, jazz.session.value)
-                kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { jazz.all(Tasks.query()) }
-            } finally {
-                holder.descendants().forEach { it.destroy() }
-                holder.destroy()
-            }
+            jazz.deleteClientStorage()
+            assertEquals(tools.jazz.SessionState.SignedOut, jazz.session.value)
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { jazz.all(Tasks.query()) }
         }
     }
 

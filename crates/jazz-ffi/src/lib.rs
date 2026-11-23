@@ -13,6 +13,7 @@
 //! language's bindings implement them over the stored values).
 
 pub mod c_abi;
+mod closing;
 mod convert;
 mod core;
 mod error;
@@ -92,12 +93,14 @@ impl JazzHandle {
 
     /// Links this device account to the user's account with the app's own
     /// sign-in (`bearer`): the session becomes that user's. Returns the user
-    /// as JSON.
+    /// as JSON. Not supported on a session's handle: use
+    /// `Session.linkDeviceAccount`.
     pub fn link(&self, bearer: String) -> Result<String> {
         self.core.surface(self.core.link(&bearer))
     }
 
-    /// Signs the end user out and closes the app.
+    /// Signs the end user out and closes the app. Not supported on a
+    /// session's handle, which stays open: use `Session.signOut`.
     pub fn sign_out(&self) -> Result<()> {
         self.core.surface(self.core.sign_out())
     }
@@ -277,6 +280,24 @@ impl JazzHandle {
         )
     }
 
+    /// [`Self::upsert`], returning once the write reaches `tier`: `"local"`
+    /// or `"global"`. The row is as written here, not as the server has it
+    /// by then.
+    pub fn upsert_at(
+        &self,
+        table: String,
+        id: String,
+        row_json: String,
+        tier: String,
+    ) -> Result<String> {
+        self.core.surface(self.core.upsert(
+            &table,
+            &id,
+            &row_json,
+            &self.core.surface(write_opts(&tier))?,
+        ))
+    }
+
     /// Brings back a deleted row, as it was or with `patch_json` (a whole
     /// row) as its new content. Returns the row.
     pub fn restore(&self, table: String, id: String, patch_json: Option<String>) -> Result<String> {
@@ -339,8 +360,7 @@ impl JazzHandle {
 
     /// Closes the app and deletes its local store (TS's
     /// `deleteClientStorage`): the next open starts empty and syncs again.
-    /// Writes the server hasn't accepted yet are lost. Refused while another
-    /// open app holds the same `dataDir`.
+    /// Writes the server hasn't accepted yet are lost.
     pub fn delete_client_storage(&self) -> Result<()> {
         self.core.surface(self.core.delete_client_storage())
     }
@@ -376,8 +396,15 @@ impl JazzHandle {
         self.subscribe_with(query_json, self.core.surface(read_opts(&tier))?, listener)
     }
 
-    /// Closes the app; later calls fail with `Closed`. Named `shutdown`, not
-    /// `close`, which would clash with Kotlin's `AutoCloseable.close`.
+    /// Closes the app; later calls fail with `Closed`, and so do the calls
+    /// waiting on the server or the network, at once (local work already
+    /// started finishes). On a `for_user` or session handle it closes that
+    /// handle only. Safe beside any other call. It has no hard time limit
+    /// (work under way, the store closing, a host name lookup in progress),
+    /// so don't call it on a UI thread. It doesn't wait for the token
+    /// provider: one already asked may still run after it returns. Named
+    /// `shutdown`, not `close`, which would clash with Kotlin's
+    /// `AutoCloseable.close`.
     pub fn shutdown(&self) -> Result<()> {
         self.core.surface(self.core.close())
     }
@@ -386,7 +413,10 @@ impl JazzHandle {
     /// the client holds to reach the server (TS's `close({ timeoutMs })`,
     /// 10 000 by default there). With memory storage, writes still unsent
     /// fail it with `Unsynced { pending }` (contract 2; `Io` otherwise), and
-    /// the app is closed all the same. `0` closes at once.
+    /// the app is closed all the same. The calls waiting on the server go on
+    /// until then. `0` waits for no writes, but is not instant: local work
+    /// finishes, and stream sessions get up to 2 s to end (no hard limit:
+    /// see [`Self::shutdown`]).
     pub fn shutdown_within(&self, timeout_ms: u64) -> Result<()> {
         self.core.surface(
             self.core
@@ -779,7 +809,9 @@ impl Session {
     }
 
     /// Closes the session and its client: handles it gave fail with
-    /// `Closed`, watches end.
+    /// `Closed` (never `Replaced`), as does the operation in flight, which
+    /// isn't waited for; watches end. As `JazzHandle.shutdown`, it has no
+    /// hard time limit and doesn't wait for a token provider already asked.
     pub fn shutdown(&self) -> Result<()> {
         self.surface(self.core.close())
     }

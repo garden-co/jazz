@@ -9,6 +9,11 @@ mobile app, or it acts as a [backend client](/docs/setup/backend-client) with a 
 credential. Like every other language, it works from your app's TypeScript schema and permissions:
 `npx jazz-tools generate` writes its typed bindings from them.
 
+<Callout type="warn" title="Known issue: a bearer user can't open offline">
+  An app signed in with a bearer token signs in with your backend when it opens, so it can't open
+  while your backend is unreachable, even with a persistent store.
+</Callout>
+
 ## Install
 
 Depend on the `jazz-app-support` crate:
@@ -69,8 +74,11 @@ takes the guest's account over if they have none yet (`link_guest`, on by defaul
 - `Storage::Dir(dir)` keeps it on disk. With `Config::user`, `dir` holds that one user's store; with
   `JazzSession`, each account's store sits in `dir/<account id>/`, with the device key in
   `dir/device.key`.
-- `jazz.delete_client_storage()` deletes the store (one account's, under a session). It's refused
-  with `StoreHeld` while another open client holds it.
+- One client at a time has a store open. Opening a directory another client has open, in this
+  process or another, fails with `StoreHeld`: clone the `Jazz` you have, or use another directory.
+  An open that follows a shutdown or last drop in this process waits up to 5 seconds for it to
+  finish. A subscription keeps its client open.
+- `jazz.delete_client_storage()` deletes the store (one account's, under a session).
 
 Keep a device key in your platform's secure store: a `DeviceKey` reads and writes as
 `jazz-auth-v1:…`, the same form as TypeScript's `exportDeviceKey`. `DeviceKey::load_or_create(path)`
@@ -90,14 +98,20 @@ does.
 
 ### Closing
 
-- `jazz.shutdown()` stops the client: calls already made finish (for up to 30 seconds), then
-  subscriptions end. Call it before exiting with `Storage::Dir`, so the store is flushed and closed.
+- `jazz.shutdown()` stops the client. Calls waiting on the server fail with `Error::Stopped` at
+  once (what they sent may still apply); local work already started finishes (for up to 30
+  seconds, though work that doesn't yield can't be cut short), then subscriptions end. It also
+  waits for a host name lookup in progress, so it has no hard time limit. Call it before exiting
+  with `Storage::Dir`, so the store is flushed and closed.
 - `jazz.close(timeout)` first waits up to `timeout` (`CLOSE_TIMEOUT` is 10 seconds) for queued
   writes to reach the server, then shuts down. With `Storage::Memory`, writes that never arrived are
-  lost and reported as `Error::Unsynced { pending }`; `Duration::ZERO` closes at once and accepts
-  that.
+  lost and reported as `Error::Unsynced { pending }`; `Duration::ZERO` doesn't wait for them and
+  accepts that.
 - With `JazzSession`, `session.sign_out()` signs out and keeps the session usable, while
-  `session.close()` ends it.
+  `session.close()` ends it. `sign_out()` and `link()` on a handle from `session.jazz()` fail
+  with `Error::Unsupported`: use `session.sign_out()` and `session.link_device_account()`.
+  When the client ends by itself (your bearer names no one at a renewal or refresh), the session
+  signs out too and `client_epoch` moves on.
 
 For a service acting with a machine credential instead of as a user, see
 [Backend Client](/docs/setup/backend-client).

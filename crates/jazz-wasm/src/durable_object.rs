@@ -250,6 +250,7 @@ extern "C" {
     fn jazz_do_next(result: &JsValue) -> Result<Vec<u8>, JsValue>;
 }
 
+#[derive(Clone)]
 struct ObjectSql {
     storage: ObjectStorage,
 }
@@ -258,11 +259,12 @@ struct ObjectCursor {
     columns: Vec<String>,
     row: Vec<Value>,
 }
+#[async_trait::async_trait(?Send)]
 impl Cursor for ObjectCursor {
     fn columns(&self) -> &[String] {
         &self.columns
     }
-    fn next(&mut self) -> SqlResult<Option<&[Value]>> {
+    async fn next(&mut self) -> SqlResult<Option<&[Value]>> {
         let bytes = jazz_do_next(&self.result).map_err(sql_error)?;
         if bytes.is_empty() {
             return Ok(None);
@@ -295,21 +297,22 @@ impl ObjectSql {
         })
     }
 
-    fn scalar(&self, query: &str) -> SqlResult<i64> {
+    async fn scalar(&self, query: &str) -> SqlResult<i64> {
         let mut cursor = self.cursor(query, &[], true)?;
-        match cursor.next()?.and_then(|row| row.first()) {
+        match cursor.next().await?.and_then(|row| row.first()) {
             Some(Value::Integer(n)) => Ok(*n),
             _ => Err(bridge_error("expected integer SQL result".into())),
         }
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl Backend for ObjectSql {
-    fn query(&self, sql: &str, parameters: &[Value]) -> SqlResult<Box<dyn Cursor + '_>> {
+    async fn query(&self, sql: &str, parameters: &[Value]) -> SqlResult<Box<dyn Cursor + '_>> {
         storage::durable_object_refusal(sql, true)?;
         Ok(Box::new(self.cursor(sql, parameters, true)?))
     }
-    fn execute(&self, sql: &str, parameters: &[Value]) -> SqlResult<usize> {
+    async fn execute(&self, sql: &str, parameters: &[Value]) -> SqlResult<usize> {
         storage::durable_object_refusal(sql, false)?;
         let first = sql
             .split_whitespace()
@@ -319,44 +322,50 @@ impl Backend for ObjectSql {
         // `changes()` is the last data-modifying statement's count, which a
         // `WITH … SELECT` does not reset: count those by `total_changes()`.
         let before = match first.as_str() {
-            "WITH" => Some(self.scalar("SELECT total_changes()")?),
+            "WITH" => Some(self.scalar("SELECT total_changes()").await?),
             _ => None,
         };
         let mut cursor = self.cursor(sql, parameters, false)?;
-        while cursor.next()?.is_some() {}
+        while cursor.next().await?.is_some() {}
         drop(cursor);
         match (first.as_str(), before) {
-            (_, Some(before)) => Ok((self.scalar("SELECT total_changes()")? - before) as usize),
+            (_, Some(before)) => {
+                Ok((self.scalar("SELECT total_changes()").await? - before) as usize)
+            }
             ("INSERT" | "UPDATE" | "DELETE" | "REPLACE", None) => {
-                Ok(self.scalar("SELECT changes()")? as usize)
+                Ok(self.scalar("SELECT changes()").await? as usize)
             }
             _ => Ok(0),
         }
     }
-    fn execute_script(&self, script: &str) -> SqlResult<()> {
+    async fn execute_script(&self, script: &str) -> SqlResult<()> {
         let mut start = 0;
         for (end, _) in script.match_indices(';') {
             let statement = &script[start..=end];
             if complete(statement) {
-                self.execute(statement, &[])?;
+                self.execute(statement, &[]).await?;
                 start = end + 1;
             }
         }
         if !script[start..].trim().is_empty() {
-            self.execute(&script[start..], &[])?;
+            self.execute(&script[start..], &[]).await?;
         }
         Ok(())
     }
-    fn transaction(&self, body: &mut dyn FnMut() -> bool) -> SqlResult<()> {
-        let mut callback = || body();
-        let closure = wasm_bindgen::closure::ScopedClosure::borrow_mut_aborting(&mut callback);
-        jazz_do_scope(&self.storage, closure.as_ref().unchecked_ref()).map_err(sql_error)
+    async fn transaction(&self, body: storage::TransactionBody<'_>) -> SqlResult<()> {
+        storage::transaction_sync(std::sync::Arc::new(self.clone()), body, |body| {
+            let mut callback = || body();
+            let closure = wasm_bindgen::closure::ScopedClosure::borrow_mut_aborting(&mut callback);
+            jazz_do_scope(&self.storage, closure.as_ref().unchecked_ref()).map_err(sql_error)
+        })
     }
-    fn last_insert_rowid(&self) -> SqlResult<i64> {
-        self.scalar("SELECT last_insert_rowid()")
+    async fn last_insert_rowid(&self) -> SqlResult<i64> {
+        self.scalar("SELECT last_insert_rowid()").await
     }
-    fn total_changes(&self) -> SqlResult<u64> {
-        self.scalar("SELECT total_changes()").map(|n| n as u64)
+    async fn total_changes(&self) -> SqlResult<u64> {
+        self.scalar("SELECT total_changes()")
+            .await
+            .map(|n| n as u64)
     }
     fn max_parameters(&self) -> usize {
         100
@@ -613,37 +622,40 @@ mod smoke {
         let storage = durable_object_storage(storage);
         let sql = |e: jazz::storage::SqlError| Error::new(ErrorCode::Storage, e.to_string());
         let insert = |s: &jazz::storage::Storage, v: i64| {
-            s.execute("INSERT INTO smoke_scopes (v) VALUES (?1)", [v])
+            jazz::db::block_on(s.execute("INSERT INTO smoke_scopes (v) VALUES (?1)", [v]))
                 .map(drop)
                 .map_err(sql)
         };
         let refused = || Error::new(ErrorCode::Storage, "refused by the smoke test");
-        storage
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS smoke_scopes (v INTEGER); DELETE FROM smoke_scopes",
-            )
-            .map_err(sql)?;
-        storage.scope("outer", |s| {
+        jazz::db::block_on(storage.execute_batch(
+            "CREATE TABLE IF NOT EXISTS smoke_scopes (v INTEGER); DELETE FROM smoke_scopes",
+        ))
+        .map_err(sql)?;
+        jazz::db::block_on(storage.scope("outer", async |s| {
             insert(s, 1)?;
-            let inner = s.scope("inner", |s| {
+            let inner = jazz::db::block_on(s.scope("inner", async |s| {
                 insert(s, 2)?;
                 Err::<(), _>(refused())
-            });
+            }));
             assert!(inner.is_err());
             insert(s, 3)
-        })?;
-        let failed = storage.scope("whole", |s| {
+        }))?;
+        let failed = jazz::db::block_on(storage.scope("whole", async |s| {
             insert(s, 4)?;
             Err::<(), _>(refused())
-        });
+        }));
         assert!(failed.is_err());
-        let rows: Vec<i64> = storage
-            .prepare("SELECT v FROM smoke_scopes ORDER BY v")
+        let rows: Vec<i64> = jazz::db::block_on(
+            jazz::db::block_on(
+                storage
+                    .prepare("SELECT v FROM smoke_scopes ORDER BY v")
+                    .map_err(sql)?
+                    .query_map([], |row| row.get::<_, i64>(0)),
+            )
             .map_err(sql)?
-            .query_map([], |row| row.get(0))
-            .map_err(sql)?
-            .collect::<Result<_, _>>()
-            .map_err(sql)?;
+            .collect::<Vec<_>>(),
+        )
+        .map_err(sql)?;
         serde_json::to_string(&rows).map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
     }
 
@@ -655,21 +667,20 @@ mod smoke {
         use jazz::db::{Error, ErrorCode};
         let storage = durable_object_storage(storage);
         let sql = |e: jazz::storage::SqlError| Error::new(ErrorCode::Storage, e.to_string());
-        storage
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS smoke_integers (v INTEGER); DELETE FROM smoke_integers",
-            )
-            .map_err(sql)?;
+        jazz::db::block_on(storage.execute_batch(
+            "CREATE TABLE IF NOT EXISTS smoke_integers (v INTEGER); DELETE FROM smoke_integers",
+        ))
+        .map_err(sql)?;
         let mut same = Vec::new();
         for n in [i64::MIN, -(1 << 53) - 1, (1 << 53) + 1, i64::MAX] {
-            storage
-                .execute("INSERT INTO smoke_integers (v) VALUES (?1)", [n])
+            jazz::db::block_on(storage.execute("INSERT INTO smoke_integers (v) VALUES (?1)", [n]))
                 .map_err(sql)?;
-            let read: i64 = storage
-                .query_row("SELECT v FROM smoke_integers WHERE v = ?1", [n], |r| {
-                    r.get(0)
-                })
-                .map_err(sql)?;
+            let read: i64 = jazz::db::block_on(storage.query_row(
+                "SELECT v FROM smoke_integers WHERE v = ?1",
+                [n],
+                |r| r.get(0),
+            ))
+            .map_err(sql)?;
             if read == n {
                 same.push(n.to_string());
             }
@@ -1301,8 +1312,10 @@ mod core_host {
             })?;
             // Admit the store (stamping a new one as Jazz's) before keeping
             // anything of the host's in it.
-            jazz::host::StoreFile::from_storage(durable_object_storage(storage.clone()))
-                .map_err(js)?;
+            jazz::db::block_on(jazz::host::StoreFile::from_storage(durable_object_storage(
+                storage.clone(),
+            )))
+            .map_err(js)?;
             let app_id = stored_app_id(&durable_object_storage(storage.clone())).map_err(js)?;
             let mut this = Self {
                 storage,
@@ -1365,7 +1378,7 @@ mod core_host {
                 let (issuer, subject) = identity.principal_parts();
                 let principal = jazz::account_registry::Principal { issuer, subject };
                 let storage = self.registry().map_err(js)?;
-                let assignment = accounts::login(&storage, &principal)
+                let assignment = jazz::db::block_on(accounts::login(&storage, &principal))
                     .map_err(|_| js("guest admission unavailable"))?;
                 if Some(assignment.account) != identity.account_id() {
                     return Err(js("guest assignment changed"));
@@ -1497,14 +1510,14 @@ mod core_host {
             let mut guest = |token: &str, peer, audience: Option<&str>| {
                 let app_id = app_id.clone().map_err(|error| error.to_string())?;
                 let storage = self.registry()?;
-                jazz_server::portable::guest::admit_guest(
+                jazz::db::block_on(jazz_server::portable::guest::admit_guest(
                     &storage,
                     token,
                     peer,
                     audience,
                     app_id,
                     now / 1000,
-                )
+                ))
                 .map_err(|refusal| refusal.to_string())
             };
             let admission = match admit_by_core_secret(&prelude, upgrade, &secret, now, &mut guest)
@@ -1662,9 +1675,9 @@ mod core_host {
                 return Ok(JsValue::UNDEFINED);
             };
             let taken = if hold_fetches {
-                core.db().take_chunk_io_holding_fetches()
+                jazz::db::block_on(core.db().take_chunk_io_holding_fetches())
             } else {
-                core.db().take_chunk_io()
+                jazz::db::block_on(core.db().take_chunk_io())
             };
             // An empty batch ends when it is dropped.
             match taken.map_err(js)? {
@@ -1704,7 +1717,9 @@ mod core_host {
                 return Ok(None);
             };
             let done = chunk_done(io, &fetched, &put, &deleted).map_err(js)?;
-            Ok(core.db().finish_chunk_io(done).err().map(|e| e.to_string()))
+            Ok(jazz::db::block_on(core.db().finish_chunk_io(done))
+                .err()
+                .map(|e| e.to_string()))
         }
 
         /// The offloaded nodes reads wait on, to fetch beside the batch that
@@ -1719,7 +1734,7 @@ mod core_host {
             let Some(core) = self.core.as_ref() else {
                 return Ok(JsValue::UNDEFINED);
             };
-            match core.db().take_chunk_fetches().map_err(js)? {
+            match jazz::db::block_on(core.db().take_chunk_fetches()).map_err(js)? {
                 Some(io) => {
                     let fetches = chunk_io_js(&io);
                     self.chunk_fetches = Some(io);
@@ -1744,9 +1759,7 @@ mod core_host {
             };
             let none = js_sys::Array::new();
             let done = chunk_done(io, &fetched, &none, &none).map_err(js)?;
-            Ok(core
-                .db()
-                .finish_chunk_fetches(done)
+            Ok(jazz::db::block_on(core.db().finish_chunk_fetches(done))
                 .err()
                 .map(|e| e.to_string()))
         }
@@ -1935,24 +1948,26 @@ mod core_host {
                 // storage bridge borrowed): the write must not stay, and
                 // the object must start afresh on a new instance.
                 "test/panic" => {
-                    let _ = storage.scope::<()>("jazz_test_panic", |storage| {
-                        // As a panic inside the core leaves a thread-local
-                        // borrowed (the trap never unwinds it): only a new
-                        // instance has it free again (see `open`).
-                        TRAPPED_BORROW.with(|cell| std::mem::forget(cell.borrow_mut()));
-                        storage
-                            .execute_batch(
+                    let _ = jazz::db::block_on(storage.scope::<()>(
+                        "jazz_test_panic",
+                        async |storage| {
+                            // As a panic inside the core leaves a thread-local
+                            // borrowed (the trap never unwinds it): only a new
+                            // instance has it free again (see `open`).
+                            TRAPPED_BORROW.with(|cell| std::mem::forget(cell.borrow_mut()));
+                            jazz::db::block_on(storage.execute_batch(
                                 "CREATE TABLE IF NOT EXISTS _jazz_test_panic (x INTEGER); \
                                  INSERT INTO _jazz_test_panic (x) VALUES (1);",
-                            )
+                            ))
                             .map_err(|error| {
                                 jazz::db::Error::new(
                                     jazz::db::ErrorCode::Storage,
                                     error.to_string(),
                                 )
                             })?;
-                        panic!("a test asked the core to panic inside a storage transaction")
-                    });
+                            panic!("a test asked the core to panic inside a storage transaction")
+                        },
+                    ));
                     unreachable!("the scope panics")
                 }
                 // How many rows a panicked write left (none).
@@ -1961,8 +1976,7 @@ mod core_host {
                     let rows = storage
                         .prepare_cached("SELECT count(*) FROM _jazz_test_panic")
                         .and_then(|mut statement| {
-                            statement
-                                .query_row([], |row| row.get::<_, i64>(0))
+                            jazz::db::block_on(statement.query_row([], |row| row.get::<_, i64>(0)))
                                 .optional()
                         })
                         .ok()
@@ -1978,7 +1992,9 @@ mod core_host {
                         storage
                             .prepare_cached(sql)
                             .and_then(|mut statement| {
-                                statement.query_row([], |row| row.get::<_, i64>(0))
+                                jazz::db::block_on(
+                                    statement.query_row([], |row| row.get::<_, i64>(0)),
+                                )
                             })
                             .unwrap_or(-1)
                     };
@@ -2002,8 +2018,7 @@ mod core_host {
                 // committed value that history keeps); the next tick
                 // reclaims them.
                 "test/unreference-large-values" => {
-                    storage
-                        .execute_batch("UPDATE _jazz_lv_root SET refs = 0")
+                    jazz::db::block_on(storage.execute_batch("UPDATE _jazz_lv_root SET refs = 0"))
                         .expect("unreference");
                     if let Some(core) = self.core.as_mut() {
                         core.tick();
@@ -2086,10 +2101,11 @@ mod core_host {
             if self.core.is_some() {
                 return Ok(());
             }
-            let file =
-                jazz::host::StoreFile::from_storage(durable_object_storage(self.storage.clone()))
-                    .map_err(js)?;
-            let rows = jazz::host::HostTables::catalogue(&file).map_err(js)?;
+            let file = jazz::db::block_on(jazz::host::StoreFile::from_storage(
+                durable_object_storage(self.storage.clone()),
+            ))
+            .map_err(js)?;
+            let rows = jazz::db::block_on(jazz::host::HostTables::catalogue(&file)).map_err(js)?;
             let schema = match (rows.schemas.first(), configured) {
                 (Some(stored), _) => jazz::schema::JazzSchema::new(&stored.schema).map_err(js)?,
                 (None, Some(json)) => {
@@ -2305,14 +2321,14 @@ mod core_host {
     /// (as a native core keeps `<data-dir>/app-id`): nobody configures it.
     fn stored_app_id(storage: &jazz::storage::Storage) -> Result<String, String> {
         use jazz::storage::OptionalExtension;
-        storage
-            .execute_batch("CREATE TABLE IF NOT EXISTS _jazz_host_app (id TEXT NOT NULL)")
-            .map_err(|error| error.to_string())?;
+        jazz::db::block_on(
+            storage.execute_batch("CREATE TABLE IF NOT EXISTS _jazz_host_app (id TEXT NOT NULL)"),
+        )
+        .map_err(|error| error.to_string())?;
         let stored = storage
             .prepare_cached("SELECT id FROM _jazz_host_app LIMIT 1")
             .and_then(|mut statement| {
-                statement
-                    .query_row([], |row| row.get::<_, String>(0))
+                jazz::db::block_on(statement.query_row([], |row| row.get::<_, String>(0)))
                     .optional()
             })
             .map_err(|error| error.to_string())?;
@@ -2320,8 +2336,7 @@ mod core_host {
             return Ok(id);
         }
         let id = uuid::Uuid::new_v4().to_string();
-        storage
-            .execute("INSERT INTO _jazz_host_app (id) VALUES (?1)", [&id])
+        jazz::db::block_on(storage.execute("INSERT INTO _jazz_host_app (id) VALUES (?1)", [&id]))
             .map_err(|error| error.to_string())?;
         Ok(id)
     }
@@ -2517,13 +2532,16 @@ mod core_host {
         /// schema).
         fn catalogue_rows(&self) -> Result<jazz::catalogue::CatalogueRows, String> {
             match &self.core {
-                Some(core) => core.db().catalogue().map_err(|error| error.to_string()),
+                Some(core) => {
+                    jazz::db::block_on(core.db().catalogue()).map_err(|error| error.to_string())
+                }
                 None => {
-                    let file = jazz::host::StoreFile::from_storage(durable_object_storage(
-                        self.storage.clone(),
+                    let file = jazz::db::block_on(jazz::host::StoreFile::from_storage(
+                        durable_object_storage(self.storage.clone()),
                     ))
                     .map_err(|error| error.to_string())?;
-                    jazz::host::HostTables::catalogue(&file).map_err(|error| error.to_string())
+                    jazz::db::block_on(jazz::host::HostTables::catalogue(&file))
+                        .map_err(|error| error.to_string())
                 }
             }
         }
@@ -2533,7 +2551,7 @@ mod core_host {
         fn registry(&mut self) -> Result<jazz::storage::Storage, String> {
             let storage = durable_object_storage(self.storage.clone());
             if !self.accounts_open {
-                accounts::open(&storage).map_err(|error| error.to_string())?;
+                jazz::db::block_on(accounts::open(&storage)).map_err(|error| error.to_string())?;
                 self.accounts_open = true;
             }
             Ok(storage)
@@ -2545,7 +2563,7 @@ mod core_host {
             principal: &jazz::account_registry::Principal,
         ) -> Result<Option<u64>, String> {
             let storage = self.registry()?;
-            accounts::sessions_revoked_before(&storage, principal)
+            jazz::db::block_on(accounts::sessions_revoked_before(&storage, principal))
                 .map_err(|error| error.to_string())
         }
 
@@ -2563,7 +2581,10 @@ mod core_host {
                 // still be the account the guest was admitted as; a refusal
                 // is told as the registry words it, and a registry that
                 // cannot be read closes the socket for a later retry.
-                let ends = match (identity.account_id(), accounts::login(storage, &principal)) {
+                let ends = match (
+                    identity.account_id(),
+                    jazz::db::block_on(accounts::login(storage, &principal)),
+                ) {
                     (Some(account), Ok(assignment)) if assignment.account == account => None,
                     (_, Err(accounts::RegistryError::Unavailable(_))) => Some(WireError::new(
                         WireErrorCode::NotReady,
@@ -2603,7 +2624,7 @@ mod core_host {
             let Ok(app_id) = uuid::Uuid::parse_str(&self.app_id) else {
                 return refusal(500, ErrorResponse::internal("the app id is not a UUID"));
             };
-            let (reply, effects) = accounts::serve(
+            let (reply, effects) = jazz::db::block_on(accounts::serve(
                 &storage,
                 route,
                 body,
@@ -2612,7 +2633,7 @@ mod core_host {
                     now_ms: js_sys::Date::now() as u64,
                     fresh_id: &mut uuid::Uuid::new_v4,
                 },
-            );
+            ));
             if effects.assignments_changed {
                 self.recheck_guests(&storage);
             }
@@ -2662,8 +2683,8 @@ mod core_host {
                 let genesis = deployment.genesis()?;
                 let rows = self.catalogue_rows().map_err(DeployError::internal)?;
                 let change = deployment.catalogue_change(&rows)?;
-                let file = jazz::host::StoreFile::from_storage(durable_object_storage(
-                    self.storage.clone(),
+                let file = jazz::db::block_on(jazz::host::StoreFile::from_storage(
+                    durable_object_storage(self.storage.clone()),
                 ))
                 .map_err(DeployError::internal)?;
                 let chunk_store = self.blobs.then(|| {
@@ -2693,7 +2714,7 @@ mod core_host {
         now: u64,
         supersede: bool,
     ) -> Result<DeploymentResponse, DeployError> {
-        let rows = core.db().catalogue().map_err(DeployError::internal)?;
+        let rows = jazz::db::block_on(core.db().catalogue()).map_err(DeployError::internal)?;
         let index = CatalogueIndex::from_rows(&rows, None);
         let deployment = deployment::prepare(&index, request, now)?;
         if !deployment.staged.response.changed {

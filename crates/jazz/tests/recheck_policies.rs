@@ -1,5 +1,6 @@
 //! Old policy and permission-advice reports rechecked against the SQLite
 //! engine: each test pins the behaviour its issue asked for.
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::pin;
@@ -83,7 +84,7 @@ fn replica(schema: JazzSchema, server: &Db, node: u8, author: AuthorSubject) -> 
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(db.connect_upstream(client_side));
     server.accept_subscriber(server_side, author).unwrap();
-    db.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    jazz::db::block_on(db.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     db
 }
 

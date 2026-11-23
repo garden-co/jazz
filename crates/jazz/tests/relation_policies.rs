@@ -14,6 +14,7 @@ use jazz::tools::public_schema::{
     TablePolicies,
 };
 use jazz::tools::{ColumnType, PolicyExpr, Schema, SchemaBuilder, TableSchema, Value};
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 fn policy_graph_policy_schema() -> Schema {
     schema_with_resource_policy(resource_access_policy())

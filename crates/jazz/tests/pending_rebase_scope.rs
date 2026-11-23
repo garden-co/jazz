@@ -8,6 +8,7 @@
 //! the commits sharing its rows, not every commit still pending.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};

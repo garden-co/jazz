@@ -8,6 +8,7 @@
 //! longer read, on the first read, on live changes, and on reconnect.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
