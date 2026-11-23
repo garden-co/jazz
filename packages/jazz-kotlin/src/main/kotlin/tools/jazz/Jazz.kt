@@ -129,6 +129,7 @@ public class Jazz internal constructor(
     public val session: StateFlow<SessionState?> by lazy {
         stateFlow(sync = false, initial = native.sessionState()?.let(SessionState::parse)) { SessionState.parse(it) }
             .also { sessionFlow = it }
+            .asStateFlow()
     }
 
     /** [session]'s flow once read, so [close] can end it as signed out. */
@@ -156,10 +157,25 @@ public class Jazz internal constructor(
 
     /**
      * Closes the app and deletes its local store (e.g. on sign-out from a
-     * shared device). Refused while another open app uses the same `dataDir`.
+     * shared device). It throws [JazzException.Refused] while another open app
+     * uses the same `dataDir`:
+     * - an app in this process: this app stays open, with its watches;
+     * - an app in another process, which is seen only once this app has
+     *   stopped: this app is closed, with its store left in place.
+     *
+     * Any other failure closes this app too. Closed, [session] reads `SignedOut`.
      */
-    public suspend fun deleteClientStorage() {
-        io { native.deleteClientStorage() }
+    public suspend fun deleteClientStorage(): Unit = io {
+        // Inside io: a cancelled caller gets no result back, and the handle is gone all the same.
+        try {
+            native.deleteClientStorage()
+        } catch (e: JazzException.Refused) {
+            if (runCatching { native.account() }.exceptionOrNull() is JazzException.Closed) endWatches()
+            throw e
+        } catch (e: Throwable) {
+            endWatches()
+            throw e
+        }
         endWatches()
     }
 
@@ -187,13 +203,17 @@ public class Jazz internal constructor(
 
     /**
      * Signs the end user out, and closes the app: [session] reads
-     * `SignedOut` when this returns.
+     * `SignedOut` when this returns or throws.
      */
-    public suspend fun signOut() {
-        io { native.signOut() }
-        // jazz-ffi may end the watches (`closed`) before it delivers the final
-        // `signedOut` state, so set it here, as [close] does.
-        endWatches()
+    public suspend fun signOut(): Unit = io {
+        try {
+            native.signOut()
+        } finally {
+            // Whatever it threw, the handle is gone. And jazz-ffi may end the
+            // watches (`closed`) before it delivers the final `signedOut`
+            // state, so set it here, as [close] does.
+            endWatches()
+        }
     }
 
     /**
@@ -557,11 +577,15 @@ public class Jazz internal constructor(
     /**
      * Closes the app: open subscriptions (and `watch`es) end with
      * [JazzException.Closed], and so do later calls. Closing again does
-     * nothing, so `use {}` and an explicit `close()` mix.
+     * nothing, so `use {}` and an explicit `close()` mix. If it throws, the
+     * app is closed all the same.
      */
     override fun close() {
-        native.close()
-        endWatches()
+        try {
+            native.close()
+        } finally {
+            endWatches()
+        }
     }
 
     /** The app closed: stop watching, and an end user's session reads as signed out. */

@@ -380,6 +380,56 @@ class StagePlanTest {
     }
 
     @Test
+    fun delete_client_storage_is_refused_while_a_second_app_holds_the_store(): Unit = runBlocking {
+        val dir = kotlin.io.path.createTempDirectory("jazz-held").toFile()
+        val auth = tools.jazz.JazzAuth.Bearer { "token-user-held" }
+        openAsUser(endpoint, appId, auth, dir.path).use { deleting ->
+            openAsUser(endpoint, appId, auth, dir.path).use { holder ->
+                val show = showNamed(deleting, "Held")
+                kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(deleting.session.value)
+                val titles = kotlinx.coroutines.channels.Channel<List<String>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+                val watching = launch {
+                    deleting.watch(Tasks.where(Tasks.showId eq show.id)).collect { rows -> titles.send(rows.map { it.title }) }
+                }
+                assertEquals(emptyList(), kotlinx.coroutines.withTimeout(30_000) { titles.receive() })
+
+                kotlin.test.assertFailsWith<tools.jazz.JazzException.Refused> { deleting.deleteClientStorage() }
+
+                // Both apps are still open, and the watch from before still delivers.
+                addTask(deleting, show, "After the refusal")
+                kotlinx.coroutines.withTimeout(30_000) { while (titles.receive() != listOf("After the refusal")) Unit }
+                kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(deleting.session.value)
+                assertEquals(show.id, showById(holder, show.id)?.id)
+                watching.cancel()
+            }
+            // The other app closed: now it deletes.
+            deleting.deleteClientStorage()
+            assertEquals(tools.jazz.SessionState.SignedOut, deleting.session.value)
+        }
+    }
+
+    @Test
+    fun delete_client_storage_refused_by_another_process_closes_the_app(): Unit = runBlocking {
+        // flock(1), standing in for another process's app: the same shared lock on the store's lock file.
+        if (!System.getProperty("os.name").startsWith("Linux")) return@runBlocking
+        val dir = kotlin.io.path.createTempDirectory("jazz-held-process").toFile()
+        openAsUser(endpoint, appId, tools.jazz.JazzAuth.Bearer { "token-user-other" }, dir.path).use { jazz ->
+            kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(jazz.session.value)
+            val lock = dir.walk().single { it.name == "jazz.lock" }
+            val holder = ProcessBuilder("flock", "--shared", lock.path, "sh", "-c", "echo held; exec sleep 60").start()
+            try {
+                assertEquals("held", holder.inputStream.bufferedReader().readLine())
+                kotlin.test.assertFailsWith<tools.jazz.JazzException.Refused> { jazz.deleteClientStorage() }
+                assertEquals(tools.jazz.SessionState.SignedOut, jazz.session.value)
+                kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { jazz.all(Tasks.query()) }
+            } finally {
+                holder.descendants().forEach { it.destroy() }
+                holder.destroy()
+            }
+        }
+    }
+
+    @Test
     fun plain_transactions_merge_and_serializable_ones_conflict(): Unit = runBlocking {
         open("user-9").use { jazz ->
             val show = showNamed(jazz, "Concurrent")
