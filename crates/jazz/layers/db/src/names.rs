@@ -8,8 +8,8 @@
 //! (`_jazz_names`), so a reopened store and its old-version views find the
 //! same columns again.
 
+use crate::storage::OptionalExtension;
 use crate::storage::Storage;
-use rusqlite::OptionalExtension;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::ids::SchemaVersionId;
@@ -285,16 +285,18 @@ fn schema_error(message: impl Into<String>) -> Error {
 }
 
 impl Names {
-    pub(crate) fn load(conn: &Storage) -> Result<Self, Error> {
-        conn.execute_batch(DDL).map_err(storage)?;
-        conn.execute_batch(crate::catalogue::DDL).map_err(storage)?;
+    pub(crate) async fn load(conn: &Storage) -> Result<Self, Error> {
+        conn.execute_batch(DDL).await.map_err(storage)?;
+        conn.execute_batch(crate::catalogue::DDL)
+            .await
+            .map_err(storage)?;
         let mut names = Self::default();
         let bad = |what: &str| Error::new(ErrorCode::Storage, format!("bad {what}"));
         let mut by_n = HashMap::new();
         let mut statement = conn
             .prepare("SELECT n, version, confirmed FROM _jazz_versions")
             .map_err(storage)?;
-        let rows = statement
+        let mut rows = statement
             .query_map([], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -302,8 +304,9 @@ impl Names {
                     r.get::<_, Option<Vec<u8>>>(2)?,
                 ))
             })
+            .await
             .map_err(storage)?;
-        for row in rows {
+        while let Some(row) = rows.next().await {
             let (n, version, confirmed) = row.map_err(storage)?;
             let version = SchemaVersionId::from_bytes(
                 version
@@ -319,11 +322,12 @@ impl Names {
             by_n.insert(n, version);
             names.versions.insert(version, (n, StoredNames::default()));
         }
+        drop(rows);
         drop(statement);
         let mut statement = conn
             .prepare("SELECT n, tbl, col, stored_tbl, stored_col FROM _jazz_names")
             .map_err(storage)?;
-        let rows = statement
+        let mut rows = statement
             .query_map([], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -333,8 +337,9 @@ impl Names {
                     r.get::<_, String>(4)?,
                 ))
             })
+            .await
             .map_err(storage)?;
-        for row in rows {
+        while let Some(row) = rows.next().await {
             let (n, table, column, stored_table, stored_column) = row.map_err(storage)?;
             let version = by_n
                 .get(&n)
@@ -350,11 +355,12 @@ impl Names {
                 columns.insert(column, stored_column);
             }
         }
+        drop(rows);
         drop(statement);
         let mut statement = conn
             .prepare("SELECT tbl, col, ty, branch, has_dflt, dflt FROM _jazz_stored_columns")
             .map_err(storage)?;
-        let rows = statement
+        let mut rows = statement
             .query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -365,8 +371,9 @@ impl Names {
                     r.get::<_, Sql>(5)?,
                 ))
             })
+            .await
             .map_err(storage)?;
-        for row in rows {
+        while let Some(row) = rows.next().await {
             let (table, column, ty, branch, has_default, default) = row.map_err(storage)?;
             let columns = names.branches.entry(table.clone()).or_default();
             if column.is_empty() {
@@ -380,12 +387,13 @@ impl Names {
                 serde_json::from_str(&ty).map_err(|_| bad("value type in _jazz_stored_columns"))?;
             names.types.entry(table).or_default().insert(column, ty);
         }
+        drop(rows);
         drop(statement);
-        if table_exists(conn, "_jazz_enum_tags")? {
+        if table_exists(conn, "_jazz_enum_tags").await? {
             let mut statement = conn
                 .prepare("SELECT tbl, col, tag, name FROM _jazz_enum_tags")
                 .map_err(storage)?;
-            let rows = statement
+            let mut rows = statement
                 .query_map([], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -394,8 +402,9 @@ impl Names {
                         r.get::<_, String>(3)?,
                     ))
                 })
+                .await
                 .map_err(storage)?;
-            for row in rows {
+            while let Some(row) = rows.next().await {
                 let (table, column, tag, name) = row.map_err(storage)?;
                 names
                     .tags
@@ -404,11 +413,11 @@ impl Names {
                     .insert(name, tag);
             }
         }
-        if table_exists(conn, "_jazz_enum_defaults")? {
+        if table_exists(conn, "_jazz_enum_defaults").await? {
             let mut statement = conn
                 .prepare("SELECT tbl, col, name FROM _jazz_enum_defaults")
                 .map_err(storage)?;
-            let rows = statement
+            let mut rows = statement
                 .query_map([], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -416,8 +425,9 @@ impl Names {
                         r.get::<_, String>(2)?,
                     ))
                 })
+                .await
                 .map_err(storage)?;
-            for row in rows {
+            while let Some(row) = rows.next().await {
                 let (table, column, name) = row.map_err(storage)?;
                 names.enum_defaults.get_mut().insert((table, column), name);
             }
@@ -425,7 +435,7 @@ impl Names {
         let mut statement = conn
             .prepare("SELECT tbl, col, since, src, dflt FROM _jazz_lens_cells")
             .map_err(storage)?;
-        let rows = statement
+        let mut rows = statement
             .query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -435,8 +445,9 @@ impl Names {
                     r.get::<_, Sql>(4)?,
                 ))
             })
+            .await
             .map_err(storage)?;
-        for row in rows {
+        while let Some(row) = rows.next().await {
             let (table, column, since, src, default) = row.map_err(storage)?;
             let since = SchemaVersionId::from_bytes(
                 since
@@ -454,12 +465,13 @@ impl Names {
                 rule,
             });
         }
+        drop(rows);
         drop(statement);
         Ok(names)
     }
 
     /// Record lens cells (once each), in memory and in the file.
-    pub(crate) fn record_lens_cells(
+    pub(crate) async fn record_lens_cells(
         &mut self,
         conn: &Storage,
         cells: Vec<LensCell>,
@@ -482,13 +494,14 @@ impl Names {
                 LensCellRule::Dropped(default) => (None, default.clone()),
             };
             insert
-                .execute(rusqlite::params![
+                .execute(crate::storage::params![
                     cell.table,
                     cell.column,
                     cell.since.as_bytes().to_vec(),
                     source,
                     default
                 ])
+                .await
                 .map_err(storage)?;
             self.lens_cells.push(cell);
         }
@@ -507,7 +520,7 @@ impl Names {
     /// takes the value of a source it gives, as (source, copy). A dropped
     /// column's backwards default is never filled here: only a writer whose
     /// version descends from the drop names it, and it sends that default
-    /// itself (see `Inner::stored_op`), so an older writer's row takes the
+    /// itself (see `Store::stored_op`), so an older writer's row takes the
     /// stored column's own default.
     pub(crate) fn stored_copies(
         &self,
@@ -572,7 +585,7 @@ impl Names {
     }
 
     /// Refuse collisions before minting metadata or issuing application DDL.
-    fn check_schema_objects(
+    async fn check_schema_objects(
         &self,
         conn: &crate::storage::Storage,
         schema: &Schema,
@@ -594,6 +607,7 @@ impl Names {
                         [name],
                         |row| row.get(0),
                     )
+                    .await
                     .optional()
                     .map_err(storage)?;
                 if let Some(existing) = existing {
@@ -614,7 +628,7 @@ impl Names {
                         "SELECT name, type, tbl_name FROM sqlite_master WHERE name = ?1 COLLATE NOCASE",
                         [&name],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
+                    ).await
                     .optional()
                     .map_err(storage)?;
                 if let Some((existing, kind, owner)) = existing
@@ -702,28 +716,30 @@ impl Names {
     /// stored columns. Another hash of a version admitted already (one that
     /// differs only in defaults or indexes) adds no names; its definition
     /// is kept, so a bundle selecting it resolves.
-    pub(crate) fn admit(
+    pub(crate) async fn admit(
         &mut self,
         conn: &crate::storage::Storage,
         schema: &Schema,
     ) -> Result<(), Error> {
         let version = schema.jazz.version_id();
         if self.versions.contains_key(&version) {
-            return crate::catalogue::record_equivalent(conn, &schema.jazz);
+            return crate::catalogue::record_equivalent(conn, &schema.jazz).await;
         }
         let n = self.versions.values().map(|(n, _)| *n).max().unwrap_or(0) + 1;
         let names = schema.names();
         let columns = self.new_stored_columns(schema)?;
-        conn.scope("jazz_names", |conn| {
+        conn.scope("jazz_names", async |conn| {
             conn.execute(
                 "INSERT INTO _jazz_versions (n, version) VALUES (?1, ?2)",
-                rusqlite::params![n, version.as_bytes().to_vec()],
+                crate::storage::params![n, version.as_bytes().to_vec()],
             )
+            .await
             .map_err(storage)?;
-            write_names(conn, n, &names)?;
-            write_stored_columns(conn, &columns)?;
-            crate::catalogue::record_admitted(conn, n, &schema.jazz)
-        })?;
+            write_names(conn, n, &names).await?;
+            write_stored_columns(conn, &columns).await?;
+            crate::catalogue::record_admitted(conn, n, &schema.jazz).await
+        })
+        .await?;
         self.versions.insert(version, (n, names));
         for column in columns {
             let branches = self.branches.entry(column.table.clone()).or_default();
@@ -808,34 +824,36 @@ impl Names {
     /// tag for yet: each column's next tags, in declaration order. Every
     /// store does this as it admits a version; [`Self::align`] then puts
     /// the current schema's in its order.
-    pub(crate) fn mint(
+    pub(crate) async fn mint(
         &self,
         conn: &crate::storage::Storage,
         schema: &Schema,
     ) -> Result<(), Error> {
-        self.check_schema_objects(conn, schema)?;
+        self.check_schema_objects(conn, schema).await?;
         // One transaction for the whole schema: each column's `intern` is a
         // scope, and outside a transaction every one would commit (and sync
         // the file) alone. A schema with many enum columns then paid one
         // durable commit per column when its store opened.
-        conn.scope("jazz_tags_mint", |conn| {
+        conn.scope("jazz_tags_mint", async |conn| {
             for table in schema.tables.values() {
                 for column in &table.columns {
                     if let Some(variants) = &column.variants {
                         let variants: Vec<&str> = variants.iter().map(String::as_str).collect();
-                        self.intern(conn, &table.stored, &column.stored, &variants)?;
+                        self.intern(conn, &table.stored, &column.stored, &variants)
+                            .await?;
                     }
                 }
             }
             Ok(())
         })
+        .await
     }
 
     /// Give each of `names` that stored column `column` of stored table
     /// `table` has no tag for the column's next tag, in the file and in
     /// memory. A name no admitted version declares (a removed variant a row
     /// still holds, say) gets one too: every enum cell is a tag.
-    pub(crate) fn intern(
+    pub(crate) async fn intern(
         &self,
         conn: &crate::storage::Storage,
         table: &str,
@@ -858,8 +876,8 @@ impl Names {
         if new.is_empty() {
             return Ok(());
         }
-        conn.scope("jazz_tags", |conn| {
-            conn.execute_batch(ENUM_DDL).map_err(storage)?;
+        conn.scope("jazz_tags", async |conn| {
+            conn.execute_batch(ENUM_DDL).await.map_err(storage)?;
             let mut insert = conn
                 .prepare_cached(
                     "INSERT INTO _jazz_enum_tags (tbl, col, tag, name) VALUES (?1, ?2, ?3, ?4)",
@@ -867,11 +885,13 @@ impl Names {
                 .map_err(storage)?;
             for (tag, name) in &new {
                 insert
-                    .execute(rusqlite::params![table, column, tag, name])
+                    .execute(crate::storage::params![table, column, tag, name])
+                    .await
                     .map_err(storage)?;
             }
             Ok(())
-        })?;
+        })
+        .await?;
         crate::values::tags_changing(conn, &tags);
         let mut tags = tags.borrow_mut();
         for (tag, name) in new {
@@ -886,7 +906,7 @@ impl Names {
     /// takes its rank in `declared`'s order, in the file and in memory.
     /// Returns each (old, new) tag that changed; the caller rewrites the
     /// cells.
-    pub(crate) fn align(
+    pub(crate) async fn align(
         &self,
         conn: &crate::storage::Storage,
         table: &str,
@@ -915,25 +935,29 @@ impl Names {
         // it now names another variant, inserts that leave the column out
         // take the default by name instead (`_jazz_enum_defaults`).
         let key = (table.to_owned(), column.to_owned());
-        let stale_default = match self.enum_defaults.borrow().contains_key(&key) {
+        let already_recorded = self.enum_defaults.borrow().contains_key(&key);
+        let stale_default = match already_recorded {
             true => None,
-            false => ddl_default(conn, table, column)?
+            false => ddl_default(conn, table, column)
+                .await?
                 .filter(|tag| changed.iter().any(|(old, _)| old == tag))
                 .and_then(|tag| tags.borrow().name(tag).map(str::to_owned)),
         };
-        conn.scope("jazz_tags", |conn| {
-            conn.execute_batch(ENUM_DDL).map_err(storage)?;
+        conn.scope("jazz_tags", async |conn| {
+            conn.execute_batch(ENUM_DDL).await.map_err(storage)?;
             if let Some(name) = &stale_default {
                 conn.execute(
                     "INSERT INTO _jazz_enum_defaults (tbl, col, name) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![table, column, name],
+                    crate::storage::params![table, column, name],
                 )
+                .await
                 .map_err(storage)?;
             }
             conn.execute(
                 "DELETE FROM _jazz_enum_tags WHERE tbl = ?1 AND col = ?2",
-                rusqlite::params![table, column],
+                crate::storage::params![table, column],
             )
+            .await
             .map_err(storage)?;
             let mut insert = conn
                 .prepare_cached(
@@ -942,11 +966,13 @@ impl Names {
                 .map_err(storage)?;
             for (tag, name) in renumbered.iter() {
                 insert
-                    .execute(rusqlite::params![table, column, tag, name])
+                    .execute(crate::storage::params![table, column, tag, name])
+                    .await
                     .map_err(storage)?;
             }
             Ok(())
-        })?;
+        })
+        .await?;
         crate::values::tags_changing(conn, &tags);
         *tags.borrow_mut() = renumbered;
         crate::values::tags_changed();
@@ -970,7 +996,7 @@ impl Names {
     /// A new copy `copy` of stored column `source` of stored table `table`
     /// starts with its source's tags, removed variants' too, so its cells
     /// are its source's and it sorts like its source.
-    pub(crate) fn copy_tags(
+    pub(crate) async fn copy_tags(
         &self,
         conn: &crate::storage::Storage,
         table: &str,
@@ -985,7 +1011,7 @@ impl Names {
             .map(|(_, name)| name.to_owned())
             .collect();
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        self.intern(conn, table, copy, &names)
+        self.intern(conn, table, copy, &names).await
     }
 
     /// Whether `version`'s names are the ones this replica's authority
@@ -1008,7 +1034,7 @@ impl Names {
 
     /// Record that the authority confirmed these (version, digest) pairs;
     /// whether any is new here.
-    pub(crate) fn confirm(
+    pub(crate) async fn confirm(
         &mut self,
         conn: &crate::storage::Storage,
         confirmed: &[([u8; 16], [u8; 16])],
@@ -1025,20 +1051,22 @@ impl Names {
         if new.is_empty() {
             return Ok(false);
         }
-        conn.scope("jazz_names", |conn| {
+        conn.scope("jazz_names", async |conn| {
             let mut update = conn
                 .prepare_cached("UPDATE _jazz_versions SET confirmed = ?2 WHERE version = ?1")
                 .map_err(storage)?;
             for (version, digest) in &new {
                 update
-                    .execute(rusqlite::params![
+                    .execute(crate::storage::params![
                         version.as_bytes().to_vec(),
                         digest.to_vec()
                     ])
+                    .await
                     .map_err(storage)?;
             }
             Ok(())
-        })?;
+        })
+        .await?;
         self.confirmed.extend(new);
         Ok(true)
     }
@@ -1415,28 +1443,30 @@ impl Names {
 
 /// The tag stored column `column` of stored table `table` was added with
 /// (`ADD COLUMN ... DEFAULT`), if any.
-fn table_exists(conn: &Storage, name: &str) -> Result<bool, Error> {
+async fn table_exists(conn: &Storage, name: &str) -> Result<bool, Error> {
     conn.query_row(
         "SELECT count(*) > 0 FROM sqlite_master WHERE name = ?1",
         [name],
         |r| r.get(0),
     )
+    .await
     .map_err(storage)
 }
 
-fn ddl_default(conn: &Storage, table: &str, column: &str) -> Result<Option<i64>, Error> {
+async fn ddl_default(conn: &Storage, table: &str, column: &str) -> Result<Option<i64>, Error> {
     let mut statement = conn
         .prepare(&format!(
             "PRAGMA table_info({})",
             crate::values::quote(table)
         ))
         .map_err(storage)?;
-    let rows = statement
+    let mut rows = statement
         .query_map([], |r| {
             Ok((r.get::<_, String>(1)?, r.get::<_, Option<String>>(4)?))
         })
+        .await
         .map_err(storage)?;
-    for row in rows {
+    while let Some(row) = rows.next().await {
         let (name, default) = row.map_err(storage)?;
         if name == column {
             return Ok(default.and_then(|default| default.trim().parse().ok()));
@@ -1445,7 +1475,7 @@ fn ddl_default(conn: &Storage, table: &str, column: &str) -> Result<Option<i64>,
     Ok(None)
 }
 
-fn write_names(conn: &Storage, n: i64, names: &StoredNames) -> Result<(), Error> {
+async fn write_names(conn: &Storage, n: i64, names: &StoredNames) -> Result<(), Error> {
     let mut insert = conn
         .prepare_cached(
             "INSERT INTO _jazz_names (n, tbl, col, stored_tbl, stored_col) \
@@ -1454,11 +1484,19 @@ fn write_names(conn: &Storage, n: i64, names: &StoredNames) -> Result<(), Error>
         .map_err(storage)?;
     for (table, (stored, columns)) in &names.tables {
         insert
-            .execute(rusqlite::params![n, table, "", stored, ""])
+            .execute(crate::storage::params![n, table, "", stored, ""])
+            .await
             .map_err(storage)?;
         for (column, stored_column) in columns {
             insert
-                .execute(rusqlite::params![n, table, column, stored, stored_column])
+                .execute(crate::storage::params![
+                    n,
+                    table,
+                    column,
+                    stored,
+                    stored_column
+                ])
+                .await
                 .map_err(storage)?;
         }
     }
@@ -1474,7 +1512,7 @@ struct NewStoredColumn {
     branch: Option<Option<Sql>>,
 }
 
-fn write_stored_columns(conn: &Storage, columns: &[NewStoredColumn]) -> Result<(), Error> {
+async fn write_stored_columns(conn: &Storage, columns: &[NewStoredColumn]) -> Result<(), Error> {
     let mut insert = conn
         .prepare_cached(
             "INSERT OR IGNORE INTO _jazz_stored_columns (tbl, col, ty, branch, has_dflt, dflt) \
@@ -1496,7 +1534,7 @@ fn write_stored_columns(conn: &Storage, columns: &[NewStoredColumn]) -> Result<(
             .transpose()?;
         let default = column.branch.clone().flatten();
         insert
-            .execute(rusqlite::params![
+            .execute(crate::storage::params![
                 column.table,
                 column.column,
                 ty,
@@ -1504,6 +1542,7 @@ fn write_stored_columns(conn: &Storage, columns: &[NewStoredColumn]) -> Result<(
                 default.is_some(),
                 default.unwrap_or(Sql::Null)
             ])
+            .await
             .map_err(storage)?;
     }
     Ok(())
@@ -1602,24 +1641,25 @@ mod tests {
     fn a_rolled_back_savepoint_takes_its_interned_tags_with_it() {
         use crate::values::{begin_savepoint, end_savepoint};
         let conn = Storage::open_in_memory().unwrap();
-        let names = Names::load(&conn).unwrap();
+        let names = crate::options::block_on(Names::load(&conn)).unwrap();
         let file = || -> Vec<(i64, String)> {
-            if !table_exists(&conn, "_jazz_enum_tags").unwrap() {
+            if !crate::options::block_on(table_exists(&conn, "_jazz_enum_tags")).unwrap() {
                 return Vec::new();
             }
             let mut statement = conn
                 .prepare("SELECT tag, name FROM _jazz_enum_tags ORDER BY tag")
                 .unwrap();
-            statement
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap()
+            crate::options::block_on(
+                crate::options::block_on(statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?))))
+                    .unwrap()
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
         };
         let tag = |name: &str| names.tags().column("t", "c").borrow().tag(name);
         begin_savepoint(&conn, "outer").unwrap();
         begin_savepoint(&conn, "inner").unwrap();
-        names.intern(&conn, "t", "c", &["lost"]).unwrap();
+        crate::options::block_on(names.intern(&conn, "t", "c", &["lost"])).unwrap();
         end_savepoint(&conn, "inner", true).unwrap();
         assert_eq!(tag("lost"), Some(0));
         end_savepoint(&conn, "outer", false).unwrap();
@@ -1627,7 +1667,7 @@ mod tests {
         assert_eq!(file(), []);
 
         begin_savepoint(&conn, "outer").unwrap();
-        names.intern(&conn, "t", "c", &["kept"]).unwrap();
+        crate::options::block_on(names.intern(&conn, "t", "c", &["kept"])).unwrap();
         end_savepoint(&conn, "outer", true).unwrap();
         assert_eq!(tag("kept"), Some(0));
         assert_eq!(file(), [(0, "kept".to_owned())]);
@@ -1640,7 +1680,7 @@ mod tests {
     fn every_change_of_enum_tags_moves_the_tag_epoch() {
         use crate::values::{begin_savepoint, end_savepoint, tag_epoch};
         let conn = Storage::open_in_memory().unwrap();
-        let names = Names::load(&conn).unwrap();
+        let names = crate::options::block_on(Names::load(&conn)).unwrap();
         let moved = |what: &str, change: &dyn Fn()| {
             let before = tag_epoch();
             change();
@@ -1650,21 +1690,25 @@ mod tests {
             );
         };
         moved("interning", &|| {
-            names.intern(&conn, "t", "c", &["b", "a"]).unwrap();
+            crate::options::block_on(names.intern(&conn, "t", "c", &["b", "a"])).unwrap();
         });
         moved("renumbering", &|| {
-            let changed = names
-                .align(&conn, "t", "c", &["a".to_owned(), "b".to_owned()])
-                .unwrap();
+            let changed = crate::options::block_on(names.align(
+                &conn,
+                "t",
+                "c",
+                &["a".to_owned(), "b".to_owned()],
+            ))
+            .unwrap();
             assert!(!changed.is_empty());
         });
         begin_savepoint(&conn, "outer").unwrap();
-        names.intern(&conn, "t", "c", &["lost"]).unwrap();
+        crate::options::block_on(names.intern(&conn, "t", "c", &["lost"])).unwrap();
         moved("a rollback", &|| {
             end_savepoint(&conn, "outer", false).unwrap();
         });
         let snapshot = std::cell::Cell::new(Some(names.tags().snapshot()));
-        names.intern(&conn, "t", "c", &["later"]).unwrap();
+        crate::options::block_on(names.intern(&conn, "t", "c", &["later"])).unwrap();
         moved("a restore", &|| {
             names
                 .tags()
@@ -1680,9 +1724,9 @@ mod tests {
         let before = tag_epoch();
         std::thread::spawn(|| {
             let conn = Storage::open_in_memory().unwrap();
-            let names = Names::load(&conn).unwrap();
+            let names = crate::options::block_on(Names::load(&conn)).unwrap();
             let start = tag_epoch();
-            names.intern(&conn, "t", "c", &["a"]).unwrap();
+            crate::options::block_on(names.intern(&conn, "t", "c", &["a"])).unwrap();
             assert!(
                 tag_epoch() > start,
                 "interning moved its own thread's epoch"

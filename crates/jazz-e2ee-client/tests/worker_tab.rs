@@ -37,7 +37,7 @@ fn a_tab_behind_a_keyless_worker_verifies_its_account() {
     ))
     .unwrap();
     worker.defer_durability_acks();
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let _worker_link = link_as(&worker, &authority, alice);
 
     let tab = block_on(Db::open(
@@ -51,8 +51,8 @@ fn a_tab_behind_a_keyless_worker_verifies_its_account() {
         .with_e2ee(client.hooks()),
     ))
     .unwrap();
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let _tab_link = link_as(&tab, &worker, alice);
 
     for _ in 0..20 {
@@ -61,7 +61,7 @@ fn a_tab_behind_a_keyless_worker_verifies_its_account() {
         block_on(authority.tick()).unwrap();
     }
     assert!(
-        client.prepare(&tab).unwrap(),
+        jazz::db::block_on(client.prepare(&tab)).unwrap(),
         "identities through the worker"
     );
     let _watch = drive(&authority, &[&tab, &worker], client.watch_account(&tab)).unwrap();
@@ -130,7 +130,7 @@ fn a_tab_behind_a_keyless_worker_verifies_its_account_whatever_the_tick_order() 
             .with_e2ee(KeylessHooks::hooks(declarations_with(settings.clone()))),
         ))
         .unwrap();
-        worker.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
         let _worker_link = link_as(&worker, &authority, alice);
         let tab = block_on(Db::open(
             DbConfig::new(
@@ -143,15 +143,15 @@ fn a_tab_behind_a_keyless_worker_verifies_its_account_whatever_the_tick_order() 
             .with_e2ee(client.hooks()),
         ))
         .unwrap();
-        tab.set_non_durable_client();
-        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(tab.set_non_durable_client());
+        jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
         let _tab_link = link_as(&tab, &worker, alice);
         for _ in 0..5 {
             block_on(tab.tick()).unwrap();
             block_on(worker.tick()).unwrap();
             block_on(authority.tick()).unwrap();
         }
-        assert!(client.prepare(&tab).unwrap());
+        assert!(jazz::db::block_on(client.prepare(&tab)).unwrap());
         let watched =
             drive_in_any_order(seed, &authority, &worker, &tab, client.watch_account(&tab));
         let verified = watched.and_then(|_watch| {

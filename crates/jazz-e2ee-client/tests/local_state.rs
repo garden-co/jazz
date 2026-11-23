@@ -154,7 +154,10 @@ fn held_keys_and_rows_survive_a_restart_offline() {
     let client = open_client(store());
     let db = client_db(&client, Some(&path));
     client.set_online(false);
-    assert!(client.prepare(&db).unwrap(), "identities are known offline");
+    assert!(
+        jazz::db::block_on(client.prepare(&db)).unwrap(),
+        "identities are known offline"
+    );
     block_on(db.insert("notes", note(space, "offline"), Default::default())).unwrap();
     let mut bodies: Vec<Value> = all(
         &db,

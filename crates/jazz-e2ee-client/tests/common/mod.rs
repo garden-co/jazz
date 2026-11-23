@@ -233,7 +233,7 @@ pub fn identity(node: u8) -> DbIdentity {
 
 pub fn authority() -> Db {
     let server = block_on(Db::open(DbConfig::new(schema(), identity(0)))).unwrap();
-    server.set_authority().unwrap();
+    jazz::db::block_on(server.set_authority()).unwrap();
     server
 }
 
@@ -282,16 +282,15 @@ pub fn link_as(client: &Db, server: &Db, who: AuthorSubject) -> (Upstream, Rc<Re
         inbound: down.clone(),
         wire: wire.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Recorded {
-                out: down,
-                inbound: up,
-                wire: wire.clone(),
-            }),
-            who,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Recorded {
+            out: down,
+            inbound: up,
+            wire: wire.clone(),
+        }),
+        who,
+    ))
+    .unwrap();
     (link, wire)
 }
 
@@ -313,7 +312,10 @@ pub fn online(
     let db = client_db(client, path);
     let (upstream, wire) = link(&db, server);
     pump(server, &db);
-    assert!(client.prepare(&db).unwrap(), "identities after one sync");
+    assert!(
+        jazz::db::block_on(client.prepare(&db)).unwrap(),
+        "identities after one sync"
+    );
     (db, upstream, wire)
 }
 
@@ -361,7 +363,10 @@ pub fn address(db: &Db, space: uuid::Uuid) -> SpaceAddress {
 
 /// The address of the space that row `space` of space table `scope` is.
 pub fn address_in(db: &Db, scope: &str, space: uuid::Uuid) -> SpaceAddress {
-    let scope = db.table_identity(scope).unwrap().unwrap().0;
+    let scope = jazz::db::block_on(db.table_identity(scope))
+        .unwrap()
+        .unwrap()
+        .0;
     SpaceAddress::new(&scope.to_string(), &space.to_string()).unwrap()
 }
 
@@ -668,7 +673,7 @@ pub fn secure_authority_with(settings: &EncryptionSettings, path: Option<&Path>)
         Some(path) => block_on(Db::open_at(config, path, FileOptions::default())).unwrap(),
         None => block_on(Db::open(config)).unwrap(),
     };
-    server.set_authority().unwrap();
+    jazz::db::block_on(server.set_authority()).unwrap();
     server
 }
 
@@ -720,18 +725,20 @@ pub fn session(
         inbound: down.clone(),
         wire: wire.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Recorded {
-                out: down,
-                inbound: up,
-                wire,
-            }),
-            who,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Recorded {
+            out: down,
+            inbound: up,
+            wire,
+        }),
+        who,
+    ))
+    .unwrap();
     pump(server, &db);
-    assert!(client.prepare(&db).unwrap(), "identities after one sync");
+    assert!(
+        jazz::db::block_on(client.prepare(&db)).unwrap(),
+        "identities after one sync"
+    );
     (db, link)
 }
 

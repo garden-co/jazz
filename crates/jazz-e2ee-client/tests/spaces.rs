@@ -96,7 +96,10 @@ fn new_project(server: &Db, creator: &Device, name: &str) -> uuid::Uuid {
 }
 
 fn add_member(server: &Db, by: &Device, space: uuid::Uuid, account: &str) {
-    let scope = by.db.table_identity("projects").unwrap().unwrap().0;
+    let scope = jazz::db::block_on(by.db.table_identity("projects"))
+        .unwrap()
+        .unwrap()
+        .0;
     let cells = BTreeMap::from([
         ("scopeId".to_owned(), Value::Uuid(scope)),
         ("identifier".to_owned(), Value::Uuid(space)),
@@ -146,7 +149,10 @@ fn read_notes(
 }
 
 fn space_address(device: &Device, space: uuid::Uuid) -> jazz::e2ee::SpaceAddress {
-    let scope = device.db.table_identity("projects").unwrap().unwrap().0;
+    let scope = jazz::db::block_on(device.db.table_identity("projects"))
+        .unwrap()
+        .unwrap()
+        .0;
     jazz::e2ee::SpaceAddress {
         scope_id: scope.to_string(),
         identifier: space.to_string(),
@@ -1008,7 +1014,7 @@ fn offline_db(client: &E2eeClient, who: AuthorSubject, node: u8, path: &std::pat
     )
     .with_e2ee(client.hooks());
     let db = block_on(Db::open_at(config, path, jazz::db::FileOptions::default())).unwrap();
-    assert!(client.prepare(&db).unwrap());
+    assert!(jazz::db::block_on(client.prepare(&db)).unwrap());
     db
 }
 
@@ -1166,7 +1172,7 @@ fn owned_device(server: &Db, who: AuthorSubject, store: MemoryStore, node: u8) -
     let db = block_on(Db::open(config)).unwrap();
     let (link, _wire) = link_as(&db, server, who);
     pump(server, &db);
-    assert!(client.prepare(&db).unwrap());
+    assert!(jazz::db::block_on(client.prepare(&db)).unwrap());
     Device {
         who,
         client,
@@ -1186,7 +1192,7 @@ fn only_an_eligible_holder_checks_the_mark_and_watches_public_successors() {
             identity(0),
         )))
         .unwrap();
-        server.set_authority().unwrap();
+        jazz::db::block_on(server.set_authority()).unwrap();
         let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
         let bob = owned_device(&server, account(0xb0), MemoryStore::new(), 2);
         alice.activate(&server);
@@ -1273,7 +1279,7 @@ fn a_refused_root_stops_automatic_creation_while_the_client_runs() {
             identity(0),
         )))
         .unwrap();
-        authority.set_authority().unwrap();
+        jazz::db::block_on(authority.set_authority()).unwrap();
         let server = authority;
         let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
         alice.activate(&server);
@@ -1435,7 +1441,10 @@ fn a_forged_earlier_root_does_not_block_a_valid_root() {
         let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
         alice.activate(&server);
         let space = new_project(&server, &alice, "plans");
-        let scope = alice.db.table_identity("projects").unwrap().unwrap().0;
+        let scope = jazz::db::block_on(alice.db.table_identity("projects"))
+            .unwrap()
+            .unwrap()
+            .0;
         let id = |n: u8| Value::Uuid(uuid::Uuid::from_bytes([n; 16]));
         let forged = BTreeMap::from([
             ("scopeId".to_owned(), Value::Uuid(scope)),
@@ -1491,7 +1500,10 @@ fn acquiring_from_a_rolled_back_server_is_stale_state() {
             drive(&server, &[&db], client.ensure_account(&db)).unwrap();
             (
                 uuid::Uuid::new_v4(),
-                db.table_identity("projects").unwrap().unwrap().0,
+                jazz::db::block_on(db.table_identity("projects"))
+                    .unwrap()
+                    .unwrap()
+                    .0,
             )
         };
         for suffix in ["", "-wal", "-shm"] {
@@ -1678,7 +1690,7 @@ fn a_refused_creation_is_found_after_a_restart() {
             identity(0),
         )))
         .unwrap();
-        authority.set_authority().unwrap();
+        jazz::db::block_on(authority.set_authority()).unwrap();
         let server = authority;
         let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
         alice.activate(&server);
@@ -1748,7 +1760,10 @@ fn a_refused_creation_is_found_after_a_restart() {
 /// A root row of `space` that this client cannot decode: `version` is out
 /// of its range (as a newer format's would be, or junk).
 fn undecodable_root(server: &Db, by: &Device, space: uuid::Uuid, version: i64) {
-    let scope = by.db.table_identity("projects").unwrap().unwrap().0;
+    let scope = jazz::db::block_on(by.db.table_identity("projects"))
+        .unwrap()
+        .unwrap()
+        .0;
     let id = |n: u8| Value::Uuid(uuid::Uuid::from_bytes([n; 16]));
     let cells = BTreeMap::from([
         ("scopeId".to_owned(), Value::Uuid(scope)),
@@ -2159,6 +2174,7 @@ fn stream_metadata_keeps_the_epoch_chosen_before_pulling() {
                     "attachment",
                     &jazz::db::WriteTarget::Root,
                 )
+                .await
             }),
         )
         .unwrap();
@@ -2775,7 +2791,10 @@ fn a_host_write_rotates_after_each_removal_of_the_run() {
 
 /// A delivery row from `by` to `to` of `epoch` with a junk envelope.
 fn junk_delivery(by: &Device, to: &Device, space: uuid::Uuid, epoch: Value) {
-    let scope = by.db.table_identity("projects").unwrap().unwrap().0;
+    let scope = jazz::db::block_on(by.db.table_identity("projects"))
+        .unwrap()
+        .unwrap()
+        .0;
     let account = |device: &Device| Value::Uuid(uuid::Uuid::parse_str(&device.id()).unwrap());
     let to_epoch = to
         .client
@@ -2944,7 +2963,10 @@ fn a_hidden_delivery_costs_a_duplicate_not_a_loop() {
 /// `count` member rows of `space` for accounts that have no history, as the
 /// authority itself.
 fn crowd(server: &Db, by: &Device, space: uuid::Uuid, count: usize) {
-    let scope = by.db.table_identity("projects").unwrap().unwrap().0;
+    let scope = jazz::db::block_on(by.db.table_identity("projects"))
+        .unwrap()
+        .unwrap()
+        .0;
     for _ in 0..count {
         let cells = BTreeMap::from([
             ("scopeId".to_owned(), Value::Uuid(scope)),
@@ -3137,7 +3159,10 @@ fn a_member_write_that_never_commits_is_dropped_after_the_wait() {
         )
         .unwrap();
         assert_eq!(alice.client.pending_member_changes(), 0);
-        let scope = alice.db.table_identity("projects").unwrap().unwrap().0;
+        let scope = jazz::db::block_on(alice.db.table_identity("projects"))
+            .unwrap()
+            .unwrap()
+            .0;
         let id = jazz::tools::OpenTransactionId::new();
         block_on(alice.db.begin_serializable(id)).unwrap();
         block_on(alice.db.tx_ref(id).insert(
@@ -3258,7 +3283,7 @@ fn a_refused_rotation_never_blocks_the_write() {
             identity(0),
         )))
         .unwrap();
-        authority.set_authority().unwrap();
+        jazz::db::block_on(authority.set_authority()).unwrap();
         let server = authority;
         let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
         alice.activate(&server);
@@ -3364,7 +3389,7 @@ fn a_failed_rotation_before_a_write_is_reported_with_its_reason() {
             identity(0),
         )))
         .unwrap();
-        authority.set_authority().unwrap();
+        jazz::db::block_on(authority.set_authority()).unwrap();
         let server = authority;
         let alice = owned_device(&server, account(0xa1), MemoryStore::new(), 1);
         alice.activate(&server);
@@ -3453,7 +3478,10 @@ fn a_failed_rotation_before_a_write_is_reported_with_its_reason() {
 
 /// A member row of `space` for `account`, written by the authority.
 fn server_member(server: &Db, by: &Device, space: uuid::Uuid, account: &str) {
-    let scope = by.db.table_identity("projects").unwrap().unwrap().0;
+    let scope = jazz::db::block_on(by.db.table_identity("projects"))
+        .unwrap()
+        .unwrap()
+        .0;
     let cells = BTreeMap::from([
         ("scopeId".to_owned(), Value::Uuid(scope)),
         ("identifier".to_owned(), Value::Uuid(space)),
@@ -3524,9 +3552,10 @@ fn the_watch_queries_are_served_by_an_index_not_a_scan() {
             .collect::<Vec<_>>();
         assert_eq!(queries.len(), 7);
         for (table, query) in queries {
-            let (_, plan) = server
-                .explain_query_plan(&server.prepare_query(&query).unwrap(), None)
-                .unwrap();
+            let (_, plan) = jazz::db::block_on(
+                server.explain_query_plan(&server.prepare_query(&query).unwrap(), None),
+            )
+            .unwrap();
             eprintln!("{table}: {plan}");
             assert!(
                 plan.contains("SEARCH") && plan.contains("USING INDEX"),
@@ -3576,7 +3605,10 @@ fn deliveries_of_earlier_versions_are_not_watched() {
         assert!(quiet.is_empty(), "nothing changed");
 
         // A delivery of the first version, written by the server.
-        let scope = alice.db.table_identity("projects").unwrap().unwrap().0;
+        let scope = jazz::db::block_on(alice.db.table_identity("projects"))
+            .unwrap()
+            .unwrap()
+            .0;
         let account = |text: &str| Value::Uuid(uuid::Uuid::parse_str(text).unwrap());
         block_on(server.insert(
             "__e2ee_space_deliveries",
@@ -4822,7 +4854,7 @@ fn locked_device(server: &Db, who: AuthorSubject, node: u8) -> Device {
     let db = block_on(Db::open(config)).unwrap();
     let (link, _wire) = link_as(&db, server, who);
     pump(server, &db);
-    assert!(client.prepare(&db).unwrap());
+    assert!(jazz::db::block_on(client.prepare(&db)).unwrap());
     Device {
         who,
         client,
@@ -4845,7 +4877,7 @@ fn a_refused_repair_stops_at_the_natural_moments() {
             identity(0),
         )))
         .unwrap();
-        authority.set_authority().unwrap();
+        jazz::db::block_on(authority.set_authority()).unwrap();
         let server = authority;
         let alice = locked_device(&server, account(0xa1), 1);
         alice.activate(&server);

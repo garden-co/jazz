@@ -2200,7 +2200,7 @@ impl NapiDb {
             )),
         }
         .map_err(|error| napi_core_error(&error))?;
-        let binding = Binding::new(db, identity, trusted);
+        let binding = block_on(Binding::new(db, identity, trusted));
         let owner = Self::runtime_owner(binding);
         if let Some((built, store)) = runtime {
             let mut inner = owner.inner.borrow_mut();
@@ -3079,9 +3079,7 @@ impl NapiDb {
             JsonValue,
         >,
     ) -> js::Result<()> {
-        self.binding()?
-            .set_session_claims(json_or_null(claims))
-            .map_err(host_error)?;
+        block_on(self.binding()?.set_session_claims(json_or_null(claims))).map_err(host_error)?;
         settle_promises();
         Ok(())
     }
@@ -3095,9 +3093,11 @@ impl NapiDb {
             JsonValue,
         >,
     ) -> js::Result<()> {
-        self.binding()?
-            .set_identity_claims(&author, json_or_null(claims))
-            .map_err(host_error)?;
+        block_on(
+            self.binding()?
+                .set_identity_claims(&author, json_or_null(claims)),
+        )
+        .map_err(host_error)?;
         settle_promises();
         Ok(())
     }
@@ -3132,10 +3132,11 @@ impl NapiDb {
         author: Uint8Array,
         claims: Option<JsonValue>,
     ) -> js::Result<ExplainedReadClauses> {
-        let (clauses, rows) = self
-            .binding()?
-            .explain_read_clauses(&table, &rows, &author, claims)
-            .map_err(host_error)?;
+        let (clauses, rows) = block_on(
+            self.binding()?
+                .explain_read_clauses(&table, &rows, &author, claims),
+        )
+        .map_err(host_error)?;
         Ok(ExplainedReadClauses {
             clauses: clauses as u32,
             rows: rows
@@ -3228,7 +3229,7 @@ impl NapiDb {
     /// subscriptions open with the worker's answer.
     #[napi(js_name = "setNonDurableClient")]
     pub fn set_non_durable_client(&self) -> js::Result<()> {
-        self.binding()?.set_non_durable_client();
+        jazz::db::block_on(self.binding()?.set_non_durable_client());
         Ok(())
     }
 
@@ -3238,9 +3239,7 @@ impl NapiDb {
     /// Drives only local-first reads that wait for the server on first load.
     #[napi(js_name = "setRemoteLinkHint")]
     pub fn set_remote_link_hint(&self, state: String) -> js::Result<()> {
-        self.binding()?
-            .set_remote_link_hint(&state)
-            .map_err(host_error)?;
+        block_on(self.binding()?.set_remote_link_hint(&state)).map_err(host_error)?;
         settle_promises();
         Ok(())
     }

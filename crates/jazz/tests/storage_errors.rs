@@ -8,6 +8,7 @@
 //! keeps.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -69,7 +70,7 @@ fn scratch(name: &str) -> PathBuf {
 /// its upload.
 fn open_file(path: &Path, node: u8) -> Db {
     let db = block_on(Db::open_at(config(node), path, FileOptions::default())).unwrap();
-    db.become_replica();
+    jazz::db::block_on(db.become_replica());
     db
 }
 
@@ -267,7 +268,7 @@ fn a_transaction_rolled_back_by_sqlite_itself_reports_its_own_error() {
         .await?;
         // What SQLite does on a full disk or an I/O error mid-transaction:
         // the whole transaction is rolled back, savepoints and all.
-        client.rollback_sqlite_transaction_for_test();
+        jazz::db::block_on(client.rollback_sqlite_transaction_for_test());
         Err(jazz::db::Error::new(
             jazz::db::ErrorCode::Storage,
             "disk I/O error".to_owned(),
@@ -379,7 +380,7 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
 fn a_serializable_commit_is_not_validated_against_an_unreadable_store() {
     let path = scratch("serializable-validation");
     let server = block_on(Db::open_at(config(0xee), &path, FileOptions::default())).unwrap();
-    server.set_authority().unwrap();
+    jazz::db::block_on(server.set_authority()).unwrap();
     let client = block_on(Db::open(config(0x11))).unwrap();
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));

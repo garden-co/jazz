@@ -6,6 +6,7 @@
 //! change, after an enum variant gets its first tag, across a schema
 //! change, and under a random mix of all of them.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{Db, InsertOptions, block_on};
@@ -150,8 +151,8 @@ fn same(db: &Db, row: RowUuid, author: AuthorSubject, what: &str) -> Vec<bool> {
 fn a_variant_tagged_after_a_check_was_kept_is_matched_by_its_tag() {
     let schema = || docs_schema(&["todo", "done"], session_eq("status", &["claims", "role"]));
     let db = open(schema(), 1);
-    db.set_authority().unwrap();
-    db.set_identity_claims(user(0), claims("n0", "ghost"));
+    jazz::db::block_on(db.set_authority()).unwrap();
+    jazz::db::block_on(db.set_identity_claims(user(0), claims("n0", "ghost")));
     insert(&db, "teams", id(TEAM, 0), &[("name", text("t0"))]);
     doc(&db, 0, "n0", 0, "todo").unwrap();
     // Select (plain, existing), then Update, which every row passes.
@@ -245,7 +246,7 @@ fn alternating_claims_each_check_under_their_own() {
         .into_iter()
         .enumerate()
     {
-        db.set_identity_claims(user(0), claims(name, "todo"));
+        jazz::db::block_on(db.set_identity_claims(user(0), claims(name, "todo")));
         let readable = same(
             &db,
             id(DOC, 0),
@@ -268,7 +269,7 @@ fn kept_checks_stay_bounded_by_the_cap() {
     insert(&db, "teams", id(TEAM, 0), &[("name", text("t0"))]);
     doc(&db, 0, "n3", 0, "todo").unwrap();
     for u in 0..40 {
-        db.set_identity_claims(user(u), claims(&format!("n{u}"), "todo"));
+        jazz::db::block_on(db.set_identity_claims(user(u), claims(&format!("n{u}"), "todo")));
         let answers = same(&db, id(DOC, 0), user(u), &format!("author {u}"));
         assert_eq!(answers.iter().all(|a| *a), u == 3);
         assert!(
@@ -359,7 +360,7 @@ fn differential(seed_of: u64) {
     let v1 = docs_schema(&["todo", "doing", "done"], first);
     let v2 = docs_schema(&["todo", "doing", "done", "later"], second);
     let db = open(v1.clone(), 1);
-    db.set_authority().unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
     db.keep_variants_for_import(
         [(
             ("docs".into(), "status".into()),
@@ -376,7 +377,9 @@ fn differential(seed_of: u64) {
         );
     }
     for (u, name) in NAMES.into_iter().enumerate() {
-        db.set_identity_claims(user(u), claims(name, ROLES[rng.next(ROLES.len())]));
+        jazz::db::block_on(
+            db.set_identity_claims(user(u), claims(name, ROLES[rng.next(ROLES.len())])),
+        );
     }
     let mut docs: Vec<usize> = Vec::new();
     let mut members: Vec<usize> = Vec::new();
@@ -443,7 +446,7 @@ fn differential(seed_of: u64) {
             6 => {
                 let u = rng.next(NAMES.len());
                 let role = ROLES[rng.next(ROLES.len())];
-                db.set_identity_claims(user(u), claims(NAMES[u], role));
+                jazz::db::block_on(db.set_identity_claims(user(u), claims(NAMES[u], role)));
                 format!("user {u} role {role}")
             }
             7 if !swapped && step > 40 => {

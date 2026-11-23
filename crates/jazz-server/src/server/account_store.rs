@@ -25,7 +25,7 @@ impl StoredAccountRegistry {
     /// Open the registry in `storage`, creating its tables in a new file.
     pub(crate) fn open(storage: HostSql) -> Result<Self, RegistryError> {
         storage
-            .write(|conn| Ok(registry::open(conn)))
+            .write(|conn| Ok(jazz::db::block_on(registry::open(conn))))
             .map_err(unavailable)??;
         Ok(Self { storage })
     }
@@ -33,7 +33,7 @@ impl StoredAccountRegistry {
     /// Resolve current admission from committed state.
     pub(crate) fn login(&mut self, principal: &Principal) -> Result<Assignment, RegistryError> {
         self.storage
-            .read(|conn| Ok(registry::login(conn, principal)))
+            .read(|conn| Ok(jazz::db::block_on(registry::login(conn, principal))))
             .map_err(unavailable)?
     }
 
@@ -45,12 +45,12 @@ impl StoredAccountRegistry {
         principal: &Principal,
     ) -> Result<LoginOrRegisterResult, RegistryError> {
         let this = std::cell::RefCell::new(self);
-        registry::login_or_register_by(
+        jazz::db::block_on(registry::login_or_register_by(
             principal,
             || AccountId(Uuid::new_v4()),
-            |principal| this.borrow_mut().login(principal),
-            |command| this.borrow_mut().execute(command),
-        )
+            async |principal| this.borrow_mut().login(principal),
+            async |command| this.borrow_mut().execute(command),
+        ))
     }
 
     /// Decide and write in one savepoint: the result is durable when it
@@ -61,10 +61,12 @@ impl StoredAccountRegistry {
     ) -> Result<AccountCommandResult, RegistryError> {
         let command = command.clone();
         self.storage
-            .write(move |conn| match registry::execute(conn, &command) {
-                Err(RegistryError::Unavailable(error)) => Err(registry::storage_error(error)),
-                decided => Ok(decided),
-            })
+            .write(
+                move |conn| match jazz::db::block_on(registry::execute(conn, &command)) {
+                    Err(RegistryError::Unavailable(error)) => Err(registry::storage_error(error)),
+                    decided => Ok(decided),
+                },
+            )
             .map_err(unavailable)?
     }
 
@@ -80,8 +82,10 @@ impl StoredAccountRegistry {
         let now_ms = unix_now_ms();
         self.storage
             .write(move |conn| {
-                registry::revoke_sessions(conn, &principal, before_ms, now_ms)
-                    .map_err(registry::storage_error)
+                jazz::db::block_on(registry::revoke_sessions(
+                    conn, &principal, before_ms, now_ms,
+                ))
+                .map_err(registry::storage_error)
             })
             .map_err(unavailable)
     }
@@ -93,12 +97,13 @@ impl StoredAccountRegistry {
     ) -> Result<crate::portable::backend_signing_key::Key, RegistryError> {
         use crate::portable::backend_signing_key as signing;
         self.storage
-            .write(
-                |conn| match signing::stored(conn, || signing::generate(Uuid::new_v4)) {
+            .write(|conn| {
+                match jazz::db::block_on(signing::stored(conn, || signing::generate(Uuid::new_v4)))
+                {
                     Err(RegistryError::Unavailable(error)) => Err(registry::storage_error(error)),
                     decided => Ok(decided),
-                },
-            )
+                }
+            })
             .map_err(unavailable)?
     }
 
@@ -108,7 +113,11 @@ impl StoredAccountRegistry {
         principal: &Principal,
     ) -> Result<Option<u64>, RegistryError> {
         self.storage
-            .read(|conn| Ok(registry::sessions_revoked_before(conn, principal)))
+            .read(|conn| {
+                Ok(jazz::db::block_on(registry::sessions_revoked_before(
+                    conn, principal,
+                )))
+            })
             .map_err(unavailable)?
     }
 }
@@ -134,7 +143,7 @@ pub(crate) struct RegistryFounders {
 
 /// The identities of `account` in the registry's tables on `conn`, or none
 /// for a store whose registry never opened.
-fn identities_of(
+async fn identities_of(
     conn: &jazz::storage::Storage,
     account: AccountId,
 ) -> Result<Vec<(String, String)>, jazz::db::Error> {
@@ -143,17 +152,19 @@ fn identities_of(
             "SELECT issuer, subject FROM _jazz_host_account_identities WHERE account = ?1",
         )
         .map_err(registry::storage_error)?;
-    let rows = statement
+    statement
         .query_map([account.0.as_bytes()], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .map_err(registry::storage_error)?;
-    rows.collect::<Result<Vec<_>, _>>()
+        .await
+        .map_err(registry::storage_error)?
+        .collect::<Vec<_>>()
+        .await
         .map_err(registry::storage_error)
 }
 
 /// How many identities of `account` are not device-account identities.
-fn external_identities_of(
+async fn external_identities_of(
     conn: &jazz::storage::Storage,
     account: AccountId,
 ) -> Result<i64, jazz::db::Error> {
@@ -165,9 +176,10 @@ fn external_identities_of(
         .map_err(registry::storage_error)?;
     statement
         .query_row(
-            rusqlite::params![account.0.as_bytes(), jazz::identity::DEVICE_ACCOUNT_ISSUER],
+            jazz::storage::params![account.0.as_bytes(), jazz::identity::DEVICE_ACCOUNT_ISSUER],
             |row| row.get::<_, i64>(0),
         )
+        .await
         .map_err(registry::storage_error)
 }
 
@@ -199,11 +211,14 @@ impl RegistryFounders {
     }
 }
 
+// The registry's reads run on native SQLite, whose futures are ready at
+// once: the synchronous view waits on them where it is called.
 impl jazz::db::AccountRegistryView for RegistryFounders {
     fn founded_by_device_account(&self, account: AccountId) -> Result<Option<bool>, String> {
         self.founded(
             account,
-            self.reader.sql(|conn| identities_of(conn, account)),
+            self.reader
+                .sql(|conn| jazz::db::block_on(identities_of(conn, account))),
         )
     }
 
@@ -212,7 +227,7 @@ impl jazz::db::AccountRegistryView for RegistryFounders {
         store: &jazz::storage::Storage,
         account: AccountId,
     ) -> Result<Option<bool>, String> {
-        self.founded(account, identities_of(store, account))
+        self.founded(account, jazz::db::block_on(identities_of(store, account)))
     }
 
     /// An account whose identities are all device-account identities and
@@ -230,7 +245,7 @@ impl jazz::db::AccountRegistryView for RegistryFounders {
             return Ok(false);
         }
         self.reader
-            .sql(|conn| external_identities_of(conn, account))
+            .sql(|conn| jazz::db::block_on(external_identities_of(conn, account)))
             .map(|external| external == 0)
             .map_err(|error| error.to_string())
     }
@@ -246,7 +261,7 @@ impl jazz::db::AccountRegistryView for RegistryFounders {
         if founded {
             return Ok(false);
         }
-        external_identities_of(store, account)
+        jazz::db::block_on(external_identities_of(store, account))
             .map(|external| external == 0)
             .map_err(|error| error.to_string())
     }
@@ -462,9 +477,11 @@ mod tests {
                 .sql()
                 .unwrap()
                 .read(|conn| {
-                    conn.query_row("SELECT count(*) FROM _jazz_host_account_links", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
+                    jazz::db::block_on(conn.query_row(
+                        "SELECT count(*) FROM _jazz_host_account_links",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    ))
                     .map_err(storage_error)
                 })
                 .unwrap()

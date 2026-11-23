@@ -850,7 +850,7 @@ fn migrated_with_an_old_row(declarations: jazz::e2ee::E2eeDeclarations) -> Migra
         identity(0),
     )))
     .unwrap();
-    server.set_authority().unwrap();
+    jazz::db::block_on(server.set_authority()).unwrap();
     let space = {
         let before = block_on(jazz::db::Db::open_at(
             jazz::db::DbConfig::new(schema_before_contents(), identity(1)),
@@ -882,7 +882,7 @@ fn migrated_with_an_old_row(declarations: jazz::e2ee::E2eeDeclarations) -> Migra
     .unwrap();
     let (_link, _) = link(&db, &server);
     pump(&server, &db);
-    assert!(client.prepare(&db).unwrap());
+    assert!(jazz::db::block_on(client.prepare(&db)).unwrap());
     hold_new_space(&client, &db, space);
     Migrated {
         _dir: dir,
@@ -989,7 +989,7 @@ fn upsert_from_a_second_replica(streamed: bool, has_default: bool) {
     .unwrap();
     let (_bob_link, _) = link(&bob, &server);
     pump(&server, &bob);
-    assert!(bob_client.prepare(&bob).unwrap());
+    assert!(jazz::db::block_on(bob_client.prepare(&bob)).unwrap());
     let space = project(&alice, "drafts");
     let address = address(&alice, space);
     let root = new_root(&alice_client.device().unwrap(), &address);
@@ -1094,7 +1094,7 @@ fn a_creating_upsert_syncs_its_large_encrypted_default_and_token() {
         identity(0),
     )))
     .unwrap();
-    server.set_authority().unwrap();
+    jazz::db::block_on(server.set_authority()).unwrap();
     let default = "a long draft ".repeat(10_000);
     let mut declared = with_body_default();
     declared
@@ -1113,7 +1113,7 @@ fn a_creating_upsert_syncs_its_large_encrypted_default_and_token() {
     .unwrap();
     let (_link, _) = link(&db, &server);
     pump(&server, &db);
-    assert!(client.prepare(&db).unwrap());
+    assert!(jazz::db::block_on(client.prepare(&db)).unwrap());
     let space = project(&db, "drafts");
     hold_new_space(&client, &db, space);
     let row = jazz::ids::RowUuid(uuid::Uuid::now_v7());

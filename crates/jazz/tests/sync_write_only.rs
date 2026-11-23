@@ -7,6 +7,7 @@ use jazz::query::Query;
 use jazz::records::Value;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -87,7 +88,7 @@ fn ordinary_write_only_case(serializable: bool) {
         },
     )))
     .unwrap();
-    alice.become_replica();
+    jazz::db::block_on(alice.become_replica());
     let bob = block_on(Db::open(DbConfig::new(
         schema,
         jazz::db::DbIdentity {
@@ -96,7 +97,7 @@ fn ordinary_write_only_case(serializable: bool) {
         },
     )))
     .unwrap();
-    bob.set_authority().unwrap();
+    jazz::db::block_on(bob.set_authority()).unwrap();
     let first = if serializable {
         let id = OpenTransactionId::new();
         block_on(alice.begin_serializable(id)).unwrap();
@@ -171,7 +172,7 @@ fn policy_pair(policies: jazz::tools::TablePolicies) -> (Db, Db) {
         },
     )))
     .unwrap();
-    alice.become_replica();
+    jazz::db::block_on(alice.become_replica());
     let bob = block_on(Db::open(DbConfig::new(
         schema,
         jazz::db::DbIdentity {
@@ -180,7 +181,7 @@ fn policy_pair(policies: jazz::tools::TablePolicies) -> (Db, Db) {
         },
     )))
     .unwrap();
-    bob.set_authority().unwrap();
+    jazz::db::block_on(bob.set_authority()).unwrap();
     (alice, bob)
 }
 fn pump(alice: &Db, bob: &Db) {
@@ -509,11 +510,11 @@ fn an_own_update_out_of_read_scope_evicts_the_row_without_a_subscription() {
 #[test]
 fn a_write_only_insert_superseded_by_another_writer_is_evicted() {
     let alice = open_as(write_only(), 31, author("alice"));
-    alice.become_replica();
+    jazz::db::block_on(alice.become_replica());
     let carol = open_as(write_only(), 32, AuthorSubject::SYSTEM);
-    carol.become_replica();
+    jazz::db::block_on(carol.become_replica());
     let bob = open_as(write_only(), 33, AuthorSubject::SYSTEM);
-    bob.set_authority().unwrap();
+    jazz::db::block_on(bob.set_authority()).unwrap();
     connect(&alice, &bob, "alice");
     let (up, down) = duplex();
     block_on(carol.connect_upstream(up));
@@ -554,21 +555,21 @@ fn a_write_only_insert_superseded_by_another_writer_is_evicted() {
 
 fn relayed(identity: AuthorSubject, server_link: bool) -> (Db, Db, Db) {
     let server = open_as(write_only(), 41, AuthorSubject::SYSTEM);
-    server.set_authority().unwrap();
+    jazz::db::block_on(server.set_authority()).unwrap();
     let relay = open_as(write_only(), 42, identity);
     if server_link {
         let (up, down) = duplex();
         block_on(relay.connect_upstream(up));
         server.accept_subscriber(down, identity).unwrap();
-        relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        jazz::db::block_on(relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     } else {
-        relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+        jazz::db::block_on(relay.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer));
     }
     let client = open_as(write_only(), 43, author("alice"));
     let (up, down) = duplex();
     block_on(client.connect_upstream(up));
     relay.accept_subscriber(down, author("alice")).unwrap();
-    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     let insert = insert(&client, 1, "founder");
     let tier = if server_link {
         DurabilityTier::Global

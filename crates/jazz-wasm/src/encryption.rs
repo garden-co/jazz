@@ -207,7 +207,9 @@ impl WasmDb {
         )?);
         let db = block_on(binding_host::open_memory(config.with_e2ee(hooks)))
             .map_err(super::to_js_error)?;
-        Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
+        Ok(Self::runtime_owner(block_on(Binding::new(
+            db, identity, trusted,
+        ))))
     }
 
     /// The encryption runtime of this database, or why there is none.
@@ -312,7 +314,7 @@ impl WasmDb {
         }
         let db_config = db_config.with_e2ee(built.client.hooks());
         let db = block_on(binding_host::open_memory(db_config)).map_err(super::to_js_error)?;
-        let owner = Self::runtime_owner(Binding::new(db, identity, trusted));
+        let owner = Self::runtime_owner(block_on(Binding::new(db, identity, trusted)));
         let inner: WasmDbInner = owner.open_inner()?;
         let host = Rc::clone(&inner.host);
         runtime.store.set_wake(Box::new(move || {

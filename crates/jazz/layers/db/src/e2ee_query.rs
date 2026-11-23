@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use super::{Inner, PreparedQuery};
+use super::{PreparedQuery, Store};
 use std::collections::BTreeMap;
 
 use crate::e2ee::{
@@ -13,7 +13,7 @@ use crate::e2ee::{
 use crate::options::{Error, ErrorCode};
 use crate::query::{ArraySubquery, JoinVia, Operand, Predicate, Query, ReachableVia};
 use crate::schema::history::history_source_table;
-use crate::values::unsupported;
+use crate::values::{Schema, unsupported};
 
 /// What a rewritten query keeps beside its physical query.
 pub(crate) struct Planned {
@@ -78,25 +78,29 @@ impl PreparedQuery {
     }
 }
 
-impl Inner {
-    /// Plan `query` with the encryption hooks: the query to prepare, and
-    /// what its execution applies after opening its rows.
-    pub(crate) fn plan_query(&self, query: &Query) -> Result<(Query, Option<Rc<Planned>>), Error> {
+impl Store {
+    /// Plan `query`, under `schema`, with the encryption hooks: the query
+    /// to prepare, and what its execution applies after opening its rows.
+    pub(crate) fn plan_query(
+        &self,
+        schema: &Schema,
+        query: &Query,
+    ) -> Result<(Query, Option<Rc<Planned>>), Error> {
         let Some(hooks) = &self.e2ee else {
             return Ok((query.clone(), None));
         };
-        self.refuse_reads(hooks.as_ref(), query, true)?;
+        self.refuse_reads(schema, hooks.as_ref(), query, true)?;
         let plan = hooks.plan_query(query)?;
         // Whatever the hook returns, a condition on an encrypted column must
         // not go upstream as written, and nothing but the conditions and
         // the window may differ from the query it was given.
         match &plan {
-            QueryPlan::Plain => self.refuse_reads(hooks.as_ref(), query, false)?,
+            QueryPlan::Plain => self.refuse_reads(schema, hooks.as_ref(), query, false)?,
             QueryPlan::Rewritten {
                 physical, residual, ..
             } => {
                 refuse_changed_beyond_conditions(query, physical)?;
-                self.refuse_reads(hooks.as_ref(), physical, false)?;
+                self.refuse_reads(schema, hooks.as_ref(), physical, false)?;
                 let physical_has_window = physical.limit.is_some() || physical.offset != 0;
                 let residual_has_window = residual.limit.is_some() || residual.offset != 0;
                 if physical_has_window && (!residual.preds.is_empty() || residual_has_window) {
@@ -136,12 +140,13 @@ impl Inner {
     /// ordering columns are refused.
     fn refuse_reads(
         &self,
+        schema: &Schema,
         hooks: &dyn E2eeHooks,
         query: &Query,
         plannable: bool,
     ) -> Result<(), Error> {
         let encrypted = &hooks.declarations().tables;
-        self.refuse_unopened(encrypted, query)?;
+        refuse_unopened(schema, encrypted, query)?;
         refuse_unplannable(encrypted, query, |entry, filter| {
             plannable
                 && matches!(filter, Predicate::Eq(Operand::Column(column), value)
@@ -150,14 +155,14 @@ impl Inner {
         })?;
         // Application queries cannot name reserved columns. A worker receives
         // the tab's rewritten query and may serve its physical token filters.
-        let reserved = plannable.then(|| self.reserved_columns());
-        if let Some(union) = crate::db::union_plan(query, &self.schema)? {
+        let reserved = plannable.then(|| reserved_columns(schema));
+        if let Some(union) = crate::db::union_plan(query, schema)? {
             let table = query.table.as_str();
             for term in &union.order_by {
                 refuse_column(encrypted, table, &term.column, "a union's ORDER BY")?;
             }
             for (_, arm) in &union.arms {
-                self.refuse_unopened(encrypted, arm)?;
+                refuse_unopened(schema, encrypted, arm)?;
                 refuse_unplannable(encrypted, arm, |_, _| false)?;
                 if let Some(reserved) = &reserved {
                     refuse_reserved(reserved, arm, |_| false)?;
@@ -171,97 +176,96 @@ impl Inner {
         }
         Ok(())
     }
+}
 
-    /// The reserved (`__e2ee_`) columns of each table of the schema, as
-    /// entries the conditions walk reads: none is plannable.
-    fn reserved_columns(&self) -> BTreeMap<String, EncryptionEntry> {
-        let column = || crate::e2ee::EncryptedColumn {
-            plain: crate::e2ee::PlainType {
-                column_type: crate::tools::ColumnType::Bytea,
-                nullable: true,
-                default: None,
-            },
-            sealed_type: None,
-        };
-        self.schema
-            .jazz
-            .tables()
-            .iter()
-            .filter_map(|table| {
-                let columns: BTreeMap<_, _> = table
-                    .columns
-                    .iter()
-                    .filter(|c| c.name.as_str().starts_with("__e2ee_"))
-                    .map(|c| (c.name.to_string(), column()))
-                    .collect();
-                (!columns.is_empty()).then(|| {
-                    (
-                        table.name.to_string(),
-                        EncryptionEntry {
-                            space: String::new(),
-                            scope: String::new(),
-                            columns,
-                            equality: Vec::new(),
-                        },
-                    )
-                })
+/// The reserved (`__e2ee_`) columns of each table of `schema`, as entries
+/// the conditions walk reads: none is plannable.
+fn reserved_columns(schema: &Schema) -> BTreeMap<String, EncryptionEntry> {
+    let column = || crate::e2ee::EncryptedColumn {
+        plain: crate::e2ee::PlainType {
+            column_type: crate::tools::ColumnType::Bytea,
+            nullable: true,
+            default: None,
+        },
+        sealed_type: None,
+    };
+    schema
+        .jazz
+        .tables()
+        .iter()
+        .filter_map(|table| {
+            let columns: BTreeMap<_, _> = table
+                .columns
+                .iter()
+                .filter(|c| c.name.as_str().starts_with("__e2ee_"))
+                .map(|c| (c.name.to_string(), column()))
+                .collect();
+            (!columns.is_empty()).then(|| {
+                (
+                    table.name.to_string(),
+                    EncryptionEntry {
+                        space: String::new(),
+                        scope: String::new(),
+                        columns,
+                        equality: Vec::new(),
+                    },
+                )
             })
-            .collect()
-    }
+        })
+        .collect()
+}
 
-    /// Refuse a read that would return cells of an encrypted table that
-    /// the hooks are never given to open: only the read's own rows are
-    /// opened. Rows nested by a relation, rows an include joins, the
-    /// sources of a flat join and history versions stay as stored, so such
-    /// reads of an encrypted table are refused, naming it (protocol §4.5).
-    fn refuse_unopened(
-        &self,
-        encrypted: &BTreeMap<String, EncryptionEntry>,
-        query: &Query,
-    ) -> Result<(), Error> {
-        if let Some(table) = history_source_table(&query.table)
-            && encrypted.contains_key(table)
-        {
+/// Refuse a read that would return cells of an encrypted table that
+/// the hooks are never given to open: only the read's own rows are
+/// opened. Rows nested by a relation, rows an include joins, the
+/// sources of a flat join and history versions stay as stored, so such
+/// reads of an encrypted table are refused, naming it (protocol §4.5).
+fn refuse_unopened(
+    schema: &Schema,
+    encrypted: &BTreeMap<String, EncryptionEntry>,
+    query: &Query,
+) -> Result<(), Error> {
+    if let Some(table) = history_source_table(&query.table)
+        && encrypted.contains_key(table)
+    {
+        return Err(unsupported(format!(
+            "Reading the history of encrypted table `{table}`"
+        )));
+    }
+    // A flat join's cells, the root's included, are named by source.
+    let root = query.flat_join.is_some().then_some(query.table.as_str());
+    let sources = query.flat_join.iter().flat_map(|join| &join.sources);
+    for table in root
+        .into_iter()
+        .chain(sources.map(|source| source.table.as_str()))
+    {
+        let table = history_source_table(table).unwrap_or(table);
+        if encrypted.contains_key(table) {
             return Err(unsupported(format!(
-                "Reading the history of encrypted table `{table}`"
+                "Reading encrypted table `{table}` in a flat join"
             )));
         }
-        // A flat join's cells, the root's included, are named by source.
-        let root = query.flat_join.is_some().then_some(query.table.as_str());
-        let sources = query.flat_join.iter().flat_map(|join| &join.sources);
-        for table in root
-            .into_iter()
-            .chain(sources.map(|source| source.table.as_str()))
-        {
-            let table = history_source_table(table).unwrap_or(table);
+    }
+    for include in &query.includes {
+        let mut table = query.table.as_str();
+        for column in include.path.split('.') {
+            let Some(target) = schema
+                .table(table)
+                .ok()
+                .and_then(|t| t.references.get(column))
+            else {
+                break;
+            };
+            table = target;
             if encrypted.contains_key(table) {
                 return Err(unsupported(format!(
-                    "Reading encrypted table `{table}` in a flat join"
+                    "Reading encrypted table `{table}` through an include (`{}`)",
+                    include.path
                 )));
             }
         }
-        for include in &query.includes {
-            let mut table = query.table.as_str();
-            for column in include.path.split('.') {
-                let Some(target) = self
-                    .schema
-                    .table(table)
-                    .ok()
-                    .and_then(|t| t.references.get(column))
-                else {
-                    break;
-                };
-                table = target;
-                if encrypted.contains_key(table) {
-                    return Err(unsupported(format!(
-                        "Reading encrypted table `{table}` through an include (`{}`)",
-                        include.path
-                    )));
-                }
-            }
-        }
-        refuse_nested_encrypted(encrypted, &query.array_subqueries)
     }
+    refuse_nested_encrypted(encrypted, &query.array_subqueries)
 }
 
 /// Refuse every read shape on an encrypted column of `query`'s table except

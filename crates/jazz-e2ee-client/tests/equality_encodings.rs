@@ -86,7 +86,7 @@ fn tags(items: &[&str]) -> Value {
 #[test]
 fn equality_on_json_and_array_columns_finds_what_plain_equality_would() {
     let server = block_on(Db::open(DbConfig::new(schema(), identity(0)))).unwrap();
-    server.set_authority().unwrap();
+    jazz::db::block_on(server.set_authority()).unwrap();
     let client = open_client_with(Rc::new(MemoryStore::new()), declarations());
     let db = block_on(Db::open(
         DbConfig::new(schema(), identity(1)).with_e2ee(client.hooks()),
@@ -94,7 +94,7 @@ fn equality_on_json_and_array_columns_finds_what_plain_equality_would() {
     .unwrap();
     let (_link, _) = link(&db, &server);
     pump(&server, &db);
-    assert!(client.prepare(&db).unwrap());
+    assert!(jazz::db::block_on(client.prepare(&db)).unwrap());
     let space = project(&db, "plans");
     hold_new_space(&client, &db, space);
 

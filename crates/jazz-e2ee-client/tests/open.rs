@@ -64,7 +64,7 @@ fn an_encrypted_app_opens_only_with_the_runtimes_hooks() {
     let db = block_on(open_memory(config().with_e2ee(client.hooks()))).unwrap();
     let (_link, _wire) = link_as(&db, &server, alice);
     pump(&server, &db);
-    assert!(client.prepare(&db).unwrap());
+    assert!(jazz::db::block_on(client.prepare(&db)).unwrap());
     let status = drive(&server, &[&db], client.ensure_account(&db)).unwrap();
     assert_eq!(status, AccountStatus::Active);
 }

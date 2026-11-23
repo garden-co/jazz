@@ -328,7 +328,7 @@ impl World {
             },
         )))
         .unwrap();
-        let rows = server.catalogue().unwrap();
+        let rows = jazz::db::block_on(server.catalogue()).unwrap();
         let permissions: HashMap<_, _> = second
             .iter()
             .map(|(name, table)| (*name, table.policies.clone()))
@@ -407,7 +407,7 @@ impl World {
     /// Whether the authority holds a live row `row` of `table`.
     fn holds(&self, table: &str, row: RowUuid) -> bool {
         if self.bundle.is_some() {
-            return self.server.holds_row_for_test(table, row);
+            return jazz::db::block_on(self.server.holds_row_for_test(table, row));
         }
         let prepared = self.server.prepare_query(&Query::from(table)).unwrap();
         block_on(self.server.all(&prepared, ReadOpts::default()))
@@ -417,7 +417,12 @@ impl World {
     }
 
     fn around(server: Db, late_fragment: bool) -> Self {
-        let projects = Value::Uuid(server.table_identity("projects").unwrap().unwrap().0);
+        let projects = Value::Uuid(
+            jazz::db::block_on(server.table_identity("projects"))
+                .unwrap()
+                .unwrap()
+                .0,
+        );
         Self {
             server,
             projects,
@@ -546,12 +551,16 @@ impl World {
         block_on(db.connect_upstream(client_side));
         match self.bundle {
             Some(bundle) => {
-                self.server
-                    .accept_pinned_subscriber(server_side, who, None, Some(bundle))
-                    .unwrap();
+                jazz::db::block_on(self.server.accept_pinned_subscriber(
+                    server_side,
+                    who,
+                    None,
+                    Some(bundle),
+                ))
+                .unwrap();
             }
             None => {
-                self.server.accept_subscriber(server_side, who).unwrap();
+                jazz::db::block_on(self.server.accept_subscriber(server_side, who)).unwrap();
             }
         }
         for table in [MEMBERS, SPACES, "projects"] {
@@ -652,10 +661,12 @@ fn delivery_lookups_seek_by_room_recipient_and_epoch() {
             "scopeId=? AND identifier=? AND keyEpochId=?",
         ),
     ] {
-        let (_, plan) = world
-            .server
-            .explain_query_plan(&world.server.prepare_query(&query).unwrap(), Some(reader))
-            .unwrap();
+        let (_, plan) = jazz::db::block_on(
+            world
+                .server
+                .explain_query_plan(&world.server.prepare_query(&query).unwrap(), Some(reader)),
+        )
+        .unwrap();
         let expected = format!("SEARCH t USING INDEX {SPACE_DELIVERIES}__ix({index}) ({seek})");
         assert!(common::unhashed(&plan).contains(&expected), "{plan}");
     }
@@ -2178,7 +2189,12 @@ fn members_read_successors_and_deliveries() {
 #[test]
 fn only_member_updaters_create_and_rotate_a_space() {
     let world = World::new();
-    let boards = Value::Uuid(world.server.table_identity("boards").unwrap().unwrap().0);
+    let boards = Value::Uuid(
+        jazz::db::block_on(world.server.table_identity("boards"))
+            .unwrap()
+            .unwrap()
+            .0,
+    );
     let board = new_row();
     world
         .commit(alice(), &[("boards", board, project(alice()))])
@@ -2770,7 +2786,9 @@ fn a_later_version_without_declarations_keeps_the_system_rows() {
         before,
         "the system table keeps its stored name"
     );
-    assert!(world.server.holds_row_for_test(MEMBERS, member));
+    assert!(jazz::db::block_on(
+        world.server.holds_row_for_test(MEMBERS, member)
+    ));
     assert_eq!(world.reads(alice(), MEMBERS), vec![member]);
 }
 

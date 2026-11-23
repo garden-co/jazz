@@ -39,7 +39,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use rusqlite::{OptionalExtension, params};
+use crate::storage::{OptionalExtension, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -327,34 +327,44 @@ pub(crate) fn now_millis() -> u64 {
 }
 
 /// Write `put` (the caller holds a savepoint or transaction).
-pub(crate) fn put(conn: &Storage, put: &CataloguePut) -> Result<(), Error> {
-    conn.execute_batch(DDL).map_err(storage)?;
+pub(crate) async fn put(conn: &Storage, put: &CataloguePut) -> Result<(), Error> {
+    conn.execute_batch(DDL).await.map_err(storage)?;
     for (schema, published_at) in &put.schemas {
         let (hash, def) = structural_def(schema)?;
-        conn.prepare_cached(
-            "INSERT INTO _jazz_schemas (hash, n, published_at, def) VALUES (?1, NULL, ?2, ?3) \
+        (async {
+            let mut statement = conn.prepare_cached(
+                "INSERT INTO _jazz_schemas (hash, n, published_at, def) VALUES (?1, NULL, ?2, ?3) \
              ON CONFLICT (hash) DO UPDATE SET \
              published_at = max(coalesce(published_at, 0), excluded.published_at)",
-        )
-        .and_then(|mut statement| {
-            statement.execute(params![hash.as_bytes().to_vec(), *published_at as i64, def])
+            )?;
+            {
+                statement
+                    .execute(params![hash.as_bytes().to_vec(), *published_at as i64, def])
+                    .await
+            }
         })
+        .await
         .map_err(storage)?;
     }
     for lens in &put.lenses {
         let def = canonical_json(&lens.forward)?;
-        conn.prepare_cached(
-            "INSERT OR REPLACE INTO _jazz_lenses (source, target, published_at, def) \
+        (async {
+            let mut statement = conn.prepare_cached(
+                "INSERT OR REPLACE INTO _jazz_lenses (source, target, published_at, def) \
              VALUES (?1, ?2, ?3, ?4)",
-        )
-        .and_then(|mut statement| {
-            statement.execute(params![
-                lens.source.as_bytes().to_vec(),
-                lens.target.as_bytes().to_vec(),
-                lens.published_at as i64,
-                def
-            ])
+            )?;
+            {
+                statement
+                    .execute(params![
+                        lens.source.as_bytes().to_vec(),
+                        lens.target.as_bytes().to_vec(),
+                        lens.published_at as i64,
+                        def
+                    ])
+                    .await
+            }
         })
+        .await
         .map_err(storage)?;
     }
     for (revision, schema, permissions, published_at) in &put.permissions {
@@ -364,23 +374,28 @@ pub(crate) fn put(conn: &Storage, put: &CataloguePut) -> Result<(), Error> {
             .map(|(name, policies)| (*name, policies.clone()))
             .collect();
         let def = canonical_json(&permissions)?;
-        conn.prepare_cached(
-            "INSERT INTO _jazz_permissions (revision, hash, published_at, def) \
+        (async {
+            let mut statement = conn.prepare_cached(
+                "INSERT INTO _jazz_permissions (revision, hash, published_at, def) \
              VALUES (?1, ?2, ?3, ?4) ON CONFLICT (revision) DO UPDATE SET \
              hash = excluded.hash, published_at = excluded.published_at, def = excluded.def",
-        )
-        .and_then(|mut statement| {
-            statement.execute(params![
-                *revision as i64,
-                schema.as_bytes().to_vec(),
-                *published_at as i64,
-                def
-            ])
+            )?;
+            {
+                statement
+                    .execute(params![
+                        *revision as i64,
+                        schema.as_bytes().to_vec(),
+                        *published_at as i64,
+                        def
+                    ])
+                    .await
+            }
         })
+        .await
         .map_err(storage)?;
     }
     if !put.bundles.is_empty() {
-        conn.execute_batch(BUNDLES_DDL).map_err(storage)?;
+        conn.execute_batch(BUNDLES_DDL).await.map_err(storage)?;
     }
     // Bundles are ordered by `published_at`: a new bundle is stamped after
     // every earlier one, even within the same millisecond or behind a clock
@@ -391,6 +406,7 @@ pub(crate) fn put(conn: &Storage, put: &CataloguePut) -> Result<(), Error> {
         conn.query_row("SELECT max(published_at) FROM _jazz_bundles", [], |r| {
             r.get(0)
         })
+        .await
         .map_err(storage)?
     };
     for (schema, permissions, published_at) in &put.bundles {
@@ -399,20 +415,24 @@ pub(crate) fn put(conn: &Storage, put: &CataloguePut) -> Result<(), Error> {
         let at = last.map_or(*published_at as i64, |last| {
             (*published_at as i64).max(last + 1)
         });
-        let inserted = conn
-            .prepare_cached(
+        let inserted = (async {
+            let mut statement = conn.prepare_cached(
                 "INSERT INTO _jazz_bundles (id, hash, published_at, def) VALUES (?1, ?2, ?3, ?4) \
                  ON CONFLICT (id) DO NOTHING",
-            )
-            .and_then(|mut statement| {
-                statement.execute(params![
-                    id.as_bytes().to_vec(),
-                    schema.as_bytes().to_vec(),
-                    at,
-                    def
-                ])
-            })
-            .map_err(storage)?;
+            )?;
+            {
+                statement
+                    .execute(params![
+                        id.as_bytes().to_vec(),
+                        schema.as_bytes().to_vec(),
+                        at,
+                        def
+                    ])
+                    .await
+            }
+        })
+        .await
+        .map_err(storage)?;
         if inserted > 0 {
             last = Some(at);
         }
@@ -420,33 +440,35 @@ pub(crate) fn put(conn: &Storage, put: &CataloguePut) -> Result<(), Error> {
     Ok(())
 }
 
-fn has_bundles(conn: &Storage) -> Result<bool, Error> {
+async fn has_bundles(conn: &Storage) -> Result<bool, Error> {
     conn.cached_row(
         "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_bundles'",
         [],
         |r| r.get(0),
     )
+    .await
     .map_err(storage)
 }
 
 /// Whether this store has published any permissions bundle: its app is
 /// served through createJazz, which pins every session it opens.
-pub(crate) fn serves_bundles(conn: &Storage) -> Result<bool, Error> {
-    if !has_bundles(conn)? {
+pub(crate) async fn serves_bundles(conn: &Storage) -> Result<bool, Error> {
+    if !has_bundles(conn).await? {
         return Ok(false);
     }
     conn.cached_row("SELECT EXISTS (SELECT 1 FROM _jazz_bundles)", [], |r| {
         r.get(0)
     })
+    .await
     .map_err(storage)
 }
 
 /// The published bundle `id`: its write schema and permissions.
-pub(crate) fn bundle(
+pub(crate) async fn bundle(
     conn: &Storage,
     id: &BundleId,
 ) -> Result<Option<(SchemaHash, Permissions)>, Error> {
-    if !has_bundles(conn)? {
+    if !has_bundles(conn).await? {
         return Ok(None);
     }
     let found: Option<(Vec<u8>, String)> = conn
@@ -455,6 +477,7 @@ pub(crate) fn bundle(
             [id.0.to_vec()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .await
         .optional()
         .map_err(storage)?;
     found
@@ -467,21 +490,22 @@ pub(crate) fn bundle(
         .transpose()
 }
 
-fn exists(conn: &Storage) -> Result<bool, Error> {
+async fn exists(conn: &Storage) -> Result<bool, Error> {
     conn.cached_row(
         "SELECT count(*) = 3 FROM sqlite_master WHERE type = 'table' \
          AND name IN ('_jazz_schemas', '_jazz_lenses', '_jazz_permissions')",
         [],
         |r| r.get(0),
     )
+    .await
     .map_err(storage)
 }
 
 /// The whole catalogue. A file with none (a store no version was admitted
 /// to yet) reads empty.
-pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
+pub(crate) async fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
     let mut rows = CatalogueRows::default();
-    if !exists(conn)? {
+    if !exists(conn).await? {
         return Ok(rows);
     }
     let has_versions: bool = conn
@@ -490,7 +514,7 @@ pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
             [],
             |r| r.get(0),
         )
-        .map_err(storage)?;
+        .await.map_err(storage)?;
     let sql = if has_versions {
         "SELECT s.hash, v.version, s.published_at, s.def, v.n FROM _jazz_schemas s \
          LEFT JOIN _jazz_versions v ON v.n = s.n ORDER BY s.hash"
@@ -498,7 +522,7 @@ pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
         "SELECT hash, NULL, published_at, def, NULL FROM _jazz_schemas ORDER BY hash"
     };
     let mut statement = conn.prepare(sql).map_err(storage)?;
-    let found = statement
+    let mut found = statement
         .query_map([], |r| {
             Ok((
                 r.get::<_, Vec<u8>>(0)?,
@@ -508,8 +532,9 @@ pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
                 r.get::<_, Option<i64>>(4)?,
             ))
         })
+        .await
         .map_err(storage)?;
-    for row in found {
+    while let Some(row) = found.next().await {
         let (hash, version, published_at, def, admitted) = row.map_err(storage)?;
         let hash = hash_of(hash, "_jazz_schemas")?;
         let version = version
@@ -537,13 +562,14 @@ pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
             schema,
         });
     }
+    drop(found);
     drop(statement);
     let mut statement = conn
         .prepare(
             "SELECT source, target, published_at, def FROM _jazz_lenses ORDER BY source, target",
         )
         .map_err(storage)?;
-    let found = statement
+    let mut found = statement
         .query_map([], |r| {
             Ok((
                 r.get::<_, Vec<u8>>(0)?,
@@ -552,8 +578,9 @@ pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
                 r.get::<_, String>(3)?,
             ))
         })
+        .await
         .map_err(storage)?;
-    for row in found {
+    while let Some(row) = found.next().await {
         let (source, target, published_at, def) = row.map_err(storage)?;
         let (source, target) = (
             hash_of(source, "_jazz_lenses")?,
@@ -569,6 +596,7 @@ pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
             )?,
         });
     }
+    drop(found);
     drop(statement);
     let mut statement = conn
         .prepare(
@@ -576,7 +604,7 @@ pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
              ORDER BY revision",
         )
         .map_err(storage)?;
-    let found = statement
+    let mut found = statement
         .query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -586,8 +614,9 @@ pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
                 r.get::<_, String>(4)?,
             ))
         })
+        .await
         .map_err(storage)?;
-    for row in found {
+    while let Some(row) = found.next().await {
         let (revision, hash, published_at, activated_seq, def) = row.map_err(storage)?;
         rows.permissions.push(PermissionsRevision {
             revision: revision as u64,
@@ -600,12 +629,13 @@ pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
             )?,
         });
     }
+    drop(found);
     drop(statement);
-    if has_bundles(conn)? {
+    if has_bundles(conn).await? {
         let mut statement = conn
             .prepare("SELECT id, hash, published_at, def FROM _jazz_bundles ORDER BY id")
             .map_err(storage)?;
-        let found = statement
+        let mut found = statement
             .query_map([], |r| {
                 Ok((
                     r.get::<_, Vec<u8>>(0)?,
@@ -614,8 +644,9 @@ pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
                     r.get::<_, String>(3)?,
                 ))
             })
+            .await
             .map_err(storage)?;
-        for row in found {
+        while let Some(row) = found.next().await {
             let (id, hash, published_at, def) = row.map_err(storage)?;
             let id = BundleId(*hash_of(id, "_jazz_bundles")?.as_bytes());
             rows.bundles.push(CatalogueBundle {
@@ -632,16 +663,25 @@ pub(crate) fn read(conn: &Storage) -> Result<CatalogueRows, Error> {
 /// Record that admitted version `n` is `schema` (structural). A schema
 /// with no public source (an engine test's, built from compiled tables)
 /// has no definition to keep, so it is not recorded.
-pub(crate) fn record_admitted(conn: &Storage, n: i64, schema: &JazzSchema) -> Result<(), Error> {
+pub(crate) async fn record_admitted(
+    conn: &Storage,
+    n: i64,
+    schema: &JazzSchema,
+) -> Result<(), Error> {
     if schema.public_schema().is_empty() && !schema.tables().is_empty() {
         return Ok(());
     }
     let (hash, def) = structural_def(schema.public_schema())?;
-    conn.prepare_cached(
-        "INSERT INTO _jazz_schemas (hash, n, published_at, def) VALUES (?1, ?2, NULL, ?3) \
+    (async {
+        let mut statement = conn.prepare_cached(
+            "INSERT INTO _jazz_schemas (hash, n, published_at, def) VALUES (?1, ?2, NULL, ?3) \
          ON CONFLICT (hash) DO UPDATE SET n = excluded.n WHERE n IS NULL",
-    )
-    .and_then(|mut statement| statement.execute(params![hash.as_bytes().to_vec(), n, def]))
+        )?;
+        statement
+            .execute(params![hash.as_bytes().to_vec(), n, def])
+            .await
+    })
+    .await
     .map_err(storage)?;
     Ok(())
 }
@@ -651,24 +691,32 @@ pub(crate) fn record_admitted(conn: &Storage, n: i64, schema: &JazzSchema) -> Re
 /// the version): its definition is kept, so a bundle selecting it resolves
 /// on any later open, but `n` stays with the hash first admitted as that
 /// version. A definition already kept is left as it is.
-pub(crate) fn record_equivalent(conn: &Storage, schema: &JazzSchema) -> Result<(), Error> {
+pub(crate) async fn record_equivalent(conn: &Storage, schema: &JazzSchema) -> Result<(), Error> {
     if schema.public_schema().is_empty() && !schema.tables().is_empty() {
         return Ok(());
     }
     let (hash, def) = structural_def(schema.public_schema())?;
-    conn.prepare_cached(
-        "INSERT INTO _jazz_schemas (hash, n, published_at, def) VALUES (?1, NULL, NULL, ?2) \
+    (async {
+        let mut statement = conn.prepare_cached(
+            "INSERT INTO _jazz_schemas (hash, n, published_at, def) VALUES (?1, NULL, NULL, ?2) \
          ON CONFLICT (hash) DO NOTHING",
-    )
-    .and_then(|mut statement| statement.execute(params![hash.as_bytes().to_vec(), def]))
+        )?;
+        statement
+            .execute(params![hash.as_bytes().to_vec(), def])
+            .await
+    })
+    .await
     .map_err(storage)?;
     Ok(())
 }
 
 /// The structural schema the catalogue keeps as `hash`, if any, checked to
 /// hash to its key.
-pub(crate) fn schema(conn: &Storage, hash: &SchemaHash) -> Result<Option<PublicSchema>, Error> {
-    if !exists(conn)? {
+pub(crate) async fn schema(
+    conn: &Storage,
+    hash: &SchemaHash,
+) -> Result<Option<PublicSchema>, Error> {
+    if !exists(conn).await? {
         return Ok(None);
     }
     let def: Option<String> = conn
@@ -677,6 +725,7 @@ pub(crate) fn schema(conn: &Storage, hash: &SchemaHash) -> Result<Option<PublicS
             [hash.as_bytes().to_vec()],
             |r| r.get(0),
         )
+        .await
         .optional()
         .map_err(storage)?;
     let Some(def) = def else {
@@ -693,24 +742,30 @@ pub(crate) fn schema(conn: &Storage, hash: &SchemaHash) -> Result<Option<PublicS
 }
 
 /// The targets of the forward migrations starting at this schema.
-pub(crate) fn successors(
+pub(crate) async fn successors(
     conn: &Storage,
     source: &SchemaHash,
 ) -> Result<HashSet<SchemaHash>, Error> {
     let mut statement = conn
         .prepare_cached("SELECT target FROM _jazz_lenses WHERE source = ?1")
         .map_err(storage)?;
-    statement
+    let targets: Vec<Vec<u8>> = statement
         .query_map([source.as_bytes().as_slice()], |row| {
             row.get::<_, Vec<u8>>(0)
         })
+        .await
         .map_err(storage)?
-        .map(|row| hash_of(row.map_err(storage)?, "_jazz_lenses"))
+        .collect()
+        .await
+        .map_err(storage)?;
+    targets
+        .into_iter()
+        .map(|target| hash_of(target, "_jazz_lenses"))
         .collect()
 }
 
 /// Every schema reachable from `source` by a forward migration.
-pub(crate) fn descendants(
+pub(crate) async fn descendants(
     conn: &Storage,
     source: &SchemaHash,
 ) -> Result<HashSet<SchemaHash>, Error> {
@@ -722,31 +777,38 @@ pub(crate) fn descendants(
          ) SELECT hash FROM descendants",
         )
         .map_err(storage)?;
-    statement
+    let hashes: Vec<Vec<u8>> = statement
         .query_map([source.as_bytes().as_slice()], |row| {
             row.get::<_, Vec<u8>>(0)
         })
+        .await
         .map_err(storage)?
-        .map(|row| hash_of(row.map_err(storage)?, "_jazz_lenses"))
+        .collect()
+        .await
+        .map_err(storage)?;
+    hashes
+        .into_iter()
+        .map(|hash| hash_of(hash, "_jazz_lenses"))
         .collect()
 }
 
 /// The admitted versions' schemas, in admission order, each checked to
 /// compile to the version it was admitted as.
-pub(crate) fn admitted(conn: &Storage) -> Result<Vec<(SchemaVersionId, JazzSchema)>, Error> {
+pub(crate) async fn admitted(conn: &Storage) -> Result<Vec<(SchemaVersionId, JazzSchema)>, Error> {
     let mut statement = conn
         .prepare(
             "SELECT v.version, s.def FROM _jazz_schemas s JOIN _jazz_versions v ON v.n = s.n \
              ORDER BY s.n",
         )
         .map_err(storage)?;
-    let found = statement
+    let mut found = statement
         .query_map([], |r| {
             Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
         })
+        .await
         .map_err(storage)?;
     let mut admitted = Vec::new();
-    for row in found {
+    while let Some(row) = found.next().await {
         let (version, def) = row.map_err(storage)?;
         let version =
             SchemaVersionId::from_bytes(version.try_into().map_err(|_| {
@@ -771,13 +833,14 @@ pub(crate) fn admitted(conn: &Storage) -> Result<Vec<(SchemaVersionId, JazzSchem
 }
 
 /// The seq the current read policies took effect at.
-pub(crate) fn activated_seq(conn: &Storage) -> Result<Option<u64>, Error> {
+pub(crate) async fn activated_seq(conn: &Storage) -> Result<Option<u64>, Error> {
     conn.cached_row(
         "SELECT activated_seq FROM _jazz_permissions WHERE activated_seq IS NOT NULL \
          ORDER BY revision DESC LIMIT 1",
         [],
         |r| r.get::<_, i64>(0),
     )
+    .await
     .optional()
     .map(|seq| seq.map(|seq| seq as u64))
     .map_err(storage)

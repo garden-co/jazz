@@ -451,16 +451,14 @@ fn readiness_reads_the_authority_again(
         root,
     )))
     .unwrap();
-    db.set_authority().unwrap();
-    let server = Binding::new(db, root, true);
+    jazz::db::block_on(db.set_authority()).unwrap();
+    let server = block_on(Binding::new(db, root, true));
     let author = AuthorSubject::authenticated("https://issuer.example", "alice")
         .unwrap()
         .with_account(jazz::account_registry::AccountId(
             ALICE_ACCOUNT_ID.parse().unwrap(),
         ));
-    let link = server
-        .accept_subscriber(author, Default::default())
-        .unwrap();
+    let link = block_on(server.accept_subscriber(author, Default::default())).unwrap();
     let wire = relay.wire().unwrap();
     relay.set_remote_link_hint(RemoteLinkHint::Live).unwrap();
     let pump = || {

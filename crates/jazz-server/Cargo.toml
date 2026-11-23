@@ -39,6 +39,7 @@ embedded-server = ["native", "jazz/runtime", "dep:tower"]
 test = ["embedded-server", "jazz/testing"]
 
 [dependencies]
+async-trait = "0.1"
 jazz = { workspace = true, default-features = false }
 jazz-otel = { workspace = true, optional = true }
 axum = { optional = true, version = "0.8.9", default-features = false, features = [

@@ -72,8 +72,8 @@ impl TxRef<'_> {
         let serializable = matches!(
             self.db
                 .inner
-                .staging()
                 .batches
+                .borrow()
                 .get(&self.id)
                 .map(|batch| &batch.kind),
             Some(BatchKind::Serializable { .. })
@@ -84,12 +84,14 @@ impl TxRef<'_> {
                 "a ledger read runs in a serializable transaction",
             ));
         }
-        let rows = self.all_prepared(prepared).await?;
+        // Boxed: the read's state stays off the stack of the runtime that
+        // polls it, whose own futures are deep already.
+        let rows = Box::pin(self.all_prepared(prepared)).await?;
         let through = match self
             .db
             .inner
-            .staging()
             .batches
+            .borrow()
             .get(&self.id)
             .map(|batch| &batch.kind)
         {
@@ -142,10 +144,11 @@ impl Db {
                 ),
             ));
         }
-        let inner = self.inner();
-        let read = ReadSpec::of(&ReadOpts::for_read_tier(ReadTier::LocalOnly), &inner)?;
-        let rows = inner.run_for_reader(prepared, None, &read, true)?;
-        let accepted_through = inner.client.as_ref().map_or(0, |client| client.known);
+        let _operation = self.write_operation().await;
+        let inner = self.inner.without_overlay();
+        let read = ReadSpec::of(&ReadOpts::for_read_tier(ReadTier::LocalOnly), inner).await?;
+        let rows = Box::pin(inner.run_for_reader(prepared, None, &read, true)).await?;
+        let accepted_through = inner.client().map_or(0, |client| client.known);
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let at = row.seq();
@@ -192,14 +195,16 @@ impl Db {
 
     /// The fate of this store's own commit `tx` (a [`super::TxReceipt`] or
     /// a write handle's transaction), as kept across restarts.
-    pub fn transaction_fate(&self, tx: u64) -> Result<TransactionFate, Error> {
-        let inner = self.inner();
+    pub async fn transaction_fate(&self, tx: u64) -> Result<TransactionFate, Error> {
+        let _operation = self.write_operation().await;
+        let inner = self.inner.without_overlay();
         let me = *inner.identity.node.as_bytes();
-        match inner.settled(me, tx)? {
+        match inner.settled(me, tx).await? {
             Some(Some(at)) => return Ok(TransactionFate::Accepted(at.seq)),
             Some(None) => {
                 let kept: BTreeMap<u64, Error> = inner
-                    .rejected_transactions()?
+                    .rejected_transactions()
+                    .await?
                     .into_iter()
                     .map(|rejected| (rejected.seq, rejected.error))
                     .collect();

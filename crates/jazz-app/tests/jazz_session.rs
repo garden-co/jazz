@@ -1252,3 +1252,328 @@ async fn a_guests_key_outlives_its_client() {
     session.close().await.unwrap();
     app.stop().await;
 }
+
+/// Closing doesn't wait for the operation under way, which fails `Stopped`
+/// and installs no client afterwards: here a switch to bob, stalled in the
+/// connection's token fetch, which answers only once the session is closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_cancels_the_operation_under_way() {
+    let app = App::start().await;
+    let token = bearer(Some("token-alice"));
+    /// Says when the provider's future is dropped.
+    struct Fetch(tokio::sync::mpsc::UnboundedSender<()>);
+    impl Drop for Fetch {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+    let (entered, mut stalled) = tokio::sync::mpsc::unbounded_channel();
+    let (dropped, mut abandoned) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let provider = {
+        let (token, release) = (token.clone(), release.clone());
+        move |reason: TokenReason| {
+            let value = token.lock().unwrap().clone();
+            let (entered, release) = (entered.clone(), release.clone());
+            let dropped = dropped.clone();
+            async move {
+                if reason == TokenReason::Connect && value.as_deref() == Some("token-bob") {
+                    let _fetch = Fetch(dropped);
+                    let _ = entered.send(());
+                    let _ = release.acquire().await;
+                }
+                Ok(value)
+            }
+        }
+    };
+    let config = SessionConfig::new(app.app_id)
+        .server(&app.relay.endpoint)
+        .bearer(provider);
+    let session = JazzSession::open(client_files(), config).await.unwrap();
+    assert_eq!(session.snapshot().status, SessionStatus::Ready);
+
+    *token.lock().unwrap() = Some("token-bob".to_owned());
+    let switching = tokio::spawn({
+        let session = session.clone();
+        async move { session.refresh().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), stalled.recv())
+        .await
+        .expect("the switch reaches its token fetch");
+    let queued = tokio::spawn({
+        let session = session.clone();
+        async move { session.create_device_account().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), session.close())
+        .await
+        .expect("close doesn't wait for the switch")
+        .unwrap();
+    for operation in [switching, queued] {
+        let ended = tokio::time::timeout(Duration::from_secs(5), operation)
+            .await
+            .expect("the operation ends with the session")
+            .unwrap();
+        assert!(matches!(ended, Err(Error::Stopped)), "{ended:?}");
+    }
+    let closed = session.snapshot();
+    assert_eq!(closed.status, SessionStatus::Closed);
+    // Nor does the opening go on on its own thread, holding the store and
+    // the app's provider.
+    tokio::time::timeout(Duration::from_secs(5), abandoned.recv())
+        .await
+        .expect("the abandoned open stops waiting for its token");
+    release.add_permits(8);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(session.snapshot(), closed, "installed a client after close");
+    assert!(matches!(session.jazz(), Err(Error::NoUser { .. })));
+    app.stop().await;
+}
+
+/// A wait in flight on a session's client: `Stopped` when the session
+/// closes, `Replaced` when it goes on (signed out, or another user).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_reads_stopped_and_replacing_replaced() {
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Ends {
+        Close,
+        SignOut,
+        OtherUser,
+    }
+    for ends in [Ends::Close, Ends::SignOut, Ends::OtherUser] {
+        let app = App::start().await;
+        let config = SessionConfig::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .initial(Initial::Device);
+        let session = JazzSession::open(client_files(), config).await.unwrap();
+        let guest = session.jazz().unwrap();
+        app.relay.set_unreachable(true);
+        guest.insert(NewTodo::new("Unsent", false)).await.unwrap();
+        let waiting = tokio::spawn({
+            let guest = guest.clone();
+            async move { guest.wait_for_sync().await }
+        });
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!waiting.is_finished(), "nothing to wait for");
+        tokio::time::timeout(Duration::from_secs(8), async {
+            match ends {
+                Ends::Close => session.close().await,
+                Ends::SignOut => session.sign_out().await,
+                Ends::OtherUser => session.create_device_account().await,
+            }
+        })
+        .await
+        .expect("the wait doesn't hold it up")
+        .unwrap();
+        let waited = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("the wait ends")
+            .unwrap();
+        let later = guest.all(todos::query()).await;
+        if ends == Ends::Close {
+            assert!(
+                matches!(waited, Err(Error::Stopped)),
+                "{ends:?}: {waited:?}"
+            );
+            assert!(matches!(later, Err(Error::Stopped)), "{ends:?}: {later:?}");
+        } else {
+            assert!(
+                matches!(waited, Err(Error::Replaced)),
+                "{ends:?}: {waited:?}"
+            );
+            assert!(matches!(later, Err(Error::Replaced)), "{ends:?}: {later:?}");
+            session.close().await.unwrap();
+            // Closed wins once both hold.
+            let closed = guest.all(todos::query()).await;
+            assert!(
+                matches!(closed, Err(Error::Stopped)),
+                "{ends:?}: {closed:?}"
+            );
+        }
+        app.relay.set_unreachable(false);
+        app.stop().await;
+    }
+}
+
+/// Closing interrupts an open on a persistent store wherever it is (from
+/// its token to its store): the same directory reopens at once, and can be
+/// deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_store_reopens_right_after_an_interrupted_open() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let token = bearer(Some("token-alice"));
+    let plain = app.session(&token).storage(Storage::Dir(dir.path().into()));
+    // Alice has her account and her store.
+    let first = JazzSession::open(client_files(), plain.clone())
+        .await
+        .unwrap();
+    assert_eq!(first.snapshot().status, SessionStatus::Ready);
+    first.close().await.unwrap();
+
+    for after in [0, 1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64] {
+        let token_bob = bearer(None);
+        let (entered, mut opening) = tokio::sync::mpsc::unbounded_channel();
+        let provider = {
+            let token = token_bob.clone();
+            move |reason: TokenReason| {
+                let value = token.lock().unwrap().clone();
+                if reason == TokenReason::Connect && value.is_some() {
+                    let _ = entered.send(());
+                }
+                async move { Ok(value) }
+            }
+        };
+        let config = SessionConfig::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .storage(Storage::Dir(dir.path().into()))
+            .bearer(provider);
+        let session = JazzSession::open(client_files(), config).await.unwrap();
+        *token_bob.lock().unwrap() = Some("token-alice".to_owned());
+        let switching = tokio::spawn({
+            let session = session.clone();
+            async move { session.refresh().await }
+        });
+        tokio::time::timeout(Duration::from_secs(10), opening.recv())
+            .await
+            .expect("the open begins");
+        tokio::time::sleep(Duration::from_millis(after)).await;
+        session.close().await.unwrap();
+
+        let again = JazzSession::open(client_files(), plain.clone())
+            .await
+            .unwrap();
+        let snapshot = again.snapshot();
+        assert_eq!(
+            snapshot.status,
+            SessionStatus::Ready,
+            "closed {after} ms into the open: {snapshot:?}"
+        );
+        let deleted = again.jazz().unwrap().delete_client_storage().await;
+        assert!(
+            deleted.is_ok(),
+            "closed {after} ms into the open: {deleted:?}"
+        );
+        again.close().await.unwrap();
+        let _ = switching.await.unwrap();
+    }
+    app.stop().await;
+}
+
+/// The same when the abandoned open is slow to let go: closing waits until
+/// it has.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_waits_for_an_abandoned_open_to_let_go_of_its_store() {
+    /// Slow to go, as a client's teardown may be.
+    struct SlowToGo;
+    impl Drop for SlowToGo {
+        fn drop(&mut self) {
+            std::thread::sleep(Duration::from_millis(600));
+        }
+    }
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let token = bearer(Some("token-alice"));
+    let plain = app.session(&token).storage(Storage::Dir(dir.path().into()));
+    let first = JazzSession::open(client_files(), plain.clone())
+        .await
+        .unwrap();
+    let account = first.snapshot().user.unwrap().account;
+    first.close().await.unwrap();
+
+    let token_later = bearer(None);
+    let (entered, mut opening) = tokio::sync::mpsc::unbounded_channel();
+    let provider = {
+        let token = token_later.clone();
+        move |reason: TokenReason| {
+            let value = token.lock().unwrap().clone();
+            let entered = entered.clone();
+            async move {
+                if reason == TokenReason::Connect && value.is_some() {
+                    let _slow = SlowToGo;
+                    let _ = entered.send(());
+                    std::future::pending::<()>().await;
+                }
+                Ok(value)
+            }
+        }
+    };
+    let config = SessionConfig::new(app.app_id)
+        .server(&app.relay.endpoint)
+        .storage(Storage::Dir(dir.path().into()))
+        .bearer(provider);
+    let session = JazzSession::open(client_files(), config).await.unwrap();
+    *token_later.lock().unwrap() = Some("token-alice".to_owned());
+    let switching = tokio::spawn({
+        let session = session.clone();
+        async move { session.refresh().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), opening.recv())
+        .await
+        .expect("the open begins");
+    session.close().await.unwrap();
+
+    let again = Jazz::open(
+        client_files(),
+        Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .storage(Storage::Dir(dir.path().join(account.0.to_string())))
+            .user(jazz_app_support::Auth::bearer(|_| async {
+                Ok(Some("token-alice".to_owned()))
+            })),
+    )
+    .await
+    .expect("reopen");
+    let deleted = again.delete_client_storage().await;
+    assert!(deleted.is_ok(), "right after close: {deleted:?}");
+    let _ = switching.await.unwrap();
+    app.stop().await;
+}
+
+/// Closing doesn't wait for the session's own link, stuck on the backend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_cancels_the_sessions_own_link() {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/jazz", listener.local_addr().unwrap());
+    let (asked, mut linking) = tokio::sync::mpsc::unbounded_channel();
+    // Takes each request and never answers it.
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let asked = asked.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut chunk = [0; 1024];
+                while let Ok(read @ 1..) = stream.read(&mut chunk).await {
+                    head.extend_from_slice(&chunk[..read]);
+                    if String::from_utf8_lossy(&head).contains("/accounts/backend-link") {
+                        let _ = asked.send(());
+                    }
+                }
+            });
+        }
+    });
+    let config = SessionConfig::new(AppId::random())
+        .server(&endpoint)
+        .bearer(|_: TokenReason| async { Ok(Some("token-alice".to_owned())) })
+        .initial(Initial::Device);
+    let session = JazzSession::open(client_files(), config).await.unwrap();
+    let linked = tokio::spawn({
+        let session = session.clone();
+        async move { session.link_device_account().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), linking.recv())
+        .await
+        .expect("the link's request");
+
+    tokio::time::timeout(Duration::from_secs(8), session.close())
+        .await
+        .expect("close doesn't wait for the link")
+        .unwrap();
+    let linked = tokio::time::timeout(Duration::from_secs(5), linked)
+        .await
+        .expect("the link ends with the session")
+        .unwrap();
+    assert!(matches!(linked, Err(Error::Stopped)), "{linked:?}");
+    assert_eq!(session.snapshot().status, SessionStatus::Closed);
+    server.abort();
+}

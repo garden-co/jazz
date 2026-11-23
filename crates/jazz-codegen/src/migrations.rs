@@ -45,23 +45,53 @@ pub fn create(
         todos: Vec::new(),
         note: None,
     };
-    let app = App::load(app_json).map_err(CodegenError::from_artifact)?;
     let Some(bindings) = bindings else {
         // No bindings: the app has no earlier version yet.
+        App::load(app_json).map_err(CodegenError::from_artifact)?;
         return Ok(unchanged());
     };
     let recorded = bindings::read(lang, bindings)?;
-    bindings::check_recorded_declarations(&app, &recorded)?;
-    if app
-        .compiled
-        .schemas
-        .iter()
-        .any(|(h, _)| *h == recorded.current)
+    // The file as it is: when it already holds the bindings' version,
+    // there is nothing to write. Otherwise it may not load (#6296): a
+    // migration without `to` targets the current `tables`, so editing them
+    // retargets it until the version it was written for is named below.
+    // Read the edited `tables` alone, then. Either way, no version the
+    // bindings were generated from may change its encryption declarations.
+    let loaded = App::load(app_json);
+    let (versions, declared) = match &loaded {
+        Ok(app) => (
+            app.compiled.schemas.iter().map(|(h, _)| *h).collect(),
+            app.compiled.encryption.clone(),
+        ),
+        Err(_) => {
+            let (versions, declared) =
+                artifact::read_declared_versions(app_json).map_err(CodegenError::from_artifact)?;
+            (versions, Some(declared))
+        }
+    };
+    bindings::check_declarations_of(&versions, declared.as_ref(), &recorded)?;
+    if let Ok(app) = &loaded
+        && app
+            .compiled
+            .schemas
+            .iter()
+            .any(|(h, _)| *h == recorded.current)
     {
         return Ok(unchanged());
     }
     let from = &recorded.current_schema;
-    let to = app.compiled.current_schema();
+    // The current version as the file will load once the migration below
+    // leads to it from the bindings' version: with Jazz's system tables
+    // when it declares encryption or that version has them.
+    let mut to = artifact::read_current_schema(app_json).map_err(CodegenError::from_artifact)?;
+    let declares = versions
+        .last()
+        .and_then(|current| declared.as_ref()?.entries(&current.to_string()))
+        .is_some();
+    if (declares || artifact::has_system_tables(from)) && !artifact::has_system_tables(&to) {
+        to = artifact::system_tables::with_e2ee_fragment(&to);
+    }
+    let to = &to;
     // Single-column indexes change the hash, not the version or the rows
     // (#5494): there is nothing to migrate, as `bindings::staleness` says.
     if bindings::differs_only_in_indexes(from, to) {
@@ -76,11 +106,11 @@ pub fn create(
 
     let mut root = artifact::json::parse(app_json).map_err(CodegenError::new)?;
     let Json::Object(top) = &mut root else {
-        unreachable!("loaded above")
+        unreachable!("read above")
     };
     let history = entry(top, "history", || Json::Object(Vec::new()), "tables");
     let Json::Object(versions) = history else {
-        unreachable!("loaded above")
+        unreachable!("read above")
     };
     if versions.iter().any(|(k, _)| *k == version) {
         return Err(CodegenError::new(format!(
@@ -94,7 +124,22 @@ pub fn create(
     let tables = artifact::declared_version_tables(from, &recorded.encryption)
         .map_err(CodegenError::from_artifact)?;
     versions.push((version.clone(), Json::object(vec![("tables", tables)])));
-
+    // Every migration written without `to` was written for the bindings'
+    // version, which is in `history` now: name it, so the edited `tables`
+    // don't become its target.
+    if let Some((_, Json::Array(items))) = top.iter_mut().find(|(k, _)| k == "migrations") {
+        for item in items {
+            if let Json::Object(fields) = item
+                && !fields.iter().any(|(k, _)| k == "to")
+            {
+                let at = fields
+                    .iter()
+                    .position(|(k, _)| k == "from")
+                    .map_or(fields.len(), |i| i + 1);
+                fields.insert(at, ("to".to_string(), Json::string(&version)));
+            }
+        }
+    }
     let mut migration = vec![
         ("name".to_string(), Json::string(name)),
         ("from".to_string(), Json::string(&version)),

@@ -768,8 +768,15 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func sessionState() throws  -> String?
     
     /**
-     * Closes the app; later calls fail with `Closed`. Named `shutdown`, not
-     * `close`, which would clash with Kotlin's `AutoCloseable.close`.
+     * Closes the app; later calls fail with `Closed`, and so do the calls
+     * waiting on the server or the network, at once (local work already
+     * started finishes). On a `for_user` or session handle it closes that
+     * handle only. Safe beside any other call. It has no hard time limit
+     * (work under way, the store closing, a host name lookup in progress),
+     * so don't call it on a UI thread. It doesn't wait for the token
+     * provider: one already asked may still run after it returns. Named
+     * `shutdown`, not `close`, which would clash with Kotlin's
+     * `AutoCloseable.close`.
      */
     func shutdown() throws 
     
@@ -778,7 +785,10 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * the client holds to reach the server (TS's `close({ timeoutMs })`,
      * 10 000 by default there). With memory storage, writes still unsent
      * fail it with `Unsynced { pending }` (contract 2; `Io` otherwise), and
-     * the app is closed all the same. `0` closes at once.
+     * the app is closed all the same. The calls waiting on the server go on
+     * until then. `0` waits for no writes, but is not instant: local work
+     * finishes, and stream sessions get up to 2 s to end (no hard limit:
+     * see [`Self::shutdown`]).
      */
     func shutdownWithin(timeoutMs: UInt64) throws 
     
@@ -1391,8 +1401,15 @@ open func sessionState()throws  -> String?  {
 }
     
     /**
-     * Closes the app; later calls fail with `Closed`. Named `shutdown`, not
-     * `close`, which would clash with Kotlin's `AutoCloseable.close`.
+     * Closes the app; later calls fail with `Closed`, and so do the calls
+     * waiting on the server or the network, at once (local work already
+     * started finishes). On a `for_user` or session handle it closes that
+     * handle only. Safe beside any other call. It has no hard time limit
+     * (work under way, the store closing, a host name lookup in progress),
+     * so don't call it on a UI thread. It doesn't wait for the token
+     * provider: one already asked may still run after it returns. Named
+     * `shutdown`, not `close`, which would clash with Kotlin's
+     * `AutoCloseable.close`.
      */
 open func shutdown()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
@@ -1407,7 +1424,10 @@ open func shutdown()throws   {try rustCallWithError(FfiConverterTypeJazzError_li
      * the client holds to reach the server (TS's `close({ timeoutMs })`,
      * 10 000 by default there). With memory storage, writes still unsent
      * fail it with `Unsynced { pending }` (contract 2; `Io` otherwise), and
-     * the app is closed all the same. `0` closes at once.
+     * the app is closed all the same. The calls waiting on the server go on
+     * until then. `0` waits for no writes, but is not instant: local work
+     * finishes, and stream sessions get up to 2 s to end (no hard limit:
+     * see [`Self::shutdown`]).
      */
 open func shutdownWithin(timeoutMs: UInt64)throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
@@ -1932,7 +1952,9 @@ public protocol SessionProtocol: AnyObject, Sendable {
     
     /**
      * Closes the session and its client: handles it gave fail with
-     * `Closed`, watches end.
+     * `Closed` (never `Replaced`), as does the operation in flight, which
+     * isn't waited for; watches end. As `JazzHandle.shutdown`, it has no
+     * hard time limit and doesn't wait for a token provider already asked.
      */
     func shutdown() throws 
     
@@ -2119,7 +2141,9 @@ open func retry()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift)
     
     /**
      * Closes the session and its client: handles it gave fail with
-     * `Closed`, watches end.
+     * `Closed` (never `Replaced`), as does the operation in flight, which
+     * isn't waited for; watches end. As `JazzHandle.shutdown`, it has no
+     * hard time limit and doesn't wait for a token provider already asked.
      */
 open func shutdown()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
@@ -4061,10 +4085,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_session_state() != 35355) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown() != 40246) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown() != 11280) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown_within() != 15915) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown_within() != 12304) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_sign_out() != 29504) {
@@ -4133,7 +4157,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_session_retry() != 39570) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_session_shutdown() != 44387) {
+    if (uniffi_jazz_ffi_checksum_method_session_shutdown() != 59354) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_session_sign_out() != 30311) {

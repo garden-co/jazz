@@ -651,16 +651,15 @@ fn link_as(
         inbound: down.clone(),
         wire: wire.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Recorded {
-                out: down,
-                inbound: up,
-                wire: wire.clone(),
-            }),
-            author,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Recorded {
+            out: down,
+            inbound: up,
+            wire: wire.clone(),
+        }),
+        author,
+    ))
+    .unwrap();
     (link, wire)
 }
 
@@ -737,7 +736,7 @@ fn plaintext_reaches_neither_storage_nor_the_wire() {
     let hooks = Fake::new();
     let alice = client_at(&hooks, &path);
     let server = block_on(Db::open(DbConfig::new(schema(), identity(0)))).unwrap();
-    server.set_authority().unwrap();
+    jazz::db::block_on(server.set_authority()).unwrap();
     let (_link, wire) = link(&alice, &server);
     let space = uuid::Uuid::new_v4();
     hooks.hold(space);
@@ -1161,7 +1160,7 @@ fn subscriptions_open_rows_and_refresh_when_a_key_arrives() {
 
     hooks.hold(late);
     assert!(stream.try_next_event().is_none());
-    alice.refresh_reads_of(&["notes"]).unwrap();
+    jazz::db::block_on(alice.refresh_reads_of(&["notes"])).unwrap();
     assert_eq!(added(stream.try_next_event()), [text("late")]);
 }
 
@@ -1196,7 +1195,7 @@ fn a_resumed_read_from_a_hooked_node_ships_rows_it_can_now_open() {
     assert!(bob.detach_connection(&upstream));
 
     hooks.hold(late);
-    hub.refresh_reads_of(&["notes"]).unwrap();
+    jazz::db::block_on(hub.refresh_reads_of(&["notes"])).unwrap();
     let _ = link(&bob, &hub);
     pump(&hub, &bob);
     let ids: Vec<RowUuid> = all(&bob, "notes").iter().map(|r| r.row_uuid()).collect();
@@ -1298,7 +1297,7 @@ fn encrypted_columns_are_only_read_and_written_whole() {
 #[test]
 fn a_database_with_hooks_cannot_become_the_authority() {
     let alice = client(&Fake::new());
-    let error = alice.set_authority().unwrap_err();
+    let error = jazz::db::block_on(alice.set_authority()).unwrap_err();
     assert_eq!(error.code, ErrorCode::Protocol);
     assert_eq!(
         error.message,
@@ -1327,7 +1326,7 @@ fn root(space: uuid::Uuid) -> BTreeMap<String, Value> {
 
 fn authority() -> Db {
     let server = block_on(Db::open(DbConfig::new(schema(), identity(0)))).unwrap();
-    server.set_authority().unwrap();
+    jazz::db::block_on(server.set_authority()).unwrap();
     server
 }
 
@@ -1453,7 +1452,7 @@ fn transaction_fates_survive_a_restart() {
         .unwrap()
         .mergeable_tx_id();
         assert!(matches!(
-            alice.transaction_fate(accepted).unwrap(),
+            jazz::db::block_on(alice.transaction_fate(accepted)).unwrap(),
             TransactionFate::Pending
         ));
         pump(&server, &alice);
@@ -1462,7 +1461,7 @@ fn transaction_fates_survive_a_restart() {
                 .unwrap()
                 .mergeable_tx_id();
         pump(&server, &alice);
-        let kept = match alice.transaction_fate(refused).unwrap() {
+        let kept = match jazz::db::block_on(alice.transaction_fate(refused)).unwrap() {
             TransactionFate::Refused(Some(error)) => error,
             other => panic!("expected a kept refusal, got {other:?}"),
         };
@@ -1471,20 +1470,20 @@ fn transaction_fates_survive_a_restart() {
     let alice = client_as(&hooks, &path, author);
     let server_position = all(&server, "space_roots")[0].seq().seq;
     assert!(matches!(
-        alice.transaction_fate(accepted).unwrap(),
+        jazz::db::block_on(alice.transaction_fate(accepted)).unwrap(),
         TransactionFate::Accepted(at) if at == server_position
     ));
-    match alice.transaction_fate(refused).unwrap() {
+    match jazz::db::block_on(alice.transaction_fate(refused)).unwrap() {
         TransactionFate::Refused(Some(error)) => assert_eq!(error.message, kept.message),
         other => panic!("expected the kept refusal, got {other:?}"),
     }
-    alice.discard_rejected_transaction(refused).unwrap();
+    jazz::db::block_on(alice.discard_rejected_transaction(refused)).unwrap();
     assert!(matches!(
-        alice.transaction_fate(refused).unwrap(),
+        jazz::db::block_on(alice.transaction_fate(refused)).unwrap(),
         TransactionFate::Refused(None)
     ));
     assert!(matches!(
-        alice.transaction_fate(refused + 1_000).unwrap(),
+        jazz::db::block_on(alice.transaction_fate(refused + 1_000)).unwrap(),
         TransactionFate::Unknown
     ));
 }
@@ -1705,16 +1704,15 @@ fn only_the_streamed_write_leaves_its_column_unsealed() {
     block_on(alice.begin_mergeable(id)).unwrap();
     let tx = alice.tx_ref(id);
     let streamed = RowUuid(uuid::Uuid::now_v7());
-    let mut upload = alice
-        .begin_streaming_value_upload_for(
-            jazz::db::StreamingMutationKind::Insert,
-            "notes",
-            streamed,
-            &mut note(space, "streamed"),
-            "attachment",
-            &jazz::db::WriteTarget::Root,
-        )
-        .unwrap();
+    let mut upload = jazz::db::block_on(alice.begin_streaming_value_upload_for(
+        jazz::db::StreamingMutationKind::Insert,
+        "notes",
+        streamed,
+        &mut note(space, "streamed"),
+        "attachment",
+        &jazz::db::WriteTarget::Root,
+    ))
+    .unwrap();
     block_on(alice.push_streaming_value_upload(&mut upload, b"streamed bytes")).unwrap();
     block_on(tx.finish_streaming_value_upload(
         upload,
@@ -1820,7 +1818,7 @@ fn a_binding_reads_the_row_it_mutates_strictly() {
     let row = block_on(alice.insert("notes", note(space, SECRET), Default::default()))
         .unwrap()
         .row_uuid();
-    let binding = jazz::binding_host::Binding::new(alice, identity(1), false);
+    let binding = block_on(jazz::binding_host::Binding::new(alice, identity(1), false));
     assert!(binding.local_current_row("notes", row.0.as_bytes()).is_ok());
     hooks.forget(space);
     assert!(
@@ -2793,16 +2791,15 @@ fn a_sealed_stream_is_published_only_where_it_was_sealed_for() {
     hooks.hold(other);
     let (sealed_row, other_row) = (RowUuid(uuid::Uuid::now_v7()), RowUuid(uuid::Uuid::now_v7()));
     let begin = || {
-        let mut upload = alice
-            .begin_streaming_value_upload_for(
-                jazz::db::StreamingMutationKind::Insert,
-                "notes",
-                sealed_row,
-                &mut note(home, "body"),
-                "attachment",
-                &jazz::db::WriteTarget::Root,
-            )
-            .unwrap();
+        let mut upload = jazz::db::block_on(alice.begin_streaming_value_upload_for(
+            jazz::db::StreamingMutationKind::Insert,
+            "notes",
+            sealed_row,
+            &mut note(home, "body"),
+            "attachment",
+            &jazz::db::WriteTarget::Root,
+        ))
+        .unwrap();
         block_on(alice.push_streaming_value_upload(&mut upload, b"sealed bytes")).unwrap();
         upload
     };
@@ -2924,22 +2921,22 @@ fn sealed_upload(
 ) -> Result<jazz::db::StreamingValueUpload, jazz::db::Error> {
     let target = jazz::db::WriteTarget::Root;
     let mut upload = match tx {
-        Some(id) => db.tx_ref(id).begin_streaming_value_upload_for(
+        Some(id) => jazz::db::block_on(db.tx_ref(id).begin_streaming_value_upload_for(
             jazz::db::StreamingMutationKind::Update,
             "notes",
             row,
             &mut cells.clone(),
             "attachment",
             &target,
-        )?,
-        None => db.begin_streaming_value_upload_for(
+        ))?,
+        None => jazz::db::block_on(db.begin_streaming_value_upload_for(
             jazz::db::StreamingMutationKind::Update,
             "notes",
             row,
             &mut cells.clone(),
             "attachment",
             &target,
-        )?,
+        ))?,
     };
     block_on(db.push_streaming_value_upload(&mut upload, bytes))?;
     Ok(upload)
@@ -3077,16 +3074,15 @@ fn a_stream_into_a_new_self_space_row_publishes() {
     let id = OpenTransactionId::new();
     block_on(alice.begin_mergeable(id)).unwrap();
     let tx = alice.tx_ref(id);
-    let mut upload = tx
-        .begin_streaming_value_upload_for(
-            jazz::db::StreamingMutationKind::Insert,
-            "vaults",
-            staged,
-            &mut BTreeMap::new(),
-            "secret",
-            &jazz::db::WriteTarget::Root,
-        )
-        .unwrap();
+    let mut upload = jazz::db::block_on(tx.begin_streaming_value_upload_for(
+        jazz::db::StreamingMutationKind::Insert,
+        "vaults",
+        staged,
+        &mut BTreeMap::new(),
+        "secret",
+        &jazz::db::WriteTarget::Root,
+    ))
+    .unwrap();
     block_on(alice.push_streaming_value_upload(&mut upload, b"staged secret")).unwrap();
     block_on(tx.finish_streaming_value_upload(
         upload,

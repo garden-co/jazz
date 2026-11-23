@@ -90,7 +90,7 @@ fn an_app_account_bootstraps_on_its_first_device() {
         jazz::db::FileOptions::default(),
     ))
     .unwrap();
-    assert!(client.prepare(&offline).unwrap());
+    assert!(jazz::db::block_on(client.prepare(&offline)).unwrap());
     let rows = all(&offline, Query::from("notes")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].cell("projectId"), Some(Value::Uuid(space)));

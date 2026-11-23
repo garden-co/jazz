@@ -215,7 +215,12 @@ fn a_two_column_correlation_loads_and_watches_one_space() {
         },
     )))
     .unwrap();
-    let projects = Value::Uuid(server.table_identity("projects").unwrap().unwrap().0);
+    let projects = Value::Uuid(
+        jazz::db::block_on(server.table_identity("projects"))
+            .unwrap()
+            .unwrap()
+            .0,
+    );
     let (p1, p2) = (
         RowUuid::from_bytes([0x11; 16]),
         RowUuid::from_bytes([0x22; 16]),
@@ -250,7 +255,7 @@ fn a_two_column_correlation_loads_and_watches_one_space() {
     .unwrap();
     let (client_side, server_side) = duplex();
     let _upstream = block_on(replica.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let mine = replica
         .prepare_query(
             &Query::from(MEMBERS)
@@ -322,7 +327,7 @@ fn open_authority(schema: &Schema) -> Db {
         },
     )))
     .unwrap();
-    authority.set_authority().unwrap();
+    jazz::db::block_on(authority.set_authority()).unwrap();
     authority
 }
 
@@ -408,7 +413,12 @@ fn row_ids(db: &Db, table: &str) -> Vec<RowUuid> {
 fn a_relay_subscribed_before_confirming_its_names_ships_the_membership() {
     let schema = space_tables().build();
     let authority = open_authority(&schema);
-    let projects = Value::Uuid(authority.table_identity("projects").unwrap().unwrap().0);
+    let projects = Value::Uuid(
+        jazz::db::block_on(authority.table_identity("projects"))
+            .unwrap()
+            .unwrap()
+            .0,
+    );
     let p1 = RowUuid::from_bytes([0x11; 16]);
     insert_row(
         &authority,
@@ -422,14 +432,12 @@ fn a_relay_subscribed_before_confirming_its_names_ships_the_membership() {
     let relay = open_as(&schema, 0xed, AuthorSubject::SYSTEM);
     let (relay_side, authority_side) = duplex();
     let _relay_upstream = block_on(relay.connect_upstream(relay_side));
-    authority
-        .accept_subscriber(authority_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(authority.accept_subscriber(authority_side, AuthorSubject::SYSTEM)).unwrap();
 
     let client = open_as(&schema, 0xa1, alice());
     let (client_side, relay_client_side) = duplex();
     let _client_upstream = block_on(client.connect_upstream(client_side));
-    relay.accept_subscriber(relay_client_side, alice()).unwrap();
+    jazz::db::block_on(relay.accept_subscriber(relay_client_side, alice())).unwrap();
     let all_projects = client.prepare_query(&Query::from("projects")).unwrap();
     let _stream = block_on(client.subscribe(&all_projects, ReadOpts::default())).unwrap();
 
@@ -438,7 +446,9 @@ fn a_relay_subscribed_before_confirming_its_names_ships_the_membership() {
     block_on(client.tick()).unwrap();
     block_on(relay.tick()).unwrap();
     assert_eq!(
-        relay.table_identity("projects").unwrap_err().code,
+        jazz::db::block_on(relay.table_identity("projects"))
+            .unwrap_err()
+            .code,
         jazz::db::ErrorCode::NotObserved
     );
 
@@ -451,8 +461,8 @@ fn a_relay_subscribed_before_confirming_its_names_ships_the_membership() {
     };
     pump();
     assert_eq!(
-        relay.table_identity("projects").unwrap(),
-        authority.table_identity("projects").unwrap()
+        jazz::db::block_on(relay.table_identity("projects")).unwrap(),
+        jazz::db::block_on(authority.table_identity("projects")).unwrap()
     );
     assert_eq!(row_ids(&client, "projects"), vec![p1]);
     assert_eq!(
@@ -514,8 +524,18 @@ fn table_identity_correlation_follows_one_tables_spaces() {
         )
         .build();
     let server = open_authority(&schema);
-    let projects = Value::Uuid(server.table_identity("projects").unwrap().unwrap().0);
-    let teams = Value::Uuid(server.table_identity("teams").unwrap().unwrap().0);
+    let projects = Value::Uuid(
+        jazz::db::block_on(server.table_identity("projects"))
+            .unwrap()
+            .unwrap()
+            .0,
+    );
+    let teams = Value::Uuid(
+        jazz::db::block_on(server.table_identity("teams"))
+            .unwrap()
+            .unwrap()
+            .0,
+    );
     let x = RowUuid::from_bytes([0x33; 16]);
     insert_row(
         &server,
@@ -537,7 +557,7 @@ fn table_identity_correlation_follows_one_tables_spaces() {
     let replica = open_as(&schema, 0xa1, alice());
     let (client_side, server_side) = duplex();
     let _upstream = block_on(replica.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let all_projects = replica.prepare_query(&Query::from("projects")).unwrap();
     let _stream = block_on(replica.subscribe(&all_projects, ReadOpts::default())).unwrap();
     let pump = || {
@@ -615,7 +635,12 @@ fn a_null_correlated_cell_follows_no_space_by_table_identity_alone() {
         )
         .build();
     let server = open_authority(&schema);
-    let projects = Value::Uuid(server.table_identity("projects").unwrap().unwrap().0);
+    let projects = Value::Uuid(
+        jazz::db::block_on(server.table_identity("projects"))
+            .unwrap()
+            .unwrap()
+            .0,
+    );
     let (x, y) = (
         RowUuid::from_bytes([0x11; 16]),
         RowUuid::from_bytes([0x22; 16]),
@@ -644,7 +669,7 @@ fn a_null_correlated_cell_follows_no_space_by_table_identity_alone() {
     let replica = open_as(&schema, 0xa1, alice());
     let (client_side, server_side) = duplex();
     let _upstream = block_on(replica.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let notes = replica.prepare_query(&Query::from("notes")).unwrap();
     let _stream = block_on(replica.subscribe(&notes, ReadOpts::default())).unwrap();
     let pump = || {
@@ -764,7 +789,7 @@ fn a_correlation_on_differently_stored_columns_follows_its_rows() {
     let replica = open_as(&schema, 0xa1, alice());
     let (client_side, server_side) = duplex();
     let _upstream = block_on(replica.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let docs = replica.prepare_query(&Query::from("docs")).unwrap();
     let _stream = block_on(replica.subscribe(&docs, ReadOpts::default())).unwrap();
     let pump = || {
@@ -785,5 +810,85 @@ fn a_correlation_on_differently_stored_columns_follows_its_rows() {
             .into_iter()
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([g1, g2])
+    );
+}
+
+/// A replica compiles a policy that names a table identity before its
+/// upstream's catalogue has given it the authority's namespace: the
+/// identity is unknown, so the policy grants nothing through it. Once the
+/// catalogue arrives (it brings the namespace and confirms the names, and
+/// no version the replica lacks), the policy compiles with the identity:
+/// a read as alice holds the project her membership opens, and so does
+/// the live result she subscribed to before the catalogue came.
+///
+/// ```text
+/// authority: X, alice@X
+/// alice's replica (no namespace): read X as alice ──► nothing
+///                                 subscribe X as alice
+/// replica ◄──catalogue (namespace), rows── authority
+/// alice's replica: read X as alice ──► X; the live result gets X
+/// ```
+#[test]
+fn a_replica_reads_through_a_table_identity_once_its_catalogue_arrives() {
+    let schema = space_tables().build();
+    let server = open_authority(&schema);
+    let projects = Value::Uuid(
+        block_on(server.table_identity("projects"))
+            .unwrap()
+            .unwrap()
+            .0,
+    );
+    let x = RowUuid::from_bytes([0x44; 16]);
+    insert_row(
+        &server,
+        "projects",
+        Some(x),
+        &[("name", Value::String("project X".into()))],
+    );
+    add_member(&server, &projects, x, account(alice()));
+
+    let replica = open_as(&schema, 0xa2, alice());
+    let all_projects = replica.prepare_query(&Query::from("projects")).unwrap();
+    let local = || ReadOpts::for_read_tier(ReadTier::LocalOnly);
+    let read_as_alice = || {
+        block_on(replica.all_for_identity(&all_projects, local(), alice()))
+            .unwrap()
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>()
+    };
+    // Compiled while the replica has no namespace.
+    assert!(
+        block_on(replica.table_identity("projects")).is_err(),
+        "the replica has no catalogue yet"
+    );
+    assert!(read_as_alice().is_empty());
+    let mut live =
+        block_on(replica.subscribe_for_identity(&all_projects, local(), alice())).unwrap();
+
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(replica.connect_upstream(client_side));
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
+    let held = replica.prepare_query(&Query::from("projects")).unwrap();
+    let _holding = block_on(replica.subscribe(&held, ReadOpts::default())).unwrap();
+    for _ in 0..20 {
+        block_on(replica.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    assert_eq!(row_ids(&replica, "projects"), vec![x], "the rows arrived");
+
+    assert_eq!(read_as_alice(), vec![x]);
+    let mut seen = Vec::new();
+    while let Some(event) = live.try_next_event() {
+        if let jazz::db::SubscriptionEvent::Delta { added, removed, .. } = event {
+            seen.extend(added.iter().map(|row| row.row_uuid()));
+            seen.retain(|id| !removed.iter().any(|gone| gone.row_uuid == *id));
+        }
+    }
+    assert_eq!(seen, vec![x], "the live result holds the project");
+    // Read last: asking for an identity reads the namespace from the file.
+    assert_eq!(
+        block_on(replica.table_identity("projects")).unwrap(),
+        block_on(server.table_identity("projects")).unwrap(),
     );
 }

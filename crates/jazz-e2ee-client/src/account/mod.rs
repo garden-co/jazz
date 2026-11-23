@@ -108,7 +108,9 @@ pub(crate) async fn serializable<T>(
     for _ in 0..attempts {
         let tx = OpenTransactionId::new();
         db.begin_serializable(tx).await?;
-        let outcome = step(tx).await;
+        // Boxed: the step's state stays off the stack of the loop that
+        // polls it.
+        let outcome = Box::pin(step(tx)).await;
         let _ = db.abandon_transaction_handle(tx);
         match outcome {
             Err(ClientError::Database(error)) if conflict(&error) => {
@@ -429,7 +431,7 @@ impl E2eeClient {
             self.ensure_open()?;
             let tx = OpenTransactionId::new();
             db.begin_serializable(tx).await?;
-            let outcome = self.step(db, tx).await;
+            let outcome = Box::pin(self.step(db, tx)).await;
             let _ = db.abandon_transaction_handle(tx);
             match outcome {
                 Ok(Step::Again) => continue,

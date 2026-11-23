@@ -3,23 +3,24 @@
 
 use std::collections::BTreeMap;
 
-use super::{Db, Inner, PreparedQuery, ReadSpec, UnreadableRow};
+use super::{Db, PreparedQuery, ReadSpec, Store, UnreadableRow};
 use crate::e2ee::{E2eeRefusal, OpenOutcome, ReadSite};
 use crate::options::{Error, ErrorCode};
 use crate::records::Value;
-use crate::values::CurrentRow;
+use crate::values::{CurrentRow, Schema};
 
 impl Db {
     /// Re-run every live result that reads one of `tables`, so rows the
     /// encryption hooks can open now (a key arrived) reach their
     /// subscribers as additions, and rows they no longer can leave.
-    pub fn refresh_reads_of(&self, tables: &[&str]) -> Result<(), Error> {
-        let mut inner = self.inner();
+    pub async fn refresh_reads_of(&self, tables: &[&str]) -> Result<(), Error> {
+        let _operation = self.write_operation().await;
+        let schema = self.operation_schema();
         let stored = tables
             .iter()
-            .map(|table| inner.schema.stored_table(table).map(str::to_owned))
+            .map(|table| schema.stored_table(table).map(str::to_owned))
             .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-        inner.refresh_reading(&stored);
+        self.inner.without_overlay().refresh_reading(&stored).await;
         Ok(())
     }
 }
@@ -34,13 +35,17 @@ impl Db {
         &self,
         table: &str,
     ) -> Result<std::collections::BTreeSet<String>, Error> {
-        let inner = self.inner();
-        inner.schema.table(table)?;
-        Ok(inner.lens_defaults(table).into_keys().collect())
+        let schema = self.operation_schema();
+        schema.table(table)?;
+        Ok(self
+            .inner
+            .lens_defaults(&schema, table)
+            .into_keys()
+            .collect())
     }
 }
 
-impl Inner {
+impl Store {
     /// Open `rows`, which `prepared` read under `read`, before they leave
     /// toward a reader, then apply a rewritten query's residual. A strict
     /// read fails rather than leave a row out (protocol §4.4); any other
@@ -59,7 +64,8 @@ impl Inner {
         };
         let table = prepared.query.table.as_str();
         let lens_defaults = if hooks.declarations().tables.contains_key(table) {
-            self.lens_defaults(table)
+            let owner = self.owner();
+            self.lens_defaults(prepared.source_schema(&owner), table)
         } else {
             BTreeMap::new()
         };
@@ -96,16 +102,16 @@ impl Inner {
     /// The columns of `table` that a migration added to rows already
     /// stored, with the value such a row reads: a stored column's default
     /// that the running schema does not declare (see `Schema::stored_view`).
-    fn lens_defaults(&self, table: &str) -> BTreeMap<String, Value> {
+    fn lens_defaults(&self, schema: &Schema, table: &str) -> BTreeMap<String, Value> {
         let mut out = BTreeMap::new();
-        let Ok(t) = self.schema.table(table) else {
+        let Ok(t) = schema.table(table) else {
             return out;
         };
-        let Some(stored) = self.physical.tables.get(&t.stored) else {
+        let physical = self.physical();
+        let Some(stored) = physical.tables.get(&t.stored) else {
             return out;
         };
-        let declared = self
-            .schema
+        let declared = schema
             .jazz
             .tables()
             .iter()

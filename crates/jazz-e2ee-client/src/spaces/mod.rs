@@ -823,7 +823,7 @@ impl E2eeClient {
             self.shared.forget_missing_keys(space);
             let tables = self.tables_of(space);
             let tables: Vec<&str> = tables.iter().map(String::as_str).collect();
-            db.refresh_reads_of(&tables)?;
+            db.refresh_reads_of(&tables).await?;
         }
         Ok(Acquired {
             state,

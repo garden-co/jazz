@@ -1033,6 +1033,44 @@ pub fn load_relations(json: &[u8]) -> Result<relations::Relations, ArtifactError
         .map_err(|(path, message)| ArtifactError::at(APP_FILE, (path, message)))
 }
 
+/// The current schema of `jazz.app.json`, read as the file states it and
+/// nothing else checked: no lens is checked against its endpoints. What
+/// `migrations create` diffs against, since an edit of `tables` can leave
+/// an earlier migration (one without `to`) aimed at the edited version
+/// until the tool names its target.
+pub fn read_current_schema(json: &[u8]) -> Result<Schema, ArtifactError> {
+    Ok(read_app(json)?.current)
+}
+
+/// Every version of `jazz.app.json` by schema hash, the current one last,
+/// and their encryption declarations, read as the file states them: no
+/// migration or lens is checked. What `migrations create` holds the
+/// bindings' recorded declarations against when an edit of `tables` keeps
+/// the file from loading.
+pub fn read_declared_versions(
+    json: &[u8],
+) -> Result<(Vec<SchemaHash>, DeclaredEncryption), ArtifactError> {
+    let file = read_app(json)?;
+    let (history, current) = version_schemas(&file);
+    let mut declared = DeclaredEncryption {
+        settings: file.settings.clone().unwrap_or_default(),
+        versions: BTreeMap::new(),
+    };
+    let mut versions = Vec::new();
+    for (schema, entries) in history.iter().chain(std::iter::once(&current)).zip(
+        file.history_encryption
+            .iter()
+            .chain([&file.current_encryption]),
+    ) {
+        let hash = SchemaHash::compute(schema);
+        if !entries.is_empty() {
+            declared.versions.insert(hash.to_string(), entries.clone());
+        }
+        versions.push(hash);
+    }
+    Ok((versions, declared))
+}
+
 fn read_app(json: &[u8]) -> Result<app_file::AppFile, ArtifactError> {
     let root = read_version(APP_FILE, json)?;
     refuse_todos(&root)?;
@@ -1285,9 +1323,9 @@ impl History {
     }
 }
 
-/// Hash every version (the file names none), refuse repeats, and give each
-/// migration its endpoints' hashes.
-fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
+/// The schemas of `file`'s versions as every loader hashes them, history
+/// first in file order, then the current `tables`.
+fn version_schemas(file: &app_file::AppFile) -> (Vec<Schema>, Schema) {
     // A version that declares encryption has Jazz's system tables, and so
     // does every version a migration leads to from one that has them, even
     // one that declares no encryption: once added they stay (an earlier
@@ -1333,6 +1371,13 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
         .map(|(name, schema)| with_fragment(schema, has[name.as_str()]))
         .collect();
     let current_schema = with_fragment(&file.current, has[CURRENT]);
+    (history_schemas, current_schema)
+}
+
+/// Hash every version (the file names none), refuse repeats, and give each
+/// migration its endpoints' hashes.
+fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
+    let (history_schemas, current_schema) = version_schemas(file);
     let current = SchemaHash::compute(&current_schema);
     let mut encryption = DeclaredEncryption {
         settings: file.settings.clone().unwrap_or_default(),
@@ -1489,7 +1534,7 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
 }
 
 /// Whether `schema` holds Jazz's system tables.
-fn has_system_tables(schema: &Schema) -> bool {
+pub fn has_system_tables(schema: &Schema) -> bool {
     schema
         .keys()
         .any(|name| system_tables::is_system_table(name.as_str()))

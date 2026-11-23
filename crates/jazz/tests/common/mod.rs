@@ -164,7 +164,7 @@ pub fn reinstall(
     ))
     .unwrap();
     if authority {
-        db.set_authority().unwrap();
+        jazz::db::block_on(db.set_authority()).unwrap();
     }
     db
 }

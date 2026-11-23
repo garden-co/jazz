@@ -1329,7 +1329,9 @@ impl WasmDb {
             durable_object::durable_object_storage(storage),
         ))
         .map_err(to_js_error)?;
-        Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
+        Ok(Self::runtime_owner(block_on(Binding::new(
+            db, identity, trusted,
+        ))))
     }
 
     /// The configuration, identity and trust of an open.
@@ -1353,7 +1355,9 @@ impl WasmDb {
         initialize_wasm_tracing();
         let (db_config, identity, trusted) = Self::prepare_open(schema, config, how)?;
         let db = block_on(binding_host::open_memory(db_config)).map_err(to_js_error)?;
-        Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
+        Ok(Self::runtime_owner(block_on(Binding::new(
+            db, identity, trusted,
+        ))))
     }
 
     #[wasm_bindgen(js_name = openMemory)]
@@ -1493,7 +1497,7 @@ impl WasmDb {
         let (db, store) = browser::open(&spec, db_config).await?;
         // Commits reach IndexedDB only after they return.
         db.defer_durability_acks();
-        let owner = Self::runtime_owner(Binding::new(db, identity, trusted));
+        let owner = Self::runtime_owner(Binding::new(db, identity, trusted).await);
         let inner = owner.open_inner()?;
         // A commit's write failing starts the retries, whether or not an
         // ack waits on it. Removed at close.
@@ -1645,17 +1649,17 @@ impl WasmDb {
     /// This does not grant a different author or enable serving reads.
     #[wasm_bindgen(js_name = setSessionClaims)]
     pub fn set_session_claims(&self, claims: JsValue) -> Result<JsValue, JsValue> {
-        self.binding()?
-            .set_session_claims(json_or_null(claims)?)
-            .map_err(host_error)?;
+        block_on(self.binding()?.set_session_claims(json_or_null(claims)?)).map_err(host_error)?;
         Ok(JsValue::UNDEFINED)
     }
 
     #[wasm_bindgen(js_name = setIdentityClaims)]
     pub fn set_identity_claims(&self, author: Vec<u8>, claims: JsValue) -> Result<(), JsValue> {
-        self.binding()?
-            .set_identity_claims(&author, json_or_null(claims)?)
-            .map_err(host_error)
+        block_on(
+            self.binding()?
+                .set_identity_claims(&author, json_or_null(claims)?),
+        )
+        .map_err(host_error)
     }
 
     #[wasm_bindgen(js_name = subscribe)]
@@ -1937,7 +1941,7 @@ impl WasmDb {
     /// subscriptions open with the worker's answer.
     #[wasm_bindgen(js_name = setNonDurableClient)]
     pub fn set_non_durable_client(&self) -> Result<(), JsValue> {
-        self.binding()?.set_non_durable_client();
+        jazz::db::block_on(self.binding()?.set_non_durable_client());
         Ok(())
     }
 
@@ -1946,9 +1950,7 @@ impl WasmDb {
     /// `"connecting" | "connected" | "unavailable"` are accepted as aliases).
     #[wasm_bindgen(js_name = setRemoteLinkHint)]
     pub fn set_remote_link_hint(&self, state: String) -> Result<(), JsValue> {
-        self.binding()?
-            .set_remote_link_hint(&state)
-            .map_err(host_error)
+        block_on(self.binding()?.set_remote_link_hint(&state)).map_err(host_error)
     }
 
     /// A fresh upstream link machine for this runtime's server connection;
@@ -2085,10 +2087,8 @@ impl WasmDb {
         claims: JsValue,
     ) -> Result<js_sys::Promise, JsValue> {
         let claims = binding_host::claims(identity, json_or_null(claims)?).map_err(host_error)?;
-        let link = self
-            .binding()?
-            .accept_subscriber(identity, claims)
-            .map_err(host_error)?;
+        let link =
+            block_on(self.binding()?.accept_subscriber(identity, claims)).map_err(host_error)?;
         Ok(js_sys::Promise::resolve(&JsValue::from(
             WasmTransport::new(link),
         )))
@@ -2139,9 +2139,7 @@ impl WasmTransport {
 impl WasmTransport {
     #[wasm_bindgen(js_name = updateAuthenticatedClaims)]
     pub fn update_authenticated_claims(&self, claims: JsValue) -> Result<js_sys::Promise, JsValue> {
-        self.link
-            .update_claims(json_or_null(claims)?)
-            .map_err(host_error)?;
+        block_on(self.link.update_claims(json_or_null(claims)?)).map_err(host_error)?;
         Ok(js_sys::Promise::resolve(&JsValue::UNDEFINED))
     }
 

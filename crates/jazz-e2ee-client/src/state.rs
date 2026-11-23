@@ -331,7 +331,7 @@ pub(crate) fn not_observed() -> jazz::db::Error {
 impl Catalogue {
     /// The identities of every declared table, space table and encrypted
     /// column, or `None` while the database has not observed them.
-    pub(crate) fn resolve(
+    pub(crate) async fn resolve(
         db: &Db,
         plans: &BTreeMap<String, TablePlan>,
     ) -> Result<Option<Self>, ClientError> {
@@ -348,7 +348,7 @@ impl Catalogue {
                 Err(error) => Err(error.into()),
             }
         }
-        let Some(names) = db.table_names_by_identity()? else {
+        let Some(names) = db.table_names_by_identity().await? else {
             return Ok(None);
         };
         let mut catalogue = Self::default();
@@ -376,7 +376,7 @@ impl Catalogue {
             );
             for column in plan.columns.keys() {
                 let Some(id) = known(
-                    db.column_identity(table, column),
+                    db.column_identity(table, column).await,
                     &format!("{table}.{column}"),
                 )?
                 else {

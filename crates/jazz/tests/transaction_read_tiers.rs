@@ -9,6 +9,7 @@ use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -37,10 +38,10 @@ fn fixture() -> (Db, Db) {
         .unwrap()
     };
     let bob = open(2, AuthorSubject::SYSTEM);
-    bob.set_authority().unwrap();
+    jazz::db::block_on(bob.set_authority()).unwrap();
     block_on(bob.insert("notes", cells("authority"), Default::default())).unwrap();
     let alice = open(1, AuthorSubject::for_test_bytes([1; 16]));
-    alice.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Failed));
     (alice, bob)
 }
 
@@ -79,7 +80,7 @@ fn connect(alice: &Db, bob: &Db) -> Rc<Cell<usize>> {
     })));
     bob.accept_subscriber(down, AuthorSubject::for_test_bytes([1; 16]))
         .unwrap();
-    alice.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Live));
     sent
 }
 fn begin(alice: &Db) -> OpenTransactionId {

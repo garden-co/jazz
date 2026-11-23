@@ -108,7 +108,7 @@ async fn typed_reads_and_writes_locally() {
     jazz.delete::<Todo>(bread.id).await.unwrap();
     assert_eq!(jazz.get::<Todo>(bread.id).await.unwrap(), None);
 
-    // Shutting down lets the calls already made finish.
+    // Shutting down lets local work already started finish.
     let slow = jazz.with_client(|_| async {
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(42)

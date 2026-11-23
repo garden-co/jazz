@@ -4,6 +4,7 @@
 //! those writes once they can, or are refused with a typed error.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -93,7 +94,7 @@ fn config(schema: JazzSchema, node: u8) -> DbConfig {
 
 fn authority_at(schema: JazzSchema, path: &Path) -> Db {
     let db = open_at(schema, 0, path);
-    db.set_authority().unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
     db
 }
 
@@ -254,7 +255,7 @@ fn a_store_that_became_a_replica_before_writing_uploads_on_first_connect() {
     let server = authority_at(v1(), &dir.path().join("server.sqlite"));
     insert(&server, 1, &[("title", "on the server")]);
     let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
-    client.become_replica();
+    jazz::db::block_on(client.become_replica());
     insert(&client, 2, &[("title", "written offline")]);
 
     let _link = link(&client, &server);
@@ -297,7 +298,7 @@ fn an_offline_view_write_uploads_once_the_server_has_its_version() {
     let server = authority_at(v1(), &server_path);
     insert(&server, 1, &[("title", "on the server")]);
     let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
-    client.become_replica();
+    jazz::db::block_on(client.become_replica());
     block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
     let ahead = block_on(client.register_schema_view(v2())).unwrap();
     insert(&ahead, 2, &[("title", "ahead"), ("tag", "new")]);
@@ -325,7 +326,7 @@ fn a_view_write_the_server_lacks_at_sync_is_refused() {
     let server = authority_at(v1(), &dir.path().join("server.sqlite"));
     insert(&server, 1, &[("title", "on the server")]);
     let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
-    client.become_replica();
+    jazz::db::block_on(client.become_replica());
     block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
     let ahead = block_on(client.register_schema_view(v2())).unwrap();
     let refused = insert(&ahead, 2, &[("title", "ahead"), ("tag", "new")]);
@@ -395,7 +396,7 @@ fn a_client_opened_ahead_uploads_once_its_server_has_the_version() {
         FileOptions::default(),
     ))
     .unwrap();
-    client.become_replica();
+    jazz::db::block_on(client.become_replica());
     insert(&client, 2, &[("title", "ahead"), ("tag", "new")]);
     let server = common::reinstall(server, &server_path, config(v2(), 0), vec![lens()]);
     let _link = link(&client, &server);
@@ -633,7 +634,7 @@ fn a_pending_view_write_survives_a_reopen() {
     let path = dir.path().join("client.sqlite");
     {
         let client = open_at(v1(), 1, &path);
-        client.become_replica();
+        jazz::db::block_on(client.become_replica());
         block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
         let ahead = block_on(client.register_schema_view(v2())).unwrap();
         insert(&ahead, 2, &[("title", "ahead"), ("tag", "new")]);
@@ -657,7 +658,7 @@ fn interleaved_versions_upload_in_order() {
     let server_path = dir.path().join("server.sqlite");
     let server = authority_at(v1(), &server_path);
     let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
-    client.become_replica();
+    jazz::db::block_on(client.become_replica());
     block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
     let ahead = block_on(client.register_schema_view(v2())).unwrap();
     insert(&client, 1, &[("title", "a")]);
@@ -726,7 +727,7 @@ fn a_pending_write_uploads_under_its_version_after_an_upgrade() {
     block_on(server.admit_schema_with_lenses(renamed(), std::slice::from_ref(&rename))).unwrap();
     let client_path = dir.path().join("client.sqlite");
     let client = open_at(v1(), 1, &client_path);
-    client.become_replica();
+    jazz::db::block_on(client.become_replica());
     let tx = insert(&client, 7, &[("title", "offline v1 write")]);
     let client = common::reinstall(client, &client_path, config(renamed(), 1), vec![rename]);
     let _link = link(&client, &server);
@@ -760,8 +761,8 @@ fn pump3(core: &Db, worker: &Db, tab: &Db) {
 /// A tab on v1 relayed by `worker`, with a v2 view.
 fn tab_on(worker: &Db) -> (Db, Db, jazz::db::Upstream) {
     let tab = open_mem(v1(), 0xa1);
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let link = link(&tab, worker);
     block_on(tab.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
     let ahead = block_on(tab.register_schema_view(v2())).unwrap();
@@ -787,14 +788,14 @@ fn relay_view_write(reopened: bool) {
     if reopened {
         let worker = open_at(v1(), 0xa0, &path);
         let _link = link(&worker, &core);
-        worker.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
         let q = worker.prepare_query(&Query::from("notes")).unwrap();
         let _sub = block_on(worker.subscribe(&q, ReadOpts::default())).unwrap();
         pump(&core, &[&worker]);
     }
     let worker = open_at(v1(), 0xa0, &path);
     let _link = link(&worker, &core);
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let (tab, ahead, _tab_link) = tab_on(&worker);
     let q = tab.prepare_query(&Query::from("notes")).unwrap();
     let _sub = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
@@ -818,7 +819,7 @@ fn a_relayed_view_write_its_core_lacks_is_refused() {
     insert(&core, 1, &[("title", "core")]);
     let worker = open_at(v1(), 0xa0, &dir.path().join("worker.sqlite"));
     let _link = link(&worker, &core);
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let (tab, ahead, _tab_link) = tab_on(&worker);
     let q = tab.prepare_query(&Query::from("notes")).unwrap();
     let _sub = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
@@ -844,9 +845,9 @@ fn an_offline_worker_keeps_a_view_write_pending() {
     let core_path = dir.path().join("core.sqlite");
     let core = authority_at(v1(), &core_path);
     let worker = open_at(v1(), 0xa0, &dir.path().join("worker.sqlite"));
-    worker.become_replica();
+    jazz::db::block_on(worker.become_replica());
     let up = link(&worker, &core);
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let (tab, ahead, _tab_link) = tab_on(&worker);
     let q = tab.prepare_query(&Query::from("notes")).unwrap();
     let _sub = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();

@@ -714,12 +714,14 @@ pub fn refuse_encrypted_app(config: &DbConfig) -> Result<(), Error> {
 /// SQLite store keeps full history. A schema with Jazz's system tables is
 /// refused unless the configuration has encryption hooks
 /// ([`refuse_encrypted_app`]).
+#[cfg(feature = "sqlite")]
 pub async fn open_memory(db_config: DbConfig) -> Result<Db, Error> {
     refuse_encrypted_app(&db_config)?;
     Db::open(db_config).await
 }
 
 /// Open a durable store in the SQLite file at `path` (see [`open_memory`]).
+#[cfg(feature = "sqlite")]
 pub async fn open_file(
     db_config: DbConfig,
     path: &std::path::Path,
@@ -989,9 +991,9 @@ impl Binding {
     /// Bind `db`, opened as `identity`.
     /// Unless `db` is the authority, it is a replica from the start: what
     /// it writes before its upstream connects is uploaded once it does.
-    pub fn new(db: Db, identity: DbIdentity, trusted_backend: bool) -> Self {
+    pub async fn new(db: Db, identity: DbIdentity, trusted_backend: bool) -> Self {
         if !db.is_authority() {
-            db.become_replica();
+            db.become_replica().await;
         }
         db.track_upstream_rejections();
         Self {
@@ -1512,7 +1514,7 @@ impl Binding {
     /// this schema version is mirrored, and with an argument error for a
     /// table the schema doesn't have.
     pub fn table_identity(&self, table: &str) -> HostResult<String> {
-        match self.db.table_identity(table)? {
+        match block_on(self.db.table_identity(table))? {
             Some(identity) => Ok(identity.0.to_string()),
             None => Err(HostError::Argument(format!("no table {table}"))),
         }
@@ -1657,20 +1659,24 @@ impl Binding {
     }
 
     /// Bind correlation claims to this client's own identity.
-    pub fn set_session_claims(&self, claims: serde_json::Value) -> HostResult<()> {
+    pub async fn set_session_claims(&self, claims: serde_json::Value) -> HostResult<()> {
         let claims = self::claims(self.author, claims)?;
-        self.db.set_identity_claims(self.author, claims);
+        self.db.set_identity_claims(self.author, claims).await;
         self.hooks.progress.wake_all();
         Ok(())
     }
 
     /// Bind correlation claims to `author` (a served identity).
-    pub fn set_identity_claims(&self, author: &[u8], claims: serde_json::Value) -> HostResult<()> {
+    pub async fn set_identity_claims(
+        &self,
+        author: &[u8],
+        claims: serde_json::Value,
+    ) -> HostResult<()> {
         let author = self.author_of(author)?;
         let claims = self::claims(author, claims)?;
         // Unchanged claims (a host repeats them before each write) wake
         // nobody.
-        if self.db.set_identity_claims(author, claims) {
+        if self.db.set_identity_claims(author, claims).await {
             self.hooks.progress.wake_all();
         }
         Ok(())
@@ -1713,7 +1719,7 @@ impl Binding {
     /// `table`, which clauses of its read policy (the arms of its top-level
     /// `Or`) hold for `author` with `claims`. Answers the number of clauses,
     /// and for each row found its id (hyphenated) and which clauses hold.
-    pub fn explain_read_clauses(
+    pub async fn explain_read_clauses(
         &self,
         table: &str,
         rows: &[String],
@@ -1730,7 +1736,10 @@ impl Binding {
                     .map_err(|error| HostError::Argument(format!("row id {row}: {error}")))
             })
             .collect::<HostResult<Vec<_>>>()?;
-        let (clauses, found) = self.db.explain_read_clauses(table, &rows, author, claims)?;
+        let (clauses, found) = self
+            .db
+            .explain_read_clauses(table, &rows, author, claims)
+            .await?;
         Ok((
             clauses,
             found
@@ -1853,7 +1862,7 @@ impl Binding {
         // Refusals kept from before (a reopened store's, or ones no
         // listener took) go out again first.
         let requeued = if self.requeue.replace(false) {
-            self.db.requeue_rejected_transactions()
+            self.db.requeue_rejected_transactions().await
         } else {
             Ok(())
         };
@@ -1861,9 +1870,13 @@ impl Binding {
         let delivered = self.hooks.report(self.node, rejections);
         // Delivered: the retry store lets go of their payloads. One no
         // listener took stays, for the next listener or the next open.
-        let discarded = delivered
-            .into_iter()
-            .try_for_each(|seq| self.db.discard_rejected_transaction(seq));
+        let discarded = async {
+            for seq in delivered {
+                self.db.discard_rejected_transaction(seq).await?;
+            }
+            Ok::<_, Error>(())
+        }
+        .await;
         self.hooks.progress.wake_all();
         result?;
         requeued?;
@@ -1909,17 +1922,17 @@ impl Binding {
     /// Make this store the optimistic, non-durable foreground of a durable
     /// relay (a browser tab over its worker): its store starts empty, so
     /// every subscription's opening waits for the relay's answer.
-    pub fn set_non_durable_client(&self) {
-        self.db.set_non_durable_client();
+    pub async fn set_non_durable_client(&self) {
+        self.db.set_non_durable_client().await;
         self.hooks.progress.wake_all();
     }
 
     /// Report the path to the authoritative server (`"none" | "attempting"
     /// | "live" | "failed"`, or the TypeScript aliases).
-    pub fn set_remote_link_hint(&self, state: &str) -> HostResult<()> {
+    pub async fn set_remote_link_hint(&self, state: &str) -> HostResult<()> {
         let hint = RemoteLinkHint::from_host_str(state)
             .ok_or_else(|| HostError::Argument(format!("unknown remote link state {state}")))?;
-        self.db.set_remote_link_hint(hint);
+        self.db.set_remote_link_hint(hint).await;
         self.hooks.progress.wake_all();
         Ok(())
     }
@@ -2014,12 +2027,12 @@ impl Binding {
         };
         // In a transaction, the row's space is the one the transaction sees.
         let upload = match transaction {
-            Some(id) => self.db.tx_ref(id).begin_streaming_value_upload_for(
+            Some(id) => block_on(self.db.tx_ref(id).begin_streaming_value_upload_for(
                 mutation, &table, row, &mut cells, &column, &target,
-            )?,
-            None => self.db.begin_streaming_value_upload_for(
+            ))?,
+            None => block_on(self.db.begin_streaming_value_upload_for(
                 mutation, &table, row, &mut cells, &column, &target,
-            )?,
+            ))?,
         };
         Ok(StreamingMutation {
             state: Some(Box::new(StreamingState {
@@ -2062,13 +2075,17 @@ impl Binding {
     /// Serve a subscriber (another replica) as `identity` with `claims`.
     /// A store configured as a user refuses any other identity (see
     /// [`Db::accept_subscriber`]).
-    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> HostResult<Link> {
+    pub async fn accept_subscriber(
+        &self,
+        identity: AuthorSubject,
+        claims: Cells,
+    ) -> HostResult<Link> {
         let queues = WireQueues::default();
         let transport = Box::new(WireTransportAdapter::current(QueueTransport {
             queues: queues.clone(),
         }));
-        let subscriber = self.db.accept_subscriber(transport, identity)?;
-        self.db.set_identity_claims(identity, claims);
+        let subscriber = self.db.accept_subscriber(transport, identity).await?;
+        self.db.set_identity_claims(identity, claims).await;
         Ok(Link {
             binding: self.clone(),
             queues,
@@ -2448,12 +2465,12 @@ impl Link {
     }
 
     /// Rebind a subscriber link's claims.
-    pub fn update_claims(&self, claims: serde_json::Value) -> HostResult<()> {
+    pub async fn update_claims(&self, claims: serde_json::Value) -> HostResult<()> {
         let LinkKind::Subscriber { identity, .. } = self.kind else {
             return Err("transport is not a subscriber link".into());
         };
         let claims = self::claims(identity, claims)?;
-        self.binding.db.set_identity_claims(identity, claims);
+        self.binding.db.set_identity_claims(identity, claims).await;
         self.binding.hooks.progress.wake_all();
         Ok(())
     }

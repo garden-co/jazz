@@ -94,7 +94,7 @@ fn insert(db: &Db, table: &str, cells: Vec<(&str, Value)>) -> RowUuid {
 
 fn world() -> World {
     let server = block_on(Db::open(DbConfig::new(schema(), identity(0)))).unwrap();
-    server.set_authority().unwrap();
+    jazz::db::block_on(server.set_authority()).unwrap();
     let client = open_client_with(Rc::new(MemoryStore::new()), declarations());
     let db = block_on(Db::open(
         DbConfig::new(schema(), identity(1)).with_e2ee(client.hooks()),
@@ -102,7 +102,7 @@ fn world() -> World {
     .unwrap();
     let (link, _) = link(&db, &server);
     pump(&server, &db);
-    assert!(client.prepare(&db).unwrap());
+    assert!(jazz::db::block_on(client.prepare(&db)).unwrap());
     let mine = project(&db, "mine");
     let other = project(&db, "other");
     let empty = project(&db, "empty");

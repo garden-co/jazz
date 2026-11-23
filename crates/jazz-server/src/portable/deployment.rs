@@ -35,8 +35,8 @@ struct DeclaredVersion {
 }
 
 impl DeclaredVersion {
-    fn read(db: &Db, hash: SchemaHash, entries: encryption::Entries) -> Result<Self, Error> {
-        let (schema, names) = db.catalogue_schema_and_stored_names(&hash)?;
+    async fn read(db: &Db, hash: SchemaHash, entries: encryption::Entries) -> Result<Self, Error> {
+        let (schema, names) = db.catalogue_schema_and_stored_names(&hash).await?;
         let stored = names.tables;
         let public = stored
             .iter()
@@ -53,7 +53,7 @@ impl DeclaredVersion {
             entries,
             stored,
             public,
-            successors: db.catalogue_successors(&hash)?,
+            successors: db.catalogue_successors(&hash).await?,
         })
     }
 
@@ -94,10 +94,10 @@ impl DeclaredVersion {
     }
 
     // Migration descendants can only append. Siblings may use either prefix of the same enum.
-    fn check_stored_types_and_spaces(
+    async fn check_stored_types_and_spaces(
         &self,
         next: &Self,
-        mut precedes: impl FnMut() -> Result<bool, Error>,
+        mut precedes: impl AsyncFnMut() -> Result<bool, Error>,
     ) -> Result<(), Error> {
         let invalid = |message: String| Error::new(ErrorCode::Schema, message);
         for (table, new) in &next.entries {
@@ -123,7 +123,7 @@ impl DeclaredVersion {
                     continue;
                 };
                 let path = format!("{table}.{name}");
-                let siblings = !previous.plain.same_type(&declared.plain) && !precedes()?;
+                let siblings = !previous.plain.same_type(&declared.plain) && !precedes().await?;
                 encryption::check_stored_column_type(&path, previous, declared, siblings)
                     .map_err(invalid)?;
             }
@@ -145,25 +145,22 @@ impl DeclaredVersion {
 
 /// Check every new declaration inside the catalogue transaction, after
 /// admission assigns stored identities and before the schema becomes live.
-pub(crate) fn check_stored_columns(
+pub(crate) async fn check_stored_columns(
     db: &Db,
     kept: &[(HostTable, Vec<u8>, Vec<u8>)],
 ) -> Result<(), Error> {
     let invalid = |message: String| Error::new(ErrorCode::Schema, message);
     let mut new = Vec::new();
     for (table, key, bytes) in kept {
-        if *table == DECLARATIONS && db.host_get(*table, key)?.is_none() {
+        if *table == DECLARATIONS && db.host_get(*table, key).await?.is_none() {
             let hash = key.as_slice().try_into().map_err(|_| {
                 invalid("invalid schema hash in new encryption declarations".into())
             })?;
             let hash = SchemaHash(hash);
             new.push((
                 hash,
-                DeclaredVersion::read(
-                    db,
-                    hash,
-                    encryption::decode_stored(bytes).map_err(invalid)?,
-                )?,
+                DeclaredVersion::read(db, hash, encryption::decode_stored(bytes).map_err(invalid)?)
+                    .await?,
             ));
         }
     }
@@ -172,13 +169,13 @@ pub(crate) fn check_stored_columns(
     }
 
     let mut history = Vec::new();
-    for (key, bytes) in db.host_prefix(DECLARATIONS, &[])? {
+    for (key, bytes) in db.host_prefix(DECLARATIONS, &[]).await? {
         // Only a schema-hash key can name a deployed version.
         if let Ok(hash) = key.as_slice().try_into() {
             let entries = encryption::decode_stored(&bytes)
                 .map_err(|error| Error::new(ErrorCode::Storage, error))?;
             let hash = SchemaHash(hash);
-            history.push((hash, DeclaredVersion::read(db, hash, entries)?));
+            history.push((hash, DeclaredVersion::read(db, hash, entries).await?));
         }
     }
     let mut descendants: HashMap<SchemaHash, HashSet<SchemaHash>> = HashMap::new();
@@ -197,18 +194,18 @@ pub(crate) fn check_stored_columns(
             if old.successors.contains(hash) {
                 old.check_transition_to(next).map_err(invalid)?;
             } else {
-                old.check_stored_types_and_spaces(next, || {
-                    use std::collections::hash_map::Entry;
-                    let reachable = match descendants.entry(*old_hash) {
-                        Entry::Occupied(entry) => entry.into_mut(),
-                        Entry::Vacant(entry) => entry.insert(db.catalogue_descendants(old_hash)?),
-                    };
-                    Ok(reachable.contains(hash))
-                })?;
+                old.check_stored_types_and_spaces(next, async || {
+                    if !descendants.contains_key(old_hash) {
+                        let reachable = db.catalogue_descendants(old_hash).await?;
+                        descendants.insert(*old_hash, reachable);
+                    }
+                    Ok(descendants[old_hash].contains(hash))
+                })
+                .await?;
             }
         }
         if i + 1 < new.len() {
-            descendants.insert(*hash, db.catalogue_descendants(hash)?);
+            descendants.insert(*hash, db.catalogue_descendants(hash).await?);
         }
     }
     Ok(())

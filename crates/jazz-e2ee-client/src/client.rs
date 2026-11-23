@@ -486,10 +486,10 @@ impl E2eeClient {
     /// (protocol §4.1). `false` while the database has not observed them:
     /// until then encrypted tables can be neither read nor written, so a
     /// client that has never synced cannot encrypt or decrypt.
-    pub fn prepare(&self, db: &Db) -> Result<bool, ClientError> {
+    pub async fn prepare(&self, db: &Db) -> Result<bool, ClientError> {
         // A refused creation is found among the refusals the store keeps.
         db.track_upstream_rejections();
-        let catalogue = Catalogue::resolve(db, &self.shared.plans)?;
+        let catalogue = Catalogue::resolve(db, &self.shared.plans).await?;
         let known = catalogue.is_some();
         if known {
             self.shared.keys.borrow_mut().catalogue = catalogue;

@@ -424,7 +424,7 @@ impl E2eeClient {
         };
         Ok(match read.rows.first() {
             Some((_, Provisional::Accepted(_))) => CreationFate::Accepted,
-            Some((_, Provisional::Own(tx))) => match db.transaction_fate(*tx)? {
+            Some((_, Provisional::Own(tx))) => match db.transaction_fate(*tx).await? {
                 TransactionFate::Accepted(_) => CreationFate::Accepted,
                 TransactionFate::Refused(error) => {
                     self.note_refusal(address, error.as_ref());
@@ -433,7 +433,7 @@ impl E2eeClient {
                 _ => CreationFate::Undecided,
             },
             None => {
-                if let Some(error) = self.refused_root(db, id_bytes)? {
+                if let Some(error) = self.refused_root(db, id_bytes).await? {
                     self.note_refusal(address, Some(&error));
                     return Ok(CreationFate::NotAccepted);
                 }
@@ -451,9 +451,14 @@ impl E2eeClient {
     /// Whether the store keeps a refused commit that inserted the root
     /// `id`: a root refused after the run staged it is gone from the
     /// store's rows, and this is what is left of it.
-    fn refused_root(&self, db: &Db, id: [u8; 16]) -> Result<Option<jazz::db::Error>, ClientError> {
+    async fn refused_root(
+        &self,
+        db: &Db,
+        id: [u8; 16],
+    ) -> Result<Option<jazz::db::Error>, ClientError> {
         Ok(db
-            .rejected_transactions()?
+            .rejected_transactions()
+            .await?
             .into_iter()
             .find(|rejected| {
                 rejected.ops.iter().any(|op| {

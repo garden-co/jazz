@@ -59,8 +59,19 @@ pub(crate) fn check_recorded_declarations(
     app: &App,
     recorded: &Recorded,
 ) -> Result<(), CodegenError> {
+    let versions: Vec<SchemaHash> = app.compiled.schemas.iter().map(|(h, _)| *h).collect();
+    check_declarations_of(&versions, app.compiled.encryption.as_ref(), recorded)
+}
+
+/// [`check_recorded_declarations`] for `versions` and their declarations
+/// as read from the app file.
+pub(crate) fn check_declarations_of(
+    versions: &[SchemaHash],
+    declared: Option<&DeclaredEncryption>,
+    recorded: &Recorded,
+) -> Result<(), CodegenError> {
     let empty = Entries::new();
-    for (version, _) in &app.compiled.schemas {
+    for version in versions {
         let hash = version.to_string();
         let before = if *version == recorded.current {
             &recorded.encryption
@@ -69,10 +80,7 @@ pub(crate) fn check_recorded_declarations(
         } else {
             continue;
         };
-        let after = app
-            .compiled
-            .encryption
-            .as_ref()
+        let after = declared
             .and_then(|declared| declared.entries(&hash))
             .unwrap_or(&empty);
         let changed = changed_declarations(before, after);

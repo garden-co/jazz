@@ -19,6 +19,7 @@
 //! rewrites it.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -86,21 +87,20 @@ fn core_at(schema: &PublicSchema, path: &Path) -> Db {
         FileOptions::default(),
     ))
     .unwrap();
-    db.set_authority().unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
     db
 }
 
 fn pin(server: &Db, bundle: BundleId) -> Result<(), String> {
     let (_client, server_side) = duplex_transport::duplex();
-    server
-        .accept_pinned_subscriber(
-            server_side,
-            AuthorSubject::for_test_bytes([0x55; 16]),
-            None,
-            Some(bundle),
-        )
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    jazz::db::block_on(server.accept_pinned_subscriber(
+        server_side,
+        AuthorSubject::for_test_bytes([0x55; 16]),
+        None,
+        Some(bundle),
+    ))
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 /// Deploy `source` through the server's own pipeline

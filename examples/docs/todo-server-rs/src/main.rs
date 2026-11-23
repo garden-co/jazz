@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Ctrl-C or SIGTERM: stop accepting, end the live streams, let the
     // requests in flight finish (for up to 10 seconds), then stop the
-    // client, so the writes already made finish and the store closes.
+    // client, so the writes already made finish locally and the store closes.
     let stopping = signal().boxed().shared();
     let app = router_until(jazz.clone(), stopping.clone())
         .layer(TraceLayer::new_for_http())

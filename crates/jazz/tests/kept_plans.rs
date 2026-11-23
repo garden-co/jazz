@@ -13,6 +13,7 @@
 //! matched by its tag; the differential mixes writes, claims changes and
 //! a variant tagged mid-run.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{Db, block_on, duplex};
@@ -137,8 +138,8 @@ fn keep_variant(db: &Db, variant: &str) {
 
 fn store(role: &str) -> crate::fanout_correlation::Store {
     let db = open(schema(), 1);
-    db.set_authority().unwrap();
-    db.set_identity_claims(user(0), claims(role));
+    jazz::db::block_on(db.set_authority()).unwrap();
+    jazz::db::block_on(db.set_identity_claims(user(0), claims(role)));
     db
 }
 
@@ -577,7 +578,7 @@ const DOCS: usize = 12;
 /// statement a fresh compile (the plan oracle).
 fn differential(seed: u64) {
     let db = store("todo");
-    db.set_identity_claims(user(1), claims("done"));
+    jazz::db::block_on(db.set_identity_claims(user(1), claims("done")));
     let mut rng = Rng(seed);
     for n in 0..TEAMS {
         team(&db, n);
@@ -639,7 +640,7 @@ fn differential(seed: u64) {
             _ => {
                 let reader = rng.next(2);
                 let role = variants[rng.next(variants.len())];
-                db.set_identity_claims(user(reader), claims(role));
+                jazz::db::block_on(db.set_identity_claims(user(reader), claims(role)));
                 format!("u{reader} role {role}")
             }
         };

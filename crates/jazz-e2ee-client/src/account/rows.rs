@@ -567,7 +567,7 @@ mod tests {
             },
         )))
         .unwrap();
-        db.set_authority().unwrap();
+        jazz::db::block_on(db.set_authority()).unwrap();
         db
     }
 

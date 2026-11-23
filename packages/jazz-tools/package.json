@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-beta.0",
+  "version": "2.0.0-beta.1",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "license": "MIT",
   "repository": {

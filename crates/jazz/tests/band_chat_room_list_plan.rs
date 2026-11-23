@@ -47,7 +47,7 @@ fn the_newest_message_of_a_room_is_read_from_the_index_without_sorting() {
                 .limit(1),
         )
         .unwrap();
-    let (_, plan) = db.explain_query_plan(&newest, None).unwrap();
+    let (_, plan) = jazz::db::block_on(db.explain_query_plan(&newest, None)).unwrap();
     assert!(plan.contains("messages__ix"), "{plan}");
     assert!(!plan.contains("TEMP B-TREE FOR ORDER BY"), "{plan}");
 }

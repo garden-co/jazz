@@ -451,10 +451,11 @@ impl Encryption {
     }
 
     /// The address of the space `id` of the space table `table`.
-    fn space_address(&self, table: &str, id: &str) -> Result<SpaceAddress, String> {
+    async fn space_address(&self, table: &str, id: &str) -> Result<SpaceAddress, String> {
         let identity = self
             .db
             .table_identity(table)
+            .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("the schema has no table `{table}`"))?;
         Ok(SpaceAddress {
@@ -856,11 +857,11 @@ impl Encryption {
                 }
             }
             "spaceRow" => {
-                let space = self.space_address(&text("table")?, &text("id")?)?;
+                let space = self.space_address(&text("table")?, &text("id")?).await?;
                 json!({ "scopeId": space.scope_id, "identifier": space.identifier })
             }
             "keysRotate" | "keysRecoverRotation" => {
-                let space = self.space_address(&text("table")?, &text("id")?)?;
+                let space = self.space_address(&text("table")?, &text("id")?).await?;
                 let delivered = if op == "keysRecoverRotation" {
                     client.recover_rotation(db, &space).await
                 } else {
@@ -891,7 +892,7 @@ async fn main_loop(this: Rc<Encryption>) {
     this.stage
         .set("waiting for the app's table identities from the server");
     loop {
-        match client.prepare(&db) {
+        match Box::pin(client.prepare(&db)).await {
             Ok(true) => {
                 this.readable.set(true);
                 break;
@@ -928,7 +929,7 @@ async fn main_loop(this: Rc<Encryption>) {
         let turn = this.gate.enter().await;
         this.stage.set("watching the account");
         if account.is_none() {
-            match client.watch_account(&db).await {
+            match Box::pin(client.watch_account(&db)).await {
                 Ok(watch) => account = Some(watch),
                 Err(error) => *this.last_error.borrow_mut() = Some(describe(error)),
             }
@@ -973,11 +974,11 @@ async fn main_loop(this: Rc<Encryption>) {
                     *result = Verification::Pending;
                 }
             }
-            let mut verified = client.ensure_account(&db).await.map(Some);
+            let mut verified = Box::pin(client.ensure_account(&db)).await.map(Some);
             if let (Ok(Some(status)), Some(native)) = (&verified, recovering) {
                 this.status.set(Some(*status));
                 this.stage.set("preparing account-secret recovery");
-                verified = this.verify_native(native, *status).await;
+                verified = Box::pin(this.verify_native(native, *status)).await;
             }
             if let Some(native) = &this.native {
                 native.finished.set(native.started.get());
@@ -997,7 +998,7 @@ async fn main_loop(this: Rc<Encryption>) {
                         *native.result.borrow_mut() = Verification::Complete;
                     }
                     if status == AccountStatus::Active {
-                        match client.complete_removal_requests(&db).await {
+                        match Box::pin(client.complete_removal_requests(&db)).await {
                             Ok(_) => {}
                             Err(error) => *this.last_error.borrow_mut() = Some(describe(error)),
                         }
@@ -1039,7 +1040,7 @@ async fn main_loop(this: Rc<Encryption>) {
             && looked.elapsed() >= std::time::Duration::from_secs(2)
         {
             looked = web_time::Instant::now();
-            match client.challenged(&db).await {
+            match Box::pin(client.challenged(&db)).await {
                 Ok(true) if !noticed => {
                     noticed = true;
                     this.reports
@@ -1061,13 +1062,13 @@ async fn main_loop(this: Rc<Encryption>) {
         // Reads that left rows out for want of a key: acquire the keys and
         // settle what they reported.
         if this.status.get() == Some(AccountStatus::Active)
-            && let Err(error) = client.settle_reads(&db).await
+            && let Err(error) = Box::pin(client.settle_reads(&db)).await
         {
             *this.last_error.borrow_mut() = Some(describe(error));
         }
         if this.status.get() == Some(AccountStatus::Active) {
             if spaces.is_none() {
-                match client.watch_spaces(&db).await {
+                match Box::pin(client.watch_spaces(&db)).await {
                     Ok(watch) => spaces = Some(watch),
                     Err(error) => *this.last_error.borrow_mut() = Some(describe(error)),
                 }
@@ -1086,7 +1087,7 @@ async fn main_loop(this: Rc<Encryption>) {
                 loop {
                     let next = this.uses.borrow_mut().pop_front();
                     let Some((open, table, id)) = next else { break };
-                    let Ok(space) = this.space_address(&table, &id) else {
+                    let Ok(space) = this.space_address(&table, &id).await else {
                         continue;
                     };
                     if open {
@@ -1095,7 +1096,7 @@ async fn main_loop(this: Rc<Encryption>) {
                         watch.release_space(&space);
                     }
                 }
-                if let Err(error) = client.sync_spaces(&db, watch).await {
+                if let Err(error) = Box::pin(client.sync_spaces(&db, watch)).await {
                     *this.last_error.borrow_mut() = Some(describe(error));
                 }
                 loop {
@@ -1103,7 +1104,7 @@ async fn main_loop(this: Rc<Encryption>) {
                     let Some(reply) = next else {
                         break;
                     };
-                    let outcome = match client.deliver_keys(&db).await {
+                    let outcome = match Box::pin(client.deliver_keys(&db)).await {
                         Ok(results) => {
                             let failed = results.iter().filter(|(_, done)| done.is_err()).count();
                             let delivered: usize = results
@@ -1460,7 +1461,7 @@ mod tests {
             )))
             .unwrap(),
         );
-        db.set_authority().unwrap();
+        jazz::db::block_on(db.set_authority()).unwrap();
         Encryption::new_native(built, store, db)
     }
 

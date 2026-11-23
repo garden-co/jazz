@@ -230,7 +230,9 @@ struct LargeColumn {
 /// and its schema's names are the authority's, else `None`. It never mints
 /// one.
 pub trait IdentitySource {
-    fn identity_namespace(&self) -> Result<Option<[u8; 16]>, Error>;
+    /// The namespace `schema`'s identities derive from, or `None` while
+    /// this store does not know them.
+    fn identity_namespace(&self, schema: &Schema) -> Result<Option<[u8; 16]>, Error>;
 }
 
 /// SQL text plus its positional parameters.
@@ -2402,7 +2404,7 @@ impl<'a> Ctx<'a> {
             Some(namespace) => namespace,
             None => {
                 let namespace = match self.catalogue {
-                    Some(catalogue) => catalogue.identity_namespace()?,
+                    Some(catalogue) => catalogue.identity_namespace(self.schema)?,
                     None => None,
                 };
                 self.namespace = Some(namespace);

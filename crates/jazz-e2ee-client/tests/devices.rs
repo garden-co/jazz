@@ -96,7 +96,10 @@ fn notes_of(server: &Db, device: &Device, space: uuid::Uuid) -> Vec<jazz::db::Cu
 fn space_with_a_note(server: &Db, first: &Device, who: &str) -> uuid::Uuid {
     let space = project(&first.db, "plans");
     pump(server, &first.db);
-    let scope = first.db.table_identity("projects").unwrap().unwrap().0;
+    let scope = jazz::db::block_on(first.db.table_identity("projects"))
+        .unwrap()
+        .unwrap()
+        .0;
     let member = std::collections::BTreeMap::from([
         ("scopeId".to_owned(), Value::Uuid(scope)),
         ("identifier".to_owned(), Value::Uuid(space)),
@@ -228,7 +231,10 @@ fn a_device_awaiting_approval_is_not_told_to_write_again() {
 }
 
 fn space_address(device: &Device, space: uuid::Uuid) -> jazz::e2ee::SpaceAddress {
-    let scope = device.db.table_identity("projects").unwrap().unwrap().0;
+    let scope = jazz::db::block_on(device.db.table_identity("projects"))
+        .unwrap()
+        .unwrap()
+        .0;
     jazz::e2ee::SpaceAddress {
         scope_id: scope.to_string(),
         identifier: space.to_string(),
@@ -528,7 +534,10 @@ impl SharedSpace {
             bob_second.status(&server, &[&bob_first]),
             AccountStatus::Active
         );
-        let scope = alice.db.table_identity("projects").unwrap().unwrap().0;
+        let scope = jazz::db::block_on(alice.db.table_identity("projects"))
+            .unwrap()
+            .unwrap()
+            .0;
         let member = std::collections::BTreeMap::from([
             ("scopeId".to_owned(), Value::Uuid(scope)),
             ("identifier".to_owned(), Value::Uuid(space)),
@@ -721,7 +730,12 @@ fn the_first_write_after_losing_a_space_watch_checks_the_subscribed_space() {
         let member = std::collections::BTreeMap::from([
             (
                 "scopeId".to_owned(),
-                Value::Uuid(db.table_identity("projects").unwrap().unwrap().0),
+                Value::Uuid(
+                    jazz::db::block_on(db.table_identity("projects"))
+                        .unwrap()
+                        .unwrap()
+                        .0,
+                ),
             ),
             ("identifier".to_owned(), Value::Uuid(other)),
             (
@@ -926,10 +940,12 @@ fn cold_writes_and_watch_passes_read_only_the_deliveries_they_need() {
         for account in [None, Some(id.as_str())] {
             let query =
                 jazz_e2ee_client::epoch_deliveries_query(&protocol_address, &id, account).unwrap();
-            let (_, plan) = shared
-                .server
-                .explain_query_plan(&shared.server.prepare_query(&query).unwrap(), None)
-                .unwrap();
+            let (_, plan) = jazz::db::block_on(
+                shared
+                    .server
+                    .explain_query_plan(&shared.server.prepare_query(&query).unwrap(), None),
+            )
+            .unwrap();
             assert!(
                 plan.contains("SEARCH") && plan.contains("keyEpochId~") && plan.contains("=?)"),
                 "{plan}"
@@ -1021,10 +1037,12 @@ fn a_write_checks_the_same_number_of_rows_after_many_rotations() {
                 &uuid::Uuid::new_v4().to_string(),
             )
             .unwrap();
-            let (_, plan) = shared
-                .server
-                .explain_query_plan(&shared.server.prepare_query(&probe).unwrap(), None)
-                .unwrap();
+            let (_, plan) = jazz::db::block_on(
+                shared
+                    .server
+                    .explain_query_plan(&shared.server.prepare_query(&probe).unwrap(), None),
+            )
+            .unwrap();
             assert!(
                 plan.contains("SEARCH")
                     && plan.rsplit_once(" AND ").is_some_and(|(_, last)| last
@@ -3016,9 +3034,7 @@ fn a_member_shown_from_before_a_device_removal_gets_no_delivery() {
             second.status(&server, &[&first]);
             approve(&server, &first, &second);
             assert_eq!(second.status(&server, &[&first]), AccountStatus::Active);
-            let scope = alice_device
-                .db
-                .table_identity("projects")
+            let scope = jazz::db::block_on(alice_device.db.table_identity("projects"))
                 .unwrap()
                 .unwrap()
                 .0;
@@ -3142,9 +3158,7 @@ fn old_history_at_a_later_cut_gets_no_delivery() {
             second.status(&server, &[&first]);
             approve(&server, &first, &second);
             assert_eq!(second.status(&server, &[&first]), AccountStatus::Active);
-            let scope = alice_device
-                .db
-                .table_identity("projects")
+            let scope = jazz::db::block_on(alice_device.db.table_identity("projects"))
                 .unwrap()
                 .unwrap()
                 .0;

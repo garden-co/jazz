@@ -3,6 +3,7 @@
 //! see why a user may or may not read each row.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::collections::BTreeMap;
 

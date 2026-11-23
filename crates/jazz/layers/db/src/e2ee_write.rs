@@ -2,10 +2,11 @@
 //! before anything stores, chunks or uploads them.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use super::large_ops::{SealedFor, StreamedSeal, sealed_elsewhere};
 use super::{
-    Cells, Db, Inner, InsertOptions, LargeEdits, Located, StagedOp, StreamingMutationKind,
+    Cells, Db, InsertOptions, LargeEdits, Located, StagedOp, Store, StreamingMutationKind,
     StreamingValueUpload, Target, WriteTarget, column_from_sql, quote, rejected, storage,
 };
 use crate::e2ee::{E2eeHooks, E2eeRefusal, SealError, StreamTarget, WriteCells, WriteKind};
@@ -13,6 +14,7 @@ use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode};
 use crate::records::Value;
 use crate::tools::OpenTransactionId;
+use crate::values::Schema;
 use crate::values::{CachedRow, Sql};
 
 impl Db {
@@ -20,8 +22,8 @@ impl Db {
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn staged_checks_and_chunks_for_test(&self, id: OpenTransactionId) -> (usize, usize) {
-        let inner = self.inner.staging();
-        let batch = &inner.batches[&id];
+        let batches = self.inner.batches.borrow();
+        let batch = &batches[&id];
         (
             batch.first_checks.len(),
             batch.edits.derived.len() + batch.edits.pending_nodes.len(),
@@ -30,16 +32,21 @@ impl Db {
 
     /// Stage `op` in batch `id` sealed by the encryption hooks. The internal rows the hooks stage with it go first; if any of them or
     /// the write fails, none stays staged.
-    pub(crate) fn stage_sealed(
+    pub(crate) async fn stage_sealed(
         &self,
         id: OpenTransactionId,
         mut op: StagedOp,
         edits: LargeEdits,
         streamed: Option<StreamedSeal<'_>>,
     ) -> Result<(), Error> {
-        let companions = self.in_overlay(id, None, |inner, _| inner.seal_op(&mut op, streamed))?;
+        let schema = self.operation_schema();
+        let companions = self
+            .in_overlay(id, None, async |inner, _| {
+                inner.seal_op(&schema, &mut op, streamed).await
+            })
+            .await?;
         if companions.is_empty() {
-            return self.stage_chunked(id, op, edits);
+            return self.stage_chunked(id, op, edits).await;
         }
         let names: Vec<(String, RowUuid)> = companions
             .iter()
@@ -49,9 +56,8 @@ impl Db {
             })
             .collect();
         let (prefix, rows, inserted, claims, new_check_keys) = {
-            let inner = self.inner.staging();
-            let batch = inner
-                .batches
+            let batches = self.inner.batches.borrow();
+            let batch = batches
                 .get(&id)
                 .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
             // Only absent entries can be added by these inserts. An unknown
@@ -59,7 +65,7 @@ impl Db {
             let new_check_keys: Vec<_> = names
                 .iter()
                 .filter_map(|(table, row)| {
-                    let stored = inner.schema.stored_table(table).ok()?;
+                    let stored = schema.stored_table(table).ok()?;
                     let key = (stored.to_owned(), *row.0.as_bytes());
                     (!batch.first_checks.contains_key(&key)).then_some(key)
                 })
@@ -72,17 +78,21 @@ impl Db {
                 new_check_keys,
             )
         };
-        let staged = companions
-            .into_iter()
-            .try_for_each(|companion| self.stage_chunked(id, companion, LargeEdits::default()))
-            .and_then(|()| self.stage_chunked(id, op, edits));
+        let staged = async {
+            for companion in companions {
+                self.stage_chunked(id, companion, LargeEdits::default())
+                    .await?;
+            }
+            self.stage_chunked(id, op, edits).await
+        }
+        .await;
         let hooks = {
-            let mut inner = self.inner.staging();
+            let inner = self.inner.as_ref();
             if staged.is_err() {
                 // The overlay may hold the companions: the next stage replays
                 // what stays staged.
                 inner.settle_overlay();
-                if let Some(batch) = inner.batches.get_mut(&id) {
+                if let Some(batch) = inner.batches.borrow_mut().get_mut(&id) {
                     batch.ops.truncate(prefix.ops);
                     batch.edits.derived.truncate(prefix.derived);
                     batch.edits.pending_nodes.truncate(prefix.pending_nodes);
@@ -96,7 +106,7 @@ impl Db {
                 inner.e2ee.clone()
             } else {
                 let hooks = inner.e2ee.clone();
-                if let Some(batch) = inner.batches.get_mut(&id) {
+                if let Some(batch) = inner.batches.borrow_mut().get_mut(&id) {
                     batch.companions.stage(hooks, names.iter().cloned());
                 }
                 None
@@ -165,13 +175,15 @@ impl From<StreamingMutationKind> for WriteKind {
     }
 }
 
-impl Inner {
-    /// Seal `op`, a write this database authors, before anything stores or
-    /// chunks it. Returns the internal rows the write needs, as inserts to
-    /// apply before it in the same transaction. A streamed write already holds
-    /// its sealed cells. Check its space and claim any root it needs here.
-    pub(crate) fn seal_op(
+impl Store {
+    /// Seal `op`, a write this database authors under `schema` (named as its
+    /// caller named it), before anything stores or chunks it. Returns the
+    /// internal rows the write needs, as inserts to apply before it in the
+    /// same transaction. A streamed write already holds its sealed cells.
+    /// Check its space and claim any root it needs here.
+    pub(crate) async fn seal_op(
         &self,
+        schema: &Rc<Schema>,
         op: &mut StagedOp,
         streamed: Option<StreamedSeal<'_>>,
     ) -> Result<Vec<StagedOp>, Error> {
@@ -179,8 +191,28 @@ impl Inner {
             return Ok(Vec::new());
         };
         let identity = op.identity();
+        // Where the write finds its row: its target in stored names, as the
+        // store applies it.
+        let found = if hooks.declarations().tables.contains_key(op.table()) {
+            let located = self.prepare_write(schema.clone(), op.clone())?;
+            let target = match &located.op {
+                StagedOp::Update(_, _, _, opts) => {
+                    Some((Target::of(&opts.target, self).await?, false))
+                }
+                StagedOp::Upsert(_, _, _, _, opts) => {
+                    Some((Target::of(&opts.target, self).await?, false))
+                }
+                // A restore finds the row deleted: its space is the one the
+                // row had when it was deleted.
+                StagedOp::Restore(_, _, _, opts) => Some((Target::exact(&opts.target), true)),
+                _ => None,
+            };
+            target.map(|target| (located.layout, target))
+        } else {
+            None
+        };
         let mut none = BTreeMap::new();
-        let (table, row, kind, cells, target) = match op {
+        let (table, row, kind, cells) = match op {
             StagedOp::Insert(table, cells, opts) => {
                 let row = opts.row_id.ok_or_else(|| {
                     Error::new(
@@ -188,38 +220,36 @@ impl Inner {
                         "an insert is sealed once its row id is drawn",
                     )
                 })?;
-                (table.clone(), row, WriteKind::Insert, cells, None)
+                (table.clone(), row, WriteKind::Insert, cells)
             }
-            StagedOp::Update(table, row, cells, opts) => (
-                table.clone(),
-                *row,
-                WriteKind::Update,
-                cells,
-                Some((Target::of(&opts.target, self)?, false)),
-            ),
-            StagedOp::Upsert(table, row, cells, _, opts) => (
-                table.clone(),
-                *row,
-                WriteKind::Upsert,
-                cells,
-                Some((Target::of(&opts.target, self)?, false)),
-            ),
-            StagedOp::Delete(table, row, _) => {
-                (table.clone(), *row, WriteKind::Delete, &mut none, None)
+            StagedOp::Update(table, row, cells, _) => {
+                (table.clone(), *row, WriteKind::Update, cells)
             }
-            // A restore finds the row deleted: its space is the one the row
-            // had when it was deleted.
-            StagedOp::Restore(table, row, content, opts) => (
+            StagedOp::Upsert(table, row, cells, _, _) => {
+                (table.clone(), *row, WriteKind::Upsert, cells)
+            }
+            StagedOp::Delete(table, row, _) => (table.clone(), *row, WriteKind::Delete, &mut none),
+            StagedOp::Restore(table, row, content, _) => (
                 table.clone(),
                 *row,
                 WriteKind::Restore,
                 content.as_mut().unwrap_or(&mut none),
-                Some((Target::exact(&opts.target), true)),
             ),
             StagedOp::Move(..) => return Ok(Vec::new()),
         };
-        let stored_space = match target {
-            Some((target, deleted)) => self.stored_space(&*hooks, &table, row, &target, deleted)?,
+        let stored_space = match found {
+            Some((layout, (target, deleted))) => {
+                self.stored_space(
+                    &*hooks,
+                    schema,
+                    &table,
+                    &layout.table,
+                    row,
+                    &target,
+                    deleted,
+                )
+                .await?
+            }
             None => None,
         };
         let mut companions = Vec::new();
@@ -280,13 +310,17 @@ impl Inner {
             .collect())
     }
 
-    /// The space cell of `row` of `table` as a write to `target` finds
-    /// it, live or (for a restore, `deleted`) deleted: `None` for a table
-    /// without an encryption entry, or no such row.
-    fn stored_space(
+    /// The space cell of `row` of `table` (stored as `physical`) as a write
+    /// to `target` (in stored names) finds it, live or (for a restore,
+    /// `deleted`) deleted: `None` for a table without an encryption entry,
+    /// or no such row.
+    #[allow(clippy::too_many_arguments)]
+    async fn stored_space(
         &self,
         hooks: &dyn E2eeHooks,
+        schema: &Schema,
         table: &str,
+        physical: &crate::values::Table,
         row: RowUuid,
         target: &Target,
         deleted: bool,
@@ -294,8 +328,8 @@ impl Inner {
         let Some(entry) = hooks.declarations().tables.get(table) else {
             return Ok(None);
         };
-        let t = self.schema.table(table)?;
-        let key = match self.locate(t, row, target)? {
+        let t = schema.table(table)?;
+        let key = match self.locate(physical, row, target).await? {
             Located::Absent { .. } => return Ok(None),
             Located::Row { deleted: is, .. } if is != deleted => return Ok(None),
             Located::Row { key, .. } => key,
@@ -319,11 +353,12 @@ impl Inner {
             .conn
             .cached_row(
                 &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key],
+                crate::storage::params![row.0.as_bytes().to_vec(), key],
                 |r| r.get::<_, Sql>(0),
             )
+            .await
             .map_err(storage)?;
-        column_from_sql(column, cell.as_ref(), &self.chunks)
+        column_from_sql(column, cell.as_ref(), &self.chunks).await
     }
 
     /// Refuse a partial read or edit (a range, a JSON pointer, a delta, a
@@ -352,6 +387,7 @@ impl Inner {
     /// The hooks check encrypted siblings against their declared plaintext types.
     pub(super) fn validate_stream_siblings(
         &self,
+        schema: &Schema,
         table: &str,
         cells: &BTreeMap<String, Value>,
     ) -> Result<(), Error> {
@@ -365,13 +401,13 @@ impl Inner {
         if entry.columns.is_empty() {
             return Ok(());
         }
-        let schema = self.schema.table(table)?;
-        self.validate_cells(schema, cells)?;
+        let t = schema.table(table)?;
+        self.validate_named_cells(t, cells.iter().map(|(name, value)| (name.as_str(), value)))?;
         for (name, value) in cells {
             if entry.columns.contains_key(name) {
                 continue;
             }
-            let column = schema.column(name).expect("validated above");
+            let column = t.column(name).expect("validated above");
             if let Value::Large(large) = Self::check_cell(column, value, Cells::Authored)? {
                 Self::check_large_kind(column, large)?;
             }
@@ -381,6 +417,7 @@ impl Inner {
 
     pub(super) fn check_rowless_stream(
         &self,
+        _schema: &Schema,
         table: &str,
         cells: &BTreeMap<String, Value>,
         mutation: Option<StreamingMutationKind>,
@@ -416,8 +453,9 @@ impl Inner {
 
     /// Prepare the row's encrypted metadata and its stream together, while the
     /// same store overlay and key are current and before the source can run.
-    pub(super) fn prepare_stream(
+    pub(super) async fn prepare_stream(
         &self,
+        schema: &Rc<Schema>,
         upload: &mut StreamingValueUpload,
         mutation: StreamingMutationKind,
         row: RowUuid,
@@ -434,14 +472,43 @@ impl Inner {
         };
         let stored = match mutation {
             StreamingMutationKind::Insert => None,
-            _ => self.stored_space(&**hooks, table, row, &Target::of(target, self)?, false)?,
+            _ => {
+                // Where the write will find its row: its target in stored
+                // names, as the store applies it.
+                let located = self.prepare_write(
+                    schema.clone(),
+                    StagedOp::Update(
+                        table.clone(),
+                        row,
+                        BTreeMap::new(),
+                        super::UpdateOptions {
+                            target: target.clone(),
+                            ..Default::default()
+                        },
+                    ),
+                )?;
+                let StagedOp::Update(_, _, _, opts) = &located.op else {
+                    unreachable!("prepared as an update")
+                };
+                let found = Target::of(&opts.target, self).await?;
+                self.stored_space(
+                    &**hooks,
+                    schema,
+                    table,
+                    &located.layout.table,
+                    row,
+                    &found,
+                    false,
+                )
+                .await?
+            }
         };
         // An upsert of a row this store does not hold inserts it; publication
         // refuses it if the row appeared since, so the same check applies.
         let inserts = mutation == StreamingMutationKind::Insert
             || (mutation == StreamingMutationKind::Upsert && stored.is_none());
         if inserts && !entry.columns.is_empty() {
-            let schema = self.schema.table(table)?;
+            let schema = schema.table(table)?;
             let branch_cells = match target {
                 WriteTarget::BranchView { head, .. } => schema.selector_cells(head)?,
                 WriteTarget::Root => BTreeMap::new(),

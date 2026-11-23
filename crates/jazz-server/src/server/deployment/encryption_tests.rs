@@ -455,8 +455,7 @@ async fn a_renamed_scope_table_keeps_its_stored_identity() {
         .unwrap()
         .with_db_for_test(move |db| {
             let names = |hash| {
-                db.catalogue_stored_names(&hash)
-                    .map_err(|err| err.to_string())
+                jazz::db::block_on(db.catalogue_stored_names(&hash)).map_err(|err| err.to_string())
             };
             Ok((names(from)?, names(to)?))
         })
@@ -1576,8 +1575,12 @@ async fn a_deploy_whose_declarations_conflict_at_apply_leaves_nothing_live() {
         tokio::spawn(async move {
             runtime
                 .with_db_for_test(move |db| {
-                    db.host_put_if_absent(super::DECLARATIONS, &v2_hash.0, &other)
-                        .map_err(|error| error.to_string())?;
+                    jazz::db::block_on(db.host_put_if_absent(
+                        super::DECLARATIONS,
+                        &v2_hash.0,
+                        &other,
+                    ))
+                    .map_err(|error| error.to_string())?;
                     Ok(())
                 })
                 .await
@@ -1814,20 +1817,21 @@ async fn a_memory_store_deploy_reads_kept_declarations_while_a_write_is_open() {
         tokio::spawn(async move {
             runtime
                 .with_db_for_test(move |db| {
-                    db.host_sql(&mut |conn| {
+                    jazz::db::block_on(db.host_sql(&mut async |conn: &jazz::storage::Storage| {
                         conn.execute_batch(
                             "CREATE TABLE IF NOT EXISTS _jazz_host_e2ee_declarations \
                              (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID; \
                              INSERT OR REPLACE INTO _jazz_host_e2ee_declarations \
                              VALUES (x'01', x'02')",
                         )
+                        .await
                         .map_err(|error| {
                             jazz::db::Error::new(jazz::db::ErrorCode::Storage, error.to_string())
                         })?;
                         entered_tx.send(()).unwrap();
                         let _ = release_rx.recv();
                         Ok(())
-                    })
+                    }))
                     .map_err(|error| error.to_string())
                 })
                 .await

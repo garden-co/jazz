@@ -49,8 +49,11 @@ fn a_change_keeps_host_values_with_it_or_not_at_all() {
     let db = open();
     let kept = |value: &[u8]| vec![(KEPT, b"k".to_vec(), value.to_vec())];
     block_on(db.apply_catalogue_keeping(change(), &kept(b"a"))).unwrap();
-    assert_eq!(db.host_get(KEPT, b"k").unwrap(), Some(b"a".to_vec()));
-    assert_eq!(db.catalogue().unwrap().schemas.len(), 1);
+    assert_eq!(
+        jazz::db::block_on(db.host_get(KEPT, b"k")).unwrap(),
+        Some(b"a".to_vec())
+    );
+    assert_eq!(jazz::db::block_on(db.catalogue()).unwrap().schemas.len(), 1);
     // The same value again is not a conflict.
     block_on(db.apply_catalogue_keeping(change(), &kept(b"a"))).unwrap();
 
@@ -69,9 +72,12 @@ fn a_change_keeps_host_values_with_it_or_not_at_all() {
     let error = block_on(db.apply_catalogue_keeping(other, &kept(b"b")))
         .expect_err("a different value for a kept key");
     assert_eq!(error.code, jazz::db::ErrorCode::Schema, "{error}");
-    assert_eq!(db.host_get(KEPT, b"k").unwrap(), Some(b"a".to_vec()));
     assert_eq!(
-        db.catalogue().unwrap().schemas.len(),
+        jazz::db::block_on(db.host_get(KEPT, b"k")).unwrap(),
+        Some(b"a".to_vec())
+    );
+    assert_eq!(
+        jazz::db::block_on(db.catalogue()).unwrap().schemas.len(),
         1,
         "the change's schema was not published"
     );
@@ -92,7 +98,7 @@ fn a_failed_change_leaves_no_earlier_kept_value_behind() {
         &[(KEPT, b"k".to_vec(), b"a".to_vec())],
     ))
     .unwrap();
-    let before = db.catalogue().unwrap().schemas.len();
+    let before = jazz::db::block_on(db.catalogue()).unwrap().schemas.len();
     let other = {
         let schema = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("other").column("title", ColumnType::Text))
@@ -111,10 +117,16 @@ fn a_failed_change_leaves_no_earlier_kept_value_behind() {
     ];
     block_on(db.apply_catalogue_keeping(other, &kept)).expect_err("the second entry conflicts");
     assert_eq!(
-        db.host_get(KEPT, b"first").unwrap(),
+        jazz::db::block_on(db.host_get(KEPT, b"first")).unwrap(),
         None,
         "the entry written before the conflict is rolled back"
     );
-    assert_eq!(db.host_get(KEPT, b"k").unwrap(), Some(b"a".to_vec()));
-    assert_eq!(db.catalogue().unwrap().schemas.len(), before);
+    assert_eq!(
+        jazz::db::block_on(db.host_get(KEPT, b"k")).unwrap(),
+        Some(b"a".to_vec())
+    );
+    assert_eq!(
+        jazz::db::block_on(db.catalogue()).unwrap().schemas.len(),
+        before
+    );
 }

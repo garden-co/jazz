@@ -1139,9 +1139,8 @@ impl Owner {
         initial: Option<InitialCatalogue>,
         configure: impl FnOnce(jazz::db::DbConfig) -> jazz::db::DbConfig,
     ) -> Result<Self, CatalogueApplyError> {
-        let rows = file
-            .catalogue()
-            .map_err(|error| format!("read catalogue: {error}"))?;
+        let rows =
+            block_on(file.catalogue()).map_err(|error| format!("read catalogue: {error}"))?;
         let stored = any_stored_catalogue
             || rows
                 .schemas
@@ -1167,19 +1166,22 @@ impl Owner {
         };
         let config = configure(config(current));
         let db = match initial {
-            Some((change, kept)) => {
-                Db::open_file_with_catalogue_checked(config, file, change, &kept, |db| {
-                    crate::portable::deployment::check_stored_columns(db, &kept)
-                })
-            }
+            Some((change, kept)) => block_on(Db::open_file_with_catalogue_checked(
+                config,
+                file,
+                change,
+                &kept,
+                async |db| crate::portable::deployment::check_stored_columns(db, &kept).await,
+            )),
             None => block_on(Db::open_file(config, file)),
         }
         .map_err(CatalogueApplyError::from)?;
-        db.set_authority()?;
+        block_on(db.set_authority())?;
         db.require_session_pins();
         db.track_closed_subscribers();
         db.set_slow_query_threshold(slow_query_threshold());
-        let catalogue = Catalogue::load(&db.catalogue().map_err(|error| error.to_string())?)?;
+        let catalogue =
+            Catalogue::load(&block_on(db.catalogue()).map_err(|error| error.to_string())?)?;
         Ok(Self {
             db,
             sessions: HashMap::new(),
@@ -1209,7 +1211,8 @@ impl Owner {
     }
 
     fn reload_catalogue(&mut self) -> Result<(), String> {
-        self.catalogue = Catalogue::load(&self.db.catalogue().map_err(|error| error.to_string())?)?;
+        self.catalogue =
+            Catalogue::load(&block_on(self.db.catalogue()).map_err(|error| error.to_string())?)?;
         Ok(())
     }
 
@@ -1236,11 +1239,10 @@ impl Owner {
     ) -> (usize, Result<(), CatalogueApplyError>) {
         let mut ended = 0;
         let result = (|| {
-            self.db
-                .apply_catalogue_checked(change, kept, |db| {
-                    crate::portable::deployment::check_stored_columns(db, kept)
-                })
-                .map_err(CatalogueApplyError::from)?;
+            block_on(self.db.apply_catalogue_checked(change, kept, async |db| {
+                crate::portable::deployment::check_stored_columns(db, kept).await
+            }))
+            .map_err(CatalogueApplyError::from)?;
             if let Some(published) = supersedes {
                 ended = self.end_pinned_sessions(
                     &|bundle| *bundle != published,
@@ -1346,7 +1348,7 @@ impl Owner {
         egress: Arc<Egress>,
     ) -> Result<(), jazz::db::Error> {
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
-            self.db.set_identity_claims(identity, claims.clone());
+            block_on(self.db.set_identity_claims(identity, claims.clone()));
             claims
         });
         let queues = Rc::new(SessionQueues::new(
@@ -1354,12 +1356,12 @@ impl Owner {
             Arc::clone(&egress),
             &self.limits,
         ));
-        let subscriber = self.db.accept_pinned_subscriber(
+        let subscriber = block_on(self.db.accept_pinned_subscriber(
             Box::new(SessionTransport(Rc::clone(&queues))),
             identity,
             claims,
             bundle,
-        )?;
+        ))?;
         self.sessions.insert(
             session,
             OwnerSession {
@@ -1467,7 +1469,7 @@ impl Owner {
     /// go on without them) for the backoff.
     #[cfg(feature = "native")]
     fn finish_chunk_fetches(&mut self, done: jazz::chunk_store::ChunkIoDone) {
-        let finished = self.db.finish_chunk_fetches(done);
+        let finished = block_on(self.db.finish_chunk_fetches(done));
         let log = match &self.chunk_io {
             Some(runner) => runner.fetched(finished.is_err()),
             None => finished.is_err(),
@@ -1484,7 +1486,7 @@ impl Owner {
         // Fetches that failed in a batch hold fetches back as the fetch
         // lane's do, so the next batch does not ask again at once.
         let fetches_failed = done.fetches_failed();
-        let finished = self.db.finish_chunk_io(done);
+        let finished = block_on(self.db.finish_chunk_io(done));
         let log = match &self.chunk_io {
             Some(runner) => runner.returned_with(finished.is_err(), fetches_failed),
             None => finished.is_err(),
@@ -1712,9 +1714,7 @@ mod tests {
         let order_host = Arc::clone(&order);
         host_sender(&store)
             .send(Box::new(move |tables: &dyn HostTables| {
-                tables
-                    .host_put_many(PROBE, &[(b"k".to_vec(), b"v".to_vec())])
-                    .unwrap();
+                block_on(tables.host_put_many(PROBE, &[(b"k".to_vec(), b"v".to_vec())])).unwrap();
                 order_host.lock().unwrap().push("host");
             }))
             .unwrap();
@@ -1871,23 +1871,21 @@ mod tests {
             .start_runtime(schema(), NodeRole::Core, false)
             .unwrap();
         let panicked = block_on(runtime.with_db_for_test(|db| {
-            db.host_put_many_then_panic_for_test(
+            block_on(db.host_put_many_then_panic_for_test(
                 PROBE,
                 &[
                     (b"a".to_vec(), b"overwritten".to_vec()),
                     (b"half".to_vec(), b"done".to_vec()),
                 ],
-            )
+            ))
             .map_err(|error| error.to_string())
         }));
         assert!(panicked.is_err());
         assert_eq!(store.fault(), None, "restarted");
         let on_runtime = block_on(runtime.with_db_for_test(|db| {
             Ok((
-                db.host_get(PROBE, b"a")
-                    .map_err(|error| error.to_string())?,
-                db.host_get(PROBE, b"half")
-                    .map_err(|error| error.to_string())?,
+                block_on(db.host_get(PROBE, b"a")).map_err(|error| error.to_string())?,
+                block_on(db.host_get(PROBE, b"half")).map_err(|error| error.to_string())?,
             ))
         }))
         .unwrap();
@@ -2406,16 +2404,16 @@ mod tests {
                 exchange(owner);
             }
             let on_server = |owner: &Owner| {
-                owner
-                    .db
-                    .read(
+                block_on(
+                    owner.db.read(
                         &owner
                             .db
                             .prepare_query(&jazz::query::Query::from("docs"))
                             .unwrap(),
-                    )
-                    .unwrap()
-                    .len()
+                    ),
+                )
+                .unwrap()
+                .len()
             };
             let held = on_server(owner) == 1;
 
@@ -2850,9 +2848,7 @@ mod tests {
         // Marked offloaded once a batch's hand-back ran, not when its puts
         // reached the bucket.
         while block_on(runtime.run(|owner| {
-            owner
-                .db
-                .offloaded_large_value_nodes_for_test()
+            block_on(owner.db.offloaded_large_value_nodes_for_test())
                 .map_err(|error| error.to_string())
         }))
         .unwrap()

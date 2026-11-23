@@ -418,9 +418,7 @@ impl ServerCore {
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
     ) -> Result<(), CatalogueApplyError> {
-        let rows = self
-            .db()
-            .catalogue()
+        let rows = jazz::db::block_on(self.db().catalogue())
             .map_err(|error| CatalogueApplyError::Failed(error.to_string()))?;
         if crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None) != *expected {
             return Err(CatalogueApplyError::Rejected(
@@ -492,7 +490,13 @@ mod tests {
 
     fn core() -> ServerCore {
         let schema = JazzSchema::new(&source()).unwrap();
-        ServerCore::open(schema, StoreFile::memory().unwrap(), false, None).unwrap()
+        ServerCore::open(
+            schema,
+            jazz::db::block_on(StoreFile::memory()).unwrap(),
+            false,
+            None,
+        )
+        .unwrap()
     }
 
     /// Alice initializes a managed store, then Bob's table blocks a later
@@ -504,14 +508,23 @@ mod tests {
         use jazz::storage::{Storage, managed_emulation::EmulatedObjectSql};
         let backend = EmulatedObjectSql::open_in_memory().unwrap();
         let observer = Storage::from_backend(backend.clone());
-        observer
-            .execute_batch("CREATE TABLE tasks (v TEXT); INSERT INTO tasks VALUES ('bob')")
-            .unwrap();
-        let file = || StoreFile::from_storage(Storage::from_backend(backend.clone())).unwrap();
+        jazz::db::block_on(
+            observer.execute_batch("CREATE TABLE tasks (v TEXT); INSERT INTO tasks VALUES ('bob')"),
+        )
+        .unwrap();
+        let file = || {
+            jazz::db::block_on(StoreFile::from_storage(Storage::from_backend(
+                backend.clone(),
+            )))
+            .unwrap()
+        };
         let initial_file = file();
-        let before: i64 = observer
-            .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
-            .unwrap();
+        let before: i64 = jazz::db::block_on(observer.query_row(
+            "SELECT count(*) FROM sqlite_master",
+            [],
+            |row| row.get(0),
+        ))
+        .unwrap();
         let source = source();
         let later = SchemaBuilder::new()
             .table(TableSchema::builder("tasks").column("body", ColumnType::Text))
@@ -532,16 +545,19 @@ mod tests {
         );
         assert!(matches!(result, Err(CatalogueApplyError::Rejected(_))));
         assert_eq!(
-            observer
-                .query_row("SELECT count(*) FROM sqlite_master", [], |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
+            jazz::db::block_on(observer.query_row(
+                "SELECT count(*) FROM sqlite_master",
+                [],
+                |row| row.get::<_, i64>(0)
+            ))
+            .unwrap(),
             before
         );
         assert_eq!(
-            observer
-                .query_row("SELECT v FROM tasks", [], |row| row.get::<_, String>(0))
-                .unwrap(),
+            jazz::db::block_on(
+                observer.query_row("SELECT v FROM tasks", [], |row| row.get::<_, String>(0))
+            )
+            .unwrap(),
             "bob"
         );
         let retry = SchemaBuilder::new()
@@ -557,8 +573,7 @@ mod tests {
         };
         let core = ServerCore::open_deployment(schema.clone(), file(), None, None, change).unwrap();
         assert!(
-            core.db()
-                .catalogue()
+            jazz::db::block_on(core.db().catalogue())
                 .unwrap()
                 .schemas
                 .iter()
@@ -567,9 +582,7 @@ mod tests {
         core.close();
         let reopened = ServerCore::open(schema, file(), true, None).unwrap();
         assert!(
-            reopened
-                .db()
-                .catalogue()
+            jazz::db::block_on(reopened.db().catalogue())
                 .unwrap()
                 .schemas
                 .iter()
@@ -942,7 +955,7 @@ mod tests {
         core: &mut ServerCore,
         request: crate::portable::deployment::DeployRequest,
     ) -> crate::portable::catalogue::DeploymentResponse {
-        let rows = core.db().catalogue().unwrap();
+        let rows = jazz::db::block_on(core.db().catalogue()).unwrap();
         let index = crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None);
         let deployment = crate::portable::deployment::prepare(&index, request, 1_000)
             .unwrap_or_else(|error| panic!("deploy refused: {}", error.body));
@@ -983,7 +996,7 @@ mod tests {
         let mut core = core();
         let request = deploy_request(&source());
         let index = crate::portable::catalogue::CatalogueIndex::from_rows(
-            &core.db().catalogue().unwrap(),
+            &jazz::db::block_on(core.db().catalogue()).unwrap(),
             None,
         );
         let expected = crate::portable::deployment::prepare(&index, deploy_request(&source()), 1)
@@ -1003,8 +1016,7 @@ mod tests {
         assert!(response.changed);
         assert_eq!(bundle(&response), pinned);
         assert_eq!(
-            core.db()
-                .catalogue()
+            jazz::db::block_on(core.db().catalogue())
                 .unwrap()
                 .bundles
                 .iter()
@@ -1113,7 +1125,7 @@ mod tests {
     #[test]
     fn a_deployment_staged_on_a_catalogue_that_moved_is_refused() {
         let mut core = core();
-        let rows = core.db().catalogue().unwrap();
+        let rows = jazz::db::block_on(core.db().catalogue()).unwrap();
         let index = crate::portable::catalogue::CatalogueIndex::from_rows(&rows, None);
         let stale =
             crate::portable::deployment::prepare(&index, deploy_request(&source()), 1).unwrap();
@@ -1124,7 +1136,7 @@ mod tests {
             table.policies = TablePolicies::new().with_select(PolicyExpr::True);
         }
         assert!(deploy(&mut core, deploy_request(&other)).changed);
-        let moved = core.db().catalogue().unwrap();
+        let moved = jazz::db::block_on(core.db().catalogue()).unwrap();
 
         let refused = core
             .apply_catalogue(stale.staged.expected(), change, stale.staged.new_bundle())
@@ -1133,6 +1145,10 @@ mod tests {
             matches!(&refused, CatalogueApplyError::Rejected(message) if message.contains("catalogue changed")),
             "{refused:?}"
         );
-        assert_eq!(core.db().catalogue().unwrap(), moved, "nothing was applied");
+        assert_eq!(
+            jazz::db::block_on(core.db().catalogue()).unwrap(),
+            moved,
+            "nothing was applied"
+        );
     }
 }

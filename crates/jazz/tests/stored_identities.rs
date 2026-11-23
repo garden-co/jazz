@@ -9,6 +9,7 @@
 //! from #4366, carried onto the one catalogue (`_jazz_names`).
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -116,7 +117,7 @@ fn authority(schema: JazzSchema, node: u8) -> Db {
         AuthorSubject::SYSTEM,
     )))
     .unwrap();
-    db.set_authority().unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
     db
 }
 
@@ -124,7 +125,7 @@ fn authority(schema: JazzSchema, node: u8) -> Db {
 /// schema (see [`common::reinstall`]).
 fn authority_at(schema: JazzSchema, node: u8, path: &Path) -> Db {
     let db = open_at(schema, node, path);
-    db.set_authority().unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
     db
 }
 
@@ -255,8 +256,8 @@ fn identities_are_the_authoritys_and_differ_between_apps() {
         AuthorSubject::SYSTEM,
     )))
     .unwrap();
-    not_observed(local.table_identity("notes"));
-    not_observed(local.column_identity("notes", "text"));
+    not_observed(block_on(local.table_identity("notes")));
+    not_observed(block_on(local.column_identity("notes", "text")));
 }
 
 /// An authority's identities survive its restart: the namespace is minted
@@ -266,12 +267,12 @@ fn a_reopened_authority_keeps_its_identities() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("authority.sqlite");
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority().unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
     let table = db.table_identity("notes").unwrap();
     let column = db.column_identity("notes", "text").unwrap();
     drop(db);
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority().unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
     assert_eq!(db.table_identity("notes").unwrap(), table);
     assert_eq!(db.column_identity("notes", "text").unwrap(), column);
 }
@@ -315,7 +316,7 @@ fn a_replica_answers_with_the_authoritys_identities_once_it_mirrors_them() {
     let path = dir.path().join("client.sqlite");
     {
         let client = open_at(notes("notes", "text"), 1, &path);
-        not_observed(client.table_identity("notes"));
+        not_observed(block_on(client.table_identity("notes")));
         let _link = link(&client, &server);
         pump(&server, &[&client]);
         assert_eq!(
@@ -357,7 +358,7 @@ fn a_version_only_the_replica_admitted_has_no_identity_until_the_authority_admit
 
     block_on(client.admit_schema_with_lenses(v2.clone(), &[lens.clone()])).unwrap();
     let ahead = block_on(client.register_schema_view(v2.clone())).unwrap();
-    not_observed(ahead.table_identity("tasks"));
+    not_observed(block_on(ahead.table_identity("tasks")));
 
     block_on(server.admit_schema_with_lenses(v2, &[lens])).unwrap();
     pump(&server, &[&client]);
@@ -376,8 +377,8 @@ fn an_attached_store_marked_authority_mints_nothing() {
     .unwrap();
     let (c, _s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    client.set_authority().unwrap();
-    not_observed(client.table_identity("notes"));
+    jazz::db::block_on(client.set_authority()).unwrap();
+    not_observed(block_on(client.table_identity("notes")));
 }
 
 /// A replica of one app connected to another app's authority refuses it:
@@ -428,14 +429,14 @@ fn a_tab_behind_a_worker_answers_with_the_authoritys_identities() {
         AuthorSubject::SYSTEM,
     )))
     .unwrap();
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let _tab_link = link(&tab, &worker);
     pump(&worker, &[&tab]);
-    not_observed(tab.table_identity("notes"));
+    not_observed(block_on(tab.table_identity("notes")));
 
     let _worker_link = link(&worker, &server);
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     for _ in 0..6 {
         block_on(tab.tick()).unwrap();
         block_on(worker.tick()).unwrap();
@@ -485,7 +486,7 @@ fn a_column_added_again_with_another_type_is_a_new_column() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority().unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
     insert(
         &db,
         1,
@@ -501,7 +502,7 @@ fn a_column_added_again_with_another_type_is_a_new_column() {
     drop(db);
     // Reopened, so only the file knows `rank` held integers.
     let db = open_at(without_rank(), 1, &path);
-    db.set_authority().unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
     let db = common::reinstall(
         db,
         &path,
@@ -526,7 +527,7 @@ fn a_type_changed_in_place_is_a_new_column() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority().unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
     insert(
         &db,
         1,
@@ -535,7 +536,7 @@ fn a_type_changed_in_place_is_a_new_column() {
     let rank = db.column_identity("notes", "rank").unwrap();
     drop(db);
     let db = open_at(text_rank(), 1, &path);
-    db.set_authority().unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
     let text = db.column_identity("notes", "rank").unwrap();
     assert!(text.is_some());
     assert_ne!(text, rank);
@@ -954,7 +955,7 @@ fn a_pending_write_under_a_retyped_column_lands_where_the_authority_stores_it() 
             .with_migrations(vec![tasks(ColumnType::Boolean)], vec![retype]),
     ))
     .unwrap();
-    client.become_replica();
+    jazz::db::block_on(client.become_replica());
     let doing = Value::Nullable(Some(Box::new(text("doing"))));
     block_on(client.insert(
         "tasks",

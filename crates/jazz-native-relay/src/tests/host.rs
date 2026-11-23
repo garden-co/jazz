@@ -1104,9 +1104,8 @@ fn a_recovered_row_leaves_the_pending_set_when_the_server_accepts_it() {
     );
 
     let relay = second.open_relay(&capability);
-    let upstream = server
-        .accept_subscriber(Fixture::author(0x14), Default::default())
-        .unwrap();
+    let upstream =
+        block_on(server.accept_subscriber(Fixture::author(0x14), Default::default())).unwrap();
     for _ in 0..200 {
         second.carry(relay, &upstream);
         second.tick(foreground);
@@ -1244,8 +1243,12 @@ fn server_with_history(bundle: &serde_json::Value) -> (jazz::binding_host::Bindi
         DbConfig::new(head.clone(), server_identity).with_migrations(schemas, lenses),
     ))
     .unwrap();
-    server_db.set_authority().unwrap();
-    let server = jazz::binding_host::Binding::new(server_db, server_identity, true);
+    jazz::db::block_on(server_db.set_authority()).unwrap();
+    let server = jazz::db::block_on(jazz::binding_host::Binding::new(
+        server_db,
+        server_identity,
+        true,
+    ));
     server
         .insert(
             "todos",
@@ -1332,9 +1335,8 @@ fn a_foreground_reads_a_server_with_schema_history() {
         Some(&bundle),
     );
     let relay = fixture.open_relay(&capability);
-    let upstream = server
-        .accept_subscriber(Fixture::author(0x47), Default::default())
-        .unwrap();
+    let upstream =
+        block_on(server.accept_subscriber(Fixture::author(0x47), Default::default())).unwrap();
     let foreground = fixture.open(&capability);
 
     for _ in 0..200 {
@@ -1436,9 +1438,8 @@ fn a_relay_attached_without_the_apps_migrations_stops_its_refused_upstream() {
         None,
     );
     let relay = fixture.open_relay(&capability);
-    let upstream = server
-        .accept_subscriber(Fixture::author(0x49), Default::default())
-        .unwrap();
+    let upstream =
+        block_on(server.accept_subscriber(Fixture::author(0x49), Default::default())).unwrap();
     let foreground = fixture.open(&capability);
     fixture.tick(foreground);
     for _ in 0..50 {
@@ -1533,11 +1534,8 @@ fn a_store_opened_without_migrations_is_rebuilt_when_nothing_is_pending() {
             // A new connection: the server serves it afresh, as on a socket.
             generation = current;
             connections += 1;
-            upstream = Some(
-                server
-                    .accept_subscriber(author, Default::default())
-                    .unwrap(),
-            );
+            upstream =
+                Some(block_on(server.accept_subscriber(author, Default::default())).unwrap());
         }
         let server_link = upstream.as_ref().unwrap();
         if let Ok(frames) = wire.take_outbound_encoded() {
@@ -1653,9 +1651,7 @@ fn a_store_opened_without_migrations_with_unsynced_writes_is_left_for_the_app() 
     let first = relay
         .run(|worker| Ok(worker.upstream_generation()))
         .unwrap();
-    let server_link = server
-        .accept_subscriber(author, Default::default())
-        .unwrap();
+    let server_link = block_on(server.accept_subscriber(author, Default::default())).unwrap();
     for _ in 0..50 {
         if let Ok(frames) = wire.take_outbound_encoded() {
             server_link.receive(frames);
@@ -1785,11 +1781,8 @@ fn a_store_is_rebuilt_once_per_schema_version() {
             if generation != current {
                 generation = current;
                 connections += 1;
-                upstream = Some(
-                    server
-                        .accept_subscriber(author, Default::default())
-                        .unwrap(),
-                );
+                upstream =
+                    Some(block_on(server.accept_subscriber(author, Default::default())).unwrap());
             }
             let link = upstream.as_ref().unwrap();
             if let Ok(frames) = wire.take_outbound_encoded() {

@@ -8,6 +8,7 @@ use jazz::query::Query;
 use jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::path::Path;
 
 fn schema() -> JazzSchema {
@@ -39,8 +40,8 @@ fn open(node: u8, path: Option<&Path>) -> Binding {
         None => block_on(Db::open(config)),
     }
     .unwrap();
-    db.set_authority().unwrap();
-    Binding::new(db, identity, true)
+    jazz::db::block_on(db.set_authority()).unwrap();
+    jazz::db::block_on(Binding::new(db, identity, true))
 }
 
 fn title(value: &str) -> Vec<u8> {
@@ -131,7 +132,7 @@ fn the_original_node_can_wait_through_a_schema_view_and_after_reopen() {
         let alice = open(1, Some(&path));
         let receipt = insert(&alice, "retained");
         let view = block_on(alice.db.register_schema_view(schema())).unwrap();
-        let sibling = Binding::new(view, identity(1), true);
+        let sibling = jazz::db::block_on(Binding::new(view, identity(1), true));
         let cloned = receipt.clone();
         block_on(sibling.wait_for_write(&cloned, "global", None).unwrap()).unwrap();
         receipt

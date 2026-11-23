@@ -280,8 +280,8 @@ fn check_recovery_readiness(allow_registration: bool) {
             .with_migrations(migrations.schemas.clone(), migrations.lenses.clone()),
     ))
     .unwrap();
-    server.set_authority().unwrap();
-    let server = Binding::new(server, authority, true);
+    jazz::db::block_on(server.set_authority()).unwrap();
+    let server = block_on(Binding::new(server, authority, true));
 
     let seed = [0x42; 32];
     let subject = derive_user_id(&seed).to_string();
@@ -314,9 +314,7 @@ fn check_recovery_readiness(allow_registration: bool) {
     )
     .unwrap();
     let wire = relay.wire().unwrap();
-    let link = server
-        .accept_subscriber(author, Default::default())
-        .unwrap();
+    let link = block_on(server.accept_subscriber(author, Default::default())).unwrap();
     let wait_for_ready = |label: &str, device: &NativeRelayClient, timeout: Duration| {
         thread::scope(|scope| {
             let verify = scope.spawn(|| {

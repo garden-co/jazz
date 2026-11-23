@@ -290,7 +290,14 @@ impl World {
             },
         )))
         .unwrap();
-        let identity = |table: &str| Value::Uuid(server.table_identity(table).unwrap().unwrap().0);
+        let identity = |table: &str| {
+            Value::Uuid(
+                jazz::db::block_on(server.table_identity(table))
+                    .unwrap()
+                    .unwrap()
+                    .0,
+            )
+        };
         let (projects, boards) = (identity("projects"), identity("boards"));
         Self {
             server,
@@ -325,7 +332,7 @@ impl World {
         );
         let (client_side, server_side) = duplex();
         block_on(db.connect_upstream(client_side));
-        self.server.accept_subscriber(server_side, who).unwrap();
+        jazz::db::block_on(self.server.accept_subscriber(server_side, who)).unwrap();
         for table in [MEMBERS, "projects"] {
             let prepared = db.prepare_query(&Query::from(table)).unwrap();
             let stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -1040,7 +1047,7 @@ fn an_unknown_table_identity_grants_nothing_until_the_names_are_confirmed() {
         },
     )))
     .unwrap();
-    replica.become_replica();
+    block_on(replica.become_replica());
     let project = id(0x10);
     // The replica holds the project and alice's member row, written in one
     // unit before it ever met its authority.
@@ -1075,10 +1082,7 @@ fn an_unknown_table_identity_grants_nothing_until_the_names_are_confirmed() {
     );
     let (client_side, server_side) = duplex();
     let _upstream = block_on(replica.connect_upstream(client_side));
-    world
-        .server
-        .accept_subscriber(server_side, alice())
-        .unwrap();
+    jazz::db::block_on(world.server.accept_subscriber(server_side, alice())).unwrap();
     let _stream = block_on(replica.subscribe(&projects, ReadOpts::default())).unwrap();
     for _ in 0..40 {
         block_on(replica.tick()).unwrap();
@@ -1088,7 +1092,11 @@ fn an_unknown_table_identity_grants_nothing_until_the_names_are_confirmed() {
         world.has_row("projects", project),
         "the authority accepted the unit"
     );
-    assert!(replica.table_identity("projects").unwrap().is_some());
+    assert!(
+        jazz::db::block_on(replica.table_identity("projects"))
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(read(&replica), 1, "the confirmed identity binds");
 }
 
@@ -1229,7 +1237,12 @@ fn an_unknown_table_identity_grants_nothing_under_not() {
         },
     )))
     .unwrap();
-    let projects = Value::Uuid(server.table_identity("projects").unwrap().unwrap().0);
+    let projects = Value::Uuid(
+        jazz::db::block_on(server.table_identity("projects"))
+            .unwrap()
+            .unwrap()
+            .0,
+    );
     let replica = block_on(Db::open(DbConfig::new(
         schema(),
         DbIdentity {
@@ -1238,7 +1251,7 @@ fn an_unknown_table_identity_grants_nothing_under_not() {
         },
     )))
     .unwrap();
-    replica.become_replica();
+    block_on(replica.become_replica());
     block_on(replica.insert(
         "notes",
         BTreeMap::from([("scopeId".to_owned(), projects)]),
@@ -1255,7 +1268,10 @@ fn an_unknown_table_identity_grants_nothing_under_not() {
         .unwrap()
         .len()
     };
-    assert!(!matches!(replica.table_identity("notes"), Ok(Some(_))));
+    assert!(!matches!(
+        jazz::db::block_on(replica.table_identity("notes")),
+        Ok(Some(_))
+    ));
     assert_eq!(
         read(&replica),
         0,
@@ -1263,13 +1279,17 @@ fn an_unknown_table_identity_grants_nothing_under_not() {
     );
     let (client_side, server_side) = duplex();
     let _upstream = block_on(replica.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, alice())).unwrap();
     let _stream = block_on(replica.subscribe(&notes, ReadOpts::default())).unwrap();
     for _ in 0..40 {
         block_on(replica.tick()).unwrap();
         block_on(server.tick()).unwrap();
     }
-    assert!(replica.table_identity("notes").unwrap().is_some());
+    assert!(
+        jazz::db::block_on(replica.table_identity("notes"))
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(read(&replica), 1, "the confirmed identity binds");
 }
 

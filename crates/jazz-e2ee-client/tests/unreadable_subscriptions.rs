@@ -243,7 +243,7 @@ fn a_row_whose_key_arrives_leaves_the_list_as_it_joins_the_result() {
     assert_eq!(told.unreadable[0].code, "key-pending");
 
     block_on(alice.keep(key)).unwrap();
-    db.refresh_reads_of(&["notes"]).unwrap();
+    jazz::db::block_on(db.refresh_reads_of(&["notes"])).unwrap();
     let event = stream.try_next_event().expect("the row arrives");
     let SubscriptionEvent::Delta {
         added, unreadable, ..
