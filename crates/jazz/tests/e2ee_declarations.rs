@@ -1142,7 +1142,7 @@ fn a_version_without_declarations_keeps_the_system_tables_after_an_encrypted_one
     // The system tables' derived policies still follow v1's declarations.
     assert_eq!(
         loaded.bundle().to_hex(),
-        "54be8c5c6e926472ea55d9be47c8232ccb6dfc7e22c9aac8665271eb065718dd"
+        "ef6fae8b8d7e11c3bc684201d8ca9a6566e4a5581734e5a87d9786766f1f2c73"
     );
     let error = refusal(load_client_current(file.as_bytes()));
     assert!(error.contains("declares end-to-end encryption"), "{error}");
@@ -1197,7 +1197,7 @@ fn decrypting_every_column_keeps_the_system_tables() {
     assert!(declarations.tables.is_empty(), "{:?}", declarations.tables);
     assert_eq!(
         loaded.bundle().to_hex(),
-        "d719418bfc7378187bc9f2f654eb0de1a94f7eb541eb0febd313ce2ef05a8c55"
+        "583f00e5a15a00b10f8dbcabaacd8f98fbd155788ff7d9a507c147156bf86172"
     );
 }
 

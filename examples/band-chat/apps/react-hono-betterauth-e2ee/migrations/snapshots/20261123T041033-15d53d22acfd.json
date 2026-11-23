@@ -841,7 +841,10 @@
         "nullable": false
       }
     ],
-    "composite_indexes": [["scopeId", "identifier", "keyEpochId"]],
+    "composite_indexes": [
+      ["scopeId", "identifier", "keyEpochId"],
+      ["scopeId", "identifier", "recipientAccountId", "keyEpochId"]
+    ],
     "indexed_columns": ["recipientAccountId"]
   },
   "__e2ee_space_successors": {
