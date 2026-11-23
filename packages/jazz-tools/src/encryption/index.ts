@@ -216,9 +216,10 @@ export class Encryption {
    * account's verification, which can need the server. Rejects only when
    * the runtime can no longer answer. Through `db.encryption` on a browser
    * Db that started thin, it first waits for the encryption runtime to load
-   * and then for the account's verification (a failed verification does not
-   * reject it), so a returning device can be waiting for those alone, and it
-   * rejects if the runtime does not load in time.
+   * and then for the account's verification, so a returning device can be
+   * waiting for those alone. Both share one 30-second deadline: it rejects if
+   * the runtime has not loaded by then, while a verification that failed or
+   * is still running at the deadline does not reject it.
    */
   async readable(): Promise<void> {
     for (;;) {

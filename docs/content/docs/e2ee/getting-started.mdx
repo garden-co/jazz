@@ -232,8 +232,9 @@ once. A device that has never synced (a new store) cannot tell yet which of its 
 its live queries on encrypted columns stay loading until its first sync, however long that takes,
 rather than show an empty result. `db.encryption.readable()` resolves when the device can read: after
 its first sync, and in a browser that started thin, also once the encryption runtime has loaded and
-checked the account (a returning device waits only for those). It rejects if the encryption runtime
-does not load in time or the Db closes:
+checked the account (a returning device waits only for those). Loading and the check share a
+30-second deadline. It rejects if the encryption runtime has not loaded by then or the Db closes; an
+account check that fails or is still running at the deadline does not stop it:
 
 ```ts
 let reading: "waiting" | "ready" | "failed" = "waiting";
