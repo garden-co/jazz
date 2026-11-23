@@ -559,7 +559,8 @@ impl Core {
 
     /// Writes the row with this id: inserts it if there is none (then
     /// `row_json` is a whole row, as for an insert), otherwise sets the
-    /// columns `row_json` names (a partial row updates). Returns the row.
+    /// columns `row_json` names (a partial row updates). Returns the row as
+    /// written here, once it reached the tier.
     pub fn upsert(
         &self,
         table_name: &str,
@@ -580,8 +581,12 @@ impl Core {
             let client = client_for(client, tx)?;
             let committed = client.upsert(&name, *id.uuid(), cells.into_iter().collect())?;
             mark_wrote(tx);
+            // Read before the wait, as insert answers with what it wrote: by
+            // the time the server accepts it, someone may have deleted or
+            // changed the row. A refusal still wins over a failed read.
+            let written = read_back(&client, &table, &name, id).await;
             settle(&client, committed, tier).await?;
-            read_back(&client, &table, &name, id).await
+            written
         }))?;
         Ok(row.to_string())
     }
@@ -1118,8 +1123,9 @@ impl Core {
     /// The end user's session as JSON (`{ "status": "signedIn", "user": … }`
     /// and so on); `None` for a local app or a backend.
     pub fn session_state(&self) -> Result<Option<String>> {
-        Ok(self
-            .open_jazz()?
+        let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("session")?;
+        Ok(jazz
             .session()
             .map(|session| serde_json::to_string(&session.state()).unwrap_or_default()))
     }
@@ -1131,8 +1137,9 @@ impl Core {
 
     /// Asks the token provider for a fresh token and reconnects with it.
     pub fn refresh(&self) -> Result<()> {
-        let session = self
-            .open_jazz()?
+        let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("refresh")?;
+        let session = jazz
             .session()
             .cloned()
             .ok_or_else(|| refused("refresh is for an end user's app (\"auth\")"))?;
@@ -1144,8 +1151,9 @@ impl Core {
     /// own sign-in (`bearer`, a token from it): the session becomes that
     /// user's, on the device's account. Returns the user as JSON.
     pub fn link(&self, bearer: &str) -> Result<String> {
-        let session = self
-            .open_jazz()?
+        let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("link")?;
+        let session = jazz
             .session()
             .cloned()
             .ok_or_else(|| refused("link is for an end user's app (\"auth\")"))?;
@@ -1159,9 +1167,11 @@ impl Core {
         Ok(serde_json::to_string(&user).unwrap_or_default())
     }
 
-    /// Signs the end user out and closes the app.
+    /// Signs the end user out and closes the app; a session's handle
+    /// refuses and stays open.
     pub fn sign_out(&self) -> Result<()> {
         let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("signOut")?;
         if jazz.session().is_none() {
             return Err(refused("sign out is for an end user's app (\"auth\")"));
         }
@@ -1190,8 +1200,8 @@ impl Core {
     }
 
     /// Closes the app and deletes its local store (TS's
-    /// `deleteClientStorage`). Refused (the app left open) while another
-    /// open app holds the same store.
+    /// `deleteClientStorage`). It holds the store's lock until the files
+    /// are gone.
     pub fn delete_client_storage(&self) -> Result<()> {
         let jazz = self.open_jazz()?;
         if self.derived {
@@ -1208,8 +1218,8 @@ impl Core {
             Ok(())
         }));
         let deleted = block_on(jazz.delete_client_storage());
-        // Refused as held by another process, the client has stopped all
-        // the same; by another app here, it runs on.
+        // Refused as held, only an app that had stopped already is stopped:
+        // while it runs nothing else can hold its store.
         let stopped = || block_on(jazz.with_client(|_| async { Ok(()) })).is_err();
         if !matches!(deleted, Err(jazz_app_support::Error::StoreHeld(..))) || stopped() {
             self.closed.store(true, Ordering::Release);
@@ -1232,6 +1242,7 @@ impl Core {
                     .map(|error| serde_json::to_string(&error).unwrap_or_default()),
             ),
             "session" => {
+                jazz.refuse_for_user("watching the session")?;
                 let session = jazz
                     .session()
                     .ok_or_else(|| refused("watching the session is for an end user's app"))?;
@@ -1283,6 +1294,11 @@ impl Core {
     /// `None`, or a zero timeout, closes at once.
     pub fn close_within(&self, timeout: Option<std::time::Duration>) -> Result<()> {
         let drain = timeout.filter(|t| !t.is_zero() && !self.derived);
+        // Before `closed` is set: a second close returns at once, and an open
+        // of the store right after it must wait for this one, not be refused.
+        if !self.derived {
+            self.jazz.begin_stopping();
+        }
         // The host's callbacks stop here, even when signing out already
         // ended the app; but after draining, which may need a fresh token.
         if drain.is_none() {

@@ -31,6 +31,8 @@ test-relay = [
 ]
 
 [dependencies]
+# Reads an old store's authors before the engine opens it.
+rusqlite = "0.40"
 axum = { version = "0.8.9", optional = true, default-features = false, features = [
   "http1",
   "tokio",
@@ -57,6 +59,15 @@ tokio-tungstenite = { version = "0.29", optional = true, default-features = fals
 ] }
 # Only for the `test-relay` feature (the `jazz-app-test-relay` bin).
 futures = { version = "0.3", optional = true }
+
+# The store's and a new device key's locks on Android, where std's file
+# locks are "not supported" (`lifecycle::flock`).
+[target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"
+
+# `lifecycle::flock`'s tests run it on Linux, beside std's lock.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
 
 [[bin]]
 name = "jazz-app-test-relay"

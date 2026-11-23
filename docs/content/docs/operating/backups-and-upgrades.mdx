@@ -92,6 +92,47 @@ once the new deployment has woken it, promoting the old deployment again doesn't
 To try an upgrade first, deploy it to a preview branch: with the per-branch setup, that preview gets
 a core of its own, separate from production's (a dry run with its own data, not a copy).
 
+## Upgrading from beta.0 to beta.1
+
+### Kotlin (experimental): install from the GitHub release
+
+`jazz-kotlin` and `jazz-kotlin-android` aren't published to Maven Central from `2.0.0-beta.1`, so
+changing the version of a `tools.jazz:` dependency to beta.1 fails to resolve. Until they're in a
+Maven repository of our own:
+
+1. Download the jar (JVM) or the AAR (Android) from the
+   [v2.0.0-beta.1 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-beta.1) into
+   `libs/`, and check it against that release's `SHA256SUMS-languages`
+   ([commands](/docs/setup/kotlin#install)).
+2. Replace the `tools.jazz:` dependency with the file and the dependencies it used to bring:
+
+```kotlin title="build.gradle.kts"
+// before
+implementation("tools.jazz:jazz-kotlin:<version>")
+
+// after
+implementation(files("libs/jazz-kotlin-2.0.0-beta.1.jar"))
+implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+implementation("net.java.dev.jna:jna:5.17.0")
+```
+
+```kotlin title="app/build.gradle.kts"
+// before
+implementation("tools.jazz:jazz-kotlin-android:<version>")
+
+// after
+implementation(files("libs/jazz-kotlin-android-2.0.0-beta.1.aar"))
+implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+implementation("net.java.dev.jna:jna:5.17.0@aar")
+```
+
+3. Make the download part of your CI too, or commit the file.
+
+Keep `mavenCentral()` for those dependencies. Your code and generated bindings don't change for
+this, and versions already on Maven Central stay there.
+
 ## Upgrading from alpha.70 to beta.0
 
 `2.0.0-beta.0` is the first beta of Jazz 2. Data directories, Vercel and Durable Object cores, and the sync

@@ -146,7 +146,7 @@ this document or public receipts.
 ## One-approval publish (release-publish.yml, being proven)
 
 `.github/workflows/release-publish.yml` publishes everything (npm, crates,
-Maven Central, Go, Swift, Inspector, GitHub release) with one run and one
+Go, Swift, Inspector, GitHub release with the Kotlin files) with one run and one
 approval of the `publish` environment. It has published every release since
 2.0.0-alpha.68; the old per-registry workflows are retired:
 
@@ -162,11 +162,16 @@ gh workflow run release-publish.yml --ref main \
   `legacy-run-ids` instead). It checks them, runs `cargo package` on every crate, embeds and
   tests the Go module, and attaches every asset to the draft release (create
   the draft with its notes first, with `github-release.yml`).
-- Every publish leg (npm, crates.io, Maven Central, Go tag, Swift mirror)
+- Every publish leg (npm, crates.io, Go tag, Swift mirror, and Maven while
+  Kotlin's channel is `central`)
   waits on `publish` at the same moment: approve them together. Inspector
   stages and promotes after npm; the draft is published as Latest last.
 - Each leg skips what is already published: after a partial failure, use
   "Re-run failed jobs" (the re-run waits for approval again).
+- While Maven Central is paused ([Kotlin](#kotlin)), the Maven leg needs no
+  approval: it signs the bundle with a throwaway key, checks it and uploads
+  nothing. It must still succeed. "Maven Central serves it" is skipped. The
+  next point applies only while the channel is `central`.
 - `maven-publishing-type` is `AUTOMATIC`: the Maven leg returns once Central
   is PUBLISHING, so the GitHub release goes public without waiting for
   Central's ~11 min of publishing; the "Maven Central serves it" job then
@@ -297,8 +302,38 @@ crates are published with a short-lived token the first time:
    closure later needs steps 2 to 4 for that crate alone. Until then, the
    workflow fails for it with a message naming the missing token.
 
-## Kotlin on Maven Central
+## Kotlin
 
+`dev/release-publish/kotlin-channel.sh` is the one switch for where Kotlin is
+released. It's read from the workflow's commit, so dispatch
+`release-publish.yml` with `--ref main`: an older commit's workflow has no switch.
+
+- **`github-release` (now, from beta.1):** Maven Central is paused
+  ([jazz#6020](https://github.com/garden-co/jazz/issues/6020)). Users install
+  the release's jar and AAR and declare their dependencies (`setup/kotlin.mdx`).
+  No Central upload happens for any version, and `maven-portal-dry-run` is refused.
+- **`central`:** the Maven leg gets the `publish` environment, signs with the
+  release key and uploads.
+
+`registry-smoke.yml` installs each version from where it was released: up to
+beta.0 from Central, later ones from the GitHub release (public URLs, checked
+against `SHA256SUMS-languages`; no fallback to a source build).
+
+While installs are from the release's files, each release's Version Packages
+review bumps the version in `setup/kotlin.mdx`'s Install section (the two
+`VERSION=` lines and the two file names). The upgrade guide keeps its own.
+The `publish` environment also accepts `release` as a ref: never dispatch from
+it, as its workflow has the switch only once main is merged into it.
+
+To switch, change `publish_to` in that script and give the versions released
+in between their own line in its `case`, so their smoke keeps working. Change
+`setup/kotlin.mdx`, the upgrade guide and the draft notes with it. Changing
+where Kotlin publishes needs Anselm's approval. `release-maven` artifacts expire after
+90 days: backfill a paused version before its run's do.
+
+### Maven Central
+
+When the channel is `central`,
 `jazz-kotlin` (the JVM jar, with every platform's `libjazz_ffi` inside) and
 `jazz-kotlin-android` (the AAR) publish to Maven Central as
 `tools.jazz:jazz-kotlin` and `tools.jazz:jazz-kotlin-android`, at jazz-tools'

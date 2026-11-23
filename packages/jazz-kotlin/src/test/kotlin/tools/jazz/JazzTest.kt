@@ -245,6 +245,121 @@ class JazzTest {
     }
 
     @Test
+    fun session_and_sync_status_cant_be_cast_to_mutable_flows(): Unit = runBlocking {
+        val jazz = open()
+        assertTrue(jazz.session !is kotlinx.coroutines.flow.MutableStateFlow<*>)
+        assertTrue(jazz.syncStatus !is kotlinx.coroutines.flow.MutableStateFlow<*>)
+    }
+
+    /** A signed-in app whose delete throws [failure]; [gone] says whether that took the handle with it. */
+    private class FailingDelete(
+        private val failure: Throwable?,
+        private val gone: Boolean,
+    ) : Native by FakeNative() {
+        var watching = 0
+        private var deleted = false
+        override fun account(): String? = if (deleted && gone) throw JazzException.Closed() else "a"
+        override fun sessionState(): String =
+            """{"status":"signedIn","user":{"account":"a","kind":"backend","issuer":"i","subject":"alice"}}"""
+        override fun watch(sync: Boolean, onChange: (String) -> Unit): () -> Unit {
+            watching++
+            return { watching-- }
+        }
+        override fun deleteClientStorage() {
+            deleted = true
+            failure?.let { throw it }
+        }
+    }
+
+    @Test
+    fun a_delete_client_storage_that_loses_the_handle_ends_the_watches(): Unit = runBlocking {
+        val cases = listOf(
+            null,
+            JazzException.Io("disk failed"),
+            JazzException.Closed(),
+            IllegalStateException("the binding failed"),
+            // Another process holds the store: refused, with this app stopped.
+            JazzException.Refused("open in another process"),
+        )
+        for (failure in cases) {
+            val native = FailingDelete(failure, gone = true)
+            Jazz.opener = Native.Opener { native }
+            val jazz = Jazz.open("{}", JazzConfig())
+            assertTrue(jazz.session.value is SessionState.SignedIn)
+            jazz.syncStatus.value
+            assertEquals(2, native.watching)
+            val thrown = runCatching { jazz.deleteClientStorage() }.exceptionOrNull()
+            assertEquals<Any?>(failure?.let { it::class }, thrown?.let { it::class })
+            assertEquals(0, native.watching, "$failure")
+            assertEquals(SessionState.SignedOut, jazz.session.value, "$failure")
+        }
+    }
+
+    @Test
+    fun a_refused_delete_client_storage_keeps_the_watches(): Unit = runBlocking {
+        val native = FailingDelete(JazzException.Refused("open in another app of this process"), gone = false)
+        Jazz.opener = Native.Opener { native }
+        val jazz = Jazz.open("{}", JazzConfig())
+        assertTrue(jazz.session.value is SessionState.SignedIn)
+        jazz.syncStatus.value
+        assertFailsWith<JazzException.Refused> { jazz.deleteClientStorage() }
+        assertEquals(2, native.watching)
+        assertTrue(jazz.session.value is SessionState.SignedIn)
+    }
+
+    @Test
+    fun a_sign_out_or_close_that_throws_still_ends_the_watches_and_rethrows(): Unit = runBlocking {
+        val calls = listOf<Pair<String, suspend (Jazz) -> Unit>>("signOut" to { it.signOut() }, "close" to { it.close() })
+        for ((name, call) in calls) {
+            var watching = 0
+            val native = object : Native by FakeNative() {
+                override fun sessionState(): String =
+                    """{"status":"signedIn","user":{"account":"a","kind":"backend","issuer":"i","subject":"alice"}}"""
+                override fun watch(sync: Boolean, onChange: (String) -> Unit): () -> Unit {
+                    watching++
+                    return { watching-- }
+                }
+                override fun signOut(): Unit = throw JazzException.Io("$name failed")
+                override fun close(): Unit = throw JazzException.Io("$name failed")
+            }
+            Jazz.opener = Native.Opener { native }
+            val jazz = Jazz.open("{}", JazzConfig())
+            assertTrue(jazz.session.value is SessionState.SignedIn)
+            jazz.syncStatus.value
+            val thrown = assertFailsWith<JazzException.Io> { call(jazz) }
+            assertEquals("$name failed", thrown.message)
+            assertEquals(0, watching, name)
+            assertEquals(SessionState.SignedOut, jazz.session.value, name)
+        }
+    }
+
+    @Test
+    fun cancelling_a_delete_client_storage_still_ends_the_watches(): Unit = runBlocking {
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        var watching = 0
+        val native = object : Native by FakeNative() {
+            override fun watch(sync: Boolean, onChange: (String) -> Unit): () -> Unit {
+                watching++
+                return { watching-- }
+            }
+            override fun deleteClientStorage() {
+                entered.countDown()
+                release.await()
+            }
+        }
+        Jazz.opener = Native.Opener { native }
+        val jazz = Jazz.open("{}", JazzConfig())
+        jazz.syncStatus.value
+        val deleting = launch(Dispatchers.Default) { jazz.deleteClientStorage() }
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        deleting.cancel()
+        release.countDown()
+        deleting.join()
+        assertEquals(0, watching)
+    }
+
+    @Test
     fun sign_out_reads_signed_out_even_when_the_watch_closes_first(): Unit = runBlocking {
         // As jazz-ffi can: signing out ends the session watch with `closed`
         // before (or without) a final `signedOut` state.
@@ -265,6 +380,40 @@ class JazzTest {
         assertTrue(jazz.session.value is SessionState.SignedIn)
         jazz.signOut()
         assertEquals(SessionState.SignedOut, jazz.session.value)
+    }
+
+    @Test
+    fun upsert_keeps_the_jvm_signature_from_before_it_took_a_tier() {
+        // Code compiled against it calls it by this exact descriptor.
+        Jazz::class.java.getMethod(
+            "upsert",
+            Table::class.java,
+            String::class.java,
+            Any::class.java,
+            kotlin.coroutines.Continuation::class.java,
+        )
+    }
+
+    @Test
+    fun upsert_passes_its_tier(): Unit = runBlocking {
+        val tiers = ArrayList<String?>()
+        val native = object : Native by FakeNative() {
+            override fun upsert(table: String, id: String, rowJson: String): String {
+                tiers += null
+                return """{"id":"$id","title":"t","rank":1,"kind":"c"}"""
+            }
+            override fun upsertAt(table: String, id: String, rowJson: String, tier: String): String {
+                tiers += tier
+                return """{"id":"$id","title":"t","rank":1,"kind":"c"}"""
+            }
+        }
+        Jazz.opener = Native.Opener { native }
+        val jazz = Jazz.open("{}", JazzConfig())
+        val row = ItemInsert(title = "t", rank = 1.0, kind = ItemKind.C)
+        jazz.upsert(Items, "i", row)
+        jazz.upsert(Items, "i", row, WriteTier.Local)
+        jazz.upsert(Items, "i", row, WriteTier.Global)
+        assertEquals(listOf(null, "local", "global"), tiers)
     }
 
     @Test

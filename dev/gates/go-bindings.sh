@@ -22,6 +22,15 @@ fi
 git config --global --add safe.directory "${root}" || true
 
 cargo build -p jazz-ffi
+# Test the library just built: jazz-go prefers target/release, where an
+# older build may be left. -count=1 below for the same reason: Go's test
+# cache doesn't see a library loaded at run time change.
+case "$(uname -s)" in
+  Darwin) ffi_library="libjazz_ffi.dylib" ;;
+  *) ffi_library="libjazz_ffi.so" ;;
+esac
+export JAZZ_FFI_LIBRARY="${root}/target/debug/${ffi_library}"
+test -f "${JAZZ_FFI_LIBRARY}"
 cargo build -p jazz-tools --bin jazz-tools
 # The tests' stand-in for a TS main backend's /jazz (jazz#5754).
 cargo build -p jazz-app-support --features test-relay --bin jazz-app-test-relay
@@ -67,13 +76,13 @@ for dir in crates/jazz-codegen/tests/apps/*/jazzapp crates/jazz-codegen/tests/go
   (cd "${module}" && GOFLAGS=-mod=mod go vet ./... && test -z "$(gofmt -l .)") || { echo "${dir} fails go vet or gofmt"; exit 1; }
 done
 
-# jazz-go needs no cgo: it loads target/debug's libjazz_ffi.so at run time.
+# jazz-go needs no cgo: it loads JAZZ_FFI_LIBRARY at run time.
 (cd packages/jazz-go && CGO_ENABLED=0 go build ./... && CGO_ENABLED=0 go vet ./...)
 (cd examples/stage-plan/apps/go-cli && CGO_ENABLED=0 go build ./...)
 # The race detector needs cgo; purego runs under it too.
-(cd packages/jazz-go && CGO_ENABLED=1 go test -race ./...)
-(cd examples/stage-plan/apps/go-cli && CGO_ENABLED=1 go test -race -v ./...)
-(cd examples/docs/todo-client-go && CGO_ENABLED=1 go test -race -v ./...)
+(cd packages/jazz-go && CGO_ENABLED=1 go test -race -count=1 ./...)
+(cd examples/stage-plan/apps/go-cli && CGO_ENABLED=1 go test -race -v -count=1 ./...)
+(cd examples/docs/todo-client-go && CGO_ENABLED=1 go test -race -v -count=1 ./...)
 
 # The same suite with StagePlan's main backend in TypeScript (createJazz,
 # go-cli/ts-main) as the server, and Go backend clients of it: needs the
