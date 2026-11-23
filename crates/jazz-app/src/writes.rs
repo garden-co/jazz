@@ -5,7 +5,7 @@ use jazz::tools::{DurabilityTier, JazzClient, ObjectId, TransactionId};
 
 use crate::error::{Error, Result};
 use crate::handle::Jazz;
-use crate::table::{Insert, Table};
+use crate::table::{Insert, Table, Updatable};
 
 /// What a write does once committed locally: on a [`Jazz::durable`]
 /// handle, wait until it reached that tier.
@@ -85,7 +85,10 @@ impl Jazz {
 
     /// Writes the row with this id: inserts it if there is none, otherwise
     /// replaces the columns `new` sets. Returns the row as stored.
-    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         let implementations = self.info.implementations.clone();
         let settle = self.settler()?;
         self.with_client(move |client| async move {

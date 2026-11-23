@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { createCliFixtures } from "../../tests/cli/fixtures.js";
 import { writeAppFiles } from "../dev/codegen-napi.js";
 import { createAppMigration, generateApp } from "../dev/project.js";
+import { printTs } from "../printer/cli.js";
 
 const { createWorkspace } = createCliFixtures(import.meta.url);
 
@@ -359,6 +360,32 @@ describe("later versions of an encrypted app", () => {
       chat({ text: "s.int().encrypted()", rooms: ", topic: s.string().optional()" }),
     );
     await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(CONVERSION);
+  });
+
+  it("round-trips through the printer, which writes each version's declarations beside its snapshot", async () => {
+    const root = await firstVersion();
+    const files = await secondVersion(root, chat({ rooms: ", topic: s.string().optional()" }));
+
+    // A project with only the app files, printed back to schema.ts and migrations/.
+    const { root: printed } = await createWorkspace();
+    await writeFile(join(printed, "jazz.app.json"), files.app);
+    await writeFile(join(printed, "jazz.permissions.json"), files.permissions);
+    await printTs({ dir: printed });
+    const snapshots = (await readdir(join(printed, "migrations", "snapshots"))).sort();
+    const sidecars = snapshots.filter((file) => file.endsWith(".encryption.json"));
+    expect(sidecars.map((file) => file.replace(".encryption.json", ".json"))).toEqual(
+      snapshots.filter((file) => !file.endsWith(".encryption.json")),
+    );
+    for (const sidecar of sidecars)
+      expect(
+        JSON.parse(await readFile(join(printed, "migrations", "snapshots", sidecar), "utf8")),
+      ).toEqual({ tables: { messages: TEXT_ENTRY } });
+
+    // generate reads the printed migrations, history and declarations as the originals.
+    await rm(join(printed, "jazz.app.json"));
+    const again = await generated(printed);
+    expect(withoutMarker(again.app)).toEqual(withoutMarker(files.app));
+    expect(again.permissions).toEqual(files.permissions);
   });
 
   it("names the version whose declarations are missing", async () => {
