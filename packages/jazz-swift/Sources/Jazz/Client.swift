@@ -82,6 +82,10 @@ public struct Config: Sendable {
     public var storage: Storage
     public var appId: String?
     public var serverUrl: String?
+    /// Where a persistent store goes. An end user's is in
+    /// `dataDir/<account>/`, so each user of one directory has their own; an
+    /// app without a user refuses a store in `dataDir` itself that a
+    /// signed-in user wrote.
     public var dataDir: String?
     /// An end user signing in through the app's Jazz endpoint (`serverUrl`).
     public var auth: Auth?

@@ -400,8 +400,9 @@ class StagePlanTest {
         showNamed(jazz, "Lifecycle")
         jazz.deleteClientStorage()
         kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { tasksOf(jazz, jazzapp.Show("x", "x", "x", "x", "x", me)) }
-        // The store is gone (an empty lock file may stay behind).
-        val left = dir.listFiles()?.filter { it.name != "jazz.lock" }.orEmpty()
+        // The store is gone (an empty lock file may stay behind), from the
+        // user's dataDir/<account>/.
+        val left = dir.walkTopDown().filter { it.isFile && it.name != "jazz.lock" }.toList()
         kotlin.test.assertTrue(left.isEmpty(), "$left")
     }
 
@@ -439,7 +440,9 @@ class StagePlanTest {
         if (!System.getProperty("os.name").startsWith("Linux")) return@runBlocking
         val dir = kotlin.io.path.createTempDirectory("jazz-held-process").toFile()
         val auth = tools.jazz.JazzAuth.Bearer { "token-user-other" }
-        val lock = java.io.File(dir, "jazz.lock")
+        // A user's store is in dataDir/<account>/.
+        val account = openAsUser(endpoint, appId, auth, dir.path).use { me(it) }
+        val lock = java.io.File(java.io.File(dir, account), "jazz.lock")
         // One process holds it, this test's own child: the shell opens the file,
         // flock locks that open file and exits, and sleep inherits it. It is
         // killed with SIGKILL, as a killed app would be: a host that ignores

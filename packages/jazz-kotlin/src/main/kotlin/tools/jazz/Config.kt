@@ -48,6 +48,9 @@ public data class JazzConfig(
     /**
      * The directory of a [Storage.Persistent] store. One app at a time has it
      * open: share that [Jazz], as opening a second one throws [JazzException.Refused].
+     * A signed-in user's store is in `dataDir/<account>/`, so each user of one
+     * directory has their own; an app without a user refuses a store in
+     * [dataDir] itself that a signed-in user wrote.
      */
     val dataDir: String? = null,
     /** How the user signs in to [serverUrl]: a device account, or your backend's sign-in. */

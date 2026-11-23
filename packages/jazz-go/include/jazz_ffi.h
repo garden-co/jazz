@@ -81,7 +81,9 @@ typedef void (*JazzCallback)(void *ctx, const char *kind, const char *json);
  * "storage"?: "memory"|"persistent", "contract"?: 2 }. Without "auth" it
  * opens as a local client; with a device key, as that end user syncing
  * through the app's /jazz. Bearer users and backend clients open with
- * jazz_open_user.
+ * jazz_open_user. An end user's (or scoped backend client's) store goes in
+ * dataDir/<account>/; an app without a user refuses a store in dataDir
+ * itself that a signed-in user wrote.
  */
 JazzHandle *jazz_open(const char *config_json, char **err);
 
