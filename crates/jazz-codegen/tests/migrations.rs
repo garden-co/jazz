@@ -603,3 +603,100 @@ fn branch_columns_are_kept_as_they_are() {
     );
     App::load(created.app.as_bytes()).unwrap();
 }
+
+/// `text` with its current `tables` replaced by `tables`, history and
+/// migrations kept.
+fn with_tables(text: &str, tables: &str) -> String {
+    let mut root = json::parse(text.as_bytes()).unwrap();
+    let json::Json::Object(top) = &mut root else {
+        panic!("not an object")
+    };
+    let at = top.iter().position(|(k, _)| k == "tables").unwrap();
+    top[at].1 = json::parse(tables.as_bytes()).unwrap();
+    json::print(&root)
+}
+
+/// #6296: a migration written without `to` targets the current `tables`;
+/// once those are edited for a third version, it must keep targeting the
+/// version it was written for, which `migrations create` moves into
+/// `history` and names in the migration's `to`.
+#[test]
+fn a_third_version_keeps_the_earlier_migrations_target() {
+    const V1: &str = r#"{ "boards": { "columns": { "name": "string" } } }"#;
+    const V2: &str = r#"{ "boards": { "columns": { "name": "string", "priority": "int?" } } }"#;
+    const V3: &str =
+        r#"{ "boards": { "columns": { "name": "string", "priority": "int?", "score": "int?" } } }"#;
+    let second = migrate(V1, V2);
+    assert!(second.changed && second.todos.is_empty(), "{second:?}");
+    let v2_bindings = generate(Lang::TypeScript, second.app.as_bytes()).unwrap();
+    let edited = with_tables(&second.app, V3);
+    let third = create(
+        Lang::TypeScript,
+        edited.as_bytes(),
+        Some(&v2_bindings),
+        "score",
+    )
+    .unwrap();
+    assert!(third.changed && third.todos.is_empty(), "{third:?}");
+    let app = App::load(third.app.as_bytes()).unwrap();
+    assert_eq!(app.compiled.schemas.len(), 3);
+    let root = json::parse(third.app.as_bytes()).unwrap();
+    let history: Vec<String> = root
+        .get("history")
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, _)| k.clone())
+        .collect();
+    assert_eq!(history.len(), 2);
+    let Some(json::Json::Array(items)) = root.get("migrations") else {
+        panic!("no migrations")
+    };
+    // v1 -> v2, now explicit; v2 -> current, implicit as before.
+    assert_eq!(
+        items[0].get("from").unwrap().as_str(),
+        Some(history[0].as_str())
+    );
+    assert_eq!(
+        items[0].get("to").unwrap().as_str(),
+        Some(history[1].as_str())
+    );
+    assert_eq!(
+        items[1].get("from").unwrap().as_str(),
+        Some(history[1].as_str())
+    );
+    assert!(items[1].get("to").is_none());
+    // Running it again changes nothing.
+    let again = create(
+        Lang::TypeScript,
+        third.app.as_bytes(),
+        Some(&v2_bindings),
+        "score",
+    )
+    .unwrap();
+    assert!(!again.changed);
+}
+
+/// Running `migrations create` again before resolving the stub's TODOs
+/// (the bindings still name the old version) says so, rather than that
+/// `history` already has that version.
+#[test]
+fn running_again_over_an_unresolved_stub_names_its_todos() {
+    let stub = migrate(
+        TODOS,
+        r#"{ "todos": { "columns": { "title": "string", "done": "boolean", "rank": "int" } } }"#,
+    );
+    assert!(!stub.todos.is_empty(), "{stub:?}");
+    let old_bindings = generate(Lang::TypeScript, file(TODOS).as_bytes()).unwrap();
+    let error = create(
+        Lang::TypeScript,
+        stub.app.as_bytes(),
+        Some(&old_bindings),
+        "change",
+    )
+    .expect_err("a TODO is left")
+    .to_string();
+    assert!(error.contains("TODO"), "{error}");
+    assert!(!error.contains("already has a version"), "{error}");
+}

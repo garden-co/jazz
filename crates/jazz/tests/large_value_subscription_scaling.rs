@@ -15,6 +15,7 @@
 //! made while no subscription is open, so a write's own work never counts
 //! against the subscription. Every other assertion is on public results.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 
 use crate::common;

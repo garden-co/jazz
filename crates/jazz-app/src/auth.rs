@@ -117,6 +117,82 @@ impl std::fmt::Debug for Bearer {
 /// The text a device key is written as, as the TypeScript client stores it.
 const KEY_PREFIX: &str = "jazz-auth-v1:";
 
+/// Puts the whole file `temp` at `path` unless something is there already
+/// (`AlreadyExists`): the first creator wins.
+#[cfg(not(any(target_os = "android", all(test, target_os = "linux"))))]
+fn publish_new(temp: &std::path::Path, path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::hard_link(temp, path)
+}
+
+/// What to hold while replacing the key at `path`: nothing, as a creator's
+/// hard link never lands on a replacer's key.
+#[cfg(not(any(target_os = "android", all(test, target_os = "linux"))))]
+pub(crate) fn lock_to_replace(_path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    Ok(None)
+}
+
+// The lib's own tests on Linux keep keys as Android does; `tests/` run
+// Linux's way.
+#[cfg(any(target_os = "android", all(test, target_os = "linux")))]
+pub(crate) use locked_rename::lock_to_replace;
+#[cfg(any(target_os = "android", all(test, target_os = "linux")))]
+use locked_rename::publish_new;
+
+/// The same on Android, which denies apps hard links (SELinux). A rename
+/// replaces what's there, so creators look and rename under a lock, and
+/// whatever replaces a key takes it too: else a creator's rename could land
+/// on the replacer's key. It isn't renameat2's `RENAME_NOREPLACE`: our
+/// oldest Android's kernel (API 24: 3.10) hasn't that call.
+///
+/// The lock is never held across an await or while another is taken, and
+/// waited for only [`WAIT`]: a session waits on its one runtime thread,
+/// which `close` needs.
+#[cfg(any(target_os = "android", all(test, target_os = "linux")))]
+mod locked_rename {
+    use std::fs::File;
+    use std::io::{Error, ErrorKind, Result};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::path::Path;
+    use std::time::Duration;
+
+    use crate::lifecycle::flock;
+
+    /// Far longer than a key takes to write and rename.
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// The lock to hold while replacing the key at `path`.
+    pub(crate) fn lock_to_replace(path: &Path) -> Result<Option<File>> {
+        lock_key(path).map(Some)
+    }
+
+    fn lock_key(path: &Path) -> Result<File> {
+        let mut name = std::ffi::OsString::from(".");
+        name.push(path.file_name().ok_or(ErrorKind::InvalidInput)?);
+        name.push(".lock");
+        // Never removed, or two creators could lock two different files. A
+        // killed creator's lock goes with it.
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path.with_file_name(name))?;
+        flock::lock(&lock, WAIT)?;
+        Ok(lock)
+    }
+
+    pub(super) fn publish_new(temp: &Path, path: &Path) -> Result<()> {
+        let _lock = lock_key(path)?;
+        // Not `exists()`: like a hard link, never replace even a dangling
+        // symlink.
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Err(Error::from(ErrorKind::AlreadyExists)),
+            Err(error) if error.kind() == ErrorKind::NotFound => std::fs::rename(temp, path),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 /// How long a device account's self-signed tokens live: the longest a core
 /// accepts. They are renewed before they expire.
 pub(crate) const DEVICE_TOKEN_TTL_SECS: u64 = 3600;
@@ -165,9 +241,22 @@ impl DeviceKey {
     }
 
     /// Writes the key to the file at `path` (readable by this user only),
-    /// replacing what it held: written whole beside it, then renamed into
-    /// place.
+    /// replacing what it held, under the creators' lock where creating
+    /// takes one ([`lock_to_replace`]).
     pub(crate) fn write_to(&self, path: &std::path::Path) -> Result<()> {
+        let io = |error: std::io::Error| {
+            Error::Config(format!("device key at {}: {error}", path.display()))
+        };
+        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        let _lock = lock_to_replace(path).map_err(io)?;
+        self.write_aside(path)
+    }
+
+    /// [`Self::write_to`] without the lock, for a path no creator publishes
+    /// at: written whole beside it, then renamed into place.
+    pub(crate) fn write_aside(&self, path: &std::path::Path) -> Result<()> {
         let io = |error: std::io::Error| {
             Error::Config(format!("device key at {}: {error}", path.display()))
         };
@@ -202,6 +291,11 @@ impl DeviceKey {
     /// (readable by this user only): for hosts without a keychain, such as a
     /// CLI or a server-side test. Apps with a platform keychain keep the
     /// key's text form there instead.
+    ///
+    /// Callers creating it at once, in this process or others, all get the
+    /// same key. On Android this leaves an empty `.<file name>.lock` beside
+    /// the key (leave it there), and fails if another process holds that
+    /// for 5 seconds.
     pub fn load_or_create(path: &std::path::Path) -> Result<Self> {
         let io = |error: std::io::Error| {
             Error::Config(format!("device key at {}: {error}", path.display()))
@@ -217,9 +311,9 @@ impl DeviceKey {
             .filter(|dir| !dir.as_os_str().is_empty())
             .unwrap_or(std::path::Path::new("."));
         std::fs::create_dir_all(dir).map_err(io)?;
-        // Written whole beside it, then linked into place: a concurrent
-        // opener sees no file or the whole key, never a partial one, and
-        // the first link wins.
+        // Written whole beside it, then published: a concurrent opener sees
+        // no file or the whole key, never a partial one, and the first to
+        // publish wins.
         let temp = dir.join(format!(
             ".{}.{}.tmp",
             path.file_name()
@@ -235,11 +329,11 @@ impl DeviceKey {
             std::io::Write::write_all(&mut file, key.to_string().as_bytes())?;
             file.sync_all()
         });
-        let linked = written.and_then(|()| std::fs::hard_link(&temp, path));
+        let published = written.and_then(|()| publish_new(&temp, path));
         let _ = std::fs::remove_file(&temp);
-        match linked {
+        match published {
             Ok(()) => Ok(key),
-            // Another opener linked theirs first: theirs is the key.
+            // Another opener published theirs first: theirs is the key.
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 std::fs::read_to_string(path).map_err(io)?.parse()
             }
@@ -342,6 +436,83 @@ mod tests {
         }
         std::fs::write(&path, "junk").unwrap();
         assert!(DeviceKey::load_or_create(&path).is_err());
+    }
+
+    /// Android's publish, run on Linux as CI runs no Rust tests on Android
+    /// (white-box for that reason; `tests/device_key.rs` tests each
+    /// platform's own): of alice's creators one wins, and none replaces
+    /// what's there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn androids_first_creator_wins() {
+        let root = tempfile::tempdir().unwrap();
+        for round in 0..100 {
+            let dir = root.path().join(round.to_string());
+            std::fs::create_dir(&dir).unwrap();
+            let path = dir.join("device.key");
+            let start = std::sync::Barrier::new(8);
+            let winners: Vec<usize> = std::thread::scope(|scope| {
+                let creators: Vec<_> = (0..8)
+                    .map(|creator| {
+                        let (dir, path, start) = (&dir, &path, &start);
+                        scope.spawn(move || {
+                            let temp = dir.join(format!("{creator}.tmp"));
+                            std::fs::write(&temp, creator.to_string()).unwrap();
+                            start.wait();
+                            match locked_rename::publish_new(&temp, path) {
+                                Ok(()) => Some(creator),
+                                Err(error) => {
+                                    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+                                    None
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+                creators
+                    .into_iter()
+                    .filter_map(|creator| creator.join().unwrap())
+                    .collect()
+            });
+            assert_eq!(winners.len(), 1, "round {round}");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                winners[0].to_string()
+            );
+            let lock = std::fs::metadata(dir.join(".device.key.lock")).unwrap();
+            let mode = std::os::unix::fs::PermissionsExt::mode(&lock.permissions());
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        let dir = root.path().join("0");
+        let (temp, dangling) = (dir.join("late.tmp"), dir.join("other.key"));
+        std::fs::write(&temp, "late").unwrap();
+        std::os::unix::fs::symlink(dir.join("nowhere"), &dangling).unwrap();
+        let error = locked_rename::publish_new(&temp, &dangling).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    /// A creator of alice's that died holding Android's lock left nothing to
+    /// wait for: the next takes it once its file closes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn androids_creators_wait_only_while_the_lock_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let (temp, path) = (dir.path().join("key.tmp"), dir.path().join("device.key"));
+        std::fs::write(&temp, "key").unwrap();
+        let held = std::fs::File::create(dir.path().join(".device.key.lock")).unwrap();
+        held.lock().unwrap();
+        let creator = std::thread::spawn({
+            let path = path.clone();
+            move || locked_rename::publish_new(&temp, &path)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!creator.is_finished());
+        assert!(!path.exists());
+        // As the kernel does for a process that dies.
+        drop(held);
+        creator.join().unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "key");
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! row and the tree it names still commit together.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -526,7 +527,7 @@ fn a_host_batch_that_fails_is_retried_by_the_next() {
     insert(&db, 1, &value);
     remote.objects().failing = true;
     let done = run_elsewhere(db.take_chunk_io().unwrap().unwrap(), store.clone());
-    let error = db.finish_chunk_io(done).err().expect("reported");
+    let error = block_on(db.finish_chunk_io(done)).err().expect("reported");
     assert_eq!(error.code, ErrorCode::Storage);
     assert_eq!(file_node_bytes(&path).1, 0);
     remote.objects().failing = false;
@@ -926,7 +927,7 @@ fn a_host_fetch_that_fails_refuses_what_waits_on_it() {
         let Some(io) = server.take_chunk_io().unwrap() else {
             continue;
         };
-        if let Err(error) = server.finish_chunk_io(run_elsewhere(io, store.clone())) {
+        if let Err(error) = block_on(server.finish_chunk_io(run_elsewhere(io, store.clone()))) {
             assert_eq!(error.code, ErrorCode::Storage);
             failed += 1;
         }
@@ -1065,8 +1066,8 @@ fn fetched_chunks_are_served_even_when_the_puts_beside_them_fail() {
             block_on(sub.alice.tick()).unwrap();
             let gets = remote.objects().gets;
             let ticked = block_on(server.tick());
-            let finished = match server.take_chunk_io() {
-                Ok(Some(io)) => server.finish_chunk_io(run_elsewhere(io, store.clone())),
+            let finished = match block_on(server.take_chunk_io()) {
+                Ok(Some(io)) => block_on(server.finish_chunk_io(run_elsewhere(io, store.clone()))),
                 _ => Ok(()),
             };
             let fetched = remote.objects().gets > gets;

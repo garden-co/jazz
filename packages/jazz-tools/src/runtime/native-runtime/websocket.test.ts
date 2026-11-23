@@ -1242,6 +1242,97 @@ describe("websocket frame carrier", () => {
       }
     });
 
+    // #6294: `vercel()`'s socket wakes the core before it connects, under a
+    // deadline of its own. A wake longer than the handshake timeout gave up
+    // attempts that would have connected.
+    function deferredCarrier() {
+      class DeferredSocket extends MessageWebSocket {
+        readonly defersConnect = true;
+        private readonly phaseListeners = new Map<string, Array<() => void>>();
+        override addEventListener(type: string, listener: unknown): void {
+          if (type === "connecting" || type === "waking") {
+            const list = this.phaseListeners.get(type) ?? [];
+            list.push(listener as () => void);
+            this.phaseListeners.set(type, list);
+          } else super.addEventListener(type as "message", listener as () => void);
+        }
+        emitPhase(type: "connecting" | "waking"): void {
+          for (const listener of this.phaseListeners.get(type) ?? []) listener();
+        }
+      }
+      let socket: DeferredSocket | undefined;
+      const terminals: unknown[] = [];
+      const carrier = new WebSocketCarrier({
+        endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+        peerIdentity: new Uint8Array(16),
+        onFrame: () => {},
+        onTerminal: (error) => terminals.push(error),
+        WebSocket: class extends DeferredSocket {
+          constructor(url: string) {
+            super(url, (created) => {
+              socket = created as DeferredSocket;
+            });
+          }
+        },
+      });
+      return { carrier, socket: socket!, terminals };
+    }
+
+    it("starts the handshake timeout only once a socket that defers its connection connects", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = deferredCarrier();
+        const ready = carrier.ready().catch((error: unknown) => error);
+        // Waking, for longer than the handshake timeout: no connection yet.
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS * 3);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        // Connected, and then the server never says hello.
+        socket.emitPhase("connecting");
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS);
+        expect(terminals).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(terminals).toEqual([
+          expect.objectContaining({ code: "websocket_silent", retry: "later" }),
+        ]);
+        expect(socket.closed).toBe(true);
+        await expect(ready).resolves.toMatchObject({
+          message: "the server did not answer the connection within 10 s",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("gives each connection a socket starts a fresh handshake window, and none while it wakes again", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = deferredCarrier();
+        socket.emitPhase("connecting");
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS - 2_000);
+        // That connection never opened: the socket wakes the core again.
+        socket.emitPhase("waking");
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS * 3);
+        socket.emitPhase("connecting");
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS - 1_000);
+        expect(terminals).toEqual([]);
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        await expect(carrier.ready()).resolves.toBeDefined();
+        await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS * 2);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("classes a silent link as a network drop, which clients retry", () => {
       expect(isSocketDropWireError({ code: "websocket_silent", retry: "later", message: "" })).toBe(
         true,

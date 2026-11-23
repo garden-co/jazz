@@ -54,26 +54,32 @@ pub fn derived(secret: &str, app_id: &str) -> Key {
 /// The insert and the read are one scope, and the insert never replaces a
 /// key: concurrent first calls (from this host or another owner of the same
 /// store) all answer the one key that was kept first.
-pub fn stored(storage: &Storage, fresh: impl FnOnce() -> Key) -> Result<Key, RegistryError> {
+pub async fn stored(storage: &Storage, fresh: impl FnOnce() -> Key) -> Result<Key, RegistryError> {
     let fresh = fresh();
     storage
-        .scope("jazz_backend_signing_key", |storage| {
-            storage.execute_batch(CREATE).map_err(storage_error)?;
-            storage
-                .prepare_cached(
+        .scope("jazz_backend_signing_key", async |storage| {
+            storage.execute_batch(CREATE).await.map_err(storage_error)?;
+            async {
+                let mut statement = storage.prepare_cached(
                     "INSERT OR IGNORE INTO _jazz_host_backend_signing_key (id, key) VALUES (1, ?1)",
-                )
-                .and_then(|mut statement| statement.execute([fresh.as_slice()]))
-                .map_err(storage_error)?;
-            storage
-                .prepare_cached("SELECT key FROM _jazz_host_backend_signing_key WHERE id = 1")
-                .and_then(|mut statement| {
-                    statement
-                        .query_row([], |row| row.get::<_, Vec<u8>>(0))
-                        .optional()
-                })
-                .map_err(storage_error)
+                )?;
+                statement.execute([fresh.as_slice()]).await
+            }
+            .await
+            .map_err(storage_error)?;
+            async {
+                let mut statement = storage.prepare_cached(
+                    "SELECT key FROM _jazz_host_backend_signing_key WHERE id = 1",
+                )?;
+                statement
+                    .query_row([], |row| row.get::<_, Vec<u8>>(0))
+                    .await
+                    .optional()
+            }
+            .await
+            .map_err(storage_error)
         })
+        .await
         .map_err(unavailable)?
         .ok_or_else(|| unavailable("the backend signing key was not kept"))?
         .try_into()

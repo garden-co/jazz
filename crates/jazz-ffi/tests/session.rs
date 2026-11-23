@@ -214,6 +214,34 @@ async fn a_session_keeps_a_device_account() {
         assert!(key.starts_with("jazz-auth-v1:"), "{key}");
         let jazz = session.jazz().unwrap();
         let account = jazz.account().unwrap().unwrap();
+        // Only the session signs out or links: the handle stays open, and
+        // its watch runs on.
+        let (seen, states) = mpsc::channel();
+        let watch = jazz
+            .watch_session(Arc::new(States(Mutex::new(seen))))
+            .unwrap();
+        watched_until(&states, |s| s["status"] == "signedIn");
+        match jazz.sign_out() {
+            Err(JazzError::NotSupported { reason }) => {
+                assert!(reason.contains("signOut"), "{reason}")
+            }
+            other => panic!("signOut on a session's handle: {other:?}"),
+        }
+        match jazz.link("token-carol".into()) {
+            Err(JazzError::NotSupported { reason }) => {
+                assert!(reason.contains("linkDeviceAccount"), "{reason}")
+            }
+            other => panic!("link on a session's handle: {other:?}"),
+        }
+        jazz.refresh().unwrap();
+        assert!(
+            matches!(
+                states.recv_timeout(Duration::from_millis(300)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "the watch changed or ended"
+        );
+        watch.cancel();
         jazz.insert("shows".into(), show(&account)).unwrap();
         jazz.wait_for_sync("global".into()).unwrap();
         session.shutdown().unwrap();
@@ -246,6 +274,59 @@ async fn a_session_keeps_a_device_account() {
     .await
     .unwrap();
     app.backend.shutdown().await.unwrap();
+}
+
+/// A host's device session (Swift and Go open through this): a kept
+/// key is never replaced by opening, whether the URL or the key is wrong.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opening_never_replaces_a_kept_device_key() {
+    let app = App::start().await;
+    let dir = std::env::temp_dir().join(format!("jazz-ffi-keep-key-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("device.key");
+    let device = json!({ "initial": "device", "storage": "persistent",
+        "dataDir": dir.to_str().unwrap() });
+    let good = app.config(device.clone());
+    let mut bad_url = device;
+    bad_url["serverUrl"] = json!("http://192.0.2.1/jazz");
+    let bad_url = app.config(bad_url);
+    tokio::task::spawn_blocking(move || {
+        let session = Session::open(good.clone(), None).unwrap();
+        let guest = snapshot_until(&session, |s| s["status"] == "ready");
+        let account = guest["user"]["account"].clone();
+        session.shutdown().unwrap();
+        let key = std::fs::read(&path).unwrap();
+
+        let session = Session::open(bad_url, None).unwrap();
+        assert!(
+            std::fs::read(&path).unwrap() == key,
+            "the wrong URL replaced the key"
+        );
+        let failed = parse(&session.snapshot().unwrap());
+        assert_eq!(failed["status"], "error", "{failed}");
+        assert_eq!(failed["error"]["kind"], "config", "{failed}");
+        session.shutdown().unwrap();
+
+        let quoted = [&b"\""[..], &key, &b"\""[..]].concat();
+        std::fs::write(&path, &quoted).unwrap();
+        let session = Session::open(good.clone(), None).unwrap();
+        assert!(
+            std::fs::read(&path).unwrap() == quoted,
+            "the unparsable key was replaced"
+        );
+        let failed = parse(&session.snapshot().unwrap());
+        assert_eq!(failed["status"], "error", "{failed}");
+        session.shutdown().unwrap();
+
+        std::fs::write(&path, &key).unwrap();
+        let session = Session::open(good, None).unwrap();
+        let mended = snapshot_until(&session, |s| s["status"] == "ready");
+        assert_eq!(mended["user"]["account"], account, "{mended}");
+        session.shutdown().unwrap();
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A guest whose user signs in with the app (no account yet) is linked:
@@ -383,6 +464,18 @@ async fn a_c_host_follows_a_session() {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(20));
         }
+        // A watch delivers the latest snapshot, so it may skip `ready` if
+        // the session signs out first: wait for it here.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(kind, s)| kind == "session" && s["status"] == "ready")
+        {
+            assert!(Instant::now() < deadline, "the watch never saw ready");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let handle = jazz_session_jazz(session, &mut err);
         assert!(!handle.is_null(), "{}", take(err));
         let account = {
@@ -390,6 +483,12 @@ async fn a_c_host_follows_a_session() {
             take(out)
         };
         assert!(account.is_string());
+        for (method, args) in [("signOut", "{}"), ("link", r#"{"bearer":"token-alice"}"#)] {
+            let out = jazz_call(handle, c(method).as_ptr(), c(args).as_ptr(), &mut err);
+            assert!(out.is_null(), "{method} on a session's handle");
+            assert_eq!(take(err)["kind"], "notSupported", "{method}");
+        }
+        assert_eq!(call("snapshot").unwrap()["status"], "ready");
         call("signOut").unwrap();
         let none = jazz_session_jazz(session, &mut err);
         assert!(none.is_null());
@@ -494,10 +593,36 @@ async fn no_token_callback_runs_after_the_session_closes() {
     // host for another, on its own, again and again.
     app.relay.refuse("token-alice", "token expired");
     app.relay.kick();
+    let relay_events = app.relay.event_log();
     tokio::task::spawn_blocking(move || unsafe {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !host.running.load(Ordering::SeqCst) {
-            assert!(Instant::now() < deadline, "no renewal");
+            if Instant::now() >= deadline {
+                // What the client and the backend saw, for the cause.
+                let mut err = ptr::null_mut();
+                let out = jazz_session_call(
+                    session as *mut _,
+                    c("snapshot").as_ptr(),
+                    c("{}").as_ptr(),
+                    &mut err,
+                );
+                let snapshot = if out.is_null() { take(err) } else { take(out) };
+                let mut err = ptr::null_mut();
+                let jazz = jazz_session_jazz(session as *mut _, &mut err);
+                let sync = if jazz.is_null() {
+                    take(err).to_string()
+                } else {
+                    let mut err = ptr::null_mut();
+                    let out = jazz_call(jazz, c("syncStatus").as_ptr(), c("{}").as_ptr(), &mut err);
+                    let sync = if out.is_null() { take(err) } else { take(out) };
+                    jazz_close(jazz);
+                    sync.to_string()
+                };
+                panic!(
+                    "no renewal\nsession: {snapshot}\nsync: {sync}\nrelay:\n{}",
+                    relay_events().join("\n")
+                );
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
         jazz_session_close(session as *mut _);
@@ -512,6 +637,89 @@ async fn no_token_callback_runs_after_the_session_closes() {
             !host.after_close.load(Ordering::SeqCst),
             "the callback ran after close"
         );
+    })
+    .await
+    .unwrap();
+    app.backend.shutdown().await.unwrap();
+}
+
+/// Kotlin's path, which has no session: a user signs out of an app with a
+/// `dataDir`, and the next opens it as someone else. They see none of the
+/// first user's data, which stays theirs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signing_out_and_opening_as_someone_else_keeps_stores_apart() {
+    let app = App::start().await;
+    let dir = std::env::temp_dir().join(format!("jazz-ffi-users-{}", app.app_id));
+    let config = app.config(json!({ "auth": { "bearer": true }, "storage": "persistent",
+        "dataDir": dir.to_str().unwrap() }));
+    tokio::task::spawn_blocking(move || {
+        let open = |user: &str| {
+            jazz_ffi::JazzHandle::open_with_tokens(
+                config.clone(),
+                Arc::new(Bearer(Mutex::new(Some(format!("token-{user}"))))),
+            )
+            .unwrap()
+        };
+        let shows = || json!({ "table": "shows" }).to_string();
+        let alice = open("alice");
+        let account = alice.account().unwrap().unwrap();
+        alice.insert("shows".into(), show(&account)).unwrap();
+        alice.sign_out().unwrap();
+
+        let bob = open("bob");
+        assert_eq!(
+            parse(&bob.all_at(shows(), "local".into()).unwrap()),
+            json!([])
+        );
+        let account = bob.account().unwrap().unwrap();
+        bob.insert("shows".into(), show(&account)).unwrap();
+        bob.wait_for_sync("global".into())
+            .expect("bob's own write syncs");
+        bob.shutdown().unwrap();
+
+        let alice = open("alice");
+        let theirs = parse(&alice.all_at(shows(), "local".into()).unwrap());
+        assert_eq!(theirs.as_array().unwrap().len(), 1, "{theirs}");
+        alice.wait_for_sync("global".into()).unwrap();
+        alice.shutdown().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    })
+    .await
+    .unwrap();
+    app.backend.shutdown().await.unwrap();
+}
+
+/// The app's own sign-out, as the handle's `refresh` finds it: the session
+/// follows, as hosts see it, and the same user signs in again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_follows_its_client_signing_out_by_itself() {
+    let app = App::start().await;
+    let config = app.config(json!({ "auth": { "bearer": true } }));
+    tokio::task::spawn_blocking(move || {
+        let bearer = Arc::new(Bearer(Mutex::new(Some("token-alice".into()))));
+        let session = Session::open(config, Some(bearer.clone())).unwrap();
+        let before = snapshot_until(&session, |s| s["status"] == "ready");
+        let (seen, states) = mpsc::channel();
+        let watch = session.watch(Arc::new(States(Mutex::new(seen)))).unwrap();
+        let old = session.jazz().unwrap();
+
+        *bearer.0.lock().unwrap() = None;
+        old.refresh().unwrap();
+        watched_until(&states, |s| {
+            s["status"] == "signed-out"
+                && s["clientEpoch"].as_u64() > before["clientEpoch"].as_u64()
+        });
+        match old.all(json!({ "table": "shows" }).to_string()) {
+            Err(JazzError::Replaced { .. }) => {}
+            other => panic!("an old handle: {other:?}"),
+        }
+
+        *bearer.0.lock().unwrap() = Some("token-alice".into());
+        session.refresh().unwrap();
+        let again = session.jazz().unwrap();
+        again.all(json!({ "table": "shows" }).to_string()).unwrap();
+        watch.cancel();
+        session.shutdown().unwrap();
     })
     .await
     .unwrap();

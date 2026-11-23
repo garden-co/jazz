@@ -2,6 +2,7 @@
 //! (a server's catalogue and account journal), reachable before a `Db`
 //! opens on the file and through it afterwards, on the one connection.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 
 use jazz::db::{

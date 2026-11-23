@@ -1,5 +1,6 @@
 //! Old sync and settlement reports rechecked against the SQLite engine:
 //! each test pins the behaviour its issue asked for.
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::pin;
@@ -85,7 +86,7 @@ fn connect(db: &Db, server: &Db, author: AuthorSubject) -> Upstream {
     let (client_side, server_side) = duplex_transport::duplex();
     let upstream = block_on(db.connect_upstream(client_side));
     server.accept_subscriber(server_side, author).unwrap();
-    db.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(db.set_remote_link_hint(RemoteLinkHint::Live));
     upstream
 }
 
@@ -458,7 +459,7 @@ fn an_offline_filtered_read_keeps_a_row_updated_in_place() {
     assert_eq!(ids(&client, of_order(), ReadTier::LocalOnly).len(), 10);
 
     assert!(client.detach_connection(&upstream));
-    client.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(client.set_remote_link_hint(RemoteLinkHint::Failed));
     block_on(client.update(
         "items",
         row(2, 3),
@@ -533,7 +534,7 @@ fn a_subscription_survives_a_server_restart_and_receives_the_pending_write() {
             jazz::db::FileOptions::default(),
         ))
         .unwrap();
-        db.set_authority();
+        jazz::db::block_on(db.set_authority());
         db
     };
     let server = start();

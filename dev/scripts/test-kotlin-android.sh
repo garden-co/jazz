@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # The Kotlin Android partition: a build check of jazz-kotlin-android, the AAR
-# with jazz-ffi cross-compiled for arm64-v8a, armeabi-v7a and x86_64. No
-# emulator or device tests. Fetches a JDK, Gradle, the Android SDK packages
+# with jazz-ffi cross-compiled for arm64-v8a, armeabi-v7a and x86_64. Running
+# it is dev/scripts/test-kotlin-android-emulator.sh's. Fetches a JDK, Gradle, the Android SDK packages
 # and the NDK into ~/.cache/jazz-kotlin, each pinned and checked against its
 # published sha256, and installs cargo-ndk and the Rust Android targets.
 #
 # CARGO_PROFILE picks the Cargo profile the .so files are built with (default
 # dev: the check is that everything cross-compiles, links and packages).
+#
+# KOTLIN_ANDROID_ABIS narrows the AAR to those ABIs.
 #
 # Split builds (attach-language-artifacts.yml), all paths absolute or relative
 # to the repository root:
@@ -29,12 +31,7 @@ jdk_sha256=d7f5d5cf865a2902b70ff549b97586a7d3f234e016f041ab447ea740c7d66d1c
 gradle_version=8.14.3
 gradle_url="https://services.gradle.org/distributions/gradle-${gradle_version}-bin.zip"
 gradle_sha256=bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
-# The same SDK packages and NDK as jazz-rn (dev/rn-device-acceptance); the
-# sha256s are of the zips whose sha1s Google lists in repository2-3.xml.
-platform_url=https://dl.google.com/android/repository/platform-36_r02.zip
-platform_sha256=37607369a28c5b640b3a7998868d45898ebcb777565a0e85f9acf36f29631d2e
-build_tools_url=https://dl.google.com/android/repository/build-tools_r36_linux.zip
-build_tools_sha256=5d9ac77fb6ff43d9da518a337b4fcf8f9097113df531d99ccefe80ef7ce8250b
+# The same NDK as jazz-rn (the SDK's pins: dev/scripts/kotlin-android-sdk.sh).
 ndk_revision=27.1.12297006
 ndk_url=https://dl.google.com/android/repository/android-ndk-r27b-linux.zip
 ndk_sha256=33e16af1a6bbabe12cad54b2117085c07eab7e4fa67cdd831805f0e94fd826c1
@@ -46,21 +43,6 @@ fetch() {
   curl -fsSL --retry 3 -o "$2.part" "$1"
   echo "$3  $2.part" | sha256sum -c --quiet -
   mv "$2.part" "$2"
-}
-
-# Unpack the pinned zip $1 (sha256 $2) into $3, whose single top-level
-# directory becomes $3. A marker records the checksum it came from.
-install_zip() {
-  local url=$1 sha256=$2 dest=$3
-  [ -f "$dest/.jazz-sha256" ] && [ "$(cat "$dest/.jazz-sha256")" = "$sha256" ] && return
-  rm -rf "$dest" "$dest.unpack"
-  mkdir -p "$dest.unpack"
-  fetch "$url" "$dest.unpack.zip" "$sha256"
-  unzip -q "$dest.unpack.zip" -d "$dest.unpack"
-  rm "$dest.unpack.zip"
-  mv "$dest.unpack"/* "$dest"
-  rmdir "$dest.unpack"
-  echo "$sha256" >"$dest/.jazz-sha256"
 }
 
 # KOTLIN_TOOLCHAIN=pinned uses the pinned ones even when PATH has others
@@ -85,15 +67,10 @@ if [ "$pinned" = pinned ] || ! command -v gradle >/dev/null; then
   export PATH="$cache/gradle-$gradle_version/bin:$PATH"
 fi
 
-# An SDK of exactly the pinned packages, laid out as sdkmanager would.
-sdk="$cache/android-sdk"
-install_zip "$platform_url" "$platform_sha256" "$sdk/platforms/android-36"
-install_zip "$build_tools_url" "$build_tools_sha256" "$sdk/build-tools/36.0.0"
+source dev/scripts/kotlin-android-sdk.sh
 install_zip "$ndk_url" "$ndk_sha256" "$sdk/ndk/$ndk_revision"
 grep -qx "Pkg.Revision = $ndk_revision" "$sdk/ndk/$ndk_revision/source.properties"
-# ANDROID_SDK_ROOT too: a runner image may set it to its own SDK, and AGP refuses
-# two different SDK paths.
-export ANDROID_HOME="$sdk" ANDROID_SDK_ROOT="$sdk" ANDROID_NDK_HOME="$sdk/ndk/$ndk_revision"
+export ANDROID_NDK_HOME="$sdk/ndk/$ndk_revision"
 
 abspath() { mkdir -p "$1" && (cd "$1" && pwd); }
 props=(-PcargoProfile="${CARGO_PROFILE:-dev}")
@@ -142,7 +119,8 @@ gradle --no-daemon --console=plain -p packages/jazz-kotlin-android \
 # The AAR must carry jazz-ffi for every ABI, and the library's classes.
 aar=$build/outputs/aar/jazz-kotlin-android-release.aar
 listing=$(unzip -l "$aar")
-for abi in arm64-v8a armeabi-v7a x86_64; do
+IFS=, read -ra expected_abis <<<"${KOTLIN_ANDROID_ABIS:-arm64-v8a,armeabi-v7a,x86_64}"
+for abi in "${expected_abis[@]}"; do
   grep -q "jni/$abi/libjazz_ffi.so" <<<"$listing" || { echo "$aar lacks jni/$abi/libjazz_ffi.so" >&2; exit 1; }
 done
 classes=$(mktemp -d)

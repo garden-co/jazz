@@ -9,6 +9,7 @@
 //! while a NULL write against a concurrent edit goes to the later write.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -155,7 +156,7 @@ impl Net {
         let i = self.clients.len();
         let node = 0x50 + i as u8;
         let db = open(node, author(node));
-        db.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(db.set_remote_link_hint(RemoteLinkHint::Live));
         self.clients.push(Client {
             node,
             db,
@@ -186,14 +187,16 @@ impl Net {
         let client = &mut self.clients[i];
         let up = client.up.take().expect("online");
         assert!(client.db.detach_connection(&up));
-        client.db.set_remote_link_hint(RemoteLinkHint::Failed);
+        jazz::db::block_on(client.db.set_remote_link_hint(RemoteLinkHint::Failed));
     }
 
     fn online(&mut self, i: usize) {
         self.connect(i);
-        self.clients[i]
-            .db
-            .set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(
+            self.clients[i]
+                .db
+                .set_remote_link_hint(RemoteLinkHint::Live),
+        );
         self.pump();
     }
 
@@ -539,7 +542,7 @@ fn a_chain_merges_over_its_value_as_sent_after_the_authority_restarts() {
     // writes again before she hears back: her second is built on her first
     // as she sent it.
     net.connect(0);
-    net.db(0).set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(net.db(0).set_remote_link_hint(RemoteLinkHint::Live));
     block_on(net.db(0).tick()).unwrap();
     block_on(net.core.tick()).unwrap();
     assert_eq!(Net::read(&net.core, row, "body"), "Hello! world");

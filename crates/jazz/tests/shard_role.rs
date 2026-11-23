@@ -5,6 +5,7 @@
 //! none of it.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -486,6 +487,43 @@ fn a_local_write_of_a_held_row_waits_for_the_part() {
     written.unwrap();
     assert_eq!(titles(&db), vec!["mine"]);
     assert!(newest(&db) > held, "above the part");
+}
+
+/// Alice's staged commit waits on Bob's hold without blocking its release.
+/// The release and the commit must each finish on their next poll.
+#[test]
+fn a_staged_commit_leaves_the_shard_free_to_release_its_hold() {
+    let (db, _now) = shard(1);
+    let row = RowUuid::from_bytes([7; 16]);
+    let part = CommitRef {
+        node: [2; 16],
+        tx: 1,
+    };
+    let tx = db.mergeable_tx().unwrap();
+    tx.insert(
+        "docs",
+        BTreeMap::from([("title".into(), Value::String("mine".into()))]),
+        InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    held_at(&db, part, &[doc_row(row)]);
+
+    let mut commit = std::pin::pin!(tx.commit());
+    assert!(poll_once(commit.as_mut()).is_pending());
+    let role = db.shard();
+    let mut release = std::pin::pin!(role.release(part));
+    assert!(matches!(
+        poll_once(release.as_mut()),
+        std::task::Poll::Ready(Ok(()))
+    ));
+    assert!(matches!(
+        poll_once(commit.as_mut()),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    assert_eq!(titles(&db), vec!["mine"]);
 }
 
 /// Another session's commit to a row a part holds waits while the hold
