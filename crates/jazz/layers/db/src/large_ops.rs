@@ -1183,6 +1183,8 @@ impl Db {
                 format!("{table}.{column} is streamed, so the other cells cannot also set it"),
             ));
         }
+        #[cfg(feature = "e2ee-client")]
+        self.inner().validate_stream_siblings(table, cells)?;
         let kind = crate::large::kind(&col);
         let emitted = Rc::new(RefCell::new(Vec::new()));
         let stage = Rc::clone(&emitted);

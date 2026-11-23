@@ -94,8 +94,7 @@ pub trait EncryptionRuntime {
     /// Called after every tick: lets the runtime's loop go on as far as it
     /// can without waiting, and asks for a tick if it owes one.
     fn after_tick(&self);
-    /// Open a reader's upload, preparing the space first when the hooks ask.
-    #[cfg(not(target_family = "wasm"))]
+    /// Open an upload, preparing the space first when the hooks ask.
     fn begin_streaming_upload<'a>(
         &self,
         begin: &'a mut dyn FnMut() -> Result<crate::db::StreamingValueUpload>,
@@ -1626,47 +1625,69 @@ impl JazzClient {
                 ));
             }
         }
-        let db = self.db()?;
-        let row = db.next_row_id();
-        let mut cells = self.core_cells(table, values)?;
         let kind = crate::db::StreamingMutationKind::Insert;
+        let (id, mut upload) = self
+            .begin_streaming_upload_for(kind, table, None, values, column)
+            .await?;
+        upload.upload = self
+            .db()?
+            .feed_streaming_value_from_reader(upload.upload, reader)
+            .await
+            .map_err(write_error)?;
+        let (id, written) = self.finish_streaming_upload(upload, kind, Some(id)).await?;
+        Ok((id, written.expect("standalone insert commits")))
+    }
+
+    /// Open an upload for a known mutation, reserving a new row ID if needed.
+    /// Prepare a missing space key before touching the source. Finish with the
+    /// returned row ID and the same mutation kind.
+    pub async fn begin_streaming_upload_for(
+        &self,
+        kind: crate::db::StreamingMutationKind,
+        table: &str,
+        object_id: Option<ObjectId>,
+        values: HashMap<String, Value>,
+        column: &str,
+    ) -> Result<(ObjectId, StreamingUpload)> {
+        self.reject_updated_at_override("streaming uploads")?;
+        let db = self.db()?;
+        let row = object_id.map_or_else(|| db.next_row_id(), |id| RowUuid(*id.uuid()));
+        let transaction = self.open_transaction()?;
+        let mut cells = self.core_cells(table, values)?;
         let mut begin = || {
-            db.begin_streaming_value_upload_for(
-                kind,
-                table,
-                row,
-                &mut cells,
-                column,
-                &WriteTarget::Root,
-            )
+            match transaction {
+                Some(id) => db.tx_ref(id).begin_streaming_value_upload_for(
+                    kind,
+                    table,
+                    row,
+                    &mut cells,
+                    column,
+                    &WriteTarget::Root,
+                ),
+                None => db.begin_streaming_value_upload_for(
+                    kind,
+                    table,
+                    row,
+                    &mut cells,
+                    column,
+                    &WriteTarget::Root,
+                ),
+            }
             .map_err(write_error)
         };
         let upload = match &self.shared.encryption {
             Some(runtime) => runtime.begin_streaming_upload(&mut begin).await?,
             None => begin()?,
         };
-        let upload = db
-            .feed_streaming_value_from_reader(upload, reader)
-            .await
-            .map_err(write_error)?;
-        let write = db
-            .finish_streaming_value_upload(
-                upload,
-                kind,
-                table,
-                row,
-                cells,
-                column,
-                WriteIdentity::Database,
-                None,
-                None,
-                None,
-            )
-            .await
-            .map_err(write_error)?;
         Ok((
-            ObjectId::from_uuid(write.row_uuid().0),
-            self.committed(write.mergeable_tx_id()),
+            ObjectId::from_uuid(row.0),
+            StreamingUpload {
+                upload,
+                table: table.to_owned(),
+                column: column.to_owned(),
+                cells,
+                transaction,
+            },
         ))
     }
 
