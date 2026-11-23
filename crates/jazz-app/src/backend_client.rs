@@ -62,7 +62,7 @@ pub(crate) struct BackendClientLink {
 const BUNDLE_HEADER: &str = "x-jazz-bundle";
 
 fn http() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    jazz_native_transport::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()
