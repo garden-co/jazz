@@ -240,6 +240,8 @@ backend's `authenticate` names the user by.
     It fails with `Error::BundleMismatch` when your main backend names the permissions it serves and
     they aren't the ones this client was opened with: open it with your app's published
     `jazz.permissions.json`.
+    The session is the backend client's: on a user's handle `session()` is `None` and `sign_out()`
+    fails with `Error::Unsupported`.
 
   </Tab>
   <Tab value="Go">
