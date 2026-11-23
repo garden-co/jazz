@@ -93,16 +93,11 @@ Then make sure every writer has stopped:
 - **Your backend.** It is not checked when it acts as the system, so stop every job of its that
   writes these tables.
 
-You may run the copy of step 3 once before this step, to shorten the pause, but only the copy made
-after the stop counts. Skip that early copy if your app can move a row to another space (change
-`projectId`): a copy cannot be moved to another space, and deleting it and copying again under the
-same ID is refused too.
-
 ### 3. Copy every row from the clients, and fill the new references
 
-Only clients hold keys, so only clients can write the encrypted copies. The server never can. Copy
-each old row into the new table under **the same row ID**, with an upsert, so that running the copy
-again overwrites the copy instead of adding another.
+Copy once every writer has stopped. Only clients hold keys, so only clients can write the encrypted
+copies. The server never can. Copy each old row into the new table under **the same row ID**, with
+an upsert, so that running the copy again overwrites the copy instead of adding another.
 
 Each client copies what it can:
 
@@ -181,10 +176,9 @@ async function checkCopy() {
 ```
 
 Fix what it reports, then check again: copy the missing spaces from a client that holds their key,
-delete the extra copies (rows deleted from the old table after an early copy; your backend can
-delete them), and fill the references again. A copy in the wrong space comes only from an early copy of a row that moved
-later; it cannot be repaired under its ID (see step 2). Switch only once the check passes with
-every writer stopped.
+and fill the references again. With every writer stopped before the copy, a copy without an old
+row or in another space than its old row's means a writer was still running: find it and stop it.
+Switch only once the check passes with every writer stopped.
 
 ### 5. Switch reads and writes to the new table
 

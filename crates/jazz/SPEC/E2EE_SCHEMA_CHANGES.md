@@ -302,14 +302,10 @@ cannot stop every writer as step 2 describes, is not covered.
    sessions to it, and they can still write. The writers have stopped once
    every such deployment is retired; writes made offline are then checked
    on reconnection under the new pin. The backend's system writes are
-   unchecked, so its jobs that write these tables stop too. A copy may run
-   before this step to shorten the pause, but only the copy after it counts.
-   An app that moves rows between spaces skips that early copy: a copy
-   cannot change its space (spec §5.1), and a delete followed by a write of
-   the same ID in another space is refused too.
-3. Copy. Clients that hold a space's key copy each old row of the space into
-   the new table under the same row ID, with an upsert, so a second run
-   overwrites rather than duplicates. When the space has no root yet, the
+   unchecked, so its jobs that write these tables stop too.
+3. Copy, once every writer has stopped. Clients that hold a space's key copy
+   each old row of the space into the new table under the same row ID, with
+   an upsert, so a second run overwrites rather than duplicates. When the space has no root yet, the
    first copy creates it (spec §3.2), which needs a session that may read
    and update the space row; the first encrypted rows and the space are
    accepted together. A space whose key holders are all offline waits. A
@@ -323,12 +319,11 @@ cannot stop every writer as step 2 describes, is not covered.
    plain. The check passes when, for every space: the old and new tables
    hold the same set of IDs; each copy has its old row's space; and each
    row's new reference equals its old one, null equal to null. Missing
-   copies name the spaces whose key holders have not copied yet; extra
-   copies (rows deleted after an early copy) are deleted, and references
-   filled again. A copy in another space than its old row's comes only from
-   an early copy of a row that moved later, and cannot be repaired under its
-   ID. The app switches only once the check passes with every writer
-   stopped.
+   copies name the spaces whose key holders have not copied yet; those are
+   copied and the references filled again. With every writer stopped before
+   the copy, a copy without an old row, or in another space than its old
+   row's, means a writer was still running. The app switches only once the
+   check passes with every writer stopped.
 5. Switch: ship the app version whose code, relations and permissions use
    the new table and the new reference columns. Its permissions give the
    referencing tables their write rules back and keep the old table frozen.
