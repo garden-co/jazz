@@ -214,7 +214,10 @@ export class Encryption {
    * so while this has not resolved, a loading query is waiting for the
    * device's first sync. Unlike {@link ready} it does not wait for the
    * account's verification, which can need the server. Rejects only when
-   * the runtime can no longer answer.
+   * the runtime can no longer answer. Through `db.encryption` on a browser
+   * Db that started thin, it first waits for the encryption runtime to load,
+   * so a returning device can be waiting for that alone, and it rejects if
+   * the runtime does not load.
    */
   async readable(): Promise<void> {
     for (;;) {
