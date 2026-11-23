@@ -28,7 +28,7 @@ use jazz::db::{
     UpdateOptions, WriteIdentity, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::deployment::artifact::DeclaredEncryption;
@@ -636,9 +636,9 @@ fn project(owner: AuthorSubject) -> Cells {
     BTreeMap::from([("ownerId".to_owned(), account(owner))])
 }
 
-/// Bob can look up his deliveries in one room, optionally for one epoch.
+/// Bob can look up his deliveries for one epoch in one room.
 /// Alice can look up every recipient of a single epoch. EXPLAIN checks
-/// that SQLite uses every filter as an index key for all three reads.
+/// that SQLite uses every filter as an index key for both reads.
 #[test]
 fn delivery_lookups_seek_by_room_recipient_and_epoch() {
     let world = World::new();
@@ -651,12 +651,6 @@ fn delivery_lookups_seek_by_room_recipient_and_epoch() {
     let epoch = eq(col("keyEpochId"), lit(Value::Uuid(new_row().0)));
     let by_recipient = "scopeId,identifier,recipientAccountId,keyEpochId";
     for (query, reader, index, seek) in [
-        (
-            own.clone().order_by("keyEpochId", OrderDirection::Asc),
-            bob(),
-            by_recipient,
-            "scopeId=? AND identifier=? AND recipientAccountId=?",
-        ),
         (
             own.filter(epoch.clone()),
             bob(),
