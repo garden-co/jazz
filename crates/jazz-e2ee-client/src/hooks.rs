@@ -80,6 +80,28 @@ fn identifier(value: Option<&Value>) -> Result<Option<String>, ()> {
     }
 }
 
+/// An omitted space keeps the stored coordinate. A named space, including
+/// null, must match the coordinate of an existing row.
+pub(super) fn write_space(
+    given: Option<&Value>,
+    stored: Option<&Value>,
+) -> Result<Option<String>, SealError> {
+    let parse = |cell| {
+        identifier(cell)
+            .map_err(|()| SealError::Refused(rejected("an encrypted row's space is not a row ID")))
+    };
+    let Some(value) = given else {
+        return parse(stored);
+    };
+    let space = parse(Some(value))?;
+    if stored.is_some() && space != parse(stored)? {
+        return Err(SealError::Refused(rejected(
+            "an encrypted row cannot change its space through an ordinary write",
+        )));
+    }
+    Ok(space)
+}
+
 pub(crate) fn code(error: DataError) -> UnreadableCode {
     match error {
         DataError::KeyUnavailable => UnreadableCode::KeyUnavailable,
@@ -338,23 +360,11 @@ impl E2eeHooks for Hooks {
         if self.shared.keys.borrow().closed {
             return Err(SealError::Refused(closed()));
         }
-        let invalid_space = || refused("an encrypted row's space is not a row ID");
-        let row_id = write.row.0.to_string();
-        let (given, stored) = if plan.self_space() {
-            (None, None)
+        let space = if plan.self_space() {
+            Some(write.row.0.to_string())
         } else {
-            (
-                identifier(write.cells.get(&plan.entry.space)).map_err(|()| invalid_space())?,
-                identifier(write.stored_space).map_err(|()| invalid_space())?,
-            )
+            write_space(write.cells.get(&plan.entry.space), write.stored_space)?
         };
-        if let (Some(given), Some(stored)) = (&given, &stored)
-            && given != stored
-        {
-            return Err(refused(
-                "an encrypted row cannot change its space through an ordinary write",
-            ));
-        }
         // A write that creates its row seals every encrypted column it
         // leaves out: null for an optional column, the declared default
         // for a required one. The stored column is required bytes, and an
@@ -399,12 +409,8 @@ impl E2eeHooks for Hooks {
         if encrypted.is_empty() && !encrypted_stream {
             return Ok(());
         }
-        let identifier = match plan.self_space() {
-            true => row_id.clone(),
-            false => given
-                .or(stored)
-                .ok_or_else(|| refused("an encrypted write names its space"))?,
-        };
+        let row_id = write.row.0.to_string();
+        let identifier = space.ok_or_else(|| refused("an encrypted write names its space"))?;
         let address = Self::address(&self.shared.keys.borrow(), plan, &identifier)
             .map_err(SealError::Refused)?;
         // An encrypted upload checked for rotation before consuming its source.

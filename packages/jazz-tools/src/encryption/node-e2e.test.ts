@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
 import permissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
-import { testApp } from "../testing/index.js";
+import { startTestJazz, testApp } from "../testing/index.js";
 import {
   acceptDeviceAccounts,
   createJazz,
@@ -177,6 +177,94 @@ async function until<T>(read: () => Promise<T | undefined>, what: string, ms = 2
 }
 
 describe("encryption on Node, end to end", () => {
+  it.each(["device", "keyless backend"] as const)(
+    "keeps an encrypted row in its original space when the %s updates or upserts it",
+    async (writer) => {
+      const reference = {
+        columns: { projectId: "uuid?", label: "string?" },
+        relations: { project: { rel: "projects", column: "projectId" } },
+      } as const;
+      const tables = testApp({
+        tables: {
+          projects: { columns: { name: "string", ownerId: "uuid" } },
+          links: reference,
+          tasks: {
+            ...reference,
+            columns: { ...reference.columns, title: "bytes" },
+            encryption: { space: "projectId", scope: "projects", columns: { title: "string?" } },
+          },
+        },
+      });
+      const writable = { read: "true", insert: "true", update: "true" };
+      const policy = {
+        format: 1,
+        tables: { projects: permissions.tables.projects, tasks: writable, links: writable },
+      };
+      const host = await startTestJazz({
+        app: tables,
+        permissions: policy,
+        coreOptions: { appId: crypto.randomUUID() },
+      });
+      cleanups.push(() => host.stop());
+      const session = await createJazzClient({
+        app: tables,
+        permissions: policy,
+        appId: host.appId,
+        serverUrl: host.url,
+        initial: "device",
+        driver: { type: "memory" },
+        store: memoryStore(),
+        encryption: { store: memoryPrivateStore() },
+      });
+      cleanups.push(() => session.close());
+      await session.db.encryption.ready();
+      const ownerId = session.getSnapshot().user!.accountId;
+      const first = await host.jazz.db
+        .insert(tables.projects, { name: "First", ownerId })
+        .wait({ tier: "global" });
+      const other = await host.jazz.db
+        .insert(tables.projects, { name: "Other", ownerId })
+        .wait({ tier: "global" });
+      const member = await host.jazz.db.encryption.members.row(
+        { table: "projects", id: first.id },
+        ownerId,
+      );
+      // testApp adds the system tables to this schema at runtime.
+      const members = (tables as typeof tables & Pick<typeof app, "__e2ee_members">).__e2ee_members;
+      await host.jazz.db.insert(members, member).wait({ tier: "global" });
+
+      const db = writer === "device" ? session.db : host.jazz.db;
+      const link = await db.insert(tables.links, { projectId: first.id }).wait({ tier: "global" });
+      await db.update(tables.links, link.id, { projectId: other.id }).wait({ tier: "global" });
+      expect(await db.all(tables.links)).toMatchObject([{ projectId: other.id }]);
+
+      for (const operation of ["update", "upsert"] as const) {
+        for (const destination of [other.id, null]) {
+          const row = await session.db
+            .insert(tables.tasks, { projectId: first.id, title: "private title" })
+            .wait({ tier: "global" });
+          const task = tables.tasks.where({ id: row.id });
+          expect(await db.all(task, { tier: "remote" })).toMatchObject([{ projectId: first.id }]);
+          const write = (change: { projectId?: string | null; label?: string }) =>
+            (operation === "update"
+              ? db.update(tables.tasks, row.id, change)
+              : db.upsert(tables.tasks, row.id, change)
+            ).wait({ tier: "global" });
+          await write({ projectId: first.id });
+          await write({ label: "edited" });
+          await expect(
+            async () => write({ projectId: destination }),
+            `${operation} to ${destination === null ? "null" : "another project"}`,
+          ).rejects.toThrow("an encrypted row cannot change its space through an ordinary write");
+          expect(await session.db.all(task, { tier: "remote" })).toMatchObject([
+            { projectId: first.id, label: "edited", title: "private title" },
+          ]);
+        }
+      }
+    },
+    60_000,
+  );
+
   it("refuses unknown tables and tables that do not hold spaces before writing", async () => {
     const host = await serve();
     const { db, account } = await device(host);

@@ -16,7 +16,7 @@ use jazz::tools::deployment::artifact::encryption::{
     EQUALITY_PREFIX, equality_column, is_equality_token_column,
 };
 
-use crate::hooks::unsupported_query;
+use crate::hooks::{unsupported_query, write_space};
 
 /// The hooks of a keyless database, built from the app's own declarations.
 pub struct KeylessHooks {
@@ -86,10 +86,16 @@ impl E2eeHooks for KeylessHooks {
 
     fn seal_write(&self, write: &mut WriteCells<'_>) -> Result<(), SealError> {
         let sealed = self.sealed(write.table);
-        match write.cells.keys().find(|name| sealed.contains(*name)) {
-            Some(name) => Err(SealError::Refused(refused(write.table, name))),
-            None => Ok(()),
+        if let Some(name) = write.cells.keys().find(|name| sealed.contains(*name)) {
+            return Err(SealError::Refused(refused(write.table, name)));
         }
+        if let Some(stored) = write.stored_space
+            && let Some(entry) = self.declarations.tables.get(write.table)
+            && let Some(given) = write.cells.get(&entry.space)
+        {
+            write_space(Some(given), Some(stored))?;
+        }
+        Ok(())
     }
 
     fn open_rows(
