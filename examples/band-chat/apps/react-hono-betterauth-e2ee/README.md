@@ -35,7 +35,7 @@ apps for now, so this app has no Worker deployment.
 
 `e2e/` drives real Chromium browsers, each with its own storage profile, so
 each is its own device with its own keys: two people in a room, and up to
-three browsers of one person. To run them as the examples gate does, build
+three browsers of one person. To run them against a production build, build
 first and drive the production server with a fresh data directory:
 
 ```sh
