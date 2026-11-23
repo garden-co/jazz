@@ -97,6 +97,12 @@ object's class from your `createJazz` and your own routes (a Hono app, say), and
 `routeToJazzBackend` forwards the Worker's requests to it. Under the `workerd` condition, which
 wrangler uses, `jazz-tools/backend` runs on WebAssembly instead of the native Node addon.
 
+Choose the store according to where your core runs. Use `durableObjects()` for a core in a
+Cloudflare Durable Object, as in the example below. Use `remote({ url, appId, secret })` for a
+separately hosted native Jazz core. Apps with encrypted columns require the native core. Their
+Worker backend relays encrypted data without holding encryption keys. See
+[Encryption limits](/docs/e2ee/limits).
+
 ```ts title="worker.ts"
 import { Hono } from "hono";
 import { createJazz, durableObjects, jazzBackend, routeToJazzBackend } from "jazz-tools/backend";
@@ -195,6 +201,5 @@ Open WebSockets keep the object awake by default. If you want your Jazz core to 
 - **Transactions run in your backend**, as with every core: the core never holds one open between
   calls.
 - **No HTTP-stream fallback** between your backend and the core: they talk over WebSockets.
-- **In a Worker, only `durableObjects()` stores** run: `sqlite()` and `memory()` run their core in
-  the backend's process, which a Worker can't. The Inspector's query explanations aren't available
-  there yet.
+- **Embedded stores require a native backend.** `sqlite()` and `memory()` run the core in the
+  backend's process. The Inspector's query explanations are unavailable in a Worker.
