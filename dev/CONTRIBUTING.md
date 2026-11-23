@@ -104,9 +104,9 @@ and testing their consumers. Vite+ runs up to three package tests in parallel.
 Jazz Tools retains its eight-worker Node cap and four-worker Chromium cap.
 
 `build:test` always validates the DSL fixture, runs the test compiler and checks
-public interface types. Its test compiler reuses
-`node_modules/.cache/tsc/tests.tsbuildinfo`; CI restores compatible state and
-TypeScript invalidates changed source, compiler options and native declarations.
+public interface types. Local builds reuse compiler state in
+`node_modules/.cache/tsrs/tests.tsbuildinfo`. TypeScript invalidates changed
+source, compiler options and native declarations.
 Keep cache options on the command, not in `tsconfig.tests.json`: generated
 migration fixtures extend that configuration and must not share package state.
 
