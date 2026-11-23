@@ -21,6 +21,36 @@ export {
   type JazzBackendApp,
 } from "./workerd-backend.js";
 
+// The same encryption names as under Node (index.ts), so an app's backend
+// code imports `keyless`, the error classes and `unreadableRows` from
+// `jazz-tools/backend` on either host. Except `memoryPrivateStore`: a
+// private store holds an app's keys, and a Worker serves encrypted apps
+// keylessly (building encryption there refuses with an `EncryptionError`),
+// so there is nothing for it to hold. workerd-entry.test.ts checks the two
+// lists stay in step.
+export {
+  keyless,
+  type EncryptedColumnName,
+  type KeylessApp,
+  type KeylessRow,
+  type KeylessTypes,
+} from "../encryption/keyless-types.js";
+export {
+  PrivateStoreConflictError,
+  PrivateStoreWipedError,
+  EncryptionError,
+  EncryptionNotDeclaredError,
+  EncryptionStoreRequiredError,
+  unreadableRows,
+} from "../encryption/index.js";
+export type {
+  Encryption,
+  EncryptionReport,
+  UnreadableRow,
+  PrivateStore,
+  StoredDocument,
+} from "../encryption/index.js";
+
 /** jazz-wasm's backend build as a backend's engine. */
 function wasmBackendNative(module: typeof wasm): BackendNative {
   const unsupported = (what: string) => () => {
