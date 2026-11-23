@@ -473,8 +473,8 @@ impl JazzHandle {
     /// waiting on the server or the network, at once (local work already
     /// started finishes). On a `for_user` or session handle it closes that
     /// handle only. Safe beside any other call. It has no hard time limit
-    /// (work under way, the store closing, a host name lookup in progress),
-    /// so don't call it on a UI thread. It doesn't wait for the token
+    /// (work under way, the store closing), so don't call it on a UI
+    /// thread. It doesn't wait for the token
     /// provider: one already asked may still run after it returns. Named
     /// `shutdown`, not `close`, which would clash with Kotlin's
     /// `AutoCloseable.close`.

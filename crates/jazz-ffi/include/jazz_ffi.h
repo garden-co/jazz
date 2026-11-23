@@ -166,8 +166,8 @@ JazzHandle *jazz_open(const char *config_json, char **err);
  *                backstop), and stream sessions get up to 2 s to end: so
  *                timeoutMs 0 is not instant. Nor is that a hard limit:
  *                work can't be interrupted while it runs, and closing also
- *                waits for the store to close and for a host name lookup in
- *                progress. Don't close on a UI thread.
+ *                waits for the store to close (not for a host name lookup
+ *                in progress). Don't close on a UI thread.
  *              - On a jazz_for_user or jazz_session_jazz handle only that
  *                handle closes: its waits end at once, what it began is
  *                rolled back, and its client lives on.

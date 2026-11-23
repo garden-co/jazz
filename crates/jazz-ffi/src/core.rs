@@ -1564,8 +1564,8 @@ impl Core {
     /// `Closed`; local work already started finishes (jazz-app-support's
     /// 30 s drain is its backstop), and stream sessions get up to 2 s to
     /// end: not instant, and no hard limit (synchronous work isn't
-    /// interrupted; the store closes, and dropping the runtime waits for a
-    /// name lookup in progress). A derived handle's client lives on: its
+    /// interrupted, and the store closes; a name lookup in progress isn't
+    /// waited for). A derived handle's client lives on: its
     /// waiting calls end `Closed` at once, and what it began is cleaned up.
     ///
     /// Returns once no host callback runs (but the caller's own).
