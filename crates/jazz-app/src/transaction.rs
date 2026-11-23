@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::handle::{Jazz, decode_result, insert};
 use crate::include::Row;
 use crate::query::Query;
-use crate::table::{Implementations, Insert, Table, Update};
+use crate::table::{Implementations, Insert, Table, Updatable, Update};
 
 /// A transaction in progress, handed to [`Jazz::transaction`]'s closure.
 ///
@@ -67,7 +67,10 @@ impl Transaction {
 
     /// Writes the row with this id, as [`Jazz::upsert`]; returns it as the
     /// transaction now sees it.
-    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         let cells = new.into_cells(&self.implementations)?;
         self.client
             .upsert(<N::Row as Table>::NAME, *id.uuid(), cells)?;
@@ -354,7 +357,10 @@ impl OpenTransaction {
             .await
     }
 
-    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
+    where
+        N::Row: Updatable,
+    {
         self.on(move |tx| async move { tx.upsert(id, new).await })
             .await
     }
