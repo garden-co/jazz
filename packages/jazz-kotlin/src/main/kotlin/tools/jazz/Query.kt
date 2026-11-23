@@ -51,8 +51,9 @@ public abstract class BaseTable<Row : Any, Insert : Any>(
 }
 
 /**
- * A table whose rows can also be updated (and upserted): how its patches
- * are made, besides what [BaseTable] declares.
+ * A table whose rows can also be updated, upserted, restored, text-edited
+ * and stream-updated: how its patches are made, besides what [BaseTable]
+ * declares.
  */
 public abstract class Table<Row : Any, Insert : Any, P : Patch>(
     tableName: String,

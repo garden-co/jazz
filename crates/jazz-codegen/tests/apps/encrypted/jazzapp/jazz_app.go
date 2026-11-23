@@ -88,11 +88,6 @@ func (e2eeMembersTable) Insert(ctx context.Context, db jazz.Querier, row NewE2ee
 	return jazz.Insert[NewE2eeMember, E2eeMember](ctx, db, "__e2ee_members", row, opts...)
 }
 
-// Restore brings back the deleted row of `__e2ee_members` with id.
-func (e2eeMembersTable) Restore(ctx context.Context, db jazz.Querier, id string) (E2eeMember, error) {
-	return jazz.Restore[E2eeMember](ctx, db, "__e2ee_members", id, nil)
-}
-
 // History starts a query of `__e2ee_members`'s history: every accepted version of its rows.
 func (e2eeMembersTable) History() *jazz.Query[jazz.HistoryRow[E2eeMember]] {
 	return jazz.History(jazz.NewQuery[E2eeMember]("__e2ee_members"))
