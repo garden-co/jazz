@@ -386,12 +386,13 @@ A browser that lacks a room's key does not show empty rooms. It says how many me
 read yet, and why.
 
 Every read result has an `unreadable` list. It names the rows the read left out, each with a
-`code`. `key-pending` means this account is a member but this browser lacks the key, which usually
-arrives from another member's device. The notice below shows those as decrypting. Anything else,
-such as `key-unavailable`, shows as locked. BandChat's own notice adds checks the snippet leaves
-out. A browser waiting for approval, or whose status is not known yet, sees locked once ten seconds
-have passed. After those ten seconds an active browser says the messages are waiting for the room's
-key, because no device may hold it any more, and a room with no key record says they are locked:
+`code`. `key-pending` means this browser does not currently have the key. For a member, the key
+usually arrives from another member's device, so the notice below shows those rows as decrypting.
+Anything else, such as `key-unavailable`, shows as locked. BandChat's own notice adds checks the
+snippet leaves out. A browser known to be waiting for approval sees locked at once. One whose
+status is not known yet sees decrypting for ten seconds, then locked. After those ten seconds an
+active browser says the messages are waiting for the room's key, since no device may hold it any
+more:
 
 ```tsx
 import { useAll } from "jazz-tools/react";
