@@ -248,6 +248,138 @@ async fn a_redeployment_cannot_append_an_encrypted_enum_variant_to_the_same_sche
     );
 }
 
+/// Both project references already belong to the stored tasks table. A
+/// new physical schema can reorder them without changing their identities.
+fn standalone_tasks() -> (LoadedApp, LoadedApp) {
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let source = APP.replace(
+        r#""projectId": "uuid", "title": "bytes""#,
+        r#""projectId": "uuid", "otherProject": { "type": "uuid", "references": "projects" }, "caption": "bytes", "title": "bytes", "plainTitle": "string?""#,
+    );
+    let reordered = source.replace(
+        r#""title": "bytes", "plainTitle": "string?""#,
+        r#""plainTitle": "string?", "title": "bytes""#,
+    );
+    let load = |s: &str| artifact::load(s.as_bytes(), permissions.as_bytes()).unwrap();
+    let versions = (load(&source), load(&reordered));
+    assert_ne!(versions.0.current_hash(), versions.1.current_hash());
+    versions
+}
+
+async fn refuses_standalone_change(edit: impl FnOnce(&mut Value), reason: &str) {
+    let (first, next) = standalone_tasks();
+    let router = router().await;
+    let (status, response) = publish(&router, first.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let mut body = next.deployment_body(false);
+    let hash = next.current_hash().to_string();
+    edit(&mut body["encryption"]["versions"][&hash]["tasks"]);
+    let (status, refusal) = publish(&router, body).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    let message = refusal["error"].as_str().unwrap();
+    assert!(
+        message.contains("tasks") && message.contains(reason),
+        "{refusal}"
+    );
+}
+
+#[tokio::test]
+async fn standalone_encryption_preserves_the_stored_space() {
+    refuses_standalone_change(
+        |e| e["space"] = json!("otherProject"),
+        "changes its space column",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn standalone_encryption_keeps_ciphertext_columns_declared() {
+    refuses_standalone_change(
+        |e| {
+            e["columns"] = json!({});
+            e["equality"] = json!([]);
+        },
+        "holds ciphertext",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn standalone_encryption_keeps_equality_while_the_token_column_remains() {
+    refuses_standalone_change(|e| e["equality"] = json!([]), "token column").await;
+}
+
+#[tokio::test]
+async fn a_standalone_decrypt_requires_confirmation_for_the_source_column() {
+    let router = router().await;
+    let (first, next) = standalone_tasks();
+    let (status, response) = publish(&router, first.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let mut body = next.deployment_body(false);
+    let hash = next.current_hash().to_string();
+    body["encryption"]["versions"][&hash]["tasks"]["columns"]["title"]["to"] = json!("plainTitle");
+    let (status, refusal) = publish(&router, body.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .unwrap()
+            .contains("confirmDecrypt"),
+        "{refusal}"
+    );
+    body["confirmDecrypt"] = json!(["tasks.title"]);
+    let (status, response) = publish(&router, body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+}
+
+#[tokio::test]
+async fn a_renamed_space_column_keeps_its_stored_identity() {
+    let router = router().await;
+    let first = loaded("ownerId = session.user");
+    let (status, response) = publish(&router, first.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let (current, history) = APP_V2.split_once(r#""history":"#).unwrap();
+    let current = current.replace("projectId", "roomId");
+    let history = history.replace(
+        r#""done": { "add""#,
+        r#""roomId": { "renameFrom": "projectId" }, "done": { "add""#,
+    );
+    let source = format!(r#"{current}"history":{history}"#);
+    let renamed = artifact::load(
+        source.as_bytes(),
+        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
+    )
+    .unwrap();
+    let (status, response) = publish(&router, renamed.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+}
+
+#[tokio::test]
+async fn an_explicit_rehome_is_accepted_with_or_without_a_migration() {
+    let (first, next) = standalone_tasks();
+    let from = first.current_hash().to_string();
+    let to = next.current_hash().to_string();
+    let first = first.deployment_body(false);
+    let mut standalone = next.deployment_body(false);
+    let entry = &mut standalone["encryption"]["versions"][&to]["tasks"];
+    entry["space"] = json!("otherProject");
+    entry["rehome"] = json!({ "space": "projectId", "scope": "projects" });
+    entry["columns"] = json!({ "caption": {
+        "type": entry["columns"]["title"]["type"], "from": "title"
+    } });
+    entry["equality"] = json!([]);
+    let mut migrated = standalone.clone();
+    migrated["migrations"] = json!([{ "fromHash": from, "toHash": to, "forward": [] }]);
+    migrated["encryption"]["versions"][&from] = first["encryption"]["versions"][&from].clone();
+    for candidate in [migrated, standalone] {
+        let router = router().await;
+        let (status, response) = publish(&router, first.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let (status, response) = publish(&router, candidate).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+    }
+}
+
 /// Alice appends an enum variant on a standalone version. A migration from
 /// her original version renames the column and must preserve that variant.
 #[tokio::test]

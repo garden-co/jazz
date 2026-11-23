@@ -489,18 +489,39 @@ pub fn check_transition(
         }
     };
 
+    let columns = |table: &str| TableMap {
+        lens: lens_of(table),
+    };
+    check_mapped_transition(
+        (old_schema, old_entries),
+        (new_schema, new_entries),
+        old_table,
+        &new_table,
+        |table, name| columns(table).old_name(name),
+        |table, name| columns(&new_table(table)?).new_name(name),
+    )
+}
+
+/// Check the same transition after catalogue admission has resolved the
+/// table and column identities of both versions. Each mapping takes names in its source
+/// version and returns their names in the destination version, if kept.
+pub fn check_mapped_transition(
+    (old_schema, old_entries): (&Schema, &Entries),
+    (new_schema, new_entries): (&Schema, &Entries),
+    old_table: impl Fn(&str) -> Option<String>,
+    new_table: impl Fn(&str) -> Option<String>,
+    old_name: impl Fn(&str, &str) -> Option<String>,
+    new_name: impl Fn(&str, &str) -> Option<String>,
+) -> Result<(), String> {
     // Every old encrypted column the new version keeps stays encrypted,
     // or is a conversion's source.
     for (table, old) in old_entries {
         let Some(renamed) = new_table(table) else {
             continue;
         };
-        let map = TableMap {
-            lens: lens_of(&renamed),
-        };
         let new = new_entries.get(&renamed);
         for name in old.columns.keys() {
-            let Some(kept) = map.new_name(name) else {
+            let Some(kept) = new_name(table, name) else {
                 continue;
             };
             let declared = new.is_some_and(|e| e.columns.contains_key(&kept));
@@ -523,18 +544,12 @@ pub fn check_transition(
         let Some(was) = old_table(table) else {
             continue;
         };
-        let map = TableMap {
-            lens: lens_of(table),
-        };
         let old = old_entries.get(&was);
-        let old_column = |name: &str| {
-            map.old_name(name)
-                .and_then(|n| column(old_schema, &was, &n))
-        };
+        let old_column =
+            |name: &str| old_name(table, name).and_then(|n| column(old_schema, &was, &n));
         if let Some(old) = old {
-            let mapped = |t: &str| new_table(t).unwrap_or_else(|| t.to_owned());
             if new.rehome.is_none() {
-                if mapped(&old.scope) != new.scope {
+                if new_table(&old.scope).as_deref() != Some(&new.scope) {
                     return Err(format!(
                         "table {table} moves its space table (`scope`) from {} to {}, which \
                          changes every cell's context; write it as a re-home conversion \
@@ -545,7 +560,7 @@ pub fn check_transition(
                 let space = if old.space == "id" {
                     Some("id".to_owned())
                 } else {
-                    map.new_name(&old.space)
+                    new_name(&was, &old.space)
                 };
                 if space.as_deref() != Some(new.space.as_str()) {
                     return Err(format!(
@@ -564,9 +579,8 @@ pub fn check_transition(
             // encrypted without equality, in a table encrypted before or
             // for the first time): it starts in `backfill` (migrations
             // §4.3, §4.5). A schema-level rule; no row is looked up.
-            let tagged_before = map
-                .old_name(name)
-                .is_some_and(|n| old.is_some_and(|o| o.equality.contains(&n)));
+            let tagged_before =
+                old_name(table, name).is_some_and(|n| old.is_some_and(|o| o.equality.contains(&n)));
             if new.equality.contains(name) && !tagged_before && !new.backfill.contains(name) {
                 return Err(format!(
                     "{path}: the table existed in the earlier version, whose rows have no \
@@ -579,8 +593,7 @@ pub fn check_transition(
                 // target of one is a column the earlier version did not
                 // hold as an encrypted column, or its cells (sealed under
                 // the old type) would no longer read.
-                if map
-                    .old_name(name)
+                if old_name(table, name)
                     .is_some_and(|n| old.is_some_and(|o| o.columns.contains_key(&n)))
                 {
                     return Err(format!(
@@ -589,7 +602,7 @@ pub fn check_transition(
                          can't write over it. Convert into a new column"
                     ));
                 }
-                let old_source = map.old_name(source);
+                let old_source = old_name(table, source);
                 match old_source
                     .as_deref()
                     .and_then(|s| old.and_then(|o| o.columns.get(s)))
@@ -625,13 +638,12 @@ pub fn check_transition(
                 }
                 continue;
             }
-            let previous = map
-                .old_name(name)
+            let previous = old_name(table, name)
                 .and_then(|n| old.and_then(|o| o.columns.get(&n).map(|c| (n, c))));
             match previous {
-                Some((old_name, previous)) => {
+                Some((was_name, previous)) => {
                     check_stored_column_type(&path, previous, declared)?;
-                    let tagged_before = old.is_some_and(|o| o.equality.contains(&old_name));
+                    let tagged_before = old.is_some_and(|o| o.equality.contains(&was_name));
                     // Removing equality drops the token column in the same
                     // migration; one left behind would be queried by older
                     // clients while nobody writes it.
@@ -647,12 +659,13 @@ pub fn check_transition(
                     }
                     if tagged_before
                         && new.equality.contains(name)
-                        && map.old_name(&equality_column(name)) != Some(equality_column(&old_name))
+                        && old_name(table, &equality_column(name))
+                            != Some(equality_column(&was_name))
                     {
                         return Err(format!(
-                            "{path}: renaming the encrypted column {old_name} also renames \
+                            "{path}: renaming the encrypted column {was_name} also renames \
                              {} to {}",
-                            equality_column(&old_name),
+                            equality_column(&was_name),
                             equality_column(name)
                         ));
                     }

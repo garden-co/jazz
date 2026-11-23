@@ -4488,6 +4488,21 @@ impl Db {
         &self,
         hash: &jazz_model::model::public_schema::SchemaHash,
     ) -> Result<crate::values::StoredNames, Error> {
+        Ok(self.catalogue_schema_and_stored_names(hash)?.1)
+    }
+
+    /// A published schema and the identities of its tables and columns,
+    /// read together from the current catalogue transaction.
+    pub fn catalogue_schema_and_stored_names(
+        &self,
+        hash: &jazz_model::model::public_schema::SchemaHash,
+    ) -> Result<
+        (
+            jazz_model::model::public_schema::Schema,
+            crate::values::StoredNames,
+        ),
+        Error,
+    > {
         let inner = self.inner.borrow();
         let schema = crate::catalogue::schema(&inner.conn, hash)?
             .ok_or_else(|| schema_error(format!("schema {hash} is missing from the catalogue")))?;
@@ -4524,7 +4539,7 @@ impl Db {
                 columns.insert(column, stored_column);
             }
         }
-        Ok(names)
+        Ok((schema, names))
     }
 
     /// Admit `schema` with the lenses into it.

@@ -3,7 +3,7 @@
 //! the change that admits them into a runtime's catalogue. Locking,
 //! committing, and starting or reaching the runtime stay with each host.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use http::StatusCode;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
@@ -13,7 +13,7 @@ use jazz::schema::JazzSchema;
 use jazz::tools::deployment::artifact::{DeclaredEncryption, encryption, system_tables};
 use jazz::tools::deployment::published::{PublishMigrationRequest, lower_migration};
 use jazz::tools::deployment::{self, DeploymentError, PreparedDeployment};
-use jazz::tools::public_schema::{EncryptedColumn, Schema, SchemaHash, TableName, TablePolicies};
+use jazz::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies};
 use serde::{Deserialize, Serialize};
 
 use super::catalogue::{CatalogueIndex, StagedDeployment};
@@ -22,8 +22,63 @@ use crate::runtime::CatalogueApplyError;
 /// Per-physical-schema declarations in [`encryption::STORED_DECLARATIONS_V1`] form.
 pub(crate) const DECLARATIONS: HostTable = HostTable::new("e2ee_declarations");
 
-/// Check new declarations inside the catalogue transaction, after admission
-/// resolves renames and gives each column its final stored identity.
+type Names = BTreeMap<String, (String, BTreeMap<String, String>)>;
+
+/// The catalogue names for a version, indexed in both directions so that
+/// the transition check can follow a stored identity across public renames.
+struct DeclaredVersion {
+    schema: Schema,
+    entries: encryption::Entries,
+    stored: Names,
+    public: Names,
+}
+
+impl DeclaredVersion {
+    fn read(db: &Db, hash: SchemaHash, entries: encryption::Entries) -> Result<Self, Error> {
+        let (schema, names) = db.catalogue_schema_and_stored_names(&hash)?;
+        let stored = names.tables;
+        let public = stored
+            .iter()
+            .map(|(table, (id, columns))| {
+                let columns = columns
+                    .iter()
+                    .map(|(name, id)| (id.clone(), name.clone()))
+                    .collect();
+                (id.clone(), (table.clone(), columns))
+            })
+            .collect();
+        Ok(Self {
+            schema,
+            entries,
+            stored,
+            public,
+        })
+    }
+
+    fn table_in(&self, other: &Self, table: &str) -> Option<String> {
+        let (id, _) = self.stored.get(table)?;
+        Some(other.public.get(id)?.0.clone())
+    }
+
+    fn column_in(&self, other: &Self, table: &str, column: &str) -> Option<String> {
+        let (id, columns) = self.stored.get(table)?;
+        other.public.get(id)?.1.get(columns.get(column)?).cloned()
+    }
+
+    fn check_transition_to(&self, next: &Self) -> Result<(), String> {
+        encryption::check_mapped_transition(
+            (&self.schema, &self.entries),
+            (&next.schema, &next.entries),
+            |table| next.table_in(self, table),
+            |table| self.table_in(next, table),
+            |table, name| next.column_in(self, table, name),
+            |table, name| self.column_in(next, table, name),
+        )
+    }
+}
+
+/// Check every new declaration inside the catalogue transaction, after
+/// admission assigns stored identities and before the schema becomes live.
 pub(crate) fn check_stored_columns(
     db: &Db,
     kept: &[(HostTable, Vec<u8>, Vec<u8>)],
@@ -32,61 +87,35 @@ pub(crate) fn check_stored_columns(
     let mut new = Vec::new();
     for (table, key, bytes) in kept {
         if *table == DECLARATIONS && db.host_get(*table, key)?.is_none() {
-            let entries = encryption::decode_stored(bytes).map_err(invalid)?;
-            if !entries.is_empty() {
-                let hash = SchemaHash(key.as_slice().try_into().map_err(|_| {
-                    invalid("invalid schema hash in new encryption declarations".into())
-                })?);
-                new.push((hash, entries));
-            }
+            let hash = key.as_slice().try_into().map_err(|_| {
+                invalid("invalid schema hash in new encryption declarations".into())
+            })?;
+            new.push(DeclaredVersion::read(
+                db,
+                SchemaHash(hash),
+                encryption::decode_stored(bytes).map_err(invalid)?,
+            )?);
         }
     }
     if new.is_empty() {
         return Ok(());
     }
 
-    let mut history = HashMap::<(String, String), Vec<EncryptedColumn>>::new();
-    let mut record_columns =
-        |hash: SchemaHash, entries: encryption::Entries, check: bool| -> Result<(), Error> {
-            if entries.is_empty() {
-                return Ok(());
-            }
-            let names = db.catalogue_stored_names(&hash)?;
-            for (table, entry) in entries {
-                for (name, declared) in entry.columns {
-                    let (stored_table, stored_column) = names
-                        .tables
-                        .get(&table)
-                        .and_then(|(table, columns)| Some((table, columns.get(&name)?)))
-                        .ok_or_else(|| {
-                            invalid(format!("{table}.{name}: no stored column in schema {hash}"))
-                        })?;
-                    let previous = history
-                        .entry((stored_table.clone(), stored_column.clone()))
-                        .or_default();
-                    if check {
-                        let path = format!("{table}.{name}");
-                        for old in previous.iter() {
-                            encryption::check_stored_column_type(&path, old, &declared)
-                                .map_err(invalid)?;
-                        }
-                    }
-                    previous.push(declared);
-                }
-            }
-            Ok(())
-        };
+    let mut history = Vec::new();
     for (key, bytes) in db.host_prefix(DECLARATIONS, &[])? {
         // Only a schema-hash key can name a deployed version.
         if let Ok(hash) = key.as_slice().try_into() {
             let entries = encryption::decode_stored(&bytes)
                 .map_err(|error| Error::new(ErrorCode::Storage, error))?;
-            record_columns(SchemaHash(hash), entries, false)?;
+            history.push(DeclaredVersion::read(db, SchemaHash(hash), entries)?);
         }
     }
     // New versions in the same publication arrive in migration order.
-    for (hash, entries) in new {
-        record_columns(hash, entries, true)?;
+    for next in new {
+        for old in &history {
+            old.check_transition_to(&next).map_err(invalid)?;
+        }
+        history.push(next);
     }
     Ok(())
 }
