@@ -265,6 +265,8 @@ describe("calls on a db.encryption handle taken while thin", () => {
     // one already in flight, which can wait longer (on its own deadline, or on the app's
     // account-secret provider), so it does not end by itself here.
     vi.spyOn(Encryption.prototype, "ready").mockImplementation(() => new Promise(() => {}));
+    // The full client's own handle, which the call reaches once the wait releases it.
+    const fullDeviceId = vi.spyOn(Encryption.prototype, "deviceId");
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let outcome: unknown = "pending";
     const call = kept.encryption.deviceId().then(
@@ -278,15 +280,18 @@ describe("calls on a db.encryption handle taken while thin", () => {
     // settles: the wait's own timer may start only after the upgrade has finished, and the full
     // client's own call then runs on the same clock. A wait without a deadline never settles.
     let elapsed = 0;
+    let releasedAt: number | undefined;
     try {
       while (elapsed < 120_000 && outcome === "pending") {
         await vi.advanceTimersByTimeAsync(100);
         elapsed += 100;
         await new Promise((resolve) => setImmediate(resolve));
+        if (releasedAt === undefined && fullDeviceId.mock.calls.length > 0) releasedAt = elapsed;
       }
       expect(outcome).toEqual({ id: expect.any(String) });
-      // Released at the 30-second deadline; the rest is the full client's own call.
-      expect(elapsed).toBeLessThan(45_000);
+      // Released at the 30-second deadline; how long the full client's own call takes after
+      // that is not this wait's.
+      expect(releasedAt).toBeLessThanOrEqual(31_000);
       await call;
     } finally {
       vi.useRealTimers();
