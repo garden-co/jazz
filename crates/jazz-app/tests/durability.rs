@@ -342,6 +342,88 @@ async fn mutation_errors_report_unwaited_refusals() {
     server.shutdown().await;
 }
 
+/// A durable wait cut short by its handle's closing isn't the one that
+/// handles the write's refusal: the refusal is a mutation error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_wait_leaves_its_refusal_to_mutation_errors() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    connected(&jazz).await;
+    let mut errors = jazz.mutation_errors().await.unwrap();
+    jazz.disconnect().await.unwrap();
+    let (close, closed) = tokio::sync::watch::channel(false);
+    let handle = jazz
+        .durable(DurabilityTier::GlobalServer)
+        .ending_waits_with(closed);
+    let writing = tokio::spawn(async move {
+        handle
+            .insert(NewNote::new(ObjectId::new(), "interrupted"))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!writing.is_finished(), "nothing to wait for");
+    close.send(true).unwrap();
+    let written = tokio::time::timeout(Duration::from_secs(5), writing)
+        .await
+        .expect("the wait ends with its handle")
+        .unwrap();
+    assert!(
+        matches!(written, Err(jazz_app_support::Error::Stopped)),
+        "{written:?}"
+    );
+    jazz.reconnect().await.unwrap();
+    assert!(next_error(&mut errors).await.denied);
+    jazz.shutdown().await.unwrap();
+    server.shutdown().await;
+}
+
+/// `shutdown` ends the waits on the server at once, rather than draining
+/// them for 30 seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_ends_waits_on_the_server() {
+    let app_id = AppId::random();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .start()
+        .await
+        .unwrap();
+    let jazz = open(&server, app_id).await;
+    connected(&jazz).await;
+    jazz.disconnect().await.unwrap();
+    let me = ObjectId::from_uuid(jazz.account().unwrap().0);
+    jazz.insert(NewNote::new(me, "unsent")).await.unwrap();
+    let syncing = tokio::spawn({
+        let jazz = jazz.clone();
+        async move { jazz.wait_for_sync().await }
+    });
+    let writing = tokio::spawn({
+        let durable = jazz.durable(DurabilityTier::GlobalServer);
+        async move { durable.insert(NewNote::new(me, "durable")).await.map(drop) }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !syncing.is_finished() && !writing.is_finished(),
+        "nothing to wait for"
+    );
+    tokio::time::timeout(Duration::from_secs(8), jazz.shutdown())
+        .await
+        .expect("shutdown doesn't drain the waits")
+        .unwrap();
+    for wait in [syncing, writing] {
+        let ended = wait.await.unwrap();
+        assert!(
+            matches!(ended, Err(jazz_app_support::Error::Stopped)),
+            "{ended:?}"
+        );
+    }
+    server.shutdown().await;
+}
+
 /// Disconnecting keeps local work going and stops sync: another client
 /// doesn't see the write until reconnecting syncs it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -469,55 +551,50 @@ async fn delete_client_storage_removes_every_file() {
     server.shutdown().await;
 }
 
-/// A store another app has open, in this process or another, is not
-/// deleted: the other app keeps it, and its writes.
+/// A store another app has open, in this process or another, is neither
+/// opened a second time nor deleted: the app that has it keeps it, and its
+/// writes.
 #[tokio::test]
 async fn delete_client_storage_refuses_a_held_store() {
     let app_id = AppId::random();
     let data = tempfile::TempDir::new().unwrap();
     let config = || Config::new(app_id).storage(jazz_app_support::Storage::Dir(data.path().into()));
     let a = bindings::open(config()).await.unwrap();
-    let b = bindings::open(config()).await.unwrap();
-
-    let refused = a.delete_client_storage().await;
-    assert!(
-        matches!(refused, Err(jazz_app_support::Error::StoreHeld(_))),
-        "{refused:?}"
-    );
-    // Both run on, on the same store.
-    let note = b
-        .insert(NewNote::new(ObjectId::new(), "b's"))
+    let refused = bindings::open(config()).await;
+    assert!(matches!(
+        refused,
+        Err(jazz_app_support::Error::StoreHeld(_))
+    ));
+    // The app that has it runs on.
+    let note = a
+        .insert(NewNote::new(ObjectId::new(), "a's"))
         .await
         .unwrap();
     assert!(data.path().join("jazz.sqlite").exists());
-    assert!(a.all(notes::query()).await.is_ok());
     a.shutdown().await.unwrap();
-    b.shutdown().await.unwrap();
-    let reopened = bindings::open(config()).await.unwrap();
-    assert_eq!(reopened.all(notes::query()).await.unwrap(), vec![note]);
 
     // Another process holds the store's lock while it has it open.
     let other = std::fs::File::open(data.path().join("jazz.lock")).unwrap();
     other.lock_shared().unwrap();
-    let refused = reopened.delete_client_storage().await;
+    let refused = a.delete_client_storage().await;
     assert!(
         matches!(refused, Err(jazz_app_support::Error::StoreHeld(_))),
         "{refused:?}"
     );
     assert!(data.path().join("jazz.sqlite").exists());
     drop(other);
+    let reopened = bindings::open(config()).await.unwrap();
+    assert_eq!(reopened.all(notes::query()).await.unwrap(), vec![note]);
     reopened.delete_client_storage().await.unwrap();
     assert!(!data.path().join("jazz.sqlite").exists());
     #[cfg(unix)]
     assert!(!data.path().join("jazz.lock").exists());
     // A later open of the directory locks it afresh, and is guarded again.
     let again = bindings::open(config()).await.unwrap();
-    let second = bindings::open(config()).await.unwrap();
     assert!(matches!(
-        again.delete_client_storage().await,
+        bindings::open(config()).await,
         Err(jazz_app_support::Error::StoreHeld(_))
     ));
-    second.shutdown().await.unwrap();
     again.delete_client_storage().await.unwrap();
     #[cfg(unix)]
     assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);

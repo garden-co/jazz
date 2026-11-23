@@ -651,8 +651,7 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     /**
      * Closes the app and deletes its local store (TS's
      * `deleteClientStorage`): the next open starts empty and syncs again.
-     * Writes the server hasn't accepted yet are lost. Refused while another
-     * open app holds the same `dataDir`.
+     * Writes the server hasn't accepted yet are lost.
      */
     func deleteClientStorage() throws 
     
@@ -703,7 +702,8 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     /**
      * Links this device account to the user's account with the app's own
      * sign-in (`bearer`): the session becomes that user's. Returns the user
-     * as JSON.
+     * as JSON. Not supported on a session's handle: use
+     * `Session.linkDeviceAccount`.
      */
     func link(bearer: String) throws  -> String
     
@@ -741,8 +741,15 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
     func sessionState() throws  -> String?
     
     /**
-     * Closes the app; later calls fail with `Closed`. Named `shutdown`, not
-     * `close`, which would clash with Kotlin's `AutoCloseable.close`.
+     * Closes the app; later calls fail with `Closed`, and so do the calls
+     * waiting on the server or the network, at once (local work already
+     * started finishes). On a `for_user` or session handle it closes that
+     * handle only. Safe beside any other call. It has no hard time limit
+     * (work under way, the store closing, a host name lookup in progress),
+     * so don't call it on a UI thread. It doesn't wait for the token
+     * provider: one already asked may still run after it returns. Named
+     * `shutdown`, not `close`, which would clash with Kotlin's
+     * `AutoCloseable.close`.
      */
     func shutdown() throws 
     
@@ -751,12 +758,16 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * the client holds to reach the server (TS's `close({ timeoutMs })`,
      * 10 000 by default there). With memory storage, writes still unsent
      * fail it with `Unsynced { pending }` (contract 2; `Io` otherwise), and
-     * the app is closed all the same. `0` closes at once.
+     * the app is closed all the same. The calls waiting on the server go on
+     * until then. `0` waits for no writes, but is not instant: local work
+     * finishes, and stream sessions get up to 2 s to end (no hard limit:
+     * see [`Self::shutdown`]).
      */
     func shutdownWithin(timeoutMs: UInt64) throws 
     
     /**
-     * Signs the end user out and closes the app.
+     * Signs the end user out and closes the app. Not supported on a
+     * session's handle, which stays open: use `Session.signOut`.
      */
     func signOut() throws 
     
@@ -793,6 +804,13 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * names. Returns the row.
      */
     func upsert(table: String, id: String, rowJson: String) throws  -> String
+    
+    /**
+     * [`Self::upsert`], returning once the write reaches `tier`: `"local"`
+     * or `"global"`. The row is as written here, not as the server has it
+     * by then.
+     */
+    func upsertAt(table: String, id: String, rowJson: String, tier: String) throws  -> String
     
     /**
      * Returns once every write committed so far reaches `tier`
@@ -1068,8 +1086,7 @@ open func deleteAt(table: String, id: String, tier: String)throws   {try rustCal
     /**
      * Closes the app and deletes its local store (TS's
      * `deleteClientStorage`): the next open starts empty and syncs again.
-     * Writes the server hasn't accepted yet are lost. Refused while another
-     * open app holds the same `dataDir`.
+     * Writes the server hasn't accepted yet are lost.
      */
 open func deleteClientStorage()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
@@ -1181,7 +1198,8 @@ open func insertAt(table: String, rowJson: String, tier: String)throws  -> Strin
     /**
      * Links this device account to the user's account with the app's own
      * sign-in (`bearer`): the session becomes that user's. Returns the user
-     * as JSON.
+     * as JSON. Not supported on a session's handle: use
+     * `Session.linkDeviceAccount`.
      */
 open func link(bearer: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
@@ -1273,8 +1291,15 @@ open func sessionState()throws  -> String?  {
 }
     
     /**
-     * Closes the app; later calls fail with `Closed`. Named `shutdown`, not
-     * `close`, which would clash with Kotlin's `AutoCloseable.close`.
+     * Closes the app; later calls fail with `Closed`, and so do the calls
+     * waiting on the server or the network, at once (local work already
+     * started finishes). On a `for_user` or session handle it closes that
+     * handle only. Safe beside any other call. It has no hard time limit
+     * (work under way, the store closing, a host name lookup in progress),
+     * so don't call it on a UI thread. It doesn't wait for the token
+     * provider: one already asked may still run after it returns. Named
+     * `shutdown`, not `close`, which would clash with Kotlin's
+     * `AutoCloseable.close`.
      */
 open func shutdown()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
@@ -1289,7 +1314,10 @@ open func shutdown()throws   {try rustCallWithError(FfiConverterTypeJazzError_li
      * the client holds to reach the server (TS's `close({ timeoutMs })`,
      * 10 000 by default there). With memory storage, writes still unsent
      * fail it with `Unsynced { pending }` (contract 2; `Io` otherwise), and
-     * the app is closed all the same. `0` closes at once.
+     * the app is closed all the same. The calls waiting on the server go on
+     * until then. `0` waits for no writes, but is not instant: local work
+     * finishes, and stream sessions get up to 2 s to end (no hard limit:
+     * see [`Self::shutdown`]).
      */
 open func shutdownWithin(timeoutMs: UInt64)throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
@@ -1301,7 +1329,8 @@ open func shutdownWithin(timeoutMs: UInt64)throws   {try rustCallWithError(FfiCo
 }
     
     /**
-     * Signs the end user out and closes the app.
+     * Signs the end user out and closes the app. Not supported on a
+     * session's handle, which stays open: use `Session.signOut`.
      */
 open func signOut()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
@@ -1396,6 +1425,24 @@ open func upsert(table: String, id: String, rowJson: String)throws  -> String  {
         FfiConverterString.lower(table),
         FfiConverterString.lower(id),
         FfiConverterString.lower(rowJson),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * [`Self::upsert`], returning once the write reaches `tier`: `"local"`
+     * or `"global"`. The row is as written here, not as the server has it
+     * by then.
+     */
+open func upsertAt(table: String, id: String, rowJson: String, tier: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeJazzError_lift) {
+        uniffiCallStatus in
+    uniffi_jazz_ffi_fn_method_jazzhandle_upsert_at(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(table),
+        FfiConverterString.lower(id),
+        FfiConverterString.lower(rowJson),
+        FfiConverterString.lower(tier),uniffiCallStatus
     )
 })
 }
@@ -1559,7 +1606,9 @@ public protocol SessionProtocol: AnyObject, Sendable {
     
     /**
      * Closes the session and its client: handles it gave fail with
-     * `Closed`, watches end.
+     * `Closed` (never `Replaced`), as does the operation in flight, which
+     * isn't waited for; watches end. As `JazzHandle.shutdown`, it has no
+     * hard time limit and doesn't wait for a token provider already asked.
      */
     func shutdown() throws 
     
@@ -1746,7 +1795,9 @@ open func retry()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift)
     
     /**
      * Closes the session and its client: handles it gave fail with
-     * `Closed`, watches end.
+     * `Closed` (never `Replaced`), as does the operation in flight, which
+     * isn't waited for; watches end. As `JazzHandle.shutdown`, it has no
+     * hard time limit and doesn't wait for a token provider already asked.
      */
 open func shutdown()throws   {try rustCallWithError(FfiConverterTypeJazzError_lift) {
         uniffiCallStatus in
@@ -3551,7 +3602,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_delete_at() != 42862) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_delete_client_storage() != 20846) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_delete_client_storage() != 32557) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_disconnect() != 12631) {
@@ -3572,7 +3623,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_insert_at() != 7087) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_link() != 1170) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_link() != 51862) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_one() != 37106) {
@@ -3593,13 +3644,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_session_state() != 35355) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown() != 40246) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown() != 11280) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown_within() != 15915) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown_within() != 12304) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_sign_out() != 13738) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_sign_out() != 29504) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_subscribe() != 48094) {
@@ -3618,6 +3669,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_upsert() != 59620) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_upsert_at() != 31942) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_wait_for_sync() != 43748) {
@@ -3656,7 +3710,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_session_retry() != 39570) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_session_shutdown() != 44387) {
+    if (uniffi_jazz_ffi_checksum_method_session_shutdown() != 59354) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_session_sign_out() != 30311) {

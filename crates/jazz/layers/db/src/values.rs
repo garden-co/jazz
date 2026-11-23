@@ -11,8 +11,10 @@ use crate::options::{Error, ErrorCode};
 use crate::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 use crate::result_tree::{ResultNode, ResultRelation};
 use crate::schema::JazzSchema;
+use crate::storage::Cell as ValueRef;
 use crate::tools::{PolicyExpr, TablePolicies};
-use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
+#[cfg(feature = "sqlite")]
+use rusqlite::types::{ToSql, ToSqlOutput};
 
 pub(crate) fn unsupported(what: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Query, format!("{what} is not supported yet"))
@@ -26,30 +28,45 @@ pub(crate) fn query_error(what: impl std::fmt::Display) -> Error {
 /// the same few shapes per row (a row's state, an interned author), so
 /// re-parsing each one costs more than running it.
 pub(crate) trait CachedRow {
-    fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    async fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> crate::storage::SqlResult<T>
     where
         P: crate::storage::Params,
-        F: FnOnce(&crate::storage::Row<'_>) -> rusqlite::Result<T>;
+        F: FnOnce(&crate::storage::Row<'_>) -> crate::storage::SqlResult<T>;
 }
 
-pub(crate) fn storage(error: rusqlite::Error) -> Error {
+pub(crate) fn storage(error: impl Into<crate::storage::SqlError>) -> Error {
+    let error = error.into();
     // Only the large-value collation and functions interrupt a statement,
     // when a chunk it needs is not local (see `crate::large`).
-    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
+    if matches!(error, crate::storage::SqlError::Backend { code: Some(code), .. } if code & 0xff == crate::storage::SQLITE_INTERRUPT)
+    {
         return crate::large::missing();
     }
     Error::new(ErrorCode::Storage, error.to_string())
 }
 
 /// Open `SAVEPOINT name`; [`end_savepoint`] closes it.
+#[cfg(feature = "sqlite")]
 pub(crate) fn begin_savepoint(conn: &Storage, name: &str) -> Result<(), Error> {
     if conn.is_managed() {
         return Err(not_on_managed_storage(name));
     }
-    conn.execute_batch(&format!("SAVEPOINT {name}"))
+    conn.native_conn()
+        .expect("native savepoint")
+        .execute_batch(&format!("SAVEPOINT {name}"))
         .map_err(storage)?;
     open_tag_undo(conn);
     Ok(())
+}
+
+#[cfg(not(feature = "sqlite"))]
+pub(crate) fn begin_savepoint(_conn: &Storage, name: &str) -> Result<(), Error> {
+    Err(not_on_managed_storage(name))
+}
+
+#[cfg(not(feature = "sqlite"))]
+pub(crate) fn end_savepoint(_conn: &Storage, name: &str, _keep: bool) -> Result<(), Error> {
+    Err(not_on_managed_storage(name))
 }
 
 /// The typed refusal for what managed storage (a Durable Object's SQL)
@@ -181,13 +198,18 @@ pub(crate) fn close_tag_undo(conn: &Storage, kept: bool, all: bool) {
 /// Release `SAVEPOINT name` (`keep`), or roll back everything since it. SQLite
 /// rolls a whole transaction back by itself after some errors (a full disk,
 /// an I/O error); then the savepoint is gone and there is nothing to undo.
+#[cfg(feature = "sqlite")]
 pub(crate) fn end_savepoint(conn: &Storage, name: &str, keep: bool) -> Result<(), Error> {
     let sql = if keep {
         format!("RELEASE {name}")
     } else {
         format!("ROLLBACK TO {name}; RELEASE {name}")
     };
-    match conn.execute_batch(&sql) {
+    match conn
+        .native_conn()
+        .ok_or_else(|| not_on_managed_storage(name))?
+        .execute_batch(&sql)
+    {
         Ok(()) => {
             close_tag_undo(conn, keep, false);
             if !keep {
@@ -271,13 +293,7 @@ impl Sql {
 impl Sql {
     /// The value as SQLite holds it, borrowed.
     pub fn as_value_ref(&self) -> ValueRef<'_> {
-        match self {
-            Self::Null => ValueRef::Null,
-            Self::Integer(n) => ValueRef::Integer(*n),
-            Self::Real(n) => ValueRef::Real(*n),
-            Self::Text(bytes) => ValueRef::Text(bytes),
-            Self::Blob(bytes) => ValueRef::Blob(bytes),
-        }
+        self.as_ref()
     }
 }
 
@@ -293,15 +309,10 @@ impl From<ValueRef<'_>> for Sql {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl ToSql for Sql {
     fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::Borrowed(self.as_ref()))
-    }
-}
-
-impl FromSql for Sql {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        Ok(Sql::from(value))
+        Ok(ToSqlOutput::Borrowed(self.as_ref().into()))
     }
 }
 
@@ -327,7 +338,7 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::String(v) => Sql::Text(v.as_bytes().to_vec()),
         Value::Bytes(v) => Sql::Blob(v.clone()),
         // A chunked cell names an epoch, which only a store has: descriptors
-        // are stored through `Inner::large_cell`.
+        // are stored through `Store::large_cell`.
         Value::Large(_) => return Err(unsupported("a large-value descriptor as a literal")),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
@@ -416,17 +427,17 @@ pub(crate) fn array_needle(sql: Sql) -> Sql {
 }
 
 /// Decode column `column`'s cell (see [`cell_from_sql`]).
-pub(crate) fn column_from_sql(
+pub(crate) async fn column_from_sql(
     column: &Column,
     cell: ValueRef<'_>,
     chunks: &crate::large::Chunks,
 ) -> Result<Option<Value>, Error> {
-    cell_from_sql(&column.ty, column.tags.as_ref(), cell, chunks)
+    cell_from_sql(&column.ty, column.tags.as_ref(), cell, chunks).await
 }
 
 /// Decode a cell of type `ty`: an enum column's (with `tags`) as its
 /// variant names, any other as [`from_sql`] does.
-pub(crate) fn cell_from_sql(
+pub(crate) async fn cell_from_sql(
     ty: &ValueType,
     tags: Option<&ColumnTags>,
     cell: ValueRef<'_>,
@@ -434,14 +445,14 @@ pub(crate) fn cell_from_sql(
 ) -> Result<Option<Value>, Error> {
     match tags {
         Some(tags) => enum_value(&tags.borrow(), ty, cell),
-        None => from_sql(ty, cell, chunks),
+        None => from_sql(ty, cell, chunks).await,
     }
 }
 
 /// Decode a SQLite cell by the column's declared type, reading a chunked
 /// large value's chunks. `None` is a NULL in a non-nullable column, which
 /// only an unwritten cell can hold.
-pub(crate) fn from_sql(
+pub(crate) async fn from_sql(
     ty: &ValueType,
     cell: ValueRef<'_>,
     chunks: &crate::large::Chunks,
@@ -449,17 +460,17 @@ pub(crate) fn from_sql(
     if let ValueType::Nullable(inner) = ty {
         return Ok(Some(match cell {
             ValueRef::Null => Value::Nullable(None),
-            cell => Value::Nullable(from_sql(inner, cell, chunks)?.map(Box::new)),
+            cell => Value::Nullable(Box::pin(from_sql(inner, cell, chunks)).await?.map(Box::new)),
         }));
     }
     match (ty, cell) {
         (ValueType::String, ValueRef::Text(_) | ValueRef::Integer(_)) => {
-            return Ok(String::from_utf8(chunks.materialize(cell)?)
+            return Ok(String::from_utf8(chunks.materialize(cell).await?)
                 .ok()
                 .map(Value::String));
         }
         (ValueType::Bytes, ValueRef::Blob(_) | ValueRef::Integer(_)) => {
-            return Ok(Some(Value::Bytes(chunks.materialize(cell)?)));
+            return Ok(Some(Value::Bytes(chunks.materialize(cell).await?)));
         }
         // An author record, read as a JSON array of its fields (see
         // `compile::column_sql`).

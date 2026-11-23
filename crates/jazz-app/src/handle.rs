@@ -42,13 +42,15 @@ pub(crate) enum Command {
     Shutdown(oneshot::Sender<Result<()>>, std::time::Duration),
 }
 
-/// How long [`Jazz::shutdown`] lets the calls already made run before it
-/// cancels them.
+/// How long [`Jazz::shutdown`] lets the local work of the calls already
+/// made run before it cancels them: the backstop, as their waits on the
+/// server end when it begins. Not a hard limit: it can't interrupt work
+/// that doesn't yield.
 const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How long shutdown waits for the backend to answer the requests that end
 /// the client's HTTP stream sessions (see `HttpStreamFallbackConnector::settle`).
-const STREAM_SESSION_END: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const STREAM_SESSION_END: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The issuer `createJazz` names the users a backend acts as by.
 const BACKEND_ISSUER: &str = "jazz:backend";
@@ -71,6 +73,9 @@ pub struct Jazz {
     /// The tier this handle's writes wait for ([`Jazz::durable`]); `None`
     /// returns once a write is committed locally.
     pub(crate) durability: Option<DurabilityTier>,
+    /// Ends this handle's calls' waits on the server once true
+    /// ([`Jazz::ending_waits_with`]).
+    pub(crate) waits_end: Option<watch::Receiver<bool>>,
 }
 
 #[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
@@ -96,9 +101,12 @@ pub(crate) struct Info {
     pub(crate) backend_client: Option<crate::backend_client::BackendClientLink>,
     /// The store keeps nothing past the process.
     pub(crate) memory: bool,
-    /// Its [`crate::JazzSession`] replaced it: calls fail with
-    /// [`Error::Replaced`], not [`Error::Stopped`].
-    pub(crate) replaced: std::sync::atomic::AtomicBool,
+    /// Its client's run, for whoever opens or deletes its store.
+    pub(crate) life: Arc<crate::lifecycle::Life>,
+    /// Its [`crate::JazzSession`] replaced it, with that session's closing
+    /// signal: calls fail with [`Error::Replaced`] while the session goes
+    /// on, and with [`Error::Stopped`] once it closes.
+    pub(crate) replaced: std::sync::OnceLock<watch::Receiver<bool>>,
 }
 
 /// A backend's way to the core, for the endpoint it serves its users with.
@@ -136,7 +144,19 @@ impl Jazz {
         config: Config,
         implementations: Implementations,
     ) -> Result<Self> {
-        Self::open_as(files, config, implementations, Link::Own).await
+        Self::open_as(files, config, implementations, Link::Own, None).await
+    }
+
+    /// [`Jazz::open`], with `ended` dropped once the client's thread has
+    /// let go of the store: how a session that abandons the opening knows
+    /// that it has.
+    pub(crate) async fn open_tracked(
+        files: AppFiles,
+        config: Config,
+        ended: oneshot::Sender<()>,
+    ) -> Result<Self> {
+        let implementations = Implementations::default();
+        Self::open_as(files, config, implementations, Link::Own, Some(ended)).await
     }
 
     /// The client a backend's endpoint acts for its users with
@@ -160,6 +180,7 @@ impl Jazz {
             config,
             self.info.implementations.clone(),
             Link::TrustedForUsers,
+            None,
         )
         .await
     }
@@ -169,6 +190,7 @@ impl Jazz {
         config: Config,
         implementations: Implementations,
         link: Link,
+        ended: Option<oneshot::Sender<()>>,
     ) -> Result<Self> {
         let files = match config.backend.as_ref().and_then(|b| b.permissions.clone()) {
             Some(permissions) => files.with_permissions(permissions),
@@ -227,25 +249,29 @@ impl Jazz {
             Storage::Dir(dir) => Some(dir.clone()),
             Storage::Memory => None,
         };
-        // Held until the client has stopped: `delete_client_storage` won't
-        // pull the store from under this app.
-        let store = storage_dir
-            .as_deref()
-            .map(crate::lifecycle::StoreDir::hold)
-            .transpose()?;
         let opened_with = config
             .backend
             .is_some()
             .then(|| (files.clone(), config.clone()));
         let (commands, receiver) = mpsc::unbounded_channel();
+        let life = crate::lifecycle::Life::new(&commands);
         let (ready, opened) = oneshot::channel();
         std::thread::Builder::new()
             .name("jazz-client".into())
             .spawn({
                 // The session stops the client through this, without keeping
                 // it alive: it stops with its last handle all the same.
-                let stopper = commands.downgrade();
-                move || run(files, config, link, store, receiver, ready, stopper)
+                let stopper = Stopper {
+                    commands: commands.downgrade(),
+                    life: life.clone(),
+                };
+                let dir = storage_dir.clone();
+                move || {
+                    let _ended = Ended(stopper.life.clone());
+                    run(files, config, link, dir, receiver, ready, stopper);
+                    // After the store.
+                    drop(ended);
+                }
             })
             .map_err(|error| Error::Config(format!("cannot start the client thread: {error}")))?;
         let Opened {
@@ -256,6 +282,7 @@ impl Jazz {
             backend,
             backend_client,
             memory,
+            storage_dir,
         } = opened.await.map_err(|_| Error::Stopped)??;
         Ok(Self {
             commands,
@@ -266,17 +293,19 @@ impl Jazz {
                 serverless,
                 default_read,
                 storage_dir,
+                life,
                 session,
                 sync,
                 backend,
                 opened_with,
                 backend_client,
                 memory,
-                replaced: std::sync::atomic::AtomicBool::new(false),
+                replaced: std::sync::OnceLock::new(),
             }),
             scope: None,
             for_user: false,
             durability: None,
+            waits_end: None,
         })
     }
 
@@ -304,6 +333,7 @@ impl Jazz {
             scope: Some(Arc::new(session)),
             for_user: true,
             durability: self.durability,
+            waits_end: self.waits_end.clone(),
         }
     }
 
@@ -322,9 +352,14 @@ impl Jazz {
     {
         let (reply, answer) = oneshot::channel();
         let scope = self.scope.clone();
+        let waits_end = self.waits_end.clone();
         let job: Job = Box::new(move |client| {
             let client = match scope {
                 Some(session) => client.for_session((*session).clone()),
+                None => client,
+            };
+            let client = match waits_end {
+                Some(ends) => client.ending_waits_with(ends),
                 None => client,
             };
             Box::pin(async move {
@@ -342,23 +377,46 @@ impl Jazz {
         self.commands
             .send(Command::Run(job))
             .map_err(|_| self.stopped())?;
-        answer.await.map_err(|_| self.stopped())?
+        match answer.await.map_err(|_| self.stopped())? {
+            // A wait on the server, ended as the client (or handle) closes.
+            Err(Error::Stopped | Error::Jazz(jazz::tools::JazzError::ChannelClosed)) => {
+                Err(self.stopped())
+            }
+            answer => answer,
+        }
     }
 
     /// Why calls fail now that the client stopped.
     fn stopped(&self) -> Error {
-        if self.info.replaced.load(std::sync::atomic::Ordering::SeqCst) {
-            Error::Replaced
-        } else {
-            Error::Stopped
+        match self.info.replaced.get() {
+            // Replaced only while its session goes on: closed wins.
+            Some(session_closing) if !*session_closing.borrow() => Error::Replaced,
+            _ => Error::Stopped,
         }
     }
 
-    /// Its [`crate::JazzSession`] is replacing it.
-    pub(crate) fn mark_replaced(&self) {
-        self.info
-            .replaced
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    /// Its [`crate::JazzSession`] is replacing it (or closing it, as
+    /// `session_closing` then reads).
+    pub(crate) fn mark_replaced(&self, session_closing: watch::Receiver<bool>) {
+        let _ = self.info.replaced.set(session_closing);
+    }
+
+    /// This handle with its calls' waits on the server ended once `ends`
+    /// reads true: for a binding's handle that closes while the client
+    /// lives on. Not public API.
+    #[doc(hidden)]
+    pub fn ending_waits_with(mut self, ends: watch::Receiver<bool>) -> Self {
+        self.waits_end = Some(ends);
+        self
+    }
+
+    /// Whether an end user's client still runs: it didn't sign out, and
+    /// wasn't stopped.
+    pub(crate) fn is_live(&self) -> bool {
+        !self.commands.is_closed()
+            && !self.session().is_some_and(|session| {
+                matches!(session.state(), crate::session::SessionState::SignedOut)
+            })
     }
 
     /// Sends `job` to the client's thread without waiting for it: for
@@ -481,13 +539,21 @@ impl Jazz {
         Ok(Subscription::new(receiver, self.clone()))
     }
 
-    /// Stops the client for every clone: the calls already made finish
-    /// first (for up to 30 seconds, after which they fail with
-    /// [`Error::Stopped`]), then open subscriptions end. Calls made once
+    /// Stops the client for every clone. The calls already made that wait
+    /// on the server or the network (`wait_for_sync`, a global tier, a
+    /// remote read) fail with [`Error::Stopped`] at once, though what they
+    /// sent may still apply; their local work finishes first (for up to 30
+    /// seconds, after which it fails with [`Error::Stopped`] too), then
+    /// open subscriptions end. Calls made once
     /// shutdown has begun, including from a call still finishing, fail
     /// with [`Error::Stopped`]. Call it before the process exits when the app
     /// keeps a persistent store ([`crate::Storage::Dir`]), so its last
     /// writes are flushed and the store closed.
+    ///
+    /// The 30 seconds are not a hard limit: work that doesn't yield isn't
+    /// interrupted, and shutdown also waits for the store to close and for
+    /// a host name lookup in progress. It doesn't wait for the token
+    /// provider's own threads or tasks.
     ///
     /// On a handle acting for a user ([`Jazz::for_user`], or
     /// `Endpoint::for_user`) it does nothing: the client it shares stops
@@ -508,15 +574,32 @@ impl Jazz {
         if self.for_user {
             return Ok(());
         }
+        self.begin_stopping();
         let (reply, done) = oneshot::channel();
-        if self
-            .commands
-            .send(Command::Shutdown(reply, session_end))
-            .is_err()
-        {
-            return Ok(());
+        let outcome = match self.commands.send(Command::Shutdown(reply, session_end)) {
+            Ok(()) => done.await.ok(),
+            // Already stopping.
+            Err(_) => None,
+        };
+        match outcome {
+            Some(result) => result,
+            // Another caller's shutdown, or the client's own stop: this one
+            // too returns only once the store is let go of.
+            None => {
+                self.info.life.ended().await;
+                Ok(())
+            }
         }
-        done.await.unwrap_or(Ok(()))
+    }
+
+    /// Says the client is about to stop, so that an open of its store waits
+    /// for it instead of being refused: for a binding whose close does more
+    /// before it calls [`Jazz::shutdown`]. Not public API.
+    #[doc(hidden)]
+    pub fn begin_stopping(&self) {
+        if !self.for_user {
+            self.info.life.stop();
+        }
     }
 }
 
@@ -608,6 +691,23 @@ pub(crate) fn decode_result<T: Row>(
     table::decode(id, row.fields, implementations)
 }
 
+/// How a client's session stops it.
+struct Stopper {
+    /// Weak: it doesn't keep the client alive.
+    commands: mpsc::WeakUnboundedSender<Command>,
+    life: Arc<crate::lifecycle::Life>,
+}
+
+/// The client's thread, as [`crate::lifecycle::Life`] knows it: ended when
+/// dropped, however the thread ends.
+struct Ended(Arc<crate::lifecycle::Life>);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.0.end();
+    }
+}
+
 /// Which link a backend opens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(feature = "unstable-endpoint"), allow(dead_code))]
@@ -623,11 +723,16 @@ fn run(
     files: AppFiles,
     config: Config,
     link: Link,
-    store: Option<crate::lifecycle::StoreDir>,
+    storage_dir: Option<std::path::PathBuf>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     ready: oneshot::Sender<Result<Opened>>,
-    stopper: mpsc::WeakUnboundedSender<Command>,
+    stopper: Stopper,
 ) {
+    // Held by `connect` once it knows whose store it opens, before anything
+    // reads the store's node id or opens SQLite; let go of after the
+    // runtime.
+    let store = std::rc::Rc::new(std::cell::RefCell::new(None::<crate::lifecycle::StoreDir>));
+    let life = stopper.life.clone();
     let client_serverless = config.server_url.is_none();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -635,6 +740,7 @@ fn run(
     {
         Ok(runtime) => runtime,
         Err(error) => {
+            drop(store);
             let _ = ready.send(Err(Error::Config(format!(
                 "cannot start the client runtime: {error}"
             ))));
@@ -642,31 +748,51 @@ fn run(
         }
     };
     let local = tokio::task::LocalSet::new();
+    let held = store.clone();
     let stopped = local.block_on(&runtime, async move {
         // Clients of a main backend may sync over its HTTP stream, whose
         // sessions end with a request on this runtime: shutdown waits for
         // it (`settle`), before the runtime goes.
         let endpoint_connector =
             Arc::new(jazz_native_transport::HttpStreamFallbackConnector::new());
-        let (client, opened) = match connect(
-            files,
-            config,
-            link,
-            stopper,
-            Arc::clone(&endpoint_connector),
-        )
-        .await
-        {
-            Ok(opened) => opened,
-            Err(error) => {
-                let _ = ready.send(Err(error));
-                return None;
+        // Borrowed only while polled: the hold's check and the select's
+        // both read it.
+        let ready = std::cell::RefCell::new(ready);
+        let abandoned = || ready.borrow().is_closed();
+        let place = Place {
+            root: storage_dir,
+            life: &life,
+            abandoned: &abandoned,
+            store: &held,
+            dir: None,
+        };
+        let connected = tokio::select! {
+            biased;
+            connected = connect(
+                files,
+                config,
+                link,
+                stopper,
+                Arc::clone(&endpoint_connector),
+                place,
+            ) => connected,
+            // Nobody waits for the open any more (its session closed): it
+            // asks the provider and the network nothing further, and lets
+            // go of the store.
+            () = std::future::poll_fn(|cx| ready.borrow_mut().poll_closed(cx)) => {
+                return End::Abandoned;
             }
+        };
+        let ready = ready.into_inner();
+        let (client, opened) = match connected {
+            Ok(opened) => opened,
+            // Answered below, with the store let go of.
+            Err(error) => return End::Failed(ready, error),
         };
         if ready.send(Ok(opened)).is_err() {
             let _ = client.shutdown().await;
             endpoint_connector.settle(STREAM_SESSION_END).await;
-            return None;
+            return End::Abandoned;
         }
         // Refused writes no durable wait claimed go to `mutation_errors`.
         if !client_serverless {
@@ -696,9 +822,14 @@ fn run(
                 Some(_) = jobs.join_next(), if !jobs.is_empty() => {}
             }
         }
+        // What waits on the server or the network ends here, on this
+        // thread, so each wait's own bookkeeping runs; what is left to
+        // drain is local work.
+        client.end_waits();
         // Nothing new starts: a call made from here on (even by a job that
         // is draining) fails with `Stopped` instead of waiting on a job
         // that never runs.
+        life.stop();
         commands.close();
         let drain = async {
             let mut open = true;
@@ -718,8 +849,8 @@ fn run(
                 }
             }
         };
-        // The jobs already started finish, within a limit: a remote read
-        // waiting on an unreachable server must not hold shutdown forever.
+        // Local work already started finishes. The limit is the backstop
+        // for work that doesn't.
         if tokio::time::timeout(SHUTDOWN_DRAIN, drain).await.is_err() {
             jobs.abort_all();
             while jobs.join_next().await.is_some() {}
@@ -727,9 +858,10 @@ fn run(
         // No job is left: roll back the transactions still open while the
         // client runs, so none is dropped with the thread's locals.
         crate::transaction::roll_back_parked();
+        crate::lifecycle::run_before_stop(&client).await;
         let result = client.shutdown().await;
         endpoint_connector.settle(session_end).await;
-        Some((result, stopped))
+        End::Stopped(result, stopped)
     });
     // The store's connections close with the last clone of the client, and
     // the tasks holding clones go with the `LocalSet`: only once both are
@@ -738,8 +870,13 @@ fn run(
     drop(local);
     drop(runtime);
     drop(store);
-    let Some((result, stopped)) = stopped else {
-        return;
+    let (result, stopped) = match stopped {
+        End::Stopped(result, replies) => (result, replies),
+        End::Abandoned => return,
+        End::Failed(ready, error) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
     };
     let failure = result.as_ref().err().map(ToString::to_string);
     let mut replies = stopped.into_iter();
@@ -753,6 +890,13 @@ fn run(
             Some(error) => Err(Error::Server(format!("shutting down: {error}"))),
         });
     }
+}
+
+/// How a client's run ended.
+enum End {
+    Failed(oneshot::Sender<Result<Opened>>, Error),
+    Abandoned,
+    Stopped(jazz::tools::Result<()>, Vec<oneshot::Sender<Result<()>>>),
 }
 
 pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
@@ -771,16 +915,19 @@ struct Opened {
     backend: Option<BackendLink>,
     backend_client: Option<crate::backend_client::BackendClientLink>,
     memory: bool,
+    /// The dir of the store held (`<dir>/<account>/` for a user).
+    storage_dir: Option<std::path::PathBuf>,
 }
 
 async fn connect(
     files: AppFiles,
     config: Config,
     link_kind: Link,
-    stopper: mpsc::WeakUnboundedSender<Command>,
+    stopper: Stopper,
     // A main backend (TS `createJazz`) may not upgrade sockets where it is
     // hosted: its clients fall back to its HTTP stream, as TS clients do.
     endpoint_connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
+    mut place: Place<'_>,
 ) -> Result<(JazzClient, Opened)> {
     let mut loaded = files.load()?;
     // The endpoint's client evaluates the sessions it acts for locally too:
@@ -857,6 +1004,7 @@ async fn connect(
                 credential,
                 endpoint,
                 own_bundle,
+                &mut place,
             )
             .await?;
             if !user.account.is_system() {
@@ -867,20 +1015,30 @@ async fn connect(
         }
         (Some(auth), Some(endpoint)) => {
             let (client, user, credential) =
-                connect_user(context, endpoint_connector, auth, endpoint).await?;
+                connect_user(context, endpoint_connector, auth, endpoint, &mut place).await?;
             admitted = Some(user.account);
             (client, Some((user, credential)))
         }
-        _ if context.server_url.is_empty() => (JazzClient::connect(context).await?, None),
-        _ => (
-            JazzClient::connect_with_native_transport(context, connector).await?,
-            None,
-        ),
+        // An app with no user: its store at the dir, which mustn't be a
+        // user's an earlier version kept there.
+        _ if context.server_url.is_empty() => {
+            place.hold(&mut context, Owner::Nobody)?;
+            (JazzClient::connect(context).await?, None)
+        }
+        // The app's backend.
+        _ => {
+            place.hold(&mut context, Owner::Machine)?;
+            (
+                JazzClient::connect_with_native_transport(context, connector).await?,
+                None,
+            )
+        }
     };
     let sync = user_session::watch_sync(client.clone());
     let session = user.map(|(user, credential)| {
         let stop = Box::new(move || {
-            if let Some(commands) = stopper.upgrade() {
+            stopper.life.stop();
+            if let Some(commands) = stopper.commands.upgrade() {
                 let (reply, _) = oneshot::channel();
                 let _ = commands.send(Command::Shutdown(reply, STREAM_SESSION_END));
             }
@@ -904,8 +1062,57 @@ async fn connect(
             backend: link,
             backend_client,
             memory,
+            storage_dir: place.dir,
         },
     ))
+}
+
+/// Whose store an open holds.
+pub(crate) enum Owner {
+    /// An app with no user and no server.
+    Nobody,
+    /// The app's backend, or a trusted backend client: the dir itself.
+    Machine,
+    /// An end user or a scoped backend client: `<dir>/<account>/`.
+    Account(AccountId),
+}
+
+/// Where the store goes, held once the open knows whose it is.
+pub(crate) struct Place<'a> {
+    /// `Storage::Dir`'s dir; `None` for memory.
+    root: Option<std::path::PathBuf>,
+    life: &'a Arc<crate::lifecycle::Life>,
+    abandoned: &'a dyn Fn() -> bool,
+    store: &'a std::cell::RefCell<Option<crate::lifecycle::StoreDir>>,
+    /// The dir held.
+    dir: Option<std::path::PathBuf>,
+}
+
+impl Place<'_> {
+    /// Holds `owner`'s store and points `context` at it. Each account keeps
+    /// its own: a client never reads another user's rows, nor uploads their
+    /// pending writes as its own. A store an earlier version kept at the
+    /// dir itself is left as it is.
+    pub(crate) fn hold(&mut self, context: &mut AppContext, owner: Owner) -> Result<()> {
+        let Some(root) = &self.root else {
+            return Ok(());
+        };
+        let dir = match &owner {
+            Owner::Account(account) => root.join(account.0.to_string()),
+            Owner::Nobody | Owner::Machine => root.clone(),
+        };
+        let Some(store) = crate::lifecycle::StoreDir::hold(&dir, self.life, self.abandoned)? else {
+            // Nobody waits for the open any more.
+            return Err(Error::Stopped);
+        };
+        *self.store.borrow_mut() = Some(store);
+        if matches!(owner, Owner::Nobody) {
+            crate::lifecycle::refuse_a_users_store(&dir)?;
+        }
+        context.data_dir = dir.clone();
+        self.dir = Some(dir);
+        Ok(())
+    }
 }
 
 /// Connects as an end user through the app's Jazz endpoint, as a browser
@@ -917,11 +1124,13 @@ async fn connect_user(
     connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
     auth: Auth,
     endpoint: &str,
+    place: &mut Place<'_>,
 ) -> Result<(JazzClient, User, Credential)> {
     let app = context.app_id;
     match auth {
         Auth::Device(key) => {
             let account = key.account(app);
+            place.hold(&mut context, Owner::Account(account))?;
             context.jwt_token = Some(key.mint(app, DEVICE_TOKEN_TTL_SECS)?);
             context.account_id = Some(account);
             let client = JazzClient::connect_with_native_transport(context, connector).await?;
@@ -948,6 +1157,7 @@ async fn connect_user(
             session.account_id = Some(signed_in.account);
             context.account_id = Some(signed_in.account);
             context.backend_session = Some(session);
+            place.hold(&mut context, Owner::Account(signed_in.account))?;
             let client =
                 JazzClient::connect_with_native_transport_bearer(context, connector, token.clone())
                     .await?;

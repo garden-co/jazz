@@ -185,18 +185,18 @@ impl Fixture {
             .expect("open RecordPlayer subscription")
     }
     pub fn coverflow_count(&self) -> usize {
-        self.db.read(&self.coverflow).expect("read albums").len()
+        block_on(self.db.read(&self.coverflow))
+            .expect("read albums")
+            .len()
     }
     pub fn playlist_window_count(&self) -> usize {
-        self.db
-            .read(&self.playlist_window)
+        block_on(self.db.read(&self.playlist_window))
             .expect("read playlist window")
             .len()
     }
 
     pub fn track_metadata_count(&self) -> usize {
-        self.db
-            .read(&self.track_metadata)
+        block_on(self.db.read(&self.track_metadata))
             .expect("read track metadata")
             .len()
     }

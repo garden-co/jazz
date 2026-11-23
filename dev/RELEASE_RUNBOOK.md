@@ -319,6 +319,12 @@ released. It's read from the workflow's commit, so dispatch
 beta.0 from Central, later ones from the GitHub release (public URLs, checked
 against `SHA256SUMS-languages`; no fallback to a source build).
 
+While installs are from the release's files, each release's Version Packages
+review bumps the version in `setup/kotlin.mdx`'s Install section (the two
+`VERSION=` lines and the two file names). The upgrade guide keeps its own.
+The `publish` environment also accepts `release` as a ref: never dispatch from
+it, as its workflow has the switch only once main is merged into it.
+
 To switch, change `publish_to` in that script and give the versions released
 in between their own line in its `case`, so their smoke keeps working. Change
 `setup/kotlin.mdx`, the upgrade guide and the draft notes with it. Changing

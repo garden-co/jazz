@@ -87,23 +87,24 @@ pub const REVOCATION_MARK_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Create the registry's tables in `storage` if they are missing. Reads
 /// nothing; run it once before the other operations.
-pub fn open(storage: &Storage) -> Result<(), RegistryError> {
+pub async fn open(storage: &Storage) -> Result<(), RegistryError> {
     storage
-        .scope("jazz_account_registry_open", |storage| {
-            storage.execute_batch(CREATE).map_err(storage_error)
+        .scope("jazz_account_registry_open", async |storage| {
+            storage.execute_batch(CREATE).await.map_err(storage_error)
         })
+        .await
         .map_err(unavailable)
 }
 
 /// Resolve current admission from committed state.
-pub fn login(storage: &Storage, principal: &Principal) -> Result<Assignment, RegistryError> {
-    account_registry::login(&mut Sql(storage), principal)
+pub async fn login(storage: &Storage, principal: &Principal) -> Result<Assignment, RegistryError> {
+    account_registry::login(&mut Sql(storage), principal).await
 }
 
 /// Atomically resolve an external identity or durably create its first
 /// assignment, as `new_account` (called only when one is created). Only an
 /// unassigned identity may register; revocation is never undone.
-pub fn login_or_register(
+pub async fn login_or_register(
     storage: &Storage,
     principal: &Principal,
     new_account: impl FnOnce() -> AccountId,
@@ -111,22 +112,23 @@ pub fn login_or_register(
     login_or_register_by(
         principal,
         new_account,
-        |principal| login(storage, principal),
-        |command| execute(storage, command),
+        async |principal| login(storage, principal).await,
+        async |command| execute(storage, command).await,
     )
+    .await
 }
 
 /// [`login_or_register`] over a host's own `login` and `execute` (native
 /// reads committed state on its read connection and writes on the store's
 /// thread).
-pub(crate) fn login_or_register_by(
+pub(crate) async fn login_or_register_by(
     principal: &Principal,
     new_account: impl FnOnce() -> AccountId,
-    login: impl FnOnce(&Principal) -> Result<Assignment, RegistryError>,
-    execute: impl FnOnce(&AccountCommand) -> Result<AccountCommandResult, RegistryError>,
+    login: impl AsyncFnOnce(&Principal) -> Result<Assignment, RegistryError>,
+    execute: impl AsyncFnOnce(&AccountCommand) -> Result<AccountCommandResult, RegistryError>,
 ) -> Result<LoginOrRegisterResult, RegistryError> {
     principal.validate(false)?;
-    match login(principal) {
+    match login(principal).await {
         Ok(assignment) => Ok(LoginOrRegisterResult {
             assignment,
             created: false,
@@ -135,7 +137,8 @@ pub(crate) fn login_or_register_by(
             let result = execute(&AccountCommand::Register {
                 principal: principal.clone(),
                 account: new_account(),
-            })?;
+            })
+            .await?;
             Ok(LoginOrRegisterResult {
                 assignment: assignment_of(result),
                 created: true,
@@ -147,18 +150,19 @@ pub(crate) fn login_or_register_by(
 
 /// Decide and write in one scope: the result is kept when it returns `Ok`,
 /// and a refused or failed command writes nothing.
-pub fn execute(
+pub async fn execute(
     storage: &Storage,
     command: &AccountCommand,
 ) -> Result<AccountCommandResult, RegistryError> {
     storage
         .scope(
             "jazz_account_registry_command",
-            |storage| match account_registry::apply(&mut Sql(storage), command) {
+            async |storage| match account_registry::apply(&mut Sql(storage), command).await {
                 Err(RegistryError::Unavailable(error)) => Err(storage_error(error)),
                 decided => Ok(decided),
             },
         )
+        .await
         .map_err(unavailable)?
 }
 
@@ -168,7 +172,7 @@ pub fn execute(
 /// mark now in force. Kept in its own table, which a core without session
 /// revocation never reads; recording a mark forgets those older than
 /// [`REVOCATION_MARK_RETENTION_MS`] before `now_ms` (this host's clock).
-pub fn revoke_sessions(
+pub async fn revoke_sessions(
     storage: &Storage,
     principal: &Principal,
     before_ms: u64,
@@ -176,46 +180,49 @@ pub fn revoke_sessions(
 ) -> Result<u64, RegistryError> {
     let forget_before = now_ms.saturating_sub(REVOCATION_MARK_RETENTION_MS);
     storage
-        .scope("jazz_account_session_revocation", |storage| {
-            storage
-                .prepare_cached(
+        .scope("jazz_account_session_revocation", async |storage| {
+            async {
+                let mut statement = storage.prepare_cached(
                     "DELETE FROM _jazz_host_account_session_revocations \
                      WHERE revoked_before_ms < ?1",
-                )
-                .and_then(|mut statement| statement.execute([signed(forget_before)?]))
-                .map_err(storage_error)?;
+                )?;
+                statement.execute([signed(forget_before)?]).await
+            }
+            .await
+            .map_err(storage_error)?;
             // No `RETURNING`: a Durable Object's SQL can't read the rows of
             // a data-modifying statement. The scope reads its own write.
             let before = signed(before_ms).map_err(storage_error)?;
-            storage
-                .prepare_cached(
+            async {
+                let mut statement = storage.prepare_cached(
                     "INSERT INTO _jazz_host_account_session_revocations \
                      (issuer, subject, revoked_before_ms) VALUES (?1, ?2, ?3) \
                      ON CONFLICT (issuer, subject) DO UPDATE SET revoked_before_ms = \
                      max(revoked_before_ms, excluded.revoked_before_ms)",
-                )
-                .and_then(|mut statement| {
-                    statement.execute([
-                        &principal.issuer as &dyn ToSql,
-                        &principal.subject,
-                        &before,
-                    ])
-                })
-                .map_err(storage_error)?;
+                )?;
+                statement
+                    .execute([&principal.issuer as &dyn ToSql, &principal.subject, &before])
+                    .await
+            }
+            .await
+            .map_err(storage_error)?;
             stored_mark(storage, principal)
+                .await
                 .map_err(storage_error)?
                 .ok_or_else(|| storage_error("the recorded revocation mark is missing"))
         })
+        .await
         .map_err(unavailable)
         .and_then(unsigned)
 }
 
 /// The latest session revocation mark recorded for `principal`.
-pub fn sessions_revoked_before(
+pub async fn sessions_revoked_before(
     storage: &Storage,
     principal: &Principal,
 ) -> Result<Option<u64>, RegistryError> {
     stored_mark(storage, principal)
+        .await
         .map_err(unavailable)?
         .map(unsigned)
         .transpose()
@@ -228,19 +235,20 @@ pub fn session_revoked(mark: Option<u64>, authenticated_at_ms: u64) -> bool {
     mark.is_some_and(|before| before > authenticated_at_ms)
 }
 
-fn stored_mark(storage: &Storage, principal: &Principal) -> Result<Option<i64>, SqlError> {
-    storage
-        .prepare_cached(
+async fn stored_mark(storage: &Storage, principal: &Principal) -> Result<Option<i64>, SqlError> {
+    async {
+        let mut statement = storage.prepare_cached(
             "SELECT revoked_before_ms FROM _jazz_host_account_session_revocations \
              WHERE issuer = ?1 AND subject = ?2",
-        )
-        .and_then(|mut statement| {
-            statement
-                .query_row([&principal.issuer, &principal.subject], |row| {
-                    row.get::<_, i64>(0)
-                })
-                .optional()
-        })
+        )?;
+        statement
+            .query_row([&principal.issuer, &principal.subject], |row| {
+                row.get::<_, i64>(0)
+            })
+            .await
+            .optional()
+    }
+    .await
 }
 
 /// The registry state in the store, inside one read or write.
@@ -249,102 +257,111 @@ struct Sql<'a>(&'a Storage);
 impl AccountState for Sql<'_> {
     type Error = RegistryError;
 
-    fn assignment(&mut self, principal: &Principal) -> Result<Option<Assignment>, RegistryError> {
-        self.0
-            .prepare_cached(
+    async fn assignment(
+        &mut self,
+        principal: &Principal,
+    ) -> Result<Option<Assignment>, RegistryError> {
+        async {
+            let mut statement = self.0.prepare_cached(
                 "SELECT account, active, manage_identities, generation \
                  FROM _jazz_host_account_identities WHERE issuer = ?1 AND subject = ?2",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_row([&principal.issuer, &principal.subject], |row| {
-                        Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            row.get::<_, bool>(1)?,
-                            row.get::<_, bool>(2)?,
-                            row.get::<_, i64>(3)?,
-                        ))
-                    })
-                    .optional()
-            })
-            .map_err(unavailable)?
-            .map(|(account, active, manage_identities, generation)| {
-                Ok(Assignment {
-                    account: AccountId(uuid(&account)?),
-                    active,
-                    manage_identities,
-                    generation: unsigned(generation)?,
+            )?;
+            statement
+                .query_row([&principal.issuer, &principal.subject], |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
                 })
+                .await
+                .optional()
+        }
+        .await
+        .map_err(unavailable)?
+        .map(|(account, active, manage_identities, generation)| {
+            Ok(Assignment {
+                account: AccountId(uuid(&account)?),
+                active,
+                manage_identities,
+                generation: unsigned(generation)?,
             })
-            .transpose()
+        })
+        .transpose()
     }
 
-    fn account_assigned(&mut self, account: AccountId) -> Result<bool, RegistryError> {
-        self.0
-            .prepare_cached(
+    async fn account_assigned(&mut self, account: AccountId) -> Result<bool, RegistryError> {
+        async {
+            let mut statement = self.0.prepare_cached(
                 "SELECT EXISTS (SELECT 1 FROM _jazz_host_account_identities WHERE account = ?1)",
-            )
-            .and_then(|mut statement| statement.query_row([account.0.as_bytes()], |row| row.get(0)))
-            .map_err(unavailable)
+            )?;
+            statement
+                .query_row([account.0.as_bytes()], |row| row.get(0))
+                .await
+        }
+        .await
+        .map_err(unavailable)
     }
 
-    fn link(&mut self, nonce: Uuid) -> Result<Option<LinkIntent>, RegistryError> {
-        self.0
-            .prepare_cached(
+    async fn link(&mut self, nonce: Uuid) -> Result<Option<LinkIntent>, RegistryError> {
+        async {
+            let mut statement = self.0.prepare_cached(
                 "SELECT account, approver_issuer, approver_subject, approver_generation, \
                  candidate_issuer, candidate_subject, expires_at, completed \
                  FROM _jazz_host_account_links WHERE nonce = ?1",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_row([nonce.as_bytes()], |row| {
-                        Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            Principal {
-                                issuer: row.get(1)?,
-                                subject: row.get(2)?,
-                            },
-                            row.get::<_, i64>(3)?,
-                            Principal {
-                                issuer: row.get(4)?,
-                                subject: row.get(5)?,
-                            },
-                            row.get::<_, i64>(6)?,
-                            row.get::<_, bool>(7)?,
-                        ))
-                    })
-                    .optional()
-            })
-            .map_err(unavailable)?
-            .map(
-                |(account, approver, approver_generation, candidate, expires_at, completed)| {
-                    Ok(LinkIntent {
-                        account: AccountId(uuid(&account)?),
-                        approver,
-                        approver_generation: unsigned(approver_generation)?,
-                        candidate,
-                        expires_at: unsigned(expires_at)?,
-                        completed,
-                    })
-                },
-            )
-            .transpose()
+            )?;
+            statement
+                .query_row([nonce.as_bytes()], |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        Principal {
+                            issuer: row.get(1)?,
+                            subject: row.get(2)?,
+                        },
+                        row.get::<_, i64>(3)?,
+                        Principal {
+                            issuer: row.get(4)?,
+                            subject: row.get(5)?,
+                        },
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, bool>(7)?,
+                    ))
+                })
+                .await
+                .optional()
+        }
+        .await
+        .map_err(unavailable)?
+        .map(
+            |(account, approver, approver_generation, candidate, expires_at, completed)| {
+                Ok(LinkIntent {
+                    account: AccountId(uuid(&account)?),
+                    approver,
+                    approver_generation: unsigned(approver_generation)?,
+                    candidate,
+                    expires_at: unsigned(expires_at)?,
+                    completed,
+                })
+            },
+        )
+        .transpose()
     }
 
-    fn put_assignment(
+    async fn put_assignment(
         &mut self,
         principal: &Principal,
         assignment: &Assignment,
     ) -> Result<(), RegistryError> {
         let generation = signed(assignment.generation).map_err(unavailable)?;
-        self.0
-            .prepare_cached(
+        async {
+            let mut statement = self.0.prepare_cached(
                 "INSERT OR REPLACE INTO _jazz_host_account_identities \
                  (issuer, subject, account, active, manage_identities, generation) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )
-            .and_then(|mut statement| {
-                statement.execute([
+            )?;
+            statement
+                .execute([
                     &principal.issuer as &dyn ToSql,
                     &principal.subject,
                     &assignment.account.0.as_bytes().as_slice(),
@@ -352,23 +369,25 @@ impl AccountState for Sql<'_> {
                     &assignment.manage_identities,
                     &generation,
                 ])
-            })
-            .map(|_| ())
-            .map_err(unavailable)
+                .await
+        }
+        .await
+        .map(|_| ())
+        .map_err(unavailable)
     }
 
-    fn put_link(&mut self, nonce: Uuid, link: &LinkIntent) -> Result<(), RegistryError> {
+    async fn put_link(&mut self, nonce: Uuid, link: &LinkIntent) -> Result<(), RegistryError> {
         let approver_generation = signed(link.approver_generation).map_err(unavailable)?;
         let expires_at = signed(link.expires_at).map_err(unavailable)?;
-        self.0
-            .prepare_cached(
+        async {
+            let mut statement = self.0.prepare_cached(
                 "INSERT OR REPLACE INTO _jazz_host_account_links \
                  (nonce, account, approver_issuer, approver_subject, approver_generation, \
                  candidate_issuer, candidate_subject, expires_at, completed) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )
-            .and_then(|mut statement| {
-                statement.execute([
+            )?;
+            statement
+                .execute([
                     &nonce.as_bytes().as_slice() as &dyn ToSql,
                     &link.account.0.as_bytes().as_slice(),
                     &link.approver.issuer,
@@ -379,19 +398,23 @@ impl AccountState for Sql<'_> {
                     &expires_at,
                     &link.completed,
                 ])
-            })
-            .map(|_| ())
-            .map_err(unavailable)
+                .await
+        }
+        .await
+        .map(|_| ())
+        .map_err(unavailable)
     }
 
-    fn prune_links(&mut self, now: u64) -> Result<(), RegistryError> {
-        self.0
-            .prepare_cached(
+    async fn prune_links(&mut self, now: u64) -> Result<(), RegistryError> {
+        async {
+            let mut statement = self.0.prepare_cached(
                 "DELETE FROM _jazz_host_account_links WHERE completed = 0 AND expires_at <= ?1",
-            )
-            .and_then(|mut statement| statement.execute([signed(now)?]))
-            .map(|_| ())
-            .map_err(unavailable)
+            )?;
+            statement.execute([signed(now)?]).await
+        }
+        .await
+        .map(|_| ())
+        .map_err(unavailable)
     }
 }
 
@@ -680,11 +703,13 @@ pub fn assignment_of(result: AccountCommandResult) -> Assignment {
 
 /// `resolve`: read-only administrative lookup; service authority can resolve
 /// an assignment but cannot create or link one.
-pub fn resolve(
+pub async fn resolve(
     storage: &Storage,
     request: IdentityRequest,
 ) -> Result<AccountResponse, RouteFailure> {
-    let assignment = login(storage, &request.identity).map_err(registry_failure)?;
+    let assignment = login(storage, &request.identity)
+        .await
+        .map_err(registry_failure)?;
     Ok(AccountResponse::new(request.identity, assignment))
 }
 
@@ -694,14 +719,15 @@ pub fn resolve(
 /// `new_account`), as `login-or-register` would for the user's own
 /// credential. Also answers whether the account was created, for a host
 /// that tells its live sessions.
-pub fn login_or_register_route(
+pub async fn login_or_register_route(
     storage: &Storage,
     request: IdentityRequest,
     new_account: impl FnOnce() -> AccountId,
 ) -> Result<(AccountResponse, bool), RouteFailure> {
     require_external_identity(&request.identity)?;
-    let result =
-        login_or_register(storage, &request.identity, new_account).map_err(registry_failure)?;
+    let result = login_or_register(storage, &request.identity, new_account)
+        .await
+        .map_err(registry_failure)?;
     Ok((
         AccountResponse::new(request.identity, result.assignment),
         result.created,
@@ -710,7 +736,7 @@ pub fn login_or_register_route(
 
 /// `found-local-first`, in the app `app_id` unless the request names
 /// another audience.
-pub fn found_device_account(
+pub async fn found_device_account(
     storage: &Storage,
     request: FoundDeviceAccountRequest,
     app_id: Uuid,
@@ -724,6 +750,7 @@ pub fn found_device_account(
             app,
         },
     )
+    .await
     .map_err(registry_failure)?;
     Ok(AccountResponse::new(
         request.identity,
@@ -735,17 +762,23 @@ pub fn found_device_account(
 /// account `from` uses. `from` must already have one (a user the backend
 /// signed in, or a local-first guest founded from its own key proof):
 /// linking never creates it.
-pub fn link(
+pub async fn link(
     storage: &Storage,
     request: LinkRequest,
     now_seconds: u64,
     fresh_nonce: impl FnOnce() -> Uuid,
 ) -> Result<AccountResponse, RouteFailure> {
     require_external_identity(&request.to)?;
-    login(storage, &request.from).map_err(registry_failure)?;
+    login(storage, &request.from)
+        .await
+        .map_err(registry_failure)?;
     let steps = link_steps(&request, now_seconds, fresh_nonce)?;
-    execute(storage, &steps.request).map_err(registry_failure)?;
-    let accepted = execute(storage, &steps.accept).map_err(registry_failure)?;
+    execute(storage, &steps.request)
+        .await
+        .map_err(registry_failure)?;
+    let accepted = execute(storage, &steps.accept)
+        .await
+        .map_err(registry_failure)?;
     Ok(AccountResponse::new(request.to, assignment_of(accepted)))
 }
 
@@ -753,7 +786,7 @@ pub fn link(
 /// account, and revokes `target`, another of its identities, as the
 /// approver's own credential would. The assignment stays: the target can no
 /// longer sign in, and is never reassigned.
-pub fn revoke(storage: &Storage, request: RevokeRequest) -> Result<(), RouteFailure> {
+pub async fn revoke(storage: &Storage, request: RevokeRequest) -> Result<(), RouteFailure> {
     execute(
         storage,
         &AccountCommand::Revoke {
@@ -761,6 +794,7 @@ pub fn revoke(storage: &Storage, request: RevokeRequest) -> Result<(), RouteFail
             target: request.target,
         },
     )
+    .await
     .map(|_| ())
     .map_err(registry_failure)
 }
@@ -770,13 +804,14 @@ pub fn revoke(storage: &Storage, request: RevokeRequest) -> Result<(), RouteFail
 /// sessions with the mark this answers, and refuses those stated later with
 /// an older `authenticatedAt` ([`session_revoked`]). The assignment is
 /// untouched: the user signs in again as before.
-pub fn revoke_sessions_route(
+pub async fn revoke_sessions_route(
     storage: &Storage,
     request: RevokeSessionsRequest,
     now_ms: u64,
 ) -> Result<RevokeSessionsResponse, RouteFailure> {
     let revoked_before =
         revoke_sessions(storage, &request.identity, request.revoked_before, now_ms)
+            .await
             .map_err(registry_failure)?;
     Ok(RevokeSessionsResponse {
         identity: request.identity,
@@ -828,20 +863,21 @@ pub struct RouteEffects {
 /// native server answers them, and what changed. A body that is not JSON is
 /// refused with 400, one that is not the route's request with 422 (as
 /// native's request extraction does; the message text is this module's).
-pub fn serve(
+pub async fn serve(
     storage: &Storage,
     route: AccountRoute,
     body: &[u8],
     context: RouteContext<'_>,
 ) -> (RouteReply, RouteEffects) {
     let mut effects = RouteEffects::default();
-    let reply = (|| -> Result<RouteReply, RouteReply> {
+    let reply = async {
         Ok(match route {
-            AccountRoute::Resolve => json(resolve(storage, parse(body)?)),
+            AccountRoute::Resolve => json(resolve(storage, parse(body)?).await),
             AccountRoute::LoginOrRegister => {
                 let result = login_or_register_route(storage, parse(body)?, || {
                     AccountId((context.fresh_id)())
-                });
+                })
+                .await;
                 effects.assignments_changed = match &result {
                     Ok((_, created)) => *created,
                     Err(failure) => failure.status == 503,
@@ -851,17 +887,18 @@ pub fn serve(
             AccountRoute::Link => {
                 let result = link(storage, parse(body)?, context.now_ms / 1000, || {
                     (context.fresh_id)()
-                });
+                })
+                .await;
                 effects.assignments_changed = changed(&result);
                 json(result)
             }
             AccountRoute::FoundDeviceAccount => {
-                let result = found_device_account(storage, parse(body)?, context.app_id);
+                let result = found_device_account(storage, parse(body)?, context.app_id).await;
                 effects.assignments_changed = changed(&result);
                 json(result)
             }
             AccountRoute::Revoke => {
-                let result = revoke(storage, parse(body)?);
+                let result = revoke(storage, parse(body)?).await;
                 effects.assignments_changed = changed(&result);
                 match result {
                     Ok(()) => RouteReply {
@@ -874,7 +911,7 @@ pub fn serve(
             AccountRoute::RevokeSessions => {
                 let request: RevokeSessionsRequest = parse(body)?;
                 let (identity, before) = (request.identity.clone(), request.revoked_before);
-                let result = revoke_sessions_route(storage, request, context.now_ms);
+                let result = revoke_sessions_route(storage, request, context.now_ms).await;
                 // A failed write may still have committed: end the sessions
                 // on the mark asked for.
                 effects.sessions_revoked = Some(match &result {
@@ -884,8 +921,9 @@ pub fn serve(
                 json(result)
             }
         })
-    })()
-    .unwrap_or_else(|refused| refused);
+    }
+    .await
+    .unwrap_or_else(|refused: RouteReply| refused);
     (reply, effects)
 }
 
@@ -961,9 +999,9 @@ mod tests {
             ),
         ];
         for (_, storage) in &stores {
-            open(storage).unwrap();
+            jazz::db::block_on(open(storage)).unwrap();
             // Opening again finds the tables and keeps them.
-            open(storage).unwrap();
+            jazz::db::block_on(open(storage)).unwrap();
         }
         stores
     }
@@ -983,7 +1021,7 @@ mod tests {
         fresh_id: &mut dyn FnMut() -> Uuid,
         now_ms: u64,
     ) -> (RouteReply, RouteEffects) {
-        serve(
+        jazz::db::block_on(serve(
             storage,
             AccountRoute::from_path(route).unwrap(),
             body.to_string().as_bytes(),
@@ -992,7 +1030,7 @@ mod tests {
                 now_ms,
                 fresh_id,
             },
-        )
+        ))
     }
 
     fn post_raw(
@@ -1005,7 +1043,7 @@ mod tests {
             now_ms: 0,
             fresh_id,
         };
-        serve(storage, AccountRoute::Resolve, body, context)
+        jazz::db::block_on(serve(storage, AccountRoute::Resolve, body, context))
     }
 
     fn account_of(reply: &RouteReply) -> Uuid {
@@ -1075,7 +1113,9 @@ mod tests {
             let (resolved, _) = post(&storage, "resolve", alice, &mut fresh_id, 0);
             assert_eq!(resolved, created, "{store}");
             assert_eq!(
-                login(&storage, &principal("alice")).unwrap().account,
+                jazz::db::block_on(login(&storage, &principal("alice")))
+                    .unwrap()
+                    .account,
                 AccountId(Uuid::from_u128(1)),
                 "{store}"
             );
@@ -1127,7 +1167,7 @@ mod tests {
             );
             assert!(
                 matches!(
-                    login(&storage, &principal("mallory")),
+                    jazz::db::block_on(login(&storage, &principal("mallory"))),
                     Err(RegistryError::Decision(AccountError::NotAssigned))
                 ),
                 "{store}"
@@ -1204,7 +1244,10 @@ mod tests {
                     "{store}: {route}"
                 );
             }
-            assert!(login(&storage, &principal("alice")).is_ok(), "{store}");
+            assert!(
+                jazz::db::block_on(login(&storage, &principal("alice"))).is_ok(),
+                "{store}"
+            );
 
             let guest = Principal {
                 issuer: jazz::tools::identity::DEVICE_ACCOUNT_ISSUER.into(),
@@ -1275,7 +1318,7 @@ mod tests {
                 "{store}"
             );
 
-            let mark = sessions_revoked_before(&storage, &alice).unwrap();
+            let mark = jazz::db::block_on(sessions_revoked_before(&storage, &alice)).unwrap();
             assert!(
                 session_revoked(mark, now - 1),
                 "{store}: older admission refused"
@@ -1284,26 +1327,26 @@ mod tests {
                 !session_revoked(mark, now),
                 "{store}: a later one is admitted"
             );
-            let bob_mark = sessions_revoked_before(&storage, &bob).unwrap();
+            let bob_mark = jazz::db::block_on(sessions_revoked_before(&storage, &bob)).unwrap();
             assert!(!session_revoked(bob_mark, 0), "{store}: bob has no mark");
 
             // An earlier mark keeps the one in force.
             assert_eq!(
-                revoke_sessions(&storage, &alice, now - 5, now).unwrap(),
+                jazz::db::block_on(revoke_sessions(&storage, &alice, now - 5, now)).unwrap(),
                 now,
                 "{store}"
             );
             // A mark past its retention is forgotten when the next is recorded.
             let long_ago = now - REVOCATION_MARK_RETENTION_MS - 1;
-            revoke_sessions(&storage, &bob, long_ago, now).unwrap();
-            revoke_sessions(&storage, &alice, now, now).unwrap();
+            jazz::db::block_on(revoke_sessions(&storage, &bob, long_ago, now)).unwrap();
+            jazz::db::block_on(revoke_sessions(&storage, &alice, now, now)).unwrap();
             assert_eq!(
-                sessions_revoked_before(&storage, &bob).unwrap(),
+                jazz::db::block_on(sessions_revoked_before(&storage, &bob)).unwrap(),
                 None,
                 "{store}"
             );
             assert_eq!(
-                sessions_revoked_before(&storage, &alice).unwrap(),
+                jazz::db::block_on(sessions_revoked_before(&storage, &alice)).unwrap(),
                 Some(now),
                 "{store}"
             );
@@ -1317,7 +1360,10 @@ mod tests {
     fn a_refused_command_writes_nothing() {
         for (store, storage) in stores() {
             let alice = principal("alice");
-            login_or_register(&storage, &alice, || AccountId(Uuid::from_u128(1))).unwrap();
+            jazz::db::block_on(login_or_register(&storage, &alice, || {
+                AccountId(Uuid::from_u128(1))
+            }))
+            .unwrap();
             let request = |candidate: &str, now: u64| AccountCommand::RequestLink {
                 approver: alice.clone(),
                 candidate: principal(candidate),
@@ -1325,22 +1371,22 @@ mod tests {
                 now,
                 expires_at: now + 10,
             };
-            execute(&storage, &request("bob", 0)).unwrap();
+            jazz::db::block_on(execute(&storage, &request("bob", 0))).unwrap();
             assert!(
                 matches!(
-                    execute(&storage, &request("mallory", 1)),
+                    jazz::db::block_on(execute(&storage, &request("mallory", 1))),
                     Err(RegistryError::Decision(AccountError::IdentifierCollision))
                 ),
                 "{store}"
             );
-            let accepted = execute(
+            let accepted = jazz::db::block_on(execute(
                 &storage,
                 &AccountCommand::AcceptLink {
                     candidate: principal("bob"),
                     nonce: Uuid::from_u128(9),
                     now: 2,
                 },
-            )
+            ))
             .unwrap();
             assert_eq!(
                 assignment_of(accepted).account,
@@ -1357,7 +1403,7 @@ mod tests {
     #[test]
     fn bad_bodies_are_refused_and_routes_name_their_authority() {
         let storage = Storage::managed_emulation_in_memory().unwrap();
-        open(&storage).unwrap();
+        jazz::db::block_on(open(&storage)).unwrap();
         let mut fresh_id = ids();
         let (syntax, _) = post_raw(&storage, b"{", &mut fresh_id);
         assert_eq!(syntax.status, 400);

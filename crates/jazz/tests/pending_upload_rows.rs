@@ -80,7 +80,7 @@ fn durable(path: &PathBuf) -> Db {
 fn connect(client: &Db, server: &Db) {
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
+    block_on(server.accept_subscriber(server_side, alice())).unwrap();
 }
 
 fn pump(client: &Db, server: &Db) {

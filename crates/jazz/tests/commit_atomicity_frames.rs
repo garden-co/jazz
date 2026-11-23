@@ -3,6 +3,7 @@
 //! arrive across several client ticks.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};

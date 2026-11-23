@@ -5,6 +5,7 @@
 //! failed IndexedDB write (quota) lost writes the app was told were saved.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -74,7 +75,7 @@ fn offline_worker_and_tab() -> (Db, Db, Db) {
     let relay = open(0x10);
     relay.defer_durability_acks();
     let tab = open(0x11);
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let (client_side, server_side) = duplex();
     block_on(relay.connect_upstream(client_side));
     core.accept_subscriber(server_side, AuthorSubject::SYSTEM)
@@ -154,7 +155,7 @@ fn a_relay_without_deferred_acks_acknowledges_at_once() {
     let core = open(0xc0);
     let relay = open(0x10);
     let tab = open(0x11);
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let (client_side, server_side) = duplex();
     block_on(relay.connect_upstream(client_side));
     core.accept_subscriber(server_side, AuthorSubject::SYSTEM)
@@ -198,11 +199,11 @@ fn a_serverless_workers_acks_wait_for_a_persist() {
         .unwrap()
     };
     let worker = open(0x70);
-    worker.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    jazz::db::block_on(worker.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer));
     worker.defer_durability_acks();
     let tab = open(0x71);
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer));
     let (client_side, server_side) = duplex();
     block_on(tab.connect_upstream(client_side));
     worker.accept_subscriber(server_side, author).unwrap();
@@ -231,7 +232,7 @@ fn a_persist_drops_the_acks_of_a_tab_that_went_away() {
     let relay = open(0x10);
     relay.defer_durability_acks();
     let tab = open(0x11);
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     let (client_side, server_side) = duplex();
     block_on(relay.connect_upstream(client_side));
     core.accept_subscriber(server_side, AuthorSubject::SYSTEM)

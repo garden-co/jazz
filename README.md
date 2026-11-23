@@ -40,37 +40,41 @@ Or have it run `npm create jazz`, which prints the same quickstart.
 
 ### 1. Install in your backend and declare a schema
 
-```json
-// jazz.app.json
-{
-  "format": 1,
-  "tables": {
-    "todos": { "columns": { "title": "string", "done": "boolean", "owner_id": "uuid" } }
-  }
-}
+```ts
+// schema.ts
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
+});
+
+const { definePermissions, session } = schema;
+
+// Each user sees and edits only the todos they created
+const createdByMe = { $createdBy: session.user };
+
+export const permissions = definePermissions({
+  todos: {
+    read: createdByMe,
+    insert: createdByMe,
+    update: createdByMe,
+    delete: createdByMe,
+  },
+});
 ```
 
-```json
-// jazz.permissions.json (read by your backend only)
-{
-  "format": 1,
-  "tables": {
-    "todos": {
-      "read": "owner_id = session.user",
-      "insert": "owner_id = session.user",
-      "update": "owner_id = session.user",
-      "delete": "owner_id = session.user"
-    }
-  }
-}
-```
-
-`npx jazz-tools generate` checks both files and writes `jazz.generated.ts`,
-the app's typed bindings. Commit all three.
+`npx jazz-tools generate` checks `schema.ts` and writes `jazz.app.json`,
+`jazz.permissions.json` (read by your backend only), `jazz.generated.ts` (the
+app's typed bindings) and a schema snapshot in `migrations/`. Commit them with
+`schema.ts`, and never edit the generated files by hand.
 
 ```ts
 // jazz.server.ts
 import { createJazz, sqlite } from "jazz-tools/backend";
+// Generated from schema.ts by `jazz-tools generate`
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
 
@@ -79,9 +83,14 @@ export const jazz = createJazz({
   permissions,
   // vercel() on Vercel, sqlite() locally and on your own servers
   store: sqlite({ path: "./jazz.db" }),
-  // Better Auth, WorkOS or any custom auth:
-  // return the user ID and permission-relevant claims, or null
-  authenticate: (request) => getSignedInUser(request),
+  // Better Auth, WorkOS or any custom auth: return the user's ID, when their
+  // session expires (Unix time in seconds) and the claims your permissions
+  // check, or null if signed out
+  authenticate: async (request) => {
+    const user = await getSignedInUser(request);
+    if (!user) return null;
+    return { userId: user.id, expiresAt: user.sessionExpiresAt, claims: { role: user.role } };
+  },
 });
 ```
 
@@ -98,10 +107,11 @@ export const { GET, POST, DELETE } = jazz.next();
 ```ts
 // app/api/todos/route.ts
 import { jazz } from "@/jazz.server";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 
 export async function GET(request: Request) {
-  // Runs as the signed-in user: only their todos
+  // Runs as the signed-in user: only their todos,
+  // according to the permissions in schema.ts
   const db = await jazz.forReqUser(request);
   const todos = await db.all(app.todos.where({ done: false }));
   return Response.json(todos);
@@ -111,7 +121,7 @@ export async function GET(request: Request) {
 ```tsx
 // OpenTodos.tsx
 import { useAll } from "jazz-tools/react";
-import { app } from "./schema";
+import { app } from "./jazz.generated";
 
 export function OpenTodos() {
   // Live results, synced through /jazz with a thin client or fully local-first
@@ -128,7 +138,7 @@ export function OpenTodos() {
 
 ## Setup guides
 
-- **Deploy:** [Vercel](https://jazz.tools/docs/setup/deployment/vercel) &middot; [your own server](https://jazz.tools/docs/setup/deployment/own-server) &middot; [Jazz Cloud](https://jazz.tools/docs/setup/deployment/jazz-cloud)
+- **Deploy:** [Vercel](https://jazz.tools/docs/setup/deployment/vercel) &middot; [your own server](https://jazz.tools/docs/setup/deployment/own-server) &middot; [Jazz Cloud (deprecated)](https://jazz.tools/docs/setup/deployment/jazz-cloud)
 - **Auth:** [how it works](https://jazz.tools/docs/setup/auth/backend) &middot; [Better Auth](https://jazz.tools/docs/setup/auth/better-auth) &middot; [WorkOS](https://jazz.tools/docs/setup/auth/workos) &middot; [custom](https://jazz.tools/docs/setup/auth/custom) &middot; [device accounts (guests)](https://jazz.tools/docs/setup/auth/device-accounts)
 - **Clients:** [thin web client](https://jazz.tools/docs/setup/web-client/thin-client) &middot; [local-first web client](https://jazz.tools/docs/setup/web-client/local-first-client) &middot; [React Native](https://jazz.tools/docs/setup/react-native) &middot; [backend clients](https://jazz.tools/docs/setup/backend-client)
 - **Examples:** [complete apps for each framework and auth setup](https://jazz.tools/docs/reference/examples)

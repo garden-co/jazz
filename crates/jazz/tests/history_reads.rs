@@ -6,6 +6,7 @@
 //! their lens.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::collections::BTreeMap;
 
@@ -683,7 +684,7 @@ impl Synced {
             let (client_side, server_side) = duplex();
             std::mem::forget(block_on(client.connect_upstream(client_side)));
             server.accept_subscriber(server_side, author).unwrap();
-            client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+            jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
             client
         };
         let alice = connect(ALICE_NODE, 0xa1);

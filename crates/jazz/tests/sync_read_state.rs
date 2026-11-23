@@ -8,6 +8,7 @@
 //! Every client is a core `Db` linked to a history-complete server `Db`
 //! over in-memory pipes, with ticks driven explicitly.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;

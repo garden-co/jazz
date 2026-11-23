@@ -426,6 +426,9 @@ pub struct Session {
     commands: mpsc::UnboundedSender<Command>,
     /// A device account's, which can be linked.
     linking: Option<std::sync::Arc<Linking>>,
+    /// Set when a [`crate::JazzSession`] owns the client: its user is that
+    /// session's to change.
+    owned: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for Session {
@@ -473,8 +476,36 @@ impl Session {
     ///
     /// Fails with [`Error::SignedOut`] when the bearer names no one, and
     /// with [`Error::Refused`] when the backend refuses the link for good
-    /// (its user already has another account).
+    /// (its user already has another account). Refused with
+    /// [`Error::Unsupported`] on a [`crate::JazzSession`]'s client: use its
+    /// [`crate::JazzSession::link_device_account`].
     pub async fn link(&self, bearer: &str) -> Result<User> {
+        self.refuse_if_owned(
+            "link",
+            "linkDeviceAccount (JazzSession::link_device_account)",
+        )?;
+        self.link_account(bearer).await
+    }
+
+    /// The client's [`crate::JazzSession`] changes its user from now on.
+    pub(crate) fn mark_owned(&self) {
+        self.owned.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// A handle never ends or changes what it came from.
+    fn refuse_if_owned(&self, what: &str, instead: &str) -> Result<()> {
+        if self.owned.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(Error::Unsupported(format!(
+                "{what} is not supported on a session's handle: its user is the session's \
+                 to change; use the session's {instead}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// [`Self::link`], for the [`crate::JazzSession`] that owns the client
+    /// too.
+    pub(crate) async fn link_account(&self, bearer: &str) -> Result<User> {
         let linking = self.linking.as_ref().ok_or_else(|| {
             Error::Config("only a device account's session links (Auth::Device)".into())
         })?;
@@ -485,11 +516,15 @@ impl Session {
                 crate::backend::link(&linking.endpoint, linking.app, &bearer, &linking.key).await
             }
         };
-        let linked = linking
-            .runtime
-            .spawn(request)
-            .await
-            .map_err(|_| Error::Stopped)??;
+        // Dropped with this call, which aborts the request.
+        let mut requesting = tokio::task::JoinSet::new();
+        requesting.spawn_on(request, &linking.runtime);
+        let linked = tokio::select! {
+            biased;
+            Some(linked) = requesting.join_next() => linked.map_err(|_| Error::Stopped)??,
+            // The session ended (the client is stopping, or signed out).
+            () = self.commands.closed() => return Err(Error::Stopped),
+        };
         if linked.account != device {
             // The backend has linked the user by now: say so, as the
             // session stays the device's.
@@ -582,6 +617,7 @@ pub(crate) fn start(
         state: receiver,
         commands,
         linking,
+        owned: Default::default(),
     }
 }
 
@@ -645,9 +681,15 @@ impl Machine {
         mut inbox: mpsc::UnboundedReceiver<Command>,
     ) {
         self.schedule_ahead();
+        let client = self.client.clone();
+        let stopping = client.waits_ended();
+        tokio::pin!(stopping);
         loop {
             let at = self.renewal.as_ref().map(|renewal| renewal.at);
             let flow = tokio::select! {
+                // The client is stopping: nothing more to renew, and who
+                // waits for a renewal hears `Stopped`.
+                () = &mut stopping => ControlFlow::Break(()),
                 changed = sync.changed() => {
                     if changed.is_err() {
                         return;
@@ -872,10 +914,11 @@ impl Machine {
     fn sign_out(&mut self) {
         self.renewal = None;
         self.pending = None;
-        self.set(SessionState::SignedOut);
+        // Stopping before anyone reads `SignedOut`: they may open the store again.
         if let Some(stop) = self.stop.take() {
             stop();
         }
+        self.set(SessionState::SignedOut);
     }
 
     fn set(&self, state: SessionState) {
@@ -905,7 +948,13 @@ impl crate::Jazz {
     /// The end user's session, for a client opened with
     /// [`crate::Config::user`]: who is signed in, and whether their
     /// credential still holds.
+    ///
+    /// `None` on a handle acting for a user ([`crate::Jazz::for_user`]): the
+    /// session is the backend client's it came from, shared by every user.
     pub fn session(&self) -> Option<&Session> {
+        if self.for_user {
+            return None;
+        }
         self.info.session.as_ref()
     }
 
@@ -923,10 +972,20 @@ impl crate::Jazz {
     /// client stops ([`crate::Jazz::shutdown`]). Their local store stays
     /// (in [`crate::Storage::Dir`]) for when they sign in again; a device
     /// account's key is the app's to keep or forget.
+    ///
+    /// Refused with [`Error::Unsupported`] on a handle from a
+    /// [`crate::JazzSession`], which stays open: use
+    /// [`crate::JazzSession::sign_out`].
+    ///
+    /// Refused with [`Error::Unsupported`] on a handle acting for a user
+    /// ([`crate::Jazz::for_user`]): the session is every user's.
     pub async fn sign_out(&self) -> Result<()> {
+        self.refuse_for_user("sign_out")?;
         let session = self.session().ok_or_else(|| {
             Error::Config("only an end user's client signs out (Config::user)".into())
         })?;
+        session.refuse_if_owned("sign_out", "signOut (JazzSession::sign_out)")?;
+        self.begin_stopping();
         session.sign_out().await;
         self.shutdown().await
     }

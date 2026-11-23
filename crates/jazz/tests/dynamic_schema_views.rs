@@ -1,4 +1,5 @@
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -611,7 +612,7 @@ mod executing_policy_context {
         .len()
     }
     fn pinned(db: &Db, bundle: &jazz::catalogue::BundleId) -> Db {
-        db.pinned_view(db.current_schema().version_id(), Some(bundle))
+        block_on(db.pinned_view(db.current_schema().version_id(), Some(bundle)))
             .unwrap()
             .unwrap()
     }

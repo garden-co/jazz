@@ -66,7 +66,7 @@ impl HostKv {
     /// Write every pair in one transaction: all or none.
     pub(crate) fn write_many(&self, pairs: &[HostPair]) -> KvResult<()> {
         let pairs = pairs.to_vec();
-        self.call(move |tables, table| tables.host_put_many(table, &pairs))
+        self.call(move |tables, table| jazz::db::block_on(tables.host_put_many(table, &pairs)))
     }
 
     /// Every pair whose key starts with `prefix`, in key order.
@@ -132,11 +132,11 @@ impl HostSql {
         self.store.send(Box::new(move |tables| {
             let mut f = Some(f);
             let mut out = None;
-            let committed = tables.host_sql(&mut |conn| {
+            let committed = jazz::db::block_on(tables.host_sql(&mut async |conn: &Storage| {
                 let f = f.take().expect("a host write runs once");
                 out = Some(f(conn)?);
                 Ok(())
-            });
+            }));
             let _ = reply.send(
                 committed
                     .map(|()| out.expect("a committed write answered"))

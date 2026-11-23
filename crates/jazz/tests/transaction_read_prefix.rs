@@ -1,5 +1,6 @@
 //! Ordinary transaction reads retain their lifetime, snapshot and admitted staging.
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 use duplex_transport::duplex;
@@ -76,9 +77,9 @@ fn exchange(alice: &Db, bob: &Db) {
 fn fixture() -> (Db, Db) {
     let alice = open(1);
     let bob = open(2);
-    bob.set_authority();
+    jazz::db::block_on(bob.set_authority());
     connect(&alice, &bob);
-    alice.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Live));
     exchange(&alice, &bob);
     (alice, bob)
 }
