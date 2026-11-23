@@ -145,6 +145,7 @@ impl E2eeClient {
             let mut watch = self.shared.member_watch.borrow_mut();
             watch.delivery_reads.0 += read.rows.len();
             watch.delivery_reads.1 += usize::from(!bounded);
+            watch.delivery_reads.2 += 1;
         }
         let mut rows = Vec::with_capacity(read.rows.len());
         for (row, at) in &read.rows {
