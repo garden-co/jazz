@@ -260,23 +260,11 @@
                   "default": {
                     "description": "What a cell never written reads as. Stored and deployed in plain text: not secret."
                   },
-                  "from": {
-                    "type": "string"
-                  },
-                  "to": {
-                    "type": "string"
-                  },
-                  "convert": {
-                    "type": "string"
-                  },
-                  "reverse": {
-                    "type": "string"
-                  },
                   "$comment": {
                     "type": "string"
                   }
                 },
-                "description": "A column during a conversion, e.g. { \"type\": \"string\", \"from\": \"bodyPlain\" }."
+                "description": "A column with a `default`, or with `sealedType` pinning the type it was introduced with when an encrypted enum appends variants."
               }
             ]
           }
@@ -286,35 +274,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Encrypted columns an equality filter may test."
-        },
-        "backfill": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "description": "Equality columns whose tokens are still being written."
-        },
-        "rehome": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["space", "scope"],
-          "properties": {
-            "space": {
-              "type": "string"
-            },
-            "scope": {
-              "type": "string"
-            },
-            "$comment": {
-              "type": "string"
-            }
-          },
-          "description": "During a re-home, the old space column and space table."
-        },
-        "sweep": {
-          "enum": ["updaters", "members"],
-          "description": "Who converts rows in the background. Updaters by default."
+          "description": "Encrypted columns an equality filter may test. Declared when the table is created."
         },
         "$comment": {
           "type": "string"
