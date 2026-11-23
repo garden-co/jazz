@@ -20,6 +20,44 @@ use crate::convert;
 use crate::error::{FfiError, Result, refused, unsupported};
 use crate::gate::HostGate;
 
+thread_local! {
+    /// The control of the call this thread is making (`controlled`).
+    static CONTROL: RefCell<Option<jazz_app_support::CallControl>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn current_control() -> Option<jazz_app_support::CallControl> {
+    CONTROL.with(|control| control.borrow().clone())
+}
+
+/// The calls this thread makes while it lives obey `control`: a host's
+/// calls block on its thread, so each runs inside one. Restores the
+/// control it replaced when dropped.
+pub(crate) struct Controlled(Option<jazz_app_support::CallControl>);
+
+impl Controlled {
+    pub(crate) fn new(control: Option<jazz_app_support::CallControl>) -> Self {
+        match control {
+            Some(control) => Self(CONTROL.with(|current| current.replace(Some(control)))),
+            None => Self(current_control()),
+        }
+    }
+}
+
+impl Controlled {
+    /// No control, for a clean-up that must run whatever ended the call
+    /// (a rollback, an abort).
+    pub(crate) fn without() -> Self {
+        Self(CONTROL.with(|current| current.replace(None)))
+    }
+}
+
+impl Drop for Controlled {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        CONTROL.with(|current| *current.borrow_mut() = previous);
+    }
+}
+
 /// The issuer jazz-app-support names a backend's users by.
 const BACKEND_ISSUER: &str = "jazz:backend";
 
@@ -49,6 +87,9 @@ pub(crate) struct Core {
     /// A C host's callbacks: shut as the app closes, waited for before
     /// close returns and again before the handle is freed.
     gates: Mutex<Vec<Arc<dyn HostGate>>>,
+    /// A C host's call controls (`callBegin`), by id: freed by `callEnd`,
+    /// or with the handle.
+    controls: Mutex<HashMap<u64, jazz_app_support::CallControl>>,
     /// A trusted backend client's handle acting for a user (`for_user`): it
     /// shares its parent's client, so closing it leaves that client running.
     derived: bool,
@@ -395,8 +436,36 @@ impl Core {
             has_server,
             contract,
             gates: Mutex::new(Vec::new()),
+            controls: Mutex::new(HashMap::new()),
             derived,
         }
+    }
+
+    /// A C host's call control (`callBegin`): its id, for `"call"` in a
+    /// call's args, `cancel` and `callEnd`.
+    pub(crate) fn call_begin(&self, timeout: Option<std::time::Duration>) -> Result<u64> {
+        self.ensure_open()?;
+        let id = self.next_tx.fetch_add(1, Ordering::Relaxed);
+        self.controls()
+            .insert(id, jazz_app_support::CallControl::new(timeout));
+        Ok(id)
+    }
+
+    /// The control `callBegin` gave `id`.
+    pub(crate) fn control(&self, id: u64) -> Result<jazz_app_support::CallControl> {
+        self.controls()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| refused(format!("call {id} is not begun (or ended)")))
+    }
+
+    /// Frees `callBegin`'s control `id`; nothing if it was freed already.
+    pub(crate) fn call_end(&self, id: u64) {
+        self.controls().remove(&id);
+    }
+
+    fn controls(&self) -> std::sync::MutexGuard<'_, HashMap<u64, jazz_app_support::CallControl>> {
+        self.controls.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// A backend client's kind, as the main backend decided it: `"trusted"`
@@ -476,7 +545,7 @@ impl Core {
         self.open_jazz().map(drop)
     }
 
-    fn open_jazz(&self) -> Result<&Jazz> {
+    fn open_jazz(&self) -> Result<Jazz> {
         let replaced = self.replaced.as_ref().is_some_and(|replaced| replaced());
         // Looked at second: a closing session replaces its handles' client,
         // and they read closed.
@@ -487,7 +556,11 @@ impl Core {
                 "this client was replaced: the session's user signed out or changed".into(),
             ))
         } else {
-            Ok(&self.jazz)
+            // The call's control, if it was made with one (`controlled`).
+            Ok(match current_control() {
+                Some(control) => self.jazz.controlled(control),
+                None => self.jazz.clone(),
+            })
         }
     }
 
@@ -1167,6 +1240,8 @@ impl Core {
 
     /// Abandons an upload: nothing is written.
     pub fn upload_abort(&self, upload: u64) -> Result<()> {
+        // Whatever cut the call short, the clean-up runs.
+        let _uncontrolled = Controlled::without();
         self.own(upload, "upload")?;
         let open = self.open.clone();
         self.wait(self.open_jazz()?.with_client(move |client| async move {
@@ -1280,6 +1355,8 @@ impl Core {
     }
 
     pub fn tx_rollback(&self, tx: u64) -> Result<()> {
+        // Whatever cut the call short, the clean-up runs.
+        let _uncontrolled = Controlled::without();
         self.own(tx, "transaction")?;
         let open = self.open.clone();
         self.wait(self.open_jazz()?.with_client(move |_| async move {
@@ -1738,6 +1815,8 @@ async fn settle(
     tier: Option<DurabilityTier>,
 ) -> jazz_app_support::Result<()> {
     if let Some(committed) = committed {
+        // Cut short by its control from here on, the call is `queued`.
+        jazz_app_support::note_committed();
         match tier {
             // Confirmed by the server: nothing for waitForSync to check,
             // unless closing cut the confirmation short.

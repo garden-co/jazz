@@ -750,6 +750,84 @@ async fn an_abandoned_close_still_closes() {
     app.stop().await;
 }
 
+/// A session's operations obey a control: a refresh stuck in the bearer's
+/// token fetch fails `Interrupted` at once when cancelled, and the session
+/// goes on; one made once the control ended does nothing. A refresh whose
+/// caller dropped it stops waiting too, so the next operation runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_controlled_session_operation_is_cut_short() {
+    use jazz_app_support::{CallControl, Interruption};
+    let app = App::start().await;
+    let stall = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (entered, mut stalled) = tokio::sync::mpsc::unbounded_channel();
+    let provider = {
+        let stall = stall.clone();
+        move |reason: TokenReason| {
+            let stalls =
+                reason == TokenReason::Refresh && stall.load(std::sync::atomic::Ordering::SeqCst);
+            let entered = entered.clone();
+            async move {
+                if stalls {
+                    let _ = entered.send(());
+                    std::future::pending::<()>().await;
+                }
+                Ok(Some("token-hal".to_owned()))
+            }
+        }
+    };
+    let config = SessionConfig::new(app.app_id)
+        .server(&app.relay.endpoint)
+        .bearer(provider);
+    let session = JazzSession::open(client_files(), config).await.unwrap();
+    assert_eq!(session.snapshot().status, SessionStatus::Ready);
+    stall.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let control = CallControl::new(None);
+    let refreshing = tokio::spawn({
+        let session = session.controlled(control.clone());
+        async move { session.refresh().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), stalled.recv())
+        .await
+        .expect("the refresh reaches its token fetch");
+    let cancelled = std::time::Instant::now();
+    control.cancel();
+    let ended = tokio::time::timeout(Duration::from_secs(5), refreshing)
+        .await
+        .expect("the refresh ends")
+        .unwrap();
+    assert!(cancelled.elapsed() < Duration::from_millis(100));
+    assert!(
+        matches!(
+            ended,
+            Err(Error::Interrupted {
+                reason: Interruption::Cancelled
+            })
+        ),
+        "{ended:?}"
+    );
+    assert!(matches!(
+        session.controlled(control).refresh().await,
+        Err(Error::Interrupted { .. })
+    ));
+
+    // Dropped: it stops waiting, and gives up its turn.
+    {
+        use futures::FutureExt as _;
+        assert!(session.refresh().now_or_never().is_none());
+    }
+    tokio::time::timeout(Duration::from_secs(10), stalled.recv())
+        .await
+        .expect("the dropped refresh had started");
+    stall.store(false, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(10), session.sign_out())
+        .await
+        .expect("the next operation gets its turn")
+        .unwrap();
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
 #[allow(dead_code)]
 fn _assert_send_sync()
 where
