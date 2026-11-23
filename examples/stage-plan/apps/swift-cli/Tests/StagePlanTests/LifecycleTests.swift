@@ -158,7 +158,7 @@ final class LifecycleTests: XCTestCase {
         try await reopened.jazz.close()
     }
 
-    func testDeleteClientStorageIsRefusedWhileAnotherAppHoldsTheStore() async throws {
+    func testASecondAppIsRefusedTheStore() async throws {
         let relay = try await TestRelay()
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("stage-plan-held-\(UUID().uuidString)").path
@@ -166,18 +166,16 @@ final class LifecycleTests: XCTestCase {
         let key = try Jazz.generateDeviceKey()
         let app = try await StagePlanApp.open(
             endpoint: relay.endpoint, appId: relay.appId, auth: .deviceKey(key), dataDir: dir)
-        let holder = try await StagePlanApp.open(
-            endpoint: relay.endpoint, appId: relay.appId, auth: .deviceKey(key), dataDir: dir)
         do {
-            try await app.jazz.deleteClientStorage()
-            XCTFail("deleting a store another app holds should be refused")
+            _ = try await StagePlanApp.open(
+                endpoint: relay.endpoint, appId: relay.appId, auth: .deviceKey(key), dataDir: dir)
+            XCTFail("opening a store another app has open should be refused")
         } catch let error as JazzError {
             guard case .refused = error else { return XCTFail("\(error)") }
         }
         // The app stays open.
         let show = try await app.show(named: "Still open")
         XCTAssertEqual(show.name, "Still open")
-        try await holder.jazz.close()
         try await app.jazz.close()
     }
 

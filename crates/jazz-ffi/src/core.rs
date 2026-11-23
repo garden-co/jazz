@@ -701,7 +701,8 @@ impl Core {
 
     /// Writes the row with this id: inserts it if there is none (then
     /// `row_json` is a whole row, as for an insert), otherwise sets the
-    /// columns `row_json` names (a partial row updates). Returns the row.
+    /// columns `row_json` names (a partial row updates). Returns the row as
+    /// written here, once it reached the tier.
     pub fn upsert(
         &self,
         table_name: &str,
@@ -722,8 +723,12 @@ impl Core {
             let client = client_for(client, tx)?;
             let committed = client.upsert(&name, *id.uuid(), cells.into_iter().collect())?;
             mark_wrote(tx);
+            // Read before the wait, as insert answers with what it wrote: by
+            // the time the server accepts it, someone may have deleted or
+            // changed the row. A refusal still wins over a failed read.
+            let written = read_back(&client, &table, &name, id).await;
             settle(&client, committed, tier).await?;
-            read_back(&client, &table, &name, id).await
+            written
         }))?;
         Ok(row.to_string())
     }
@@ -1288,8 +1293,9 @@ impl Core {
     /// The end user's session as JSON (`{ "status": "signedIn", "user": … }`
     /// and so on); `None` for a local app or a backend.
     pub fn session_state(&self) -> Result<Option<String>> {
-        Ok(self
-            .open_jazz()?
+        let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("session")?;
+        Ok(jazz
             .session()
             .map(|session| serde_json::to_string(&session.state()).unwrap_or_default()))
     }
@@ -1301,8 +1307,9 @@ impl Core {
 
     /// Asks the token provider for a fresh token and reconnects with it.
     pub fn refresh(&self) -> Result<()> {
-        let session = self
-            .open_jazz()?
+        let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("refresh")?;
+        let session = jazz
             .session()
             .cloned()
             .ok_or_else(|| refused("refresh is for an end user's app (\"auth\")"))?;
@@ -1317,8 +1324,9 @@ impl Core {
     /// own sign-in (`bearer`, a token from it): the session becomes that
     /// user's, on the device's account. Returns the user as JSON.
     pub fn link(&self, bearer: &str) -> Result<String> {
-        let session = self
-            .open_jazz()?
+        let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("link")?;
+        let session = jazz
             .session()
             .cloned()
             .ok_or_else(|| refused("link is for an end user's app (\"auth\")"))?;
@@ -1336,32 +1344,17 @@ impl Core {
         Ok(serde_json::to_string(&user).unwrap_or_default())
     }
 
-    /// Signs the end user out and closes the app.
+    /// Signs the end user out and closes the app; a session's handle
+    /// refuses and stays open.
     pub fn sign_out(&self) -> Result<()> {
         let jazz = self.open_jazz()?;
+        jazz.refuse_for_user("signOut")?;
         if jazz.session().is_none() {
             return Err(refused("sign out is for an end user's app (\"auth\")"));
         }
-        if self.derived {
-            // On a thread of its own, as signing out mustn't stop halfway
-            // (signed out, the client syncing on) when closing the handle
-            // ends the wait.
-            let (sender, signed_out) = tokio::sync::oneshot::channel();
-            let jazz = jazz.clone();
-            std::thread::Builder::new()
-                .name("jazz-sign-out".into())
-                .spawn(move || {
-                    let _ = sender.send(block_on(jazz.sign_out()));
-                })
-                .map_err(|error| FfiError::Io(format!("cannot sign out: {error}")))?;
-            self.wait(async {
-                signed_out
-                    .await
-                    .map_err(|_| jazz_app_support::Error::Stopped)?
-            })?;
-        } else {
-            self.wait(jazz.sign_out())?;
-        }
+        // Derived handles never get this far: a for_user handle is refused
+        // above, and a session's handle by jazz-app (the session signs out).
+        self.wait(jazz.sign_out())?;
         // Signed out, the app has ended: no token callback after this. A
         // close racing this does the waiting if it was first: two callbacks
         // ending the app must not wait for each other.
@@ -1386,8 +1379,8 @@ impl Core {
     }
 
     /// Closes the app and deletes its local store (TS's
-    /// `deleteClientStorage`). Refused (the app left open) while another
-    /// open app holds the same store.
+    /// `deleteClientStorage`). It holds the store's lock until the files
+    /// are gone.
     pub fn delete_client_storage(&self) -> Result<()> {
         let jazz = self.open_jazz()?;
         if self.derived {
@@ -1398,8 +1391,8 @@ impl Core {
         // What is open rolls back and aborts as the client stops; a delete
         // refused with the app running on leaves it be.
         let deleted = block_on(jazz.delete_client_storage());
-        // Refused as held by another process, the client has stopped all
-        // the same; by another app here, it runs on.
+        // Refused as held, only an app that had stopped already is stopped:
+        // while it runs nothing else can hold its store.
         let stopped = || block_on(jazz.with_client(|_| async { Ok(()) })).is_err();
         if self.open.closed.is_closed() {
             // A close stopped the client meanwhile: nothing to report but
@@ -1428,6 +1421,7 @@ impl Core {
                     .map(|error| serde_json::to_string(&error).unwrap_or_default()),
             ),
             "session" => {
+                jazz.refuse_for_user("watching the session")?;
                 let session = jazz
                     .session()
                     .ok_or_else(|| refused("watching the session is for an end user's app"))?;
@@ -1499,6 +1493,11 @@ impl Core {
     ///
     /// Returns once no host callback runs (but the caller's own).
     pub fn close_within(&self, timeout: Option<std::time::Duration>) -> Result<()> {
+        // Before `closed` is set: an open of the store right after this
+        // close must wait for it, not be refused.
+        if !self.derived {
+            self.jazz.begin_stopping();
+        }
         if !self.open.closed.close() {
             return Ok(());
         }

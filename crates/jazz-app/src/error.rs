@@ -106,7 +106,8 @@ pub enum Error {
     Panicked(String),
 
     /// The local store is in use by another open app (in this process or
-    /// another), so it can't be deleted (TS's `StoreHeldByAnotherTabError`).
+    /// another): one at a time can have it open, so it can't be opened, or
+    /// deleted (TS's `StoreHeldByAnotherTabError`).
     #[error("the local store is held: {0}")]
     StoreHeld(String),
 

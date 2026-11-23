@@ -60,6 +60,7 @@ export const ciPartitionJobs = Object.freeze({
   "go-ts-backend": "test-go-ts-backend",
   kotlin: "test-kotlin",
   "kotlin-android": "test-kotlin-android",
+  "kotlin-android-emulator": "test-kotlin-android-emulator",
   "warm-native-builds": "warm-native-builds",
 });
 
@@ -537,6 +538,13 @@ export const ciPartitions = Object.freeze({
   // with cargo-ndk: a build check, no emulator.
   "kotlin-android": Object.freeze([
     command("Kotlin Android AAR build", "bash", ["dev/scripts/test-kotlin-android.sh"]),
+  ]),
+  // A minified app of that AAR (x86_64) on an emulator, against a Jazz server
+  // and the test relay. Needs /dev/kvm.
+  "kotlin-android-emulator": Object.freeze([
+    command("Kotlin Android emulator smoke test", "bash", [
+      "dev/scripts/test-kotlin-android-emulator.sh",
+    ]),
   ]),
 });
 
