@@ -6,7 +6,8 @@ use jazz::tools::{ObjectId, Value};
 /// A Rust type a column's values convert to and from.
 ///
 /// Implemented for the types generated bindings use: `String`, `bool`,
-/// `i32`, `i64`, `f64`, [`ObjectId`], `Vec<u8>` (bytes), [`Timestamp`],
+/// `i32`, `i64`, `f64`, [`ObjectId`], `Vec<u8>` (bytes), `Vec<f32>`
+/// (vectors), [`Point`], [`Timestamp`],
 /// [`Json`], `Vec<T>` (arrays) and `Option<T>` (nullable columns), and by
 /// generated enums.
 pub trait ColumnValue: Sized + Send + 'static {
@@ -38,6 +39,24 @@ scalar!(i64, BigInt);
 scalar!(f64, Double);
 scalar!(ObjectId, Uuid);
 scalar!(Vec<u8>, Bytea);
+
+/// A `vector` column's value (SPEC 20.1), carried as its `f32le/1` bytes.
+/// The column's dimensions and finiteness are checked when the row is
+/// written.
+impl ColumnValue for Vec<f32> {
+    fn into_value(self) -> Value {
+        Value::Bytea(self.iter().flat_map(|x| x.to_le_bytes()).collect())
+    }
+    fn from_value(value: Value) -> Result<Self, Value> {
+        match value {
+            Value::Bytea(bytes) if bytes.len() % 4 == 0 => Ok(bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()),
+            other => Err(other),
+        }
+    }
+}
 
 impl<T: ColumnValue> ColumnValue for Option<T> {
     fn into_value(self) -> Value {
@@ -84,6 +103,37 @@ impl ColumnValue for Timestamp {
     fn from_value(value: Value) -> Result<Self, Value> {
         match value {
             Value::Timestamp(millis) => Ok(Self(millis)),
+            other => Err(other),
+        }
+    }
+}
+
+/// A `point` column's value (SPEC 20.1): a WGS84 position in degrees.
+/// Stored as `point-f64le/1`, longitude first (GeoJSON order); a write with
+/// a non-finite coordinate, a longitude outside `[-180, 180]` or a latitude
+/// outside `[-90, 90]` is refused.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point {
+    pub lng: f64,
+    pub lat: f64,
+}
+
+impl ColumnValue for Point {
+    fn into_value(self) -> Value {
+        let mut bytes = Vec::with_capacity(16);
+        bytes.extend_from_slice(&self.lng.to_le_bytes());
+        bytes.extend_from_slice(&self.lat.to_le_bytes());
+        Value::Bytea(bytes)
+    }
+    fn from_value(value: Value) -> Result<Self, Value> {
+        match value {
+            Value::Bytea(bytes) if bytes.len() == 16 => {
+                let (lng, lat) = bytes.split_at(8);
+                Ok(Self {
+                    lng: f64::from_le_bytes(lng.try_into().expect("8 bytes")),
+                    lat: f64::from_le_bytes(lat.try_into().expect("8 bytes")),
+                })
+            }
             other => Err(other),
         }
     }

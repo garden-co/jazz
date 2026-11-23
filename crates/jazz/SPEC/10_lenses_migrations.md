@@ -920,13 +920,27 @@ generate` writes both files from it, and marks each with a top-level
 **Column** is a type string, or an object when it needs options.
 
 - Type strings: `string`, `int`, `bigint`, `float`, `boolean`, `timestamp`,
-  `uuid`, `bytes`; a trailing `?` makes the column optional (`"string?"`).
+  `uuid`, `bytes`, `point`; a trailing `?` makes the column optional
+  (`"string?"`).
+- `point` is a WGS84 position in degrees (20.1), stored as 16 bytes in
+  encoding `point-f64le/1`: longitude, then latitude, each IEEE-754 binary64
+  little-endian. Its value is **`[lng, lat]`, GeoJSON order: longitude
+  first**, although people often write latitude first. A write with a
+  non-finite coordinate, a longitude outside `[-180, 180]` or a latitude
+  outside `[-90, 90]` is refused. A point is not an array element, payload
+  field, index column (except of a `geo` index) or ordering key; filters
+  compare whole points bit for bit; no migration changes a column to or from
+  a point.
 - Objects carry one type key and options:
   - `{"type": "<scalar>"}`;
   - `{"enum": ["todo", "done"]}` (an object of cases with fields is
     refused: Jazz has no such columns, see jazz#5758);
   - `{"json": <JSON Schema>}` or `{"json": true}` for any JSON;
-  - `{"array": <Column type>}`.
+  - `{"array": <Column type>}` (not of vectors or points);
+  - `{"vector": n}`, `1 ≤ n ≤ 4096`: `n` IEEE-754 binary32 values (20.1),
+    stored as `f32le/1` bytes; not an array element, payload field, index
+    column or typed query parameter, and no migration changes a column to, from or
+    between vector types.
   - Options: `"optional": true`, `"default": <Value>`,
     `"merge": "counter" | "g-set" | "text" | "markdown" | "html"`, and
     `"references": "<table>"` for a column that references a table no
@@ -939,7 +953,10 @@ generate` writes both files from it, and marks each with a top-level
   `uuid`, numbers for `int`/`float`, a decimal string for `bigint`, the
   engine's integer for `timestamp`, milliseconds since the Unix epoch (an ISO
   8601 form is not supported yet),
-  base64 for `bytes`, any JSON for `json`, arrays for `array`, and `null`.
+  base64 for `bytes`, any JSON for `json`, arrays for `array`, an array of
+  `n` finite numbers for `vector` (each rounded to binary32; the writer
+  prints each in its shortest form that reads back to the same bits),
+  `[lng, lat]` for `point`, and `null`.
 
 **Transform** `{stored, view}`: two column types without `?` or options.
 The engine stores `stored`; code reads and writes `view`, converting with

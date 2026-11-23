@@ -7,6 +7,8 @@ import { assertSchemaNameAllowed } from "./schema-name.js";
 import { WHERE_OPERATORS, type WhereOperator } from "./where-operators.js";
 import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "./runtime/db.js";
 import type { StreamingValueSource } from "./runtime/client.js";
+import { vectorLiteralJson } from "./runtime/vector.js";
+import { pointLiteralJson } from "./runtime/point.js";
 
 // ============================================================================
 // The generated type map
@@ -27,7 +29,9 @@ export type ColumnKind =
   | "bytes"
   | "json"
   | "enum"
-  | "array";
+  | "array"
+  | "vector"
+  | "point";
 
 /** One stored column in the generated type map. */
 export interface ColumnTypes {
@@ -206,7 +210,12 @@ type WhereInputForColumn<C extends ColumnTypes> = C["kind"] extends "string"
                         C["nullable"],
                         { contains?: ArrayElement<C["value"]> } & Membership<C["value"]>
                       >
-                    : never;
+                    : // Whole values, bit for bit (SPEC 6.1.1); nearness is an index search.
+                      C["kind"] extends "vector"
+                      ? WhereEqNe<Float32Array, C["nullable"], Membership<Float32Array | number[]>>
+                      : C["kind"] extends "point"
+                        ? WhereEqNe<C["value"], C["nullable"], Membership<C["value"]>>
+                        : never;
 
 export type TableWhereInput<
   TSchema extends SchemaLike,
@@ -828,6 +837,8 @@ function cloneBuiltCondition(condition: BuiltCondition): BuiltCondition {
 
 function queryBuilderJsonReplacer(_key: string, value: unknown): unknown {
   if (value instanceof Uint8Array) return [...value];
+  // Hex of the f32le bytes, so a filter keeps every bit (JSON numbers lose -0).
+  if (value instanceof Float32Array) return vectorLiteralJson(value);
   return typeof value === "bigint" ? value.toString() : value;
 }
 
@@ -1210,17 +1221,27 @@ export class TypedTableQueryBuilder<
         ((columnType?.type === "Json" && !hasRecognizedOperator) ||
           (columnType?.type === "Timestamp" && value instanceof Date) ||
           (columnType?.type === "Bytea" && value instanceof Uint8Array) ||
+          (columnType?.type === "Vector" && value instanceof Float32Array) ||
           (columnType?.type === "Row" &&
             columnType.columns.some((column) => Object.hasOwn(value, column.name))));
 
+      // A point literal travels as the hex of its bytes, so a filter keeps
+      // every bit (JSON numbers lose -0); `[lng, lat]` is checked here.
+      const literal = (op: string, opValue: unknown): unknown => {
+        if (columnType?.type !== "Point" || opValue === null) return opValue;
+        if ((op === "in" || op === "notIn") && Array.isArray(opValue)) {
+          return opValue.map((point) => pointLiteralJson(point, key));
+        }
+        return op === "eq" || op === "ne" ? pointLiteralJson(opValue, key) : opValue;
+      };
       if (isObjectValue && !isDirectObjectValue) {
         for (const [op, opValue] of Object.entries(value)) {
           if (opValue !== undefined) {
-            built.push({ column: key, op, value: opValue });
+            built.push({ column: key, op, value: literal(op, opValue) });
           }
         }
       } else {
-        built.push({ column: key, op: "eq", value });
+        built.push({ column: key, op: "eq", value: literal("eq", value) });
       }
     }
     return built;

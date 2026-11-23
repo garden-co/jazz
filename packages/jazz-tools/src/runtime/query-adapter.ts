@@ -1,4 +1,6 @@
 import { resolveQueryTable } from "./history-relation.js";
+import { vectorToBytes } from "./vector.js";
+import { pointToBytes } from "./point.js";
 /**
  * Translate public QueryBuilder JSON into the runtime query payload.
  *
@@ -118,6 +120,12 @@ function toRuntimeValue(value: unknown, columnType: ColumnType): object {
   }
   if (columnType.type === "Timestamp" && value instanceof Date) {
     return { type: "Timestamp", value: toRuntimeTimestampValue(value) };
+  }
+  if (columnType.type === "Vector") {
+    return { type: "Bytea", value: [...vectorToBytes(value, columnType.dimensions)] };
+  }
+  if (columnType.type === "Point") {
+    return { type: "Bytea", value: [...pointToBytes(value)] };
   }
   if (columnType.type === "Bytea") {
     if (value instanceof Uint8Array) {
