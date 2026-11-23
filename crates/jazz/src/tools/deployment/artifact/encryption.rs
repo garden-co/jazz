@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalogue::Permissions;
 use crate::tools::public_schema::{
-    CmpOp, ColumnDescriptor, ColumnType, EncryptionEntry, EncryptionSettings, PolicyExpr,
-    PolicyValue, Schema, TableName, TablePolicies, Value,
+    CmpOp, ColumnDescriptor, ColumnType, EncryptedColumn, EncryptionEntry, EncryptionSettings,
+    PolicyExpr, PolicyValue, Schema, TableName, TablePolicies, Value,
 };
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
@@ -630,34 +630,7 @@ pub fn check_transition(
                 .and_then(|n| old.and_then(|o| o.columns.get(&n).map(|c| (n, c))));
             match previous {
                 Some((old_name, previous)) => {
-                    if !declared.cell_type().same_type(previous.cell_type()) {
-                        return Err(format!(
-                            "{path}: the encrypted column's type changes from {:?} to {:?}, \
-                             which its cells were sealed under; re-encrypt it into a new column \
-                             (`\"from\"`, with `\"convert\"` unless the values carry over), or \
-                             pin the old type as `\"sealedType\"` for a widening",
-                            previous.cell_type(),
-                            declared.cell_type()
-                        ));
-                    }
-                    // Rows older than the column read its default: another
-                    // default would read them differently on clients of
-                    // each version.
-                    if declared.plain.default != previous.plain.default {
-                        return Err(format!(
-                            "{path}: the encrypted column's default changes, and the rows \
-                             stored before the column read it; re-encrypt it into a new column \
-                             (`\"from\"`) to change it"
-                        ));
-                    }
-                    if !widens(declared.cell_type(), &declared.plain)
-                        || !widens(&previous.plain, &declared.plain)
-                    {
-                        return Err(format!(
-                            "{path}: only appending enum variants preserves existing encrypted values in place; \
-                             re-encrypt other type changes into a new column with \"from\""
-                        ));
-                    }
+                    check_stored_column_type(&path, previous, declared)?;
                     let tagged_before = old.is_some_and(|o| o.equality.contains(&old_name));
                     // Removing equality drops the token column in the same
                     // migration; one left behind would be queried by older
@@ -709,6 +682,42 @@ pub fn check_transition(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Whether a new declaration can read the values of a previously declared
+/// encrypted column with the same stored identity.
+pub fn check_stored_column_type(
+    path: &str,
+    previous: &EncryptedColumn,
+    declared: &EncryptedColumn,
+) -> Result<(), String> {
+    if !declared.cell_type().same_type(previous.cell_type()) {
+        return Err(format!(
+            "{path}: the encrypted column's type changes from {:?} to {:?}, \
+             which its cells were sealed under; re-encrypt it into a new column \
+             (`\"from\"`, with `\"convert\"` unless the values carry over), or \
+             pin the old type as `\"sealedType\"` for a widening",
+            previous.cell_type(),
+            declared.cell_type()
+        ));
+    }
+    // Rows older than the column read its default: another
+    // default would read them differently on clients of
+    // each version.
+    if declared.plain.default != previous.plain.default {
+        return Err(format!(
+            "{path}: the encrypted column's default changes, and the rows \
+             stored before the column read it; re-encrypt it into a new column \
+             (`\"from\"`) to change it"
+        ));
+    }
+    if !widens(declared.cell_type(), &declared.plain) || !widens(&previous.plain, &declared.plain) {
+        return Err(format!(
+            "{path}: only appending enum variants preserves existing encrypted values in place; \
+             re-encrypt other type changes into a new column with \"from\""
+        ));
     }
     Ok(())
 }

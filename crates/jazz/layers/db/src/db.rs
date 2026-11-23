@@ -2106,6 +2106,18 @@ impl Db {
         change: crate::catalogue::CatalogueChange,
         kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
     ) -> Result<Self, Error> {
+        Self::open_file_with_catalogue_checked(config, file, change, kept, |_| Ok(()))
+    }
+
+    /// As [`Self::open_file_with_catalogue_keeping`], checking the newly
+    /// admitted catalogue before committing any part of initialization.
+    pub fn open_file_with_catalogue_checked(
+        config: DbConfig,
+        file: crate::host::StoreFile,
+        change: crate::catalogue::CatalogueChange,
+        kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
+        check: impl FnOnce(&Db) -> Result<(), Error>,
+    ) -> Result<Self, Error> {
         let crate::host::StoreFile { conn, path } = file;
         let conn = Rc::new(conn);
         conn.scope("jazz_initialize", |_| {
@@ -2115,7 +2127,7 @@ impl Db {
                 conn.clone(),
                 path.as_ref().map(|(path, vfs)| (path.as_path(), *vfs)),
             )?;
-            db.apply_catalogue_now(change, kept)?;
+            db.apply_catalogue_checked(change, kept, check)?;
             Ok(db)
         })
     }
@@ -4368,7 +4380,7 @@ impl Db {
         &self,
         change: crate::catalogue::CatalogueChange,
     ) -> Result<(), Error> {
-        self.apply_catalogue_now(change, &[])
+        self.apply_catalogue_checked(change, &[], |_| Ok(()))
     }
 
     /// [`Self::apply_catalogue`] that also keeps `kept` (host table, key,
@@ -4382,13 +4394,17 @@ impl Db {
         change: crate::catalogue::CatalogueChange,
         kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
     ) -> Result<(), Error> {
-        self.apply_catalogue_now(change, kept)
+        self.apply_catalogue_checked(change, kept, |_| Ok(()))
     }
 
-    fn apply_catalogue_now(
+    /// As [`Self::apply_catalogue_keeping`], running a host's check after
+    /// admission assigns stored names and before the transaction keeps its
+    /// new host values. A failed check rolls the whole change back.
+    pub fn apply_catalogue_checked(
         &self,
         change: crate::catalogue::CatalogueChange,
         kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
+        check: impl FnOnce(&Db) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let saved = {
             let inner = self.inner();
@@ -4406,6 +4422,7 @@ impl Db {
             for (schema, lenses) in change.admit {
                 self.admit(schema, &lenses)?;
             }
+            check(self)?;
             for (table, key, value) in kept {
                 if let Some(existing) = crate::host::put_if_absent(conn, *table, key, value)?
                     && existing != *value
@@ -4463,6 +4480,51 @@ impl Db {
     /// it keeps (see [`crate::catalogue`]).
     pub fn catalogue(&self) -> Result<crate::catalogue::CatalogueRows, Error> {
         crate::catalogue::read(&self.inner().conn)
+    }
+
+    /// The admitted table and column names used for storage by a published
+    /// schema hash, including hashes that share a runtime schema version.
+    pub fn catalogue_stored_names(
+        &self,
+        hash: &jazz_model::model::public_schema::SchemaHash,
+    ) -> Result<crate::values::StoredNames, Error> {
+        let inner = self.inner.borrow();
+        let schema = crate::catalogue::schema(&inner.conn, hash)?
+            .ok_or_else(|| schema_error(format!("schema {hash} is missing from the catalogue")))?;
+        let version = JazzSchema::new(&schema)
+            .map_err(|error| schema_error(error.to_string()))?
+            .version_id();
+        // Read the transaction's catalogue: another instance can have
+        // admitted this version since the runtime loaded its own names.
+        let mut statement = inner
+            .conn
+            .prepare_cached(
+                "SELECT tbl, col, stored_tbl, stored_col FROM _jazz_names \
+             WHERE n = (SELECT n FROM _jazz_versions WHERE version = ?1)",
+            )
+            .map_err(storage)?;
+        let rows = statement
+            .query_map([version.as_bytes().as_slice()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(storage)?;
+        let mut names = crate::values::StoredNames::default();
+        for row in rows {
+            let (table, column, stored_table, stored_column) = row.map_err(storage)?;
+            let (_, columns) = names
+                .tables
+                .entry(table)
+                .or_insert_with(|| (stored_table, BTreeMap::new()));
+            if !column.is_empty() {
+                columns.insert(column, stored_column);
+            }
+        }
+        Ok(names)
     }
 
     /// Admit `schema` with the lenses into it.

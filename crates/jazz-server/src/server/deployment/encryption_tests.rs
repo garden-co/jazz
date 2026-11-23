@@ -248,6 +248,88 @@ async fn a_redeployment_cannot_append_an_encrypted_enum_variant_to_the_same_sche
     );
 }
 
+/// Alice appends an enum variant on a standalone version. A migration from
+/// her original version renames the column and must preserve that variant.
+#[tokio::test]
+async fn a_renamed_enum_keeps_variants_from_deployments_outside_its_migration() {
+    let router = router().await;
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let load = |source: &str| artifact::load(source.as_bytes(), permissions.as_bytes()).unwrap();
+    let original = r#""title": {"enum":["a"]}"#;
+    let v1 = load(&APP.replace(r#""title": "string""#, original));
+    let (status, body) = publish(&router, v1.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let branch = APP
+        .replace(
+            r#""projectId": "uuid", "title": "bytes""#,
+            r#""title": "bytes", "projectId": "uuid""#,
+        )
+        .replace(
+            r#""title": "string""#,
+            r#""title": {"type":{"enum":["a","b"]},"sealedType":{"enum":["a"]}}"#,
+        );
+    let branch = load(&branch);
+    assert_ne!(branch.current_hash(), v1.current_hash());
+    let (status, body) = publish(&router, branch.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (current, history) = APP_V2.split_once(r#""history":"#).unwrap();
+    let current = current.replace("title", "caption");
+    let history = history.replace(r#""title": "string""#, original).replace(
+        r#""done": { "add""#,
+        r#""caption": { "renameFrom": "title" }, "__e2ee_eq_caption": { "renameFrom": "__e2ee_eq_title" }, "done": { "add""#,
+    );
+    let renamed = |variants| {
+        let declaration =
+            format!(r#""caption": {{"type":{{"enum":{variants}}},"sealedType":{{"enum":["a"]}}}}"#);
+        let current = current.replace(r#""caption": "string""#, &declaration);
+        load(&format!(r#"{current}"history":{history}"#))
+    };
+    let candidate = renamed(r#"["a","c"]"#);
+    let (status, refusal) = publish(&router, candidate.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    let reason = refusal["error"].as_str().unwrap();
+    assert!(
+        reason.contains("tasks.caption") && reason.contains("appending enum"),
+        "{refusal}"
+    );
+    let compatible = renamed(r#"["a","b","c"]"#);
+    assert_eq!(candidate.current_hash(), compatible.current_hash());
+    let (status, body) = publish(&router, compatible.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = publish(&router, v1.deployment_body(false)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "replaying the original declaration: {body}"
+    );
+}
+
+/// Alice can re-encrypt a required title into a new optional column even
+/// when the new column uses the same application name as the original.
+#[tokio::test]
+async fn a_conversion_can_reuse_the_name_of_a_different_stored_column() {
+    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables": { "notes": {
+            "columns": { "oldTitle": "bytes", "title": { "type": "bytes", "default": "" } },
+            "encryption": { "space": "id", "scope": "notes",
+                "columns": { "title": { "type": "string?", "from": "oldTitle" } } } } },
+        "history": {
+            "v1": { "tables": { "notes": { "columns": { "title": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } },
+            "v2": { "tables": { "notes": { "columns": { "oldTitle": "bytes" },
+                "encryption": { "space": "id", "scope": "notes", "columns": { "oldTitle": "string" } } } } } },
+        "migrations": [
+            { "from": "v1", "to": "v2", "migrate": { "notes": { "oldTitle": { "renameFrom": "title" } } } },
+            { "from": "v2", "migrate": { "notes": { "title": { "add": "bytes", "default": "" } } } }] }"#;
+    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
+    let app = artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap();
+    let (status, response) = publish(&router().await, app.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+}
+
 /// The server's kept declarations judge a redeployed version like a
 /// migration: with the schema unchanged, a conversion may not write over a
 /// column that is already encrypted (its cells are sealed under the old

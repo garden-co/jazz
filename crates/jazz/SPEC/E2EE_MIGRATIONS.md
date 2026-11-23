@@ -85,8 +85,10 @@ columns and a client-run rewrite between them.
 - **Known limits: hosts that keep no declarations.** A server keeps the
   declarations a version was first deployed with in a host table of its
   store. A redeploy of the same physical schema hash must send the same
-  declarations, even for an enum append. Appending variants needs a new
-  schema version and a migration from the previous version. Two hosts keep
+  declarations, even for an enum append. For a new hash the server checks
+  each encrypted column against every declaration it holds for the same
+  stored table and column. Renames preserve this identity, and different
+  hashes can share it even without an explicit migration. Two hosts keep
   no declarations:
   - A host whose deploy path takes no declarations (the Durable Object host)
     refuses every schema that has Jazz's system tables, with "has Jazz's
@@ -441,10 +443,10 @@ backend), because the server and every replica then hold the plaintext. Rows in 
   `T` for life: the type it was introduced with, recorded as `sealedType` in
   the entry whenever the current `type` differs. A migration can append enum
   variants in place because encrypted enums store their variant names. Each
-  version must retain every variant of the immediately preceding declaration
-  in order, including variants added after `sealedType` was pinned. Both
-  versions must have the same nullability. An optional value carries a
-  presence byte, so changing nullability in either direction requires
+  new declaration must retain every previously declared list of variants
+  for that stored column as a prefix, including variants added on another
+  branch. All declarations must have the same nullability. An optional value
+  carries a presence byte, so changing nullability in either direction requires
   re-encryption into a new column. The deploy also requires a new column for
   JSON schema changes, including loosening a constraint. Use `from` for
   re-encryption and `convert` when the values change.
@@ -607,9 +609,9 @@ cache its position in memory; it is never authoritative.
 4. The seal is a permissions revision that tooling proposes and the developer
    applies.
 5. An encrypted enum may append variants while keeping its original
-   `sealedType` and all variants from the preceding version. Changing
-   nullability in either direction, changing a JSON schema, or otherwise
-   changing the type requires re-encryption into a new column.
+   `sealedType` and all variants already declared for that stored column.
+   Changing nullability in either direction, changing a JSON schema, or
+   otherwise changing the type requires re-encryption into a new column.
 6. Equality tags are backfilled in place, with an opt-in core write floor per
    table.
 7. Rows move between spaces through a serializable, online-only `move` write;

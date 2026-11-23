@@ -1168,7 +1168,9 @@ impl Owner {
         let config = configure(config(current));
         let db = match initial {
             Some((change, kept)) => {
-                Db::open_file_with_catalogue_keeping(config, file, change, &kept)
+                Db::open_file_with_catalogue_checked(config, file, change, &kept, |db| {
+                    crate::portable::deployment::check_stored_columns(db, &kept)
+                })
             }
             None => block_on(Db::open_file(config, file)),
         }
@@ -1234,13 +1236,11 @@ impl Owner {
     ) -> (usize, Result<(), CatalogueApplyError>) {
         let mut ended = 0;
         let result = (|| {
-            block_on(self.db.apply_catalogue_keeping(change, kept)).map_err(|error| {
-                if error.code == jazz::db::ErrorCode::Storage {
-                    CatalogueApplyError::Failed(error.to_string())
-                } else {
-                    CatalogueApplyError::Rejected(error.to_string())
-                }
-            })?;
+            self.db
+                .apply_catalogue_checked(change, kept, |db| {
+                    crate::portable::deployment::check_stored_columns(db, kept)
+                })
+                .map_err(CatalogueApplyError::from)?;
             if let Some(published) = supersedes {
                 ended = self.end_pinned_sessions(
                     &|bundle| *bundle != published,

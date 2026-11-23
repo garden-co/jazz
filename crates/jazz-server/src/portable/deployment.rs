@@ -7,15 +7,89 @@ use std::collections::HashMap;
 
 use http::StatusCode;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
+use jazz::db::{Db, Error, ErrorCode};
+use jazz::host::{HostTable, HostTables};
 use jazz::schema::JazzSchema;
 use jazz::tools::deployment::artifact::{DeclaredEncryption, encryption, system_tables};
 use jazz::tools::deployment::published::{PublishMigrationRequest, lower_migration};
 use jazz::tools::deployment::{self, DeploymentError, PreparedDeployment};
-use jazz::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies};
+use jazz::tools::public_schema::{EncryptedColumn, Schema, SchemaHash, TableName, TablePolicies};
 use serde::{Deserialize, Serialize};
 
 use super::catalogue::{CatalogueIndex, StagedDeployment};
 use crate::runtime::CatalogueApplyError;
+
+/// Per-physical-schema declarations in [`encryption::STORED_DECLARATIONS_V1`] form.
+pub(crate) const DECLARATIONS: HostTable = HostTable::new("e2ee_declarations");
+
+/// Check new declarations inside the catalogue transaction, after admission
+/// resolves renames and gives each column its final stored identity.
+pub(crate) fn check_stored_columns(
+    db: &Db,
+    kept: &[(HostTable, Vec<u8>, Vec<u8>)],
+) -> Result<(), Error> {
+    let invalid = |message: String| Error::new(ErrorCode::Schema, message);
+    let mut new = Vec::new();
+    for (table, key, bytes) in kept {
+        if *table == DECLARATIONS && db.host_get(*table, key)?.is_none() {
+            let entries = encryption::decode_stored(bytes).map_err(invalid)?;
+            if !entries.is_empty() {
+                new.push((key.as_slice(), entries));
+            }
+        }
+    }
+    if new.is_empty() {
+        return Ok(());
+    }
+
+    let mut history = HashMap::<(String, String), Vec<EncryptedColumn>>::new();
+    let mut record_columns =
+        |key: &[u8], entries: encryption::Entries, check: bool| -> Result<(), Error> {
+            if entries.is_empty() {
+                return Ok(());
+            }
+            let hash = SchemaHash(
+                key.try_into()
+                    .map_err(|_| invalid("invalid stored declaration key".into()))?,
+            );
+            let names = db.catalogue_stored_names(&hash)?;
+            for (table, entry) in entries {
+                for (name, declared) in entry.columns {
+                    let (stored_table, stored_column) = names
+                        .tables
+                        .get(&table)
+                        .and_then(|(table, columns)| Some((table, columns.get(&name)?)))
+                        .ok_or_else(|| {
+                            invalid(format!("{table}.{name}: no stored column in schema {hash}"))
+                        })?;
+                    let previous = history
+                        .entry((stored_table.clone(), stored_column.clone()))
+                        .or_default();
+                    if check {
+                        let path = format!("{table}.{name}");
+                        for old in previous.iter() {
+                            encryption::check_stored_column_type(&path, old, &declared)
+                                .map_err(invalid)?;
+                        }
+                    }
+                    previous.push(declared);
+                }
+            }
+            Ok(())
+        };
+    for (key, bytes) in db.host_prefix(DECLARATIONS, &[])? {
+        record_columns(
+            &key,
+            encryption::decode_stored(&bytes).map_err(invalid)?,
+            false,
+        )?;
+    }
+    // New versions in the same publication arrive in migration order.
+    for (key, entries) in new {
+        record_columns(key, entries, true)?;
+    }
+    Ok(())
+}
 
 /// The deploy route's request body.
 #[derive(Debug, Serialize, Deserialize)]
@@ -229,9 +303,7 @@ pub fn prepare_encrypted(
     // The declarations every version this deployment touches is judged by:
     // the target, both ends of every migration, and every version it
     // submits or declares. A version deployed before keeps the
-    // declarations it was deployed with: the body must repeat them, or
-    // change them only as a migration could without a conversion; it
-    // never decides them alone.
+    // declarations it was deployed with. The body must repeat them.
     let target = hash(&request.target_schema_hash)?;
     let mut touched = vec![target];
     for migration in &request.migrations {
@@ -244,7 +316,7 @@ pub fn prepare_encrypted(
     }
     touched.sort_by_key(|hash| hash.0);
     touched.dedup();
-    let mut first_declared = Vec::new();
+    let mut first_declared = HashMap::new();
     let empty = encryption::Entries::new();
     for version in touched {
         let hex = version.to_string();
@@ -290,10 +362,10 @@ pub fn prepare_encrypted(
         }
         if stored.is_none() && (has_system_tables || given.is_some()) {
             let initial = previous.or(given).unwrap_or(&empty);
-            first_declared.push((
+            first_declared.insert(
                 version,
                 encryption::encode_stored(initial).map_err(DeployError::internal)?,
-            ));
+            );
         }
         if let Some(given) = given
             && let Some(unconfirmed) = encryption::new_decrypts(previous, given)
@@ -346,6 +418,14 @@ pub fn prepare_encrypted(
         .stage_deployment(&prepared, now)
         .map_err(|error| DeployError::invalid(staging_error(error)))?;
     staged.response.warnings = warnings;
+    let first_declared = prepared
+        .schemas()
+        .iter()
+        .filter_map(|schema| {
+            let hash = SchemaHash::compute(schema);
+            first_declared.remove(&hash).map(|entries| (hash, entries))
+        })
+        .collect();
     Ok(Deployment {
         prepared,
         staged,

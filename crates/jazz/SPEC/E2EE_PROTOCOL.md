@@ -2351,7 +2351,8 @@ canonical JSON of the column's **sealed type**: the logical column type
 (including nullability, enum variants and JSON schema) it was introduced with.
 When an encrypted enum appends variants, the declaration pins the original
 type as `sealedType` and the cipher continues to use it as `cellType`.
-Each version retains all variants of its predecessor in order. Other type
+Each new version retains all variants previously declared for the same
+stored table and column, in order. Other type
 changes, including changing nullability in either direction or changing a
 JSON schema, require re-encryption into a new column ([migrations](E2EE_MIGRATIONS.md) §4.3).
 Plaintext is Jazz's native encoding of the single value.
