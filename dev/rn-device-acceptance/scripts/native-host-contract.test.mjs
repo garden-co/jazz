@@ -1157,42 +1157,31 @@ test("device acceptance is a registered, narrowly scoped pnpm workspace package"
 
   assert.match(workspace, /^  - dev\/rn-device-acceptance$/m);
   assert.match(lockfile, /^  dev\/rn-device-acceptance:/m);
-  // Registering the app gives CI its declared Expo dependencies. Explicit
-  // package-task overrides prevent the root generic build/test rules from
-  // inheriting their `^build` closure; device work remains reachable only
-  // through the app's explicit `verify`/`device:*` scripts in its workflow.
+  // Registration installs Expo dependencies. Ordinary workspace builds and
+  // tests must leave device work to the explicit verify and device scripts.
   assert.doesNotMatch(rootPackage, /rn-device-acceptance/);
-  const turboConfig = JSON.parse(turbo);
-  for (const task of ["rn-device-acceptance#test", "rn-device-acceptance#build"]) {
-    assert.deepEqual(turboConfig.tasks[task]?.dependsOn, [], `${task} must not inherit ^build`);
-  }
-
-  for (const task of ["test", "build"]) {
-    // `build` has unrelated repository-wide documentation configuration, so
-    // resolve that package's generic build task directly. Root `test` remains
-    // intentionally unfiltered: it is the everyday command this registration
-    // must keep cheap.
-    const args = ["exec", "turbo", "run", task, "--dry-run=json"];
-    if (task === "build") args.push("--filter=rn-device-acceptance");
-    const graph = JSON.parse(
-      execFileSync("pnpm", args, {
-        cwd: path.resolve(root, "../.."),
-        encoding: "utf8",
-      }),
-    );
-    const acceptanceTask = graph.tasks.find(
-      (candidate) => candidate.taskId === `rn-device-acceptance#${task}`,
-    );
-    assert.ok(
-      acceptanceTask,
-      `root Turbo graph must resolve the registered acceptance ${task} task`,
-    );
-    assert.deepEqual(
-      acceptanceTask.dependencies,
-      [],
-      `root Turbo ${task} must not schedule Jazz builds through rn-device-acceptance`,
-    );
-  }
+  assert.deepEqual(JSON.parse(turbo).tasks["rn-device-acceptance#build"].dependsOn, []);
+  const cwd = path.resolve(root, "../..");
+  const buildGraph = JSON.parse(
+    execFileSync(
+      "pnpm",
+      ["exec", "turbo", "run", "build", "--filter=rn-device-acceptance", "--dry-run=json"],
+      { cwd, encoding: "utf8" },
+    ),
+  );
+  assert.deepEqual(
+    buildGraph.tasks.find((task) => task.taskId === "rn-device-acceptance#build")?.dependencies,
+    [],
+  );
+  const args = JSON.parse(rootPackage).scripts.test.split(" ");
+  args.splice(args.indexOf("run") + 1, 0, "--dry-run", "--json");
+  const { plan } = JSON.parse(execFileSync("pnpm", ["exec", ...args], { cwd, encoding: "utf8" }));
+  assert.ok(Object.keys(plan).length > 0);
+  assert.ok(
+    Object.values(plan).every(
+      (task) => task.name === "test" && task.package !== "dev/rn-device-acceptance",
+    ),
+  );
 });
 
 test("Android bootstrap rejects corrupt pinned archives before extraction", () => {

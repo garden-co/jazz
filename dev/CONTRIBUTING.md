@@ -78,7 +78,7 @@ and cleans up temporary files and stubbed globals after each test.
 ### Running tests
 
 ```sh
-pnpm test          # everything (via turbo)
+pnpm test          # workspace tests (via Vite+)
 cargo test -p jazz-core --no-default-features --features testing,transport-compression-zstd   # rust core only
 ```
 
@@ -100,8 +100,8 @@ pnpm --filter jazz-tools typecheck:react-native
 ```
 
 The partition prepares and verifies sealed native artifacts before building
-and testing their consumers. Package tests run with three Turbo tasks; Jazz
-Tools retains its eight-worker Node cap and four-worker Chromium cap.
+and testing their consumers. Vite+ runs up to three package tests in parallel.
+Jazz Tools retains its eight-worker Node cap and four-worker Chromium cap.
 
 `build:test` always validates the DSL fixture, runs the test compiler and checks
 public interface types. Its test compiler reuses

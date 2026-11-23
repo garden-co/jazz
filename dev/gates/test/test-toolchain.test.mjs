@@ -72,36 +72,59 @@ for (const [path, task] of [
   });
 }
 
-test("Turbo test tasks preserve the runner's canonical temporary directory", () => {
+test("workspace tests inherit the runner environment and nested admission capability", () => {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), "jazz-test-tmpdir-"));
   try {
-    const task = { ...manifest("turbo.json").tasks.test, dependsOn: [] };
-    writeFileSync(join(directory, "turbo.json"), JSON.stringify({ tasks: { test: task } }));
+    const rootManifest = manifest("package.json");
+    const runner = rootManifest.scripts.test.split(" ");
+    assert.equal(runner.shift(), "vp");
     writeFileSync(
       join(directory, "package.json"),
       JSON.stringify({
-        name: "jazz-env-probe",
+        name: "root",
         private: true,
-        packageManager: manifest("package.json").packageManager,
-        scripts: { test: "node probe.mjs" },
+        packageManager: rootManifest.packageManager,
+        scripts: { test: rootManifest.scripts.test },
       }),
     );
+    writeFileSync(join(directory, "pnpm-workspace.yaml"), "packages: [probe]\n");
+    mkdirSync(join(directory, "probe"));
     writeFileSync(
-      join(directory, "pnpm-lock.yaml"),
-      "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
+      join(directory, "probe/package.json"),
+      JSON.stringify({
+        name: "probe",
+        scripts: { test: "node probe.cjs" },
+      }),
     );
-    writeFileSync(join(directory, "pnpm-workspace.yaml"), "packages: []\n");
+    const env = {
+      TMPDIR: directory,
+      RUSTC: "probe-rustc",
+      RUSTC_WRAPPER: "probe-wrapper",
+      SCCACHE_SERVER_UDS: "probe-socket",
+      CI: "1",
+      JAZZ_TEST_SEALED_TOOLS_DIST: "1",
+      JAZZ_CORRECTNESS_ARTIFACT_RUN: "1",
+      JAZZ_RN_TEST_BRIDGE: "1",
+      JAZZ_CORRECTNESS_WASM_PACKAGE: "probe-wasm",
+      JAZZ_CORRECTNESS_NAPI_BINDING: "probe-napi",
+      JAZZ_CORRECTNESS_NAPI_FINGERPRINT: "probe-fingerprint",
+      JAZZ_CORRECTNESS_CONSUMER_CAPABILITY: "probe-capability",
+      JAZZ_CORRECTNESS_CONSUMER_TOKEN: "probe-token",
+    };
     writeFileSync(
-      join(directory, "probe.mjs"),
-      `import assert from 'node:assert/strict'; assert.equal(process.env.TMPDIR, ${JSON.stringify(directory)});\n`,
+      join(directory, "probe/probe.cjs"),
+      `const assert = require("node:assert/strict");
+      for (const [name, value] of Object.entries(${JSON.stringify(env)})) assert.equal(process.env[name], value);
+      console.log("workspace probe passed");`,
     );
-    const child = spawnSync(join(root, "node_modules/.bin/turbo"), ["run", "test", "--no-daemon"], {
+    const child = spawnSync(join(root, "node_modules/.bin/vp"), runner, {
       cwd: directory,
-      env: { ...process.env, TMPDIR: directory, TURBO_TELEMETRY_DISABLED: "1" },
+      env: { ...process.env, ...env },
       encoding: "utf8",
       timeout: 30000,
     });
     assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
+    assert.match(child.stdout + child.stderr, /workspace probe passed/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
