@@ -379,6 +379,96 @@ async fn an_unknown_deployment_field_names_its_location_and_allowed_fields() {
     }
 }
 
+/// Alice renames an encrypted column but replaces its token with a fresh bytes column.
+/// The new token has the expected public name, but contains none of the stored tokens.
+#[tokio::test]
+async fn a_renamed_encrypted_column_cannot_replace_its_token() {
+    let (current, history) = APP_V2.split_once(r#""history":"#).unwrap();
+    let current = current.replace("title", "caption");
+    let history = history.replace(
+        r#""done": { "add""#,
+        r#""caption": { "renameFrom": "title" },
+           "__e2ee_eq_title": { "drop": "bytes", "backwardsDefault": "" },
+           "__e2ee_eq_caption": { "add": "bytes", "default": "" }, "done": { "add""#,
+    );
+    // Build the physical migration first so the server checks the declarations itself.
+    let file = format!(r#"{current}"history":{history}"#)
+        .replace(r#", "equality": ["title"]"#, "")
+        .replace(r#", "equality": ["caption"]"#, "");
+    let app = artifact::load(
+        file.as_bytes(),
+        permissions(MEMBERS_RULE, "ownerId = session.user").as_bytes(),
+    )
+    .unwrap();
+    let mut body = app.deployment_body(false);
+    let from = body["migrations"][0]["fromHash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    body["encryption"]["versions"][&from]["tasks"]["equality"] = json!(["title"]);
+    body["encryption"]["versions"][app.current_hash().to_string()]["tasks"]["equality"] =
+        json!(["caption"]);
+    let (status, response) = publish(&router().await, body).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    let error = response["error"].as_str().unwrap();
+    assert!(
+        error.contains("tasks.caption") && error.contains("__e2ee_eq_title to __e2ee_eq_caption"),
+        "{response}"
+    );
+}
+
+/// Alice renames the projects table. Both names refer to the same stored scope for tasks.
+#[tokio::test]
+async fn a_renamed_scope_table_keeps_its_stored_identity() {
+    let (router, state) = router_and_state().await;
+    let original = loaded("ownerId = session.user");
+    let (status, response) = publish(&router, original.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    // Another deployed version shares the stored scope without a direct migration to rooms.
+    let sibling = APP.replace(
+        r#""name": "string", "ownerId": "uuid""#,
+        r#""ownerId": "uuid", "name": "string""#,
+    );
+    let policy = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let sibling = artifact::load(sibling.as_bytes(), policy.as_bytes()).unwrap();
+    assert_ne!(sibling.current_hash(), original.current_hash());
+    let (status, response) = publish(&router, sibling.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    let (current, history) = APP_V2.split_once(r#""history":"#).unwrap();
+    let current = current.replace("projects", "rooms");
+    let history = history.replace(
+        r#""from": "v1", "migrate""#,
+        r#""from": "v1", "renameTables": { "rooms": "projects" }, "migrate""#,
+    );
+    let file = format!(r#"{current}"history":{history}"#);
+    let policy = policy.replace("projects", "rooms");
+    let renamed = artifact::load(file.as_bytes(), policy.as_bytes()).unwrap();
+    let (status, response) = publish(&router, renamed.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    // Read the admitted catalogue to check the identities the cell context uses.
+    let (from, to) = (original.current_hash(), renamed.current_hash());
+    let (before, after) = state
+        .runtime()
+        .unwrap()
+        .with_db_for_test(move |db| {
+            let names = |hash| {
+                db.catalogue_stored_names(&hash)
+                    .map_err(|err| err.to_string())
+            };
+            Ok((names(from)?, names(to)?))
+        })
+        .await
+        .unwrap();
+    assert_eq!(before.tables["projects"].0, after.tables["rooms"].0);
+    assert_eq!(
+        before.tables["tasks"].1["projectId"],
+        after.tables["tasks"].1["projectId"]
+    );
+}
+
 /// Alice renames the project reference. The same stored column still selects the space.
 #[tokio::test]
 async fn a_renamed_space_column_keeps_its_stored_identity() {

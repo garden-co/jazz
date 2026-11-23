@@ -18,7 +18,7 @@ import {
   snapshotToVersion,
   type ModuleLoader,
 } from "./migrations.js";
-import { loadAppFiles } from "./codegen-napi.js";
+import { loadAppFiles, validateBindings } from "./codegen-napi.js";
 import type { ReadableTable } from "../schema-dsl/readable-app.js";
 import { readableSchema } from "../schema-dsl/define-schema.js";
 
@@ -57,6 +57,26 @@ async function fixtureMigrations(withFromSnapshot: boolean): Promise<string> {
     );
   return dir;
 }
+
+it("validateBindings refuses a migration that changes an encrypted column's default", async () => {
+  const notes = (columns: Record<string, string>, titleDefault: string) => ({
+    columns: { title: "bytes", ...columns },
+    encryption: {
+      space: "id",
+      scope: "notes",
+      columns: { title: { type: "string", default: titleDefault } },
+    },
+  });
+  const file = {
+    $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
+    tables: { notes: notes({ done: "boolean" }, "untitled") },
+    history: { v1: { tables: { notes: notes({}, "draft") } } },
+    migrations: [{ from: "v1", migrate: { notes: { done: { add: "boolean", default: false } } } }],
+  };
+  await expect(validateBindings(JSON.stringify(file), null)).rejects.toThrow(
+    "notes.title: the encrypted column's default changes",
+  );
+});
 
 describe("snapshots", () => {
   it("round-trips a .64 snapshot through the readable form with the same hash", async () => {
