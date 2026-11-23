@@ -6,6 +6,10 @@ use jazz_app_support::jazz::tools::{ColumnDescriptor, ColumnType, SchemaHash, Ta
 /// in its declaration. Add a plain column whose name resembles a token
 /// for the unindexed encrypted column.
 pub fn app() -> WrittenApp {
+    with_private_note(ColumnType::Text)
+}
+
+pub fn with_private_note(plain_type: ColumnType) -> WrittenApp {
     let loaded = artifact::load(
         include_bytes!("jazz.app.json"),
         include_bytes!("jazz.permissions.json"),
@@ -28,7 +32,7 @@ pub fn app() -> WrittenApp {
     let encrypted = &mut entries.get_mut("tasks").unwrap().columns;
     encrypted.get_mut("title").unwrap().plain.default = Some(Value::Text("untitled".into()));
     let mut private_note = encrypted["title"].clone();
-    private_note.plain = PlainType::new(ColumnType::Text, true);
+    private_note.plain = PlainType::new(plain_type, true);
     encrypted.insert("privateNote".into(), private_note);
     encryption.versions.insert(current.clone(), entries);
     let mut codegen = loaded.codegen().clone();
