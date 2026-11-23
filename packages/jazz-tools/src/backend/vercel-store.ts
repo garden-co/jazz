@@ -1208,6 +1208,17 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     let restarted = false;
     /** The last transient start failure, for the error if the wake times out. */
     let lastTransient: string | undefined;
+    /** What this wake had to do, for its log line. */
+    const steps = new Set<string>();
+    /** Done: say how long it took, once per wake, if the core wasn't simply answering. */
+    const woke = (sbx: SandboxHandle, base: string) => {
+      if (steps.size > 0) {
+        console.info(
+          `jazz: vercel(): core ${name} woke in ${since(t0)} ms (${[...steps].join(", ")})`,
+        );
+      }
+      return { sbx, base };
+    };
     let sbx = await getRunning();
     for (;;) {
       while (!sbx) {
@@ -1216,6 +1227,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           // Before resuming, which starts its server: a core elsewhere is
           // never woken.
           if (existing) refuseRegionMove(`core ${name}`, existing.region, region);
+          steps.add(existing ? "resumed" : "created");
           sbx = existing
             ? await sdk.Sandbox.get({
                 name,
@@ -1250,7 +1262,10 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       await refuseForeignPin(sbx);
       let base = sbx.domain(VERCEL_CORE_PORT);
       let ok = await healthy(base, 300, healthFails);
-      if (!ok) await startServer(sbx);
+      if (!ok) {
+        steps.add("started its server");
+        await startServer(sbx);
+      }
       const healthT0 = performance.now();
       while (!ok && sbx && performance.now() < deadline) {
         ok = await healthy(base, 5_000, healthFails);
@@ -1267,6 +1282,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           performance.now() - healthT0 > NOT_LISTENING_RECYCLE_MS
         ) {
           recycled = true;
+          steps.add("recycled a session the router didn't reach");
           await stopSession(sbx);
           sbx = null;
           break;
@@ -1283,16 +1299,17 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
         // An instance of a newer deployment restarts an older server once;
         // an older instance uses whatever newer server it finds.
         const running = await runningVersion(sbx);
-        if (!running || !newerVersion(version, running)) return { sbx, base };
+        if (!running || !newerVersion(version, running)) return woke(sbx, base);
         if (restarted) {
           throw new Error(`vercel(): core ${name} still runs ${running}, not ${version}`);
         }
         restarted = true;
+        steps.add(`restarted ${running} on ${version}`);
         await startServer(sbx);
         while (performance.now() < deadline) {
           const now = await runningVersion(sbx);
           if (now && !newerVersion(version, now) && (await healthy(base, 1_000, healthFails))) {
-            return { sbx, base };
+            return woke(sbx, base);
           }
           // The older core stays up for the deployments still using it.
           const failure = await startError(sbx);
