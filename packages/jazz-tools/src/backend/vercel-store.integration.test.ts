@@ -1019,11 +1019,13 @@ describe("vercel() store", () => {
     const row = await jazz.db.insert(app.notes, { text: "kept" }).wait({ tier: "global" });
 
     // The Sandbox stops under the backend's live session, and resuming it
-    // takes longer than the handshake timeout, well within the wake's own
-    // deadline. The backend's reconnect waits for the wake, then connects.
+    // takes longer than the handshake timeout and its confirmation (11 s),
+    // well within the wake's own deadline. The backend's reconnect waits for
+    // the wake, then connects. (The read itself waits up to 15 s for an
+    // answer, a budget of its own: a longer wake fails it as `NotObserved`.)
     const get = fake.sdk.Sandbox.get;
     fake.sdk.Sandbox.get = async (params) => {
-      if (params.resume) await sleep(HANDSHAKE_TIMEOUT_MS + 5_000);
+      if (params.resume) await sleep(HANDSHAKE_TIMEOUT_MS + 2_000);
       return get(params);
     };
     fake.state.status = "stopped";
