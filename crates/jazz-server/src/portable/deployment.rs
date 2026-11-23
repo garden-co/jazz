@@ -93,8 +93,7 @@ impl DeclaredVersion {
         Ok(())
     }
 
-    // A widened enum can share storage with its ancestors. Sibling versions
-    // must be able to read each other's values. Look up ancestry only on widening.
+    // Migration descendants can only append. Siblings may use either prefix of the same enum.
     fn check_stored_types_and_spaces(
         &self,
         next: &Self,
@@ -124,12 +123,9 @@ impl DeclaredVersion {
                     continue;
                 };
                 let path = format!("{table}.{name}");
-                encryption::check_stored_column_type(&path, previous, declared).map_err(invalid)?;
-                if !previous.plain.same_type(&declared.plain) && !precedes()? {
-                    return Err(invalid(format!(
-                        "{path}: sibling versions must declare the same enum variants"
-                    )));
-                }
+                let siblings = !previous.plain.same_type(&declared.plain) && !precedes()?;
+                encryption::check_stored_column_type(&path, previous, declared, siblings)
+                    .map_err(invalid)?;
             }
         }
         Ok(())

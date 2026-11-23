@@ -728,9 +728,9 @@ fn with_sibling(target: &LoadedApp, other: &LoadedApp) -> Value {
     body
 }
 
-/// Alice can publish sibling versions together or separately only if both read the same variants.
+/// Alice's sibling enums follow one append-only sequence, whichever version she publishes first.
 #[tokio::test]
-async fn sibling_versions_agree_on_enum_variants_in_either_submission_order() {
+async fn sibling_versions_accept_comparable_enum_prefixes_in_either_submission_order() {
     let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
     let root_type = r#""title": {"enum":["a"]}"#;
     let load = |s: &str| artifact::load(s.as_bytes(), permissions.as_bytes()).unwrap();
@@ -748,11 +748,7 @@ async fn sibling_versions_agree_on_enum_variants_in_either_submission_order() {
 
     for (left_variants, right_variants, expected) in [
         (&["a", "b"][..], &["a", "b"][..], StatusCode::OK),
-        (
-            &["a"][..],
-            &["a", "b"][..],
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ),
+        (&["a"][..], &["a", "b"][..], StatusCode::OK),
         (
             &["a", "b"][..],
             &["a", "c"][..],
@@ -789,29 +785,34 @@ async fn sibling_versions_agree_on_enum_variants_in_either_submission_order() {
     }
 }
 
+fn enum_migration_chain(first_variants: &[&str], next_variants: &[&str]) -> (Value, Value) {
+    let mut second: Value = serde_json::from_str(APP_V2).unwrap();
+    let root = json!({"enum":["a"]});
+    let widened = |variants: &[&str]| json!({"type":{"enum":variants},"sealedType":root});
+    let first = &mut second["history"]["v1"]["tables"]["tasks"];
+    first["encryption"]["columns"]["title"] = root.clone();
+    second["tables"]["tasks"]["encryption"]["columns"]["title"] = widened(first_variants);
+    let mut third = second.clone();
+    let mut previous = second["history"]["v1"].clone();
+    previous["tables"]["tasks"]["columns"]["done"] = json!("boolean");
+    previous["tables"]["tasks"]["encryption"]["columns"]["title"] = widened(first_variants);
+    third["history"]["v2"] = previous;
+    third["tables"]["tasks"]["columns"]["archived"] = json!("boolean");
+    third["tables"]["tasks"]["encryption"]["columns"]["title"] = widened(next_variants);
+    third["migrations"][0]["to"] = json!("v2");
+    third["migrations"].as_array_mut().unwrap().push(
+        json!({"from":"v2","migrate":{"tasks":{"archived":{"add":"boolean","default":false}}}}),
+    );
+    (second, third)
+}
+
 /// An old declaration can still be reached through two migrations that each append enum variants.
 #[tokio::test]
 async fn an_encrypted_enum_can_widen_again_after_an_intermediate_version() {
     let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
     let load =
         |file: &Value| artifact::load(file.to_string().as_bytes(), permissions.as_bytes()).unwrap();
-    let mut second: Value = serde_json::from_str(APP_V2).unwrap();
-    let root = json!({"enum":["a"]});
-    let widened = |variants: &[&str]| json!({"type":{"enum":variants},"sealedType":root});
-    let first = &mut second["history"]["v1"]["tables"]["tasks"];
-    first["encryption"]["columns"]["title"] = root.clone();
-    second["tables"]["tasks"]["encryption"]["columns"]["title"] = widened(&["a", "b"]);
-    let mut third = second.clone();
-    let mut previous = second["history"]["v1"].clone();
-    previous["tables"]["tasks"]["columns"]["done"] = json!("boolean");
-    previous["tables"]["tasks"]["encryption"]["columns"]["title"] = widened(&["a", "b"]);
-    third["history"]["v2"] = previous;
-    third["tables"]["tasks"]["columns"]["archived"] = json!("boolean");
-    third["tables"]["tasks"]["encryption"]["columns"]["title"] = widened(&["a", "b", "c"]);
-    third["migrations"][0]["to"] = json!("v2");
-    third["migrations"].as_array_mut().unwrap().push(
-        json!({"from":"v2","migrate":{"tasks":{"archived":{"add":"boolean","default":false}}}}),
-    );
+    let (second, third) = enum_migration_chain(&["a", "b"], &["a", "b", "c"]);
     let latest = load(&third);
     for in_steps in [false, true] {
         let server = router().await;
@@ -824,9 +825,42 @@ async fn an_encrypted_enum_can_widen_again_after_an_intermediate_version() {
     }
 }
 
+/// Alice can append on one branch after deploying two siblings that both kept the root enum.
+#[tokio::test]
+async fn an_enum_can_grow_after_both_siblings_kept_the_root_variants() {
+    let (left, wider) = enum_migration_chain(&["a"], &["a", "b"]);
+    let right = left.to_string().replace("done", "reviewed");
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let server = router().await;
+    for file in [left.to_string(), right, wider.to_string()] {
+        let app = artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap();
+        let (status, response) = publish(&server, app.deployment_body(false)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+    }
+}
+
+/// Alice may later branch from the root with either prefix of an enum already widened on another branch.
+#[tokio::test]
+async fn a_later_root_branch_can_use_either_prefix_of_a_stored_enum() {
+    let (_, wider) = enum_migration_chain(&["a"], &["a", "b"]);
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    for variants in [&["a", "b"][..], &["a"]] {
+        let (branch, _) = enum_migration_chain(variants, variants);
+        let server = router().await;
+        for file in [
+            wider.to_string(),
+            branch.to_string().replace("done", "reviewed"),
+        ] {
+            let app = artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap();
+            let (status, response) = publish(&server, app.deployment_body(false)).await;
+            assert_eq!(status, StatusCode::OK, "{variants:?}: {response}");
+        }
+    }
+}
+
 /// The version that drops a column cannot erase the declarations of versions that still store it.
 #[tokio::test]
-async fn a_branch_cannot_narrow_an_enum_after_another_branch_dropped_it() {
+async fn a_branch_cannot_diverge_from_an_enum_after_another_branch_dropped_it() {
     let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
     let load = |file: &str| artifact::load(file.as_bytes(), permissions.as_bytes()).unwrap();
     let root_type = r#""title": {"enum":["a"]}"#;
@@ -866,12 +900,15 @@ async fn a_branch_cannot_narrow_an_enum_after_another_branch_dropped_it() {
     assert_eq!(status, StatusCode::OK, "{response}");
 
     // This sibling still uses the original stored title. Its own migration starts at ["a"].
-    let narrow = load(
-        &APP_V2
-            .replace("done", "archived")
-            .replace(r#""title": "string""#, root_type),
-    );
-    let (status, response) = publish(&router, narrow.deployment_body(false)).await;
+    let divergent = load(&format!(
+        r#"{}"history":{history}"#,
+        tables.replace("done", "archived").replace(
+            r#""title": "string""#,
+            &wide_type.replace(r#""b""#, r#""c""#)
+        ),
+        history = history.replace("done", "archived")
+    ));
+    let (status, response) = publish(&router, divergent.deployment_body(false)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
     let reason = response["error"].as_str().unwrap();
     assert!(

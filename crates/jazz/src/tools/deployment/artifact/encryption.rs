@@ -543,7 +543,7 @@ pub fn check_mapped_transition(
                 .and_then(|n| old.and_then(|o| o.columns.get(&n).map(|c| (n, c))));
             match previous {
                 Some((was_name, previous)) => {
-                    check_stored_column_type(&path, previous, declared)?;
+                    check_stored_column_type(&path, previous, declared, false)?;
                     let tagged_before = old.is_some_and(|o| o.equality.contains(&was_name));
                     if tagged_before
                         && new.equality.contains(name)
@@ -621,6 +621,7 @@ pub fn check_stored_column_type(
     path: &str,
     previous: &EncryptedColumn,
     declared: &EncryptedColumn,
+    siblings: bool,
 ) -> Result<(), String> {
     if !declared.cell_type().same_type(previous.cell_type()) {
         return Err(format!(
@@ -640,7 +641,9 @@ pub fn check_stored_column_type(
              stored before the column read it; {COPY_GUIDE}"
         ));
     }
-    if !widens(declared.cell_type(), &declared.plain) || !widens(&previous.plain, &declared.plain) {
+    let compatible = widens(&previous.plain, &declared.plain)
+        || (siblings && widens(&declared.plain, &previous.plain));
+    if !widens(declared.cell_type(), &declared.plain) || !compatible {
         return Err(format!(
             "{path}: only appending enum variants preserves existing encrypted values in place; \
              {COPY_GUIDE}"
