@@ -158,12 +158,3 @@ public data class SyncStatus(
         }
     }
 }
-
-private fun deviceKeys(): String {
-    val native = Class.forName("tools.jazz.UniffiNative")
-    return try {
-        native.getMethod("generateDeviceKey").invoke(null) as String
-    } catch (e: java.lang.reflect.InvocationTargetException) {
-        throw e.targetException
-    }
-}

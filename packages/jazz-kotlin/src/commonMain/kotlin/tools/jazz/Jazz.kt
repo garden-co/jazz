@@ -1,7 +1,9 @@
 package tools.jazz
 
+import kotlin.concurrent.Volatile
+import kotlin.concurrent.atomics.AtomicBoolean
+import kotlin.concurrent.atomics.AtomicReference
 import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -9,13 +11,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
@@ -29,25 +29,6 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
-
-/**
- * `className.open(config)`, by reflection: UniffiNative is compiled from the
- * sources uniffi-bindgen generates for jazz-ffi (see build.gradle.kts), so
- * the rest of the library builds without them. What `open` throws is
- * rethrown as it is, not wrapped.
- */
-internal fun openReflectively(className: String, config: String, tokens: ((String) -> String?)? = null): Native {
-    val native = Class.forName(className)
-    return try {
-        if (tokens == null) {
-            native.getMethod("open", String::class.java).invoke(null, config) as Native
-        } else {
-            native.getMethod("openWithTokens", String::class.java, Function1::class.java).invoke(null, config, tokens) as Native
-        }
-    } catch (e: java.lang.reflect.InvocationTargetException) {
-        throw e.targetException
-    }
-}
 
 /**
  * What [start] returns on [dispatcher], for a handle someone must give back:
@@ -89,32 +70,27 @@ public class Jazz internal constructor(
     /** The app's `JazzComputed`, for transforms and computed fields. */
     private val implementations: Any? = null,
     /** Where blocking native calls run ([JazzConfig.dispatcher]). */
-    private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val dispatcher: CoroutineDispatcher = ioDispatcher,
     /** The persistent store's directory, canonical, so a reopen waits for this app's teardown. */
     private val store: String? = null,
     /** Set by [close]; also stops the bearer provider being asked. */
-    private val closedFlag: java.util.concurrent.atomic.AtomicBoolean = java.util.concurrent.atomic.AtomicBoolean(false),
+    private val closedFlag: AtomicBoolean = AtomicBoolean(false),
 ) : AutoCloseable {
     public companion object {
         /** How [open] reaches jazz-ffi; replace it to open through something else. */
         @Volatile
-        public var opener: Native.Opener = object : Native.Opener {
-            override fun open(configJson: String): Native = openReflectively("tools.jazz.UniffiNative", configJson)
-
-            override fun openWithTokens(configJson: String, tokens: (String) -> String?): Native =
-                openReflectively("tools.jazz.UniffiNative", configJson, tokens)
-        }
+        public var opener: Native.Opener = platformOpener()
 
         /**
          * Teardowns still running, by store directory: [close] returns before
          * the native core has let go of the store, and an open of the same
          * directory waits for that instead of sharing the store with it.
          */
-        private val teardowns = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<Unit>>()
+        private val teardowns = AtomicReference<Map<String, kotlinx.coroutines.CompletableDeferred<Unit>>>(emptyMap())
 
         /** Waits for a closed app's teardown on [store], if one is running. */
         private suspend fun awaitTeardown(store: String) {
-            val teardown = teardowns[store] ?: return
+            val teardown = teardowns.load()[store] ?: return
             try {
                 teardown.await()
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -126,10 +102,10 @@ public class Jazz internal constructor(
 
         /** Opens the app [app] (the text of its `jazz.app.json`), as generated bindings' `open` does. */
         public suspend fun open(app: String, config: JazzConfig, implementations: Any? = null): Jazz {
-            val store = if (config.storage == Storage.Persistent) config.dataDir?.let { java.io.File(it).canonicalPath } else null
+            val store = if (config.storage == Storage.Persistent) config.dataDir?.let { canonicalPath(it) } else null
             // A previous app on this directory may still be tearing down.
             store?.let { awaitTeardown(it) }
-            val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+            val closed = AtomicBoolean(false)
             // Given back already off the caller's thread: close it there, not in the background.
             return startHandle(config.dispatcher, giveBack = { it.startClose(inline = true) }) {
                 if (config.serverUrl != null && config.auth == null) {
@@ -143,8 +119,8 @@ public class Jazz internal constructor(
                     // The native core asks on a thread of its own: blocking there is fine.
                     is JazzAuth.Bearer -> opener.openWithTokens(json) { reason ->
                         // Once closed, the provider isn't asked any more: a failed fetch, never a sign-out.
-                        if (closed.get()) throw JazzException.Closed()
-                        runBlocking { auth.token(TokenReason.of(reason)) }
+                        if (closed.load()) throw JazzException.Closed()
+                        blockOn { auth.token(TokenReason.of(reason)) }
                     }
                     else -> opener.open(json)
                 }
@@ -169,15 +145,16 @@ public class Jazz internal constructor(
     /** How the app syncs ([SyncStatus.Connected], `Offline`, …), as it changes. */
     public val syncStatus: StateFlow<SyncStatus> by lazy { stateFlow(sync = true, initial = SyncStatus.parse(native.syncStatus())) { SyncStatus.parse(it) }.asStateFlow() }
 
-    private val watches = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+    private val watches = AtomicReference<List<() -> Unit>>(emptyList())
 
     private fun <T> stateFlow(sync: Boolean, initial: T, parse: (String) -> T): MutableStateFlow<T> {
         checkOpen()
         val flow = MutableStateFlow(initial)
-        watches += native.watch(sync) { json ->
+        val stop = native.watch(sync) { json ->
             // A closing app ends each watch with {"kind":"closed"}: not a state.
             if (!isClosedNotice(json)) flow.value = parse(json)
         }
+        watches.updateAtomic { it + stop }
         return flow
     }
 
@@ -597,7 +574,7 @@ public class Jazz internal constructor(
                 onDelta = { json ->
                     val o = jazzJson.parseToJsonElement(json) as JsonObject
                     // Never dropped: a lost delta would leave `watch`'s result wrong for good.
-                    trySendBlocking(
+                    trySendBlockingCompat(
                         RawDelta(
                             added = (o["added"] as? JsonArray)?.objects() ?: emptyList(),
                             updated = (o["updated"] as? JsonArray)?.objects() ?: emptyList(),
@@ -633,7 +610,7 @@ public class Jazz internal constructor(
         jazzJson.decodeFromJsonElement(query.rowSerializer, prepareRow(query.source, query.includes, row, implementations))
 
     /** The background teardown [close] started, once started. */
-    private val closing = java.util.concurrent.atomic.AtomicReference<kotlinx.coroutines.CompletableDeferred<Unit>?>(null)
+    private val closing = AtomicReference<kotlinx.coroutines.CompletableDeferred<Unit>?>(null)
 
     /**
      * Closes the app, and returns at once, so it's safe on Android's main
@@ -664,9 +641,9 @@ public class Jazz internal constructor(
 
     private fun startClose(inline: Boolean = false): kotlinx.coroutines.CompletableDeferred<Unit> {
         val mine = kotlinx.coroutines.CompletableDeferred<Unit>()
-        if (!closing.compareAndSet(null, mine)) return closing.get()!!
-        closedFlag.set(true)
-        store?.let { teardowns[it] = mine }
+        if (!closing.compareAndSet(null, mine)) return closing.load()!!
+        closedFlag.store(true)
+        store?.let { teardowns.updateAtomic { map -> map + (it to mine) } }
         endWatches()
         val shutDown = {
             try {
@@ -675,23 +652,22 @@ public class Jazz internal constructor(
             } catch (e: Throwable) {
                 mine.completeExceptionally(e)
             } finally {
-                store?.let { teardowns.remove(it, mine) }
+                store?.let { teardowns.updateAtomic { map -> if (map[it] === mine) map - it else map } }
             }
         }
         // Not a daemon thread: a JVM program that ends right after close()
         // still lets the store shut down cleanly.
-        if (inline) shutDown() else Thread({ shutDown() }, "jazz-close").apply { isDaemon = false }.start()
+        if (inline) shutDown() else startThread("jazz-close") { shutDown() }
         return mine
     }
 
     private fun checkOpen() {
-        if (closedFlag.get()) throw JazzException.Closed()
+        if (closedFlag.load()) throw JazzException.Closed()
     }
 
     /** The app closed: stop watching, and an end user's session reads as signed out. */
     private fun endWatches() {
-        watches.forEach { runCatching { it() } }
-        watches.clear()
+        watches.exchange(emptyList()).forEach { runCatching { it() } }
         sessionFlow?.let { flow -> if (flow.value != null) flow.value = SessionState.SignedOut }
     }
 
