@@ -139,6 +139,8 @@ pub struct WriteCells<'a> {
     /// The cells the write names, by column name: plaintext in, sealed
     /// out.
     pub cells: &'a mut BTreeMap<String, Value>,
+    /// Sealed defaults and their tokens that apply only if this upsert creates the row.
+    pub insert_only: &'a mut BTreeMap<String, Value>,
     /// The column supplied by a stream, omitted while its metadata is sealed.
     pub streamed_column: Option<&'a str>,
     /// The root the upload uses. Publication checks it and claims a pending creation.

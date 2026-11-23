@@ -1641,6 +1641,7 @@ pub(crate) struct SealedFor {
     pub(super) existed: bool,
     pub(super) root: Option<String>,
     pub(super) cells: BTreeMap<String, Value>,
+    pub(super) insert_only: BTreeMap<String, Value>,
     pub(super) companions: Vec<(String, RowUuid, BTreeMap<String, Value>)>,
 }
 

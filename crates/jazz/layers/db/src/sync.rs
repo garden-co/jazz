@@ -7080,6 +7080,11 @@ impl Inner {
             for value in cells.values() {
                 large(value, &mut values);
             }
+            if let WireWrite::Upsert { created, .. } = &op.write {
+                for value in created.values() {
+                    large(value, &mut values);
+                }
+            }
             if values.is_empty() {
                 continue;
             }

@@ -5431,10 +5431,11 @@ impl Inner {
                 opts.target = view(opts.target);
                 StagedOp::Update(name, row, stored(cells), opts)
             }
-            StagedOp::Upsert(_, row, cells, mut extra, mut opts) => {
+            StagedOp::Upsert(_, row, cells, extra, mut opts) => {
                 opts.target = view(opts.target);
-                extra.extend(created(&cells));
-                StagedOp::Upsert(name, row, stored(cells), extra, opts)
+                let mut defaults = created(&cells);
+                defaults.extend(stored(extra));
+                StagedOp::Upsert(name, row, stored(cells), defaults, opts)
             }
             StagedOp::Delete(_, row, mut opts) => {
                 opts.target = view(opts.target);
@@ -8400,17 +8401,22 @@ impl Inner {
     /// and in history.
     pub(crate) fn chunk_large_cells(&mut self, op: &mut StagedOp) -> Result<LargeEdits, Error> {
         let mut edits = LargeEdits::default();
-        let (table_name, row, cells) = match op {
-            StagedOp::Insert(t, c, _) => (t.clone(), None, c),
+        let (table_name, row, cells, mut insert_only) = match op {
+            StagedOp::Insert(t, c, _) => (t.clone(), None, c, None),
             StagedOp::Update(t, r, c, o) => {
                 let root = matches!(o.target, crate::options::WriteTarget::Root);
-                (t.clone(), root.then_some((*r, o.identity)), c)
+                (t.clone(), root.then_some((*r, o.identity)), c, None)
             }
-            StagedOp::Upsert(t, r, c, _, o) => {
+            StagedOp::Upsert(t, r, c, created, o) => {
                 let root = matches!(o.target, crate::options::WriteTarget::Root);
-                (t.clone(), root.then_some((*r, o.identity)), c)
+                (
+                    t.clone(),
+                    root.then_some((*r, o.identity)),
+                    c,
+                    Some(created),
+                )
             }
-            StagedOp::Restore(t, _, Some(c), _) => (t.clone(), None, c),
+            StagedOp::Restore(t, _, Some(c), _) => (t.clone(), None, c, None),
             _ => return Ok(edits),
         };
         let schema = self.schema.clone();
@@ -8419,7 +8425,11 @@ impl Inner {
             if !crate::large::large_capable(column) {
                 continue;
             }
-            let Some(mut value) = cells.get_mut(&column.name) else {
+            let (mut value, base) = if let Some(value) = cells.get_mut(&column.name) {
+                (value, row.as_ref())
+            } else if let Some(value) = insert_only.as_mut().and_then(|c| c.get_mut(&column.name)) {
+                (value, None)
+            } else {
                 continue;
             };
             while let Value::Nullable(Some(inner)) = value {
@@ -8433,7 +8443,7 @@ impl Inner {
             if logical.len() <= crate::large::inline_max(column) {
                 continue;
             }
-            if let Some((row, identity)) = &row {
+            if let Some((row, identity)) = base {
                 let marks = (self.derived.len(), self.pending_nodes.len());
                 if let Some(edited) =
                     self.whole_write_as_edit(&table_name, *row, column, logical, *identity)

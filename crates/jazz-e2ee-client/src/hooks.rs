@@ -367,10 +367,9 @@ impl E2eeHooks for Hooks {
         };
         // A write that creates its row seals every encrypted column it
         // leaves out: null for an optional column, the declared default
-        // for a required one. The stored column is required bytes, and an
-        // empty cell would read as never written. An upsert creates its
-        // row when the write finds none: core gives no stored space then,
-        // for a row that is its own space as for any other.
+        // for a required one. An upsert may find the row only at the authority.
+        // Keep its generated values separate so they apply only on insertion.
+        let mut defaults = BTreeMap::new();
         let creates = match write.kind {
             WriteKind::Insert => true,
             WriteKind::Upsert => write.stored_space.is_none(),
@@ -393,13 +392,14 @@ impl E2eeHooks for Hooks {
                     None => None,
                 };
                 if let Some(value) = filled {
-                    write.cells.insert(name.clone(), value);
+                    defaults.insert(name.clone(), value);
                 }
             }
         }
         let encrypted: Vec<String> = write
             .cells
             .keys()
+            .chain(defaults.keys())
             .filter(|name| plan.columns.contains_key(*name))
             .cloned()
             .collect();
@@ -434,7 +434,7 @@ impl E2eeHooks for Hooks {
         let mut columns = Vec::with_capacity(encrypted.len());
         for name in &encrypted {
             let codec = &plan.columns[name];
-            let value = &write.cells[name];
+            let value = write.cells.get(name).unwrap_or_else(|| &defaults[name]);
             let wrong_type = || refused("an encrypted cell takes its column's plaintext type");
             plaintexts.push(Zeroizing::new(codec.encode(value).ok_or_else(wrong_type)?));
             equalities.push(match codec.equality {
@@ -473,11 +473,14 @@ impl E2eeHooks for Hooks {
         )
         .map_err(|error| SealError::Refused(failed(error)))?;
         for (name, cell) in encrypted.iter().zip(sealed.cells) {
-            write.cells.insert(name.clone(), Value::Bytes(cell.stored));
+            let cells = if write.kind == WriteKind::Upsert && defaults.contains_key(name) {
+                &mut *write.insert_only
+            } else {
+                &mut *write.cells
+            };
+            cells.insert(name.clone(), Value::Bytes(cell.stored));
             if let Some(token) = cell.equality_token {
-                write
-                    .cells
-                    .insert(format!("__e2ee_eq_{name}"), Value::Bytes(token));
+                cells.insert(format!("__e2ee_eq_{name}"), Value::Bytes(token));
             }
         }
         if write.streamed_column.is_some() {

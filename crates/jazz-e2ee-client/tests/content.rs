@@ -940,6 +940,206 @@ fn with_body_default() -> jazz::e2ee::E2eeDeclarations {
     declared
 }
 
+/// Alice and Bob share a key. Bob edits a plain field without having read Alice's note.
+/// His upsert preserves her encrypted body, optional note, and equality token.
+#[test]
+fn an_upsert_from_a_second_replica_preserves_omitted_encrypted_cells() {
+    upsert_from_a_second_replica(false, true);
+}
+
+/// Bob streams an attachment with a new caption. Alice sees both edits and her original body.
+#[test]
+fn a_streamed_upsert_from_a_second_replica_preserves_omitted_encrypted_cells() {
+    upsert_from_a_second_replica(true, true);
+}
+
+/// Without a default for the encrypted body, Bob's locally creating upsert requires it.
+/// An ordinary or streamed write missing it leaves Alice's note alone.
+#[test]
+fn an_upsert_from_a_second_replica_requires_an_encrypted_field_without_a_default() {
+    upsert_from_a_second_replica(false, false);
+    upsert_from_a_second_replica(true, false);
+}
+
+fn upsert_from_a_second_replica(streamed: bool, has_default: bool) {
+    let server = authority();
+    let device = |account_id| {
+        block_on(jazz_e2ee_client::E2eeClient::open(
+            jazz_e2ee_client::ClientConfig {
+                store: Rc::new(MemoryStore::new()),
+                declarations: if has_default {
+                    with_body_default()
+                } else {
+                    declarations()
+                },
+                account_id,
+                registry: jazz_e2ee::registry::Registry::builtin(),
+                random: Box::new(jazz_e2ee::OsRandom),
+                device_account: None,
+            },
+        ))
+        .unwrap()
+    };
+    let alice_client = device(ALICE.to_owned());
+    let (alice, _alice_link, _) = online(&alice_client, &server, None);
+    let bob_client = device(account_id(account(2)));
+    let bob = block_on(jazz::db::Db::open(
+        jazz::db::DbConfig::new(schema(), identity(2)).with_e2ee(bob_client.hooks()),
+    ))
+    .unwrap();
+    let (_bob_link, _) = link(&bob, &server);
+    pump(&server, &bob);
+    assert!(bob_client.prepare(&bob).unwrap());
+    let space = project(&alice, "drafts");
+    let address = address(&alice, space);
+    let root = new_root(&alice_client.device().unwrap(), &address);
+    for client in [&alice_client, &bob_client] {
+        client.record_fixture_rotation_check(&address);
+        block_on(client.keep(held(&root))).unwrap();
+    }
+    let mut original = note(space, "first draft");
+    original.insert("note".into(), text("keep this"));
+    let row = block_on(alice.insert("notes", original, Default::default()))
+        .unwrap()
+        .row_uuid();
+    let notes = Query::from("notes");
+    let prepared = alice.prepare_query(&notes).unwrap();
+    let _live = block_on(alice.subscribe(&prepared, Default::default())).unwrap();
+    pump(&server, &alice);
+    let token = cell(&all(&server, notes.clone()).unwrap()[0], "__e2ee_eq_body");
+    assert!(all(&bob, notes.clone()).unwrap().is_empty());
+    let mut edit = BTreeMap::from([
+        ("projectId".to_owned(), Value::Uuid(space)),
+        ("title".to_owned(), text("edited")),
+    ]);
+    let write = if streamed {
+        edit.insert("note".into(), text("revised caption"));
+        block_on(bob.write_streaming_value_with_id(
+            jazz::db::StreamingMutationKind::Upsert,
+            "notes",
+            row,
+            edit,
+            "attachment",
+            &b"new attachment"[..],
+            None,
+            None,
+            None,
+            None,
+        ))
+    } else {
+        block_on(bob.upsert("notes", row, edit, Default::default()))
+    };
+    let expected_title = if has_default {
+        write.unwrap();
+        "edited"
+    } else {
+        let error = write.unwrap_err();
+        assert_eq!(
+            error.reason,
+            Some(jazz::db::Reason::MissingRequired),
+            "{error}"
+        );
+        assert!(error.message.contains("body"), "{error}");
+        "title"
+    };
+    pump(&server, &bob);
+    pump(&server, &alice);
+    let prepared = bob.prepare_query(&notes).unwrap();
+    let _bob_live = block_on(bob.subscribe(&prepared, Default::default())).unwrap();
+    pump(&server, &bob);
+    for db in [&alice, &bob] {
+        let rows = all(db, notes.clone()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(cell(&rows[0], "title"), text(expected_title));
+        assert_eq!(cell(&rows[0], "body"), text("first draft"));
+        let caption = if streamed && has_default {
+            "revised caption"
+        } else {
+            "keep this"
+        };
+        assert_eq!(
+            cell(&rows[0], "note"),
+            Value::Nullable(Some(Box::new(text(caption))))
+        );
+        if streamed && has_default {
+            assert_eq!(
+                cell(&rows[0], "attachment"),
+                Value::Nullable(Some(Box::new(Value::Bytes(b"new attachment".to_vec()))))
+            );
+        }
+    }
+    assert_eq!(
+        cell(&all(&server, notes).unwrap()[0], "__e2ee_eq_body"),
+        token
+    );
+}
+
+/// Alice upserts a new ID. Her sealed default and token take precedence over the
+/// stored empty bytes, and the authority receives the chunks of her large default.
+#[test]
+fn a_creating_upsert_syncs_its_large_encrypted_default_and_token() {
+    let mut schema = app_schema();
+    let notes = schema
+        .get_mut(&jazz::tools::public_schema::TableName::from("notes"))
+        .unwrap();
+    for column in &mut notes.columns.columns {
+        if matches!(column.name_str(), "body" | "__e2ee_eq_body") {
+            column.nullable = false;
+            column.default = Some(jazz::tools::Value::Bytea(Vec::new()));
+        }
+    }
+    let schema = jazz::schema::JazzSchema::new(&schema).unwrap();
+    let server = block_on(jazz::db::Db::open(jazz::db::DbConfig::new(
+        schema.clone(),
+        identity(0),
+    )))
+    .unwrap();
+    server.set_authority().unwrap();
+    let default = "a long draft ".repeat(10_000);
+    let mut declared = with_body_default();
+    declared
+        .tables
+        .get_mut("notes")
+        .unwrap()
+        .columns
+        .get_mut("body")
+        .unwrap()
+        .plain
+        .default = Some(jazz::tools::Value::Text(default.clone()));
+    let client = open_client_with(Rc::new(MemoryStore::new()), declared);
+    let db = block_on(jazz::db::Db::open(
+        jazz::db::DbConfig::new(schema, identity(1)).with_e2ee(client.hooks()),
+    ))
+    .unwrap();
+    let (_link, _) = link(&db, &server);
+    pump(&server, &db);
+    assert!(client.prepare(&db).unwrap());
+    let space = project(&db, "drafts");
+    hold_new_space(&client, &db, space);
+    let row = jazz::ids::RowUuid(uuid::Uuid::now_v7());
+    let write = block_on(db.upsert(
+        "notes",
+        row,
+        BTreeMap::from([
+            ("projectId".into(), Value::Uuid(space)),
+            ("title".into(), text("new")),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    drive(
+        &server,
+        &[&db],
+        db.wait_for_transaction(write.mergeable_tx_id(), jazz::tx::DurabilityTier::Global),
+    )
+    .unwrap();
+    let rows = all(&server, Query::from("notes")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(cell(&rows[0], "body"), Value::Bytes(bytes) if bytes.len() > default.len()));
+    assert!(matches!(cell(&rows[0], "__e2ee_eq_body"), Value::Bytes(token) if !token.is_empty()));
+    assert!(cell(&all(&db, Query::from("notes")).unwrap()[0], "body") == text(&default));
+}
+
 /// Contract: rows stored before a migration added a required encrypted
 /// column read its declared default, with no report, and are never left
 /// out.

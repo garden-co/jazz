@@ -223,6 +223,7 @@ impl Inner {
             None => None,
         };
         let mut companions = Vec::new();
+        let mut insert_only = BTreeMap::new();
         if let Some(seal) = streamed {
             let space = self
                 .stream_space(&table, row, cells, stored_space.as_ref())
@@ -236,6 +237,7 @@ impl Inner {
                 ));
             }
             companions.clone_from(&seal.companions);
+            insert_only.clone_from(&seal.insert_only);
             hooks
                 .claim_stream_companions(
                     &table,
@@ -251,12 +253,16 @@ impl Inner {
                     row,
                     kind,
                     cells,
+                    insert_only: &mut insert_only,
                     streamed_column: None,
                     stream_root: None,
                     stored_space: stored_space.as_ref(),
                     companion_rows: &mut companions,
                 })
                 .map_err(seal_error)?;
+        }
+        if let StagedOp::Upsert(_, _, _, created, _) = op {
+            created.extend(insert_only);
         }
         Ok(companions
             .into_iter()
@@ -478,11 +484,13 @@ impl Inner {
             );
         }
         let mut companions = Vec::new();
+        let mut insert_only = BTreeMap::new();
         let mut metadata = WriteCells {
             table,
             row,
             kind: mutation.into(),
             cells,
+            insert_only: &mut insert_only,
             streamed_column: Some(column),
             stream_root: None,
             stored_space: stored.as_ref(),
@@ -497,6 +505,7 @@ impl Inner {
             space,
             existed: stored.is_some(),
             cells: std::mem::take(cells),
+            insert_only,
             companions,
             root,
         });
