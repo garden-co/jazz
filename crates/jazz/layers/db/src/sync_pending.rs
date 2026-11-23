@@ -95,11 +95,14 @@ const PENDING_READ_VIEWS_DDL: &str = concat!(
 );
 
 /// Whether this store holds pending reads' views at all.
-fn has_read_views(conn: &Storage) -> Result<bool, Error> {
-    conn.prepare_cached(
+async fn has_read_views(conn: &Storage) -> Result<bool, Error> {
+    (async {
+        let mut statement = conn.prepare_cached(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_pending_read_views'",
-    )
-    .and_then(|mut statement| statement.exists([]))
+    )?;
+        statement.exists([]).await
+    })
+    .await
     .map_err(storage)
 }
 
@@ -272,7 +275,7 @@ fn sql_cell(ty: &str, nulls: i64, sql: SqlValue) -> Result<Value, Error> {
 }
 
 /// Store pending commit `tx`: `commit` and the local rows it wrote.
-pub(crate) fn write(
+pub(crate) async fn write(
     conn: &Storage,
     tx: u64,
     commit: &SyncMessage,
@@ -310,93 +313,117 @@ pub(crate) fn write(
             Some(exact_json("claims", claims)?),
         ),
     };
-    conn.prepare_cached(
+    (async {
+        let mut statement = conn.prepare_cached(
         "INSERT INTO _jazz_pending (tx, node, seq, clock, snapshot, own, acting, author, claims) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-    )
-    .and_then(|mut statement| {
-        statement.execute(rusqlite::params![
-            tx,
-            id.node.as_bytes().as_slice(),
-            id.time.0 as i64,
-            *clock as i64,
-            snapshot,
-            own,
-            acting,
-            author,
-            claims,
-        ])
+    )?;
+        {
+            statement
+                .execute(rusqlite::params![
+                    tx,
+                    id.node.as_bytes().as_slice(),
+                    id.time.0 as i64,
+                    *clock as i64,
+                    snapshot,
+                    own,
+                    acting,
+                    author,
+                    claims,
+                ])
+                .await
+        }
     })
+    .await
     .map_err(storage)?;
     for (n, op) in ops.iter().enumerate() {
-        write_op(conn, tx, n as i64, op)?;
+        write_op(conn, tx, n as i64, op).await?;
     }
     for (n, read) in reads.iter().enumerate() {
         let n = n as i64;
         let query = exact_json("a read's query", &read.query)?;
         let binding = exact_json("a read's binding", &read.binding)?;
-        conn.prepare_cached(
-            "INSERT INTO _jazz_pending_reads (tx, n, version, query, binding, include_deleted) \
+        (async {
+            let mut statement = conn.prepare_cached(
+                "INSERT INTO _jazz_pending_reads (tx, n, version, query, binding, include_deleted) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .and_then(|mut statement| {
-            statement.execute(rusqlite::params![
-                tx,
-                n,
-                read.version.as_slice(),
-                query,
-                binding,
-                read.include_deleted,
-            ])
+            )?;
+            {
+                statement
+                    .execute(rusqlite::params![
+                        tx,
+                        n,
+                        read.version.as_slice(),
+                        query,
+                        binding,
+                        read.include_deleted,
+                    ])
+                    .await
+            }
         })
+        .await
         .map_err(storage)?;
         if read.view != ReadViewSourceSpec::Current {
             conn.execute_batch(PENDING_READ_VIEWS_DDL)
+                .await
                 .map_err(storage)?;
             let view = exact_json("a read's view", &read.view)?;
-            conn.prepare_cached(
-                "INSERT INTO _jazz_pending_read_views (tx, n, view) VALUES (?1, ?2, ?3)",
-            )
-            .and_then(|mut statement| statement.execute(rusqlite::params![tx, n, view]))
+            (async {
+                let mut statement = conn.prepare_cached(
+                    "INSERT INTO _jazz_pending_read_views (tx, n, view) VALUES (?1, ?2, ?3)",
+                )?;
+                statement.execute(rusqlite::params![tx, n, view]).await
+            })
+            .await
             .map_err(storage)?;
         }
         for (i, (id, node, t)) in read.rows.iter().enumerate() {
-            conn.prepare_cached(
-                "INSERT INTO _jazz_pending_read_rows (tx, n, i, id, node, t) \
+            (async {
+                let mut statement = conn.prepare_cached(
+                    "INSERT INTO _jazz_pending_read_rows (tx, n, i, id, node, t) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )
-            .and_then(|mut statement| {
-                statement.execute(rusqlite::params![
-                    tx,
-                    n,
-                    i as i64,
-                    id.as_slice(),
-                    node.as_ref().map(|node| node.as_slice()),
-                    *t as i64,
-                ])
+                )?;
+                {
+                    statement
+                        .execute(rusqlite::params![
+                            tx,
+                            n,
+                            i as i64,
+                            id.as_slice(),
+                            node.as_ref().map(|node| node.as_slice()),
+                            *t as i64,
+                        ])
+                        .await
+                }
             })
+            .await
             .map_err(storage)?;
         }
     }
     for (n, (table, row, key)) in rows.iter().enumerate() {
-        conn.prepare_cached(
-            "INSERT INTO _jazz_pending_rows (tx, n, tbl, id, key) VALUES (?1, ?2, ?3, ?4, ?5)",
-        )
-        .and_then(|mut statement| {
-            statement.execute(rusqlite::params![
-                tx,
-                n as i64,
-                table,
-                row.0.as_bytes().as_slice(),
-                key
-            ])
+        (async {
+            let mut statement = conn.prepare_cached(
+                "INSERT INTO _jazz_pending_rows (tx, n, tbl, id, key) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?;
+            {
+                statement
+                    .execute(rusqlite::params![
+                        tx,
+                        n as i64,
+                        table,
+                        row.0.as_bytes().as_slice(),
+                        key
+                    ])
+                    .await
+            }
         })
+        .await
         .map_err(storage)?;
     }
     Ok(())
 }
 
-fn write_op(conn: &Storage, tx: i64, n: i64, op: &WireOp) -> Result<(), Error> {
+async fn write_op(conn: &Storage, tx: i64, n: i64, op: &WireOp) -> Result<(), Error> {
     let none = || None::<&BTreeMap<String, Value>>;
     let (target, moved, at, cells, created) = match &op.write {
         WireWrite::Insert {
@@ -428,12 +455,11 @@ fn write_op(conn: &Storage, tx: i64, n: i64, op: &WireOp) -> Result<(), Error> {
         Some(proof) => (Some(proof.key.as_slice()), Some(proof.seq as i64)),
         None => (None, None),
     };
-    conn.prepare_cached(
+    (async { let mut statement = conn.prepare_cached(
         "INSERT INTO _jazz_pending_ops \
          (tx, n, op, tbl, id, target, move_from, move_to, at, has_cells, bases, proof_key, proof_seq) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-    )
-    .and_then(|mut statement| {
+    )?; {
         statement.execute(rusqlite::params![
             tx,
             n,
@@ -448,59 +474,71 @@ fn write_op(conn: &Storage, tx: i64, n: i64, op: &WireOp) -> Result<(), Error> {
             bases,
             proof_key,
             proof_seq,
-        ])
-    })
+        ]).await
+    } }).await
     .map_err(storage)?;
     for (list, cells) in [(CELLS, cells), (CREATED, created)] {
         for (column, value) in cells.into_iter().flatten() {
             let (ty, nulls, value) = cell_sql(value)?;
-            conn.prepare_cached(
-                "INSERT INTO _jazz_pending_cells (tx, n, list, col, ty, nulls, value) \
+            (async {
+                let mut statement = conn.prepare_cached(
+                    "INSERT INTO _jazz_pending_cells (tx, n, list, col, ty, nulls, value) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            )
-            .and_then(|mut statement| {
-                statement.execute(rusqlite::params![tx, n, list, column, ty, nulls, value])
+                )?;
+                {
+                    statement
+                        .execute(rusqlite::params![tx, n, list, column, ty, nulls, value])
+                        .await
+                }
             })
+            .await
             .map_err(storage)?;
         }
     }
     for (i, delta) in op.deltas.iter().enumerate() {
-        conn.prepare_cached(
-            "INSERT INTO _jazz_pending_deltas (tx, n, i, col, depth, key, seq, base, edits) \
+        (async {
+            let mut statement = conn.prepare_cached(
+                "INSERT INTO _jazz_pending_deltas (tx, n, i, col, depth, key, seq, base, edits) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        )
-        .and_then(|mut statement| {
-            statement.execute(rusqlite::params![
-                tx,
-                n,
-                i as i64,
-                delta.column,
-                delta.depth,
-                delta.key,
-                delta.delta.seq as i64,
-                delta.delta.base,
-                delta.delta.edits,
-            ])
+            )?;
+            {
+                statement
+                    .execute(rusqlite::params![
+                        tx,
+                        n,
+                        i as i64,
+                        delta.column,
+                        delta.depth,
+                        delta.key,
+                        delta.delta.seq as i64,
+                        delta.delta.base,
+                        delta.delta.edits,
+                    ])
+                    .await
+            }
         })
+        .await
         .map_err(storage)?;
     }
     Ok(())
 }
 
 /// The txs of the pending commits, oldest first.
-pub(crate) fn txs(conn: &Storage) -> Result<Vec<u64>, Error> {
+pub(crate) async fn txs(conn: &Storage) -> Result<Vec<u64>, Error> {
     let mut statement = conn
         .prepare_cached("SELECT tx FROM _jazz_pending ORDER BY tx")
         .map_err(storage)?;
     statement
-        .query_map([], |r| r.get::<_, i64>(0))
+        .query_map([], |r| Ok(r.get::<_, i64>(0)? as u64))
+        .await
         .map_err(storage)?
-        .map(|tx| tx.map(|tx| tx as u64).map_err(storage))
         .collect()
+        .await
+        .map_err(storage)
 }
 
 /// Pending commit `tx` as [`write`] stored it.
-pub(crate) fn read(conn: &Storage, tx: u64) -> Result<SyncMessage, Error> {
+pub(crate) async fn read(conn: &Storage, tx: u64) -> Result<SyncMessage, Error> {
     type Header = (
         Vec<u8>,
         i64,
@@ -529,6 +567,7 @@ pub(crate) fn read(conn: &Storage, tx: u64) -> Result<SyncMessage, Error> {
                 ))
             },
         )
+        .await
         .map_err(|error| match error {
             rusqlite::Error::InvalidColumnType(..) => bad(format_args!("has a malformed header")),
             error => storage(error),
@@ -545,14 +584,14 @@ pub(crate) fn read(conn: &Storage, tx: u64) -> Result<SyncMessage, Error> {
     let tx = tx as i64;
     let kind = match (snapshot, own) {
         (None, None) => {
-            if count(conn, "_jazz_pending_reads", tx)? > 0 {
+            if count(conn, "_jazz_pending_reads", tx).await? > 0 {
                 return Err(bad("is mergeable but has reads"));
             }
             WireKind::Mergeable
         }
         (Some(snapshot), Some(own)) => WireKind::Serializable {
             snapshot: snapshot as u64,
-            reads: reads(conn, tx)?,
+            reads: reads(conn, tx).await?,
             own: from_json("own list", &own)?,
         },
         _ => return Err(bad("has half a serializable snapshot")),
@@ -561,21 +600,22 @@ pub(crate) fn read(conn: &Storage, tx: u64) -> Result<SyncMessage, Error> {
         id: tx_id(blob("node", node)?, seq as u64),
         clock: clock as u64,
         kind,
-        ops: ops(conn, "_jazz_pending", tx as u64)?,
+        ops: ops(conn, "_jazz_pending", tx as u64).await?,
         acting,
     })
 }
 
-fn count(conn: &Storage, table: &str, tx: i64) -> Result<i64, Error> {
+async fn count(conn: &Storage, table: &str, tx: i64) -> Result<i64, Error> {
     conn.cached_row(
         &format!("SELECT count(*) FROM {table} WHERE tx = ?1"),
         [tx],
         |r| r.get(0),
     )
+    .await
     .map_err(storage)
 }
 
-fn reads(conn: &Storage, tx: i64) -> Result<Vec<WireRead>, Error> {
+async fn reads(conn: &Storage, tx: i64) -> Result<Vec<WireRead>, Error> {
     let mut statement = conn
         .prepare_cached(
             "SELECT n, version, query, binding, include_deleted \
@@ -592,69 +632,88 @@ fn reads(conn: &Storage, tx: i64) -> Result<Vec<WireRead>, Error> {
                 r.get::<_, bool>(4)?,
             ))
         })
+        .await
         .map_err(storage)?
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<Vec<_>>()
+        .await
         .map_err(|_| bad("has a malformed read"))?;
     drop(statement);
-    let viewed = has_read_views(conn)?;
-    stored
-        .into_iter()
-        .map(|(n, version, query, binding, include_deleted)| {
-            let mut statement = conn
-                .prepare_cached(
-                    "SELECT id, node, t FROM _jazz_pending_read_rows \
+    let viewed = has_read_views(conn).await?;
+    (async {
+        let mut out = Vec::new();
+        for (n, version, query, binding, include_deleted) in stored.into_iter() {
+            out.push(
+                (async {
+                    {
+                        let mut statement = conn
+                            .prepare_cached(
+                                "SELECT id, node, t FROM _jazz_pending_read_rows \
                      WHERE tx = ?1 AND n = ?2 ORDER BY i",
-                )
-                .map_err(storage)?;
-            let rows = statement
-                .query_map([tx, n], |r| {
-                    Ok((
-                        r.get::<_, Vec<u8>>(0)?,
-                        r.get::<_, Option<Vec<u8>>>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                })
-                .map_err(storage)?
-                .map(|row| {
-                    let (id, node, t) = row.map_err(|_| bad("has a malformed read row"))?;
-                    Ok((
-                        blob("read row id", id)?,
-                        node.map(|node| blob("read row node", node)).transpose()?,
-                        t as u64,
-                    ))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            let view = if viewed {
-                conn.prepare_cached(
+                            )
+                            .map_err(storage)?;
+                        let rows = statement
+                            .query_map([tx, n], |r| {
+                                Ok((
+                                    r.get::<_, Vec<u8>>(0)?,
+                                    r.get::<_, Option<Vec<u8>>>(1)?,
+                                    r.get::<_, i64>(2)?,
+                                ))
+                            })
+                            .await
+                            .map_err(storage)?
+                            .collect::<Vec<_>>()
+                            .await
+                            .map_err(|_| bad("has a malformed read row"))?
+                            .into_iter()
+                            .map(|(id, node, t)| {
+                                Ok((
+                                    blob("read row id", id)?,
+                                    node.map(|node| blob("read row node", node)).transpose()?,
+                                    t as u64,
+                                ))
+                            })
+                            .collect::<Result<Vec<_>, Error>>()?;
+                        let view = if viewed {
+                            (async {
+                                let mut statement = conn.prepare_cached(
                     "SELECT view FROM _jazz_pending_read_views WHERE tx = ?1 AND n = ?2",
-                )
-                .and_then(|mut statement| {
-                    statement
-                        .query_row([tx, n], |r| r.get::<_, String>(0))
-                        .optional()
+                )?;
+                                {
+                                    statement
+                                        .query_row([tx, n], |r| r.get::<_, String>(0))
+                                        .await
+                                        .optional()
+                                }
+                            })
+                            .await
+                            .map_err(storage)?
+                            .map(|view| from_json("read view", &view))
+                            .transpose()?
+                            .unwrap_or_default()
+                        } else {
+                            ReadViewSourceSpec::Current
+                        };
+                        Ok::<_, Error>(WireRead {
+                            version: blob("schema version", version)?,
+                            query: from_json("read query", &query)?,
+                            binding: from_json("read binding", &binding)?,
+                            include_deleted,
+                            rows,
+                            view,
+                        })
+                    }
                 })
-                .map_err(storage)?
-                .map(|view| from_json("read view", &view))
-                .transpose()?
-                .unwrap_or_default()
-            } else {
-                ReadViewSourceSpec::Current
-            };
-            Ok(WireRead {
-                version: blob("schema version", version)?,
-                query: from_json("read query", &query)?,
-                binding: from_json("read binding", &binding)?,
-                include_deleted,
-                rows,
-                view,
-            })
-        })
-        .collect()
+                .await?,
+            );
+        }
+        Ok(out)
+    })
+    .await
 }
 
 /// The ops of commit `tx` in `{prefix}_ops` and its cell and delta tables:
 /// `_jazz_pending`'s or the retry store's `_jazz_rejected`.
-pub(crate) fn ops(conn: &Storage, prefix: &str, tx: u64) -> Result<Vec<WireOp>, Error> {
+pub(crate) async fn ops(conn: &Storage, prefix: &str, tx: u64) -> Result<Vec<WireOp>, Error> {
     let tx = tx as i64;
     type Stored = (
         i64,
@@ -693,112 +752,127 @@ pub(crate) fn ops(conn: &Storage, prefix: &str, tx: u64) -> Result<Vec<WireOp>, 
                 r.get(11)?,
             ))
         })
+        .await
         .map_err(storage)?
-        .collect::<Result<_, _>>()
+        .collect::<_>()
+        .await
         .map_err(|_| bad("has a malformed op"))?;
     drop(statement);
-    stored
-        .into_iter()
-        .enumerate()
-        .map(|(position, stored)| {
-            let (n, op, table, row, target, from, to, at, has_cells, bases, key, seq) = stored;
-            if n != position as i64 {
-                return Err(bad(format_args!("is missing op {position}")));
-            }
-            let row = blob("row id", row)?;
-            let at = at.map(|at| at as u64);
-            let (mut cells, mut created) = cells(conn, prefix, tx, n)?;
-            if !has_cells && !cells.is_empty() {
-                return Err(bad(format_args!("has cells on op {n}, which takes none")));
-            }
-            let target = || match &target {
-                Some(target) => from_json::<WireTarget>("branch target", target),
-                None => Err(bad(format_args!("has no branch target on op {n}"))),
-            };
-            let cells_of = |cells: &mut BTreeMap<String, Value>| std::mem::take(cells);
-            let write = match op.as_str() {
-                "insert" => WireWrite::Insert {
-                    table,
-                    row,
-                    cells: cells_of(&mut cells),
-                    target: target()?,
-                    at,
-                },
-                "update" => WireWrite::Update {
-                    table,
-                    row,
-                    cells: cells_of(&mut cells),
-                    target: target()?,
-                    at,
-                },
-                "upsert" => WireWrite::Upsert {
-                    table,
-                    row,
-                    cells: cells_of(&mut cells),
-                    created: cells_of(&mut created),
-                    target: target()?,
-                    at,
-                },
-                "delete" => WireWrite::Delete {
-                    table,
-                    row,
-                    target: target()?,
-                    at,
-                },
-                "restore" => WireWrite::Restore {
-                    table,
-                    row,
-                    cells: has_cells.then(|| cells_of(&mut cells)),
-                    target: target()?,
-                    at,
-                },
-                "move" => match (&from, &to) {
-                    (Some(from), Some(to)) => WireWrite::Move {
-                        table,
-                        row,
-                        from: from_json("move source", from)?,
-                        to: from_json("move destination", to)?,
-                    },
-                    _ => {
-                        return Err(bad(format_args!(
-                            "has a move without its branches on op {n}"
-                        )));
+    (async {
+        let mut out = Vec::new();
+        for (position, stored) in stored.into_iter().enumerate() {
+            out.push(
+                (async {
+                    {
+                        let (n, op, table, row, target, from, to, at, has_cells, bases, key, seq) =
+                            stored;
+                        if n != position as i64 {
+                            return Err(bad(format_args!("is missing op {position}")));
+                        }
+                        let row = blob("row id", row)?;
+                        let at = at.map(|at| at as u64);
+                        let (mut cells, mut created) = cells(conn, prefix, tx, n).await?;
+                        if !has_cells && !cells.is_empty() {
+                            return Err(bad(format_args!("has cells on op {n}, which takes none")));
+                        }
+                        let target = || match &target {
+                            Some(target) => from_json::<WireTarget>("branch target", target),
+                            None => Err(bad(format_args!("has no branch target on op {n}"))),
+                        };
+                        let cells_of = |cells: &mut BTreeMap<String, Value>| std::mem::take(cells);
+                        let write = match op.as_str() {
+                            "insert" => WireWrite::Insert {
+                                table,
+                                row,
+                                cells: cells_of(&mut cells),
+                                target: target()?,
+                                at,
+                            },
+                            "update" => WireWrite::Update {
+                                table,
+                                row,
+                                cells: cells_of(&mut cells),
+                                target: target()?,
+                                at,
+                            },
+                            "upsert" => WireWrite::Upsert {
+                                table,
+                                row,
+                                cells: cells_of(&mut cells),
+                                created: cells_of(&mut created),
+                                target: target()?,
+                                at,
+                            },
+                            "delete" => WireWrite::Delete {
+                                table,
+                                row,
+                                target: target()?,
+                                at,
+                            },
+                            "restore" => WireWrite::Restore {
+                                table,
+                                row,
+                                cells: has_cells.then(|| cells_of(&mut cells)),
+                                target: target()?,
+                                at,
+                            },
+                            "move" => match (&from, &to) {
+                                (Some(from), Some(to)) => WireWrite::Move {
+                                    table,
+                                    row,
+                                    from: from_json("move source", from)?,
+                                    to: from_json("move destination", to)?,
+                                },
+                                _ => {
+                                    return Err(bad(format_args!(
+                                        "has a move without its branches on op {n}"
+                                    )));
+                                }
+                            },
+                            op => return Err(bad(format_args!("has an op {op:?}"))),
+                        };
+                        if !created.is_empty() {
+                            return Err(bad(format_args!(
+                                "has created cells on op {n}, which is no upsert"
+                            )));
+                        }
+                        let access_proof = match (key, seq) {
+                            (Some(key), Some(seq)) => Some(AccessProof {
+                                key,
+                                seq: seq as u64,
+                            }),
+                            (None, None) => None,
+                            _ => {
+                                return Err(bad(format_args!(
+                                    "has half an access proof on op {n}"
+                                )));
+                            }
+                        };
+                        Ok(WireOp {
+                            write,
+                            bases: from_json("bases", &bases)?,
+                            access_proof,
+                            deltas: deltas(conn, prefix, tx, n).await?,
+                        })
                     }
-                },
-                op => return Err(bad(format_args!("has an op {op:?}"))),
-            };
-            if !created.is_empty() {
-                return Err(bad(format_args!(
-                    "has created cells on op {n}, which is no upsert"
-                )));
-            }
-            let access_proof = match (key, seq) {
-                (Some(key), Some(seq)) => Some(AccessProof {
-                    key,
-                    seq: seq as u64,
-                }),
-                (None, None) => None,
-                _ => return Err(bad(format_args!("has half an access proof on op {n}"))),
-            };
-            Ok(WireOp {
-                write,
-                bases: from_json("bases", &bases)?,
-                access_proof,
-                deltas: deltas(conn, prefix, tx, n)?,
-            })
-        })
-        .collect()
+                })
+                .await?,
+            );
+        }
+        Ok(out)
+    })
+    .await
 }
 
 type CellLists = (BTreeMap<String, Value>, BTreeMap<String, Value>);
 
-fn cells(conn: &Storage, prefix: &str, tx: i64, n: i64) -> Result<CellLists, Error> {
+async fn cells(conn: &Storage, prefix: &str, tx: i64, n: i64) -> Result<CellLists, Error> {
     let mut statement = conn
         .prepare_cached(&format!(
             "SELECT list, col, ty, nulls, value FROM {prefix}_cells WHERE tx = ?1 AND n = ?2"
         ))
         .map_err(storage)?;
-    let rows = statement
+    let mut rows = statement
         .query_map([tx, n], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -808,9 +882,10 @@ fn cells(conn: &Storage, prefix: &str, tx: i64, n: i64) -> Result<CellLists, Err
                 r.get::<_, SqlValue>(4)?,
             ))
         })
+        .await
         .map_err(storage)?;
     let mut lists = (BTreeMap::new(), BTreeMap::new());
-    for row in rows {
+    while let Some(row) = rows.next().await {
         let (list, column, ty, nulls, value) = row.map_err(|_| bad("has a malformed cell"))?;
         let value = sql_cell(&ty, nulls, value)?;
         match list {
@@ -822,7 +897,7 @@ fn cells(conn: &Storage, prefix: &str, tx: i64, n: i64) -> Result<CellLists, Err
     Ok(lists)
 }
 
-fn deltas(conn: &Storage, prefix: &str, tx: i64, n: i64) -> Result<Vec<CellDelta>, Error> {
+async fn deltas(conn: &Storage, prefix: &str, tx: i64, n: i64) -> Result<Vec<CellDelta>, Error> {
     let mut statement = conn
         .prepare_cached(&format!(
             "SELECT col, depth, key, seq, base, edits FROM {prefix}_deltas \
@@ -842,9 +917,11 @@ fn deltas(conn: &Storage, prefix: &str, tx: i64, n: i64) -> Result<Vec<CellDelta
                 },
             })
         })
+        .await
         .map_err(storage)?
-        .map(|delta| delta.map_err(|_| bad("has a malformed delta")))
         .collect()
+        .await
+        .map_err(|_| bad("has a malformed delta"))
 }
 
 #[cfg(test)]
@@ -854,8 +931,8 @@ mod tests {
 
     fn store() -> Storage {
         let conn = Storage::open_in_memory().unwrap();
-        conn.execute_batch(PENDING_DDL).unwrap();
-        conn.execute_batch(SYNC_DDL).unwrap();
+        crate::options::block_on(conn.execute_batch(PENDING_DDL)).unwrap();
+        crate::options::block_on(conn.execute_batch(SYNC_DDL)).unwrap();
         conn
     }
 
@@ -1075,11 +1152,15 @@ mod tests {
             ),
         ];
         for (tx, commit) in &commits {
-            write(&conn, *tx, commit, &[]).unwrap();
+            crate::options::block_on(write(&conn, *tx, commit, &[])).unwrap();
         }
-        assert_eq!(txs(&conn).unwrap(), [1, 2, 3]);
+        assert_eq!(crate::options::block_on(txs(&conn)).unwrap(), [1, 2, 3]);
         for (tx, commit) in &commits {
-            assert_eq!(bytes(&read(&conn, *tx).unwrap()), bytes(commit), "tx {tx}");
+            assert_eq!(
+                bytes(&crate::options::block_on(read(&conn, *tx)).unwrap()),
+                bytes(commit),
+                "tx {tx}"
+            );
         }
     }
 
@@ -1101,13 +1182,14 @@ mod tests {
         };
         // Opening a store creates nothing new: a store written before views
         // must keep its file as it was.
-        assert!(!has_read_views(&conn).unwrap());
-        write(&conn, 4, &serializable_commit(), &[]).unwrap();
-        assert!(!has_read_views(&conn).unwrap());
+        assert!(!crate::options::block_on(has_read_views(&conn)).unwrap());
+        crate::options::block_on(write(&conn, 4, &serializable_commit(), &[])).unwrap();
+        assert!(!crate::options::block_on(has_read_views(&conn)).unwrap());
         let commit = serializable_commit_reading(vec![ReadViewSourceSpec::Current, draft.clone()]);
-        write(&conn, 5, &commit, &[]).unwrap();
-        assert!(has_read_views(&conn).unwrap());
-        let SyncMessage::Commit { kind, .. } = read(&conn, 5).unwrap() else {
+        crate::options::block_on(write(&conn, 5, &commit, &[])).unwrap();
+        assert!(crate::options::block_on(has_read_views(&conn)).unwrap());
+        let SyncMessage::Commit { kind, .. } = crate::options::block_on(read(&conn, 5)).unwrap()
+        else {
             panic!("not a commit");
         };
         let WireKind::Serializable { reads, .. } = &kind else {
@@ -1120,10 +1202,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             [ReadViewSourceSpec::Current, draft]
         );
-        assert_eq!(bytes(&read(&conn, 5).unwrap()), bytes(&commit));
-        conn.execute("DELETE FROM _jazz_pending WHERE tx = 5", [])
+        assert_eq!(
+            bytes(&crate::options::block_on(read(&conn, 5)).unwrap()),
+            bytes(&commit)
+        );
+        crate::options::block_on(conn.execute("DELETE FROM _jazz_pending WHERE tx = 5", []))
             .unwrap();
-        assert_eq!(count(&conn, "_jazz_pending_read_views", 5).unwrap(), 0);
+        assert_eq!(
+            crate::options::block_on(count(&conn, "_jazz_pending_read_views", 5)).unwrap(),
+            0
+        );
     }
 
     /// The layout itself, written by hand: a store holding these rows must
@@ -1132,7 +1220,7 @@ mod tests {
     #[test]
     fn the_pending_layout_is_pinned() {
         let conn = store();
-        conn.execute_batch(
+        crate::options::block_on(conn.execute_batch(
             "INSERT INTO _jazz_pending (tx, node, seq, clock, snapshot, own, acting, author, claims) \
              VALUES (4, x'07070707070707070707070707070707', 41, 1234, NULL, NULL, 'own', NULL, NULL); \
              INSERT INTO _jazz_pending_ops \
@@ -1149,7 +1237,7 @@ mod tests {
              (4, 0, 0, 'tags', 'json', 0, '{\"Array\":[{\"String\":\"home\"}]}'); \
              INSERT INTO _jazz_pending_deltas (tx, n, i, col, depth, key, seq, base, edits) \
              VALUES (4, 0, 0, 'body', 0, x'', 3, 2, x'0a0b');",
-        )
+        ))
         .unwrap();
         let mut op: WireOp = WireWrite::Insert {
             table: "notes".to_owned(),
@@ -1191,35 +1279,37 @@ mod tests {
             ops: vec![op],
             acting: Acting::Own,
         };
-        assert_eq!(bytes(&read(&conn, 4).unwrap()), bytes(&expected));
+        assert_eq!(
+            bytes(&crate::options::block_on(read(&conn, 4)).unwrap()),
+            bytes(&expected)
+        );
     }
 
     #[test]
     fn a_refused_commit_keeps_its_ops_in_the_same_layout() {
         let conn = store();
-        write(&conn, 1, &serializable_commit(), &[]).unwrap();
+        crate::options::block_on(write(&conn, 1, &serializable_commit(), &[])).unwrap();
         for ddl in REJECTED_OPS_DDL {
-            conn.execute(ddl, []).unwrap();
+            crate::options::block_on(conn.execute(ddl, [])).unwrap();
         }
         for table in OP_TABLES {
-            conn.execute(
+            crate::options::block_on(conn.execute(
                 &format!(
                     "INSERT INTO _jazz_rejected_{table} SELECT * FROM _jazz_pending_{table} WHERE tx = 1"
                 ),
                 [],
-            )
+            ))
             .unwrap();
         }
-        conn.execute("DELETE FROM _jazz_pending WHERE tx = 1", [])
+        crate::options::block_on(conn.execute("DELETE FROM _jazz_pending WHERE tx = 1", []))
             .unwrap();
         for table in OP_TABLES {
-            let left: i64 = conn
-                .query_row(
-                    &format!("SELECT count(*) FROM _jazz_pending_{table}"),
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
+            let left: i64 = crate::options::block_on(conn.query_row(
+                &format!("SELECT count(*) FROM _jazz_pending_{table}"),
+                [],
+                |r| r.get(0),
+            ))
+            .unwrap();
             assert_eq!(
                 left, 0,
                 "forgetting the commit empties _jazz_pending_{table}"
@@ -1228,7 +1318,7 @@ mod tests {
         let SyncMessage::Commit { ops: expected, .. } = serializable_commit() else {
             unreachable!()
         };
-        let ops = ops(&conn, "_jazz_rejected", 1).unwrap();
+        let ops = crate::options::block_on(ops(&conn, "_jazz_rejected", 1)).unwrap();
         assert_eq!(
             postcard::to_allocvec(&ops).unwrap(),
             postcard::to_allocvec(&expected).unwrap()
@@ -1251,9 +1341,9 @@ mod tests {
             "UPDATE _jazz_pending SET node = x'0102'",
         ] {
             let conn = store();
-            write(&conn, 1, &serializable_commit(), &[]).unwrap();
-            conn.execute_batch(edit).unwrap();
-            let error = read(&conn, 1).expect_err(edit);
+            crate::options::block_on(write(&conn, 1, &serializable_commit(), &[])).unwrap();
+            crate::options::block_on(conn.execute_batch(edit)).unwrap();
+            let error = crate::options::block_on(read(&conn, 1)).expect_err(edit);
             assert_eq!(
                 error.code,
                 ErrorCode::UnsupportedStorageCodecs,
@@ -1275,7 +1365,8 @@ mod tests {
                 claims: BTreeMap::from([("score".to_owned(), Value::F64(f64::NAN))]),
             },
         };
-        let error = write(&conn, 1, &commit, &[]).expect_err("NaN has no JSON");
+        let error =
+            crate::options::block_on(write(&conn, 1, &commit, &[])).expect_err("NaN has no JSON");
         assert!(error.message.contains("not supported yet"), "{error}");
     }
 }

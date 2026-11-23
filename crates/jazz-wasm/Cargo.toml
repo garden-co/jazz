@@ -9,6 +9,7 @@ description = "WebAssembly bindings for the Jazz database engine"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+async-trait = "0.1"
 base64 = "0.22"
 bytes = { version = "1", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }

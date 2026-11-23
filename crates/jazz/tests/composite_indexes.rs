@@ -2,6 +2,7 @@
 //! builder and the `Db` read/write API, in memory and over durable
 //! file-backed storage.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 
 use jazz::db::{

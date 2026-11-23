@@ -3,6 +3,7 @@
 //! upstream only over a link that negotiated
 //! `FEATURE_TEXT_AFFIX_PREDICATES`.
 
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
@@ -245,7 +246,7 @@ impl Transport for Pipe {
 /// Alice's replica sent.
 fn connected(features: jazz::wire::WireFeatures) -> (Db, Db, Rc<RefCell<usize>>) {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     seed(&server);
     let client = open(0x02, alice());
     let (upstream, affix_reads) = link(&server, &client, features);
@@ -389,7 +390,7 @@ fn an_affix_read_needs_a_server_that_negotiated_it() {
 #[test]
 fn a_serializable_commit_reading_by_prefix_needs_a_server_that_negotiated_it() {
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     seed(&server);
     let client = open(0x02, alice());
     let (upstream, _) = link(&server, &client, jazz::wire::current_wire_features());

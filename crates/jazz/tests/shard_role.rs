@@ -5,6 +5,7 @@
 //! none of it.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};

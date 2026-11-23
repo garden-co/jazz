@@ -11,6 +11,7 @@
 //! value.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -136,7 +137,7 @@ fn reopen(db: Db, path: &Path, config: DbConfig) -> Db {
     drop(db);
     let db = block_on(Db::open_at(config, path, FileOptions::default())).unwrap();
     if authority {
-        db.set_authority();
+        jazz::db::block_on(db.set_authority());
     }
     db
 }
@@ -469,7 +470,7 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
     }
 
     let server = open_at(after.clone(), &path);
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     let fresh = block_on(Db::open(
         bare_config(after, 2, user(2)).with_migrations(vec![before], vec![rename]),
     ))
@@ -1183,8 +1184,8 @@ fn a_tab_behind_a_worker_reads_a_renamed_column_after_the_worker_mirrors() {
     seed(&server, "todos", 1, &[("name", text("from server"))]);
     let worker = block_on(Db::open(config(v2(), 0xa0, user(0xa0)))).unwrap();
     let tab = block_on(Db::open(config(v2(), 0xa1, user(0xa0)))).unwrap();
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let (tc, ts) = pipe();
     let _tab_link = block_on(tab.connect_upstream(tc));
     worker.accept_subscriber(ts, user(0xa0)).unwrap();
@@ -1193,7 +1194,7 @@ fn a_tab_behind_a_worker_reads_a_renamed_column_after_the_worker_mirrors() {
     let (wc, ws) = pipe();
     let _worker_link = block_on(worker.connect_upstream(wc));
     server.accept_subscriber(ws, user(0xa0)).unwrap();
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let q = tab.prepare_query(&Query::from("todos")).unwrap();
     let _stream = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
     for _ in 0..6 {
@@ -1224,7 +1225,7 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
         // Offline under v1, then v3 without the lenses between: `tasks` is
         // stored here as a new table, beside v1's `todos`.
         let client = open_at(v1(), &path);
-        client.become_replica();
+        jazz::db::block_on(client.become_replica());
         insert(&client, "todos", 2, "title", "v1 row");
     }
     let client = block_on(Db::open_at(

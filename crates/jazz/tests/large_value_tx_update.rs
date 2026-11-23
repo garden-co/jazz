@@ -7,6 +7,7 @@
 //!
 //! All tests use one in-process `Db` runtime: the contract is local write
 //! lowering, so no server topology is needed.
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 
 use crate::common;

@@ -34,6 +34,8 @@ durable-object-limits = ["rusqlite/limits"]
 managed-storage-emulation = ["testing"]
 
 [dependencies]
+async-trait = "0.1"
+tokio = { version = "1", default-features = false, features = ["sync"] }
 jazz-text.workspace = true
 jazz-types.workspace = true
 jazz-model.workspace = true

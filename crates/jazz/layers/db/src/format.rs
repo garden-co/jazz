@@ -45,19 +45,19 @@ pub(crate) fn unsupported(detail: impl std::fmt::Display) -> Error {
 }
 
 /// Stamp a new store inside its caller's initialization/write transaction.
-pub(crate) fn admit(conn: &Storage) -> Result<(), Error> {
-    if !check(conn)? {
-        conn.scope("jazz_format", |conn| {
+pub(crate) async fn admit(conn: &Storage) -> Result<(), Error> {
+    if !check(conn).await? {
+        conn.scope("jazz_format", async |conn| {
             conn.execute_batch(&format!(
                 "CREATE TABLE {STAMP_TABLE} (version INTEGER NOT NULL); INSERT INTO {STAMP_TABLE} (version) VALUES ({STORAGE_FORMAT});"
-            )).map_err(storage)
-        })?;
+            )).await.map_err(storage)
+        }).await?;
     }
     Ok(())
 }
 
 /// Validate without writing. Whether the store already has a valid stamp.
-pub(crate) fn check(conn: &Storage) -> Result<bool, Error> {
+pub(crate) async fn check(conn: &Storage) -> Result<bool, Error> {
     // Only Jazz owns this namespace; other tables may share the file.
     let stamp: Option<String> = conn
         .query_row(
@@ -65,6 +65,7 @@ pub(crate) fn check(conn: &Storage) -> Result<bool, Error> {
             [STAMP_TABLE],
             |row| row.get(0),
         )
+        .await
         .optional()
         .map_err(storage)?;
     if stamp.is_none() {
@@ -77,8 +78,8 @@ pub(crate) fn check(conn: &Storage) -> Result<bool, Error> {
                 [],
                 |row| row.get(0),
             )
-            .map_err(storage)?;
-        if unstamped || is_groove_sqlite(conn)? {
+            .await.map_err(storage)?;
+        if unstamped || is_groove_sqlite(conn).await? {
             return Err(unsupported(
                 "Jazz storage metadata exists without its format stamp, or the file contains a legacy Groove store",
             ));
@@ -88,14 +89,18 @@ pub(crate) fn check(conn: &Storage) -> Result<bool, Error> {
     if stamp.as_deref() != Some("table") {
         return Err(unsupported("Jazz format stamp is not a table"));
     }
-    let versions: Vec<rusqlite::types::Value> = conn
-        .prepare(&format!("SELECT version FROM {STAMP_TABLE}"))
-        .and_then(|mut statement| {
+    let versions: Vec<rusqlite::types::Value> = (async {
+        let mut statement = conn.prepare(&format!("SELECT version FROM {STAMP_TABLE}"))?;
+        {
             statement
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<_, _>>()
-        })
-        .map_err(storage)?;
+                .query_map([], |row| row.get(0))
+                .await?
+                .collect::<_>()
+                .await
+        }
+    })
+    .await
+    .map_err(storage)?;
     match versions.as_slice() {
         [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => Ok(true),
         [rusqlite::types::Value::Integer(version)] => Err(unsupported(format!(
@@ -109,22 +114,26 @@ pub(crate) fn check(conn: &Storage) -> Result<bool, Error> {
 }
 
 /// Recognize the legacy format by indexed metadata, not by the spelling of DDL.
-fn is_groove_sqlite(conn: &Storage) -> Result<bool, Error> {
+async fn is_groove_sqlite(conn: &Storage) -> Result<bool, Error> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta' COLLATE NOCASE)",
         [], |row| row.get(0),
-    ).map_err(storage)?;
+    ).await.map_err(storage)?;
     if !exists {
         return Ok(false);
     }
-    let columns: Vec<(String, i64)> = conn
-        .prepare("PRAGMA table_info('meta')")
-        .and_then(|mut statement| {
+    let columns: Vec<(String, i64)> = (async {
+        let mut statement = conn.prepare("PRAGMA table_info('meta')")?;
+        {
             statement
-                .query_map([], |row| Ok((row.get(1)?, row.get(5)?)))?
+                .query_map([], |row| Ok((row.get(1)?, row.get(5)?)))
+                .await?
                 .collect()
-        })
-        .map_err(storage)?;
+                .await
+        }
+    })
+    .await
+    .map_err(storage)?;
     let primary: Vec<_> = columns.iter().filter(|(_, pk)| *pk != 0).collect();
     // Avoid scanning another application's unindexed metadata.
     if primary.len() != 1
@@ -140,6 +149,7 @@ fn is_groove_sqlite(conn: &Storage) -> Result<bool, Error> {
         [b"jazz-groove-ordered-kv".as_slice()],
         |row| row.get(0),
     )
+    .await
     .map_err(storage)
 }
 

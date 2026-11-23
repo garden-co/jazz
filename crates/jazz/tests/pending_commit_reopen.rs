@@ -3,6 +3,7 @@
 //! bases must reload every part after a restart and settle as written.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -90,7 +91,7 @@ fn drive<T>(dbs: &[&Db], future: impl Future<Output = T>) -> T {
 fn connect(client: &Db, server: &Db) {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
-    client.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(client.set_remote_link_hint(RemoteLinkHint::Live));
     server
         .accept_subscriber(server_side, AuthorSubject::SYSTEM)
         .unwrap();
@@ -275,7 +276,7 @@ fn an_update_that_changes_nothing_records_no_upload() {
     };
     let (inserted, unchanged) = {
         let client = open_file(&path);
-        client.become_replica();
+        jazz::db::block_on(client.become_replica());
         let inserted = block_on(client.insert(
             "docs",
             doc("kept"),
