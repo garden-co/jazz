@@ -223,6 +223,29 @@ async fn a_redeployment_cannot_change_an_encrypted_columns_type_or_nullability()
 }
 
 #[tokio::test]
+async fn a_first_declaration_can_pin_only_the_columns_declared_type() {
+    let router = router().await;
+    let app = loaded("ownerId = session.user");
+    let mut body = app.deployment_body(false);
+    let hash = app.current_hash().to_string();
+    let title = &mut body["encryption"]["versions"][&hash]["tasks"]["columns"]["title"];
+    title["sealedType"] = title["type"].clone();
+    title["type"]["nullable"] = json!(true);
+    let (status, refusal) = publish(&router, body.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    let reason = refusal["error"].as_str().unwrap();
+    assert!(
+        reason.contains("tasks.title") && reason.contains("sealedType only pins an earlier type"),
+        "{refusal}"
+    );
+
+    body["encryption"]["versions"][&hash]["tasks"]["columns"]["title"]["sealedType"]["nullable"] =
+        json!(true);
+    let (status, response) = publish(&router, body).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+}
+
+#[tokio::test]
 async fn a_redeployment_cannot_append_an_encrypted_enum_variant_to_the_same_schema_hash() {
     let router = router().await;
     let app = loaded("ownerId = session.user");

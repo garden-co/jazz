@@ -65,6 +65,32 @@ impl DeclaredVersion {
         other.public.get(id)?.1.get(columns.get(column)?).cloned()
     }
 
+    fn check_sealed_types<'a>(
+        &self,
+        history: impl Iterator<Item = &'a Self> + Clone,
+    ) -> Result<(), String> {
+        for (table, entry) in &self.entries {
+            for (name, declared) in &entry.columns {
+                if declared.cell_type().same_type(&declared.plain) {
+                    continue;
+                }
+                let declared_before = history.clone().any(|old| {
+                    self.table_in(old, table)
+                        .and_then(|t| old.entries.get(&t))
+                        .zip(self.column_in(old, table, name))
+                        .is_some_and(|(entry, column)| entry.columns.contains_key(&column))
+                });
+                if !declared_before {
+                    return Err(format!(
+                        "{table}.{name}: sealedType only pins an earlier type; on its first \
+                         declaration it must match the declared type, including nullability"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn check_transition_to(&self, next: &Self) -> Result<(), String> {
         encryption::check_mapped_transition(
             (&self.schema, &self.entries),
@@ -112,6 +138,7 @@ pub(crate) fn check_stored_columns(
     }
     // New versions in the same publication arrive in migration order.
     for next in new {
+        next.check_sealed_types(history.iter()).map_err(invalid)?;
         for old in &history {
             old.check_transition_to(&next).map_err(invalid)?;
         }
