@@ -7,7 +7,7 @@ languageTabs: backend
 Jazz encrypts a column that is declared encrypted when it is created. It does not convert a plain
 column that already holds data, and an app file cannot ask it to. To encrypt data you already
 store, add a new encrypted table, stop writes to the old one, have your app's clients copy the rows
-across, and then retire the old table.
+across, point references at the copies, and then retire the old table.
 
 **The old plaintext stays.** Copying protects the values from then on, not the ones already
 stored. The old values remain in the old table's history, on every replica that synced them, and
@@ -42,6 +42,14 @@ added to a table that already exists, because rows older than the column have no
 To filter by a column of an existing table later, copy it into a new table that declares it, with
 this same recipe.
 
+In the same migration, give every table that references the old table a new reference column
+that points at the new table, for example `secureTaskId` beside `taskId` in `comments`. A
+reference column names its table, and the deploy refuses a migration that points an existing one
+at another table. The copies keep their row IDs, so the new column takes the same values as the
+old one. From this version on, have your app set both columns whenever it writes the reference.
+A reference inside the old table itself, such as a parent task, needs nothing more: the new table
+declares its own column referencing the new table, and the copy keeps its values.
+
 ### 2. Freeze the old table
 
 Deploy a permissions revision that refuses every write to the old table and keeps its read rule:
@@ -59,9 +67,20 @@ Deploy a permissions revision that refuses every write to the old table and keep
 }
 ```
 
-This pauses writes to that data: from this deploy until step 3, your users can read the old rows
-but cannot add, change or delete them. Your backend is not checked when it acts as the system, so
-stop any job of its that writes the old table too.
+This pauses writes to that data: your users can read the old rows but cannot add, change or
+delete them. Keep these rules on the old table in every later version until you drop it.
+
+The freeze holds only where these permissions are served. Your app's backend pins every session it
+opens to the permissions it was deployed with, whichever app version the client runs, and a client
+cannot choose others. When a backend publishes new permissions, Jazz closes the sessions pinned to
+other permissions, and they reconnect through whichever backend serves them now. A deployment that
+still serves the old permissions (an older version still running, a preview, a canary) pins its
+sessions to them, and those sessions can still write the old table. So shut down every such
+deployment before you copy. Edits a client made offline are checked when it reconnects, under the
+permissions of the backend it reconnects through.
+
+Your backend is not checked when it acts as the system, so stop any job of its that writes the old
+table too.
 
 If the pause is not acceptable, the alternative is to have your app write to both tables while the
 copy runs, then reconcile them before switching over. It is more work: every write path changes
@@ -72,7 +91,12 @@ twice, and you must decide which side wins when the two disagree.
 Only clients hold keys, so only clients can write the encrypted copies. The server never can. Copy
 each old row into the new table under **the same row ID**, with an upsert, so that running the copy
 again overwrites the copy instead of adding another. Never skip a row because it was copied before:
-copy it again. References to the old rows then point at their copies.
+copy it again.
+
+Then fill the new reference columns: for every row whose old reference is set, write the same ID
+into the new column. Rows written before your app set both columns need this. A client or your
+backend allowed to update those rows can do it; in an encrypted table, that is a client holding
+the row's space key.
 
 A sketch of a copying client (not a drop-in function). `tasks` is the old table and `secureTasks`
 the new one, with an encrypted `title`:
@@ -82,19 +106,29 @@ import type { Db } from "jazz-tools/backend";
 import { app } from "./jazz.generated";
 
 async function copyProject(db: Db, projectId: string) {
-  const oldTasks = await db.all(app.tasks.where({ projectId }));
+  const oldTasks = await db.all(app.tasks.where({ projectId }), { tier: "remote" });
   for (const task of oldTasks) {
     // The same ID: a second run overwrites this copy.
     await db
       .upsert(app.secureTasks, task.id, { projectId, title: task.title })
       .wait({ tier: "global" });
   }
-  const copies = await db.all(app.secureTasks.where({ projectId }));
-  if (copies.length !== oldTasks.length) {
-    throw new Error(`project ${projectId}: ${copies.length} copies of ${oldTasks.length} rows`);
-  }
+}
+
+// Whether every old row of the project has its copy, and no copy is left of a deleted row.
+async function projectIsCopied(db: Db, projectId: string) {
+  const read = { tier: "remote" } as const;
+  const oldIds = new Set((await db.all(app.tasks.where({ projectId }), read)).map((t) => t.id));
+  const copyIds = new Set(
+    (await db.all(app.secureTasks.where({ projectId }), read)).map((t) => t.id),
+  );
+  return oldIds.size === copyIds.size && [...oldIds].every((id) => copyIds.has(id));
 }
 ```
+
+Read both tables with `tier: "remote"`. A read with the local-first tier can answer from what the
+device has synced so far, so a check made with it can compare two partial lists and pass for a
+space that was never copied.
 
 Each client copies what it can:
 
@@ -102,16 +136,24 @@ Each client copies what it can:
 - in a space with no key yet, the first encrypted write creates it, and that needs a session
   allowed to update the space row. Other members get the key from it.
 
-A space whose key holders are all offline waits until one of them comes online. Before you switch,
-check that every space is done: the number of rows in the new table matches the old one, space by
-space. Run the copy again for any space where they differ.
+A space whose key holders are all offline waits until one of them comes online.
+
+Before you switch, check every space: each old row's ID must have a copy in the new table, and the
+new table must hold no other rows. Compare the IDs, not only the counts. Run the copy again for any
+space that fails, and switch only once every space passes. Check too that no row has an old
+reference set and the new one empty. If a write may have reached the old table after its copy
+started, for example through a deployment you shut down late, run the whole copy again: the
+upserts bring every copy up to date. Delete any copy whose old row no longer exists.
 
 ### 4. Switch reads and writes to the new table
 
 Ship the app version that reads and writes the new table: its code, relations and permissions point
-at `secureTasks`. The rows keep their IDs, so links to them still work.
+at `secureTasks`, and they follow the new reference columns instead of the old ones. IDs you keep
+outside Jazz's relations, such as in URLs, still work, because the rows keep their IDs. Keep the
+old table frozen in this version's permissions.
 
 ### 5. Drop the old table later
 
-Once no client still uses the old table, drop it in a later migration. As above, its data stays in
-history, on replicas and in backups.
+Once no client still uses the old table, drop it in a later migration, together with the old
+reference columns: a column cannot reference a table that no longer exists. As above, the old
+data stays in history, on replicas and in backups.

@@ -89,9 +89,11 @@ app encrypts data it already stores. References: the
 
 - An entry takes `space`, `scope`, `columns` and `equality`. A column is a
   type string, or an object with `type` and, optionally, `default` and
-  `sealedType`. The reader refuses any other key, naming where it is and
-  pointing to the copy recipe (§5); a raw deploy body with one is refused when
-  it is decoded.
+  `sealedType` (and `$comment` anywhere). The reader refuses any other key,
+  naming where it is and the keys that object takes; a raw deploy body with
+  one is refused when it is decoded. Only the retired conversion keys
+  (`from`, `to`, `convert`, `reverse`, `backfill`, `rehome` and `sweep`) also
+  get a pointer to the copy recipe (§5), in both places.
 - The entry names a `space` (the column referencing the scope table, or `id`
   when the table is its own space table) and a `scope`, which is not one of
   Jazz's system tables. The space column and `id` stay plaintext: the server
@@ -101,6 +103,14 @@ app encrypts data it already stores. References: the
   ciphertext). Names starting with `__e2ee_` are Jazz's own.
 - A required encrypted column that rows may predate declares its plaintext
   default in the entry, where it is public; otherwise it is optional.
+- A declared `default` is a value of the column's declared type: `null` only
+  when the column is optional; for an enum, one of its variants; for JSON,
+  text that parses as JSON and, when the column has a JSON schema, satisfies
+  it; for an array, an array whose elements each fit the element type; and
+  for any other type, a value of exactly that type. A transaction-ID column
+  takes no default other than `null`. The deploy, `generate` and the loaders
+  all check this. `sealedType` names only the stored type and
+  takes no `default`: the default is declared beside it.
 - An equality column's tokens are stored in a required `bytes` column
   `__e2ee_eq_<column>`. Equality is declared only on the types the equality
   format encodes: boolean, integer, bigint, timestamp, double, text, bytes,
@@ -142,18 +152,21 @@ version holds it.
   record which `T` it used, so each encrypted stored column keeps one `T` for
   life. A migration can append enum variants in place because encrypted enums
   store their variant names; the entry then pins the type the column was
-  introduced with as `sealedType`. Each new declaration retains every
-  previously declared list of variants for that stored column as a prefix,
-  including variants added on another branch, so every version's variants lie
-  on one append-only sequence: two versions that append different variants
-  after the same prefix are refused, in whichever order they arrive and
-  whether they are deployed together or separately. All declarations of a stored
+  introduced with as `sealedType`. Only a version that descends from another
+  along a chain of migrations may declare more variants than it, and then
+  only by appending to that version's list. Versions where neither descends
+  from the other (siblings) must declare identical variants: `[a]` beside
+  `[a, b]` is refused, as is `[a, b]` beside `[a, c]`, in whichever order
+  they arrive and whether they are deployed together or separately. All
+  declarations of a stored
   column have the same nullability: an optional value carries a presence
   byte, so changing nullability in either direction would leave old cells
   unreadable. A JSON schema change, even loosening a constraint, also needs a
   new column.
 - **Defaults.** Rows stored before a column existed read its declared default,
   so another default would read them differently on clients of each version.
+  Every declaration of a stored column therefore has the same default, or
+  none in all of them; each must also be a value of its type (§3.1).
 - **Space and scope.** The context binds the scope table's identity and the
   space identifier, so a change of `space` or `scope` that is not a rename
   would leave every cell unreadable.
@@ -204,22 +217,53 @@ the data into a new encrypted table instead (the developer guide is
 
 1. Add the new table to `jazz.app.json` with its `encryption` entry, its
    encrypted columns and its `equality`, and `createTables` it in the
-   migration (after §4 if its space table needs it); deploy and ship.
+   migration (after §4 if its space table needs it). In the same migration,
+   every table with a reference to the old table gains a new reference
+   column to the new table: a reference column names its target table, and
+   the deploy refuses a migration that retargets an existing one ("Add a new
+   column referencing … and drop this one in a later release"). From this
+   version on, the app's writes set both columns to the same ID. A reference
+   inside the old table is declared in the new table against the new table.
+   Deploy and ship.
 2. Freeze the old table: a permissions revision whose insert, update and
-   delete rules on it are `false`, its read rule unchanged. Writes to that
-   data pause until step 4. (The alternative, writing to both tables during
-   the copy and reconciling them, changes every write path.)
+   delete rules on it are `false`, its read rule unchanged, kept in every
+   later version until the table is dropped. Writes to that data pause. The
+   freeze reaches a session only through its pin: the backend that opens a
+   session pins it to the bundle that backend publishes, whatever the
+   client's app version, and a client cannot pick its own ([topology](9_topology.md) §9.7).
+   Publishing a new bundle ends the sessions pinned to others, which
+   reconnect through whichever backend serves them now; a deployment still
+   serving an earlier bundle pins its sessions to it, and they can still
+   write the old table. So every such deployment is retired before the copy
+   starts. Writes made offline are checked on reconnection under the
+   reconnecting session's pin. The backend's system writes are unchecked, so
+   its jobs that write the old table stop too. (The alternative, writing to
+   both tables during the copy and reconciling them, changes every write
+   path.)
 3. In clients that hold a space's key, copy each old row of the space into
    the new table under the same row ID, with an upsert, so a second run
    overwrites rather than duplicates; nothing is skipped for having been
    copied before. When the space has no root yet, the first copy creates it
    (spec §3.2), which needs a session that may read and update the space
    row; the first encrypted rows and the space are accepted together. A space
-   whose key holders are all offline waits. Verify, space by space, that the
-   new table holds as many rows as the old one.
+   whose key holders are all offline waits. Then the new reference columns
+   are filled: each row whose old reference is set gets the same ID in the
+   new one (the copies keep the IDs, so copying the value is enough), written
+   by a client or backend that may update the row, and in an encrypted table
+   by a holder of its space key. Verify every space before step 4, reading
+   both tables at the `remote` tier (a local-first read can answer from a
+   partial sync, and two partial reads can agree): the set of IDs in the new
+   table equals the set in the old one, not merely the count, and no row has
+   an old reference without the new one. A space that fails is copied again.
+   If a write may have reached the old table after the copy started, the
+   whole copy runs again (its upserts update every copy) and copies of rows
+   since deleted are deleted.
 4. Ship the app version whose code, relations and permissions use the new
-   table. Rows keep their IDs, so references to them still hold.
-5. Drop the old table in a later migration.
+   table and the new reference columns. IDs kept outside Jazz's relations,
+   such as in URLs, still resolve, because the copies keep their IDs.
+5. Drop the old table in a later migration, with the old reference columns
+   in the same migration: a schema whose column references a table it does
+   not have is refused.
 
 **The old plaintext stays.** Copying protects the values from then on. The
 old values remain in the old table's history, which no new version reads, on
