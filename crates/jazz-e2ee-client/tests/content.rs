@@ -44,6 +44,28 @@ fn invalid_plain_stream_sibling_leaves_the_attachment_unread() {
     assert!(error.message.contains("title"), "{error}");
 }
 
+/// Alice's streamed insert reports a missing required sibling before it reads her attachment.
+#[test]
+fn missing_required_stream_sibling_leaves_the_attachment_unread() {
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (db, _link, _) = online(&client, &server, None);
+    let space = project(&db, "plans");
+    hold_new_space(&client, &db, space);
+    for missing in ["title", "body"] {
+        let mut cells = note(space, SECRET);
+        cells.remove(missing);
+        let error =
+            block_on(db.insert_streaming_value("notes", cells, "attachment", Unread)).unwrap_err();
+        assert_eq!(error.code, ErrorCode::WriteRejected);
+        assert_eq!(error.reason, Some(jazz::db::Reason::MissingRequired));
+        assert_eq!(
+            error.message,
+            format!("missing required field `{missing}` in `notes`")
+        );
+    }
+}
+
 /// Rowless begin checks the kinds of plain siblings on an encrypted table.
 #[test]
 fn invalid_plain_stream_sibling_is_rejected_at_rowless_begin() {
@@ -97,7 +119,11 @@ fn refuses_invalid_stream_metadata(kind: jazz::db::StreamingMutationKind) {
         if kind != jazz::db::StreamingMutationKind::Update {
             cells.remove("body");
             let error = write(cells.clone()).unwrap_err();
-            assert!(error.message.contains("notes.body"), "{error}");
+            if kind == jazz::db::StreamingMutationKind::Insert {
+                assert_eq!(error.reason, Some(jazz::db::Reason::MissingRequired));
+            } else {
+                assert!(error.message.contains("notes.body"), "{error}");
+            }
         }
     }
 }
