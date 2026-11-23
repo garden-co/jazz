@@ -277,6 +277,25 @@ class StagePlanTest {
     }
 
     @Test
+    fun a_cancelled_open_lets_go_of_the_store(): Unit = runBlocking {
+        val dir = kotlin.io.path.createTempDirectory("jazz-cancelled-open").toFile()
+        val asked = java.util.concurrent.CountDownLatch(1)
+        val answer = java.util.concurrent.CountDownLatch(1)
+        val slowSignIn = tools.jazz.JazzAuth.Bearer {
+            asked.countDown()
+            answer.await()
+            "token-user-cancelled"
+        }
+        val opening = launch(kotlinx.coroutines.Dispatchers.Default) { openAsUser(endpoint, appId, slowSignIn, dir.path) }
+        kotlin.test.assertTrue(asked.await(30, java.util.concurrent.TimeUnit.SECONDS), "open never asked for a token")
+        opening.cancel()
+        answer.countDown()
+        opening.join()
+        // Refused if the app no one got were still open on it.
+        openAsUser(endpoint, appId, tools.jazz.JazzAuth.Bearer { "token-user-cancelled" }, dir.path).use { it.deleteClientStorage() }
+    }
+
+    @Test
     fun a_token_provider_that_throws_doesnt_sign_the_user_out(): Unit = runBlocking {
         var n = 0
         val jazz = openAsUser(endpoint, appId, tools.jazz.JazzAuth.Bearer { if (n++ == 0) "token-tp" else throw java.io.IOException("sign-in server down") })
@@ -358,6 +377,63 @@ class StagePlanTest {
         // The store is gone (an empty lock file may stay behind).
         val left = dir.listFiles()?.filter { it.name != "jazz.lock" }.orEmpty()
         kotlin.test.assertTrue(left.isEmpty(), "$left")
+    }
+
+    @Test
+    fun a_second_app_is_refused_the_store_and_the_first_runs_on(): Unit = runBlocking {
+        val dir = kotlin.io.path.createTempDirectory("jazz-held").toFile()
+        val auth = tools.jazz.JazzAuth.Bearer { "token-user-held" }
+        openAsUser(endpoint, appId, auth, dir.path).use { first ->
+            val show = showNamed(first, "Held")
+            kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(first.session.value)
+            val titles = kotlinx.coroutines.channels.Channel<List<String>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            val watching = launch {
+                first.watch(Tasks.where(Tasks.showId eq show.id)).collect { rows -> titles.send(rows.map { it.title }) }
+            }
+            assertEquals(emptyList(), kotlinx.coroutines.withTimeout(30_000) { titles.receive() })
+
+            // One app at a time has a store open.
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Refused> { openAsUser(endpoint, appId, auth, dir.path) }
+
+            // The first is untouched: it writes, reads the server, and the watch from before still delivers.
+            addTask(first, show, "After the refusal")
+            kotlinx.coroutines.withTimeout(30_000) { while (titles.receive() != listOf("After the refusal")) Unit }
+            kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(first.session.value)
+            assertEquals(show.id, showById(first, show.id)?.id)
+            watching.cancel()
+            // And deletes its store: no one else can be holding it.
+            first.deleteClientStorage()
+            assertEquals(tools.jazz.SessionState.SignedOut, first.session.value)
+        }
+    }
+
+    @Test
+    fun an_open_is_refused_while_another_process_holds_the_store(): Unit = runBlocking {
+        // flock(1), standing in for another process's app: the same exclusive lock on the store's lock file.
+        if (!System.getProperty("os.name").startsWith("Linux")) return@runBlocking
+        val dir = kotlin.io.path.createTempDirectory("jazz-held-process").toFile()
+        val auth = tools.jazz.JazzAuth.Bearer { "token-user-other" }
+        val lock = java.io.File(dir, "jazz.lock")
+        // One process holds it, this test's own child: the shell opens the file,
+        // flock locks that open file and exits, and sleep inherits it. It is
+        // killed with SIGKILL, as a killed app would be: a host that ignores
+        // SIGTERM passes that on to its children, which then never exit.
+        val holder = ProcessBuilder(
+            "sh", "-c", "exec 9>>\"$1\" && flock --exclusive 9 && echo held && exec sleep 60", "sh", lock.path,
+        ).start()
+        try {
+            assertEquals("held", holder.inputStream.bufferedReader().readLine())
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Refused> { openAsUser(endpoint, appId, auth, dir.path) }
+        } finally {
+            holder.destroyForcibly()
+            kotlin.test.assertTrue(holder.waitFor(30, java.util.concurrent.TimeUnit.SECONDS), "the lock's holder didn't exit")
+        }
+        openAsUser(endpoint, appId, auth, dir.path).use { jazz ->
+            kotlin.test.assertIs<tools.jazz.SessionState.SignedIn>(jazz.session.value)
+            jazz.deleteClientStorage()
+            assertEquals(tools.jazz.SessionState.SignedOut, jazz.session.value)
+            kotlin.test.assertFailsWith<tools.jazz.JazzException.Closed> { jazz.all(Tasks.query()) }
+        }
     }
 
     @Test

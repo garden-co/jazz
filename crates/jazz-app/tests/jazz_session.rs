@@ -11,11 +11,12 @@ mod relay;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bindings::{NewTodo, todos};
+use bindings::{NewTodo, Todo, todos};
 use futures::StreamExt;
+use jazz_app_support::jazz::account_registry::AccountId;
 use jazz_app_support::{
-    AppFiles, AppId, Backend, Config, Error, Initial, Jazz, JazzSession, ReadTier, SessionConfig,
-    SessionStatus, Storage, TokenReason, UserKind,
+    AppFiles, AppId, Backend, Config, Error, Initial, Jazz, JazzSession, ReadTier, Recovery,
+    SessionConfig, SessionStatus, Storage, TokenReason, UserKind,
 };
 use jazz_server::JazzServer;
 
@@ -77,6 +78,13 @@ impl App {
                 let token = token.lock().unwrap().clone();
                 async move { Ok(token) }
             })
+    }
+
+    /// A session that opens as the device account `dir` keeps.
+    fn guest(&self, dir: &std::path::Path) -> SessionConfig {
+        self.session(&bearer(None))
+            .storage(Storage::Dir(dir.into()))
+            .initial(Initial::Device)
     }
 
     async fn stop(self) {
@@ -302,6 +310,363 @@ async fn a_session_starts_as_a_guest_and_reports_failures() {
     app.stop().await;
 }
 
+/// An endpoint refused before any request: plain http beyond this machine.
+const INSECURE: &str = "http://192.0.2.1/jazz";
+
+/// A device account kept in `dir`, with a write of its own: its key file's
+/// bytes, its account and the write.
+async fn keep_a_guest(app: &App, dir: &std::path::Path) -> (Vec<u8>, AccountId, Todo) {
+    let session = JazzSession::open(client_files(), app.guest(dir))
+        .await
+        .unwrap();
+    let account = session.snapshot().user.unwrap().account;
+    let written = session
+        .jazz()
+        .unwrap()
+        .insert(NewTodo::new("The guest's", false))
+        .await
+        .unwrap();
+    session.close().await.unwrap();
+    (
+        std::fs::read(dir.join("device.key")).unwrap(),
+        account,
+        written,
+    )
+}
+
+/// `session` found no account it could sign in to, and says why.
+fn assert_open_failed(session: &JazzSession) {
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.status, SessionStatus::Error, "{snapshot:?}");
+    assert_eq!(snapshot.error.as_ref().unwrap().kind, "config");
+    assert_eq!(snapshot.recovery, Some(Recovery::Session));
+    assert!(snapshot.user.is_none(), "{snapshot:?}");
+}
+
+/// Alice's guest has data; a later launch has a wrong URL. Her key is left
+/// as it was, and the fixed URL signs her in with her data.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_sign_in_at_open_leaves_the_kept_key() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (key, account, written) = keep_a_guest(&app, dir.path()).await;
+    let path = dir.path().join("device.key");
+
+    let session = JazzSession::open(client_files(), app.guest(dir.path()).server(INSECURE))
+        .await
+        .unwrap();
+    assert!(std::fs::read(&path).unwrap() == key, "the kept key changed");
+    assert_open_failed(&session);
+    assert!(session.retry().await.is_err());
+    assert!(
+        std::fs::read(&path).unwrap() == key,
+        "retry changed the key"
+    );
+    session.close().await.unwrap();
+
+    let fixed = JazzSession::open(client_files(), app.guest(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(fixed.snapshot().user.unwrap().account, account);
+    assert_eq!(
+        fixed
+            .jazz()
+            .unwrap()
+            .all_with(todos::query(), ReadTier::LocalOnly)
+            .await
+            .unwrap(),
+        vec![written]
+    );
+    fixed.close().await.unwrap();
+    app.stop().await;
+}
+
+/// A key file that holds no key (quoted whole, cut short, empty, not text)
+/// is reported and left as it was; mended, retry signs in as its account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_that_does_not_parse_is_left_as_it_was() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (key, account, _) = keep_a_guest(&app, dir.path()).await;
+    let path = dir.path().join("device.key");
+
+    let quoted = [&b"\""[..], &key, &b"\""[..]].concat();
+    let cut = key[..20].to_vec();
+    for held in [quoted, cut, Vec::new(), vec![0xff, 0xfe]] {
+        std::fs::write(&path, &held).unwrap();
+        let session = JazzSession::open(client_files(), app.guest(dir.path()))
+            .await
+            .unwrap();
+        assert!(
+            std::fs::read(&path).unwrap() == held,
+            "the key file changed"
+        );
+        assert_open_failed(&session);
+
+        std::fs::write(&path, &key).unwrap();
+        session.retry().await.unwrap();
+        assert_eq!(session.snapshot().user.unwrap().account, account);
+        session.close().await.unwrap();
+    }
+    app.stop().await;
+}
+
+/// A key file this user may not read is reported and left as it was;
+/// readable again, retry signs in as its account.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_key_is_left_as_it_was() {
+    use std::os::unix::fs::PermissionsExt;
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (key, account, _) = keep_a_guest(&app, dir.path()).await;
+    let path = dir.path().join("device.key");
+    let mode = |mode| std::fs::set_permissions(&path, PermissionsExt::from_mode(mode)).unwrap();
+
+    mode(0o000);
+    if std::fs::read(&path).is_ok() {
+        eprintln!("skipped: this user reads files whatever their mode (root)");
+    } else {
+        let session = JazzSession::open(client_files(), app.guest(dir.path()))
+            .await
+            .unwrap();
+        let after = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(after & 0o777, 0, "the key file was replaced");
+        assert_open_failed(&session);
+
+        mode(0o600);
+        assert!(std::fs::read(&path).unwrap() == key, "the kept key changed");
+        session.retry().await.unwrap();
+        assert_eq!(session.snapshot().user.unwrap().account, account);
+        session.close().await.unwrap();
+    }
+    app.stop().await;
+}
+
+/// A key kept through a link whose target is away (an unmounted volume)
+/// is no first launch: the link stays.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_link_to_nowhere_is_left_as_it_was() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (path, target) = (dir.path().join("device.key"), dir.path().join("away/key"));
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+
+    let session = JazzSession::open(client_files(), app.guest(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_link(&path).expect("still the link"),
+        target,
+        "the link changed"
+    );
+    assert_open_failed(&session);
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
+/// An unreachable server is no reason to change accounts either: the
+/// guest opens offline on the kept key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreachable_server_leaves_the_kept_key() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (key, account, _) = keep_a_guest(&app, dir.path()).await;
+
+    let session = JazzSession::open(
+        client_files(),
+        app.guest(dir.path()).server("http://127.0.0.1:9/jazz"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        std::fs::read(dir.path().join("device.key")).unwrap() == key,
+        "the key changed"
+    );
+    if let Some(user) = session.snapshot().user {
+        assert_eq!(user.account, account);
+    }
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
+/// A first launch keeps a new key, and signs in as it next time. One whose
+/// sign-in fails keeps its key too: retry doesn't make another.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_first_launch_keeps_one_new_key() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (key, account, _) = keep_a_guest(&app, dir.path()).await;
+    let again = JazzSession::open(client_files(), app.guest(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(again.snapshot().user.unwrap().account, account);
+    assert!(
+        std::fs::read(dir.path().join("device.key")).unwrap() == key,
+        "the key changed"
+    );
+    again.close().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let failed = JazzSession::open(client_files(), app.guest(dir.path()).server(INSECURE))
+        .await
+        .unwrap();
+    let first = std::fs::read(dir.path().join("device.key")).unwrap();
+    assert!(failed.retry().await.is_err());
+    assert!(
+        std::fs::read(dir.path().join("device.key")).unwrap() == first,
+        "retry made another key"
+    );
+    failed.close().await.unwrap();
+    app.stop().await;
+}
+
+/// Asking for a new device account replaces the kept one only once the new
+/// one signed in; a failure, and its retry, leave the kept key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_create_leaves_the_kept_key() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (key, account, _) = keep_a_guest(&app, dir.path()).await;
+    let path = dir.path().join("device.key");
+    let signed_out = || app.guest(dir.path()).initial(Initial::SignedOut);
+
+    let failing = JazzSession::open(client_files(), signed_out().server(INSECURE))
+        .await
+        .unwrap();
+    assert!(failing.create_device_account().await.is_err());
+    assert!(
+        std::fs::read(&path).unwrap() == key,
+        "a failed create changed the key"
+    );
+    assert!(failing.retry().await.is_err());
+    assert!(
+        std::fs::read(&path).unwrap() == key,
+        "its retry changed the key"
+    );
+    failing.close().await.unwrap();
+    let files: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.contains("key"))
+        .collect();
+    assert_eq!(files, ["device.key"], "a failed create left a key behind");
+
+    let session = JazzSession::open(client_files(), signed_out())
+        .await
+        .unwrap();
+    session.create_device_account().await.unwrap();
+    assert_ne!(session.snapshot().user.unwrap().account, account);
+    assert!(
+        std::fs::read_to_string(&path).unwrap() == session.export_device_key().unwrap(),
+        "the new key is not kept"
+    );
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
+/// With nothing kept yet, a failed create's retry is for the same account.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retrying_a_create_makes_no_other_account() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("device.key");
+    let session = JazzSession::open(
+        client_files(),
+        app.guest(dir.path())
+            .initial(Initial::SignedOut)
+            .server(INSECURE),
+    )
+    .await
+    .unwrap();
+    assert!(session.create_device_account().await.is_err());
+    let first = std::fs::read(&path).unwrap();
+    assert!(session.retry().await.is_err());
+    assert!(
+        std::fs::read(&path).unwrap() == first,
+        "retry made another key"
+    );
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
+/// Sessions opened at once on a first launch keep one key: whoever signed
+/// in did so as its account. (The other may find the account's store busy.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn first_launches_at_once_keep_one_key() {
+    let app = App::start().await;
+    for round in 0..20 {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = tokio::join!(
+            JazzSession::open(client_files(), app.guest(dir.path())),
+            JazzSession::open(client_files(), app.guest(dir.path())),
+        );
+        let sessions = [first.unwrap(), second.unwrap()];
+        let signed_in: Vec<_> = sessions
+            .iter()
+            .filter_map(|session| session.snapshot().user)
+            .map(|user| user.account)
+            .collect();
+        let kept: jazz_app_support::DeviceKey =
+            std::fs::read_to_string(dir.path().join("device.key"))
+                .unwrap()
+                .parse()
+                .unwrap();
+        assert!(!signed_in.is_empty(), "round {round}: {sessions:?}");
+        for account in signed_in {
+            assert_eq!(
+                account,
+                kept.account(app.app_id),
+                "round {round}: its key was replaced"
+            );
+        }
+        for session in sessions {
+            session.close().await.unwrap();
+        }
+    }
+    app.stop().await;
+}
+
+/// A key another first launch keeps while this one looks is that key, not
+/// an error. (Exporting signed out only looks: cheap enough to race.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_kept_while_looking_is_found() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("device.key");
+    let session = JazzSession::open(
+        client_files(),
+        app.guest(dir.path()).initial(Initial::SignedOut),
+    )
+    .await
+    .unwrap();
+    let key = jazz_app_support::DeviceKey::generate().unwrap().to_string();
+    for round in 0..3000 {
+        let _ = std::fs::remove_file(&path);
+        let whole = dir.path().join("whole.tmp");
+        std::fs::write(&whole, &key).unwrap();
+        std::thread::scope(|scope| {
+            let keeper = scope.spawn(|| std::fs::rename(&whole, &path).unwrap());
+            loop {
+                match session.export_device_key() {
+                    Ok(found) => {
+                        assert!(found == key, "round {round}: another key");
+                        break;
+                    }
+                    Err(error) => assert!(
+                        !error.to_string().contains("device key at"),
+                        "round {round}: {error}"
+                    ),
+                }
+            }
+            keeper.join().unwrap();
+        });
+    }
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
 /// Every operation works from any executor: they run on the session's own
 /// runtime (as jazz-ffi calls them, with `block_on` on a host thread).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -440,6 +805,60 @@ async fn a_guest_is_kept_while_no_one_is_signed_in_and_linked_on_sign_up() {
     assert_eq!(hal.subject, "hal");
     assert_eq!(hal.account, guest.account);
     unlinked.close().await.unwrap();
+    app.stop().await;
+}
+
+/// One app per store doesn't get in a session's way: signing out and in
+/// again, and linking, open the same directory while the handles they
+/// replace are still around and busy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_reopens_the_store_it_just_left() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let token = bearer(None);
+    let session = JazzSession::open(
+        client_files(),
+        app.session(&token)
+            .storage(Storage::Dir(dir.path().into()))
+            .initial(Initial::SignedOut),
+    )
+    .await
+    .unwrap();
+    session.create_device_account().await.unwrap();
+
+    let mut replaced = Vec::new();
+    for round in 0..20 {
+        let old = session.jazz().unwrap();
+        let busy = old.clone();
+        let (running, started) = tokio::sync::oneshot::channel();
+        let job = tokio::spawn(async move {
+            busy.with_client(move |_| async move {
+                let _ = running.send(());
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Ok(())
+            })
+            .await
+        });
+        started.await.unwrap();
+        if round % 2 == 1 {
+            // The client is already stopping when the session replaces it.
+            let stopping = old.clone();
+            tokio::spawn(async move { stopping.shutdown().await });
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        session.sign_out().await.unwrap();
+        session
+            .reopen_device_account()
+            .await
+            .unwrap_or_else(|error| panic!("round {round}: {error}"));
+        let _ = job.await.unwrap();
+        replaced.push(old);
+    }
+
+    *token.lock().unwrap() = Some("token-kim".to_owned());
+    session.link_device_account().await.unwrap();
+    assert_eq!(session.snapshot().user.unwrap().subject, "kim");
+    session.close().await.unwrap();
     app.stop().await;
 }
 
@@ -664,6 +1083,172 @@ async fn retry_after_a_link_whose_reopen_failed_signs_the_user_in() {
         ("quin", guest.account)
     );
     assert_eq!(session.snapshot().status, SessionStatus::Ready);
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
+/// The session's snapshot once `done` holds.
+async fn snapshot_until(
+    session: &JazzSession,
+    done: impl Fn(&jazz_app_support::SessionSnapshot) -> bool,
+) -> jazz_app_support::SessionSnapshot {
+    let mut changes = session.changes();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(snapshot) = changes.next().await {
+            if done(&snapshot) {
+                return snapshot;
+            }
+        }
+        panic!("the session's changes ended");
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the session stays {:?}", session.snapshot()))
+}
+
+async fn connected(jazz: &Jazz) {
+    let mut changes = jazz.sync_changes();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(status) = changes.next().await {
+            if status.link == jazz_app_support::Link::Connected {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the client connects");
+}
+
+/// An ordinary logout in the app's own auth: the client finds no one at a
+/// renewal or refresh and ends by itself. The session follows it.
+async fn follows_a_client_that_ended(by_refresh: bool) {
+    let app = App::start().await;
+    let token = bearer(Some("token-alice"));
+    let session = JazzSession::open(client_files(), app.session(&token))
+        .await
+        .unwrap();
+    let before = session.snapshot();
+    let old = session.jazz().unwrap();
+    connected(&old).await;
+
+    *token.lock().unwrap() = None;
+    if by_refresh {
+        old.session().unwrap().refresh().await.unwrap();
+    } else {
+        app.relay.refuse("token-alice", "token expired");
+        app.relay.kick();
+    }
+    let out = snapshot_until(&session, |s| s.status == SessionStatus::SignedOut).await;
+    assert!(out.client_epoch > before.client_epoch, "{out:?}");
+    assert_eq!(out.user, None);
+    assert!(matches!(session.jazz(), Err(Error::NoUser { .. })));
+    let read = old.all(todos::query()).await;
+    assert!(matches!(read, Err(Error::Replaced)), "{read:?}");
+
+    // The same user again: a client that works, and stays.
+    *token.lock().unwrap() = Some("token-alice.2".to_owned());
+    session.refresh().await.unwrap();
+    let back = session.snapshot();
+    assert_eq!(back.status, SessionStatus::Ready);
+    assert_eq!(
+        back.user.as_ref().map(|user| user.subject.as_str()),
+        Some("alice")
+    );
+    session.jazz().unwrap().all(todos::query()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(session.snapshot().client_epoch, back.client_epoch);
+    assert_eq!(session.snapshot().status, SessionStatus::Ready);
+
+    session.close().await.unwrap();
+    assert_eq!(session.snapshot().status, SessionStatus::Closed);
+    app.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_follows_its_client_signed_out_at_a_renewal() {
+    follows_a_client_that_ended(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_follows_its_client_signed_out_at_a_refresh() {
+    follows_a_client_that_ended(true).await;
+}
+
+/// The client ends while the session is already following the same user:
+/// following doesn't keep the dead client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn following_the_same_user_needs_a_client_that_lives() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let app = App::start().await;
+    let token = bearer(Some("token-alice"));
+    let hold = Arc::new(AtomicBool::new(false));
+    let (asked, answer) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let provider = {
+        let (token, hold) = (token.clone(), hold.clone());
+        let (asked, answer) = (asked.clone(), answer.clone());
+        move |_: TokenReason| {
+            let held = hold.swap(false, Ordering::SeqCst);
+            let token = token.lock().unwrap().clone();
+            let (asked, answer) = (asked.clone(), answer.clone());
+            async move {
+                if held {
+                    asked.notify_one();
+                    answer.notified().await;
+                    return Ok(Some("token-alice.2".to_owned()));
+                }
+                Ok(token)
+            }
+        }
+    };
+    let config = SessionConfig::new(app.app_id)
+        .server(&app.relay.endpoint)
+        .bearer(provider);
+    let session = JazzSession::open(client_files(), config).await.unwrap();
+    let old = session.jazz().unwrap();
+    let epoch = session.snapshot().client_epoch;
+
+    hold.store(true, Ordering::SeqCst);
+    let following = tokio::spawn({
+        let session = session.clone();
+        async move { session.refresh().await }
+    });
+    asked.notified().await;
+    *token.lock().unwrap() = None;
+    old.session().unwrap().refresh().await.unwrap();
+    *token.lock().unwrap() = Some("token-alice.2".to_owned());
+    answer.notify_one();
+    following.await.unwrap().unwrap();
+
+    let back = session.snapshot();
+    assert_eq!(back.status, SessionStatus::Ready);
+    assert!(back.client_epoch > epoch, "kept the dead client: {back:?}");
+    session.jazz().unwrap().all(todos::query()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(session.snapshot(), back, "the old client's end changed it");
+
+    session.close().await.unwrap();
+    app.stop().await;
+}
+
+/// A guest's client that stops signs the session out, as signing out does:
+/// the key is kept to reopen, and no account is made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_guests_key_outlives_its_client() {
+    let app = App::start().await;
+    let token = bearer(None);
+    let config = app.session(&token).initial(Initial::Device);
+    let session = JazzSession::open(client_files(), config).await.unwrap();
+    let guest = session.snapshot().user.unwrap().account;
+    let key = session.export_device_key().unwrap();
+
+    session.jazz().unwrap().shutdown().await.unwrap();
+    snapshot_until(&session, |s| s.status == SessionStatus::SignedOut).await;
+    assert_eq!(session.export_device_key().unwrap(), key);
+    session.reopen_device_account().await.unwrap();
+    assert_eq!(session.snapshot().user.unwrap().account, guest);
+
     session.close().await.unwrap();
     app.stop().await;
 }

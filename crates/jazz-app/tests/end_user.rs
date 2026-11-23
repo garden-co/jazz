@@ -627,6 +627,72 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
     app.stop().await;
 }
 
+/// A user's handle can't sign out the backend client it came from, which
+/// goes on renewing its credential for every user.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_users_handle_cant_sign_out_its_backend_client() {
+    let app = App::start().await;
+    let token = Arc::new(Mutex::new("machine-trusted".to_owned()));
+    let provider = {
+        let token = token.clone();
+        move |_: TokenReason| {
+            let token = token.lock().unwrap().clone();
+            async move { Ok(Some(token)) }
+        }
+    };
+    let job = Jazz::open(
+        files(),
+        Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .credential(provider),
+    )
+    .await
+    .unwrap();
+    let alice = Jazz::open(
+        client_files(),
+        app.user(Auth::bearer(|_| async {
+            Ok(Some("token-alice".to_owned()))
+        })),
+    )
+    .await
+    .unwrap();
+    connected(&job).await;
+    let as_alice = job
+        .for_user("alice", serde_json::Value::Null)
+        .await
+        .unwrap();
+
+    let signed_out = as_alice.sign_out().await;
+    let backend = job.session().unwrap();
+    assert!(
+        matches!(backend.state(), SessionState::SignedIn { .. }),
+        "the backend client's session: {:?}",
+        backend.state()
+    );
+    assert!(
+        matches!(&signed_out, Err(Error::Unsupported(what)) if what.contains("(for_user)")),
+        "{signed_out:?}"
+    );
+    assert!(
+        as_alice.session().is_none(),
+        "not the backend client's session"
+    );
+
+    // Its credential expires: it still renews, and the user's writes sync.
+    *token.lock().unwrap() = "machine-trusted.2".to_owned();
+    app.relay.refuse("machine-trusted", "token expired");
+    app.relay.kick();
+    as_alice
+        .insert(NewTodo::new("After the renewal", false))
+        .await
+        .unwrap();
+    assert_eq!(remote_todos(&alice, 1).await.len(), 1);
+
+    job.close(jazz_app_support::CLOSE_TIMEOUT).await.unwrap();
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_scoped_backend_client_acts_as_its_user_and_an_untrusted_one_is_refused() {
     use jazz_app_support::BackendClientKind;

@@ -904,10 +904,11 @@ impl Machine {
     fn sign_out(&mut self) {
         self.renewal = None;
         self.pending = None;
-        self.set(SessionState::SignedOut);
+        // Stopping before anyone reads `SignedOut`: they may open the store again.
         if let Some(stop) = self.stop.take() {
             stop();
         }
+        self.set(SessionState::SignedOut);
     }
 
     fn set(&self, state: SessionState) {
@@ -937,7 +938,13 @@ impl crate::Jazz {
     /// The end user's session, for a client opened with
     /// [`crate::Config::user`]: who is signed in, and whether their
     /// credential still holds.
+    ///
+    /// `None` on a handle acting for a user ([`crate::Jazz::for_user`]): the
+    /// session is the backend client's it came from, shared by every user.
     pub fn session(&self) -> Option<&Session> {
+        if self.for_user {
+            return None;
+        }
         self.info.session.as_ref()
     }
 
@@ -959,11 +966,16 @@ impl crate::Jazz {
     /// Refused with [`Error::Unsupported`] on a handle from a
     /// [`crate::JazzSession`], which stays open: use
     /// [`crate::JazzSession::sign_out`].
+    ///
+    /// Refused with [`Error::Unsupported`] on a handle acting for a user
+    /// ([`crate::Jazz::for_user`]): the session is every user's.
     pub async fn sign_out(&self) -> Result<()> {
+        self.refuse_for_user("sign_out")?;
         let session = self.session().ok_or_else(|| {
             Error::Config("only an end user's client signs out (Config::user)".into())
         })?;
         session.refuse_if_owned("sign_out", "signOut (JazzSession::sign_out)")?;
+        self.begin_stopping();
         session.sign_out().await;
         self.shutdown().await
     }
