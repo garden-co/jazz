@@ -897,3 +897,50 @@ it("keeps the key of a clearOnSignOut sign-out whose wipe failed: whether anothe
   expect(session.getSnapshot().status).toBe("signed-out");
   expect(JSON.parse(store.value()!).roots).toEqual([guestRoot(1)]);
 });
+
+// A sign-out recorded when it begins (`requestSignOut`), before the client closes.
+it("a device account's sign-out that hasn't finished already holds across a reload", async () => {
+  const store = storeWith(null);
+  const accounts = await deviceAccounts(store, guestRoot(1));
+  await ensureAutomaticLocalFirst(accounts);
+  await accounts.settleSelection();
+  await accounts.requestSignOut();
+  // Still the session's account in this tab (the app may retry the sign-out)…
+  expect(accounts.getLoggedIn()!.id).toBe(accountOf(guestRoot(1)));
+  // …but the device says signed out, and keeps the key for its next sign-in.
+  expect(JSON.parse(store.value()!)).toMatchObject({
+    roots: [guestRoot(1)],
+    selected: null,
+    signedOut: true,
+  });
+  const reloaded = await deviceAccounts(store, guestRoot(2));
+  expect(reloaded.getLoggedIn()).toBeUndefined();
+  expect(await ensureAutomaticLocalFirst(reloaded)).toBeUndefined();
+  expect(await keptDeviceKey(reloaded).latest()).toBe(guestRoot(1));
+});
+
+it("with clearOnSignOut, a sign-out that finishes after it was recorded forgets the key", async () => {
+  const store = storeWith(null);
+  const accounts = await deviceAccounts(store, guestRoot(1), false);
+  accounts.createLocalFirst();
+  await accounts.settleSelection();
+  await accounts.requestSignOut();
+  expect(JSON.parse(store.value()!).roots).toEqual([guestRoot(1)]);
+  accounts.logout();
+  await accounts.settleSelection();
+  expect(store.value()).not.toContain(guestRoot(1));
+  expect(JSON.parse(store.value()!)).toMatchObject({ roots: [], selected: null, signedOut: true });
+});
+
+it("a remembered user's sign-out that hasn't finished already holds across a reload", async () => {
+  const store = storeWith(REMEMBERED_FIXTURE);
+  const accounts = await prepareAccountManager({ appId: "test", registry, store, mintToken });
+  expect(accounts.getLoggedIn()!.id).toBe(ACCOUNT);
+  await accounts.requestSignOut();
+  expect(accounts.getLoggedIn()!.id).toBe(ACCOUNT);
+  expect(store.value()).toBe(
+    '{"format":"jazz-account-selection-v1","roots":[],"selected":null,"signedOut":true}',
+  );
+  const reloaded = await prepareAccountManager({ appId: "test", registry, store, mintToken });
+  expect(reloaded.getLoggedIn()).toBeUndefined();
+});

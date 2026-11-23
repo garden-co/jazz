@@ -1,7 +1,7 @@
 import type { AccountHandle, AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
 import type { AuthFailureReason } from "../runtime/auth-state.js";
-import { switchJazzSessionUser, type SessionCore } from "./state.js";
+import { signOutPendingAccount, switchJazzSessionUser, type SessionCore } from "./state.js";
 
 const LOCAL_FIRST_ISSUER = "urn:jazz:local-first";
 const SYSTEM_ISSUER = "urn:jazz:system";
@@ -411,8 +411,20 @@ export function watchBackendUser<Client>(
         refusedLink.account === account &&
         refusedLink.issuer === signedIn.issuer &&
         refusedLink.subject === signedIn.subject;
+      // A guest whose sign-out began and couldn't finish: it is signed out
+      // on this device, so it is never linked to whoever signs in next. The
+      // user signs in to an account of their own; the guest's key and
+      // writes stay on this device.
+      const leaving = guest && signOutPendingAccount(session) === account;
+      if (leaving && signedIn.hasAccount === false) return attempt(session.loginWithBackend());
       // Not linking on its own: the app decides what becomes of this guest.
-      if (guest && !linkGuest && signedIn.hasAccount === false) return;
+      // A check of the watch's own leaves it as it is; the app's
+      // `reauthenticate` (its `refresh()`) is that decision: an account of
+      // the user's own, the guest staying on this device.
+      if (guest && !linkGuest && signedIn.hasAccount === false) {
+        if (!asked) return;
+        return attempt(session.loginWithBackend());
+      }
       if (guest && signedIn.hasAccount === false && !refusedBefore) {
         const link = { done: linkWithBackend(), result: undefined as unknown };
         linking = link;

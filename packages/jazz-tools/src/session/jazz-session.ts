@@ -185,6 +185,14 @@ export interface JazzSession<Client> {
    * else, or when signed out and the device keeps no device account.
    */
   exportDeviceKey(): string;
+  /**
+   * Sign out of Jazz (your own auth's sign-out is separate). Waits for the
+   * account's writes to upload; when they can't yet (offline), it rejects
+   * and the session stays signed in here, so you can call it again. The
+   * device already counts the account as signed out: a reload opens no
+   * one, and the next sign-in gets an account of its own. The account's key
+   * and unsynced writes stay on the device until it signs in again.
+   */
   signOut(): Promise<void>;
   /** Try again after an error: see `snapshot.recovery`. Restarts a failed startup. */
   retry(): Promise<void>;
