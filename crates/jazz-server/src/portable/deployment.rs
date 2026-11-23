@@ -34,7 +34,10 @@ pub(crate) fn check_stored_columns(
         if *table == DECLARATIONS && db.host_get(*table, key)?.is_none() {
             let entries = encryption::decode_stored(bytes).map_err(invalid)?;
             if !entries.is_empty() {
-                new.push((key.as_slice(), entries));
+                let hash = SchemaHash(key.as_slice().try_into().map_err(|_| {
+                    invalid("invalid schema hash in new encryption declarations".into())
+                })?);
+                new.push((hash, entries));
             }
         }
     }
@@ -44,14 +47,10 @@ pub(crate) fn check_stored_columns(
 
     let mut history = HashMap::<(String, String), Vec<EncryptedColumn>>::new();
     let mut record_columns =
-        |key: &[u8], entries: encryption::Entries, check: bool| -> Result<(), Error> {
+        |hash: SchemaHash, entries: encryption::Entries, check: bool| -> Result<(), Error> {
             if entries.is_empty() {
                 return Ok(());
             }
-            let hash = SchemaHash(
-                key.try_into()
-                    .map_err(|_| invalid("invalid stored declaration key".into()))?,
-            );
             let names = db.catalogue_stored_names(&hash)?;
             for (table, entry) in entries {
                 for (name, declared) in entry.columns {
@@ -78,15 +77,16 @@ pub(crate) fn check_stored_columns(
             Ok(())
         };
     for (key, bytes) in db.host_prefix(DECLARATIONS, &[])? {
-        record_columns(
-            &key,
-            encryption::decode_stored(&bytes).map_err(invalid)?,
-            false,
-        )?;
+        // Only a schema-hash key can name a deployed version.
+        if let Ok(hash) = key.as_slice().try_into() {
+            let entries = encryption::decode_stored(&bytes)
+                .map_err(|error| Error::new(ErrorCode::Storage, error))?;
+            record_columns(SchemaHash(hash), entries, false)?;
+        }
     }
     // New versions in the same publication arrive in migration order.
-    for (key, entries) in new {
-        record_columns(key, entries, true)?;
+    for (hash, entries) in new {
+        record_columns(hash, entries, true)?;
     }
     Ok(())
 }
