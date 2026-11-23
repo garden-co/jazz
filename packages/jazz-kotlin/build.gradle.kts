@@ -324,12 +324,15 @@ tasks.named<Test>("jvmTest") {
     finalizedBy("jvmComputedTest")
 }
 tasks.named("check") { dependsOn("compileEdgesKotlinJvm") }
-// `gradle test` as before the multiplatform move: the JVM target's tests.
-tasks.register("test") {
-    group = "verification"
-    description = "Runs the JVM target's tests (jvmTest, and the goldens' own)."
-    dependsOn("jvmTest", "jvmComputedTest")
+// `gradle test` as before the multiplatform move: the JVM target's tests (with
+// the Android target, AGP's `test` too, which runs its host-side unit tests).
+if (!withAndroid) {
+    tasks.register("test") {
+        group = "verification"
+        description = "Runs the JVM target's tests (jvmTest, and the goldens' own)."
+    }
 }
+tasks.configureEach { if (name == "test") dependsOn("jvmTest", "jvmComputedTest") }
 
 // Maven Central (dev/scripts/publish-kotlin.sh) and the local repository
 // (publishAllPublicationsToJazzLocalRepository): tools.jazz:jazz-kotlin (the
