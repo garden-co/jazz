@@ -850,12 +850,17 @@ describe("encryption on Node, end to end", () => {
       { tier: "local-first" },
     );
     cleanups.push(async () => stop());
+    // The app can ask why the query is still loading: the device can't read yet.
+    let readable = false;
+    void fresh.db.encryption.readable().then(() => (readable = true));
     await new Promise((resolve) => setTimeout(resolve, 2_000));
     expect(seen).toEqual([]);
     expect(errors).toEqual([]);
+    expect(readable).toBe(false);
     // The server comes back: the first sync brings the catalogue and the rows.
     await serve({ dir, port });
     await expect.poll(() => seen.at(-1), { timeout: 30_000 }).toEqual(["kept"]);
+    await expect.poll(() => readable, { timeout: 1_000 }).toBe(true);
     expect(errors).toEqual([]);
     // Its open socket would hold the restarted server's close.
     stop();

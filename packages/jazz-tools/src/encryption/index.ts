@@ -205,13 +205,16 @@ export class Encryption {
   }
 
   /**
-   * @internal Resolves once this client can open the encrypted rows its
-   * store holds: it knows the app's catalogue identities (synced once, then
-   * kept with the store) and has loaded the keys it holds. A device that
-   * synced before is readable at once, with or without the server; one that
-   * never synced waits, without a deadline, for its first sync. Unlike
-   * {@link ready} it does not wait for the account's verification, which
-   * needs the server. Rejects only when the runtime can no longer answer.
+   * Resolves once this client can open the encrypted rows its store holds:
+   * it knows the app's catalogue identities (synced once, then kept with
+   * the store) and has loaded the keys it holds. A device that synced
+   * before is readable at once, with or without the server; one that never
+   * synced waits, without a deadline, for its first sync. Live queries on
+   * encrypted columns wait for the same thing and stay loading until then,
+   * so while this has not resolved, a loading query is waiting for the
+   * device's first sync. Unlike {@link ready} it does not wait for the
+   * account's verification, which can need the server. Rejects only when
+   * the runtime can no longer answer.
    */
   async readable(): Promise<void> {
     for (;;) {
