@@ -1072,18 +1072,29 @@ async fn connect_user(
                 .token(TokenReason::Connect)
                 .await?
                 .ok_or(Error::SignedOut)?;
-            let signed_in = backend::sign_in(endpoint, app, &token)
-                .await?
-                .ok_or(Error::SignedOut)?;
-            let mut session = Session::new(&signed_in.identity.issuer, &signed_in.identity.subject)
-                .with_claims(signed_in.claims.clone());
-            session.account_id = Some(signed_in.account);
-            context.account_id = Some(signed_in.account);
-            context.backend_session = Some(session);
-            place.hold(&mut context, Owner::Account(signed_in.account))?;
-            let client =
-                JazzClient::connect_with_native_transport_bearer(context, connector, token.clone())
-                    .await?;
+            let signed_in = match backend::try_sign_in(endpoint, app, &token).await? {
+                backend::SignIn::SignedIn(signed_in) => signed_in,
+                backend::SignIn::NoOne => return Err(Error::SignedOut),
+                backend::SignIn::Failing(error) => return Err(error),
+                backend::SignIn::Unreachable(error) => {
+                    return open_offline(
+                        context, connector, provider, token, endpoint, place, error,
+                    )
+                    .await;
+                }
+            };
+            // Remembered for opening offline later: a store that can't keep
+            // it still opens now.
+            if let Some(root) = &place.root {
+                let _ = crate::remembered::record(
+                    root,
+                    &token,
+                    signed_in.account,
+                    &signed_in.identity.issuer,
+                    &signed_in.identity.subject,
+                    &signed_in.claims,
+                );
+            }
             let user = User {
                 account: signed_in.account,
                 issuer: signed_in.identity.issuer,
@@ -1091,9 +1102,103 @@ async fn connect_user(
                 claims: signed_in.claims,
                 kind: UserKind::Backend,
             };
-            Ok((client, user, Credential::Bearer { provider, token }))
+            let client = connect_bearer(context, connector, &user, &token, place, false).await?;
+            Ok((
+                client,
+                user,
+                Credential::Bearer {
+                    provider,
+                    token,
+                    unverified: None,
+                },
+            ))
         }
     }
+}
+
+/// Opens the bearer's user's store, connecting with `token`; `held`: with
+/// nothing reaching the server until the session releases it.
+async fn connect_bearer(
+    mut context: AppContext,
+    connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
+    user: &User,
+    token: &str,
+    place: &mut Place<'_>,
+    held: bool,
+) -> Result<JazzClient> {
+    let mut session = Session::new(&user.issuer, &user.subject).with_claims(user.claims.clone());
+    session.account_id = Some(user.account);
+    context.account_id = Some(user.account);
+    context.backend_session = Some(session);
+    place.hold(&mut context, Owner::Account(user.account))?;
+    let token = token.to_owned();
+    Ok(if held {
+        JazzClient::connect_with_native_transport_bearer_held(context, connector, token).await?
+    } else {
+        JazzClient::connect_with_native_transport_bearer(context, connector, token).await?
+    })
+}
+
+/// The bearer's user, opened with no network: their store as the account
+/// the bearer's `iss`/`sub` last signed in as on this device. The bearer is
+/// not verified, so it only opens a store already here (anyone with the
+/// files can read it). The client reaches the server only once the session
+/// signs the bearer in again as that account; until then nothing uploads,
+/// and writes queue.
+async fn open_offline(
+    context: AppContext,
+    connector: Arc<jazz_native_transport::HttpStreamFallbackConnector>,
+    provider: crate::auth::Bearer,
+    token: String,
+    endpoint: &str,
+    place: &mut Place<'_>,
+    unreachable: String,
+) -> Result<(JazzClient, User, Credential)> {
+    let cannot = |why: &str| {
+        Error::Server(format!(
+            "signing in: {unreachable}; opening offline needs an earlier sign-in with this \
+             bearer's user on this device ({why})"
+        ))
+    };
+    let Some(root) = place.root.clone() else {
+        return Err(cannot("the store is in memory"));
+    };
+    if crate::remembered::token_identity(&token).is_none() {
+        return Err(cannot("the bearer is not a JWT"));
+    }
+    let Some(remembered) = crate::remembered::lookup(&root, &token) else {
+        return Err(cannot("no sign-in remembered"));
+    };
+    if !root
+        .join(remembered.account.0.to_string())
+        .join("jazz.sqlite")
+        .exists()
+    {
+        return Err(cannot("their store is gone"));
+    }
+    let user = User {
+        account: remembered.account,
+        issuer: remembered.issuer,
+        subject: remembered.subject,
+        claims: remembered.claims,
+        kind: UserKind::Backend,
+    };
+    let app = context.app_id;
+    let client = connect_bearer(context, connector, &user, &token, place, true).await?;
+    let unverified = crate::session::Unverified {
+        endpoint: endpoint.to_owned(),
+        app,
+        root,
+    };
+    Ok((
+        client,
+        user,
+        Credential::Bearer {
+            provider,
+            token,
+            unverified: Some(unverified),
+        },
+    ))
 }
 
 #[allow(dead_code)]

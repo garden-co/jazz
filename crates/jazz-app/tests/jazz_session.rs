@@ -699,3 +699,64 @@ async fn retry_after_a_link_whose_reopen_failed_signs_the_user_in() {
     session.close().await.unwrap();
     app.stop().await;
 }
+
+/// A session on the app's bearer opens its user's store with no network,
+/// if they signed in on this device before; once the backend is back, the
+/// same client syncs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_opens_its_bearers_store_offline() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let token = bearer(Some(&relay::jwt("kim", 0)));
+    let open = || {
+        JazzSession::open(
+            client_files(),
+            app.session(&token).storage(Storage::Dir(dir.path().into())),
+        )
+    };
+    let session = open().await.unwrap();
+    let kim = session.snapshot().user.unwrap();
+    let jazz = session.jazz().unwrap();
+    jazz.insert(NewTodo::new("synced", false)).await.unwrap();
+    jazz.wait_for_sync().await.unwrap();
+    drop(jazz);
+    session.close().await.unwrap();
+
+    app.relay.set_unreachable(true);
+    *token.lock().unwrap() = Some(relay::jwt("kim", 1));
+    let session = open().await.expect("opens offline");
+    assert_eq!(session.snapshot().user.unwrap().account, kim.account);
+    let jazz = session.jazz().unwrap();
+    assert_eq!(
+        jazz.all_with(todos::query(), ReadTier::LocalOnly)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    jazz.insert(NewTodo::new("offline", false)).await.unwrap();
+    app.relay.set_unreachable(false);
+    jazz.wait_for_sync()
+        .await
+        .expect("syncs once the backend is back");
+    drop(jazz);
+    session.close().await.unwrap();
+
+    // Someone who never signed in here is refused offline.
+    app.relay.set_unreachable(true);
+    *token.lock().unwrap() = Some(relay::jwt("lee", 0));
+    // The session opens with no usable client, and says why.
+    let refused = open().await.unwrap();
+    let snapshot = refused.snapshot();
+    assert_eq!(snapshot.status, SessionStatus::Error, "{snapshot:?}");
+    assert!(snapshot.user.is_none());
+    let error = snapshot.error.expect("an error");
+    assert!(
+        error
+            .message
+            .contains("opening offline needs an earlier sign-in"),
+        "{error:?}"
+    );
+    refused.close().await.unwrap();
+    app.stop().await;
+}

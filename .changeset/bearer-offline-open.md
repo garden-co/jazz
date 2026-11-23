@@ -1,0 +1,5 @@
+---
+"jazz-tools": patch
+---
+
+**Native clients (`jazz-app-support`, `jazz-ffi`): a user signed in with the app's bearer opens their persistent store offline.** Each successful bearer sign-in records the bearer JWT's `iss`/`sub` and the account the server named in `<dataDir>/bearer-accounts.json`. When the app's endpoint can't be reached at open (no HTTP answer: connecting fails, the connection drops, or the request times out), a JWT bearer that signed in on this device before opens that account's store, with reads and local writes working. The client makes no request and uploads nothing as that user until the server has signed the bearer in again as the same account. If the server names another account or refuses the bearer, the client stops and the session reads signed out. An opaque bearer, a user who never signed in on this device, a deleted store and a server that answers (`4xx`/`5xx`) still fail the open, now with a message saying that opening offline needs an earlier sign-in on this device.

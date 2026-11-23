@@ -137,6 +137,21 @@ pub(crate) struct SignedInIdentity {
     pub subject: String,
 }
 
+/// What signing a bearer in came to.
+#[derive(Debug)]
+pub(crate) enum SignIn {
+    /// The server signed the user in.
+    SignedIn(SignedIn),
+    /// The server answered that the bearer names no one.
+    NoOne,
+    /// No answer came back: the request could not connect, was cut off
+    /// before a response, or timed out. Any HTTP answer, a `5xx` too, is
+    /// not this: the server was reached.
+    Unreachable(String),
+    /// The server answered with a `5xx`: reached, but failing for now.
+    Failing(Error),
+}
+
 /// Signs the bearer's user in at the app's Jazz endpoint (`createJazz`'s
 /// handler, e.g. `https://app.example/jazz`), as a browser does with its
 /// cookies: the backend's `authenticate` names the user, and the core
@@ -146,14 +161,32 @@ pub(crate) async fn sign_in(
     app_id: AppId,
     bearer: &str,
 ) -> Result<Option<SignedIn>> {
-    let response = http()?
+    match try_sign_in(endpoint, app_id, bearer).await? {
+        SignIn::SignedIn(signed_in) => Ok(Some(signed_in)),
+        SignIn::NoOne => Ok(None),
+        SignIn::Unreachable(error) => Err(Error::Server(format!("signing in: {error}"))),
+        SignIn::Failing(error) => Err(error),
+    }
+}
+
+/// [`sign_in`], telling an unreachable server apart from its answers.
+pub(crate) async fn try_sign_in(endpoint: &str, app_id: AppId, bearer: &str) -> Result<SignIn> {
+    let response = match http()?
         .post(app_url(endpoint, app_id, "accounts/backend-sign-in"))
         .bearer_auth(bearer)
         .send()
         .await
-        .map_err(|error| Error::Server(format!("signing in: {error}")))?;
+    {
+        Ok(response) => response,
+        // `send` fails only before a response arrives (with redirects off):
+        // connecting, the request cut off, or the timeout.
+        Err(error) if error.is_builder() => {
+            return Err(Error::Server(format!("signing in: {error}")));
+        }
+        Err(error) => return Ok(SignIn::Unreachable(error.to_string())),
+    };
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Ok(None);
+        return Ok(SignIn::NoOne);
     }
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Err(Error::Server(
@@ -161,6 +194,9 @@ pub(crate) async fn sign_in(
              endpoint (createJazz's handler, e.g. https://app.example/jazz), not the core"
                 .into(),
         ));
+    }
+    if response.status().is_server_error() {
+        return Ok(SignIn::Failing(refusal("signing in", response).await));
     }
     if !response.status().is_success() {
         return Err(refusal("signing in", response).await);
@@ -174,7 +210,7 @@ pub(crate) async fn sign_in(
             "signing in returned the system account".into(),
         ));
     }
-    Ok(Some(signed_in))
+    Ok(SignIn::SignedIn(signed_in))
 }
 
 /// Links the device account `key` to the user the app's backend names from
@@ -258,19 +294,27 @@ pub(crate) async fn backend_user(
     endpoint: &str,
     app_id: AppId,
     bearer: &str,
-) -> Result<Option<BackendUser>> {
-    let response = http()?
+) -> std::result::Result<Option<BackendUser>, Unanswered> {
+    let response = match http()?
         .post(app_url(endpoint, app_id, "accounts/backend-user"))
         .bearer_auth(bearer)
         .send()
         .await
-        .map_err(|error| Error::Server(format!("asking who is signed in: {error}")))?;
+    {
+        Ok(response) => response,
+        Err(error) if !error.is_builder() => {
+            return Err(Unanswered::Unreachable(format!(
+                "asking who is signed in: {error}"
+            )));
+        }
+        Err(error) => return Err(Error::Server(format!("asking who is signed in: {error}")).into()),
+    };
     // Older backends answer no one with a 401.
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Ok(None);
     }
     if !response.status().is_success() {
-        return Err(refusal("asking who is signed in", response).await);
+        return Err(refusal("asking who is signed in", response).await.into());
     }
     let body: serde_json::Value = response
         .json()
@@ -281,5 +325,28 @@ pub(crate) async fn backend_user(
     }
     serde_json::from_value(body)
         .map(Some)
-        .map_err(|error| Error::Server(format!("asking who is signed in: {error}")))
+        .map_err(|error| Error::Server(format!("asking who is signed in: {error}")).into())
+}
+
+/// A request that failed: unanswered (as [`SignIn::Unreachable`]), or an
+/// error.
+#[derive(Debug)]
+pub(crate) enum Unanswered {
+    Unreachable(String),
+    Failed(Error),
+}
+
+impl From<Error> for Unanswered {
+    fn from(error: Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<Unanswered> for Error {
+    fn from(unanswered: Unanswered) -> Self {
+        match unanswered {
+            Unanswered::Unreachable(error) => Error::Server(error),
+            Unanswered::Failed(error) => error,
+        }
+    }
 }

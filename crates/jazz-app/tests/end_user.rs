@@ -1356,3 +1356,279 @@ async fn a_store_kept_at_the_dir_itself_is_left_alone() {
     local.shutdown().await.unwrap();
     app.stop().await;
 }
+
+// ---- opening offline with a bearer ------------------------------------------
+
+/// A bearer whose provider always gives `token`.
+fn bearer_of(token: String) -> Auth {
+    Auth::bearer(move |_| {
+        let token = token.clone();
+        async move { Ok(Some(token)) }
+    })
+}
+
+/// An endpoint nothing listens at: connecting is refused.
+async fn dead_endpoint() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/jazz", listener.local_addr().unwrap());
+    drop(listener);
+    endpoint
+}
+
+/// Alice, signed in once with her JWT on `dir`: one write synced, one left
+/// unsent. Returns her account.
+async fn alice_signed_in_once(app: &App, dir: &std::path::Path) -> jazz_app_support::AccountId {
+    let alice = Jazz::open(
+        client_files(),
+        app.user(bearer_of(relay::jwt("alice", 0)))
+            .storage(Storage::Dir(dir.into())),
+    )
+    .await
+    .expect("alice signs in");
+    connected(&alice).await;
+    alice.insert(NewTodo::new("synced", false)).await.unwrap();
+    alice.wait_for_sync().await.unwrap();
+    app.relay.set_unreachable(true);
+    alice.insert(NewTodo::new("unsent", false)).await.unwrap();
+    let account = alice.account().unwrap();
+    alice.shutdown().await.unwrap();
+    account
+}
+
+fn admitted_as(app: &App, who: &str) -> usize {
+    app.relay
+        .admitted
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|admitted| *admitted == who)
+        .count()
+}
+
+fn offline_open_refused(result: Result<Jazz, Error>) -> String {
+    match result {
+        Err(Error::Server(message)) => {
+            assert!(
+                message.contains("opening offline needs an earlier sign-in"),
+                "{message}"
+            );
+            message
+        }
+        Err(error) => panic!("refused as offline open: {error:?}"),
+        Ok(_) => panic!("refused as offline open, but it opened"),
+    }
+}
+
+/// Written, closed, and with the server gone, a bearer's user opens their
+/// store again: their rows and writes are there, nothing reaches the server
+/// until it signs them in again, and then their queued writes upload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bearers_user_opens_their_store_offline() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let account = alice_signed_in_once(&app, dir.path()).await;
+    let admitted = admitted_as(&app, "user:alice");
+
+    // No server listening at all: the store opens, as hers.
+    let gone = Jazz::open(
+        client_files(),
+        Config::new(app.app_id)
+            .server(dead_endpoint().await)
+            .user(bearer_of(relay::jwt("alice", 1)))
+            .storage(Storage::Dir(dir.path().into())),
+    )
+    .await
+    .expect("opens offline with no server listening");
+    assert_eq!(gone.account(), Some(account));
+    assert_eq!(local_titles(&gone).await, ["synced", "unsent"]);
+    gone.shutdown().await.unwrap();
+
+    // The app's server drops every connection: the same.
+    let alice = Jazz::open(
+        client_files(),
+        app.user(bearer_of(relay::jwt("alice", 2)))
+            .storage(Storage::Dir(dir.path().into())),
+    )
+    .await
+    .expect("opens offline");
+    let session = alice.session().unwrap().clone();
+    let SessionState::SignedIn { user } = session.state() else {
+        panic!("signed in: {:?}", session.state());
+    };
+    assert_eq!(
+        (user.account, user.issuer.as_str(), user.subject.as_str()),
+        (account, "jazz:backend", "alice")
+    );
+    assert_eq!(local_titles(&alice).await, ["synced", "unsent"]);
+    alice.insert(NewTodo::new("offline", false)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(admitted_as(&app, "user:alice"), admitted);
+
+    // The server is back: it signs her in again, and her writes upload.
+    app.relay.set_unreachable(false);
+    alice
+        .wait_for_sync()
+        .await
+        .expect("her queued writes upload");
+    assert_eq!(
+        server_titles(&app, 3).await,
+        ["offline", "synced", "unsent"]
+    );
+    assert_eq!(admitted_as(&app, "user:alice"), admitted + 1);
+    assert!(matches!(session.state(), SessionState::SignedIn { .. }));
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// Offline, another user's bearer opens only what that user signed in to
+/// on this device: their own store, or nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn offline_another_users_bearer_opens_only_their_own_store() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let on_dir = |token: String| {
+        app.user(bearer_of(token))
+            .storage(Storage::Dir(dir.path().into()))
+    };
+    let alice = alice_signed_in_once(&app, dir.path()).await;
+
+    // Bob never signed in here.
+    offline_open_refused(Jazz::open(client_files(), on_dir(relay::jwt("bob", 0))).await);
+    // Nor did a token naming Alice from another issuer, nor an opaque one.
+    offline_open_refused(
+        Jazz::open(
+            client_files(),
+            on_dir(relay::jwt_from("https://other.test", "alice", 0)),
+        )
+        .await,
+    );
+    offline_open_refused(Jazz::open(client_files(), on_dir("token-alice".into())).await);
+
+    // Bob signs in once, online; offline, his bearer opens his store.
+    app.relay.set_unreachable(false);
+    let bob = Jazz::open(client_files(), on_dir(relay::jwt("bob", 0)))
+        .await
+        .unwrap();
+    connected(&bob).await;
+    bob.insert(NewTodo::new("bob's", false)).await.unwrap();
+    bob.wait_for_sync().await.unwrap();
+    let bob_account = bob.account().unwrap();
+    bob.shutdown().await.unwrap();
+    app.relay.set_unreachable(true);
+    let bob = Jazz::open(client_files(), on_dir(relay::jwt("bob", 1)))
+        .await
+        .expect("bob opens offline");
+    assert_eq!(bob.account(), Some(bob_account));
+    assert_ne!(bob.account(), Some(alice));
+    assert_eq!(local_titles(&bob).await, ["bob's"]);
+    bob.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// Offline open is for a server that can't be reached: one that answers
+/// (failing, or naming no one) fails the open as before, remembered or not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_that_answers_is_not_offline() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    alice_signed_in_once(&app, dir.path()).await;
+    app.relay.set_unreachable(false);
+    let open = || {
+        Jazz::open(
+            client_files(),
+            app.user(bearer_of(relay::jwt("alice", 1)))
+                .storage(Storage::Dir(dir.path().into())),
+        )
+    };
+
+    app.relay
+        .links
+        .lock()
+        .unwrap()
+        .fail_sign_in
+        .insert("alice".into());
+    match open().await {
+        Err(Error::Server(message)) => {
+            assert!(message.contains("503"), "{message}");
+            assert!(!message.contains("offline"), "{message}");
+        }
+        other => panic!("a 503 fails the open: {:?}", other.map(|_| ())),
+    }
+
+    app.relay
+        .links
+        .lock()
+        .unwrap()
+        .no_one
+        .insert("alice".into());
+    assert!(matches!(open().await, Err(Error::SignedOut)));
+    app.stop().await;
+}
+
+/// A remembered account whose store was deleted is not opened offline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remembered_account_whose_store_is_gone_does_not_open_offline() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let account = alice_signed_in_once(&app, dir.path()).await;
+    std::fs::remove_dir_all(dir.path().join(account.0.to_string())).unwrap();
+    offline_open_refused(
+        Jazz::open(
+            client_files(),
+            app.user(bearer_of(relay::jwt("alice", 1)))
+                .storage(Storage::Dir(dir.path().into())),
+        )
+        .await,
+    );
+    assert!(!dir.path().join(account.0.to_string()).exists());
+    app.stop().await;
+}
+
+/// Opened offline, then the server signs the bearer in as another account:
+/// the client stops and the session reads signed out, having uploaded
+/// nothing. A server refusing the bearer does the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn offline_then_another_account_or_a_refusal_signs_out_with_nothing_uploaded() {
+    for refusal in [false, true] {
+        let app = App::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        alice_signed_in_once(&app, dir.path()).await;
+        let admitted = admitted_as(&app, "user:alice");
+        let alice = Jazz::open(
+            client_files(),
+            app.user(bearer_of(relay::jwt("alice", 1)))
+                .storage(Storage::Dir(dir.path().into())),
+        )
+        .await
+        .expect("opens offline");
+        alice.insert(NewTodo::new("offline", false)).await.unwrap();
+        let session = alice.session().unwrap().clone();
+        {
+            let mut links = app.relay.links.lock().unwrap();
+            if refusal {
+                links.no_one.insert("alice".into());
+            } else {
+                links.sign_in_as.insert("alice".into(), "mallory".into());
+            }
+        }
+        app.relay.set_unreachable(false);
+        session_until(&session, |state| *state == SessionState::SignedOut).await;
+        assert!(matches!(
+            alice.insert(NewTodo::new("after", false)).await,
+            Err(Error::Stopped)
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            admitted_as(&app, "user:alice"),
+            admitted,
+            "refusal: {refusal}"
+        );
+        assert_eq!(
+            server_titles(&app, 1).await,
+            ["synced"],
+            "refusal: {refusal}"
+        );
+        let _ = alice.shutdown().await;
+        app.stop().await;
+    }
+}

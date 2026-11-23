@@ -4,7 +4,8 @@
 //! way `admitPrelude` does (`packages/jazz-tools/src/backend/create-jazz.ts`).
 //!
 //! It also links a device account to a user (`backend-link`, with its
-//! challenge). Its `authenticate` reads `Authorization: Bearer token-<user>`.
+//! challenge). Its `authenticate` reads `Authorization: Bearer token-<user>`,
+//! or a JWT ([`jwt`]) whose `sub` is `<user>`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,12 @@ pub struct Links {
     pub attempts: usize,
     /// Users whose next `backend-sign-in` fails (`503`), once each.
     pub fail_sign_in: std::collections::HashSet<String>,
+    /// Users `backend-sign-in` names no one for (`401`).
+    pub no_one: std::collections::HashSet<String>,
+    /// Users `backend-sign-in` signs in as another user's account.
+    pub sign_in_as: HashMap<String, String>,
+    /// `backend-sign-in` requests answered so far, by user.
+    pub sign_ins: Vec<String>,
 }
 
 pub struct Relay {
@@ -180,9 +187,72 @@ async fn existing_account_of(backend: &Backend, user: &str) -> Result<Option<Str
 
 /// `authenticate`: the user a bearer names (`token-<user>[.<n>]`).
 fn authenticate(authorization: Option<&str>) -> Option<String> {
-    let token = authorization?.strip_prefix("Bearer token-")?;
+    let bearer = authorization?.strip_prefix("Bearer ")?;
+    if let Some(sub) = jwt_subject(bearer) {
+        return Some(sub);
+    }
+    let token = bearer.strip_prefix("token-")?;
     let user = token.split('.').next()?;
     (!user.is_empty()).then(|| user.to_owned())
+}
+
+const BASE64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+fn base64url(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, byte)| n | (u32::from(*byte) << (16 - 8 * i)));
+        for i in 0..=chunk.len() {
+            out.push(BASE64URL[((n >> (18 - 6 * i)) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
+fn unbase64url(text: &str) -> Option<Vec<u8>> {
+    let mut bits = 0u32;
+    let mut count = 0;
+    let mut out = Vec::new();
+    for c in text.bytes() {
+        let value = BASE64URL.iter().position(|b| *b == c)? as u32;
+        bits = (bits << 6) | value;
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            out.push((bits >> count) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// An (unsigned) JWT from the app's identity provider for `user`, as the
+/// app hands its bearer over: `iss` is the provider, `sub` the user, and
+/// `n` makes another token for the same user.
+#[allow(dead_code)]
+pub fn jwt(user: &str, n: u32) -> String {
+    jwt_from("https://idp.test", user, n)
+}
+
+/// A JWT from `issuer`: this backend authenticates only its own provider's.
+#[allow(dead_code)]
+pub fn jwt_from(issuer: &str, user: &str, n: u32) -> String {
+    let header = base64url(br#"{"alg":"none","typ":"JWT"}"#);
+    let claims = json!({ "iss": issuer, "sub": user, "n": n });
+    format!("{header}.{}.sig", base64url(claims.to_string().as_bytes()))
+}
+
+/// The `sub` of a JWT this provider issued.
+fn jwt_subject(token: &str) -> Option<String> {
+    let mut parts = token.split('.');
+    let (_, claims, _) = (parts.next()?, parts.next()?, parts.next()?);
+    let claims: Value = serde_json::from_slice(&unbase64url(claims)?).ok()?;
+    if claims["iss"] != "https://idp.test" {
+        return None;
+    }
+    claims["sub"].as_str().map(str::to_owned)
 }
 
 async fn serve(
@@ -304,11 +374,23 @@ async fn http(mut stream: TcpStream, head: &str, backend: Backend) {
             },
         }
     } else if path.ends_with("/accounts/backend-sign-in") {
-        let failing = user
-            .as_ref()
-            .is_some_and(|user| backend.links.lock().unwrap().fail_sign_in.remove(user));
+        let (failing, no_one, user) = {
+            let mut links = backend.links.lock().unwrap();
+            if let Some(user) = &user {
+                links.sign_ins.push(user.clone());
+            }
+            let failing = user
+                .as_ref()
+                .is_some_and(|user| links.fail_sign_in.remove(user));
+            let no_one = user
+                .as_ref()
+                .is_some_and(|user| links.no_one.contains(user));
+            let user = user.map(|user| links.sign_in_as.get(&user).cloned().unwrap_or(user));
+            (failing, no_one, user)
+        };
         match user {
             None => ("401 Unauthorized", "signed_out".to_owned()),
+            Some(_) if no_one => ("401 Unauthorized", "signed_out".to_owned()),
             Some(_) if failing => (
                 "503 Service Unavailable",
                 "account_request_failed".to_owned(),
