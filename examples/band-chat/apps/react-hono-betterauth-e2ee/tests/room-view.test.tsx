@@ -110,6 +110,7 @@ describe("locked messages", () => {
 
   it("says messages are locked once a room has had no key record for a while", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    deviceStatus.current = "active";
     show({
       messages: {
         data: [],
