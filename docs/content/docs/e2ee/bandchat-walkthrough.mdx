@@ -250,7 +250,7 @@ export async function admitMember({
 
 Being admitted does not give the person the key. Their devices get it from a device that already
 holds it. That device has to be online. Until then the new member sees the room's messages as
-**locked**.
+**decrypting**, and after ten seconds as waiting for the room's key.
 
 If `deliver()` fails or reports `failed` above zero, BandChat shows "Key not delivered yet".
 The member is already admitted. The dialog shows the reason when the call returns one.
@@ -382,9 +382,12 @@ the creator's next encrypted write.
 
 ## Messages you cannot read yet
 
-A browser that lacks a room's key does not show empty rooms. It says the messages are locked.
+A browser that lacks a room's key does not show empty rooms. It says how many messages it cannot
+read yet, and why.
 
-Every read result has an `unreadable` list. It names the rows the read left out. BandChat counts it:
+Every read result has an `unreadable` list. It names the rows the read left out, each with a
+`code`. `key-pending` means this account is a member and the key is on its way, so BandChat shows
+those as decrypting. Anything else, such as `key-unavailable`, shows as locked:
 
 ```tsx
 import { useAll } from "jazz-tools/react";
@@ -392,11 +395,16 @@ import { app } from "./jazz.generated";
 
 export function LockedNotice({ roomId }: { roomId: string }) {
   const { data: messages = [], unreadable } = useAll(app.messages.where({ roomId }));
-  return unreadable.length > 0 ? (
+  if (unreadable.length === 0) return null;
+  const keyOnItsWay = unreadable.every((row) => row.code === "key-pending");
+  return (
     <p>
-      {unreadable.length} messages are locked on this browser. {messages.length} are shown.
+      {keyOnItsWay
+        ? `Decrypting ${unreadable.length} messages…`
+        : `${unreadable.length} messages are locked on this browser.`}{" "}
+      {messages.length} are shown.
     </p>
-  ) : null;
+  );
 }
 ```
 
