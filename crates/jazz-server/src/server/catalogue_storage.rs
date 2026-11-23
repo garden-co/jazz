@@ -47,8 +47,7 @@ impl CatalogueStorage {
         self.store
             .send(Box::new(move |tables| {
                 let _ = reply.send(
-                    tables
-                        .catalogue_put(&put)
+                    jazz::db::block_on(tables.catalogue_put(&put))
                         .map_err(|error| error.to_string()),
                 );
             }))

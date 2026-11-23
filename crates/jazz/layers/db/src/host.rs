@@ -19,15 +19,23 @@
 //! [`FileOptions::synchronous_full`]: crate::db::FileOptions::synchronous_full
 //! [`Db`]: crate::db::Db
 
-use std::path::{Path, PathBuf};
+#[cfg(feature = "sqlite")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(feature = "sqlite")]
 use std::sync::Mutex;
+#[cfg(feature = "sqlite")]
 use std::time::Duration;
 
-use rusqlite::{OptionalExtension, params};
+use crate::storage::{OptionalExtension, params};
 
 use crate::catalogue::{CataloguePut, CatalogueRows};
-use crate::db::{Db, FileOptions, Journal};
-use crate::options::{Error, ErrorCode};
+use crate::db::Db;
+#[cfg(feature = "sqlite")]
+use crate::db::{FileOptions, Journal};
+use crate::options::Error;
+#[cfg(feature = "sqlite")]
+use crate::options::ErrorCode;
 use crate::storage::Storage;
 use crate::values::storage;
 
@@ -61,34 +69,49 @@ impl HostTable {
 /// An ordered key-value pair.
 pub type HostPair = (Vec<u8>, Vec<u8>);
 
+/// A host transaction body can borrow both its captured state and the scoped
+/// connection while its SQL runs. Host jobs dispatch through `dyn HostTables`.
+#[async_trait::async_trait(?Send)]
+pub trait HostSqlBody {
+    async fn run(&mut self, conn: &Storage) -> Result<(), Error>;
+}
+
+#[async_trait::async_trait(?Send)]
+impl<F: AsyncFnMut(&Storage) -> Result<(), Error>> HostSqlBody for F {
+    async fn run(&mut self, conn: &Storage) -> Result<(), Error> {
+        self(conn).await
+    }
+}
+
 /// Reads and writes of host tables, on whatever holds the store's
 /// connection.
+#[async_trait::async_trait(?Send)]
 pub trait HostTables {
     /// The value at `key`.
-    fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error>;
+    async fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error>;
     /// Every pair whose key starts with `prefix`, in key order.
-    fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error>;
+    async fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error>;
     /// Write every pair (replacing what is there) in one commit: all or none.
-    fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error>;
+    async fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error>;
     /// Write `value` unless `key` exists; returns the existing value if so.
-    fn host_put_if_absent(
+    async fn host_put_if_absent(
         &self,
         table: HostTable,
         key: &[u8],
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, Error>;
     /// Remove `key`.
-    fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error>;
+    async fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error>;
     /// The store's catalogue (see [`crate::catalogue`]).
-    fn catalogue(&self) -> Result<CatalogueRows, Error>;
+    async fn catalogue(&self) -> Result<CatalogueRows, Error>;
     /// Publish `put` into the store's catalogue in one commit: all or none.
-    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error>;
+    async fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error>;
     /// Run `f` on the store's connection inside one `host_write` savepoint:
     /// what it wrote commits when it returns `Ok`, nothing does otherwise.
     /// For host tables with columns of their own (`_jazz_host_<name>`,
     /// created by `f` itself), which plain key-value pairs would hide from
     /// SQL.
-    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error>;
+    async fn host_sql(&self, f: &mut dyn HostSqlBody) -> Result<(), Error>;
 }
 
 /// Turn on SQLite's query planner stability guarantee
@@ -103,22 +126,26 @@ pub trait HostTables {
 /// (thousands of reprepares per write on a busy client). The engine never
 /// runs `ANALYZE`, uses no `LIKE` on bound patterns and no partial indexes,
 /// so the guarantee costs no plan it would otherwise pick.
-pub(crate) fn stable_plans(conn: &Storage) -> Result<(), Error> {
+pub(crate) fn stable_plans(_conn: &Storage) -> Result<(), Error> {
     // Managed SQL plans as its host does.
-    let Some(conn) = conn.native_conn() else {
-        return Ok(());
-    };
-    conn.set_db_config(
-        rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG,
-        true,
-    )
-    .map_err(storage)?;
+    #[cfg(feature = "sqlite")]
+    {
+        let Some(conn) = _conn.native_conn() else {
+            return Ok(());
+        };
+        conn.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG,
+            true,
+        )
+        .map_err(storage)?;
+    }
     Ok(())
 }
 
 /// A store's file opened and format-checked, before a [`Db`] is opened on it:
 /// [`StoreFile::open`] then [`Db::open_file`] is [`Db::open_at`].
 pub struct StoreFile {
+    operation: futures::lock::Mutex<()>,
     pub(crate) conn: Storage,
     pub(crate) path: Option<(PathBuf, Option<&'static str>)>,
 }
@@ -128,7 +155,8 @@ impl StoreFile {
     /// storage format (see [`crate::format`]); a refused file is left as it
     /// was. New stores are stamped transactionally with their first write,
     /// not by opening this handle.
-    pub fn open(path: &Path, options: FileOptions) -> Result<Self, Error> {
+    #[cfg(feature = "sqlite")]
+    pub async fn open(path: &Path, options: FileOptions) -> Result<Self, Error> {
         // SQLite cannot open a directory; one the Groove engine wrote gets
         // the typed refusal.
         if path.is_dir() {
@@ -158,16 +186,18 @@ impl StoreFile {
         // Before anything writes: a new file takes it on creation.
         if let Some(page_size) = options.page_size {
             conn.execute_batch(&format!("PRAGMA page_size = {page_size}"))
+                .await
                 .map_err(storage)?;
         }
         // Before the journal mode, which rewrites the header: a refused file
         // is left as it was.
-        crate::format::check(&conn)?;
+        crate::format::check(&conn).await?;
         // `journal_mode` answers with a row, so it is queried, not batched.
         let mode: String = conn
             .query_row(&format!("PRAGMA journal_mode = {journal}"), [], |r| {
                 r.get(0)
             })
+            .await
             .map_err(storage)?;
         if !mode.eq_ignore_ascii_case(journal) {
             return Err(Error::new(
@@ -179,8 +209,10 @@ impl StoreFile {
             "PRAGMA synchronous = {synchronous}; PRAGMA cache_size = -{};{cache_spill}",
             options.cache_kib
         ))
+        .await
         .map_err(storage)?;
         Ok(Self {
+            operation: futures::lock::Mutex::new(()),
             conn,
             path: Some((path.to_path_buf(), options.vfs)),
         })
@@ -189,29 +221,40 @@ impl StoreFile {
     /// A store on `storage` a host opened (a Durable Object's SQL:
     /// [`Storage::from_backend`]), admitted as a file is, with no path:
     /// its chunks live in the store itself.
-    pub fn from_storage(storage: Storage) -> Result<Self, Error> {
-        crate::format::check(&storage)?;
+    pub async fn from_storage(storage: Storage) -> Result<Self, Error> {
+        crate::format::check(&storage).await?;
         Ok(Self {
+            operation: futures::lock::Mutex::new(()),
             conn: storage,
             path: None,
         })
     }
 
     /// A store that lives only as long as what is opened on it.
-    pub fn memory() -> Result<Self, Error> {
+    #[cfg(feature = "sqlite")]
+    pub async fn memory() -> Result<Self, Error> {
         let conn = Storage::open_in_memory().map_err(storage)?;
-        crate::format::check(&conn)?;
-        Ok(Self { conn, path: None })
+        crate::format::check(&conn).await?;
+        Ok(Self {
+            conn,
+            path: None,
+            operation: futures::lock::Mutex::new(()),
+        })
     }
 
     /// An in-memory store this process shares by `name`: it lives while any
     /// connection to it is open, so a host keeping one can reopen the store
     /// (or read it with a [`HostReader`]) without losing it.
-    pub fn shared_memory(name: &str) -> Result<Self, Error> {
+    #[cfg(feature = "sqlite")]
+    pub async fn shared_memory(name: &str) -> Result<Self, Error> {
         let conn =
             Storage::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
-        crate::format::check(&conn)?;
-        Ok(Self { conn, path: None })
+        crate::format::check(&conn).await?;
+        Ok(Self {
+            conn,
+            path: None,
+            operation: futures::lock::Mutex::new(()),
+        })
     }
 }
 
@@ -219,10 +262,12 @@ impl StoreFile {
 /// another thread never waits for work on the store's connection (a WAL
 /// file serves readers beside its writer). It sees every write that
 /// returned before the read began.
+#[cfg(feature = "sqlite")]
 pub struct HostReader {
     conn: Mutex<Option<Storage>>,
 }
 
+#[cfg(feature = "sqlite")]
 impl HostReader {
     /// Read the file at `path`, which a [`StoreFile`] opened already.
     pub fn open(path: &Path, vfs: Option<&'static str>) -> Result<Self, Error> {
@@ -264,17 +309,17 @@ impl HostReader {
 
     /// The value at `key`.
     pub fn get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        self.read(|conn| get(conn, table, key))
+        self.read(|conn| crate::options::block_on(get(conn, table, key)))
     }
 
     /// Every pair whose key starts with `prefix`, in key order.
     pub fn prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
-        self.read(|conn| prefix_scan(conn, table, prefix))
+        self.read(|conn| crate::options::block_on(prefix_scan(conn, table, prefix)))
     }
 
     /// The store's catalogue as committed (see [`crate::catalogue`]).
     pub fn catalogue(&self) -> Result<CatalogueRows, Error> {
-        self.read(crate::catalogue::read)
+        self.read(|conn| crate::options::block_on(crate::catalogue::read(conn)))
     }
 
     /// Run `f` on the read-only connection, for host tables that
@@ -296,97 +341,126 @@ impl HostReader {
 
 /// SQLite's `memdb` VFS shares a database whose name starts with `/`
 /// between the process's connections.
+#[cfg(feature = "sqlite")]
 fn shared_memory_uri(name: &str) -> String {
     format!("file:/{name}?vfs=memdb")
 }
 
+#[cfg(feature = "sqlite")]
 fn uri_flags() -> rusqlite::OpenFlags {
     rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_URI
 }
 
+#[async_trait::async_trait(?Send)]
 impl HostTables for StoreFile {
-    fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        get(&self.conn, table, key)
+    async fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        let _operation = self.operation.lock().await;
+        get(&self.conn, table, key).await
     }
 
-    fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
-        prefix_scan(&self.conn, table, prefix)
+    async fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
+        let _operation = self.operation.lock().await;
+        prefix_scan(&self.conn, table, prefix).await
     }
 
-    fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
-        put_many(&self.conn, table, pairs)
+    async fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
+        let _operation = self.operation.lock().await;
+        put_many(&self.conn, table, pairs).await
     }
 
-    fn host_put_if_absent(
+    async fn host_put_if_absent(
         &self,
         table: HostTable,
         key: &[u8],
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, Error> {
-        put_if_absent(&self.conn, table, key, value)
+        let _operation = self.operation.lock().await;
+        put_if_absent(&self.conn, table, key, value).await
     }
 
-    fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
-        delete(&self.conn, table, key)
+    async fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
+        let _operation = self.operation.lock().await;
+        delete(&self.conn, table, key).await
     }
 
-    fn catalogue(&self) -> Result<CatalogueRows, Error> {
-        crate::catalogue::read(&self.conn)
+    async fn catalogue(&self) -> Result<CatalogueRows, Error> {
+        let _operation = self.operation.lock().await;
+        crate::catalogue::read(&self.conn).await
     }
 
-    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
-        self.conn.scope("host_write", |conn| {
-            crate::format::admit(conn)?;
-            crate::catalogue::put(conn, put)
-        })
+    async fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
+        let _operation = self.operation.lock().await;
+        self.conn
+            .scope("host_write", async |conn| {
+                crate::format::admit(conn).await?;
+                crate::catalogue::put(conn, put).await
+            })
+            .await
     }
 
-    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error> {
-        self.conn.scope("host_write", |conn| {
-            crate::format::admit(conn)?;
-            f(conn)
-        })
+    async fn host_sql(&self, f: &mut dyn HostSqlBody) -> Result<(), Error> {
+        let _operation = self.operation.lock().await;
+        self.conn
+            .scope("host_write", async |conn| {
+                crate::format::admit(conn).await?;
+                f.run(conn).await
+            })
+            .await
     }
 }
 
+#[async_trait::async_trait(?Send)]
 impl HostTables for Db {
-    fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        self.with_host_connection(|conn| get(conn, table, key))
+    async fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        self.with_host_connection(async |conn| get(conn, table, key).await)
+            .await
     }
 
-    fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
-        self.with_host_connection(|conn| prefix_scan(conn, table, prefix))
+    async fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
+        self.with_host_connection(async |conn| prefix_scan(conn, table, prefix).await)
+            .await
     }
 
-    fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
-        self.with_host_connection(|conn| put_many(conn, table, pairs))
+    async fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
+        self.with_host_connection(async |conn| put_many(conn, table, pairs).await)
+            .await
     }
 
-    fn host_put_if_absent(
+    async fn host_put_if_absent(
         &self,
         table: HostTable,
         key: &[u8],
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, Error> {
-        self.with_host_connection(|conn| put_if_absent(conn, table, key, value))
+        self.with_host_connection(async |conn| put_if_absent(conn, table, key, value).await)
+            .await
     }
 
-    fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
-        self.with_host_connection(|conn| delete(conn, table, key))
+    async fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
+        self.with_host_connection(async |conn| delete(conn, table, key).await)
+            .await
     }
 
-    fn catalogue(&self) -> Result<CatalogueRows, Error> {
-        self.with_host_connection(crate::catalogue::read)
+    async fn catalogue(&self) -> Result<CatalogueRows, Error> {
+        self.with_host_connection(crate::catalogue::read).await
     }
 
-    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
-        self.with_host_connection(|conn| {
-            conn.scope("host_write", |conn| crate::catalogue::put(conn, put))
+    async fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
+        self.with_host_connection(async |conn| {
+            conn.scope("host_write", async |conn| {
+                crate::catalogue::put(conn, put).await
+            })
+            .await
         })
+        .await
     }
 
-    fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error> {
-        self.with_host_connection(|conn| conn.scope("host_write", |conn| f(conn)))
+    async fn host_sql(&self, f: &mut dyn HostSqlBody) -> Result<(), Error> {
+        self.with_host_connection(async |conn| {
+            conn.scope("host_write", async |conn| f.run(conn).await)
+                .await
+        })
+        .await
     }
 }
 
@@ -394,14 +468,14 @@ impl HostTables for Db {
 impl Db {
     /// Tests: a host write that fails half done. Writes `pairs` inside the
     /// write's savepoint, then panics before releasing it.
-    pub fn host_put_many_then_panic_for_test(
+    pub async fn host_put_many_then_panic_for_test(
         &self,
         table: HostTable,
         pairs: &[HostPair],
     ) -> Result<(), Error> {
-        self.with_host_connection(|conn| {
+        self.with_host_connection(async |conn| {
             crate::values::begin_savepoint(conn, "host_write")?;
-            create(conn, table)?;
+            create(conn, table).await?;
             for (key, value) in pairs {
                 conn.execute(
                     &format!(
@@ -410,39 +484,60 @@ impl Db {
                     ),
                     params![key, value],
                 )
+                .await
                 .map_err(storage)?;
             }
             panic!("injected failure mid host write")
         })
+        .await
     }
 }
 
 /// Whether `table` exists yet; reads of one that does not find nothing.
-fn exists(conn: &Storage, table: HostTable) -> Result<bool, Error> {
-    conn.prepare_cached("SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1")
-        .and_then(|mut statement| statement.query_row([table.sql_name()], |row| row.get(0)))
-        .map_err(storage)
+async fn exists(conn: &Storage, table: HostTable) -> Result<bool, Error> {
+    (async {
+        let mut statement = conn.prepare_cached(
+            "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        )?;
+        statement
+            .query_row([table.sql_name()], |row| row.get(0))
+            .await
+    })
+    .await
+    .map_err(storage)
 }
 
-fn create(conn: &Storage, table: HostTable) -> Result<(), Error> {
+async fn create(conn: &Storage, table: HostTable) -> Result<(), Error> {
     conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS {} (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID",
         table.sql_name()
     ))
+    .await
     .map_err(storage)
 }
 
-fn get(conn: &Storage, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-    if !exists(conn, table)? {
+async fn get(conn: &Storage, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    if !exists(conn, table).await? {
         return Ok(None);
     }
-    conn.prepare_cached(&format!("SELECT v FROM {} WHERE k = ?1", table.sql_name()))
-        .and_then(|mut statement| statement.query_row([key], |row| row.get(0)).optional())
-        .map_err(storage)
+    (async {
+        let mut statement =
+            conn.prepare_cached(&format!("SELECT v FROM {} WHERE k = ?1", table.sql_name()))?;
+        statement
+            .query_row([key], |row| row.get(0))
+            .await
+            .optional()
+    })
+    .await
+    .map_err(storage)
 }
 
-fn prefix_scan(conn: &Storage, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
-    if !exists(conn, table)? {
+async fn prefix_scan(
+    conn: &Storage,
+    table: HostTable,
+    prefix: &[u8],
+) -> Result<Vec<HostPair>, Error> {
+    if !exists(conn, table).await? {
         return Ok(Vec::new());
     }
     let mut statement = conn
@@ -451,11 +546,12 @@ fn prefix_scan(conn: &Storage, table: HostTable, prefix: &[u8]) -> Result<Vec<Ho
             table.sql_name()
         ))
         .map_err(storage)?;
-    let rows = statement
+    let mut rows = statement
         .query_map([prefix], |row| Ok((row.get(0)?, row.get(1)?)))
+        .await
         .map_err(storage)?;
     let mut out = Vec::new();
-    for row in rows {
+    while let Some(row) = rows.next().await {
         let (key, value): HostPair = row.map_err(storage)?;
         if !key.starts_with(prefix) {
             break;
@@ -465,13 +561,13 @@ fn prefix_scan(conn: &Storage, table: HostTable, prefix: &[u8]) -> Result<Vec<Ho
     Ok(out)
 }
 
-fn put_many(conn: &Storage, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
+async fn put_many(conn: &Storage, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
     if pairs.is_empty() {
         return Ok(());
     }
-    conn.scope("host_write", |conn| {
-        crate::format::admit(conn)?;
-        create(conn, table)?;
+    conn.scope("host_write", async |conn| {
+        crate::format::admit(conn).await?;
+        create(conn, table).await?;
         let mut statement = conn
             .prepare_cached(&format!(
                 "INSERT OR REPLACE INTO {} (k, v) VALUES (?1, ?2)",
@@ -479,64 +575,85 @@ fn put_many(conn: &Storage, table: HostTable, pairs: &[HostPair]) -> Result<(), 
             ))
             .map_err(storage)?;
         for (key, value) in pairs {
-            statement.execute(params![key, value]).map_err(storage)?;
+            statement
+                .execute(params![key, value])
+                .await
+                .map_err(storage)?;
         }
         Ok(())
     })
+    .await
 }
 
-fn put_if_absent(
+async fn put_if_absent(
     conn: &Storage,
     table: HostTable,
     key: &[u8],
     value: &[u8],
 ) -> Result<Option<Vec<u8>>, Error> {
-    conn.scope("host_write", |conn| {
-        crate::format::admit(conn)?;
-        create(conn, table)?;
-        let existing: Option<Vec<u8>> = conn
-            .prepare_cached(&format!("SELECT v FROM {} WHERE k = ?1", table.sql_name()))
-            .and_then(|mut statement| statement.query_row([key], |row| row.get(0)).optional())
-            .map_err(storage)?;
+    conn.scope("host_write", async |conn| {
+        crate::format::admit(conn).await?;
+        create(conn, table).await?;
+        let existing: Option<Vec<u8>> = (async {
+            let mut statement =
+                conn.prepare_cached(&format!("SELECT v FROM {} WHERE k = ?1", table.sql_name()))?;
+            statement
+                .query_row([key], |row| row.get(0))
+                .await
+                .optional()
+        })
+        .await
+        .map_err(storage)?;
         if existing.is_none() {
-            conn.prepare_cached(&format!(
-                "INSERT INTO {} (k, v) VALUES (?1, ?2)",
-                table.sql_name()
-            ))
-            .and_then(|mut statement| statement.execute(params![key, value]))
+            (async {
+                let mut statement = conn.prepare_cached(&format!(
+                    "INSERT INTO {} (k, v) VALUES (?1, ?2)",
+                    table.sql_name()
+                ))?;
+                statement.execute(params![key, value]).await
+            })
+            .await
             .map_err(storage)?;
         }
         Ok(existing)
     })
+    .await
 }
 
-fn delete(conn: &Storage, table: HostTable, key: &[u8]) -> Result<(), Error> {
-    if !exists(conn, table)? {
+async fn delete(conn: &Storage, table: HostTable, key: &[u8]) -> Result<(), Error> {
+    if !exists(conn, table).await? {
         return Ok(());
     }
-    conn.prepare_cached(&format!("DELETE FROM {} WHERE k = ?1", table.sql_name()))
-        .and_then(|mut statement| statement.execute([key]))
-        .map(|_| ())
-        .map_err(storage)
+    (async {
+        let mut statement =
+            conn.prepare_cached(&format!("DELETE FROM {} WHERE k = ?1", table.sql_name()))?;
+        statement.execute([key]).await
+    })
+    .await
+    .map(|_| ())
+    .map_err(storage)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::StatementStatus;
     use crate::storage::Storage;
-    use rusqlite::StatementStatus;
 
     /// Reprepares of a cached `LIMIT ?` read run `runs` times on `conn`.
     fn reprepares(conn: &Storage, runs: i64) -> i32 {
-        conn.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2), (3);")
-            .unwrap();
+        crate::options::block_on(
+            conn.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1), (2), (3);"),
+        )
+        .unwrap();
         let sql = "SELECT x FROM t ORDER BY x LIMIT ?1 OFFSET ?2";
         for _ in 0..runs {
             let mut stmt = conn.prepare_cached(sql).unwrap();
-            let rows: Vec<i64> = stmt
-                .query_map([2i64, 0], |r| r.get(0))
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap();
+            let rows: Vec<i64> = crate::options::block_on(
+                crate::options::block_on(stmt.query_map([2i64, 0], |r| r.get::<_, i64>(0)))
+                    .unwrap()
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
             assert_eq!(rows, [1, 2]);
         }
         conn.prepare_cached(sql)

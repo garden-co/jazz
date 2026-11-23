@@ -8,6 +8,7 @@
 //! may resend any time.
 
 use crate::common;
+use jazz_types::legacy_test_future::ResultFutureExt;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -130,7 +131,7 @@ fn update_as(
     block_on(db.write_as_origin(
         TxId::new(TxTime(seq), NodeUuid::from_bytes(client)),
         &alice(),
-        async || {
+        async |db| {
             db.update(
                 table,
                 id,
@@ -333,13 +334,13 @@ fn an_aged_out_thin_writer_leaves_no_rows_behind() {
     const PHONE: [u8; 16] = bounded(0x7e);
     let path = scratch("nodes");
     let core = block_on(Db::open_at(config(0), &path, FileOptions::default())).unwrap();
-    core.set_authority();
+    jazz::db::block_on(core.set_authority());
     let t0 = start_clock(&core);
     let replica = open(1);
     let (up, down) = duplex();
     let _link = block_on(replica.connect_upstream(up));
     core.accept_subscriber(down, AuthorSubject::SYSTEM).unwrap();
-    replica.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(replica.set_remote_link_hint(RemoteLinkHint::Live));
     let settle = || {
         for _ in 0..8 {
             for db in [&replica, &core] {

@@ -11,6 +11,7 @@ use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 
 fn schema(extra: bool) -> JazzSchema {

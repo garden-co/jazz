@@ -1,3 +1,4 @@
+use jazz_types::legacy_test_future::ResultFutureExt;
 use std::collections::BTreeMap;
 
 use crate::common;

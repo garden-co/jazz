@@ -157,7 +157,7 @@ fn a_relation_literal_compares_as_its_columns_type() {
     let cases = cases();
     let db = open(&cases);
     let bob = AuthorSubject::for_test_bytes([0x60; 16]);
-    db.set_identity_claims(bob, BTreeMap::new());
+    jazz::db::block_on(db.set_identity_claims(bob, BTreeMap::new()));
     let mut wrong = Vec::new();
     for (index, case) in cases.iter().enumerate() {
         let table = table(index);
