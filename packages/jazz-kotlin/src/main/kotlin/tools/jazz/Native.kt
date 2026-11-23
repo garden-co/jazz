@@ -106,13 +106,14 @@ public interface Native : AutoCloseable {
     /** Signs the end user out, and closes the app. */
     public fun signOut(): Unit = close()
 
-    /** Opens native handles from a config JSON (the contract's open config). */
     /**
      * A call whose waits [NativeCall.cancel] can end, or `null` where calls
      * can't be cut short. Calls made inside [NativeCall.run], on that
      * thread, obey it.
      */
     public fun newCall(): NativeCall? = null
+
+    /** Opens native handles from a config JSON (the contract's open config). */
 
     public fun interface Opener {
         public fun open(configJson: String): Native

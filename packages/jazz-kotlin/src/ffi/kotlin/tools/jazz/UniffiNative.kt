@@ -14,30 +14,39 @@ public class UniffiNative private constructor(private val root: JazzHandle) : Na
     /** Calls go through the current call's view, if any: it shares the app. */
     private val handle: JazzHandle get() = view.get() ?: root
 
-    override fun newCall(): NativeCall {
-        val control = uniffi.jazz_ffi.CallControl(null)
-        return object : NativeCall {
-            override fun <T> run(block: () -> T): T {
-                val controlled = try {
-                    live { root.controlled(control) }
-                } catch (e: Throwable) {
-                    control.destroy()
-                    throw e
-                }
+    override fun newCall(): NativeCall = object : NativeCall {
+        private val lock = Any()
+        private var cancelled = false
+
+        // Made in run, so a call that never runs (its coroutine cancelled first) holds nothing.
+        private var control: uniffi.jazz_ffi.CallControl? = null
+
+        override fun <T> run(block: () -> T): T {
+            val made = uniffi.jazz_ffi.CallControl(null)
+            synchronized(lock) {
+                control = made
+                // Cancelled before it ran: its calls do nothing.
+                if (cancelled) made.cancel()
+            }
+            try {
+                val controlled = live { root.controlled(made) }
                 view.set(controlled)
                 try {
                     return block()
                 } finally {
                     view.remove()
                     controlled.destroy()
-                    control.destroy()
                 }
+            } finally {
+                synchronized(lock) { control = null }
+                made.destroy()
             }
+        }
 
-            // Safe beside run: the control is freed only once run's call has returned,
-            // and a cancel after that finds nothing waiting.
-            override fun cancel() {
-                runCatching { control.cancel() }
+        override fun cancel() {
+            synchronized(lock) {
+                cancelled = true
+                control?.cancel()
             }
         }
     }
