@@ -272,7 +272,12 @@ extension Client {
             // Set before starting: a state delivered during `start` may end
             // the stream, and the watch must still be cancelled then.
             let holder = WatchHolder()
-            continuation.onTermination = { _ in holder.cancel() }
+            // Cancelled off this thread: termination may run under the
+            // iterating task's status lock (its iteration was cancelled), and
+            // `cancel` waits for a state jazz-ffi is delivering, which needs
+            // that lock to reach this stream. Waiting here deadlocked both.
+            // A state delivered meanwhile is dropped: the stream is finished.
+            continuation.onTermination = { _ in DispatchQueue.global().async { holder.cancel() } }
             let listener = States { json in
                 // The app closed (`close`, `signOut`): the watch's last state.
                 if (try? Coding.decode(Closed.self, json))?.kind == "closed" {
