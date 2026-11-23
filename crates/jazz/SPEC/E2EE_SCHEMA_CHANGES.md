@@ -199,14 +199,21 @@ the data into a new encrypted table instead (the developer guide is
 1. Add the new table to `jazz.app.json` with its `encryption` entry, its
    encrypted columns and its `equality`, and `createTables` it in the
    migration (after §4 if its space table needs it); deploy and ship.
-2. In clients that hold a space's key, read the old rows of the space and
-   insert their copies into the new table. When the space has no root yet,
-   the first copy creates it (spec §3.2), which needs a session that may read
-   and update the space row; the first encrypted rows and the space are
-   accepted together. A space whose key holders are all offline waits.
-3. Point the app's code, relations and permissions at the new table; rows get
-   new IDs, so references to them must be rewritten or mapped by the app.
-4. Stop writing the old table, then drop it in a later migration.
+2. Freeze the old table: a permissions revision whose insert, update and
+   delete rules on it are `false`, its read rule unchanged. Writes to that
+   data pause until step 4. (The alternative, writing to both tables during
+   the copy and reconciling them, changes every write path.)
+3. In clients that hold a space's key, copy each old row of the space into
+   the new table under the same row ID, with an upsert, so a second run
+   overwrites rather than duplicates; nothing is skipped for having been
+   copied before. When the space has no root yet, the first copy creates it
+   (spec §3.2), which needs a session that may read and update the space
+   row; the first encrypted rows and the space are accepted together. A space
+   whose key holders are all offline waits. Verify, space by space, that the
+   new table holds as many rows as the old one.
+4. Ship the app version whose code, relations and permissions use the new
+   table. Rows keep their IDs, so references to them still hold.
+5. Drop the old table in a later migration.
 
 **The old plaintext stays.** Copying protects the values from then on. The
 old values remain in the old table's history, which no new version reads, on

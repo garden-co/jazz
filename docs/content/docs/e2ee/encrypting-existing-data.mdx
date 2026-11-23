@@ -6,8 +6,8 @@ languageTabs: backend
 
 Jazz encrypts a column that is declared encrypted when it is created. It does not convert a plain
 column that already holds data, and an app file cannot ask it to. To encrypt data you already
-store, add a new encrypted table, have your app's clients copy the rows into it, and then retire
-the old table.
+store, add a new encrypted table, stop writes to the old one, have your app's clients copy the rows
+across, and then retire the old table.
 
 **The old plaintext stays.** Copying protects the values from then on, not the ones already
 stored. The old values remain in the old table's history, on every replica that synced them, and
@@ -16,14 +16,16 @@ matters, treat the old data as already disclosed.
 
 ## The recipe
 
-### 1. Make the space table's members first
+Do the steps in this order. Copying while the old table still takes writes can miss an edit, a
+delete or a new row made after a row was copied.
+
+### 1. Prepare the space table and the new table
 
 An encrypted table's rows live in **spaces**, the rows of a space table (a project, a room), and
 its members are the rows of `__e2ee_members`. The space table's read rule must come from the
 members table before any table encrypts columns in its spaces (see
-[Sharing and keys](/docs/e2ee/sharing-and-keys)).
-
-If your space table already has that read rule, go to step 2. Otherwise, move it in two deploys:
+[Sharing and keys](/docs/e2ee/sharing-and-keys)). If your space table has another read rule, move
+it in two deploys first:
 
 1. Declare an `encryption` entry for the space table itself with no encrypted columns
    (`"space": "id", "scope": "<the table>", "columns": {}`). This adds Jazz's encryption tables,
@@ -33,31 +35,47 @@ If your space table already has that read rule, go to step 2. Otherwise, move it
 2. Change the space table's read rule to the members rule. Accounts without a member row stop
    reading the space row at this deploy.
 
-### 2. Add the new encrypted table
+Then add the new table to your schema, with its encrypted columns and its `encryption` entry
+naming the space column, in the same migration that creates the table. Declare `equality` here,
+for every column you will filter by. Declare equality when you create the table: it cannot be
+added to a table that already exists, because rows older than the column have no equality token.
+To filter by a column of an existing table later, copy it into a new table that declares it, with
+this same recipe.
 
-Add the new table to your schema, with its encrypted columns and its `encryption` entry naming the
-space column, in the same migration that creates the table. Declare `equality` here, for every
-column you will filter by. Declare equality when you create the table: it cannot be added to a
-table that already exists, because rows older than the column have no equality token. To filter
-by a column of an existing table later, copy it into a new table that declares it, with this same
-recipe.
+### 2. Freeze the old table
 
-If you want to know which rows are already copied, give the new table a plain column for the old
-row's ID.
+Deploy a permissions revision that refuses every write to the old table and keeps its read rule:
 
-### 3. Copy the rows from your app's clients
+```json title="jazz.permissions.json"
+{
+  "tables": {
+    "tasks": {
+      "read": "…the rule it has now…",
+      "insert": "false",
+      "update": "false",
+      "delete": "false"
+    }
+  }
+}
+```
 
-Only clients hold keys, so only clients can write the encrypted copies. The server never can. Each
-client copies what it can:
+This pauses writes to that data: from this deploy until step 3, your users can read the old rows
+but cannot add, change or delete them. Your backend is not checked when it acts as the system, so
+stop any job of its that writes the old table too.
 
-- the rows it can read, in spaces whose key it holds;
-- in a space with no key yet, the first encrypted write creates it, and that needs a session
-  allowed to update the space row. Other members get the key from it.
+If the pause is not acceptable, the alternative is to have your app write to both tables while the
+copy runs, then reconcile them before switching over. It is more work: every write path changes
+twice, and you must decide which side wins when the two disagree.
 
-A space whose key holders are all offline waits until one of them comes online.
+### 3. Copy every row, keyed by its ID
 
-A sketch of a copying client (not a drop-in function). `tasks` is the old table, `secureTasks` the
-new one with an encrypted `title`, and `copiedFrom` holds the old row's ID:
+Only clients hold keys, so only clients can write the encrypted copies. The server never can. Copy
+each old row into the new table under **the same row ID**, with an upsert, so that running the copy
+again overwrites the copy instead of adding another. Never skip a row because it was copied before:
+copy it again. References to the old rows then point at their copies.
+
+A sketch of a copying client (not a drop-in function). `tasks` is the old table and `secureTasks`
+the new one, with an encrypted `title`:
 
 ```ts
 import type { Db } from "jazz-tools/backend";
@@ -66,21 +84,34 @@ import { app } from "./jazz.generated";
 async function copyProject(db: Db, projectId: string) {
   const oldTasks = await db.all(app.tasks.where({ projectId }));
   for (const task of oldTasks) {
-    const copied = await db.all(app.secureTasks.where({ copiedFrom: task.id }));
-    if (copied.length > 0) continue;
+    // The same ID: a second run overwrites this copy.
     await db
-      .insert(app.secureTasks, { projectId, copiedFrom: task.id, title: task.title })
+      .upsert(app.secureTasks, task.id, { projectId, title: task.title })
       .wait({ tier: "global" });
+  }
+  const copies = await db.all(app.secureTasks.where({ projectId }));
+  if (copies.length !== oldTasks.length) {
+    throw new Error(`project ${projectId}: ${copies.length} copies of ${oldTasks.length} rows`);
   }
 }
 ```
 
-Run it when a client opens a project, for example, so the work spreads across the members who
-use the app. Two clients copying the same row at the same time can both insert a copy: check for
-duplicates by `copiedFrom` before you switch over, or copy each project from one place only.
+Each client copies what it can:
 
-### 4. Switch to the new table, then drop the old one
+- the rows it can read, in spaces whose key it holds;
+- in a space with no key yet, the first encrypted write creates it, and that needs a session
+  allowed to update the space row. Other members get the key from it.
 
-Point your app's reads, writes, relations and permissions at the new table. The copies have new row
-IDs, so update references to the old rows, or map them in your app. Once nothing writes the old
-table, drop it in a later migration. As above, its data stays in history, replicas and backups.
+A space whose key holders are all offline waits until one of them comes online. Before you switch,
+check that every space is done: the number of rows in the new table matches the old one, space by
+space. Run the copy again for any space where they differ.
+
+### 4. Switch reads and writes to the new table
+
+Ship the app version that reads and writes the new table: its code, relations and permissions point
+at `secureTasks`. The rows keep their IDs, so links to them still work.
+
+### 5. Drop the old table later
+
+Once no client still uses the old table, drop it in a later migration. As above, its data stays in
+history, on replicas and in backups.
