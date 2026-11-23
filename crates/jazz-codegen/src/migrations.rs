@@ -88,7 +88,10 @@ pub fn create(
             artifact::APP_FILE
         )));
     }
-    let tables = artifact::version_tables(from).map_err(CodegenError::from_artifact)?;
+    // The version keeps its own encryption declarations: without them the
+    // deploy would read its encrypted columns as plaintext ones.
+    let tables = artifact::declared_version_tables(from, &recorded.encryption)
+        .map_err(CodegenError::from_artifact)?;
     versions.push((version.clone(), Json::object(vec![("tables", tables)])));
 
     let mut migration = vec![

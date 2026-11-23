@@ -2725,6 +2725,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
+ "jazz-codegen",
  "jazz-core",
  "jazz-otel",
  "jsonwebtoken",

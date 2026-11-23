@@ -1860,7 +1860,17 @@ fn check_codegen(
 /// A schema in the readable form of a `history` version's `tables` (no
 /// relations, computed fields or transforms), as the writer prints it.
 pub fn version_tables(schema: &Schema) -> Result<Json, ArtifactError> {
-    app_file::write_version_tables(schema)
+    declared_version_tables(schema, &encryption::Entries::new())
+}
+
+/// [`version_tables`], with each table's `encryption` entry from `entries`
+/// (the version's own declarations), as the writer prints a `history`
+/// version that declares encryption.
+pub fn declared_version_tables(
+    schema: &Schema,
+    entries: &encryption::Entries,
+) -> Result<Json, ArtifactError> {
+    app_file::write_version_tables(schema, entries)
         .map_err(|error| ArtifactError::unsupported(APP_FILE, error))
 }
 

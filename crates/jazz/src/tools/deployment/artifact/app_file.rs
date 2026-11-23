@@ -1291,8 +1291,8 @@ pub fn write(
 
 /// A history version's `tables`: a schema without relations, computed fields
 /// or transforms.
-pub fn write_version_tables(schema: &Schema) -> Result<Json, String> {
-    write_tables(schema, None, &Entries::new())
+pub fn write_version_tables(schema: &Schema, entries: &Entries) -> Result<Json, String> {
+    write_tables(schema, None, entries)
 }
 
 /// A schema's tables, with their encryption entries. Jazz's system tables

@@ -247,4 +247,6 @@ async fn change(
 #[cfg(test)]
 mod encryption_tests;
 #[cfg(test)]
+mod migrations_create_tests;
+#[cfg(test)]
 mod tests;

@@ -4,6 +4,7 @@
 //! `tables` that needs a migration from one that doesn't, and how
 //! `migrations create` finds the version to migrate from.
 
+use jazz::tools::deployment::artifact::encryption::{DeclaredEncryption, Entries};
 use jazz::tools::deployment::artifact::json::{self, Json};
 use jazz::tools::deployment::published::{PublishedSchema, parse_schema_hash};
 use jazz::tools::public_schema::{Schema, SchemaHash};
@@ -21,6 +22,21 @@ pub struct Recorded {
     /// That file's current schema.
     pub current: SchemaHash,
     pub current_schema: Schema,
+    /// The current version's encryption entries, by table (empty when it
+    /// declares none): `migrations create` keeps them on the version it
+    /// moves into `history`.
+    pub encryption: Entries,
+}
+
+/// The entries `encryption` declares for version `current`.
+pub(crate) fn version_entries(
+    encryption: Option<&DeclaredEncryption>,
+    current: &SchemaHash,
+) -> Entries {
+    encryption
+        .and_then(|declared| declared.entries(&current.to_string()))
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The digest of what the generator wrote that `lang`'s bindings record,
@@ -127,11 +143,17 @@ fn read_ts(bindings: &str) -> Result<Recorded, CodegenError> {
     if SchemaHash::compute(&current_schema) != current {
         return Err(refuse("the current schema doesn't match its hash"));
     }
+    let encryption = schema
+        .get("encryption")
+        .map(|e| serde_json::from_str::<DeclaredEncryption>(&json::print(e)))
+        .transpose()
+        .map_err(|e| refuse(&format!("schema.encryption: {e}")))?;
     Ok(Recorded {
         format,
         source,
         current,
         current_schema,
+        encryption: version_entries(encryption.as_ref(), &current),
     })
 }
 

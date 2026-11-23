@@ -1057,6 +1057,10 @@ pub(crate) fn read(bindings: &str) -> Result<crate::bindings::Recorded, CodegenE
         format,
         current: app.compiled.current,
         current_schema: app.compiled.current_schema().clone(),
+        encryption: crate::bindings::version_entries(
+            app.compiled.encryption.as_ref(),
+            &app.compiled.current,
+        ),
     })
 }
 
