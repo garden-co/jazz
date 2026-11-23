@@ -244,6 +244,7 @@ fn alice_with_a_note(server: &Db) -> (uuid::Uuid, MemoryStore) {
 
 /// Alice adds Bob after rotating each room. While he waits for a delivery,
 /// each acquisition reads the current epoch and checks his older deliveries once.
+/// The authority's plan must seek to Bob's deliveries in this room for that second read.
 #[test]
 fn a_keyless_members_delivery_queries_stay_constant_across_rotations() {
     within(|| {
@@ -252,6 +253,13 @@ fn a_keyless_members_delivery_queries_stay_constant_across_rotations() {
         alice.activate(&server);
         let bob = device(&server, account(0xb0), MemoryStore::new(), 2);
         bob.activate(&server);
+        let table = jazz::tools::deployment::artifact::system_tables::SPACE_DELIVERIES;
+        let [scope, room, recipient, epoch] =
+            ["scopeId", "identifier", "recipientAccountId", "keyEpochId"]
+                .map(|column| server.stored_column_for_test(table, column).1);
+        let fallback_seek = format!(
+            "USING INDEX {table}__ix({scope},{room},{recipient},{epoch}) ({scope}=? AND {room}=? AND {recipient}=?)"
+        );
         let mut counts = Vec::new();
         for rotations in [1, 6] {
             let space = new_project(&server, &alice, "plans");
@@ -268,8 +276,22 @@ fn a_keyless_members_delivery_queries_stay_constant_across_rotations() {
             }
             add_member(&server, &alice, space, &bob.id());
             bob.client.take_delivery_reads();
+            server.take_slow_queries();
+            server.set_slow_query_threshold(Some(std::time::Duration::ZERO));
             let state = drive(&server, &[&bob.db], bob.client.acquire(&bob.db, &address)).unwrap();
             assert_eq!(state, SpaceKeyState::KeyPending);
+            server.set_slow_query_threshold(None);
+            let plans: Vec<_> = server
+                .take_slow_queries()
+                .0
+                .into_iter()
+                .filter(|query| query.table == table)
+                .map(|query| query.plan)
+                .collect();
+            assert!(
+                plans.iter().any(|plan| plan.contains(&fallback_seek)),
+                "{plans:#?}"
+            );
             counts.push(bob.client.take_delivery_reads().2);
         }
         assert_eq!(counts, [2, 2]);
