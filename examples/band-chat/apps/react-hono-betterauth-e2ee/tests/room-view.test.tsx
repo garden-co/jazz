@@ -67,13 +67,16 @@ function show(answers: {
     if (q.table === "reactions" || q.table === "joinRequests") return { data: [] };
     return undefined;
   };
-  return render(
+  const tree = () => (
     <ProfileDirectoryProvider me={alice as never}>
       <UnsentMessagesProvider>
         <RoomView summary={summary as never} author="alice-account" />
       </UnsentMessagesProvider>
-    </ProfileDirectoryProvider>,
+    </ProfileDirectoryProvider>
   );
+  const view = render(tree());
+  // Renders again with whatever the answers say now.
+  return { ...view, refresh: () => view.rerender(tree()) };
 }
 const markerWrites = () => db.insert.mock.calls.length + db.update.mock.calls.length;
 
@@ -106,6 +109,72 @@ describe("locked messages", () => {
     });
     expect(screen.getByText(/1 message is waiting for the room's key/)).toBeTruthy();
     expect(screen.queryByText(/Decrypting/)).toBeNull();
+  });
+
+  it("says decrypting first again when the room's key is on its way a second time", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    deviceStatus.current = "active";
+    const answers: Parameters<typeof show>[0] = { messages: { data: [], unreadable: [pending] } };
+    const view = show(answers);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.getByText(/1 message is waiting for the room's key/)).toBeTruthy();
+
+    answers.messages = { data: [message("m3", "2026-01-03T00:00:00Z")] };
+    view.refresh();
+    expect(screen.getByText("text m3")).toBeTruthy();
+    expect(screen.queryByText(/waiting for the room's key/)).toBeNull();
+
+    answers.messages = { data: [], unreadable: [pending] };
+    view.refresh();
+    expect(screen.getByText(/Decrypting 1 message/)).toBeTruthy();
+    expect(screen.queryByText(/waiting for the room's key/)).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.getByText(/1 message is waiting for the room's key/)).toBeTruthy();
+  });
+
+  it("starts the ten seconds again when the room's key is on its way a second time", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    deviceStatus.current = "active";
+    const answers: Parameters<typeof show>[0] = { messages: { data: [], unreadable: [pending] } };
+    const view = show(answers);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+    });
+    answers.messages = { data: [message("m3", "2026-01-03T00:00:00Z")] };
+    view.refresh();
+    answers.messages = { data: [], unreadable: [pending] };
+    view.refresh();
+    // The first episode's timer would have fired at ten seconds.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+    });
+    expect(screen.getByText(/Decrypting 1 message/)).toBeTruthy();
+    expect(screen.queryByText(/waiting for the room's key/)).toBeNull();
+  });
+
+  it("clears the ten-second timer once the room view closes", () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const setTimer = vi.spyOn(globalThis, "setTimeout");
+    const clearTimer = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      deviceStatus.current = "active";
+      const view = show({ messages: { data: [], unreadable: [pending] } });
+      expect(screen.getByText(/Decrypting 1 message/)).toBeTruthy();
+      const timers = setTimer.mock.results.filter(
+        (_, call) => setTimer.mock.calls[call]![1] === 10_000,
+      );
+      expect(timers).toHaveLength(1);
+      expect(clearTimer).not.toHaveBeenCalledWith(timers[0]!.value);
+      view.unmount();
+      expect(clearTimer).toHaveBeenCalledWith(timers[0]!.value);
+    } finally {
+      setTimer.mockRestore();
+      clearTimer.mockRestore();
+    }
   });
 
   it("says messages are locked once a room has had no key record for a while", async () => {

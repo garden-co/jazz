@@ -313,8 +313,11 @@ public class Jazz internal constructor(
         }
     }
 
-    /** Brings back deleted row [id] of [table], as it was or with [row] as its content; returns it. */
-    public suspend fun <Row : Any, Insert : Any> restore(table: BaseTable<Row, Insert>, id: String, row: Insert? = null): Row =
+    /**
+     * Brings back deleted row [id] of [table], as it was or with [row] as its content; returns it.
+     * A restore is checked against the update policy, so it takes a [Table], not a [BaseTable].
+     */
+    public suspend fun <Row : Any, Insert : Any> restore(table: Table<Row, Insert, *>, id: String, row: Insert? = null): Row =
         io { decodeStored(table, native.restore(table.tableName, id, row?.let { insertJson(table, it) })) }
 
     /** Every row [query] matches, read at [tier] (by default local-first). */
@@ -480,7 +483,7 @@ public class Jazz internal constructor(
             run { decodeStored(table, tx.upsert(table.tableName, id, insertJson(table, row))) }
 
         /** [Jazz.restore], in the transaction. */
-        public suspend fun <Row : Any, Insert : Any> restore(table: BaseTable<Row, Insert>, id: String, row: Insert? = null): Row =
+        public suspend fun <Row : Any, Insert : Any> restore(table: Table<Row, Insert, *>, id: String, row: Insert? = null): Row =
             run { decodeStored(table, tx.restore(table.tableName, id, row?.let { insertJson(table, it) })) }
 
         /** [Jazz.editText], in the transaction. */

@@ -7,7 +7,8 @@
  * declarations: the schema hash covers only what is stored, so an encrypted
  * `bytes` column that lost `.encrypted()` would keep it.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AppJson, PermissionsJson, PolicyJson } from "./app-json.js";
@@ -139,8 +140,6 @@ function parsedPolicies(text: string): unknown {
   );
 }
 
-let scratch = 0;
-
 /**
  * Print `c` as TS (then `edit` the printed schema.ts), compile it, and
  * expect what the original loads to. Returns both current schema hashes
@@ -152,9 +151,10 @@ async function expectParity(
 ): Promise<{ original: string; compiled: string } | undefined> {
   const printed = printSchemaTs(JSON.parse(c.app) as AppJson, JSON.parse(c.permissions));
   expect(printed.unsupported, "forms the DSL can't express").toEqual([]);
-  // Inside the package, so `jazz-tools` resolves to this source.
-  const dir = join(__dirname, ".parity", String(scratch++));
-  mkdirSync(dir, { recursive: true });
+  // Outside src/: other tests walk the sources while this one runs. The
+  // printed import is rewritten to an absolute path, so nothing resolves
+  // relative to the scratch dir.
+  const dir = mkdtempSync(join(tmpdir(), "jazz-parity-"));
   try {
     // The schema namespace alone: the package root needs the built runtime.
     const namespace = join(__dirname, "..", "schema-namespace.ts");

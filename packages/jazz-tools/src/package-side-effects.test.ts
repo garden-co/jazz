@@ -12,9 +12,11 @@ function shippedSources(dir = srcRoot): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = `${dir}/${entry.name}`;
     if (entry.isDirectory()) {
-      return /^(fixtures|__fixtures__|__typecheck__|testing|client-tests)$/.test(entry.name)
-        ? []
-        : shippedSources(path);
+      // tsc's `src/**/*` skips dot-directories (scratch dirs, caches).
+      const unshipped =
+        entry.name.startsWith(".") ||
+        /^(fixtures|__fixtures__|__typecheck__|testing|client-tests)$/.test(entry.name);
+      return unshipped ? [] : shippedSources(path);
     }
     if (!/\.tsx?$/.test(entry.name) || entry.name.endsWith(".d.ts")) return [];
     if (/\.(test|typecheck)\.tsx?$|test-helpers|test-utils/.test(entry.name)) return [];
