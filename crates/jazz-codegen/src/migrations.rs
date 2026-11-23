@@ -84,17 +84,26 @@ pub fn create(
     // leads to it from the bindings' version: with Jazz's system tables
     // when it declares encryption or that version has them.
     let mut to = artifact::read_current_schema(app_json).map_err(CodegenError::from_artifact)?;
-    let declares = versions
+    let current_declared = versions
         .last()
-        .and_then(|current| declared.as_ref()?.entries(&current.to_string()))
-        .is_some();
-    if (declares || artifact::has_system_tables(from)) && !artifact::has_system_tables(&to) {
+        .and_then(|current| declared.as_ref()?.entries(&current.to_string()));
+    if (current_declared.is_some() || artifact::has_system_tables(from))
+        && !artifact::has_system_tables(&to)
+    {
         to = artifact::system_tables::with_e2ee_fragment(&to);
     }
     let to = &to;
     // Single-column indexes change the hash, not the version or the rows
     // (#5494): there is nothing to migrate, as `bindings::staleness` says.
     if bindings::differs_only_in_indexes(from, to) {
+        // No migration is written, so the file must load as it is: say why
+        // it doesn't. And the current version is the bindings' one, so it
+        // keeps their declarations, even when it declares none and so
+        // leaves out Jazz's system tables.
+        if let Err(error) = loaded {
+            return Err(CodegenError::from_artifact(error));
+        }
+        bindings::check_current_declarations(current_declared, &recorded)?;
         return Ok(Created {
             note: Some(
                 "only single-column indexes changed: no migration needed; run `npx jazz-tools generate`".into(),
@@ -144,7 +153,9 @@ pub fn create(
         ("name".to_string(), Json::string(name)),
         ("from".to_string(), Json::string(&version)),
     ];
-    migration.extend(diff(from, to)?);
+    // Jazz's system tables are Jazz's: the loader adds or drops them with
+    // the encryption declarations, so the authored diff leaves them out.
+    migration.extend(diff(&authored_tables(from), &authored_tables(to))?);
     let migrations = entry(top, "migrations", || Json::Array(Vec::new()), "history");
     let Json::Array(items) = migrations else {
         unreachable!("loaded above")
@@ -167,6 +178,13 @@ pub fn create(
         todos,
         note: None,
     })
+}
+
+/// `schema` without Jazz's system tables.
+fn authored_tables(schema: &Schema) -> Schema {
+    let mut schema = schema.clone();
+    schema.retain(|name, _| !artifact::system_tables::is_system_table(name.as_str()));
+    schema
 }
 
 /// `top[key]`, inserted after `after` (or at the end) when absent.

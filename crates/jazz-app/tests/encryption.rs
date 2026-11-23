@@ -354,7 +354,7 @@ async fn signing_in_opens_the_same_accounts_rows_and_keys() {
             assert!(local.is_empty());
             jazz.insert(NewNote::new(user)).await.unwrap();
         }
-        jazz.shutdown().await.unwrap();
+        jazz.sign_out().await.unwrap();
     }
     drop(store);
     private_store.join().unwrap();
