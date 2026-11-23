@@ -225,6 +225,20 @@ session.db.encryption.onUnreadable((report) => {
 While no listener is registered, the runtime keeps up to 1,024 reports for the next listener. Past that
 the oldest are dropped, and the next listener first receives a `reports-dropped` report with their count.
 
+### A new device's first sync
+
+A device reads its encrypted rows from its own store, offline too, once it has synced with the server
+once. A device that has never synced (a new store) cannot tell yet which of its rows are encrypted, so
+its live queries on encrypted columns stay loading until its first sync, however long that takes,
+rather than show an empty result. `db.encryption.readable()` resolves when the device can read. While
+it has not, a loading query is waiting for that first sync:
+
+```ts
+let firstSync = true;
+void session.db.encryption.readable().then(() => (firstSync = false));
+// Show "Waiting to connect for the first time" rather than a spinner while `firstSync` is true.
+```
+
 ## The backend holds no keys
 
 Your backend (`createJazz`) starts for an encrypted app and relays its clients as usual. It is not an

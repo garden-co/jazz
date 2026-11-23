@@ -2409,17 +2409,24 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       if (pendingHighSurrogate) await pushBounded(encoder.encode(pendingHighSurrogate));
       const previous = owner.streamingFinalization;
+      const id = formatUuid(rowId);
+      let finishStarted = false;
       let timer: ReturnType<typeof setTimeout>;
       const deadline = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          const error = new Error("Streaming publication timed out");
+          const message = finishStarted
+            ? `Streaming publication of ${table} row ${id} timed out and may still complete. Await error.settled before retrying.`
+            : "Streaming write timed out before publication started";
+          const error = new Error(message);
           error.name = "TimeoutError";
+          if (finishStarted) Object.assign(error, { rowId: id, settled: publication });
           reject(error);
         }, KEY_WAIT_MS);
       });
       const publish = async (): Promise<StreamingInsertResult> => {
         try {
           await Promise.race([previous, deadline]);
+          finishStarted = true;
           let receipt: MutationResult;
           if (tx) {
             await upload.finishInTransaction!();
@@ -2428,7 +2435,7 @@ export class NativeRuntimeAdapter implements Runtime {
           } else {
             receipt = this.finishMutation(await upload.finish());
           }
-          return { id: formatUuid(rowId), ...receipt };
+          return { id, ...receipt };
         } catch (error) {
           await upload.abort();
           throw error;

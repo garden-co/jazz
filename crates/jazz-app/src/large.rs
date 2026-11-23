@@ -197,11 +197,18 @@ impl Jazz {
     {
         streamed_column::<T>(&mut cells, column)?;
         let settle = self.settler()?;
-        let upload = self
+        let (id, upload) = self
             .with_client(move |client| async move {
-                let upload =
-                    client.begin_streaming_upload(T::NAME, cells.into_iter().collect(), column)?;
-                Ok(park(upload))
+                let (id, upload) = client
+                    .begin_streaming_upload_for(
+                        kind.core(),
+                        T::NAME,
+                        id,
+                        cells.into_iter().collect(),
+                        column,
+                    )
+                    .await?;
+                Ok((id, park(upload)))
             })
             .await?;
         let guard = self.feed(upload, chunks).await?;
@@ -210,7 +217,7 @@ impl Jazz {
             .with_client(move |client| async move {
                 let parked = unpark(upload).ok_or(Error::Stopped)?;
                 let (id, written) = client
-                    .finish_streaming_upload(parked, kind.core(), id)
+                    .finish_streaming_upload(parked, kind.core(), Some(id))
                     .await?;
                 settle.settle(&client, written).await?;
                 read_back::<T>(&client, id, &implementations).await
@@ -370,8 +377,15 @@ impl crate::transaction::Transaction {
     {
         streamed_column::<T>(&mut cells, column)?;
         let client = self.client();
-        let mut upload =
-            client.begin_streaming_upload(T::NAME, cells.into_iter().collect(), column)?;
+        let (id, mut upload) = client
+            .begin_streaming_upload_for(
+                kind.core(),
+                T::NAME,
+                id,
+                cells.into_iter().collect(),
+                column,
+            )
+            .await?;
         let mut chunks = std::pin::pin!(chunks);
         while let Some(chunk) = chunks.next().await {
             let chunk = match chunk {
@@ -387,7 +401,7 @@ impl crate::transaction::Transaction {
             }
         }
         let (id, _) = client
-            .finish_streaming_upload(upload, kind.core(), id)
+            .finish_streaming_upload(upload, kind.core(), Some(id))
             .await?;
         self.wrote();
         self.read_back(id).await
@@ -527,14 +541,19 @@ impl crate::transaction::OpenTransaction {
         E: std::fmt::Display,
     {
         streamed_column::<T>(&mut cells, column)?;
-        let upload = self
+        let (id, upload) = self
             .on(move |tx| async move {
-                let upload = tx.client().begin_streaming_upload(
-                    T::NAME,
-                    cells.into_iter().collect(),
-                    column,
-                )?;
-                Ok(park(upload))
+                let (id, upload) = tx
+                    .client()
+                    .begin_streaming_upload_for(
+                        kind.core(),
+                        T::NAME,
+                        id,
+                        cells.into_iter().collect(),
+                        column,
+                    )
+                    .await?;
+                Ok((id, park(upload)))
             })
             .await?;
         let guard = self.jazz.feed(upload, chunks).await?;
@@ -545,7 +564,7 @@ impl crate::transaction::OpenTransaction {
                 let parked = unpark(upload).ok_or(Error::Stopped)?;
                 let (id, _) = tx
                     .client()
-                    .finish_streaming_upload(parked, kind.core(), id)
+                    .finish_streaming_upload(parked, kind.core(), Some(id))
                     .await?;
                 tx.wrote();
                 tx.read_back(id).await

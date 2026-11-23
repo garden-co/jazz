@@ -345,12 +345,21 @@ describe("encryption on Node, end to end", () => {
   }, 90_000);
 
   it("lists a device's published removal request", async () => {
-    const alice = await device(await serve());
+    const host = await serve();
+    const alice = await device(host);
+    // A device leaves only through another active device, so alice signs in on a second one first.
+    const other = await device(host, { key: alice.session.exportDeviceKey() });
+    await until(async () => {
+      const devices = await alice.db.encryption.devices.list();
+      return devices.filter((d) => d.status === "active").length >= 2 ? devices : undefined;
+    }, "alice's first device to see her second one");
+    // The other device is offline, so the request stays published rather than completed at once.
+    await other.session.close();
     const mine = async () => (await alice.db.encryption.devices.list()).find((d) => d.isThisDevice);
     expect((await mine())?.removalRequested).toBe(false);
     await alice.db.encryption.devices.requestRemoval();
     expect((await mine())?.removalRequested).toBe(true);
-  }, 60_000);
+  }, 90_000);
 
   it.each(["new", "existing"] as const)(
     "streams encrypted bytes when the project key is %s",
@@ -977,12 +986,17 @@ describe("encryption on Node, end to end", () => {
       { tier: "local-first" },
     );
     cleanups.push(async () => stop());
+    // The app can ask why the query is still loading: the device can't read yet.
+    let readable = false;
+    void fresh.db.encryption.readable().then(() => (readable = true));
     await new Promise((resolve) => setTimeout(resolve, 2_000));
     expect(seen).toEqual([]);
     expect(errors).toEqual([]);
+    expect(readable).toBe(false);
     // The server comes back: the first sync brings the catalogue and the rows.
     await serve({ dir, port });
     await expect.poll(() => seen.at(-1), { timeout: 30_000 }).toEqual(["kept"]);
+    await expect.poll(() => readable, { timeout: 1_000 }).toBe(true);
     expect(errors).toEqual([]);
     // Its open socket would hold the restarted server's close.
     stop();
