@@ -1,4 +1,3 @@
 [
-  {"name":"beta0","sha":"7ea1e85606e8570554851de3f0d3c00c6dcfd373","run":"44970010209","mustFail":["close.ends-waits","signout.derived","store.second-open","android.persist.reopen.device","store.per-account","signout.client-ends"]},
-  {"name":"beta1-cut","sha":"9cf8b28defe13416fee986f0a0540a8a2149d50e","run":"45103742571"}
+  {"name": "beta1", "sha": "9cf8b28defe13416fee986f0a0540a8a2149d50e", "run": "45103742571", "mustFail": ["close.ends-waits", "offline.bearer-open", "android.offline.bearer-open"]}
 ]
