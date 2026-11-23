@@ -113,8 +113,19 @@ async function clientEnds(r) {
   value(await process.call("stoken", { h: "s", token: "" }), "the provider gives no token");
   const renewed = await process.call("hrefresh", { h: "a" });
   r.note(`the handle's refresh: ${renewed.ok ? "ok" : renewed.kind}`);
-  const after = value(await process.call("ssnap", { h: "s" }), "snapshot after");
-  if (after.status !== "signed-out") throw new Broken(`the session reads ${after.status}, not signed-out`);
+  // The session follows its client's end on its own (jazz#6242 does it in a task of its own), so
+  // it may read signed out a moment after the refresh returns. No bound is decided: 3 s.
+  // One wait per round, never a retry: a round that misses it FAILs.
+  let after;
+  const asked = Date.now();
+  const until = asked + 3_000;
+  do {
+    after = value(await process.call("ssnap", { h: "s" }), "snapshot after");
+    if (after.status === "signed-out") break;
+    await r.sleep(25);
+  } while (Date.now() < until);
+  if (after.status !== "signed-out") throw new Broken(`the session still reads ${after.status} 3 s later, not signed-out`);
+  r.time("signed-out after the handle's refresh", Date.now() - asked);
   if (after.clientEpoch === before.clientEpoch) throw new Broken("clientEpoch didn't change");
   refusal(await process.call("read", { h: "a", tier: "local" }), inLang(replaced, r.lang), "the old handle's read");
   value(await process.call("stoken", { h: "s", token }), "the provider gives the token again");

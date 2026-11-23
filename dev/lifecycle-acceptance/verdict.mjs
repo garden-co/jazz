@@ -45,7 +45,7 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
       totals[is]++;
       // The only gap a PASS may have is one the rule declares for that language.
       const declared = !rule.external && rule.notCovered?.[lang];
-      if (is === "NOT_COVERED" && !declared && !isKnown(rule.id)) open++;
+      if (is === "NOT_COVERED" && !declared) open++;
       status[`${rule.id} ${lang}`] = got?.observed ?? is;
       if (!got) {
         console.log(`FAIL ${name} ${lang} ${rule.id}: no result (setup broke, see the job)`);
@@ -76,7 +76,7 @@ for (const { name, sha, run, mustFail = [] } of candidates) {
     const is = got?.status in totals ? got.status : "FAIL";
     const why = got ? got.why : "no result (setup broke, see the job)";
     totals[is]++;
-    if (is === "NOT_COVERED" && !gap && !isKnown(id)) open++;
+    if (is === "NOT_COVERED" && !gap) open++;
     status[`${id} android`] = got?.observed ?? is;
     const label = is === "FAIL" && got && isKnown(id) ? "KNOWN_ISSUE" : is;
     if (label === "KNOWN_ISSUE") knownFails.push(`${id} android`);
