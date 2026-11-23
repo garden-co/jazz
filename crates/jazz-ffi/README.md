@@ -156,7 +156,7 @@ that free) gives the calls in flight the same guarantees:
   stream sessions get up to 2 s to end. So closing takes about `timeout_ms`,
   plus that: `0` is not instant. Nor is that a hard limit: work can't be
   interrupted while it runs, and closing also waits for the store to close
-  and for a host name lookup in progress. Don't close on a UI thread.
+  (but not for a host name lookup in progress). Don't close on a UI thread.
 - A `for_user` or session handle closes only itself, and rolls back what it
   began.
 - A session doesn't wait for the operation in flight, which fails `Closed`

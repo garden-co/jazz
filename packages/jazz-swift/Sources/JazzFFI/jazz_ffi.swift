@@ -745,8 +745,8 @@ public protocol JazzHandleProtocol: AnyObject, Sendable {
      * waiting on the server or the network, at once (local work already
      * started finishes). On a `for_user` or session handle it closes that
      * handle only. Safe beside any other call. It has no hard time limit
-     * (work under way, the store closing, a host name lookup in progress),
-     * so don't call it on a UI thread. It doesn't wait for the token
+     * (work under way, the store closing), so don't call it on a UI
+     * thread. It doesn't wait for the token
      * provider: one already asked may still run after it returns. Named
      * `shutdown`, not `close`, which would clash with Kotlin's
      * `AutoCloseable.close`.
@@ -1287,8 +1287,8 @@ open func sessionState()throws  -> String?  {
      * waiting on the server or the network, at once (local work already
      * started finishes). On a `for_user` or session handle it closes that
      * handle only. Safe beside any other call. It has no hard time limit
-     * (work under way, the store closing, a host name lookup in progress),
-     * so don't call it on a UI thread. It doesn't wait for the token
+     * (work under way, the store closing), so don't call it on a UI
+     * thread. It doesn't wait for the token
      * provider: one already asked may still run after it returns. Named
      * `shutdown`, not `close`, which would clash with Kotlin's
      * `AutoCloseable.close`.
@@ -3617,7 +3617,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_session_state() != 35355) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown() != 11280) {
+    if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown() != 31795) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_jazz_ffi_checksum_method_jazzhandle_shutdown_within() != 12304) {
