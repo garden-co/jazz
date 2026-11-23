@@ -11,6 +11,12 @@ vi.mock("../src/lib/attachments", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/lib/attachments")>()),
   downloadBytes: vi.fn(),
 }));
+const deviceStatus = vi.hoisted(() => ({ current: null as string | null }));
+vi.mock("../src/lib/device-state", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/lib/device-state")>()),
+  useDeviceStateIfAny: () =>
+    deviceStatus.current === null ? null : { status: deviceStatus.current },
+}));
 vi.mock("../src/lib/use-object-url", () => ({
   useObjectUrl: (bytes: Uint8Array | undefined) => (bytes ? "blob:preview" : undefined),
 }));
@@ -71,13 +77,49 @@ function show(answers: {
 }
 const markerWrites = () => db.insert.mock.calls.length + db.update.mock.calls.length;
 
-beforeEach(resetWorld);
-afterEach(cleanup);
+beforeEach(() => {
+  resetWorld();
+  deviceStatus.current = null;
+});
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe("locked messages", () => {
-  it("says messages are locked on this browser, and does not show an empty room", async () => {
+  const pending = { table: "messages", id: "m3", code: "key-pending" };
+
+  it("says a message is decrypting while the room's key is on its way, not that the room is empty", async () => {
+    deviceStatus.current = "active";
+    show({ messages: { data: [], unreadable: [pending] } });
+    expect(await screen.findByText(/Decrypting 1 message/)).toBeTruthy();
+    expect(screen.queryByText(/locked on this browser/)).toBeNull();
+    expect(screen.queryByText("No messages yet")).toBeNull();
+  });
+
+  it("says messages are waiting for the room's key once it has been on its way for a while", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    show({ messages: { data: [], unreadable: [pending] } });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.getByText(/1 message is waiting for the room's key/)).toBeTruthy();
+    expect(screen.queryByText(/Decrypting/)).toBeNull();
+  });
+
+  it("says messages are locked on this browser while it waits for approval", async () => {
+    deviceStatus.current = "awaiting-approval";
+    show({ messages: { data: [], unreadable: [pending] } });
+    expect(await screen.findByText(/1 message is locked on this browser/)).toBeTruthy();
+    expect(screen.queryByText(/Decrypting/)).toBeNull();
+  });
+
+  it("says messages are locked on this browser when it has no access to the key", async () => {
     show({
-      messages: { data: [], unreadable: [{ table: "messages", id: "m3", code: "key-pending" }] },
+      messages: {
+        data: [],
+        unreadable: [{ table: "messages", id: "m3", code: "key-unavailable" }],
+      },
     });
     expect(await screen.findByText(/1 message is locked on this browser/)).toBeTruthy();
     expect(screen.queryByText("No messages yet")).toBeNull();
@@ -98,7 +140,7 @@ describe("the room view's read marker", () => {
         unreadable: [{ table: "messages", id: "m3", code: "key-pending" }],
       },
     });
-    await screen.findByText(/locked on this browser/);
+    await screen.findByText(/Decrypting 1 message/);
     expect(markerWrites()).toBe(0);
   });
 

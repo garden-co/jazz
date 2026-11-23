@@ -7,6 +7,7 @@ import {
   createRoom,
   deviceIdOf,
   joinThroughLink,
+  decryptingNotice,
   lockedBanner,
   message,
   myAccountId,
@@ -286,7 +287,9 @@ test("an active new member attempts no read marker until the room key arrives", 
   });
   await admit(a.page, bob);
   await expect.poll(() => deliveryHeld, { timeout: T }).toBe(true);
-  await expect(lockedBanner(b.page)).toBeVisible({ timeout: T });
+  // Admitted and waiting only for the key: decrypting, not locked.
+  await expect(decryptingNotice(b.page)).toBeVisible({ timeout: T });
+  await expect(lockedBanner(b.page)).toHaveCount(0);
   await expect(waitingBanner(b.page)).toHaveCount(0);
   const bobId = await myAccountId(b.page);
   expect(await serverMarkerCount(roomId, bobId)).toBe(0);
