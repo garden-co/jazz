@@ -141,6 +141,25 @@ describe("locked messages", () => {
     expect(screen.queryByText(/Decrypting/)).toBeNull();
   });
 
+  it("says messages are locked when any of them is locked for another reason", async () => {
+    deviceStatus.current = "active";
+    show({
+      messages: {
+        data: [],
+        unreadable: [pending, { table: "messages", id: "m2", code: "key-unavailable" }],
+      },
+    });
+    expect(await screen.findByText(/2 messages are locked on this browser/)).toBeTruthy();
+    expect(screen.queryByText(/Decrypting/)).toBeNull();
+  });
+
+  it("says messages are locked on a browser that enrolled again and waits for approval", async () => {
+    deviceStatus.current = "reenrolled";
+    show({ messages: { data: [], unreadable: [pending] } });
+    expect(await screen.findByText(/1 message is locked on this browser/)).toBeTruthy();
+    expect(screen.queryByText(/Decrypting/)).toBeNull();
+  });
+
   it("says messages are locked on this browser when it has no access to the key", async () => {
     show({
       messages: {
