@@ -62,7 +62,7 @@ pub(crate) struct BackendClientLink {
 const BUNDLE_HEADER: &str = "x-jazz-bundle";
 
 fn http() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    jazz_native_transport::http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .build()
@@ -116,6 +116,7 @@ pub(crate) async fn connect(
     credential: Bearer,
     endpoint: &str,
     own_bundle: Option<String>,
+    place: &mut crate::handle::Place<'_>,
 ) -> Result<(JazzClient, User, Credential, BackendClientLink)> {
     let app = context.app_id;
     let first = token(&credential, TokenReason::Connect).await?;
@@ -132,6 +133,7 @@ pub(crate) async fn connect(
             _ => None,
         };
         context.backend_secret = Some(STAND_IN_SECRET.to_owned());
+        place.hold(&mut context, crate::handle::Owner::Machine)?;
         let client =
             JazzClient::connect_with_native_transport_bearer(context, connector, first.clone())
                 .await?;
@@ -161,6 +163,10 @@ pub(crate) async fn connect(
     session.account_id = Some(signed_in.account);
     context.account_id = Some(signed_in.account);
     context.backend_session = Some(session);
+    place.hold(
+        &mut context,
+        crate::handle::Owner::Account(signed_in.account),
+    )?;
     let client =
         JazzClient::connect_with_native_transport_bearer(context, connector, first.clone()).await?;
     let user = User {
@@ -310,6 +316,8 @@ impl Jazz {
         if self.for_user {
             return Ok(());
         }
+        // An open of its store waits for this close rather than being refused.
+        self.begin_stopping();
         let started = std::time::Instant::now();
         if !self.info.serverless && !timeout.is_zero() {
             // An outage, or the server refusing, ends the wait: what is still

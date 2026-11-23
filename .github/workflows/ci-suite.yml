@@ -350,6 +350,7 @@ jobs:
         test-crates-package,
         test-kotlin,
         test-kotlin-android,
+        test-kotlin-android-emulator,
       ]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
@@ -365,6 +366,7 @@ jobs:
           CRATES_PACKAGE_RESULT: ${{ needs.test-crates-package.result }}
           KOTLIN_RESULT: ${{ needs.test-kotlin.result }}
           KOTLIN_ANDROID_RESULT: ${{ needs.test-kotlin-android.result }}
+          KOTLIN_ANDROID_EMULATOR_RESULT: ${{ needs.test-kotlin-android-emulator.result }}
         run: |
           test "${WORKSPACE_RESULT}" = success
           test "${STORAGE_COMPAT_RESULT}" = success
@@ -373,6 +375,7 @@ jobs:
           test "${CRATES_PACKAGE_RESULT}" = success
           test "${KOTLIN_RESULT}" = success
           test "${KOTLIN_ANDROID_RESULT}" = success
+          test "${KOTLIN_ANDROID_EMULATOR_RESULT}" = success
 
   # The Go bindings (packages/jazz-go over crates/jazz-ffi's C ABI) and
   # the StagePlan Go example, on Linux: see dev/gates/go-bindings.sh.
@@ -840,7 +843,7 @@ jobs:
         run: sccache --show-stats
 
   # jazz-kotlin-android: a build check of the AAR, with jazz-ffi cross-compiled
-  # for arm64-v8a, armeabi-v7a and x86_64 (no emulator or device tests).
+  # for arm64-v8a, armeabi-v7a and x86_64 (test-kotlin-android-emulator runs it).
   test-kotlin-android:
     if: inputs.scope == 'full'
     # Three cargo-ndk builds of jazz-ffi (arm64-v8a, armeabi-v7a, x86_64) and
@@ -882,6 +885,53 @@ jobs:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
       - name: Run CI-equivalent Kotlin Android partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition kotlin-android
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
+  # The AAR, run: a minified app of an x86_64 build of it opens, writes,
+  # reads and syncs on an emulator, across a process restart
+  # (dev/scripts/test-kotlin-android-emulator.sh). Beside test-kotlin-android,
+  # not after it: it builds its one ABI while the emulator boots.
+  test-kotlin-android-emulator:
+    if: inputs.scope == 'full'
+    # The runner image, not the toolchain container: the emulator needs
+    # /dev/kvm and the image's X and audio libraries.
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate trusted sccache writer
+        if: inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache reader
+        if: inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted sccache configuration
+        if: inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')
+        env:
+          CACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+          CACHE_REGION: ${{ vars.SCCACHE_REGION }}
+        run: |
+          echo "SCCACHE_BUCKET=${CACHE_BUCKET}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_REGION=${CACHE_REGION}" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_USE_SSL=true" >> "${GITHUB_ENV}"
+          echo "SCCACHE_S3_KEY_PREFIX=jazz-ci/v1/production/blacksmith-v1" >> "${GITHUB_ENV}"
+      - uses: ./.github/actions/setup-build
+        with:
+          setup-node: "false"
+          rust-cache: "false"
+          sccache: "true"
+          sccache-sticky-disk: "false"
+          sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
+      - name: Run CI-equivalent Kotlin Android emulator partition
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition kotlin-android-emulator
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
