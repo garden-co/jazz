@@ -365,6 +365,7 @@ use flock::try_lock;
 pub(crate) mod flock {
     use std::io::{Error, ErrorKind, Result};
     use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
 
     use super::{File, Lock};
 
@@ -382,10 +383,24 @@ pub(crate) mod flock {
         }
     }
 
-    /// Takes the exclusive lock, waiting for whoever holds it, as std's
-    /// `File::lock` would.
-    pub(crate) fn lock(file: &File) -> Result<()> {
-        flock(file, libc::LOCK_EX)
+    /// How often a lock that is waited for is tried again.
+    const RETRY: Duration = Duration::from_millis(5);
+
+    /// Takes the exclusive lock, waiting up to `wait` for whoever holds it
+    /// (`TimedOut` after): not `File::lock`'s endless wait, as the holder
+    /// may be a process Android froze.
+    pub(crate) fn lock(file: &File, wait: Duration) -> Result<()> {
+        let deadline = Instant::now() + wait;
+        while !try_lock(file, Lock::Exclusive)? {
+            if Instant::now() >= deadline {
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "another process held its lock for too long",
+                ));
+            }
+            std::thread::sleep(RETRY);
+        }
+        Ok(())
     }
 
     fn flock(file: &File, operation: libc::c_int) -> Result<()> {
