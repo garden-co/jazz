@@ -81,6 +81,7 @@ mod lifecycle;
 mod query;
 mod read;
 mod relation;
+mod remembered;
 mod session;
 mod subscription;
 mod table;
