@@ -3,6 +3,8 @@ package tools.jazz
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.channels.Channel
@@ -430,9 +432,9 @@ public class Jazz internal constructor(
      * with a concurrent one throws [JazzException.Conflict] instead. It commits when [block] returns (at [tier]:
      * with [WriteTier.Global] it returns once the server accepted it) and
      * rolls back when [block] throws, rethrowing. Returns [block]'s value.
-     * If cancellation makes [block] throw, it rolls back. Once [block] has
-     * returned it commits, even if the caller was cancelled, and cancelling
-     * doesn't undo that.
+     * If the caller is cancelled before the commit starts (while [block]
+     * runs, or as it returns), it rolls back and throws the cancellation.
+     * Once the commit has started it stands, and this returns [block]'s value.
      *
      * ```kotlin
      * val moved = jazz.transaction { tx ->
@@ -450,7 +452,8 @@ public class Jazz internal constructor(
         val native = startHandle(dispatcher, giveBack = { it.rollback() }) { checkOpen(); if (serializable) native.begin() else native.beginMergeable() }
         val tx = Transaction(native)
         val result = try {
-            block(tx)
+            // Checked here, so a cancellation rolls back too.
+            block(tx).also { currentCoroutineContext().ensureActive() }
         } catch (e: Throwable) {
             withContext(NonCancellable) { tx.end { runCatching { native.rollback() } } }
             throw e
@@ -585,6 +588,8 @@ public class Jazz internal constructor(
         // subscribing (withContext then throws) still unsubscribes.
         var cancel: (() -> Unit)? = null
         try {
+            // A caller cancelled already subscribes to nothing.
+            ensureActive()
             withContext(dispatcher + NonCancellable) {
                 cancel = subscribeNative(
                 query.toJson(),

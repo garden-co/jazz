@@ -206,11 +206,12 @@ class CancellationTest {
     }
 
     @Test
-    fun a_transaction_cancelled_during_its_block_rolls_back_only_if_the_block_throws() {
+    fun a_transaction_cancelled_during_its_block_rolls_back() {
+        // However the block ends after the cancel (the rule since beta.1).
         val blocks = listOf<Triple<String, String, suspend () -> Unit>>(
             Triple("suspends", "rolled back", { kotlinx.coroutines.delay(10) }),
-            Triple("only computes", "committed", { Thread.sleep(10) }),
-            Triple("returns at once", "committed", { }),
+            Triple("only computes", "rolled back", { Thread.sleep(10) }),
+            Triple("returns at once", "rolled back", { }),
         )
         for ((name, expected, afterCancel) in blocks) {
             var ended = "neither"
