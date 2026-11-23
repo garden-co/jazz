@@ -545,9 +545,6 @@ impl AuthorSubject {
     pub const SYSTEM_CANONICAL: &'static str = r#"["urn:jazz:system","system"]"#;
     /// Reserved issuer for self-signed device-account JWTs (value unchanged).
     pub const DEVICE_ACCOUNT_ISSUER: &'static str = "urn:jazz:local-first";
-    /// Deprecated alias of [`Self::DEVICE_ACCOUNT_ISSUER`].
-    #[deprecated(note = "renamed to DEVICE_ACCOUNT_ISSUER")]
-    pub const LOCAL_FIRST_ISSUER: &'static str = Self::DEVICE_ACCOUNT_ISSUER;
     /// Reserved issuer for process-local static bearer sessions.
     pub const STATIC_BEARER_ISSUER: &'static str = "urn:jazz:static-bearer";
     /// Reserved issuer for sessions without an external credential.

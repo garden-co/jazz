@@ -60,12 +60,6 @@ pub fn device_account_id(app: Uuid, subject: &str) -> AccountId {
     AccountId(Uuid::new_v5(&app, &name))
 }
 
-/// Deprecated alias of [`device_account_id`].
-#[deprecated(note = "renamed to device_account_id")]
-pub fn local_first_account_id(app: Uuid, subject: &str) -> AccountId {
-    device_account_id(app, subject)
-}
-
 /// Permanent assignment with independently revocable admission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assignment {

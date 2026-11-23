@@ -1532,7 +1532,7 @@ export type ComputedImpl<TTypes extends SchemaLike> = {
  * Null passes through: Jazz never calls a transform with null, so a null
  * branch is never reached. Either may still return null, so an alpha.64
  * transform on an optional column, which handled null itself and which
- * `jazz-tools upgrade` moves here unchanged, keeps typechecking.
+ * alpha.66's `jazz-tools upgrade` moved here unchanged, keeps typechecking.
  */
 /**
  * Whether every column stored through the transform `TName` is nullable: only

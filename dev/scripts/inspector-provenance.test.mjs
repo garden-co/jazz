@@ -41,8 +41,6 @@ test("accepts a release-artifacts run on release with an identical tree", () => 
   assert.equal(verifyInspectorHandoff(handoff()), artifactSha);
 });
 for (const [path, event, head_branch] of [
-  ["publish-jazz-tools-alpha.yml", "push", "release"],
-  ["publish-jazz-tools-alpha.yml", "workflow_dispatch", "release"],
   ["release-artifacts.yml", "workflow_dispatch", "release"],
   ["release-artifacts.yml", "push", "release"],
   ["release-artifacts.yml", "workflow_dispatch", "changeset-release/release"],
@@ -112,6 +110,14 @@ for (const [name, changes] of [
       path: ".github/workflows/preview-jazz-tools-alpha-release.yml",
       event: "push",
       head_branch: "changeset-release/release",
+    },
+  ],
+  [
+    "the retired publisher, on release",
+    {
+      path: ".github/workflows/publish-jazz-tools-alpha.yml",
+      event: "push",
+      head_branch: "release",
     },
   ],
   [

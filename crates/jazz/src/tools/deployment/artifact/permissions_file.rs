@@ -37,7 +37,7 @@ pub fn read(
                 "defs",
                 "`defs` was removed in alpha.66: inline each definition where it is \
                  called, or author the app in schema.ts, where helpers are plain \
-                 functions (`npx jazz-tools upgrade` does this for an alpha.65 app)",
+                 functions",
             ));
         }
         if key != "$comment" && !TOP_KEYS.contains(&key.as_str()) {

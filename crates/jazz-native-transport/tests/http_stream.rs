@@ -25,6 +25,8 @@ use jazz_server::{AuthConfig, ServerBuilder, StorageBackend};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
+mod tls;
+
 fn record(kind: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![kind];
     out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
@@ -583,5 +585,57 @@ async fn settle_with_no_time_waits_for_nothing() {
     assert!(
         budget >= Duration::from_millis(250) && budget < Duration::from_secs(2),
         "settle(300 ms) against a 5 s DELETE took {budget:?}"
+    );
+}
+
+/// Alice's main backend can't upgrade sockets and has a certificate from a
+/// CA only her OS trusts: she syncs over its stream, which is plain HTTPS.
+#[test]
+fn the_stream_trusts_a_ca_the_os_trusts() {
+    tls::with_os_store(
+        "the_stream_trusts_a_ca_the_os_trusts",
+        &[tls::Store::PrivateCa],
+        |tls| async move {
+            let app_id = AppId::from_name("http-stream-fallback-private-ca");
+            let served = serve(app_id, schema(), Upgrades::StreamInstead).await;
+            let https = tls.proxy(&served.url).await;
+            let connector = Arc::new(HttpStreamFallbackConnector::new());
+            let client = JazzClient::connect_with_native_transport(
+                context(app_id, https.url.clone()),
+                connector.clone(),
+            )
+            .await
+            .expect("connects over the stream");
+            insert_and_read_back(&client, "over a private CA").await;
+            assert_eq!(
+                connector.last_transport(),
+                Some(HttpStreamTransportKind::HttpStream)
+            );
+            client.shutdown().await.expect("shutdown");
+        },
+    );
+}
+
+/// Mallory's CA is in no store: neither the socket nor the stream connects.
+#[test]
+fn the_stream_refuses_a_ca_nobody_trusts() {
+    tls::with_os_store(
+        "the_stream_refuses_a_ca_nobody_trusts",
+        &[tls::Store::AnotherCa],
+        |tls| async move {
+            let app_id = AppId::from_name("http-stream-fallback-unknown-ca");
+            let mut served = serve(app_id, schema(), Upgrades::StreamInstead).await;
+            let https = tls.proxy(&served.url).await;
+            served.url = https.url.clone();
+            let connector = HttpStreamFallbackConnector::new();
+            assert!(
+                connector
+                    .connect(request_for(&served, app_id))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(https.handshakes(), 0);
+            assert_eq!(served.backend.opened.load(Ordering::SeqCst), 0);
+        },
     );
 }

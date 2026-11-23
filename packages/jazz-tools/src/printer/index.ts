@@ -1,8 +1,8 @@
 /**
  * The JSON → TS printer: `jazz.app.json` + `jazz.permissions.json` → the
  * alpha.66 sources (`schema.ts` with `s.defineSchema` and `definePermissions`,
- * and `migrations/` when the app has history). Used by `jazz-tools upgrade`,
- * `jazz-tools print-ts` and the parity test.
+ * and `migrations/` when the app has history). Used by `jazz-tools print-ts`
+ * and the parity test.
  */
 import type { AppJson, PermissionsJson } from "./app-json.js";
 import { printPermissions, type Unsupported } from "./permissions.js";
@@ -70,7 +70,10 @@ export function printSchemaTs(
   }
   const printed = printPermissions(app, permissions);
   unsupported.push(
-    ...printed.unsupported.map((u) => ({ ...u, path: `jazz.permissions.json: ${u.path}` })),
+    ...printed.unsupported.map((u) => ({
+      ...u,
+      path: `jazz.permissions.json: ${u.path}`,
+    })),
   );
   const header = options.header ? `${options.header.trimEnd()}\n` : "";
   const schemaTs = `${header}import { schema as s } from "jazz-tools";\n\nexport const schema = s.defineSchema(${tables});\n`;

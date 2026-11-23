@@ -156,12 +156,14 @@ impl JazzHandle {
 
     /// Links this device account to the user's account with the app's own
     /// sign-in (`bearer`): the session becomes that user's. Returns the user
-    /// as JSON.
+    /// as JSON. Not supported on a session's handle: use
+    /// `Session.linkDeviceAccount`.
     pub fn link(&self, bearer: String) -> Result<String> {
         self.core.surface(self.core.link(&bearer))
     }
 
-    /// Signs the end user out and closes the app.
+    /// Signs the end user out and closes the app. Not supported on a
+    /// session's handle, which stays open: use `Session.signOut`.
     pub fn sign_out(&self) -> Result<()> {
         self.core.surface(self.core.sign_out())
     }
@@ -348,6 +350,24 @@ impl JazzHandle {
         )
     }
 
+    /// [`Self::upsert`], returning once the write reaches `tier`: `"local"`
+    /// or `"global"`. The row is as written here, not as the server has it
+    /// by then.
+    pub fn upsert_at(
+        &self,
+        table: String,
+        id: String,
+        row_json: String,
+        tier: String,
+    ) -> Result<String> {
+        self.core.surface(self.core.upsert(
+            &table,
+            &id,
+            &row_json,
+            &self.core.surface(write_opts(&tier))?,
+        ))
+    }
+
     /// Brings back a deleted row, as it was or with `patch_json` (a whole
     /// row) as its new content. Returns the row.
     pub fn restore(&self, table: String, id: String, patch_json: Option<String>) -> Result<String> {
@@ -410,8 +430,7 @@ impl JazzHandle {
 
     /// Closes the app and deletes its local store (TS's
     /// `deleteClientStorage`): the next open starts empty and syncs again.
-    /// Writes the server hasn't accepted yet are lost. Refused while another
-    /// open app holds the same `dataDir`.
+    /// Writes the server hasn't accepted yet are lost.
     pub fn delete_client_storage(&self) -> Result<()> {
         self.core.surface(self.core.delete_client_storage())
     }

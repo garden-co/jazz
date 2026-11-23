@@ -108,6 +108,7 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
     "test-crates-package",
     "test-jazz-ffi-bindings",
     "test-kotlin-android",
+    "test-kotlin-android-emulator",
     "warm-native-builds",
   ].includes(jobName)
     ? 16
@@ -201,6 +202,7 @@ const assertSuiteS3ConfigurationBoundary = (source) => {
     "test-crates-package",
     "test-jazz-ffi-bindings",
     "test-kotlin-android",
+    "test-kotlin-android-emulator",
   ]) {
     const parsedJob = document.jobs[name];
     assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
@@ -823,7 +825,7 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   assert.match(aggregate, /if: always\(\)/);
   assert.match(
     aggregate,
-    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-durable-object-limits,\s*test-jazz-ffi-bindings,\s*test-crates-package,\s*test-kotlin,\s*test-kotlin-android,?\s*\]/,
+    /needs:\s*\[\s*test-rust-workspace,\s*test-storage-compat,\s*test-durable-object-limits,\s*test-jazz-ffi-bindings,\s*test-crates-package,\s*test-kotlin,\s*test-kotlin-android,\s*test-kotlin-android-emulator,?\s*\]/,
   );
   assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{STORAGE_COMPAT_RESULT\}" = success/);
@@ -832,6 +834,7 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   assert.match(aggregate, /test "\$\{CRATES_PACKAGE_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{KOTLIN_RESULT\}" = success/);
   assert.match(aggregate, /test "\$\{KOTLIN_ANDROID_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{KOTLIN_ANDROID_EMULATOR_RESULT\}" = success/);
   assert.throws(
     () => assert.match(localCi.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
     /exact/,
@@ -968,6 +971,7 @@ test("shared Rust cache writes are main and merge-group only while trusted PRs r
     "test-crates-package",
     "test-jazz-ffi-bindings",
     "test-kotlin-android",
+    "test-kotlin-android-emulator",
   ]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
@@ -1602,14 +1606,13 @@ test("the jazz-tools npm package ships no native CLI binary", () => {
   assert.doesNotMatch(packageBuild, /jazz-tools-darwin-/);
   for (const arch of ["x64", "arm64"])
     assert.match(packageBuild, new RegExp(`output: jazz-tools-linux-${arch}\\n`));
-  const publish = fs.readFileSync(
-    path.join(root, ".github/workflows/publish-jazz-tools-alpha.yml"),
-    "utf8",
-  );
+  // release-publish.yml attaches them, with their SHA256SUMS, to the draft.
+  const publish = fs.readFileSync(path.join(root, ".github/workflows/release-publish.yml"), "utf8");
   assert.match(
     publish,
-    /gh release upload "\$\{TAG\}" dist\/jazz-tools-linux-x64 dist\/jazz-tools-linux-arm64 dist\/SHA256SUMS/,
+    /cp art\/release-server\/jazz-tools-linux-x64 art\/release-server\/jazz-tools-linux-arm64 art\/release-server\/SHA256SUMS assets\//,
   );
+  assert.match(publish, /gh release upload "\$\{TAG\}" assets\/\* --clobber/);
   const launcher = fs.readFileSync(
     path.join(root, "packages/jazz-tools/bin/jazz-tools.js"),
     "utf8",
@@ -2200,6 +2203,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
     "test-go-ts-backend",
     "test-kotlin",
     "test-kotlin-android",
+    "test-kotlin-android-emulator",
   ])
     assert.equal(
       suite.jobs[name].if,
@@ -2222,6 +2226,7 @@ test("ready PRs run only the lint partition and drafts run nothing", () => {
       "test-jazz-ffi-bindings",
       "test-kotlin",
       "test-kotlin-android",
+      "test-kotlin-android-emulator",
       "test-next-trace",
       "test-react-native",
       "test-rust",

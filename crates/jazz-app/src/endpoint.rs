@@ -441,7 +441,7 @@ impl Endpoint {
             mac.update(format!("jazz-link-challenge-v1\0{}", core.app_id).as_bytes());
             mac.finalize().into_bytes().to_vec()
         };
-        let http = reqwest::Client::builder()
+        let http = jazz_native_transport::http_client_builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(CORE_TIMEOUT)
             .build()

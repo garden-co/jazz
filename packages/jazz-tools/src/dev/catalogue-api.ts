@@ -53,7 +53,6 @@ export interface StoredSchemaHash {
 }
 
 interface SchemaHashesResponseBody {
-  hashes?: string[];
   schemas?: Array<{
     hash: string;
     publishedAt?: number | null;
@@ -66,14 +65,10 @@ function isSchemaHashesResponseBody(value: unknown): value is SchemaHashesRespon
   }
 
   const candidate = value as {
-    hashes?: unknown;
     schemas?: unknown;
   };
 
-  const hasValidHashes =
-    candidate.hashes === undefined ||
-    (Array.isArray(candidate.hashes) && candidate.hashes.every((hash) => typeof hash === "string"));
-  const hasValidSchemas =
+  return (
     candidate.schemas === undefined ||
     (Array.isArray(candidate.schemas) &&
       candidate.schemas.every((schema) => {
@@ -87,9 +82,8 @@ function isSchemaHashesResponseBody(value: unknown): value is SchemaHashesRespon
             entry.publishedAt === null ||
             (typeof entry.publishedAt === "number" && Number.isFinite(entry.publishedAt)))
         );
-      }));
-
-  return hasValidHashes && hasValidSchemas;
+      }))
+  );
 }
 
 export async function fetchSchemaHashes(
@@ -117,7 +111,7 @@ export async function fetchSchemaHashes(
     })) ?? [];
 
   return {
-    hashes: schemaHashesResponse.hashes ?? schemas.map((schema) => schema.hash),
+    hashes: schemas.map((schema) => schema.hash),
     schemas,
   };
 }

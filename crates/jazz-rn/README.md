@@ -1,13 +1,13 @@
 # jazz-rn
 
 This directory is the native relay package for Jazz's supported React Native
-alpha. Applications use the public `jazz-tools/react-native` client API: open
+client. Applications use the public `jazz-tools/react-native` client API: open
 a session with `createJazzClient` (or `<JazzProvider>` from
 `jazz-tools/expo`), which signs in a device account or your backend's user. The
 [canonical Expo scaffold](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo) shows the
 complete client lifecycle.
 
-The alpha requires a matching native development or release build. Expo Go
+The client requires a matching native development or release build. Expo Go
 cannot contain this native module.
 
 The shared JSI HostObject source plus Rust C ABI opens an account-scoped native
@@ -126,7 +126,7 @@ those are produced by the native artifact/release workflows and are checked sepa
 acceptance app. A source checkout with no staged native artifacts should fail
 at relay use rather than pretend to provide persistence.
 
-## Alpha validation limit
+## Validation limit
 
 The installed-device receipt currently covers two foreground aliases in one
 physical JSI runtime. It does not yet prove two physical JSI runtimes attached

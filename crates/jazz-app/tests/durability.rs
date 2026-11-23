@@ -469,55 +469,50 @@ async fn delete_client_storage_removes_every_file() {
     server.shutdown().await;
 }
 
-/// A store another app has open, in this process or another, is not
-/// deleted: the other app keeps it, and its writes.
+/// A store another app has open, in this process or another, is neither
+/// opened a second time nor deleted: the app that has it keeps it, and its
+/// writes.
 #[tokio::test]
 async fn delete_client_storage_refuses_a_held_store() {
     let app_id = AppId::random();
     let data = tempfile::TempDir::new().unwrap();
     let config = || Config::new(app_id).storage(jazz_app_support::Storage::Dir(data.path().into()));
     let a = bindings::open(config()).await.unwrap();
-    let b = bindings::open(config()).await.unwrap();
-
-    let refused = a.delete_client_storage().await;
-    assert!(
-        matches!(refused, Err(jazz_app_support::Error::StoreHeld(_))),
-        "{refused:?}"
-    );
-    // Both run on, on the same store.
-    let note = b
-        .insert(NewNote::new(ObjectId::new(), "b's"))
+    let refused = bindings::open(config()).await;
+    assert!(matches!(
+        refused,
+        Err(jazz_app_support::Error::StoreHeld(_))
+    ));
+    // The app that has it runs on.
+    let note = a
+        .insert(NewNote::new(ObjectId::new(), "a's"))
         .await
         .unwrap();
     assert!(data.path().join("jazz.sqlite").exists());
-    assert!(a.all(notes::query()).await.is_ok());
     a.shutdown().await.unwrap();
-    b.shutdown().await.unwrap();
-    let reopened = bindings::open(config()).await.unwrap();
-    assert_eq!(reopened.all(notes::query()).await.unwrap(), vec![note]);
 
     // Another process holds the store's lock while it has it open.
     let other = std::fs::File::open(data.path().join("jazz.lock")).unwrap();
     other.lock_shared().unwrap();
-    let refused = reopened.delete_client_storage().await;
+    let refused = a.delete_client_storage().await;
     assert!(
         matches!(refused, Err(jazz_app_support::Error::StoreHeld(_))),
         "{refused:?}"
     );
     assert!(data.path().join("jazz.sqlite").exists());
     drop(other);
+    let reopened = bindings::open(config()).await.unwrap();
+    assert_eq!(reopened.all(notes::query()).await.unwrap(), vec![note]);
     reopened.delete_client_storage().await.unwrap();
     assert!(!data.path().join("jazz.sqlite").exists());
     #[cfg(unix)]
     assert!(!data.path().join("jazz.lock").exists());
     // A later open of the directory locks it afresh, and is guarded again.
     let again = bindings::open(config()).await.unwrap();
-    let second = bindings::open(config()).await.unwrap();
     assert!(matches!(
-        again.delete_client_storage().await,
+        bindings::open(config()).await,
         Err(jazz_app_support::Error::StoreHeld(_))
     ));
-    second.shutdown().await.unwrap();
     again.delete_client_storage().await.unwrap();
     #[cfg(unix)]
     assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);

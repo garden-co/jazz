@@ -263,6 +263,99 @@ async fn titles(jazz: &Jazz, count: usize) -> Vec<String> {
     .expect("the rows reach this device and open")
 }
 
+/// Alice and Bob sign in on the same installation. Each opens their own local
+/// rows and encryption keys, including when Alice returns after Bob signs out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signing_in_opens_the_same_accounts_rows_and_keys() {
+    use bindings::{NewNote, notes, tasks};
+    use std::sync::mpsc;
+
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    // Serve one app-supplied private store across all three client threads.
+    let (requests, receiver) = mpsc::channel::<(String, mpsc::Sender<(bool, String)>)>();
+    let private_store = std::thread::spawn(move || {
+        let serve = jazz_e2ee_client::host::bridge::serve(Rc::new(MemoryStore::new()));
+        for (request, reply) in receiver {
+            reply
+                .send(futures::executor::block_on(serve(request)))
+                .unwrap();
+        }
+    });
+    let store = EncryptionConfig::store_calls(move |request| {
+        let (reply, answer) = mpsc::channel();
+        requests.send((request, reply)).unwrap();
+        answer.recv().unwrap()
+    });
+    let mut devices = HashMap::new();
+    for user in ["alice", "bob", "alice"] {
+        let config = Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .user(Auth::bearer(move |_| async move {
+                Ok(Some(format!("token-{user}")))
+            }))
+            .storage(jazz_app_support::Storage::Dir(dir.path().into()))
+            .encryption(store.clone());
+        let jazz = Jazz::open(client_files(), config).await.unwrap();
+        assert_eq!(
+            jazz.encryption()
+                .ready(Duration::from_secs(30))
+                .await
+                .unwrap(),
+            "active"
+        );
+        let device = jazz.encryption().call("deviceId", json!({})).await.unwrap();
+        assert!(
+            dir.path()
+                .join(jazz.account().unwrap().0.to_string())
+                .join("jazz.sqlite")
+                .is_file()
+        );
+
+        let returning = devices.contains_key(user);
+        if let Some(original) = devices.get(user) {
+            assert_eq!(original, &device);
+        } else {
+            assert!(!devices.values().any(|id| id == &device));
+            devices.insert(user, device);
+            let project = make_project(&jazz, user).await;
+            add_task(&jazz, &project, user).await.unwrap();
+        }
+        jazz.disconnect().await.unwrap();
+        let opened = jazz
+            .all_with(tasks::query(), ReadTier::LocalOnly)
+            .await
+            .unwrap();
+        assert_eq!(
+            opened
+                .iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            [user]
+        );
+        let local = jazz
+            .all_with(notes::query(), ReadTier::LocalOnly)
+            .await
+            .unwrap();
+        if returning {
+            assert_eq!(
+                local
+                    .iter()
+                    .map(|row| row.text.as_str())
+                    .collect::<Vec<_>>(),
+                [user]
+            );
+        } else {
+            assert!(local.is_empty());
+            jazz.insert(NewNote::new(user)).await.unwrap();
+        }
+        jazz.shutdown().await.unwrap();
+    }
+    drop(store);
+    private_store.join().unwrap();
+    app.stop().await;
+}
+
 /// Contract: two members, each a device with a private store of its own,
 /// share an encrypted space and read each other's encrypted rows through the
 /// Rust client. The first write of a space makes its key (the write waits for

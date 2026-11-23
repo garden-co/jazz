@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Publishes Jazz's Rust crates to crates.io in dependency order. Used by
-// .github/workflows/publish-jazz-crates-alpha.yml; see dev/RELEASE_RUNBOOK.md, "Rust
+// .github/workflows/release-publish.yml (its crates legs); see dev/RELEASE_RUNBOOK.md, "Rust
 // crates on crates.io".
 //
 //   node dev/scripts/publish-crates.mjs --list       the crates, in order
@@ -202,7 +202,7 @@ async function main() {
       throw new Error(
         `${name}@${version} needs ${auth}, but ${variable} is not set. ` +
           (state.exists
-            ? `Check ${name}'s trusted publisher on crates.io (workflow publish-jazz-crates-alpha.yml, environment publish).`
+            ? `Check ${name}'s trusted publisher on crates.io (workflow release-publish.yml, environment publish).`
             : "Store a publish-new CRATES_IO_BOOTSTRAP_TOKEN in the publish environment."),
       );
     }

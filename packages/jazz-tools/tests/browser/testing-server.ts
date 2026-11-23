@@ -1,4 +1,4 @@
-import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import { createTestAccountManager } from "../../src/runtime/testing/account-fixtures.js";
 import type { AccountStore } from "../../src/accounts/persistence.js";
 import type { AccountHandle } from "../../src/accounts/state.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../../src/schema-source.js";
@@ -190,10 +190,10 @@ export function jazzAppUser(
   userId: string,
   claims?: Record<string, unknown>,
 ): Promise<{ appId: string; serverUrl: string; account: AccountHandle }> {
-  return signInWithJazzApp(createAccountManager, app, userId, claims);
+  return signInWithJazzApp(createTestAccountManager, app, userId, claims);
 }
 
-/** An account manager factory: this package's or an example's own `createAccountManager`. */
+/** An account manager factory: this package's or an example's own `createTestAccountManager`. */
 export type AccountManagerFactory<Account> = (config: {
   appId: string;
   serverUrl: string;
@@ -202,7 +202,7 @@ export type AccountManagerFactory<Account> = (config: {
 }) => Promise<{ loginWithBackend(): Promise<Account> }>;
 
 /**
- * {@link jazzAppUser} with the caller's own `createAccountManager`, so an
+ * {@link jazzAppUser} with the caller's own `createTestAccountManager`, so an
  * example's account handles come from (and stay in) its own copy of Jazz.
  */
 export async function signInWithJazzApp<Account>(
@@ -227,7 +227,7 @@ export async function signInWithJazzApp<Account>(
 export async function loginAtJazzAppUser<Account = AccountHandle>(
   appId: string,
   userUrl: string,
-  createManager: AccountManagerFactory<Account> = createAccountManager as never,
+  createManager: AccountManagerFactory<Account> = createTestAccountManager as never,
 ): Promise<Account> {
   const accounts = await createManager({
     appId,

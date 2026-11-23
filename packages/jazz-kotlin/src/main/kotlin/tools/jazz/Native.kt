@@ -34,6 +34,9 @@ public interface Native : AutoCloseable {
     public fun updateAt(table: String, id: String, patchJson: String, tier: String): Unit = update(table, id, patchJson)
     public fun deleteAt(table: String, id: String, tier: String): Unit = delete(table, id)
 
+    /** [upsert] at a durability tier. */
+    public fun upsertAt(table: String, id: String, rowJson: String, tier: String): String = throw JazzException.NotSupported("upsert at a tier")
+
     public fun subscribeAt(
         queryJson: String,
         tier: String,

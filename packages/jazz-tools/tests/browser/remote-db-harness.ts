@@ -1,7 +1,7 @@
 import type { Db, QueryBuilder, TableProxy } from "../../src/runtime/db.js";
 import type { DbConfig } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import { createTestAccountManager } from "../../src/runtime/testing/account-fixtures.js";
 import { createBrowserTestDb } from "./account-fixtures.js";
 
 export interface RemoteBrowserDbCreateInput {
@@ -90,7 +90,7 @@ async function loginAtUserOrigin(appId: string, userUrl: string) {
     return new Response(response.body, { status: response.status, headers: response.headers });
   };
   let stored: string | null = null;
-  const accounts = await createAccountManager({
+  const accounts = await createTestAccountManager({
     appId,
     serverUrl: userUrl,
     fetch: relayFetch,

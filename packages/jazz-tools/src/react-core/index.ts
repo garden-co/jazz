@@ -4,7 +4,6 @@ export {
   JazzClientProvider,
   useDb,
   useJazzClient,
-  useSession,
   type JazzClientProviderProps,
 } from "./provider.js";
 export { useAll, useAllSuspense, type UseAllResult, type UseAllSuspenseResult } from "./use-all.js";
@@ -16,8 +15,8 @@ export type { DurabilityTier, QueryBuilder, QueryOptions, TableProxy } from "../
 
 export {
   // The provider a host binding builds its `<JazzProvider>` on (it takes the
-  // host's `openCore`). Not alpha.60's `JazzSessionProvider`, whose name the
-  // bindings keep as a removed-API stub.
+  // host's `openCore`). Exported under another name so it isn't mistaken for
+  // alpha.60's `JazzSessionProvider`.
   JazzSessionProvider as JazzHostSessionProvider,
   useJazzSession,
   reportJazzStartupFailure,
@@ -25,6 +24,3 @@ export {
   type JazzSessionViewProps,
   type UseJazzSessionResult,
 } from "./session.js";
-
-// Removed in alpha.61: stubs that throw, naming the replacement (one release).
-export { createUseLocalFirstAuth, useJazzSessionOwner } from "../removed-api.js";

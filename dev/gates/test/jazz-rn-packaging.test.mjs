@@ -972,7 +972,7 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
   );
 });
 
-test("React Native docs advertise the supported alpha session and account-handle clients", async () => {
+test("React Native docs advertise the supported beta session and account-handle clients", async () => {
   const [
     readme,
     installGuide,
@@ -1005,7 +1005,7 @@ test("React Native docs advertise the supported alpha session and account-handle
   assert.match(readme, /RCT_NEW_ARCH_ENABLED=0/);
   assert.doesNotMatch(readme, /plugin\s+sets\s+`newArchEnabled`/);
   assert.match(readme, /Expo Go is not\s+supported/);
-  assert.match(readme, /supported React Native\s+alpha/);
+  assert.match(readme, /supported React Native\s+client/);
   assert.match(readme, /`jazz-tools\/react-native`/);
   assert.match(readme, /signs in a device account or your backend's user/);
   assert.match(readme, /`createJazzClient`/);
@@ -1036,7 +1036,7 @@ test("React Native docs advertise the supported alpha session and account-handle
   );
   assert.match(
     installGuide,
-    /React Native and Expo are supported as an alpha[\s\S]*`jazz-tools\/react-native`[\s\S]*canonical Expo\s+scaffold/,
+    /React Native and Expo are supported in the beta[\s\S]*`jazz-tools\/react-native`[\s\S]*canonical Expo\s+scaffold/,
     "the public install guide must direct RN users to the supported account-handle client path",
   );
   const expoSetup = clientSetupGuide.match(/## Setup\n([\s\S]*?)(?=\n## )/)?.[1];
@@ -1055,10 +1055,10 @@ test("React Native docs advertise the supported alpha session and account-handle
   assert.match(clientSetupGuide, /canonical Expo\s+scaffold/);
   assert.match(
     durabilityGuide,
-    /React Native\/Expo alpha uses these same read and write durability tiers/,
+    /React Native\/Expo client uses these same read and write durability tiers/,
   );
   assert.match(durabilityGuide, /client with `createJazzClient`/);
-  assert.match(examplesGuide, /Supported alpha app:[\s\S]*device accounts[\s\S]*`JazzProvider`/);
+  assert.match(examplesGuide, /Supported beta app:[\s\S]*device accounts[\s\S]*`JazzProvider`/);
   assert.match(
     exampleReadme,
     /Expo local-first todos using `jazz-tools\/react-native` and the installed `jazz-rn` runtime/,
@@ -3229,7 +3229,8 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.match(alphaPublish, /JAZZ_REUSE_PREVIEW_ARTIFACTS/);
   assert.match(alphaPublish, /release-artifact-source-revision\.mjs/);
   assert.match(alphaPublish, /Verify packed jazz-rn relay payload/);
-  assert.match(alphaPublish, /Publish jazz-rn$/m);
+  // The publish itself moved to release-publish.yml (prebuilt tarballs).
+  assert.doesNotMatch(alphaPublish, /Publish jazz-rn$/m);
   assert.match(
     alphaPublish,
     /uses: \.\/\.github\/workflows\/build-jazz-packages\.yml[\s\S]*include_rn: true/,

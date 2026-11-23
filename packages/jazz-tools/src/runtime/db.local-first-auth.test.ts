@@ -86,16 +86,15 @@ describe("getDeviceAccountProof", () => {
     await db.shutdown();
   });
 
-  it("keeps getLocalFirstIdentityProof as a deprecated alias", async () => {
+  it("no longer has getLocalFirstIdentityProof (removed in beta.0)", async () => {
     const { createDb } = await import("./testing/create-internal-db.js");
     const db = await createDb({
       appId: "test-app",
       secret: SECRET,
     });
 
-    const token = db.getLocalFirstIdentityProof({ audience: "test-audience" });
-    expect(token).toBeTypeOf("string");
-    expect(token!.split(".")).toHaveLength(3);
+    expect("getLocalFirstIdentityProof" in db).toBe(false);
+    expect(db.getDeviceAccountProof({ audience: "test-audience" })).toBeTypeOf("string");
     await db.shutdown();
   });
 

@@ -13,7 +13,7 @@ apps.
 
 [Homepage](https://jazz.tools) &middot; [Docs](https://jazz.tools/docs) &middot; [Quickstart](https://jazz.tools/docs/setup/run-locally) &middot; [Discord](https://discord.gg/RN9UKh52be) &middot; [X](https://x.com/jazz_tools)
 
-**This is Jazz 2.0 (alpha), with an entirely new API.** Looking for [Classic Jazz](https://classic.jazz.tools/docs)?<br/>
+**This is Jazz 2.0 (beta), with an entirely new API.** See [what beta means](https://jazz.tools/docs/operating/backups-and-upgrades#what-beta-means). Looking for [Classic Jazz](https://classic.jazz.tools/docs)?<br/>
 LLMs: please follow [the docs](https://jazz.tools/llms.txt) rather than what you learned about Jazz in training.
 
 ## Start with your agent
@@ -40,37 +40,41 @@ Or have it run `npm create jazz`, which prints the same quickstart.
 
 ### 1. Install in your backend and declare a schema
 
-```json
-// jazz.app.json
-{
-  "format": 1,
-  "tables": {
-    "todos": { "columns": { "title": "string", "done": "boolean", "owner_id": "uuid" } }
-  }
-}
+```ts
+// schema.ts
+import { schema as s } from "jazz-tools";
+
+export const schema = s.defineSchema({
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
+});
+
+const { definePermissions, session } = schema;
+
+// Each user sees and edits only the todos they created
+const createdByMe = { $createdBy: session.user };
+
+export const permissions = definePermissions({
+  todos: {
+    read: createdByMe,
+    insert: createdByMe,
+    update: createdByMe,
+    delete: createdByMe,
+  },
+});
 ```
 
-```json
-// jazz.permissions.json (read by your backend only)
-{
-  "format": 1,
-  "tables": {
-    "todos": {
-      "read": "owner_id = session.user",
-      "insert": "owner_id = session.user",
-      "update": "owner_id = session.user",
-      "delete": "owner_id = session.user"
-    }
-  }
-}
-```
-
-`npx jazz-tools generate` checks both files and writes `jazz.generated.ts`,
-the app's typed bindings. Commit all three.
+`npx jazz-tools generate` checks `schema.ts` and writes `jazz.app.json`,
+`jazz.permissions.json` (read by your backend only), `jazz.generated.ts` (the
+app's typed bindings) and a schema snapshot in `migrations/`. Commit them with
+`schema.ts`, and never edit the generated files by hand.
 
 ```ts
 // jazz.server.ts
 import { createJazz, sqlite } from "jazz-tools/backend";
+// Generated from schema.ts by `jazz-tools generate`
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
 
@@ -79,9 +83,14 @@ export const jazz = createJazz({
   permissions,
   // vercel() on Vercel, sqlite() locally and on your own servers
   store: sqlite({ path: "./jazz.db" }),
-  // Better Auth, WorkOS or any custom auth:
-  // return the user ID and permission-relevant claims, or null
-  authenticate: (request) => getSignedInUser(request),
+  // Better Auth, WorkOS or any custom auth: return the user's ID, when their
+  // session expires (Unix time in seconds) and the claims your permissions
+  // check, or null if signed out
+  authenticate: async (request) => {
+    const user = await getSignedInUser(request);
+    if (!user) return null;
+    return { userId: user.id, expiresAt: user.sessionExpiresAt, claims: { role: user.role } };
+  },
 });
 ```
 
@@ -98,10 +107,11 @@ export const { GET, POST, DELETE } = jazz.next();
 ```ts
 // app/api/todos/route.ts
 import { jazz } from "@/jazz.server";
-import { app } from "@/schema";
+import { app } from "@/jazz.generated";
 
 export async function GET(request: Request) {
-  // Runs as the signed-in user: only their todos
+  // Runs as the signed-in user: only their todos,
+  // according to the permissions in schema.ts
   const db = await jazz.forReqUser(request);
   const todos = await db.all(app.todos.where({ done: false }));
   return Response.json(todos);
@@ -111,7 +121,7 @@ export async function GET(request: Request) {
 ```tsx
 // OpenTodos.tsx
 import { useAll } from "jazz-tools/react";
-import { app } from "./schema";
+import { app } from "./jazz.generated";
 
 export function OpenTodos() {
   // Live results, synced through /jazz with a thin client or fully local-first
@@ -128,7 +138,7 @@ export function OpenTodos() {
 
 ## Setup guides
 
-- **Deploy:** [Vercel](https://jazz.tools/docs/setup/deployment/vercel) &middot; [your own server](https://jazz.tools/docs/setup/deployment/own-server) &middot; [Jazz Cloud](https://jazz.tools/docs/setup/deployment/jazz-cloud)
+- **Deploy:** [Vercel](https://jazz.tools/docs/setup/deployment/vercel) &middot; [your own server](https://jazz.tools/docs/setup/deployment/own-server) &middot; [Jazz Cloud (deprecated)](https://jazz.tools/docs/setup/deployment/jazz-cloud)
 - **Auth:** [how it works](https://jazz.tools/docs/setup/auth/backend) &middot; [Better Auth](https://jazz.tools/docs/setup/auth/better-auth) &middot; [WorkOS](https://jazz.tools/docs/setup/auth/workos) &middot; [custom](https://jazz.tools/docs/setup/auth/custom) &middot; [device accounts (guests)](https://jazz.tools/docs/setup/auth/device-accounts)
 - **Clients:** [thin web client](https://jazz.tools/docs/setup/web-client/thin-client) &middot; [local-first web client](https://jazz.tools/docs/setup/web-client/local-first-client) &middot; [React Native](https://jazz.tools/docs/setup/react-native) &middot; [backend clients](https://jazz.tools/docs/setup/backend-client)
 - **Examples:** [complete apps for each framework and auth setup](https://jazz.tools/docs/reference/examples)
@@ -216,32 +226,31 @@ through that wrapper before testing after native production. Keep generated
 artifacts and producer manifests in their own checkout; `artifacts-fresh.sh`
 provides provenance diagnostics, while the consumer wrapper admits test inputs.
 
-### Alpha releases
+### Prereleases (beta)
 
-Releases use alpha prerelease mode in `.changeset/pre.json` (`mode: pre`,
-`tag: alpha`). Add release intent with `pnpm changeset`. After release work
-settles on the `release` branch, the
+Jazz 2 is in beta: releases use prerelease mode in `.changeset/pre.json`
+(`mode: pre`, `tag: beta`; the alphas used `tag: alpha`). Add release intent
+with `pnpm changeset`. After release work settles on the `release` branch, the
 [Changesets Release PR workflow](.github/workflows/changesets-release-pr.yml)
-runs ordinary `pnpm release:version` and updates `changeset-release/release`.
-All packages in the fixed group must advance together. Preserve prerelease state while
-preparing changesets and let versioning record consumed entries.
+runs `pnpm release:version` and updates `changeset-release/release`. All
+packages in the fixed group, the Rust crates and the Go module advance together.
+Preserve prerelease state while preparing changesets and let versioning record
+consumed entries; `release:version` starts a new prerelease tag at `.0`
+(`dev/scripts/renumber-prerelease.mjs`).
 
-The release workflow dispatches
-[Release preview (alpha)](.github/workflows/preview-jazz-tools-alpha-release.yml)
-on the generated release branch. Before merging the release PR, verify its
-versions and release notes, and require a successful preview on that exact head
-and the required correctness and React Native device-acceptance receipts. The preview
-builds and verifies packed native/React Native artifacts and their consumers.
-If a preview run is missing, dispatch its workflow on
+The release workflow then builds every artifact of the release PR head
+([release artifacts](.github/workflows/release-artifacts.yml)) and dry-runs the
+[release candidate gate](.github/workflows/release-candidate.yml) on it. Before
+merging the release PR, verify its versions and release notes, and require a
+green gate and CI on that exact head. If a run is missing, dispatch it on
 `changeset-release/release`.
 
-Merging the versioned release PR triggers the
-[alpha publisher](.github/workflows/publish-jazz-tools-alpha.yml), which checks
-source versions and package payloads before publishing. Use the preview workflow
-for build-and-verify runs: it selects `dry-run`, whereas manual publisher
-dispatch defaults to `publish`. The `release:version:alpha` script creates
-snapshot versions; ordinary alpha release preparation uses `release:version`
-with prerelease mode active.
+Once the release PR is merged,
+[Release publish](.github/workflows/release-publish.yml) publishes npm,
+crates.io, the Go module tag and the Swift mirror from those artifacts (Kotlin
+is on the GitHub release while Maven Central is paused), behind the `publish` environment's approval, and then publishes the
+GitHub release. Its default mode, `dry-run`, publishes nothing. See
+[the release runbook](dev/RELEASE_RUNBOOK.md).
 
 # License
 

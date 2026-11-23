@@ -1050,29 +1050,11 @@ impl Binding {
         Ok(())
     }
 
-    /// Deprecated alias of [`Self::admit_device_account_session`].
-    #[deprecated(note = "renamed to admit_device_account_session")]
-    pub fn admit_local_first_session(
-        &self,
-        token: &str,
-        app_id: &str,
-        claimed_author: &str,
-    ) -> HostResult<()> {
-        self.admit_device_account_session(token, app_id, claimed_author)
-    }
-
     /// How many device accounts this backend holds an unexpired-at-
     /// admission proof for: only tests read it, to see the map stay bounded.
     #[cfg(any(test, feature = "testing"))]
     pub fn admitted_device_accounts(&self) -> usize {
         self.admitted.borrow().len()
-    }
-
-    /// Deprecated alias of `admitted_device_accounts`.
-    #[deprecated(note = "renamed to admitted_device_accounts")]
-    #[cfg(any(test, feature = "testing"))]
-    pub fn admitted_local_first_accounts(&self) -> usize {
-        self.admitted_device_accounts()
     }
 
     /// The subject `bytes` (canonical author JSON) names: an ordinary

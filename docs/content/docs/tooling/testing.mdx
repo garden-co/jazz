@@ -213,7 +213,7 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
   token: `testJazz.bearer(userId, claims)` returns one your permissions see as that user. Pass it
   as `bearer: () => token` on `createJazzClient`, with `serverUrl: testJazz.url`, and call
   `refresh()`, as below. There, the `serverUrl` from `testJazz.as()` doesn't sign anyone in:
-  `refresh()` throws "loginWithBackend and linkWithBackend need a browser".
+  `refresh()` throws "refresh() and linkDeviceAccount() need a browser".
 - **Signed-in users in a real browser** (Vitest browser mode, Playwright) call
   `await testJazz.as(userId, claims)` instead and point the client at its `serverUrl`: each user
   gets their own origin, which stands in for their session cookie. `bearer` is refused wherever

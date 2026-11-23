@@ -627,6 +627,72 @@ async fn a_trusted_backend_client_acts_as_the_system_and_for_users_with_accounts
     app.stop().await;
 }
 
+/// A user's handle can't sign out the backend client it came from, which
+/// goes on renewing its credential for every user.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_users_handle_cant_sign_out_its_backend_client() {
+    let app = App::start().await;
+    let token = Arc::new(Mutex::new("machine-trusted".to_owned()));
+    let provider = {
+        let token = token.clone();
+        move |_: TokenReason| {
+            let token = token.lock().unwrap().clone();
+            async move { Ok(Some(token)) }
+        }
+    };
+    let job = Jazz::open(
+        files(),
+        Config::new(app.app_id)
+            .server(&app.relay.endpoint)
+            .credential(provider),
+    )
+    .await
+    .unwrap();
+    let alice = Jazz::open(
+        client_files(),
+        app.user(Auth::bearer(|_| async {
+            Ok(Some("token-alice".to_owned()))
+        })),
+    )
+    .await
+    .unwrap();
+    connected(&job).await;
+    let as_alice = job
+        .for_user("alice", serde_json::Value::Null)
+        .await
+        .unwrap();
+
+    let signed_out = as_alice.sign_out().await;
+    let backend = job.session().unwrap();
+    assert!(
+        matches!(backend.state(), SessionState::SignedIn { .. }),
+        "the backend client's session: {:?}",
+        backend.state()
+    );
+    assert!(
+        matches!(&signed_out, Err(Error::Unsupported(what)) if what.contains("(for_user)")),
+        "{signed_out:?}"
+    );
+    assert!(
+        as_alice.session().is_none(),
+        "not the backend client's session"
+    );
+
+    // Its credential expires: it still renews, and the user's writes sync.
+    *token.lock().unwrap() = "machine-trusted.2".to_owned();
+    app.relay.refuse("machine-trusted", "token expired");
+    app.relay.kick();
+    as_alice
+        .insert(NewTodo::new("After the renewal", false))
+        .await
+        .unwrap();
+    assert_eq!(remote_todos(&alice, 1).await.len(), 1);
+
+    job.close(jazz_app_support::CLOSE_TIMEOUT).await.unwrap();
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_scoped_backend_client_acts_as_its_user_and_an_untrusted_one_is_refused() {
     use jazz_app_support::BackendClientKind;
@@ -1093,5 +1159,266 @@ async fn remote_reads_wait_for_an_unreachable_server() {
 
     drop(changes);
     agent.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// Titles of the todos `jazz` holds locally.
+async fn local_titles(jazz: &Jazz) -> Vec<String> {
+    let mut titles: Vec<String> = jazz
+        .all_with(todos::query(), ReadTier::LocalOnly)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|todo| todo.title)
+        .collect();
+    titles.sort();
+    titles
+}
+
+/// Titles of every todo on the server, once it has `count`.
+async fn server_titles(app: &App, count: usize) -> Vec<String> {
+    let mut titles: Vec<String> = remote_todos(&app.backend, count)
+        .await
+        .into_iter()
+        .map(|todo| todo.title)
+        .collect();
+    titles.sort();
+    titles
+}
+
+/// Two end users on one device, one after the other, with the same
+/// `Storage::Dir`: each has a store of their own under it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_user_on_a_dir_has_a_store_of_their_own() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let alice = DeviceKey::generate().unwrap();
+    let as_ = |key: &DeviceKey| {
+        app.user(Auth::Device(key.clone()))
+            .storage(Storage::Dir(dir.path().into()))
+    };
+
+    // Alice syncs one write and leaves one unsent, then closes the app.
+    let first = Jazz::open(client_files(), as_(&alice)).await.unwrap();
+    connected(&first).await;
+    first
+        .insert(NewTodo::new("alice synced", false))
+        .await
+        .unwrap();
+    first.wait_for_sync().await.unwrap();
+    app.relay.set_unreachable(true);
+    first
+        .insert(NewTodo::new("alice unsent", false))
+        .await
+        .unwrap();
+    first.shutdown().await.unwrap();
+    app.relay.set_unreachable(false);
+
+    // Bob, on the same dir, sees none of it and uploads only his own.
+    let bob = DeviceKey::generate().unwrap();
+    let second = Jazz::open(client_files(), as_(&bob)).await.unwrap();
+    assert_eq!(local_titles(&second).await, Vec::<String>::new());
+    second.insert(NewTodo::new("bob", false)).await.unwrap();
+    second.wait_for_sync().await.expect("bob's own write syncs");
+    assert_eq!(server_titles(&app, 2).await, ["alice synced", "bob"]);
+    second.shutdown().await.unwrap();
+
+    // Alice again: her store, and her unsent write goes up as hers.
+    let again = Jazz::open(client_files(), as_(&alice)).await.unwrap();
+    assert_eq!(local_titles(&again).await, ["alice synced", "alice unsent"]);
+    again.wait_for_sync().await.unwrap();
+    assert_eq!(
+        server_titles(&app, 3).await,
+        ["alice synced", "alice unsent", "bob"]
+    );
+
+    // Each account's store deletes alone.
+    again.delete_client_storage().await.unwrap();
+    let after = Jazz::open(client_files(), as_(&bob)).await.unwrap();
+    assert_eq!(local_titles(&after).await, ["bob"]);
+    after.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// The same with the app's own sign-in: one user signs out, the next signs
+/// in on the same dir.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signing_out_and_in_as_someone_else_opens_their_store() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let as_ = |user: &'static str| {
+        app.user(Auth::bearer(move |_| async move {
+            Ok(Some(format!("token-{user}")))
+        }))
+        .storage(Storage::Dir(dir.path().into()))
+    };
+    let alice = Jazz::open(client_files(), as_("alice")).await.unwrap();
+    connected(&alice).await;
+    app.relay.set_unreachable(true);
+    alice
+        .insert(NewTodo::new("alice unsent", false))
+        .await
+        .unwrap();
+    alice.sign_out().await.unwrap();
+    app.relay.set_unreachable(false);
+
+    let bob = Jazz::open(client_files(), as_("bob")).await.unwrap();
+    assert_eq!(local_titles(&bob).await, Vec::<String>::new());
+    bob.insert(NewTodo::new("bob", false)).await.unwrap();
+    bob.wait_for_sync().await.expect("bob's own write syncs");
+    assert_eq!(server_titles(&app, 1).await, ["bob"]);
+    bob.shutdown().await.unwrap();
+
+    let alice = Jazz::open(client_files(), as_("alice")).await.unwrap();
+    alice.wait_for_sync().await.unwrap();
+    assert_eq!(server_titles(&app, 2).await, ["alice unsent", "bob"]);
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// Scoped backend clients are users too: each has its own store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scoped_backend_clients_on_a_dir_have_stores_of_their_own() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let open = |token: &'static str| {
+        Jazz::open(
+            files(),
+            Config::new(app.app_id)
+                .server(&app.relay.endpoint)
+                .credential(machine(token))
+                .storage(Storage::Dir(dir.path().into())),
+        )
+    };
+    let agent = open("token-agent").await.unwrap();
+    agent.insert(NewTodo::new("agent", false)).await.unwrap();
+    agent.wait_for_sync().await.unwrap();
+    agent.shutdown().await.unwrap();
+    let other = open("token-other-agent").await.unwrap();
+    assert_eq!(local_titles(&other).await, Vec::<String>::new());
+    other.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// A device account linked to the app's sign-in keeps its account, and so
+/// its store: signing in with the bearer later opens it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_linked_device_account_keeps_its_store() {
+    let app = App::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = DeviceKey::generate().unwrap();
+    let device = Jazz::open(
+        client_files(),
+        app.user(Auth::Device(key))
+            .storage(Storage::Dir(dir.path().into())),
+    )
+    .await
+    .unwrap();
+    connected(&device).await;
+    device.insert(NewTodo::new("erin's", false)).await.unwrap();
+    device.session().unwrap().link("token-erin").await.unwrap();
+    device.shutdown().await.unwrap();
+
+    app.relay.set_unreachable(true);
+    let erin = Jazz::open(
+        client_files(),
+        app.user(Auth::bearer(|_| async {
+            Ok(Some("token-erin".to_owned()))
+        }))
+        .storage(Storage::Dir(dir.path().into())),
+    )
+    .await;
+    app.relay.set_unreachable(false);
+    // Signing in needs the backend: reachable again, the same store.
+    let erin = match erin {
+        Ok(erin) => erin,
+        Err(_) => Jazz::open(
+            client_files(),
+            app.user(Auth::bearer(|_| async {
+                Ok(Some("token-erin".to_owned()))
+            }))
+            .storage(Storage::Dir(dir.path().into())),
+        )
+        .await
+        .unwrap(),
+    };
+    assert_eq!(local_titles(&erin).await, ["erin's"]);
+    erin.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// A store an earlier version kept at the dir itself is left as it was:
+/// end users open stores of their own beside it, and an app without a
+/// user refuses it when a signed-in user wrote it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_store_kept_at_the_dir_itself_is_left_alone() {
+    let app = App::start().await;
+    let made = tempfile::tempdir().unwrap();
+    let key = DeviceKey::generate().unwrap();
+    // A user's store, moved to where an earlier version kept it.
+    let user = Jazz::open(
+        client_files(),
+        app.user(Auth::Device(key.clone()))
+            .storage(Storage::Dir(made.path().into())),
+    )
+    .await
+    .unwrap();
+    connected(&user).await;
+    user.insert(NewTodo::new("from before", false))
+        .await
+        .unwrap();
+    user.wait_for_sync().await.unwrap();
+    user.shutdown().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::fs::read_dir(made.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.join("jazz.sqlite").exists())
+        .unwrap_or_else(|| made.path().to_owned());
+    for entry in std::fs::read_dir(&store).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            std::fs::copy(&path, dir.path().join(path.file_name().unwrap())).unwrap();
+        }
+    }
+    let before = std::fs::read(dir.path().join("jazz.sqlite")).unwrap();
+
+    // An app with no user on that dir: refused, the store untouched.
+    let local = Jazz::open(
+        client_files(),
+        Config::new(app.app_id).storage(Storage::Dir(dir.path().into())),
+    )
+    .await;
+    match local {
+        Err(Error::Refused(message)) => assert!(message.contains("signed-in user"), "{message}"),
+        other => panic!(
+            "opened a signed-in user's store without them: {:?}",
+            other.err()
+        ),
+    }
+
+    // A user on that dir gets a store of their own; this one stays.
+    let again = Jazz::open(
+        client_files(),
+        app.user(Auth::Device(key))
+            .storage(Storage::Dir(dir.path().into())),
+    )
+    .await
+    .unwrap();
+    again.shutdown().await.unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("jazz.sqlite")).unwrap(),
+        before
+    );
+
+    // A store with only an app's own writes opens as before.
+    let own = tempfile::tempdir().unwrap();
+    let config = || Config::new(app.app_id).storage(Storage::Dir(own.path().into()));
+    let local = Jazz::open(client_files(), config()).await.unwrap();
+    local.insert(NewTodo::new("local", false)).await.unwrap();
+    local.shutdown().await.unwrap();
+    let local = Jazz::open(client_files(), config()).await.unwrap();
+    assert_eq!(local_titles(&local).await, ["local"]);
+    local.shutdown().await.unwrap();
     app.stop().await;
 }

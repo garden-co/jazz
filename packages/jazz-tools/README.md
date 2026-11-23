@@ -2,6 +2,79 @@
 
 TypeScript SDK, framework bindings, and CLI tools for **Jazz 2**.
 
+## Usage
+
+```bash
+npx jazz-tools generate          # check jazz.app.json / jazz.permissions.json, write jazz.generated.ts
+npx jazz-tools migrations create --name <name>   # record a schema change
+```
+
+## Supported binary targets
+
+- macOS arm64
+- macOS x64
+- Linux x64
+- Linux arm64
+
+If your platform is not supported in the npm package, install with Cargo from source.
+
+## React Native boundary
+
+The `jazz-tools/react-native` entry point requires a matching installed
+`jazz-rn` native artifact. Persistent databases use native account admission
+or a platform-issued `nativeRelay` capability. Storage is owned by the native
+runtime; there is no JavaScript SQLite driver option. Explicit memory mode is
+not supported by the React Native entrypoint.
+
+## Relations
+
+Relations are declared explicitly in a table's `relations` in `jazz.app.json`.
+Store row IDs in `uuid` columns (or `{ "array": "uuid" }`), name a forward
+relation with `{ "rel": "<table>", "column": "<column>" }`, and name a reverse
+traversal with `{ "reverse": "<table>", "relation": "<forward relation>" }`.
+There is no suffix convention and no automatic reverse relation: a UUID column
+without a relation declaration stays an ordinary UUID column. See
+[Defining tables](https://jazz.tools/docs/schemas/defining-tables) for the full rules.
+
+```json
+{
+  "format": 1,
+  "tables": {
+    "people": {
+      "columns": { "name": "string" },
+      "relations": { "records": { "reverse": "records", "relation": "people" } }
+    },
+    "records": {
+      "columns": { "personIds": { "array": "uuid" }, "addressId": "uuid?" },
+      "relations": {
+        "people": { "rel": "people", "column": "personIds" },
+        "address": { "rel": "people", "column": "addressId" }
+      }
+    }
+  }
+}
+```
+
+```ts
+import type { RowOf } from "jazz-tools";
+import { app } from "./jazz.generated";
+
+export const recordsWithPeople = app.records.include({ people: true, address: true });
+export type RecordWithPeople = RowOf<typeof recordsWithPeople>;
+// people: Array<{ id: string; name: string }>
+// address: { id: string; name: string } | null
+
+export const peopleWithRecords = app.people.include({ records: true });
+export const relatedPeople = app.records.hopTo("people");
+```
+
+`RowOf` preserves scalar/array cardinality. `.requireIncludes()` refines a
+non-nullable scalar reference's included row from `Row | null` to `Row` and
+requires its match; nullable references such as `address` stay nullable. Required
+array includes require all referenced matches and remain arrays. Reverse includes
+remain arrays. Relation names come straight from `jazz.app.json`, through the
+bindings `jazz-tools generate` writes; `generate --check` in CI catches stale ones.
+
 ## Jazz Classic API errors
 
 Jazz 2 is a local-first relational database with tables, queries, and row-level
@@ -58,7 +131,7 @@ JavaScript, declaring a subclass may be inert; calling its inherited constructor
 or accessing Classic static operations raises the diagnostic. A constructor that
 deliberately bypasses the Classic base does not execute that base's diagnostic.
 
-Svelte's `JazzSvelteProvider` and Vue's `JazzProvider` are still supported Jazz 2
+Svelte's and Vue's `JazzProvider` are still supported Jazz 2
 components, and Svelte's `getJazzContext` remains supported. These providers take
 `config`, not Classic `sync` or `AccountSchema` props. Supplying those old props
 (including `accountSchema` / `account-schema` spellings, even with an undefined
@@ -77,77 +150,3 @@ bindings respectively.
 These diagnostics apply when using the installed Jazz 2 package. They cannot
 intercept separate legacy packages such as `jazz-vue`, `jazz-svelte` or
 `jazz-react` that bring their own Classic dependencies.
-
-## Usage
-
-```bash
-npx jazz-tools generate          # check jazz.app.json / jazz.permissions.json, write jazz.generated.ts
-npx jazz-tools migrations create --name <name>   # record a schema change
-npx jazz-tools upgrade           # convert an alpha.64 app (schema.ts, permissions.ts, migrations/)
-```
-
-## Supported binary targets
-
-- macOS arm64
-- macOS x64
-- Linux x64
-- Linux arm64
-
-If your platform is not supported in the npm package, install with Cargo from source.
-
-## React Native alpha boundary
-
-The `jazz-tools/react-native` entry point requires a matching installed
-`jazz-rn` native artifact. Persistent databases use native account admission
-or a platform-issued `nativeRelay` capability. Storage is owned by the native
-runtime; there is no JavaScript SQLite driver option. Explicit memory mode is
-not supported by the React Native entrypoint.
-
-## Relations
-
-Relations are declared explicitly in a table's `relations` in `jazz.app.json`.
-Store row IDs in `uuid` columns (or `{ "array": "uuid" }`), name a forward
-relation with `{ "rel": "<table>", "column": "<column>" }`, and name a reverse
-traversal with `{ "reverse": "<table>", "relation": "<forward relation>" }`.
-There is no suffix convention and no automatic reverse relation: a UUID column
-without a relation declaration stays an ordinary UUID column. See
-[Defining tables](https://jazz.tools/docs/schemas/defining-tables) for the full rules.
-
-```json
-{
-  "format": 1,
-  "tables": {
-    "people": {
-      "columns": { "name": "string" },
-      "relations": { "records": { "reverse": "records", "relation": "people" } }
-    },
-    "records": {
-      "columns": { "personIds": { "array": "uuid" }, "addressId": "uuid?" },
-      "relations": {
-        "people": { "rel": "people", "column": "personIds" },
-        "address": { "rel": "people", "column": "addressId" }
-      }
-    }
-  }
-}
-```
-
-```ts
-import type { RowOf } from "jazz-tools";
-import { app } from "./jazz.generated";
-
-export const recordsWithPeople = app.records.include({ people: true, address: true });
-export type RecordWithPeople = RowOf<typeof recordsWithPeople>;
-// people: Array<{ id: string; name: string }>
-// address: { id: string; name: string } | null
-
-export const peopleWithRecords = app.people.include({ records: true });
-export const relatedPeople = app.records.hopTo("people");
-```
-
-`RowOf` preserves scalar/array cardinality. `.requireIncludes()` refines a
-non-nullable scalar reference's included row from `Row | null` to `Row` and
-requires its match; nullable references such as `address` stay nullable. Required
-array includes require all referenced matches and remain arrays. Reverse includes
-remain arrays. Relation names come straight from `jazz.app.json`, through the
-bindings `jazz-tools generate` writes; `generate --check` in CI catches stale ones.

@@ -2,16 +2,41 @@
 # Post-publish smoke from the real registries: each target installs the published version into a clean project
 # outside the repo and runs the t9 privacy checks against a stock TS createJazz backend on npm's jazz-tools.
 # Usage: registry-smoke.sh <version, e.g. 2.0.0-alpha.68> npm|create-jazz|crates|go|swift|kotlin
+# Kotlin installs from where dev/release-publish/kotlin-channel.sh says that version is: Maven Central, or the GitHub
+# release's jar (AG_KOTLIN_CHANNEL overrides, to try a channel on an older version).
 # Registries can lag (Maven Central ~15-30 min): set AG_WAIT_MIN to poll for availability first (default 0).
 . "$(dirname "$0")/lib.sh"
 V=$1; T=$2; export AG_TGZ=$AG/.reg/$V AG_REGISTRY=1
+if [ "$T" = kotlin ]; then
+  KC=${AG_KOTLIN_CHANNEL:-$(bash "$AG/../release-publish/kotlin-channel.sh" "$V")}; export AG_KOTLIN_CHANNEL=$KC
+  case $KC in central|github-release) ;; *) echo "FAIL registry-kotlin: unknown channel '$KC'" | tee "$AG_RESULTS/registry-kotlin.txt"; exit 1 ;; esac
+fi
+RELEASE=https://github.com/garden-co/jazz/releases/download/v$V
+KOTLIN_FILES="jazz-kotlin-$V.jar jazz-kotlin-android-$V.aar"
 available() { case $T in
   npm|create-jazz) npm view "jazz-tools@$V" version >/dev/null 2>&1 && npm view "create-jazz@$V" version >/dev/null 2>&1 ;;
   crates) curl -sf -A jazz-adopter-gate "https://crates.io/api/v1/crates/jazz-app-support/$V" >/dev/null ;;
   go) curl -sf "https://proxy.golang.org/github.com/garden-co/jazz/packages/jazz-go/v2/@v/v$V.info" >/dev/null ;;
   swift) git ls-remote --tags https://github.com/garden-co/jazz-swift | grep -q "refs/tags/$V$" ;;
-  kotlin) curl -sf -o /dev/null "https://repo1.maven.org/maven2/tools/jazz/jazz-kotlin/$V/jazz-kotlin-$V.pom" ;;
+  kotlin) if [ "$KC" = central ]; then curl -sf -o /dev/null "https://repo1.maven.org/maven2/tools/jazz/jazz-kotlin/$V/jazz-kotlin-$V.pom"
+          else local f; for f in SHA256SUMS-languages $KOTLIN_FILES; do curl -sfIL -o /dev/null "$RELEASE/$f" || return 1; done; fi ;;
 esac; }
+# The release's Kotlin files as a user gets them: public URLs without a token, each listed in SHA256SUMS-languages.
+kotlin_release() (
+  cd "$AG_TGZ" || { echo "FAIL registry-kotlin: no $AG_TGZ"; return 1; }
+  for f in SHA256SUMS-languages $KOTLIN_FILES; do
+    rm -f "$f"; ag_retry 3 curl -sSfL -o "$f" "$RELEASE/$f" || { echo "FAIL registry-kotlin: download $f"; return 1; }
+  done
+  for f in $KOTLIN_FILES; do
+    awk -v f="$f" '$2 == f' SHA256SUMS-languages | sha256sum --strict --status -c - || { echo "FAIL registry-kotlin: $f doesn't match SHA256SUMS-languages"; return 1; }
+    echo "PASS registry kotlin: $f matches SHA256SUMS-languages"
+  done
+  listing=$(unzip -Z1 "jazz-kotlin-android-$V.aar") || { echo "FAIL registry-kotlin: unreadable AAR"; return 1; }
+  for f in classes.jar jni/{arm64-v8a,armeabi-v7a,x86_64}/libjazz_ffi.so; do
+    grep -qx "$f" <<< "$listing" || { echo "FAIL registry-kotlin: the AAR lacks $f"; return 1; }
+  done
+  echo "PASS registry kotlin: the AAR has its classes and every ABI"
+)
 end=$(( $(date +%s) + ${AG_WAIT_MIN:-0} * 60 )); until available; do [ "$(date +%s)" -ge $end ] && break; sleep 30; done
 available || { echo "FAIL registry-$T: $V not available (waited ${AG_WAIT_MIN:-0} min)" | tee "$AG_RESULTS/registry-$T.txt"; exit 1; }
 # The TS backend runs on npm's packages (packed into AG_TGZ, which t9.sh installs from).
@@ -28,7 +53,9 @@ case $T in
        ag_job registry-create-jazz body ;;
   crates) AG_RESULTS=$AG_RESULTS "$AG/t9.sh" rust; cp "$AG_RESULTS/t9-rust.txt" "$AG_RESULTS/registry-crates.txt" ;;
   go) "$AG/t9.sh" go; cp "$AG_RESULTS/t9-go.txt" "$AG_RESULTS/registry-go.txt" ;;
-  kotlin) "$AG/t9.sh" kotlin; cp "$AG_RESULTS/t9-kotlin.txt" "$AG_RESULTS/registry-kotlin.txt" ;;
+  kotlin) body() { if [ "$KC" = github-release ]; then kotlin_release || return; fi
+            "$AG/t9.sh" kotlin || echo "FAIL registry-kotlin: t9"; }
+          ag_job registry-kotlin body ;;
   swift) FETCH_TAG=v$V FETCH_DEST=$AG_TGZ FETCH_NAMES=libjazz_ffi-linux-x86_64.tar.gz bash "$AG/../../.github/actions/fetch-release-artifacts/fetch.sh" >/dev/null \
            || { echo "FAIL registry-swift: release libjazz_ffi" | tee "$AG_RESULTS/registry-swift.txt"; exit 1; }
          "$AG/t9.sh" swift; cp "$AG_RESULTS/t9-swift.txt" "$AG_RESULTS/registry-swift.txt" ;;

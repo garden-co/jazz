@@ -1,7 +1,7 @@
 export { CoState, AccountCoState, InviteListener, SyncConnectionStatus } from "../classic-api.js";
 export { default as JazzSvelteClientProvider } from "./JazzSvelteClientProvider.svelte";
 export type { JazzClient } from "./create-jazz-client.js";
-export { getDb, getSession, getJazzContext, type JazzContext } from "./context.svelte.js";
+export { getDb, getJazzContext, type JazzContext } from "./context.svelte.js";
 export { QuerySubscription, QuerySubscriptionOne } from "./query-subscription.svelte.js";
 export { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
 export type { DurabilityTier, QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
@@ -26,16 +26,3 @@ export type {
 } from "../session/jazz-session.js";
 export { default as JazzProvider } from "./JazzProvider.svelte";
 export { sessionState, getJazzSession, type JazzSessionState } from "./session-state.js";
-
-// Removed in alpha.61: stubs that throw, naming the replacement (one release).
-export {
-  AccountManager,
-  BrowserAuthSecretStore,
-  JazzSessionProvider,
-  JazzSvelteProvider,
-  LocalFirstAuth,
-  accountState,
-  createAccountManager,
-  exportLocalFirstSecret,
-  useJazzAuth,
-} from "../removed-api.js";

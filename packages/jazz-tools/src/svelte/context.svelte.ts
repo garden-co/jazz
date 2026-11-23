@@ -1,5 +1,4 @@
 import { getContext, setContext } from "svelte";
-import { warnSessionHookDeprecated } from "../session/deprecated-session-hook.js";
 import type { Db } from "../runtime/db.js";
 import type { PublicSession } from "../runtime/context.js";
 import type { SubscriptionStore } from "../subscription-store-internal.js";
@@ -17,7 +16,7 @@ export interface JazzContext {
 
 /**
  * Initialize the Jazz context for descendant Svelte components.
- * Called internally by {@link JazzSvelteProvider} and {@link JazzSvelteClientProvider}.
+ * Called internally by `JazzProvider` and `JazzSvelteClientProvider`.
  */
 export function initJazzContext(): JazzContext {
   const ctx: JazzContext = $state({
@@ -36,9 +35,7 @@ export function initJazzContext(): JazzContext {
 export function getJazzContext(): JazzContext {
   const ctx = getContext<JazzContext | undefined>(JAZZ_CTX_KEY);
   if (!ctx) {
-    throw new Error(
-      "getDb/getSession must be used within <JazzSvelteProvider> or <JazzSvelteClientProvider>",
-    );
+    throw new Error("getDb must be used within <JazzProvider> or <JazzSvelteClientProvider>");
   }
   return ctx;
 }
@@ -57,22 +54,4 @@ export function getDb(): Db {
     throw new Error("Jazz database is not yet initialised");
   }
   return ctx.db;
-}
-
-/**
- * Subscribe to the current Jazz {@link Session}.
- * The returned handle's `.current` property always reflects the latest session,
- * updating automatically as the user logs in or out.
- *
- * @deprecated Use `getJazzSession()` and read `$session.user`: the same user,
- * with `user` as `accountId`. Warns once in development; removed in a later alpha.
- */
-export function getSession(): { readonly current: PublicSession | null } {
-  warnSessionHookDeprecated("getSession()", "getJazzSession() ($session.user)");
-  const ctx = getJazzContext();
-  return {
-    get current() {
-      return ctx.session;
-    },
-  };
 }

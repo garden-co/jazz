@@ -31,18 +31,19 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
 
-      - name: Guard alpha prerelease mode
+      - name: Guard prerelease mode (alpha or beta)
+        id: pre
         run: |
           test -f .changeset/pre.json
-          node -e 'const fs=require("fs");const pre=JSON.parse(fs.readFileSync(".changeset/pre.json","utf8"));if(pre.mode!=="pre"||pre.tag!=="alpha"){throw new Error(`Expected .changeset/pre.json mode=pre tag=alpha, got mode=${pre.mode} tag=${pre.tag}`);}console.log("Changesets prerelease mode: alpha");'
+          node -e 'const fs=require("fs");const pre=JSON.parse(fs.readFileSync(".changeset/pre.json","utf8"));if(pre.mode!=="pre"||!["alpha","beta"].includes(pre.tag)){throw new Error(`Expected .changeset/pre.json mode=pre tag=alpha|beta, got mode=${pre.mode} tag=${pre.tag}`);}console.log(`Changesets prerelease mode: ${pre.tag}`);fs.appendFileSync(process.env.GITHUB_OUTPUT,`tag=${pre.tag}\n`);'
 
       - name: Create or update release PR
         id: changesets
         uses: changesets/action@63a615b9cd06ba9a3e6d13796c7fbcb080a60a0b # v1
         with:
           version: pnpm release:version
-          title: "Version Packages (alpha)"
-          commit: "Version Packages (alpha)"
+          title: "Version Packages (${{ steps.pre.outputs.tag }})"
+          commit: "Version Packages (${{ steps.pre.outputs.tag }})"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

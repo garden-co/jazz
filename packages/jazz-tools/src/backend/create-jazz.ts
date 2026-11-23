@@ -502,12 +502,6 @@ export interface DeviceAccountsAnswer {
 }
 
 /**
- * @deprecated Renamed to {@link DeviceAccountsAnswer}; this alias goes in a later release.
- * An interface (not a type alias), so code that merges declarations into it keeps compiling.
- */
-export interface LocalFirstGuest extends DeviceAccountsAnswer {}
-
-/**
  * The marker's brand, registered globally like `createJazz`'s store registry:
  * a bundler may load this module more than once (Next dev evaluates it per
  * route), and a shared Jazz must still recognise a marker made by another copy.
@@ -4343,7 +4337,7 @@ function boundAppOf(app: BackendSchemaInput) {
   if (!bound) {
     throw new Error(
       'createJazz: `app` must be the app that jazz.generated.ts exports (`import { app } from "./jazz.generated"`); ' +
-        "run `npx jazz-tools generate` to generate it, or `npx jazz-tools upgrade` for an alpha.64 app.",
+        "run `npx jazz-tools generate` to generate it, or see https://jazz.tools/docs/operating/backups-and-upgrades#upgrading-from-alpha70-to-beta0 for an alpha.64 app.",
     );
   }
   return bound;

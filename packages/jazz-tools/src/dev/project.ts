@@ -113,7 +113,7 @@ export async function generateApp(options: GenerateOptions): Promise<GenerateRes
     if (marker === "none")
       throw new Error(
         `${shown(app.dir, file)} was not written by \`jazz-tools generate\` (it has no \`$generated\` marker) and differs from what your TS makes. ` +
-          "Run `jazz-tools generate --force` to replace it (`jazz-tools upgrade` does, for an alpha.65 app).",
+          "Run `jazz-tools generate --force` to replace it.",
       );
   }
   if (options.check && stale.length > 0) {

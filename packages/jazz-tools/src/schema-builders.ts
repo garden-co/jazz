@@ -7,8 +7,6 @@
  * names.
  */
 import { schemaColumns } from "./dsl.js";
-import { removedSchemaApi } from "./removed-schema-api.js";
-import type { RemovedApi } from "./removed-api.js";
 import type { Schema as DefinedSchema } from "./schema-dsl/define-schema.js";
 import type {
   Row as RowOf,
@@ -21,17 +19,6 @@ export { rel, reverse } from "./relationships.js";
 export { allowExternalProvenanceName, computed } from "./dsl.js";
 export { defineTable as table } from "./schema-dsl/table.js";
 export { defineSchema, claims } from "./schema-dsl/define-schema.js";
-
-/** @deprecated Removed: define the schema with `s.defineSchema({ … })`; throws, pointing at `npx jazz-tools upgrade`. */
-export const defineApp: RemovedApi = /*#__PURE__*/ removedSchemaApi("schema.defineApp");
-/** @deprecated Removed: schema slicing is gone; throws, pointing at `npx jazz-tools upgrade`. */
-export const defineSliceableApp: RemovedApi = /*#__PURE__*/ removedSchemaApi(
-  "schema.defineSliceableApp",
-);
-/** @deprecated Removed: use `schema.definePermissions({ … })`; throws, pointing at `npx jazz-tools upgrade`. */
-export const definePermissions: RemovedApi = /*#__PURE__*/ removedSchemaApi(
-  "schema.definePermissions",
-);
 
 export const string = schemaColumns.string;
 export const uuid = schemaColumns.uuid;

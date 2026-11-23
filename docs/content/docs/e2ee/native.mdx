@@ -8,6 +8,8 @@ default one: where keys are kept, and what protects them, is your platform's cal
 same seven small operations on every platform (see [Private store](/docs/e2ee/private-store)); each
 language gives you its own interface to implement, and Jazz asks it for what it needs.
 
+Deleting the local database keeps the app-supplied private store so the device can decrypt its rows when they sync again.
+
 What a store holds is small and rarely written: the device's own keys, the key for each space it
 belongs to, and one floor for each other account it has seen (the mark that lets it notice a rolled-back history; see [limits](/docs/e2ee/limits)). Jazz calls the store one request at a time on the client's thread, so keep it quick: a
 store that waits on the network holds up the client while it waits. A synchronous store callback (Go,

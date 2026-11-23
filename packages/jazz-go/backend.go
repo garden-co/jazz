@@ -50,7 +50,9 @@ func (db *DB) BackendClient(ctx context.Context) (BackendKind, error) {
 // that aren't the bundle the main backend serves are ErrBundleMismatch; a scoped
 // client, or a DB ForUser returned, gets ErrRefused. Close the result
 // when done (db stays open); after db closes, the result's calls return
-// ErrClosed. db's Shutdown drains the result's writes too.
+// ErrClosed. db's Shutdown drains the result's writes too. The session
+// stays db's: on the result Session, OnSession, Refresh, Link and SignOut
+// are ErrNotSupported.
 func (db *DB) ForUser(ctx context.Context, userID string, claims map[string]any) (*DB, error) {
 	if ffi.forUser == nil {
 		return nil, &Error{Kind: KindNotSupported, Message: "ForUser is not supported yet by this libjazz_ffi"}

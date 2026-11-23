@@ -22,24 +22,12 @@ export {
 } from "../react-core/session.js";
 
 export { JazzProvider, type JazzProviderProps } from "./provider.js";
-export { useDb, useJazzClient, useSession } from "../react-native/provider.js";
+export { useDb, useJazzClient } from "../react-native/provider.js";
 export { useAll, useAllSuspense } from "../react-native/use-all.js";
 export { unreadableRows, type UnreadableRow } from "../encryption/unreadable.js";
 export { useOne, useOneSuspense } from "../react-native/use-one.js";
 export { useSyncStatus } from "../react-core/use-sync-status.js";
 export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
-
-// Removed in alpha.61: stubs that throw, naming the replacement (one release).
-export {
-  ExpoAuthSecretStore,
-  JazzSessionProvider,
-  createAccountManager,
-  expoAuthSecretStore,
-  useAccountState,
-  useJazzAuth,
-  useJazzSessionOwner,
-  useLocalFirstAuth,
-} from "../removed-api.js";
 
 export {
   memoryPrivateStore,

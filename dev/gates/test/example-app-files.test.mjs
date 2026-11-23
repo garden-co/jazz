@@ -79,7 +79,7 @@ test("every example app has its schema.ts, and no alpha.64 leftovers", () => {
   assert.deepEqual(
     leftovers,
     [],
-    `alpha.66 reads migrations/*.ts itself; \`jazz-tools upgrade\` deletes these:\n${leftovers.join("\n")}`,
+    `alpha.66 reads migrations/*.ts itself; delete these:\n${leftovers.join("\n")}`,
   );
 });
 
