@@ -2,6 +2,9 @@ package tools.jazz
 
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -380,7 +383,11 @@ public class Jazz internal constructor(
 
     private fun idArgs(id: String): String = "{\"id\":${JsonPrimitive(id)}}"
 
-    /** Returns once every write made so far reached [tier]; throws if the server refused one. */
+    /**
+     * Returns once every write made so far reached [tier]; throws if the server refused one.
+     * Cancelling the caller, or `withTimeout`, ends the wait at once, as for every
+     * call that waits on the server (global writes, remote reads).
+     */
     public suspend fun waitForSync(tier: WriteTier = WriteTier.Global): Unit = io { native.waitForSync(tier.wire) }
 
     /**
@@ -604,5 +611,32 @@ public class Jazz internal constructor(
         sessionFlow?.let { flow -> if (flow.value != null) flow.value = SessionState.SignedOut }
     }
 
-    private suspend fun <T> io(block: () -> T): T = withContext(dispatcher) { block() }
+    /**
+     * [block] on [dispatcher], as one native call that a cancelled caller (or
+     * `withTimeout`) cuts short: its wait on the server ends at once. A write
+     * cut short after it committed locally throws [JazzException.StillQueued],
+     * even past a cancellation: it may still reach the server.
+     */
+    private suspend fun <T> io(block: () -> T): T {
+        val call = native.newCall() ?: return withContext(dispatcher) { block() }
+        var cancelledBy: CancellationException? = null
+        try {
+            // Not withContext, whose block can't be interrupted: a cancelled caller
+            // would wait for the server.
+            return coroutineScope {
+                val running = async(dispatcher) { call.run(block) }
+                try {
+                    running.await()
+                } catch (e: CancellationException) {
+                    cancelledBy = e
+                    call.cancel()
+                    throw e
+                }
+            }
+        } catch (e: JazzException.StillQueued) {
+            // On the innermost one: kotlinx may have wrapped it in a copy.
+            cancelledBy?.let { cancel -> runCatching { generateSequence<Throwable>(e) { it.cause }.last().initCause(cancel) } }
+            throw e
+        }
+    }
 }

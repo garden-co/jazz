@@ -107,6 +107,13 @@ public interface Native : AutoCloseable {
     public fun signOut(): Unit = close()
 
     /** Opens native handles from a config JSON (the contract's open config). */
+    /**
+     * A call whose waits [NativeCall.cancel] can end, or `null` where calls
+     * can't be cut short. Calls made inside [NativeCall.run], on that
+     * thread, obey it.
+     */
+    public fun newCall(): NativeCall? = null
+
     public fun interface Opener {
         public fun open(configJson: String): Native
 
@@ -138,4 +145,13 @@ public interface NativeUpload {
     public fun push(bytes: ByteArray)
     public fun finish(): String
     public fun abort()
+}
+
+/** One call that can be cut short: see [Native.newCall]. */
+public interface NativeCall {
+    /** Runs [block], whose calls on this [Native] obey this one, then frees it. */
+    public fun <T> run(block: () -> T): T
+
+    /** Ends its waits now: a call waiting fails (and one made later does nothing). */
+    public fun cancel()
 }

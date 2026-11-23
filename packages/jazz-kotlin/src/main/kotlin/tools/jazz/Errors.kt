@@ -23,6 +23,18 @@ public sealed class JazzException(message: String) : Exception(message) {
     /** The handle was closed. */
     public class Closed : JazzException("the Jazz handle is closed")
 
+    /**
+     * A write cut short while it waited (the server unreachable, say) that
+     * was already committed locally: it stays queued and may still reach
+     * the server, so don't retry it. Its outcome comes later, as for any
+     * local-first write: a refusal reaches [Jazz.mutationErrors].
+     *
+     * Thrown in place of the cancellation that cut it short, which is its
+     * cause: it escapes `withTimeout` and `withTimeoutOrNull` (which doesn't
+     * turn it into `null`), and a cancelled scope's job fails with it.
+     */
+    public class StillQueued(message: String) : JazzException(message)
+
     public companion object {
         /** The exception for an error jazz-ffi reports by kind (a subscription's end). */
         public fun of(kind: String, message: String): JazzException = when (kind) {
