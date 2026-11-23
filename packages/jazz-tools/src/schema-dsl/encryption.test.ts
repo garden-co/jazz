@@ -275,9 +275,7 @@ describe("later versions of an encrypted app", () => {
 
   it("refuses a new equality column on an existing table, writing no stub", async () => {
     const root = await firstVersion();
-    // The rows stored before it would hold no equality token, and writing
-    // theirs (a backfill) needs their spaces' keys: refused before a stub
-    // with a TODO the author couldn't resolve.
+    // The migration cannot write tokens for older rows without their spaces' keys.
     await writeFile(
       join(root, "schema.ts"),
       chat({ messages: ", subject: s.string().optional().encrypted({ equality: true })" }),
@@ -340,17 +338,17 @@ describe("later versions of an encrypted app", () => {
     await expect(generateApp({ cwd: root })).rejects.toThrow(REQUIRED);
   });
 
-  const CONVERSION =
-    /messages\.text: its plaintext type changed from "string" to "int"\. Changing an encrypted column's plaintext type is a conversion, which isn't supported yet/;
+  const TYPE_CHANGE =
+    /messages\.text: its plaintext type changed from "string" to "int"\. Keep the declaration or copy the data into a new encrypted table/;
 
   it("refuses an encrypted column's new plaintext type, which stores the same bytes", async () => {
     const root = await firstVersion();
     await writeFile(join(root, "schema.ts"), chat({ text: "s.int().encrypted()" }));
-    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(CONVERSION);
+    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(TYPE_CHANGE);
     await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(
       /which stores the same columns/,
     );
-    await expect(generateApp({ cwd: root })).rejects.toThrow(CONVERSION);
+    await expect(generateApp({ cwd: root })).rejects.toThrow(TYPE_CHANGE);
   });
 
   it("refuses a new plaintext type beside another change", async () => {
@@ -359,7 +357,7 @@ describe("later versions of an encrypted app", () => {
       join(root, "schema.ts"),
       chat({ text: "s.int().encrypted()", rooms: ", topic: s.string().optional()" }),
     );
-    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(CONVERSION);
+    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(TYPE_CHANGE);
   });
 
   it("round-trips through the printer, which writes each version's declarations beside its snapshot", async () => {

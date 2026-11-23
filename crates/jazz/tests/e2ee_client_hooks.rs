@@ -2313,44 +2313,55 @@ fn a_hook_cannot_window_rows_twice_without_residual_predicates() {
     }
 }
 
-/// Contract: hooks are not installed on a schema that gives an encrypted
-/// column a stored default, which would be stored as plaintext where its
-/// ciphertext belongs.
+/// Alice opens a schema whose encrypted cell and token default to empty bytes.
+/// A non-empty default on either would put unauthenticated data in older rows.
 #[test]
-fn a_stored_default_on_an_encrypted_column_refuses_the_hooks() {
+fn only_empty_bytes_can_default_an_encrypted_cell_or_token() {
     let hooks = Fake::new();
-    let with_default = compile_schema(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("projects")
-                    .column("name", ColumnType::Text)
-                    .policies(allow_all_policies()),
+    let open = |body: &[u8], tag: &[u8]| {
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("projects")
+                        .column("name", ColumnType::Text)
+                        .policies(allow_all_policies()),
+                )
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .fk_column("projectId", "projects")
+                        .column("title", ColumnType::Text)
+                        .column_with_default(
+                            "body",
+                            ColumnType::Bytea,
+                            jazz::tools::public_schema::Value::Bytea(body.to_vec()),
+                        )
+                        .column_with_default(
+                            "__e2ee_eq_body",
+                            ColumnType::Bytea,
+                            jazz::tools::public_schema::Value::Bytea(tag.to_vec()),
+                        )
+                        .nullable_column("attachment", ColumnType::Bytea)
+                        .policies(allow_all_policies()),
+                )
+                .build(),
+        );
+        block_on(Db::open(
+            DbConfig::new(schema, identity(1)).with_e2ee(hooks.clone()),
+        ))
+    };
+    assert!(open(&[], &[]).is_ok());
+    for (body, tag, name) in [
+        (&b"plain"[..], &[][..], "body"),
+        (&[][..], &b"plain"[..], "__e2ee_eq_body"),
+    ] {
+        let error = open(body, tag).err().expect("non-empty physical default");
+        assert_eq!(
+            error.message,
+            format!(
+                "encrypted column `notes.{name}` has a stored default, which would be stored as plaintext where its ciphertext belongs"
             )
-            .table(
-                TableSchemaBuilder::new("notes")
-                    .fk_column("projectId", "projects")
-                    .column("title", ColumnType::Text)
-                    .column_with_default(
-                        "body",
-                        ColumnType::Bytea,
-                        jazz::tools::public_schema::Value::Bytea(b"plain".to_vec()),
-                    )
-                    .nullable_column("__e2ee_eq_body", ColumnType::Bytea)
-                    .nullable_column("attachment", ColumnType::Bytea)
-                    .policies(allow_all_policies()),
-            )
-            .build(),
-    );
-    let error = block_on(Db::open(
-        DbConfig::new(with_default, identity(1)).with_e2ee(hooks.clone()),
-    ))
-    .err()
-    .expect("refused");
-    assert_eq!(
-        error.message,
-        "encrypted column `notes.body` has a stored default, which would be stored as plaintext \
-         where its ciphertext belongs"
-    );
+        );
+    }
     client(&hooks);
 }
 

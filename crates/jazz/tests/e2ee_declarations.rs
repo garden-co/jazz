@@ -197,7 +197,7 @@ fn unknown_encryption_keys_are_refused_in_the_app_file() {
         assert!(
             error.contains(path)
                 && error.contains(&format!("unknown key `{key}`"))
-                && error.contains("docs/e2ee/encrypting-existing-data"),
+                && error.contains("docs/e2ee/encrypting-existing-data") == (key != "unexpected"),
             "{error}"
         );
     }
@@ -210,6 +210,63 @@ fn unknown_encryption_keys_are_refused_in_the_app_file() {
         error.contains("tables.tasks.encryption.columns.notes.type")
             && error.contains("unknown key `from`"),
         "{error}"
+    );
+}
+
+/// Alice receives the nested location when an array element names an unknown field.
+#[test]
+fn nested_encrypted_type_objects_refuse_unknown_fields() {
+    let plain = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"notes":{"columns":{"labels":{"array":{"type":"string"}}}}}}"#;
+    let annotated = plain.replace(r#""type":"string""#, r#""type":"string","from":"oldTitle""#);
+    assert_eq!(
+        load_app(annotated.as_bytes()).unwrap().current_hash(),
+        load_app(plain.as_bytes()).unwrap().current_hash()
+    );
+    let duplicate = r#"{"columnType":{"type":"Array","element":{"type":"Integer","type":"Text"}}}"#;
+    assert!(
+        serde_json::from_str::<PlainType>(duplicate)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate field")
+    );
+    let mut accepted = Vec::new();
+    for (ty, path, key) in [
+        (
+            r#"{"array":{"type":"string","from":"oldTitle"}}"#,
+            "array",
+            "from",
+        ),
+        (
+            r#"{"type":{"array":{"type":"string","reverse":"oldTitle"}}}"#,
+            "type.array",
+            "reverse",
+        ),
+        (
+            r#"{"type":{"array":{"array":"string"}},"sealedType":{"array":{"array":{"type":"string","typo":0}}}}"#,
+            "sealedType.array.array",
+            "typo",
+        ),
+    ] {
+        let file =
+            app(&tasks_entry().replace(r#""notes": "string?""#, &format!(r#""notes": {ty}"#)));
+        match load_app(file.as_bytes()) {
+            Ok(_) => accepted.push(path),
+            Err(e) => {
+                let error = e.to_string();
+                assert!(
+                    error.contains(&format!("tables.tasks.encryption.columns.notes.{path}"))
+                        && error.contains(&format!("unknown key `{key}`"))
+                        && error.contains("this object takes")
+                        && error.contains("docs/e2ee/encrypting-existing-data") == (key != "typo"),
+                    "{error}"
+                );
+            }
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted nested fields at {accepted:?}"
     );
 }
 

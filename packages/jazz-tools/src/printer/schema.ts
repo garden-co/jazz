@@ -125,7 +125,7 @@ function refuseUnprintedEncryption(
     options.unsupported.push({
       path: `${at}.${key}`,
       text: JSON.stringify(value),
-      reason: `Printing an encryption entry's ${key} is not supported yet`,
+      reason: `Unknown encryption key ${key}. Expected space, scope, columns or equality.`,
     });
   }
   for (const [name, column] of Object.entries(encryption.columns)) {
@@ -135,7 +135,10 @@ function refuseUnprintedEncryption(
       options.unsupported.push({
         path: `${at}.columns.${name}.${field}`,
         text: JSON.stringify((column as Record<string, unknown>)[field]),
-        reason: `Printing an encrypted column's field ${field} is not supported yet`,
+        reason:
+          field === "sealedType"
+            ? "Printing an encrypted column's field sealedType is not supported yet"
+            : `Unknown encrypted column field ${field}. Expected a type declaration, sealedType or default.`,
       });
     }
   }

@@ -348,11 +348,7 @@ fn read_tables(
             entries.insert(
                 name.clone(),
                 read_entry(entry, &format!("{path}.encryption")).map_err(|(at, reason)| {
-                    if reason.starts_with("unknown key") {
-                        (at, format!("{reason}; {}", super::encryption::COPY_GUIDE))
-                    } else {
-                        (at, reason)
-                    }
+                    (at, super::encryption::explain_unknown_key(&reason))
                 })?,
             );
         }
@@ -721,10 +717,49 @@ fn in_variants(column_type: &ColumnType, value: &Value) -> bool {
     }
 }
 
+/// Check only type objects. A JSON schema inside a type is application data.
+fn encrypted_type_keys(spec: &Json, path: &str, allowed: &[&str]) -> Result<(), Refusal> {
+    let Some(fields) = spec.as_object() else {
+        return Ok(());
+    };
+    only_keys(fields, allowed, path)?;
+    for (key, value) in fields {
+        match key.as_str() {
+            "type" | "array" => encrypted_type_keys(
+                value,
+                &format!("{path}.{key}"),
+                &["type", "enum", "json", "array"],
+            )?,
+            "enum" => {
+                if let Some(cases) = value.as_object() {
+                    for (case, fields) in cases {
+                        if let Some(fields) = fields.as_object() {
+                            for (name, field) in fields {
+                                encrypted_type_keys(
+                                    field,
+                                    &format!("{path}.enum.{case}.{name}"),
+                                    COLUMN_KEYS,
+                                )?;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// A plaintext type: a type string (`"string?"`) or type object, without
 /// the options only a stored column has, and, where `with_default`, its
 /// declared default (protocol §4.1): a sealed type takes none.
 fn read_plain(spec: &Json, path: &str, with_default: bool) -> Result<PlainType, Refusal> {
+    encrypted_type_keys(
+        spec,
+        path,
+        &["type", "enum", "json", "array", "optional", "default"],
+    )?;
     let mut column = read_column("", spec, path)?;
     let default = if with_default {
         column.default.take()

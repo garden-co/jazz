@@ -413,7 +413,7 @@ describe("the schema printer", () => {
       {
         path: "tables.rooms.encryption.backfill",
         text: '["name"]',
-        reason: "Printing an encryption entry's backfill is not supported yet",
+        reason: "Unknown encryption key backfill. Expected space, scope, columns or equality.",
       },
       {
         path: "tables.rooms.encryption.columns.name.sealedType",
@@ -423,7 +423,8 @@ describe("the schema printer", () => {
       {
         path: "tables.rooms.encryption.columns.name.from",
         text: '"nameText"',
-        reason: "Printing an encrypted column's field from is not supported yet",
+        reason:
+          "Unknown encrypted column field from. Expected a type declaration, sealedType or default.",
       },
       {
         path: "encryption",

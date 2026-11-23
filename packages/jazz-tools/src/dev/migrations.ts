@@ -932,8 +932,8 @@ function refuseEncryptionChanges(changes: string[], version: string, sameStorage
   throw new Error(
     `The schema's encryption declarations differ from version ${version}'s` +
       (sameStorage ? ", which stores the same columns" : "") +
-      `: ${changes.join("; ")}. Changing an encrypted column's plaintext type is a conversion, ` +
-      "which isn't supported yet: keep the declaration, or add a new column for the new type.",
+      `: ${changes.join("; ")}. Keep the declaration or copy the data into a new encrypted table ` +
+      "(docs/e2ee/encrypting-existing-data).",
   );
 }
 

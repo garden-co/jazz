@@ -928,6 +928,78 @@ async fn check_required_title(files: AppFiles) {
     app.stop().await;
 }
 
+/// Alice writes a task, upgrades to a schema with an empty stored cell for priority,
+/// and reads the declared priority from the row she wrote before the migration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_older_task_reads_the_new_encrypted_columns_declared_default() {
+    let app = App::start().await;
+    let alice = app.device().await;
+    alice
+        .encryption()
+        .ready(Duration::from_secs(30))
+        .await
+        .unwrap();
+    let project = make_project(&alice, "plans").await;
+    add_task(&alice, &project, "before the migration")
+        .await
+        .unwrap();
+    alice.shutdown().await.unwrap();
+    app.backend.shutdown().await.unwrap();
+    drop(app.relay);
+
+    let mut file: serde_json::Value =
+        serde_json::from_slice(include_bytes!("fixtures/encrypted/jazz.app.json")).unwrap();
+    let mut before = file["tables"].clone();
+    before["tasks"].as_object_mut().unwrap().remove("relations");
+    before["tasks"]["columns"]["projectId"] = json!({"type":"uuid","references":"projects"});
+    file["history"] = json!({"before": {"tables":before}});
+    file["tables"]["tasks"]["columns"]["priority"] = json!({"type":"bytes","default":""});
+    file["tables"]["tasks"]["encryption"]["columns"]["priority"] =
+        json!({"type":"string","default":"normal"});
+    file["migrations"] =
+        json!([{"from":"before","migrate":{"tasks":{"priority":{"add":"bytes","default":""}}}}]);
+    let file = serde_json::to_vec(&file).unwrap();
+    let app = App::on_server(
+        AppFiles::new(file.clone(), None).with_permissions(
+            include_bytes!("fixtures/encrypted/jazz.permissions.json").as_slice(),
+        ),
+        app.server,
+    )
+    .await;
+    let device = Jazz::open(
+        AppFiles::new(file, None),
+        app.user(DeviceKey::generate().unwrap())
+            .encryption(EncryptionConfig::store(|| Rc::new(MemoryStore::new()))),
+    )
+    .await
+    .unwrap();
+    device
+        .encryption()
+        .ready(Duration::from_secs(30))
+        .await
+        .unwrap();
+    let rows = device
+        .with_client(|client| async move {
+            Ok(client
+                .query(
+                    Query::from("tasks").select(["projectId", "priority"]),
+                    ReadTier::Remote,
+                )
+                .await?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        rows[0]
+            .fields
+            .iter()
+            .any(|f| f.name == "priority" && f.value == text("normal"))
+    );
+    device.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// Alice's first note in a project streams its label from a one-shot reader.
 /// The encrypted title needs a space key before the label can be read.
 ///

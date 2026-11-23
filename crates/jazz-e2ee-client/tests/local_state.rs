@@ -378,10 +378,9 @@ fn two_writers_of_one_document_merge() {
 
 /// Contract: the runtime refuses at open what it cannot honour: mechanism
 /// settings that name an unknown role, a mechanism this build lacks, or a
-/// selection outside the allow-list, and declarations with an encrypted
-/// schema conversion; the explicit built-in settings open.
+/// selection outside the allow-list. The explicit built-in settings open.
 #[test]
-fn unusable_settings_and_declarations_are_refused_at_open() {
+fn unusable_mechanism_settings_are_refused_at_open() {
     let with = |mechanisms: serde_json::Value| {
         try_open(
             Rc::new(MemoryStore::new()),

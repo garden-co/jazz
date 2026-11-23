@@ -454,6 +454,258 @@ async fn a_token_dropped_with_equality_can_be_replaced_by_an_unindexed_column() 
     assert_eq!(status, StatusCode::OK, "{response}");
 }
 
+/// Alice drops equality, then tries to keep the old token storage under its original or a new name.
+#[tokio::test]
+async fn removing_equality_drops_its_stored_token_in_files_and_raw_deployments() {
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let load = |file: &str| artifact::load(file.as_bytes(), permissions.as_bytes());
+    let original = load(APP).unwrap();
+    let from = original.current_hash().to_string();
+    let (current, history) = APP_V2.split_once(r#""history":"#).unwrap();
+    let equality = r#", "equality": ["title"]"#;
+    let mut results = Vec::new();
+    for (name, tag, operations) in [
+        (
+            "caption",
+            "__e2ee_eq_title",
+            r#""caption":{"renameFrom":"title"},"#,
+        ),
+        (
+            "caption",
+            "formerTag",
+            r#""caption":{"renameFrom":"title"},"formerTag":{"renameFrom":"__e2ee_eq_title"},"#,
+        ),
+        (
+            "",
+            "__e2ee_eq_title",
+            r#""title":{"drop":"bytes","backwardsDefault":""},"#,
+        ),
+    ] {
+        let next = current
+            .replace(equality, "")
+            .replace("__e2ee_eq_title", tag);
+        let next = if name.is_empty() {
+            next.replace(r#""title": "bytes", "#, "")
+                .replace(r#""title": "string""#, "")
+        } else {
+            next.replace(r#""title""#, &format!(r#""{name}""#))
+        };
+        let history = history.replace(
+            r#""done": { "add""#,
+            &format!(r#"{operations}"done": {{ "add""#),
+        );
+        let file = format!(r#"{next}"history":{history}"#);
+        let file_error = load(&file)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        // Build the physical migration independently of the source declaration, then post the real declaration.
+        let mut raw = load(&file.replace(equality, ""))
+            .unwrap()
+            .deployment_body(false);
+        raw["encryption"]["versions"][&from] =
+            original.deployment_body(false)["encryption"]["versions"][&from].clone();
+        let (status, response) = publish(&router().await, raw).await;
+        results.push((tag, file_error, status, response));
+    }
+    for (tag, file_error, status, response) in &results {
+        assert!(
+            file_error.contains("token column") && file_error.contains(tag),
+            "{results:?}"
+        );
+        assert_eq!(*status, StatusCode::UNPROCESSABLE_ENTITY, "{results:?}");
+        assert!(
+            response["error"].as_str().unwrap().contains(tag),
+            "{response}"
+        );
+    }
+}
+
+/// Alice's logical default is read only when the migration supplies an empty stored cell for old rows.
+#[tokio::test]
+async fn adding_an_encrypted_column_requires_an_empty_lens_default() {
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let load = |file: &str| artifact::load(file.as_bytes(), permissions.as_bytes());
+    let (current, history) = APP_V2.split_once(r#""history":"#).unwrap();
+    let current = current
+        .replace(r#""done": "boolean""#, r#""body": "bytes""#)
+        .replace(
+            r#""title": "string""#,
+            r#""title":"string","body":{"type":"string","default":"none"}"#,
+        );
+    let op = r#""body": { "add": "bytes", "default": "" }"#;
+    let history = history.replace(r#""done": { "add": "boolean", "default": false }"#, op);
+    let file = format!(r#"{current}"history":{history}"#);
+    let mut raw = load(&file).unwrap().deployment_body(false);
+    let (status, response) = publish(&router().await, raw.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let invalid = file.replace(op, r#""body":{"add":"bytes","default":"AQ=="}"#);
+    let file_error = load(&invalid)
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+    raw["migrations"][0]["forward"][0]["operations"][0]["value"] =
+        json!({"type":"Bytea","value":[1]});
+    let (status, response) = publish(&router().await, raw).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "file error={file_error:?}, raw={response}"
+    );
+    for error in [&file_error, response["error"].as_str().unwrap()] {
+        assert!(
+            error.contains("tasks.body") && error.contains("empty"),
+            "{error}"
+        );
+    }
+}
+
+/// When a migration introduces token storage on an existing table, earlier rows cannot receive a token from its lens.
+#[tokio::test]
+async fn an_introduced_token_cannot_have_nonempty_stored_bytes() {
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let load = |file: &str| artifact::load(file.as_bytes(), permissions.as_bytes());
+    let (current, history) = APP_V2.split_once(r#""history":"#).unwrap();
+    let current = current
+        .replace(
+            r#""done": "boolean""#,
+            r#""body": "bytes", "__e2ee_eq_body": "bytes""#,
+        )
+        .replace(
+            r#""title": "string""#,
+            r#""title":"string","body":"string?""#,
+        );
+    let history = history.replace(
+        r#""done": { "add": "boolean", "default": false }"#,
+        r#""body":{"add":"bytes","default":""},"__e2ee_eq_body":{"add":"bytes","default":"AQ=="}"#,
+    );
+    let file = format!(r#"{current}"history":{history}"#);
+    let base = load(&file).unwrap();
+    let mut raw = base.deployment_body(false);
+    let hash = base.current_hash().to_string();
+    raw["encryption"]["versions"][&hash]["tasks"]["equality"] = json!(["title", "body"]);
+    let file = file.replacen(
+        r#""equality": ["title"]"#,
+        r#""equality":["title","body"]"#,
+        1,
+    );
+    let error = load(&file).unwrap_err().to_string();
+    let (status, response) = publish(&router().await, raw).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    for reason in [&error, response["error"].as_str().unwrap()] {
+        assert!(
+            reason.contains("tasks.__e2ee_eq_body") && reason.contains("empty byte string"),
+            "{reason}"
+        );
+    }
+}
+
+/// Alice's encrypted array declarations check each element type. A plain schema keeps its usual reader.
+#[tokio::test]
+async fn only_encrypted_declarations_refuse_unknown_scalar_type_fields() {
+    let mut plain = plain_body();
+    let column = &mut plain["schemas"][0]["schema"]["tables"]["tasks"]["columns"][0]["column_type"];
+    assert_eq!(column["type"], "Uuid");
+    column["from"] = json!("oldTitle");
+    let (status, response) = publish(&router().await, plain).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    let app = loaded("ownerId = session.user");
+    let hash = app.current_hash().to_string();
+    let mut results = Vec::new();
+    for (field, key) in [
+        ("type", "from"),
+        ("type", "typo"),
+        ("sealedType", "reverse"),
+    ] {
+        let mut raw = app.deployment_body(false);
+        let column = &mut raw["encryption"]["versions"][&hash]["tasks"]["columns"]["title"];
+        let array = json!({"type":"Array","element":{"type":"Array","element":{"type":"Text"}}});
+        column["type"]["columnType"] = array.clone();
+        column[field] = json!({"columnType":array,"nullable":false});
+        column[field]["columnType"]["element"]["element"][key] = json!("oldTitle");
+        let (status, response) = publish(&router().await, raw).await;
+        results.push((key, status, response));
+    }
+    for (key, status, response) in &results {
+        assert_eq!(*status, StatusCode::BAD_REQUEST, "{results:?}");
+        let error = response["error"].as_str().unwrap();
+        assert!(
+            error.contains(key)
+                && error.contains("tasks")
+                && error.contains("title")
+                && error.contains("element")
+                && error.contains("docs/e2ee/encrypting-existing-data") == (*key != "typo"),
+            "{response}"
+        );
+    }
+}
+
+/// Alice can declare null only on an optional encrypted column.
+#[tokio::test]
+async fn defaults_in_files_and_raw_deployments_must_match_the_encrypted_type() {
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let load = |file: &str| artifact::load(file.as_bytes(), permissions.as_bytes());
+    let app = load(APP).unwrap();
+    let hash = app.current_hash().to_string();
+    for (ty, value, nullable, expected) in [
+        (
+            "string",
+            json!({"type":"Null"}),
+            false,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        ("string?", json!({"type":"Null"}), true, StatusCode::OK),
+        (
+            "string",
+            json!({"type":"Integer","value":7}),
+            false,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let default = if value["type"] == "Integer" {
+            "7"
+        } else {
+            "null"
+        };
+        let file = APP.replace(
+            r#""title": "string""#,
+            &format!(r#""title": {{"type":"{ty}","default":{default}}}"#),
+        );
+        let file_result = load(&file);
+        let mut raw = app.deployment_body(false);
+        let plain = &mut raw["encryption"]["versions"][&hash]["tasks"]["columns"]["title"]["type"];
+        plain["nullable"] = json!(nullable);
+        plain["default"] = value;
+        let (status, response) = publish(&router().await, raw).await;
+        assert_eq!(
+            status,
+            expected,
+            "file accepted={}, raw={response}",
+            file_result.is_ok()
+        );
+        assert_eq!(file_result.is_ok(), expected == StatusCode::OK);
+        if status != StatusCode::OK {
+            let error = response["error"].as_str().unwrap();
+            assert!(
+                error.contains("title") && error.contains("default"),
+                "{response}"
+            );
+        }
+    }
+    let mut raw = app.deployment_body(false);
+    let column = &mut raw["encryption"]["versions"][&hash]["tasks"]["columns"]["title"];
+    column["sealedType"] = column["type"].clone();
+    column["sealedType"]["default"] =
+        json!({"type":"Text","value":"a default belongs on the column"});
+    let (status, response) = publish(&router().await, raw).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert!(
+        response["error"].as_str().unwrap().contains("sealedType"),
+        "{response}"
+    );
+}
+
 fn with_sibling(target: &LoadedApp, other: &LoadedApp) -> Value {
     let mut body = target.deployment_body(false);
     let other_hash = other.current_hash().to_string();
@@ -476,9 +728,9 @@ fn with_sibling(target: &LoadedApp, other: &LoadedApp) -> Value {
     body
 }
 
-/// Alice publishes two branches of the same enum. Either can be the target and either can widen it.
+/// Alice can publish sibling versions together or separately only if both read the same variants.
 #[tokio::test]
-async fn sibling_versions_check_their_common_source_in_either_submission_order() {
+async fn sibling_versions_agree_on_enum_variants_in_either_submission_order() {
     let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
     let root_type = r#""title": {"enum":["a"]}"#;
     let load = |s: &str| artifact::load(s.as_bytes(), permissions.as_bytes()).unwrap();
@@ -495,8 +747,12 @@ async fn sibling_versions_check_their_common_source_in_either_submission_order()
     };
 
     for (left_variants, right_variants, expected) in [
-        (&["a", "b"][..], &["a"][..], StatusCode::OK),
-        (&["a"][..], &["a", "b"][..], StatusCode::OK),
+        (&["a", "b"][..], &["a", "b"][..], StatusCode::OK),
+        (
+            &["a"][..],
+            &["a", "b"][..],
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
         (
             &["a", "b"][..],
             &["a", "c"][..],
@@ -506,33 +762,65 @@ async fn sibling_versions_check_their_common_source_in_either_submission_order()
         let left = sibling("completed", left_variants);
         let right = sibling("archived", right_variants);
         for (target, other) in [(&left, &right), (&right, &left)] {
-            let router = router().await;
-            let (status, response) = publish(&router, root.deployment_body(false)).await;
-            assert_eq!(status, StatusCode::OK, "{response}");
-            let body = with_sibling(target, other);
-            let (status, response) = publish(&router, body).await;
-            assert_eq!(status, expected, "{response}");
-            if expected == StatusCode::UNPROCESSABLE_ENTITY {
-                assert!(
-                    response["error"]
-                        .as_str()
-                        .unwrap()
-                        .contains("appending enum"),
-                    "{response}"
-                );
-                let (status, response) = publish(&router, target.deployment_body(false)).await;
+            for together in [true, false] {
+                let router = router().await;
+                let (status, response) = publish(&router, root.deployment_body(false)).await;
                 assert_eq!(status, StatusCode::OK, "{response}");
-                let (status, response) = publish(&router, other.deployment_body(false)).await;
+                let body = if together {
+                    with_sibling(target, other)
+                } else {
+                    let (status, response) = publish(&router, target.deployment_body(false)).await;
+                    assert_eq!(status, StatusCode::OK, "{response}");
+                    other.deployment_body(false)
+                };
+                let (status, response) = publish(&router, body).await;
                 assert_eq!(status, expected, "{response}");
-                assert!(
-                    response["error"]
-                        .as_str()
-                        .unwrap()
-                        .contains("appending enum"),
-                    "{response}"
-                );
+                if expected == StatusCode::UNPROCESSABLE_ENTITY {
+                    assert!(
+                        response["error"]
+                            .as_str()
+                            .unwrap()
+                            .contains("enum variants"),
+                        "{response}"
+                    );
+                }
             }
         }
+    }
+}
+
+/// An old declaration can still be reached through two migrations that each append enum variants.
+#[tokio::test]
+async fn an_encrypted_enum_can_widen_again_after_an_intermediate_version() {
+    let permissions = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let load =
+        |file: &Value| artifact::load(file.to_string().as_bytes(), permissions.as_bytes()).unwrap();
+    let mut second: Value = serde_json::from_str(APP_V2).unwrap();
+    let root = json!({"enum":["a"]});
+    let widened = |variants: &[&str]| json!({"type":{"enum":variants},"sealedType":root});
+    let first = &mut second["history"]["v1"]["tables"]["tasks"];
+    first["encryption"]["columns"]["title"] = root.clone();
+    second["tables"]["tasks"]["encryption"]["columns"]["title"] = widened(&["a", "b"]);
+    let mut third = second.clone();
+    let mut previous = second["history"]["v1"].clone();
+    previous["tables"]["tasks"]["columns"]["done"] = json!("boolean");
+    previous["tables"]["tasks"]["encryption"]["columns"]["title"] = widened(&["a", "b"]);
+    third["history"]["v2"] = previous;
+    third["tables"]["tasks"]["columns"]["archived"] = json!("boolean");
+    third["tables"]["tasks"]["encryption"]["columns"]["title"] = widened(&["a", "b", "c"]);
+    third["migrations"][0]["to"] = json!("v2");
+    third["migrations"].as_array_mut().unwrap().push(
+        json!({"from":"v2","migrate":{"tasks":{"archived":{"add":"boolean","default":false}}}}),
+    );
+    let latest = load(&third);
+    for in_steps in [false, true] {
+        let server = router().await;
+        if in_steps {
+            let (status, response) = publish(&server, load(&second).deployment_body(false)).await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+        }
+        let (status, response) = publish(&server, latest.deployment_body(false)).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
     }
 }
 
@@ -587,7 +875,7 @@ async fn a_branch_cannot_narrow_an_enum_after_another_branch_dropped_it() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
     let reason = response["error"].as_str().unwrap();
     assert!(
-        reason.contains("tasks.title") && reason.contains("appending enum"),
+        reason.contains("tasks.title") && reason.contains("enum variants"),
         "{response}"
     );
 }
@@ -667,10 +955,10 @@ async fn a_renamed_enum_keeps_variants_from_deployments_outside_its_migration() 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
     let reason = refusal["error"].as_str().unwrap();
     assert!(
-        reason.contains("tasks.caption") && reason.contains("appending enum"),
+        reason.contains("tasks.caption") && reason.contains("enum variants"),
         "{refusal}"
     );
-    let compatible = renamed(r#"["a","b","c"]"#);
+    let compatible = renamed(r#"["a","b"]"#);
     assert_eq!(candidate.current_hash(), compatible.current_hash());
     let (status, body) = publish(&router, compatible.deployment_body(false)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -684,7 +972,7 @@ async fn a_renamed_enum_keeps_variants_from_deployments_outside_its_migration() 
 
 /// Alice cannot convert into a fresh stored column that reuses an old name.
 #[tokio::test]
-async fn a_conversion_cannot_reuse_the_name_of_a_different_stored_column() {
+async fn a_new_column_reusing_a_name_still_refuses_an_unknown_source_field() {
     let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
         "tables": { "notes": {
             "columns": { "oldTitle": "bytes", "title": { "type": "bytes", "default": "" } },
@@ -710,12 +998,10 @@ async fn a_conversion_cannot_reuse_the_name_of_a_different_stored_column() {
     );
 }
 
-/// The server's kept declarations judge a redeployed version like a
-/// migration: with the schema unchanged, a conversion may not write over a
-/// column that is already encrypted (its cells are sealed under the old
-/// type), and equality can't be dropped while its token column stays.
+/// Redeclaring an encrypted column checks its fields and preserves equality
+/// while its token column stays.
 #[tokio::test]
-async fn a_redeclaration_may_not_convert_over_a_column_or_drop_its_equality() {
+async fn a_redeclaration_refuses_unknown_fields_and_keeps_required_equality() {
     let router = router().await;
     let app = loaded("ownerId = session.user");
     let (status, body) = publish(&router, app.deployment_body(false)).await;
@@ -1130,7 +1416,7 @@ fn the_first_deployment_of_an_unpublished_genesis_can_declare_encryption() {
 }
 
 /// When Alice redeploys a schema that previously declared no encryption,
-/// its existing plaintext columns still require an encryption conversion.
+/// its existing plaintext columns must stay plaintext.
 ///
 /// ```text
 /// Alice deploys v1 (encrypted title) and v2 (plaintext body)
@@ -1203,7 +1489,7 @@ async fn a_version_deployed_without_declarations_cannot_encrypt_in_place() {
             }
         },
     ) else {
-        panic!("the legacy deployment must require a conversion");
+        panic!("the existing plaintext column cannot be encrypted in place");
     };
     assert_eq!(legacy_refusal.body, refusal);
 }

@@ -93,8 +93,14 @@ impl DeclaredVersion {
         Ok(())
     }
 
-    // A column's sealed encoding binds every version that shares its storage identity.
-    fn check_stored_types_and_spaces(&self, next: &Self, siblings: bool) -> Result<(), String> {
+    // A widened enum can share storage with its ancestors. Sibling versions
+    // must be able to read each other's values. Look up ancestry only on widening.
+    fn check_stored_types_and_spaces(
+        &self,
+        next: &Self,
+        mut precedes: impl FnMut() -> Result<bool, Error>,
+    ) -> Result<(), Error> {
+        let invalid = |message: String| Error::new(ErrorCode::Schema, message);
         for (table, new) in &next.entries {
             let Some(was) = next.table_in(self, table) else {
                 continue;
@@ -108,7 +114,8 @@ impl DeclaredVersion {
                 new,
                 self.table_in(next, &old.scope),
                 self.column_in(next, &was, &old.space),
-            )?;
+            )
+            .map_err(invalid)?;
             for (name, declared) in &new.columns {
                 let Some(previous) = next
                     .column_in(self, table, name)
@@ -117,12 +124,11 @@ impl DeclaredVersion {
                     continue;
                 };
                 let path = format!("{table}.{name}");
-                let check = encryption::check_stored_column_type(&path, previous, declared);
-                // Siblings can have different lengths of the same sequence of enum variants.
-                if siblings && check.is_err() {
-                    encryption::check_stored_column_type(&path, declared, previous)?;
-                } else {
-                    check?;
+                encryption::check_stored_column_type(&path, previous, declared).map_err(invalid)?;
+                if !previous.plain.same_type(&declared.plain) && !precedes()? {
+                    return Err(invalid(format!(
+                        "{path}: sibling versions must declare the same enum variants"
+                    )));
                 }
             }
         }
@@ -176,31 +182,37 @@ pub(crate) fn check_stored_columns(
             let entries = encryption::decode_stored(&bytes)
                 .map_err(|error| Error::new(ErrorCode::Storage, error))?;
             let hash = SchemaHash(hash);
-            history.push(DeclaredVersion::read(db, hash, entries)?);
+            history.push((hash, DeclaredVersion::read(db, hash, entries)?));
         }
     }
-    let mut submitted: Vec<(&DeclaredVersion, HashSet<SchemaHash>)> = Vec::new();
+    let mut descendants: HashMap<SchemaHash, HashSet<SchemaHash>> = HashMap::new();
     for (i, (hash, next)) in new.iter().enumerate() {
-        let ancestors = submitted
-            .iter()
-            .filter_map(|(version, descendants)| descendants.contains(hash).then_some(*version));
-        next.check_sealed_types(history.iter().chain(ancestors))
-            .map_err(invalid)?;
-        let previous = history.iter().map(|old| (old, false)).chain(
-            submitted
-                .iter()
-                .map(|(old, descendants)| (*old, !descendants.contains(hash))),
-        );
-        for (old, siblings) in previous {
+        let submitted = &new[..i];
+        next.check_sealed_types(
+            history.iter().map(|(_, old)| old).chain(
+                submitted
+                    .iter()
+                    .filter(|(old, _)| descendants[old].contains(hash))
+                    .map(|(_, old)| old),
+            ),
+        )
+        .map_err(invalid)?;
+        for (old_hash, old) in history.iter().chain(submitted) {
             if old.successors.contains(hash) {
-                old.check_transition_to(next)
+                old.check_transition_to(next).map_err(invalid)?;
             } else {
-                old.check_stored_types_and_spaces(next, siblings)
+                old.check_stored_types_and_spaces(next, || {
+                    use std::collections::hash_map::Entry;
+                    let reachable = match descendants.entry(*old_hash) {
+                        Entry::Occupied(entry) => entry.into_mut(),
+                        Entry::Vacant(entry) => entry.insert(db.catalogue_descendants(old_hash)?),
+                    };
+                    Ok(reachable.contains(hash))
+                })?;
             }
-            .map_err(invalid)?;
         }
         if i + 1 < new.len() {
-            submitted.push((next, db.catalogue_descendants(hash)?));
+            descendants.insert(*hash, db.catalogue_descendants(hash)?);
         }
     }
     Ok(())
@@ -236,7 +248,7 @@ fn read_encryption<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<DeclaredEncryption>, D::Error> {
     Option::<DeclaredEncryption>::deserialize(reader).map_err(|error| {
         if error.to_string().starts_with("unknown field") {
-            serde::de::Error::custom(format!("{error}; {}", encryption::COPY_GUIDE))
+            serde::de::Error::custom(encryption::explain_unknown_key(&error.to_string()))
         } else {
             error
         }

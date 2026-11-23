@@ -21,7 +21,22 @@ use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTab
 use super::system_tables::{MEMBERS, is_system_table};
 
 /// How an existing plaintext app can adopt encryption.
-pub const COPY_GUIDE: &str = "in-place conversion is not supported; to encrypt existing data, copy it into a new encrypted table (docs/e2ee/encrypting-existing-data)";
+pub const COPY_GUIDE: &str = "to encrypt existing data, copy it into a new encrypted table (docs/e2ee/encrypting-existing-data)";
+
+/// Add the copy recipe when a declaration names one of the retired keys.
+pub fn explain_unknown_key(reason: &str) -> String {
+    let key = reason
+        .strip_prefix("unknown key `")
+        .or_else(|| reason.strip_prefix("unknown field `"))
+        .and_then(|message| message.split_once('`'))
+        .map(|(key, _)| key);
+    match key {
+        Some("from" | "to" | "convert" | "reverse" | "backfill" | "rehome" | "sweep") => {
+            format!("{reason}; in-place conversion is not supported; {COPY_GUIDE}")
+        }
+        _ => reason.to_owned(),
+    }
+}
 
 /// A schema version's encryption entries, by table.
 pub type Entries = BTreeMap<String, EncryptionEntry>;
@@ -159,8 +174,34 @@ pub fn check_entry(
     schema: &Schema,
 ) -> Result<(), EntryRefusal> {
     check_space(table, &entry.space, &entry.scope, schema, "")?;
-    for name in entry.columns.keys() {
+    for (name, declared) in &entry.columns {
         let at = format!(".columns.{name}");
+        let plain = &declared.plain;
+        if declared
+            .sealed_type
+            .as_ref()
+            .is_some_and(|sealed| sealed.default.is_some())
+        {
+            return Err((
+                format!("{at}.sealedType.default"),
+                format!(
+                    "{table}.{name}: sealedType names only the stored type; declare the column's default beside it"
+                ),
+            ));
+        }
+        if let Some(default) = &plain.default {
+            let path = format!("{at}.default");
+            if !(default == &Value::Null && plain.nullable
+                || fits_default(&plain.column_type, default))
+            {
+                return Err((
+                    path,
+                    format!("{table}.{name}: the declared default is not a value of its type"),
+                ));
+            }
+            crate::tools::public_schema::validate_json_value(default, &plain.column_type, name)
+                .map_err(|message| (path, message))?;
+        }
         // The `__e2ee_` column names are Jazz's: an equality column's token
         // column (`__e2ee_eq_<column>`) is Jazz's, not an encrypted column
         // of the app's, and neither is any other reserved name.
@@ -238,7 +279,17 @@ pub fn check_entry(
             ));
         }
         let tag = equality_column(name);
-        if !column(schema, table, &tag).is_some_and(is_cipher) {
+        let token = column(schema, table, &tag);
+        if token
+            .and_then(|c| c.default.as_ref())
+            .is_some_and(|v| !is_empty_cell(v))
+        {
+            return Err((
+                at,
+                format!("the stored default of token column {tag} must be an empty byte string"),
+            ));
+        }
+        if !token.is_some_and(is_cipher) {
             return Err((
                 at,
                 format!(
@@ -250,14 +301,20 @@ pub fn check_entry(
     Ok(())
 }
 
-/// Whether `value` is the empty cell a row older than an encrypted column
-/// reads: the empty byte string (or text, as a file may write it).
-fn is_empty_cell(value: &Value) -> bool {
-    match value {
-        Value::Bytea(bytes) => bytes.is_empty(),
-        Value::Text(text) => text.is_empty(),
-        _ => false,
+fn fits_default(ty: &ColumnType, value: &Value) -> bool {
+    match (ty, value) {
+        (ColumnType::Enum { variants }, Value::Text(text)) => variants.contains(text),
+        (ColumnType::Json { .. }, Value::Text(_)) => true,
+        (ColumnType::Array { element }, Value::Array(items)) => {
+            items.iter().all(|item| fits_default(element, item))
+        }
+        (ColumnType::Array { .. } | ColumnType::TransactionId, _) => false,
+        _ => value.column_type().as_ref() == Some(ty),
     }
+}
+
+fn is_empty_cell(value: &Value) -> bool {
+    matches!(value, Value::Bytea(bytes) if bytes.is_empty())
 }
 
 /// What stops the equality format encoding values of `column_type`, if
@@ -380,6 +437,27 @@ pub fn check_transition(
     let columns = |table: &str| TableMap {
         lens: lens_of(table),
     };
+    for lens in &migration.forward {
+        let Some(entry) = new_entries.get(&lens.table) else {
+            continue;
+        };
+        let was = lens.renamed_from.as_deref().unwrap_or(&lens.table);
+        if lens.added || !old_schema.contains_key(&TableName::from(was)) {
+            continue;
+        }
+        for op in &lens.operations {
+            if let PublishLensOp::Introduce { column, value, .. } = op
+                && (entry.columns.contains_key(column)
+                    || is_equality_token_column(Some(entry), column))
+                && !is_empty_cell(value)
+            {
+                return Err(format!(
+                    "{}.{}: the migration must supply an empty byte string for the stored cells of existing rows",
+                    lens.table, column
+                ));
+            }
+        }
+    }
     check_mapped_transition(
         (old_schema, old_entries),
         (new_schema, new_entries),
@@ -395,7 +473,7 @@ pub fn check_transition(
 /// version and returns their names in the destination version, if kept.
 pub fn check_mapped_transition(
     (old_schema, old_entries): (&Schema, &Entries),
-    (new_schema, new_entries): (&Schema, &Entries),
+    (_, new_entries): (&Schema, &Entries),
     old_table: impl Fn(&str) -> Option<String>,
     new_table: impl Fn(&str) -> Option<String>,
     old_name: impl Fn(&str, &str) -> Option<String>,
@@ -409,15 +487,25 @@ pub fn check_mapped_transition(
         };
         let new = new_entries.get(&renamed);
         for name in old.columns.keys() {
-            let Some(kept) = new_name(table, name) else {
-                continue;
-            };
-            let declared = new.is_some_and(|e| e.columns.contains_key(&kept));
-            if !declared {
+            let kept = new_name(table, name);
+            if let Some(kept) = &kept
+                && !new.is_some_and(|entry| entry.columns.contains_key(kept))
+            {
                 return Err(format!(
                     "column {renamed}.{kept} holds ciphertext but is no longer declared \
                      encrypted; keep its declaration \
                      or drop the column (E2EE_SCHEMA_CHANGES.md §3.2)"
+                ));
+            }
+            if old.equality.contains(name)
+                && !kept
+                    .as_ref()
+                    .is_some_and(|name| new.is_some_and(|entry| entry.equality.contains(name)))
+                && let Some(tag) = new_name(table, &equality_column(name))
+            {
+                let column = kept.as_ref().unwrap_or(name);
+                return Err(format!(
+                    "{renamed}.{column}: the token column {tag} stays after equality is removed; drop it in the same migration (E2EE_SCHEMA_CHANGES.md §3.2)"
                 ));
             }
         }
@@ -457,19 +545,6 @@ pub fn check_mapped_transition(
                 Some((was_name, previous)) => {
                     check_stored_column_type(&path, previous, declared)?;
                     let tagged_before = old.is_some_and(|o| o.equality.contains(&was_name));
-                    // Removing equality drops the token column in the same
-                    // migration; one left behind would be queried by older
-                    // clients while nobody writes it.
-                    if tagged_before
-                        && !new.equality.contains(name)
-                        && column(new_schema, table, &equality_column(name)).is_some()
-                    {
-                        return Err(format!(
-                            "{path}: it is no longer an equality column, but the token column \
-                             {} stays: drop it in the same migration (E2EE_SCHEMA_CHANGES.md §3.2)",
-                            equality_column(name)
-                        ));
-                    }
                     if tagged_before
                         && new.equality.contains(name)
                         && old_name(table, &equality_column(name))

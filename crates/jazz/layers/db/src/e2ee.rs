@@ -476,10 +476,7 @@ impl CurrentRow {
     }
 }
 
-/// Refuse to install hooks for a schema that gives an encrypted column a
-/// stored default: a row written without the column would store that
-/// plaintext default where its ciphertext belongs. The deploy refuses such
-/// an app; this covers a configuration built by hand.
+/// Encrypted cells and their tokens may default only to the empty byte string.
 pub(crate) fn refuse_stored_defaults(
     schema: &crate::schema::JazzSchema,
     declarations: &E2eeDeclarations,
@@ -489,7 +486,16 @@ pub(crate) fn refuse_stored_defaults(
             continue;
         };
         for column in &table.columns {
-            if entry.columns.contains_key(column.name.as_str()) && column.default.is_some() {
+            let name = column.name.as_str();
+            let token = name
+                .strip_prefix("__e2ee_eq_")
+                .is_some_and(|source| entry.equality.iter().any(|c| c == source));
+            if (entry.columns.contains_key(name) || token)
+                && column
+                    .default
+                    .as_ref()
+                    .is_some_and(|v| !matches!(v, Value::Bytes(bytes) if bytes.is_empty()))
+            {
                 return Err(Error::new(
                     ErrorCode::Schema,
                     format!(

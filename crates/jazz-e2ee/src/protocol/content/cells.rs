@@ -133,7 +133,7 @@ pub trait PlaintextValues {
 /// The equality value a decrypted `plaintext` is tagged with, or `None`
 /// for a column without an index. A plaintext that does not decode to a
 /// value of the column's index is a bad value some writer stored:
-/// `invalid-ciphertext` for that cell alone, so a sweep skips and reports
+/// `invalid-ciphertext` for that cell alone, so repair skips and reports
 /// it and carries on with the rest. A provider failure, or inconsistent
 /// evidence, stays an error.
 pub(crate) fn decrypted_equality_value(

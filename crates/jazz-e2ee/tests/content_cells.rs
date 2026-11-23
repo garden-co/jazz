@@ -1555,9 +1555,7 @@ fn a_stream_is_stale_only_once_a_record_authenticates() {
 /// A third space, for values sealed under neither side of a move.
 const THIRD_ROW: &str = "038f2e3d-4c5b-7a69-8877-665544332233";
 
-/// Re-homing a row from one space to another never carries a value sealed
-/// under a third space: a cell is unconvertible (`stale-space`), and a
-/// stream is refused the same way, whether or not it has plaintext.
+/// Resealing a stream checks its original space even when it has no plaintext.
 #[test]
 fn a_stream_of_a_third_space_is_never_resealed() {
     let mut world = world(29);

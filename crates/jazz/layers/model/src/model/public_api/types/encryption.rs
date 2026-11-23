@@ -88,6 +88,7 @@ impl EncryptedColumn {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PlainType {
     /// The column type.
+    #[serde(deserialize_with = "read_column_type")]
     pub column_type: ColumnType,
     /// Whether the value may be null.
     #[serde(default)]
@@ -98,6 +99,60 @@ pub struct PlainType {
     /// absent from the stored form when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
+}
+
+// Serde accepts extra fields on the shared ColumnType's unit variants. An
+// encrypted declaration must account for every field, including inside arrays.
+fn read_column_type<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<ColumnType, D::Error> {
+    if !reader.is_human_readable() {
+        return ColumnType::deserialize(reader);
+    }
+    // Read the tagged type directly as well as its fields: a JSON map alone
+    // would discard duplicate keys before the normal type reader sees them.
+    #[derive(Deserialize)]
+    struct DeclarationType {
+        #[serde(flatten)]
+        fields: serde_json::Value,
+        #[serde(flatten)]
+        parsed: ColumnType,
+    }
+    let value = DeclarationType::deserialize(reader)?;
+    check_type_keys(&value.fields, "columnType").map_err(serde::de::Error::custom)?;
+    Ok(value.parsed)
+}
+
+fn check_type_keys(raw: &serde_json::Value, path: &str) -> Result<(), String> {
+    let Some(fields) = raw.as_object() else {
+        return Ok(());
+    };
+    match raw["type"].as_str() {
+        Some("Array") => check_type_keys(&raw["element"], &format!("{path}.element"))?,
+        Some("Row") => check_field_types(&raw["columns"], &format!("{path}.columns"))?,
+        Some("EnumPayload") => {
+            if let Some(cases) = raw["cases"].as_array() {
+                for (i, case) in cases.iter().enumerate() {
+                    check_field_types(&case["fields"], &format!("{path}.cases[{i}].fields"))?;
+                }
+            }
+        }
+        Some("Enum" | "ScalarEnum" | "Json") => (),
+        Some(_) => {
+            if let Some(key) = fields.keys().find(|name| *name != "type") {
+                return Err(format!("unknown field `{key}` in {path}; expected `type`"));
+            }
+        }
+        None => (),
+    }
+    Ok(())
+}
+
+fn check_field_types(fields: &serde_json::Value, path: &str) -> Result<(), String> {
+    if let Some(fields) = fields.as_array() {
+        for (i, field) in fields.iter().enumerate() {
+            check_type_keys(&field["column_type"], &format!("{path}[{i}].column_type"))?;
+        }
+    }
+    Ok(())
 }
 
 impl PlainType {
