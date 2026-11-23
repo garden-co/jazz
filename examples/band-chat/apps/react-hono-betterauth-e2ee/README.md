@@ -161,8 +161,10 @@ There are two ways to remove this browser as a device:
 
 **Leaving** asks another of your devices to remove this browser. An only
 device cannot leave: nothing else would hold your keys, and BandChat says so.
-Otherwise the row shows "Removal pending" and the browser stays usable. Once
-another of your devices completes the removal, Jazz erases this browser's
+Otherwise, once Jazz has published the request, the row shows "Removal
+pending" and the browser stays usable. If another of your devices is online,
+it may complete the removal before that shows. Once another of your devices
+completes the removal, Jazz erases this browser's
 keys for your account and the page signs itself out. If erasing fails,
 BandChat says leaving did not finish and that the keys may still be here, and
 stays signed in; reloading checks again.
