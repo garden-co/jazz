@@ -1,6 +1,9 @@
 use jazz::tools::native_transport_connector::NativeTransportLink;
 
+mod http;
 mod http_stream;
+#[doc(hidden)]
+pub use http::http_client_builder;
 pub use http_stream::{
     HttpStreamError, HttpStreamFallbackConnector, HttpStreamTransportKind,
     UPGRADE_FAILURES_BEFORE_STREAM, UPGRADE_HANGS_BEFORE_STREAM,
