@@ -346,6 +346,12 @@ cannot stop every writer as step 2 describes, is not covered.
    compiles to `exists <table>(id = this.id, <column> = this.<column>)`;
    null equals null there, so a row without the reference keeps its other
    columns writable: [the test](../tests/frozen_reference_column.rs)).
+   That needs the old reference to be optional. A required one can't take
+   `<column> = null` as an insert rule (its permissions don't compile), and
+   no migration makes a kept column optional (the lens check refuses it:
+   `a_migration_cannot_make_a_kept_required_reference_optional`). Its table
+   then refuses every insert (`"insert": "false"`) until the old column is
+   dropped, with the same update rule, so its other columns stay writable.
    IDs kept outside Jazz's relations, such as in URLs, still resolve,
    because the copies keep their IDs.
 6. Drop the old table in a later migration, with the old reference columns

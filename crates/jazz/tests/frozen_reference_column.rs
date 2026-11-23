@@ -41,8 +41,29 @@ fn schema() -> JazzSchema {
                             ),
                     ),
             )
+            .table(required_reference(PolicyExpr::False))
             .build(),
     )
+}
+
+/// `notes`: its `taskId` is required, so no insert can leave it empty; the
+/// insert rule is `insert`, and an update keeps `taskId` as `comments` does.
+fn required_reference(insert: PolicyExpr) -> TableSchemaBuilder {
+    TableSchemaBuilder::new("notes")
+        .column("body", ColumnType::Text)
+        .column("taskId", ColumnType::Uuid)
+        .policies(
+            TablePolicies::new()
+                .with_select(PolicyExpr::True)
+                .with_insert(insert)
+                .with_update(
+                    Some(PolicyExpr::True),
+                    exists(
+                        "notes",
+                        vec![outer_eq("id", "id"), outer_eq("taskId", "taskId")],
+                    ),
+                ),
+        )
 }
 
 fn open() -> Db {
@@ -154,4 +175,48 @@ fn a_column_kept_by_its_update_rule_and_left_empty_by_inserts_stays_frozen() {
     );
     assert!(may_insert(&db, "comments", NONE), "inserted without a task");
     assert!(!may_insert(&db, "comments", task(1)), "inserted with one");
+}
+
+fn required(n: u8) -> Value {
+    Value::Uuid(uuid::Uuid::from_bytes([n; 16]))
+}
+
+/// A required reference can't be left empty, so `taskId = null` doesn't
+/// compile as its insert rule. Refusing every insert does, and with the
+/// update rule above the other columns stay writable while `taskId` can't
+/// change.
+#[test]
+fn a_required_reference_stays_frozen_with_inserts_refused() {
+    let null_rule = jazz::schema::JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(required_reference(PolicyExpr::IsNull {
+                column: "taskId".to_owned(),
+            }))
+            .build(),
+    );
+    assert!(null_rule.is_err(), "taskId = null on a required column");
+
+    let db = open();
+    for n in [1, 2] {
+        block_on(db.insert(
+            "notes",
+            BTreeMap::from([
+                ("body".to_owned(), Value::String("hello".into())),
+                ("taskId".to_owned(), required(1)),
+            ]),
+            InsertOptions {
+                row_id: Some(row(n)),
+                identity: WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let edit = [("body", Value::String("edited".into()))];
+    assert!(may_update(&db, "notes", 1, &edit), "another column");
+    assert!(
+        !may_update(&db, "notes", 2, &[("taskId", required(2))]),
+        "changed"
+    );
+    assert!(!may_insert(&db, "notes", required(1)), "inserted");
 }

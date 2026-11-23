@@ -223,8 +223,14 @@ elsewhere. An insert must leave it empty, and an update must keep it as it was (
 
 A row whose `taskId` is empty keeps it empty under this rule, and its other columns stay writable.
 
+This needs `taskId` to be optional. If it's required, `taskId = null` can't be its insert rule (the
+permissions don't compile), and a migration can't make a column it keeps optional. Refuse every
+insert into that table instead, with `"insert": "false"`, and keep the update rule above: rows
+can't be added to it until you drop the old column, while their other columns stay writable.
+
 ### 6. Drop the old table later
 
 Once no client still uses the old table, drop it in a later migration, together with the old
-reference columns: a column cannot reference a table that no longer exists. As above, the old
-data stays in history, on replicas and in backups.
+reference columns: a column cannot reference a table that no longer exists. That version's
+permissions can then let the referencing tables take inserts again. As above, the old data stays
+in history, on replicas and in backups.

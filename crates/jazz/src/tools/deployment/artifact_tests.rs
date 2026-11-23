@@ -3425,10 +3425,21 @@ fn the_json_schema_takes_enum_cases_with_fields_in_history_only() {
         br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }"#;
     let current = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
         "tables":{"todos":{"columns":{"title":"string","status":{"enum":{"open":{},"done":{"at":"timestamp"}},"optional":true}}}}}"#;
+    // A case's field takes what a column's type takes (a type string with
+    // `?`, or a type object), not an empty object.
+    let field = |spec: &str| {
+        plain.replace(
+            r#""done":{"at":"timestamp"}"#,
+            &format!(r#""done":{{"at":{spec}}}"#),
+        )
+    };
+    let (optional_field, empty_field) = (field(r#"{"type":"string?"}"#), field("{}"));
     for (text, permissions, expected) in [
         (encrypted, &permissions[..], true),
         (plain, &plain_permissions[..], true),
         (current, &plain_permissions[..], false),
+        (optional_field.as_str(), &plain_permissions[..], true),
+        (empty_field.as_str(), &plain_permissions[..], false),
     ] {
         let instance: serde_json::Value = serde_json::from_str(text).unwrap();
         let by_schema = validator.is_valid(&instance);
@@ -3477,6 +3488,7 @@ fn the_json_schema_takes_exactly_the_encrypted_columns_the_reader_takes() {
         r#"{ "type": { "array": { "enum": ["low"], "$comment": "a note" } } }"#,
         r#"{ "json": { "type": "integer", "minimum": 1, "maximum": 10 } }"#,
         r#"{ "array": { "json": { "enum": [1, "two", null, true] } } }"#,
+        r#"{ "json": { "minimum": -9223372036854775808, "maximum": 18446744073709551615 } }"#,
     ];
     let refused = [
         r#"42"#,
@@ -3504,11 +3516,25 @@ fn the_json_schema_takes_exactly_the_encrypted_columns_the_reader_takes() {
         r#"{ "type": { "array": { "json": { "multipleOf": 0.25 } } } }"#,
         r#"{ "enum": { "pending": { "reason": "string" } } }"#,
         r#"{ "array": { "enum": { "pending": { "reason": "string" } } } }"#,
+        // Just past the largest unsigned 64-bit integer: this validator
+        // compares it exactly (a JavaScript editor reads it as the nearest
+        // double, which is the bound itself).
+        r#"{ "json": { "maximum": 18446744073709551616 } }"#,
+        r#"{ "json": { "maximum": 100000000000000000000000000000 } }"#,
+        r#"{ "json": { "minimum": -100000000000000000000000000000 } }"#,
     ];
-    // The one known difference. JSON Schema compares numbers by value, so it
-    // takes `1.0` (or `1e2`) as an integer; the reader goes by how the number
-    // is written and refuses it, as a client could not encode it.
-    let schema_only = [r#"{ "json": { "minimum": 1.0 } }"#];
+    // The known differences, where the JSON Schema takes what the reader
+    // refuses:
+    // - JSON Schema compares numbers by value, so it takes `1.0` (or `1e2`)
+    //   as an integer; the reader goes by how the number is written and
+    //   refuses it, as a client could not encode it.
+    // - A number just below the smallest signed 64-bit integer is read as the
+    //   nearest double, which is that bound, so it passes the JSON Schema's
+    //   `minimum`; the reader refuses it.
+    let schema_only = [
+        r#"{ "json": { "minimum": 1.0 } }"#,
+        r#"{ "json": { "minimum": -9223372036854775809 } }"#,
+    ];
     for declaration in schema_only {
         let text = app(declaration);
         let instance: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -3529,4 +3555,29 @@ fn the_json_schema_takes_exactly_the_encrypted_columns_the_reader_takes() {
             );
         }
     }
+}
+
+/// A migration can't make a kept column optional: the deploy's lens check
+/// refuses it, as `migrations create` does. So an app whose old reference
+/// column is required can't loosen it before switching to a new reference
+/// column (the encryption guide's copy recipe relies on this).
+#[test]
+fn a_migration_cannot_make_a_kept_required_reference_optional() {
+    let file = r#"{"$schema":"https://jazz.tools/schemas/jazz.app.v1.json",
+        "tables":{"tasks":{"columns":{"title":"string"}},
+                  "comments":{"columns":{"body":"string","taskId":{"type":"uuid","references":"tasks","optional":true}}}},
+        "history":{"v1":{"tables":{"tasks":{"columns":{"title":"string"}},
+                  "comments":{"columns":{"body":"string","taskId":{"type":"uuid","references":"tasks"}}}}}},
+        "migrations":[{"from":"v1","migrate":{}}]}"#;
+    let permissions =
+        br#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json", "tables": {} }"#;
+    let error = load(file.as_bytes(), permissions)
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(
+        error.contains("\"taskId\" comes out required but is optional")
+            && error.contains("must keep its type and optionality"),
+        "{error}"
+    );
 }

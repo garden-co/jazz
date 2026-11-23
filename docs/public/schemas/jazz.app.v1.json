@@ -467,9 +467,74 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": {
-          "$ref": "#/$defs/column"
+          "$ref": "#/$defs/enumCaseField"
         }
       }
+    },
+    "enumCaseField": {
+      "description": "A field of an enum case, as the reader takes it: a type string, or an object with exactly one of `type` (a type string, `?` allowed, or a nested type), `enum`, `json` and `array`, and a column's options.",
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^(string|int|bigint|float|boolean|timestamp|uuid|bytes)\\??$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "enum": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "$ref": "#/$defs/enumCases"
+                }
+              ]
+            },
+            "json": {},
+            "array": {
+              "$ref": "#/$defs/encryptedTypeExpression"
+            },
+            "optional": {
+              "type": "boolean"
+            },
+            "default": {},
+            "merge": {
+              "enum": ["counter", "g-set", "text", "markdown", "html"]
+            },
+            "references": {
+              "type": "string"
+            },
+            "transform": {
+              "type": "string"
+            },
+            "$comment": {
+              "type": "string"
+            }
+          },
+          "oneOf": [
+            {
+              "required": ["type"]
+            },
+            {
+              "required": ["enum"]
+            },
+            {
+              "required": ["json"]
+            },
+            {
+              "required": ["array"]
+            }
+          ]
+        }
+      ]
     },
     "currentTables": {
       "description": "What the current `tables` may not hold, though a `history` version may: an enum whose cases carry fields, and, in an encrypted column, a JSON schema with a number that isn't an integer.",
@@ -523,10 +588,15 @@
       }
     },
     "integerNumbersOnly": {
-      "description": "A JSON value whose numbers are all integers.",
+      "description": "A JSON value whose numbers are all integers a client can encode: from -9223372036854775808 (the smallest 64-bit signed integer) to 18446744073709551615 (the largest 64-bit unsigned one).",
       "anyOf": [
         {
-          "type": ["integer", "string", "boolean", "null"]
+          "type": "integer",
+          "minimum": -9223372036854775808,
+          "maximum": 18446744073709551615
+        },
+        {
+          "type": ["string", "boolean", "null"]
         },
         {
           "type": "array",
