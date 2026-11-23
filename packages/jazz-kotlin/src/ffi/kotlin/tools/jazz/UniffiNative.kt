@@ -5,8 +5,51 @@ import uniffi.jazz_ffi.SubscriptionListener
 import uniffi.jazz_ffi.JazzException as FfiException
 
 /** [Native] over the Kotlin bindings uniffi-bindgen generates for jazz-ffi. */
-public class UniffiNative private constructor(private val handle: JazzHandle) : Native {
+public class UniffiNative private constructor(private val root: JazzHandle) : Native {
     private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** The view a [NativeCall] runs this thread's calls through. */
+    private val view = ThreadLocal<JazzHandle?>()
+
+    /** Calls go through the current call's view, if any: it shares the app. */
+    private val handle: JazzHandle get() = view.get() ?: root
+
+    override fun newCall(): NativeCall = object : NativeCall {
+        private val lock = Any()
+        private var cancelled = false
+
+        // Made in run, so a call that never runs (its coroutine cancelled first) holds nothing.
+        private var control: uniffi.jazz_ffi.CallControl? = null
+
+        override fun <T> run(block: () -> T): T {
+            val made = uniffi.jazz_ffi.CallControl(null)
+            synchronized(lock) {
+                control = made
+                // Cancelled before it ran: its calls do nothing.
+                if (cancelled) made.cancel()
+            }
+            try {
+                val controlled = live { root.controlled(made) }
+                view.set(controlled)
+                try {
+                    return block()
+                } finally {
+                    view.remove()
+                    controlled.destroy()
+                }
+            } finally {
+                synchronized(lock) { control = null }
+                made.destroy()
+            }
+        }
+
+        override fun cancel() {
+            synchronized(lock) {
+                cancelled = true
+                control?.cancel()
+            }
+        }
+    }
 
     /** [block] on the handle, or [JazzException.Closed] once [close] ran. */
     private inline fun <T> live(block: () -> T): T {
@@ -45,6 +88,11 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
                 is FfiException.Permission -> JazzException.Permission(e.reason)
                 is FfiException.NotSupported -> JazzException.NotSupported(e.reason)
                 is FfiException.Conflict -> JazzException.Conflict(e.reason)
+                // Cut short by its call's control, which only a cancelled coroutine
+                // cancels: the caller gets its own cancellation instead, unless a
+                // write was committed locally.
+                is FfiException.Interrupted ->
+                    if (e.queued) JazzException.StillQueued(e.reason) else kotlinx.coroutines.CancellationException(e.reason)
                 // Kinds a newer jazz-ffi adds (e.g. NoAccount, Unsynced): refused, with its message.
                 else -> JazzException.Refused(e.message ?: e.toString())
             }
@@ -111,7 +159,7 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
         try {
             call { handle.signOut() }
         } finally {
-            handle.destroy()
+            root.destroy()
         }
     }
 
@@ -152,11 +200,11 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
             // Refused (e.g. a delete already under way): nothing was closed here.
             throw e
         } catch (e: Throwable) {
-            if (closed.compareAndSet(false, true)) handle.destroy()
+            if (closed.compareAndSet(false, true)) root.destroy()
             throw e
         }
         // Deleted: the core closed the app.
-        if (closed.compareAndSet(false, true)) handle.destroy()
+        if (closed.compareAndSet(false, true)) root.destroy()
     }
 
     override fun watchMutationErrors(onError: (String) -> Unit): () -> Unit {
@@ -195,9 +243,9 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         try {
-            call { handle.shutdown() }
+            call { root.shutdown() }
         } finally {
-            handle.destroy()
+            root.destroy()
         }
     }
 }
