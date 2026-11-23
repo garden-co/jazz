@@ -781,17 +781,22 @@ class Printer {
       !ast.hops.length &&
       ast.conditions.length === 3
     ) {
-      // Match the three equalities in the order emitted by isMember.
-      const [scopeId, identifier, accountId] = ast.conditions.map((condition, i) =>
-        condition.kind === "cmp" &&
-        condition.op === "=" &&
-        condition.left.kind === "column" &&
-        condition.left.qual.kind === "none" &&
-        condition.left.name === ["scopeId", "identifier", "accountId"][i]
-          ? condition.right
-          : undefined,
-      );
+      // The three equalities in any order, as deploy recognises the members
+      // rule (protocol R13): each of the members table's columns exactly once.
+      const equalities = new Map<string, Operand>();
+      for (const condition of ast.conditions)
+        if (
+          condition.kind === "cmp" &&
+          condition.op === "=" &&
+          condition.left.kind === "column" &&
+          condition.left.qual.kind === "none"
+        )
+          equalities.set(condition.left.name, condition.right);
+      const scopeId = equalities.get("scopeId");
+      const identifier = equalities.get("identifier");
+      const accountId = equalities.get("accountId");
       if (
+        equalities.size === 3 &&
         scopeId?.kind === "tableId" &&
         identifier?.kind === "column" &&
         identifier.qual.kind === "this" &&
