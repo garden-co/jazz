@@ -225,22 +225,23 @@ session.db.encryption.onUnreadable((report) => {
 While no listener is registered, the runtime keeps up to 1,024 reports for the next listener. Past that
 the oldest are dropped, and the next listener first receives a `reports-dropped` report with their count.
 
-### A new device's first sync
+### Before a device can read
 
 A device reads its encrypted rows from its own store, offline too, once it has synced with the server
 once. A device that has never synced (a new store) cannot tell yet which of its rows are encrypted, so
 its live queries on encrypted columns stay loading until its first sync, however long that takes,
 rather than show an empty result. `db.encryption.readable()` resolves when the device can read. While
-it has not, a loading query is waiting for that first sync. It rejects if the encryption runtime does
-not load (in a browser that started thin) or the Db closes:
+it has not, a loading query is waiting for the device to become readable: for its first sync, and in a
+browser that started thin, also for the encryption runtime to load (a returning device waits only for
+that). It rejects if the encryption runtime does not load or the Db closes:
 
 ```ts
-let reading: "first-sync" | "ready" | "failed" = "first-sync";
+let reading: "waiting" | "ready" | "failed" = "waiting";
 session.db.encryption.readable().then(
   () => (reading = "ready"),
   () => (reading = "failed"),
 );
-// While `reading` is "first-sync", show "Waiting to connect for the first time" rather than a spinner.
+// While `reading` is "waiting", say that encrypted data is still loading rather than show it as empty.
 // If it is "failed", show that encrypted data could not load.
 ```
 

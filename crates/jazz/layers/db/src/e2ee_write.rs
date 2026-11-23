@@ -501,7 +501,15 @@ impl Inner {
         let Some(entry) = hooks.declarations().tables.get(table) else {
             return Ok(());
         };
-        if mutation == StreamingMutationKind::Insert && !entry.columns.is_empty() {
+        let stored = match mutation {
+            StreamingMutationKind::Insert => None,
+            _ => self.stored_space(&**hooks, table, row, &Target::of(target, self)?, false)?,
+        };
+        // An upsert of a row this store does not hold inserts it; publication
+        // refuses it if the row appeared since, so the same check applies.
+        let inserts = mutation == StreamingMutationKind::Insert
+            || (mutation == StreamingMutationKind::Upsert && stored.is_none());
+        if inserts && !entry.columns.is_empty() {
             let schema = self.schema.table(table)?;
             let branch_cells = match target {
                 WriteTarget::BranchView { head, .. } => schema.selector_cells(head)?,
@@ -531,10 +539,6 @@ impl Inner {
                 }
             }
         }
-        let stored = match mutation {
-            StreamingMutationKind::Insert => None,
-            _ => self.stored_space(&**hooks, table, row, &Target::of(target, self)?, false)?,
-        };
         let space = self.stream_space(table, row, cells, stored.as_ref())?;
         if entry.columns.contains_key(column) {
             upload.sealer = Some(
