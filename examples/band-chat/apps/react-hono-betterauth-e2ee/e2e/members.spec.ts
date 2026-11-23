@@ -7,12 +7,13 @@ import {
   createRoom,
   deviceIdOf,
   joinThroughLink,
-  decryptingNotice,
+  keyNoticesSeen,
   lockedBanner,
   message,
   myAccountId,
   newDevice,
   pageStorage,
+  watchKeyNotices,
   watchMarkerWrites,
   reopen,
   roomList,
@@ -267,6 +268,7 @@ test("an active new member attempts no read marker until the room key arrives", 
   await expect(b.page.getByText("Waiting for the room creator")).toBeVisible({ timeout: T });
   await deviceIdOf(b.page);
   await watchMarkerWrites(b.page);
+  await watchKeyNotices(b.page);
 
   // Admission's delivery call happens after the authority accepted the
   // transaction. Hold outgoing sync then, including automatic deliveries.
@@ -287,8 +289,11 @@ test("an active new member attempts no read marker until the room key arrives", 
   });
   await admit(a.page, bob);
   await expect.poll(() => deliveryHeld, { timeout: T }).toBe(true);
-  // Admitted and waiting only for the key: decrypting, not locked.
-  await expect(decryptingNotice(b.page)).toBeVisible({ timeout: T });
+  // Admitted and waiting only for the key: decrypting first, never locked.
+  // The notices are recorded as they show, so a slow run that passes the
+  // ten seconds of "decrypting" before this looks still sees it.
+  await expect.poll(() => keyNoticesSeen(b.page), { timeout: T }).not.toEqual([]);
+  expect((await keyNoticesSeen(b.page))[0]).toBe("decrypting");
   await expect(lockedBanner(b.page)).toHaveCount(0);
   await expect(waitingBanner(b.page)).toHaveCount(0);
   const bobId = await myAccountId(b.page);
@@ -296,6 +301,7 @@ test("an active new member attempts no read marker until the room key arrives", 
   expect(await b.page.evaluate(() => window.bandChatMarkerWrites)).toEqual([]);
 
   await expect(message(b.page, text)).toHaveCount(0);
+  expect(await keyNoticesSeen(b.page)).not.toContain("locked");
   a.wire.resumeOutgoing();
   await expect(message(b.page, text)).toBeVisible({ timeout: T });
   await until(
