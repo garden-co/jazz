@@ -496,7 +496,7 @@ pub fn check_transition(
         (old_schema, old_entries),
         (new_schema, new_entries),
         old_table,
-        &new_table,
+        new_table,
         |table, name| columns(table).old_name(name),
         |table, name| columns(&new_table(table)?).new_name(name),
     )
