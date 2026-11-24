@@ -78,31 +78,8 @@ fn exists(table: &str, conditions: Vec<PolicyExpr>) -> PolicyExpr {
     }
 }
 
-/// `M(projects)`: a member row of this project for the session.
-fn member_of_this_project() -> PolicyExpr {
-    exists(
-        MEMBERS,
-        vec![
-            cmp("scopeId", table_id("projects")),
-            cmp("identifier", this("id")),
-            cmp("accountId", me()),
-        ],
-    )
-}
-
 /// `MEMBER(session)` on a member row: the session's member row of the
 /// same space.
-fn member_of_same_space() -> PolicyExpr {
-    exists(
-        MEMBERS,
-        vec![
-            cmp("scopeId", this("scopeId")),
-            cmp("identifier", this("identifier")),
-            cmp("accountId", me()),
-        ],
-    )
-}
-
 fn inherits_from(operation: Operation) -> PolicyExpr {
     PolicyExpr::InheritsFrom {
         operation,
@@ -159,7 +136,7 @@ fn schema(creator: bool) -> JazzSchema {
                     .policies(
                         TablePolicies::new()
                             .with_select(PolicyExpr::And(vec![
-                                member_of_this_project(),
+                                common::member_of_space(MEMBERS, "projects", "id"),
                                 PolicyExpr::eq_literal("hidden", false.into()),
                             ]))
                             .with_insert(PolicyExpr::True)
@@ -200,7 +177,7 @@ fn schema(creator: bool) -> JazzSchema {
                         TablePolicies::new()
                             .with_select(PolicyExpr::Or(vec![
                                 cmp("accountId", me()),
-                                member_of_same_space(),
+                                common::member_of_same_space(MEMBERS),
                             ]))
                             .with_insert(member_insert)
                             .with_delete(PolicyExpr::Or(vec![cmp("accountId", me()), manages()])),

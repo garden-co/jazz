@@ -870,54 +870,20 @@ fn system_rows_are_immutable_for_every_writer() {
 #[test]
 fn a_public_approval_pairs_with_its_private_approval_by_row_id() {
     let world = World::new();
-    let device = new_row();
-    let mut request = BTreeMap::from([
-        ("publicKey".to_owned(), bytes("pk")),
-        ("mechanism".to_owned(), Value::String("m".to_owned())),
-        ("version".to_owned(), Value::I64(1)),
-        ("signingPublicKey".to_owned(), bytes("spk")),
-        ("signingMechanism".to_owned(), Value::String("s".to_owned())),
-        ("signingVersion".to_owned(), Value::I64(1)),
-    ]);
-    request.insert("nonceCommitment".to_owned(), bytes("n"));
-    world
-        .commit(alice(), &[(DEVICE_REQUESTS, device, request)])
-        .expect("a device request");
-    let challenge = new_row();
+    let device = world.device(alice());
+    let challenge_id = new_row();
     world
         .commit(
             alice(),
             &[(
                 system_tables::DEVICE_CHALLENGES,
-                challenge,
-                BTreeMap::from([
-                    ("deviceId".to_owned(), Value::Uuid(device.0)),
-                    ("epochId".to_owned(), Value::Uuid(uuid::Uuid::new_v4())),
-                    ("envelope".to_owned(), bytes("e")),
-                    ("nonce".to_owned(), bytes("n")),
-                    ("signerId".to_owned(), Value::Uuid(device.0)),
-                    ("signature".to_owned(), bytes("s")),
-                ]),
+                challenge_id,
+                challenge(device),
             )],
         )
         .expect("a challenge");
-    let private = || {
-        BTreeMap::from([
-            ("challengeId".to_owned(), Value::Uuid(challenge.0)),
-            ("signerId".to_owned(), Value::Uuid(device.0)),
-            ("verification".to_owned(), bytes("v")),
-            ("signature".to_owned(), bytes("s")),
-        ])
-    };
-    let public = || {
-        BTreeMap::from([
-            ("accountId".to_owned(), account(alice())),
-            ("epochId".to_owned(), Value::Uuid(uuid::Uuid::new_v4())),
-            ("deviceId".to_owned(), Value::Uuid(device.0)),
-            ("signerId".to_owned(), Value::Uuid(device.0)),
-            ("signature".to_owned(), bytes("s")),
-        ])
-    };
+    let private = || approval(challenge_id, device);
+    let public = || public_approval(alice(), device, device, None);
     let private_table = system_tables::DEVICE_APPROVALS;
     let public_table = system_tables::PUBLIC_DEVICE_APPROVALS;
     let x = new_row();
@@ -1578,12 +1544,12 @@ fn account_key(who: AuthorSubject, signer: RowUuid) -> Cells {
     ])
 }
 
-fn identity_row(device: RowUuid, generation: i64, ledger: i64) -> Cells {
+fn identity_row(device: RowUuid, generation: i64, ledger: i64, epoch: Value) -> Cells {
     cells(&[
         ("ledgerVersion", Value::I64(ledger)),
         ("generation", Value::I64(generation)),
         ("deviceId", id_of(device)),
-        ("epochId", fresh()),
+        ("epochId", epoch),
         ("envelope", bytes("e")),
         ("verification", bytes("v")),
     ])
@@ -1819,25 +1785,41 @@ fn a_first_identity_is_the_accounts_own() {
     world
         .commit(
             alice(),
-            &[(ACCOUNT_IDENTITIES, new_row(), identity_row(device, 0, 1))],
+            &[(
+                ACCOUNT_IDENTITIES,
+                new_row(),
+                identity_row(device, 0, 1, fresh()),
+            )],
         )
         .expect_err("a first identity under another row id");
     world
         .commit(
             alice(),
-            &[(ACCOUNT_IDENTITIES, own_id, identity_row(bobs, 0, 1))],
+            &[(
+                ACCOUNT_IDENTITIES,
+                own_id,
+                identity_row(bobs, 0, 1, fresh()),
+            )],
         )
         .expect_err("a first identity from another account's device");
     world
         .commit(
             alice(),
-            &[(ACCOUNT_IDENTITIES, own_id, identity_row(device, 0, 2))],
+            &[(
+                ACCOUNT_IDENTITIES,
+                own_id,
+                identity_row(device, 0, 2, fresh()),
+            )],
         )
         .expect_err("another ledger version");
     world
         .commit(
             alice(),
-            &[(ACCOUNT_IDENTITIES, own_id, identity_row(device, 0, 1))],
+            &[(
+                ACCOUNT_IDENTITIES,
+                own_id,
+                identity_row(device, 0, 1, fresh()),
+            )],
         )
         .expect("the account's first identity");
 }
@@ -1850,7 +1832,7 @@ fn a_root_comes_with_its_identity() {
     let world = World::new();
     let device = world.device(alice());
     let own_id = RowUuid(alice().account_id().unwrap().0);
-    let identity = identity_row(device, 0, 1);
+    let identity = identity_row(device, 0, 1, fresh());
     let epoch = identity["epochId"].clone();
     world
         .commit(
@@ -2277,20 +2259,13 @@ fn an_account_bootstraps_from_its_own_client() {
     ))
     .unwrap();
     world.visible(alice(), DEVICE_REQUESTS);
-    let epoch = Value::Uuid(uuid::Uuid::new_v4());
+    let epoch = fresh();
     let id = OpenTransactionId::new();
     block_on(replica.begin_mergeable(id)).unwrap();
     let tx = replica.tx_ref(id);
     block_on(tx.insert(
         system_tables::ACCOUNT_IDENTITIES,
-        BTreeMap::from([
-            ("ledgerVersion".to_owned(), Value::I64(1)),
-            ("generation".to_owned(), Value::I64(0)),
-            ("deviceId".to_owned(), Value::Uuid(device.0)),
-            ("epochId".to_owned(), epoch.clone()),
-            ("envelope".to_owned(), bytes("e")),
-            ("verification".to_owned(), bytes("v")),
-        ]),
+        identity_row(device, 0, 1, epoch.clone()),
         InsertOptions {
             row_id: Some(RowUuid(alice().account_id().unwrap().0)),
             ..Default::default()
@@ -2299,14 +2274,7 @@ fn an_account_bootstraps_from_its_own_client() {
     .unwrap();
     block_on(tx.insert(
         system_tables::ACCOUNT_ROOTS,
-        BTreeMap::from([
-            ("ledgerVersion".to_owned(), Value::I64(1)),
-            ("generation".to_owned(), Value::I64(0)),
-            ("accountId".to_owned(), account(alice())),
-            ("deviceId".to_owned(), Value::Uuid(device.0)),
-            ("epochId".to_owned(), epoch),
-            ("kind".to_owned(), Value::String("app".to_owned())),
-        ]),
+        root_row(alice(), device, epoch, "app"),
         InsertOptions {
             row_id: Some(new_row()),
             ..Default::default()
@@ -2816,6 +2784,31 @@ fn a_later_version_without_declarations_keeps_the_system_rows() {
     assert_eq!(world.reads(alice(), MEMBERS), vec![member]);
 }
 
+/// The admitted plain and encrypted versions and their declarations.
+fn stored_two_version_catalogue() -> (Schema, Schema, DeploymentCatalogue, DeclaredEncryption) {
+    use jazz::tools::{Lens, LensTransform};
+    let plain = structural_of(app());
+    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let (v0, v1) = (SchemaHash::compute(&plain), SchemaHash::compute(&fragment));
+    let stored = DeploymentCatalogue {
+        schemas: vec![plain.clone(), fragment.clone()],
+        migrations: vec![Lens::new(
+            v0,
+            v1,
+            LensTransform {
+                ops: fragment_ops(&fragment, true),
+                draft_ops: Vec::new(),
+            },
+        )],
+        admitted_schema_hashes: vec![v0, v1],
+    };
+    let declared = DeclaredEncryption {
+        versions: BTreeMap::from([(v1.to_string(), entries())]),
+        ..Default::default()
+    };
+    (plain, fragment, stored, declared)
+}
+
 /// A version that keeps the system tables without declaring encryption takes
 /// the declarations of the version it follows nearest. With two parents that
 /// declare alike, they are the ones; declaring differently leaves no nearest,
@@ -2838,8 +2831,7 @@ fn a_version_with_two_parents_takes_their_declarations_only_if_they_agree() {
         table: name.to_owned(),
         schema: table(name),
     };
-    let plain = structural_of(app());
-    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let (plain, fragment, _, _) = stored_two_version_catalogue();
     let mut with_b = fragment.clone();
     with_b.insert(TableName::from("b_marker"), table("b_marker"));
     let mut with_both = with_b.clone();
@@ -2886,8 +2878,7 @@ fn a_version_with_two_parents_takes_their_declarations_only_if_they_agree() {
 #[test]
 fn a_new_version_without_the_system_tables_is_refused_against_the_stored_catalogue() {
     use jazz::tools::{Lens, LensOp, LensTransform};
-    let plain = structural_of(app());
-    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let (plain, _, stored, declared) = stored_two_version_catalogue();
     let mut sibling = plain.clone();
     sibling.insert(
         TableName::from("notes"),
@@ -2895,11 +2886,7 @@ fn a_new_version_without_the_system_tables_is_refused_against_the_stored_catalog
             .column("body", ColumnType::Text)
             .build(),
     );
-    let (v0, v1, v2) = (
-        SchemaHash::compute(&plain),
-        SchemaHash::compute(&fragment),
-        SchemaHash::compute(&sibling),
-    );
+    let (v0, v2) = (SchemaHash::compute(&plain), SchemaHash::compute(&sibling));
     let lens = |from, to, ops| {
         Lens::new(
             from,
@@ -2909,15 +2896,6 @@ fn a_new_version_without_the_system_tables_is_refused_against_the_stored_catalog
                 draft_ops: Vec::new(),
             },
         )
-    };
-    let stored = DeploymentCatalogue {
-        schemas: vec![plain.clone(), fragment.clone()],
-        migrations: vec![lens(v0, v1, fragment_ops(&fragment, true))],
-        admitted_schema_hashes: vec![v0, v1],
-    };
-    let declared = DeclaredEncryption {
-        versions: BTreeMap::from([(v1.to_string(), entries())]),
-        ..Default::default()
     };
     for allow_dropping_history in [false, true] {
         let error = prepare_encrypted_deployment(
@@ -2951,27 +2929,8 @@ fn a_new_version_without_the_system_tables_is_refused_against_the_stored_catalog
 /// from before encryption, even when she allows dropping history.
 #[test]
 fn a_deploy_cannot_target_a_stored_version_from_before_encryption() {
-    use jazz::tools::{Lens, LensTransform};
-    let plain = structural_of(app());
-    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let (plain, fragment, stored, declared) = stored_two_version_catalogue();
     let (v0, v1) = (SchemaHash::compute(&plain), SchemaHash::compute(&fragment));
-    let lens = Lens::new(
-        v0,
-        v1,
-        LensTransform {
-            ops: fragment_ops(&fragment, true),
-            draft_ops: Vec::new(),
-        },
-    );
-    let stored = DeploymentCatalogue {
-        schemas: vec![plain, fragment],
-        migrations: vec![lens],
-        admitted_schema_hashes: vec![v0, v1],
-    };
-    let declared = DeclaredEncryption {
-        versions: BTreeMap::from([(v1.to_string(), entries())]),
-        ..Default::default()
-    };
     let deploy = |target_schema_hash, allow_dropping_history| {
         prepare_encrypted_deployment(
             &stored,
@@ -3016,8 +2975,7 @@ fn a_deploy_cannot_target_a_stored_version_from_before_encryption() {
 #[test]
 fn a_lens_the_deploy_brings_does_not_exempt_a_new_version_without_the_system_tables() {
     use jazz::tools::{Lens, LensOp, LensTransform};
-    let plain = structural_of(app());
-    let fragment = structural_of(with_e2ee_fragment(&app()));
+    let (plain, fragment, stored, declared) = stored_two_version_catalogue();
     let mut sibling = plain.clone();
     sibling.insert(
         TableName::from("notes"),
@@ -3040,15 +2998,6 @@ fn a_lens_the_deploy_brings_does_not_exempt_a_new_version_without_the_system_tab
                 draft_ops: Vec::new(),
             },
         )
-    };
-    let stored = DeploymentCatalogue {
-        schemas: vec![plain.clone(), fragment.clone()],
-        migrations: vec![lens(v0, v1, fragment_ops(&fragment, true))],
-        admitted_schema_hashes: vec![v0, v1],
-    };
-    let declared = DeclaredEncryption {
-        versions: BTreeMap::from([(v1.to_string(), entries())]),
-        ..Default::default()
     };
     let mut back_to_v1 = vec![LensOp::RemoveTable {
         table: "notes".to_owned(),
