@@ -1,3 +1,4 @@
+import { hasSystemTables } from "../encryption/table-names.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { verifyChallenge } from "../local-first-auth/server.js";
 import { BACKEND_SIGNING_KEY_ROUTE, backendSigningKeys } from "./signing-key.js";
@@ -4278,8 +4279,7 @@ async function compiledApp(options: CreateJazzOptions): Promise<LoadedBackendApp
     ({ hash }) => hash.toLowerCase() === loaded.current,
   )?.schema;
   const tables = isRecord(current) ? current.tables : undefined;
-  const hasEncryptionTables =
-    isRecord(tables) && Object.keys(tables).some((table) => table.startsWith("__e2ee_"));
+  const hasEncryptionTables = isRecord(tables) && hasSystemTables(tables);
   if (
     hasEncryptionTables &&
     (!declaresEncryption(options.app) ||

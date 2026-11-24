@@ -10,6 +10,7 @@
  * `keyless`) has those columns optional, so nothing it decodes or converts
  * counts on a value being there.
  */
+import { EQUALITY_PREFIX, hasSystemTables } from "./table-names.js";
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { boundApp } from "../typed-app.js";
@@ -33,7 +34,7 @@ export function declaresEncryption(app: SchemaSourceInput): boolean {
   const current = bound.schema.encryption?.versions?.[bound.schema.current];
   if (current !== undefined && Object.keys(current).length > 0) return true;
   const version = bound.schema.schemas?.find((entry) => entry.hash === bound.schema.current);
-  return Object.keys(version?.schema.tables ?? {}).some((name) => name.startsWith("__e2ee_"));
+  return hasSystemTables(version?.schema.tables ?? {});
 }
 
 export type PlainEntries = Record<
@@ -80,7 +81,7 @@ export function plainSchema(
   for (const [table, entry] of Object.entries(entries)) {
     const stored = schema[table];
     if (!stored) continue;
-    const equalityTokens = new Set(entry.equality?.map((name) => `__e2ee_eq_${name}`));
+    const equalityTokens = new Set(entry.equality?.map((name) => `${EQUALITY_PREFIX}${name}`));
     plain[table] = {
       ...stored,
       columns: stored.columns

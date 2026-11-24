@@ -1,4 +1,5 @@
 /** `jazz.app.json` tables → `.64` builders (`s.table(…)`) for `s.defineSchema({…})`. */
+import { EQUALITY_PREFIX } from "../encryption/table-names.js";
 import type { AppJson, ColumnJson, ColumnObject, TableJson } from "./app-json.js";
 import { jsLiteral, propKey } from "./names.js";
 import type { Unsupported } from "./permissions.js";
@@ -28,7 +29,7 @@ export function printTable(table: TableJson, options: TablesPrintOptions): strin
   const encryption = options.relations === false ? undefined : table.encryption;
   const encryptedColumns = encryption?.columns ?? {};
   const equality = new Set(encryption?.equality);
-  const tokenColumns = new Set([...equality].map((name) => `__e2ee_eq_${name}`));
+  const tokenColumns = new Set([...equality].map((name) => `${EQUALITY_PREFIX}${name}`));
   if (encryption) refuseUnprintedEncryption(encryption, options);
   const columns = Object.entries(table.columns)
     .filter(([name]) => !tokenColumns.has(name))
