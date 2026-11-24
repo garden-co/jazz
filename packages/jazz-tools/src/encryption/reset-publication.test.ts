@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, expectTypeOf, it } from "vitest";
 import { Encryption, EncryptionError, type EncryptionNative } from "./index.js";
 
 it("exposes the records from a failed reset publication on the rejected promise", async () => {
@@ -25,5 +25,10 @@ it("exposes the records from a failed reset publication on the rejected promise"
 
   const error = await encryption.resetAccount().catch((error: unknown) => error);
   expect(error).toBeInstanceOf(EncryptionError);
-  expect(error).toMatchObject(publication);
+  if (error instanceof EncryptionError) {
+    expectTypeOf(error.stage).toEqualTypeOf<"account-reset" | undefined>();
+    expectTypeOf(error.outcome).toEqualTypeOf<"refused" | "unknown" | undefined>();
+    expectTypeOf(error.recordIds).toEqualTypeOf<readonly [string, string, string] | undefined>();
+    expect(error).toMatchObject(publication);
+  }
 });

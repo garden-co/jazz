@@ -62,6 +62,9 @@ export class EncryptionError extends Error {
     | "device-account-secret-required"
     | "no-account"
     | (string & Record<never, never>);
+  declare readonly stage?: "account-reset";
+  declare readonly outcome?: "refused" | "unknown";
+  declare readonly recordIds?: readonly [string, string, string];
   constructor(code: string, message: string) {
     super(message);
     this.name = "EncryptionError";
@@ -177,8 +180,6 @@ function verificationTimeout(state: { error?: string | null; stage?: string }): 
   );
 }
 
-const MAX_ACTIVE_REPORTS = 10_000;
-
 /** The handle an app uses; see the docs. */
 export class Encryption {
   readonly devices: Devices;
@@ -187,7 +188,8 @@ export class Encryption {
   readonly members: Members;
   private readonly listeners = new Set<(report: EncryptionReport) => void>();
   private readonly pendingReports: EncryptionReport[] = [];
-  private readonly activeReports = new Map<string, EncryptionReport>();
+  private readonly waitingListeners = new Set<(report: EncryptionReport) => void>();
+  private replaying = false;
   private timer: ReturnType<typeof setInterval> | undefined;
   private closed = false;
   private readonly assertOpen = () => {
@@ -386,54 +388,30 @@ export class Encryption {
     })();
   }
 
-  /** Closes this handle and stops background verification and report delivery. */
+  /** Permanently closes this handle at teardown, ending verification and report delivery. */
   stop(): void {
     this.closed = true;
     if (this.runner) this.runner.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.listeners.clear();
-    this.activeReports.clear();
+    this.waitingListeners.clear();
   }
 
   private emit(report: EncryptionReport) {
-    if (report.type === "unreadable" || report.type === "withdrawn") {
-      const space = report.space as ReportSpace | null;
-      const key = JSON.stringify([
-        report.table,
-        report.id,
-        report.column,
-        report.code,
-        space?.scopeId,
-        space?.id,
-      ]);
-      this.activeReports.delete(key);
-      if (report.type === "unreadable") {
-        this.activeReports.set(key, report);
-        if (this.activeReports.size > MAX_ACTIVE_REPORTS)
-          this.activeReports.delete(this.activeReports.keys().next().value!);
-      }
-    }
     for (const listener of this.listeners) listener(report);
   }
 
   /** Listens to reports; returns the function that stops it. */
   onReport(listener: (report: EncryptionReport) => void): () => void {
     this.assertOpen();
-    if (!this.listeners.has(listener) && this.activeReports.size > 0) {
-      queueMicrotask(() => {
-        for (const report of this.activeReports.values()) {
-          if (!this.listeners.has(listener)) break;
-          listener(report);
-        }
-      });
-    }
-    this.listeners.add(listener);
+    if (!this.listeners.has(listener)) this.waitingListeners.add(listener);
     this.timer ??= setInterval(() => this.deliver(), this.options.reportIntervalMs ?? 25);
     (this.timer as { unref?: () => void }).unref?.();
     return () => {
       this.listeners.delete(listener);
-      if (this.listeners.size === 0 && this.timer) {
+      this.waitingListeners.delete(listener);
+      if (this.listeners.size === 0 && this.waitingListeners.size === 0 && this.timer) {
         clearInterval(this.timer);
         this.timer = undefined;
       }
@@ -458,11 +436,50 @@ export class Encryption {
   }
 
   private deliver() {
+    // The listener snapshot drains the queue itself.
+    if (this.replaying) return;
+    if (this.waitingListeners.size > 0) {
+      this.replaying = true;
+      void this.replayReports();
+      return;
+    }
     for (const report of this.pendingReports.splice(0)) this.emit(report);
     for (const text of this.native.takeEncryptionReports()) {
       this.emit(JSON.parse(text) as EncryptionReport);
     }
   }
+
+  private readonly replayReports = async () => {
+    try {
+      const snapshot = await this.call<{ active: EncryptionReport[]; queued: string[] }>(
+        "reportsForListener",
+        {},
+      ).catch(() => undefined);
+      if (!snapshot || this.closed) return;
+
+      const waiting = [...this.waitingListeners];
+      const queued = snapshot.queued.map((text) => JSON.parse(text) as EncryptionReport);
+      const pending = this.pendingReports.splice(0);
+      for (const report of [...pending, ...queued]) this.emit(report);
+
+      // The active set already accounts for queued unreadables and withdrawals.
+      const replay = [
+        ...snapshot.active,
+        ...pending,
+        ...queued.filter((report) => report.type !== "unreadable" && report.type !== "withdrawn"),
+      ];
+      for (const listener of waiting) {
+        if (!this.waitingListeners.delete(listener)) continue;
+        this.listeners.add(listener);
+        for (const report of replay) {
+          if (!this.listeners.has(listener)) break;
+          listener(report);
+        }
+      }
+    } finally {
+      this.replaying = false;
+    }
+  };
 }
 
 type Call = <T>(op: string, args?: Record<string, unknown>) => Promise<T>;
