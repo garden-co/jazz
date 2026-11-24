@@ -16,6 +16,9 @@ languageTabs: backend
   has already deployed, such as shortening an encrypted enum list in a version that only adds an
   index. The tooling accepts those, and the deploy may still refuse them with an error naming the
   column.
+- **An app that stops encrypting keeps its space tables.** You can drop every encrypted table, but
+  a version with no encrypted columns can't drop a space table, such as a room table whose rows are
+  their own spaces. Keep it, with its read rule from the members table.
 - **A writer that hasn't loaded a row can move it to another space.** A write can't change an
   encrypted row's space, but the client or backend making the write checks this against its own
   copy of the row, and the server does not check it again. A writer that has never loaded the row
