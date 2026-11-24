@@ -21,17 +21,15 @@ use zeroize::Zeroizing;
 use crate::agility::StreamWriter;
 use crate::error::Error;
 use crate::random::RandomSource;
-use crate::records::{self, CELL_RECORD, EqualityValue, RecordKind, read_stored_record};
+use crate::records::{
+    self, CELL_RECORD, EqualityValue, MIN_RECORD_PAYLOAD, RecordKind, read_stored_record,
+};
 use crate::registry::{Registry, Suite};
 
 use super::super::error::ProtocolError;
 use super::super::records::space::SpaceAddress;
 use super::held::{HeldKeys, HeldSpace, WriteKey};
 use super::{ContentError, ContentResult, DataError, EncryptedColumn, RowTarget};
-
-const EPOCH_BYTES: usize = 36;
-/// The smallest cell record payload: the epoch and the shortest envelope.
-const MIN_RECORD_PAYLOAD: usize = EPOCH_BYTES + 11;
 
 /// The length of the shortest stored cell record (header plus 47 payload
 /// bytes). Any shorter non-empty stored value is `invalid-ciphertext` (§4.1).

@@ -175,13 +175,11 @@ impl<'a> RowTarget<'a> {
     }
 
     fn equality<'c>(&'c self, column_id: &'c str, epoch_id: &'c str) -> EqualityIdentity<'c> {
-        EqualityIdentity {
-            application: self.domain.as_str(),
-            scope_id: &self.space.scope_id,
-            identifier: &self.space.identifier,
+        TableTarget {
+            domain: self.domain,
+            space: self.space,
             table_id: self.table_id,
-            column_id,
-            epoch_id,
         }
+        .equality(column_id, epoch_id)
     }
 }

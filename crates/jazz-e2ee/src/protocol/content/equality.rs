@@ -50,12 +50,11 @@ pub struct TableTarget<'a> {
     pub table_id: &'a str,
 }
 
-impl TableTarget<'_> {
-    pub(crate) fn equality<'c>(
-        &'c self,
-        column_id: &'c str,
-        epoch_id: &'c str,
-    ) -> EqualityIdentity<'c> {
+impl<'a> TableTarget<'a> {
+    pub(crate) fn equality<'c>(&self, column_id: &'c str, epoch_id: &'c str) -> EqualityIdentity<'c>
+    where
+        'a: 'c,
+    {
         EqualityIdentity {
             application: self.domain.as_str(),
             scope_id: &self.space.scope_id,

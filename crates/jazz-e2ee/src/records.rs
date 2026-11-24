@@ -28,7 +28,7 @@ const STREAM_POLICY: &str = "jazz.e2ee.stream-record.v1";
 const EQUALITY_POLICY: &str = "jazz.e2ee.equality.v1";
 const EPOCH_BYTES: usize = 36;
 /// The epoch ID plus the shortest possible envelope.
-const MIN_RECORD_PAYLOAD: usize = EPOCH_BYTES + 11;
+pub(crate) const MIN_RECORD_PAYLOAD: usize = EPOCH_BYTES + 11;
 
 /// Stable catalogue identities of one encrypted cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
