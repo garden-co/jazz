@@ -1,14 +1,14 @@
 //! Derivations from secrets and keys (`E2EE_PROTOCOL.md` §2.1, §2.9,
 //! §2.12).
 
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::agility::{KeyPair, KeySealer, Signer as _};
 use crate::mechanisms::{key_seal, signature};
 use crate::primitives::hash;
 
 use super::domain::AccountDomain;
-use super::error::{ProtocolError, ProtocolResult};
+use super::error::ProtocolResult;
 use super::ids;
 
 // Every keyed derivation hashes `UTF8(label) ‖ 0x00 ‖ input` (the input may
@@ -22,88 +22,7 @@ const ACCOUNT_KEM_LABEL: &[u8] = b"jazz.e2ee.account-kem-key.v1\0";
 const LOCAL_DEVICE_CHECK_LABEL: &str = "jazz.e2ee.local-device-check.v1\0";
 const RECOVERY_MATERIAL_CHECK_LABEL: &str = "jazz.e2ee.recovery-material-check.v1\0";
 
-/// The prefix of a formatted account or recovery secret.
-pub const SECRET_PREFIX: &str = "jazz-auth-v1:";
-
-/// A 32-byte recovery secret `s` (§2.9): a device account's account
-/// secret, or an externally authenticated account's separate secret. Cleared
-/// on drop.
-#[derive(Clone, PartialEq, Eq)]
-pub struct RecoverySecret(Zeroizing<[u8; 32]>);
-
-impl core::fmt::Debug for RecoverySecret {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("RecoverySecret(..)")
-    }
-}
-
-const BASE64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-impl RecoverySecret {
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(Zeroizing::new(bytes))
-    }
-
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    /// `jazz-auth-v1:` followed by 43 unpadded base64url characters.
-    pub fn format(&self) -> Zeroizing<String> {
-        let mut out = Zeroizing::new(String::with_capacity(SECRET_PREFIX.len() + 43));
-        out.push_str(SECRET_PREFIX);
-        let mut bits = 0u32;
-        let mut count = 0u32;
-        for byte in self.0.iter() {
-            bits = (bits << 8) | u32::from(*byte);
-            count += 8;
-            while count >= 6 {
-                count -= 6;
-                out.push(char::from(BASE64URL[((bits >> count) & 63) as usize]));
-            }
-        }
-        if count > 0 {
-            out.push(char::from(BASE64URL[((bits << (6 - count)) & 63) as usize]));
-        }
-        bits.zeroize();
-        out
-    }
-
-    /// Parses the formatted secret. Anything but exactly the canonical form
-    /// is [`ProtocolError::InvalidRecord`].
-    pub fn parse(text: &str) -> ProtocolResult<Self> {
-        let invalid = ProtocolError::InvalidRecord("invalid recovery secret");
-        let encoded = text.strip_prefix(SECRET_PREFIX).ok_or(invalid)?;
-        if encoded.len() != 43 {
-            return Err(invalid);
-        }
-        let mut out = Zeroizing::new([0u8; 32]);
-        let mut bits = 0u32;
-        let mut count = 0u32;
-        let mut written = 0usize;
-        for symbol in encoded.bytes() {
-            let value = BASE64URL
-                .iter()
-                .position(|candidate| *candidate == symbol)
-                .ok_or(invalid)? as u32;
-            bits = (bits << 6) | value;
-            count += 6;
-            if count >= 8 {
-                count -= 8;
-                out[written] = (bits >> count) as u8;
-                written += 1;
-            }
-        }
-        // 43 symbols carry 258 bits: the last two must be zero.
-        let canonical = written == 32 && bits & ((1 << count) - 1) == 0;
-        bits.zeroize();
-        if canonical {
-            Ok(Self(out))
-        } else {
-            Err(invalid)
-        }
-    }
-}
+pub use jazz_types::identity::{DeviceAccountSecret as RecoverySecret, SECRET_PREFIX};
 
 /// The recovery root derived from a recovery secret for one account domain:
 /// its version 8 root ID and its sealing and signing key pairs, of the

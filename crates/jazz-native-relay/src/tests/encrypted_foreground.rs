@@ -202,7 +202,7 @@ fn a_leased_phone_preserves_missing_recovery_evidence_at_its_deadline() {
         "app_id": APP_ID, "env": "test", "account_id": account.0.to_string(),
         "issuer": DEVICE_ACCOUNT_ISSUER, "subject": subject,
         "jwt": mint_jazz_self_signed_token(&seed, DEVICE_ACCOUNT_ISSUER, APP_ID, 3600).unwrap(),
-        "device_account_secret": "42".repeat(32), "server_url": null,
+        "device_account_secret": jazz::identity::DeviceAccountSecret::from_bytes(seed).format().as_str(), "server_url": null,
     });
     unsafe {
         let host = jazz_native_relay_host_new();
@@ -306,7 +306,8 @@ fn the_host_keeps_no_account_secret_once_a_foreground_attached() {
             .account_session_owners
             .get_mut(&capability)
             .unwrap()
-            .device_account_secret = Some(zeroize::Zeroizing::new("42".repeat(32)));
+            .device_account_secret =
+            Some(jazz::identity::DeviceAccountSecret::from_bytes([0x42; 32]));
         assert!(secret());
 
         let foreground = open_admitted_foreground(&*lease, &admitted);

@@ -1424,12 +1424,12 @@ async fn a_device_accounts_automatic_registration_refuses_another_identitys_secr
     assert_eq!(before.as_array().map(Vec::len), Some(1), "{before}");
 
     // Not the laptop's key (that one is random): another identity's secret.
-    let mallory = "5f".repeat(32);
+    let mallory = jazz_e2ee_client::host::RecoverySecret::from_bytes([0x5f; 32]).format();
     match laptop
         .encryption()
         .call(
             "recoveryRegister",
-            json!({ "secret": mallory, "automatic": true }),
+            json!({ "secret": mallory.as_str(), "automatic": true }),
         )
         .await
     {

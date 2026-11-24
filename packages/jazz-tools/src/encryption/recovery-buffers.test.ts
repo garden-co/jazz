@@ -9,6 +9,8 @@ import {
 import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
 import { formatSecret } from "../local-first-auth/secret.js";
 import { Encryption, type EncryptionNative } from "./index.js";
+import { buildEncryption } from "./build.js";
+import { memoryPrivateStore } from "./private-store.js";
 
 const parsed = vi.hoisted(() => ({ last: undefined as Uint8Array | undefined }));
 vi.mock("../local-first-auth/secret.js", async (load) => {
@@ -98,12 +100,42 @@ it("clears the decoded secret when the passkey challenge cannot be generated", a
   expect(failure).toMatchObject({ code: "create-failed" });
 });
 
-it("clears the decoded account secret before passing its hex to the React Native host", async () => {
+it("passes the original account secret to the Node and browser runtime factory", async () => {
+  const deviceAccountSecret = formatSecret(new Uint8Array(32).fill(7));
+  const fromBindings = vi.fn(() => ({
+    ready: async () => {},
+    takeStoreRequests: () => [],
+    replyStore: () => false,
+  }));
+  parsed.last = undefined;
+  await buildEncryption({
+    host: { fromBindings },
+    app,
+    appId: "app-1",
+    environment: "test",
+    accountId: "alice",
+    deviceAccountSecret,
+    store: memoryPrivateStore(),
+  });
+  expect(fromBindings).toHaveBeenCalledWith(
+    expect.any(String),
+    "app-1",
+    "test",
+    "alice",
+    deviceAccountSecret,
+  );
+  expect(parsed.last).toBeUndefined();
+});
+
+it("passes the original account secret to the React Native host without decoding it", async () => {
   const config = await resolveAccountRuntimeConfig({ scope: "app-1", account: makeFakeAccount() });
   config.encryption = { app, accountSecret: () => formatSecret(new Uint8Array(32).fill(7)) };
+  parsed.last = undefined;
   const beginAccountSession = vi.fn((request: string) => {
-    expect(JSON.parse(request).device_account_secret).toBe("07".repeat(32));
-    expect(parsed.last).toEqual(new Uint8Array(32));
+    expect(JSON.parse(request).device_account_secret).toBe(
+      formatSecret(new Uint8Array(32).fill(7)),
+    );
+    expect(parsed.last).toBeUndefined();
     return new Uint8Array(32);
   });
   beginNativeAccountSession(

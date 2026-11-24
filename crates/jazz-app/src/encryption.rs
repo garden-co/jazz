@@ -249,7 +249,7 @@ mod plan {
             let device_account_secret = secret
                 .map(|key| jazz_e2ee_client::host::RecoverySecret::from_bytes(key.to_bytes()));
             let built = host::build_native(
-                host::NativeOptions {
+                host::Options {
                     app_file: self.app_file.clone(),
                     from_bindings: false,
                     device_account_secret,

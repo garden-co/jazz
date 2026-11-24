@@ -71,17 +71,11 @@ impl ForegroundEncryption {
     pub async fn build(
         self,
         account: String,
-        device_account_secret: Option<zeroize::Zeroizing<String>>,
+        device_account_secret: Option<jazz::identity::DeviceAccountSecret>,
         store: Rc<JsStore>,
     ) -> Result<Built, String> {
-        // Read straight into a zeroizing `RecoverySecret`; the hexadecimal
-        // text is wiped when it drops here.
-        let device_account_secret = device_account_secret
-            .as_ref()
-            .map(|secret| account_secret(secret.as_str()))
-            .transpose()?;
         let built = host::build_native(
-            host::NativeOptions {
+            host::Options {
                 app_file: self.bindings.to_vec(),
                 from_bindings: true,
                 device_account_secret,
@@ -105,22 +99,4 @@ pub(crate) struct Built {
 
 pub(crate) fn keyless(declarations: Declarations) -> Rc<dyn jazz::e2ee::E2eeHooks> {
     jazz_e2ee_client::KeylessHooks::hooks(declarations)
-}
-
-/// The device account's secret from its 64 hexadecimal characters, as the
-/// [`RecoverySecret`](jazz_e2ee_client::host::RecoverySecret) the runtime
-/// takes (which zeroizes its bytes when dropped).
-fn account_secret(hex: &str) -> Result<jazz_e2ee_client::host::RecoverySecret, String> {
-    if hex.len() != 64 || !hex.is_ascii() {
-        return Err("a recovery secret is 64 hexadecimal characters".to_owned());
-    }
-    // Zeroized when dropped, on every return: a `fill(0)` of a local that is
-    // never read again may be optimised away, and would miss the bytes
-    // parsed before a refusal.
-    let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[2 * index..2 * index + 2], 16)
-            .map_err(|_| "a recovery secret is hexadecimal".to_owned())?;
-    }
-    Ok(jazz_e2ee_client::host::RecoverySecret::from_bytes(*bytes))
 }

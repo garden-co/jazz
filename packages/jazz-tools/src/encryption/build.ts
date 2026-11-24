@@ -7,8 +7,7 @@
  */
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { boundApp } from "../typed-app.js";
-import { parseSecret } from "../local-first-auth/secret.js";
-import { EncryptionStoreRequiredError, takeSecretHex } from "./index.js";
+import { EncryptionStoreRequiredError } from "./index.js";
 import { servePrivateStore, type PrivateStore } from "./private-store.js";
 
 interface Declared {
@@ -77,9 +76,7 @@ export async function buildEncryption(options: {
     options.appId,
     options.environment,
     options.accountId,
-    options.deviceAccountSecret === undefined
-      ? undefined
-      : takeSecretHex(parseSecret(options.deviceAccountSecret)),
+    options.deviceAccountSecret,
   );
   // The store answers the runtime while it loads or makes the device.
   const serving = servePrivateStore(runtime, store);

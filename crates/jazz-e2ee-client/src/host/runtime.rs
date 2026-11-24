@@ -31,7 +31,7 @@ use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 
 use super::bridge::JsStore;
 use serde_json::{Value, json};
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 /// What a host passes to open an encrypted app's database.
 pub struct Options {
@@ -39,19 +39,12 @@ pub struct Options {
     /// (`from_bindings`), from which the declarations are read.
     pub app_file: Vec<u8>,
     pub from_bindings: bool,
-    /// The device account's secret as 64 hexadecimal characters: the
-    /// runtime derives a signing key to found the account. Native hosts
+    /// The runtime derives the founding signing key from this secret. Native hosts
     /// also use the secret to register or restore recovery at startup.
     /// `None` for an account the app signs in itself.
-    pub device_account_secret: Option<String>,
+    pub device_account_secret: Option<RecoverySecret>,
     pub app_id: String,
     pub environment: String,
-}
-
-impl Drop for Options {
-    fn drop(&mut self) {
-        self.device_account_secret.zeroize();
-    }
 }
 
 /// The built runtime and its reports.
@@ -215,59 +208,22 @@ pub fn build(
     account_id: String,
     store: Rc<JsStore>,
 ) -> impl Future<Output = Result<Built, String>> + use<> {
-    let prepared = declarations(options).and_then(|declarations| {
-        let recovery = options
-            .device_account_secret
-            .as_deref()
-            .map(secret)
-            .transpose()?;
-        Ok((declarations, recovery))
-    });
-    async move {
-        let (declarations, recovery) = prepared?;
-        build_client(declarations, account_id, store, recovery.as_ref()).await
-    }
-}
-
-/// What a native host passes to open an encrypted app's database: as
-/// [`Options`] for the app's `jazz.app.json`, with the device account's
-/// secret as a [`RecoverySecret`], which zeroizes its bytes when dropped,
-/// rather than as hexadecimal text.
-pub struct NativeOptions {
-    /// The app's `jazz.app.json`, or its generated bindings' compiled app
-    /// (`from_bindings`), from which the declarations are read.
-    pub app_file: Vec<u8>,
-    pub from_bindings: bool,
-    /// The device account's secret; `None` for an account the app signs in
-    /// itself.
-    pub device_account_secret: Option<RecoverySecret>,
-    pub app_id: String,
-    pub environment: String,
+    let recovery = options.device_account_secret.clone();
+    let declarations = declarations(options);
+    async move { build_client(declarations?, account_id, store, recovery.as_ref()).await }
 }
 
 /// Build a native device runtime that handles account-secret recovery at
 /// startup. When a keyless relay supplies its declarations, the device must
 /// use those same declarations, including the app and environment.
 pub async fn build_native(
-    options: NativeOptions,
+    mut options: Options,
     account_id: String,
     store: Rc<JsStore>,
     relay_declarations: Option<&E2eeDeclarations>,
 ) -> Result<NativeBuilt, String> {
-    let NativeOptions {
-        app_file,
-        from_bindings,
-        device_account_secret: recovery,
-        app_id,
-        environment,
-    } = options;
-    let declarations = declarations(&Options {
-        app_file,
-        from_bindings,
-        device_account_secret: None,
-        app_id,
-        environment,
-    })?;
+    let recovery = options.device_account_secret.take();
+    let declarations = declarations(&options)?;
     if relay_declarations.is_some_and(|expected| *expected != declarations) {
         return Err("the device's encryption declarations do not match the relay".to_owned());
     }
@@ -662,13 +618,20 @@ impl Encryption {
     pub fn call(
         self: &Rc<Self>,
         op: String,
-        args: Value,
+        mut args: Value,
     ) -> LocalBoxFuture<'static, Result<Value, String>> {
         let this = Rc::clone(self);
-        Box::pin(async move { this.run(&op, &args).await })
+        let secret = args.get_mut("secret").and_then(|value| match value {
+            Value::String(text) => Some(Zeroizing::new(std::mem::take(text))),
+            _ => None,
+        });
+        Box::pin(async move {
+            this.run(&op, &args, secret.as_ref().map(|text| text.as_str()))
+                .await
+        })
     }
 
-    async fn run(&self, op: &str, args: &Value) -> Result<Value, String> {
+    async fn run(&self, op: &str, args: &Value, secret: Option<&str>) -> Result<Value, String> {
         if op == "shutdown" {
             // The loop can be holding the store lock while waiting for its
             // save to settle. Keep driving it until the client is closed.
@@ -791,7 +754,7 @@ impl Encryption {
             // (`recovery-root-mismatch`) and nothing is written. Otherwise a
             // retired root is refused (`recovery-root-mismatch`).
             "recoveryRegister" => {
-                let secret = recovery_secret(args)?;
+                let secret = recovery_secret(args, secret)?;
                 if args.get("automatic").and_then(Value::as_bool) == Some(true) {
                     match client.refuse_foreign_device_secret(&secret) {
                         Ok(()) => client.register_recovery_at_start(db, &secret).await,
@@ -807,7 +770,7 @@ impl Encryption {
             // as native readiness runs it. `null`: nothing to recover from
             // (yet), so the device stays awaiting approval.
             "recoveryRestore" => {
-                let secret = recovery_secret(args)?;
+                let secret = recovery_secret(args, secret)?;
                 let restored = if args.get("automatic").and_then(Value::as_bool) == Some(true) {
                     match client.recover_device_when_available(db, &secret).await {
                         Err(ClientError::ApprovalAnswered) => {
@@ -1254,19 +1217,19 @@ fn describe(error: ClientError) -> String {
     format!("{code}: {error}")
 }
 
-/// The recovery secret an operation names: its 24-word `phrase`, or its
-/// `secret` as 64 hexadecimal characters.
-fn recovery_secret(args: &Value) -> Result<RecoverySecret, String> {
+/// Read a recovery phrase, a formatted device account secret for automatic
+/// recovery, or a hexadecimal backup secret for explicit recovery.
+fn recovery_secret(args: &Value, text: Option<&str>) -> Result<RecoverySecret, String> {
     if let Some(phrase) = args.get("phrase").and_then(Value::as_str) {
         return super::phrase::to_secret(phrase)
             .map(|bytes| RecoverySecret::from_bytes(*bytes))
             .map_err(|error| format!("{}: the recovery phrase is not valid", error.code()));
     }
-    let hex = args
-        .get("secret")
-        .and_then(Value::as_str)
-        .ok_or("`phrase` is missing")?;
-    secret(hex)
+    let text = text.ok_or("`phrase` is missing")?;
+    if args.get("automatic").and_then(Value::as_bool) == Some(true) {
+        return RecoverySecret::parse(text).map_err(str::to_owned);
+    }
+    secret(text)
 }
 
 /// A recovery secret from its hexadecimal text.
@@ -1442,7 +1405,7 @@ mod tests {
         use jazz::schema::JazzSchema;
         use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
-        let options = NativeOptions {
+        let options = Options {
             app_file: br#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
                 "tables": {
                     "projects": { "columns": { "name": "string" } },

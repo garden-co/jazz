@@ -2,6 +2,7 @@
 //! owns the enrolled handle; native code owns proof checking and OS paths.
 
 use super::*;
+use jazz::identity::DeviceAccountSecret;
 use jazz::ids::AuthorSubject;
 
 #[cfg(all(test, feature = "e2ee-client"))]
@@ -17,7 +18,7 @@ pub(super) struct AccountSessionOwner {
     /// foreground takes it for its runtime's recovery at start (wiped when
     /// dropped). Nothing here keeps a copy after that.
     #[cfg(feature = "e2ee-client")]
-    pub device_account_secret: Option<zeroize::Zeroizing<String>>,
+    pub device_account_secret: Option<DeviceAccountSecret>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -34,8 +35,8 @@ struct AccountSessionRequest {
     #[serde(default)]
     jwt: Option<String>,
     /// Optional self-recovery secret, sent only with a matching device proof.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    device_account_secret: Option<String>,
+    #[serde(default, deserialize_with = "account_secret", skip_serializing)]
+    device_account_secret: Option<DeviceAccountSecret>,
     /// For a user signed in through the app's backend: the app's own bearer,
     /// which that backend authenticates the socket by. Opaque here.
     #[serde(default)]
@@ -43,6 +44,17 @@ struct AccountSessionRequest {
     server_url: Option<String>,
     #[serde(default)]
     claims: BTreeMap<String, serde_json::Value>,
+}
+
+// A later invalid request field must also drop the secret in zeroizing storage.
+fn account_secret<'de, D: serde::Deserializer<'de>>(
+    input: D,
+) -> Result<Option<DeviceAccountSecret>, D::Error> {
+    use serde::Deserialize;
+    Option::<String>::deserialize(input)?
+        .map(DeviceAccountSecret::parse_owned)
+        .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 /// A new credential for the same principal: `jwt` for a local-first
@@ -237,23 +249,14 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_begin_account_session_json
         };
         let mut request = serde_json::from_slice::<AccountSessionRequest>(request)
             .map_err(|_| JazzNativeRelayStatus::InvalidCommand)?;
-        // Wiped when dropped: once checked, or once the scope's first
-        // encrypted foreground has handed it to its runtime.
-        let device_account_secret = request
-            .device_account_secret
-            .take()
-            .map(zeroize::Zeroizing::new);
+        let device_account_secret = request.device_account_secret.take();
         // A recovery secret is accepted only if it is the account's own
         // signing root. The normal admission below still verifies its JWT.
-        if let Some(secret) = &device_account_secret {
-            let seed = jazz::tools::public_schema::SchemaHash::from_hex(secret)
-                .ok_or(JazzNativeRelayStatus::InvalidCommand)?;
-            if request.issuer != jazz::tools::identity::DEVICE_ACCOUNT_ISSUER
-                || jazz::tools::identity::derive_user_id(seed.as_bytes()).to_string()
-                    != request.subject
-            {
-                return Err(JazzNativeRelayStatus::LifecycleFailure);
-            }
+        if let Some(secret) = &device_account_secret
+            && (request.issuer != jazz::identity::DEVICE_ACCOUNT_ISSUER
+                || jazz::identity::derive_user_id(secret.as_bytes()).to_string() != request.subject)
+        {
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
         }
         let owner = AccountSessionOwner {
             runtime_token: lease.runtime_token,
@@ -519,6 +522,61 @@ mod tests {
             bearer: Some(format!("x.app-session-{subject}")),
             server_url: None,
             claims: BTreeMap::new(),
+        }
+    }
+
+    /// Alice can admit her own device secret with or without encryption support.
+    /// A well-formed secret for Bob fails the identity check, and malformed text fails decoding.
+    #[test]
+    fn admission_checks_the_device_account_secret_against_its_subject() {
+        use jazz::identity::{DEVICE_ACCOUNT_ISSUER, derive_user_id, mint_jazz_self_signed_token};
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().as_os_str().as_encoded_bytes();
+        let mut alice = external("alice");
+        let seed = [7; 32];
+        alice.subject = derive_user_id(&seed).to_string();
+        alice.account_id = jazz::account_registry::device_account_id(
+            alice.app_id.parse().unwrap(),
+            &alice.subject,
+        );
+        alice.issuer = DEVICE_ACCOUNT_ISSUER.into();
+        alice.jwt = Some(
+            mint_jazz_self_signed_token(&seed, DEVICE_ACCOUNT_ISSUER, &alice.app_id, 3600).unwrap(),
+        );
+        alice.bearer = None;
+        let mut request = serde_json::to_value(alice).unwrap();
+        unsafe {
+            let host = jazz_native_relay_host_new();
+            let lease = jazz_native_relay_host_retain(host, 1);
+            let mut admit = |text: &str| {
+                request["device_account_secret"] = serde_json::json!(text);
+                let bytes = serde_json::to_vec(&request).unwrap();
+                let mut out = JazzNativeRelayBytes::EMPTY;
+                let status = jazz_native_relay_host_lease_begin_account_session_json(
+                    lease,
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    root.as_ptr(),
+                    root.len(),
+                    &mut out,
+                );
+                jazz_native_relay_bytes_free(&mut out);
+                status
+            };
+            assert_eq!(
+                admit("jazz-auth-v1:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"),
+                JazzNativeRelayStatus::Ok
+            );
+            assert_eq!(
+                admit("jazz-auth-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                JazzNativeRelayStatus::LifecycleFailure
+            );
+            assert_eq!(
+                admit("jazz-auth-v1:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwd"),
+                JazzNativeRelayStatus::InvalidCommand
+            );
+            jazz_native_relay_host_lease_free(lease);
+            jazz_native_relay_host_free(host);
         }
     }
 

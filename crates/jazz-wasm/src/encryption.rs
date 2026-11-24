@@ -99,7 +99,7 @@ impl WasmEncryptionRuntime {
     /// A runtime for the app whose generated bindings embed the compiled app
     /// `bindings` (JSON of `{ schema, relations }`), for the account
     /// `account_id` of the session that will open the database;
-    /// `device_account_secret` (64 hexadecimal characters) for a device
+    /// `device_account_secret` (`jazz-auth-v1:…`) for a device
     /// account, whose secret is its recovery secret.
     #[wasm_bindgen(js_name = fromBindings)]
     pub fn from_bindings(
@@ -108,8 +108,12 @@ impl WasmEncryptionRuntime {
         environment: String,
         account_id: String,
         device_account_secret: Option<String>,
-    ) -> WasmEncryptionRuntime {
-        WasmEncryptionRuntime {
+    ) -> Result<WasmEncryptionRuntime, JsValue> {
+        let device_account_secret = device_account_secret
+            .map(jazz::identity::DeviceAccountSecret::parse_owned)
+            .transpose()
+            .map_err(super::to_js_error)?;
+        Ok(WasmEncryptionRuntime {
             store: Rc::default(),
             options: Rc::new(RefCell::new(Some(Options {
                 app_file: bindings.into_bytes(),
@@ -122,7 +126,7 @@ impl WasmEncryptionRuntime {
             account_id,
             app_id,
             built: Rc::default(),
-        }
+        })
     }
 
     /// Builds the runtime: settles when its device is loaded or made, which
@@ -443,6 +447,22 @@ mod tests {
     use wasm_bindgen_futures::JsFuture;
     use wasm_bindgen_test::wasm_bindgen_test;
 
+    /// Alice's malformed device secret is refused at browser runtime construction,
+    /// before her application declarations or private store are read.
+    #[wasm_bindgen_test]
+    fn device_secret_is_checked_before_readiness() {
+        let result = WasmEncryptionRuntime::from_bindings(
+            "invalid app".into(),
+            "test".into(),
+            "test".into(),
+            "alice".into(),
+            Some("jazz-auth-v1:short".into()),
+        );
+        assert!(result.is_err_and(|error| {
+            error.as_string().as_deref() == Some("invalid device account secret")
+        }));
+    }
+
     /// Alice can retry readiness after her private store refuses a request,
     /// and Bob's refused open leaves the built runtime available to Alice.
     #[wasm_bindgen_test]
@@ -460,7 +480,9 @@ mod tests {
                 from_bindings: false,
                 app_id: "test".into(),
                 environment: "test".into(),
-                device_account_secret: Some("01".repeat(32)),
+                device_account_secret: Some(jazz::identity::DeviceAccountSecret::from_bytes(
+                    [1; 32],
+                )),
             }))),
             building: Rc::default(),
             account_id: alice.account_id().unwrap().0.to_string(),
@@ -489,7 +511,11 @@ mod tests {
             .contains("store unavailable"));
         assert!(
             runtime.options.borrow().as_ref().is_some_and(|options| {
-                options.device_account_secret.as_deref() == Some("01".repeat(32).as_str())
+                options
+                    .device_account_secret
+                    .as_ref()
+                    .map(|secret| secret.as_bytes())
+                    == Some(&[1; 32])
             }),
             "failed readiness preserves the recovery secret for a retry"
         );

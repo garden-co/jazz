@@ -1763,7 +1763,12 @@ fn the_host_registers_a_retired_root_only_when_automatic() {
         };
         let before = rows();
         let register = |automatic: Option<bool>| {
-            let mut args = serde_json::json!({ "secret": "05".repeat(32) });
+            let text = if automatic == Some(true) {
+                secret.format().to_string()
+            } else {
+                "05".repeat(32)
+            };
+            let mut args = serde_json::json!({ "secret": text });
             if let Some(automatic) = automatic {
                 args["automatic"] = serde_json::json!(automatic);
             }
