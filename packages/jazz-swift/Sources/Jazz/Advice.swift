@@ -29,7 +29,7 @@ extension Client {
     {
         try await Self.typed {
             let json = try Coding.json(JSONValue.object(try args()))
-            return try await Self.run { try self.handle.can(table: table, op: op, argsJson: json) }
+            return try await self.controlled { handle in try handle.can(table: table, op: op, argsJson: json) }
         }
     }
 }
