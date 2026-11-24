@@ -12,101 +12,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::TestRandom;
+use common::mechanisms::{FLAKY_SIGN, FLAKY_WRAP, flaky_registry_with_all_record_signer};
 use common::protocol::{ALICE, Env, Ledger};
-use jazz_e2ee::agility::{KeyPair, KeyWrapper, MechanismConfig, MechanismImpl, PublicKey, Signer};
+use jazz_e2ee::Error;
+use jazz_e2ee::agility::{KeyWrapper, MechanismConfig, MechanismImpl};
 use jazz_e2ee::envelope::{self, Mechanism};
-use jazz_e2ee::mechanisms::{key_envelope, signature};
 use jazz_e2ee::protocol::account::build;
 use jazz_e2ee::protocol::error::ProtocolError;
 use jazz_e2ee::registry::Registry;
-use jazz_e2ee::{Error, RandomSource, Result, Zeroizing};
-
-const SIGN: Mechanism<'static> = Mechanism::new("com.example.flaky-sign", 1);
-const WRAP: Mechanism<'static> = Mechanism::new("com.example.flaky-wrap", 1);
-
-/// Re-labels a built-in envelope's payload under `to`.
-fn relabel(from: Mechanism<'_>, to: Mechanism<'_>, bytes: &[u8]) -> Result<Vec<u8>> {
-    envelope::encode(to, envelope::decode(from, bytes)?)
-}
-
-struct FlakySigner(Arc<AtomicBool>);
-
-impl MechanismImpl for FlakySigner {
-    fn mechanism(&self) -> Mechanism<'static> {
-        SIGN
-    }
-}
-
-fn as_builtin(public: &PublicKey) -> PublicKey {
-    PublicKey {
-        mechanism: signature::MECHANISM.into(),
-        bytes: public.bytes.clone(),
-    }
-}
-
-impl Signer for FlakySigner {
-    fn derive_key_pair(&self, seed: &[u8]) -> Result<KeyPair> {
-        let mut pair = signature::Builtin.derive_key_pair(seed)?;
-        pair.public.mechanism = SIGN.into();
-        Ok(pair)
-    }
-
-    fn sign(&self, key: &KeyPair, record: &[u8]) -> Result<Vec<u8>> {
-        let builtin = KeyPair {
-            public: as_builtin(&key.public),
-            secret: key.secret.clone(),
-        };
-        relabel(
-            signature::MECHANISM,
-            SIGN,
-            &signature::Builtin.sign(&builtin, record)?,
-        )
-    }
-
-    fn verify(&self, public: &PublicKey, record: &[u8], signature: &[u8]) -> Result<bool> {
-        if self.0.load(Ordering::SeqCst) {
-            return Err(Error::CryptoFailure);
-        }
-        let Ok(builtin) = relabel(SIGN, signature::MECHANISM, signature) else {
-            return Ok(false);
-        };
-        signature::Builtin.verify(&as_builtin(public), record, &builtin)
-    }
-}
-
-struct FlakyWrapper(Arc<AtomicBool>);
-
-impl MechanismImpl for FlakyWrapper {
-    fn mechanism(&self) -> Mechanism<'static> {
-        WRAP
-    }
-}
-
-impl KeyWrapper for FlakyWrapper {
-    fn wrap(
-        &self,
-        wrapping_key: &[u8; 32],
-        context: &[u8],
-        key: &[u8; 32],
-        rng: &mut dyn RandomSource,
-    ) -> Result<Vec<u8>> {
-        let wrapped = key_envelope::Builtin.wrap(wrapping_key, context, key, rng)?;
-        relabel(key_envelope::MECHANISM, WRAP, &wrapped)
-    }
-
-    fn unwrap(
-        &self,
-        wrapping_key: &[u8; 32],
-        context: &[u8],
-        envelope: &[u8],
-    ) -> Result<Zeroizing<[u8; 32]>> {
-        if self.0.load(Ordering::SeqCst) {
-            return Err(Error::CryptoFailure);
-        }
-        let builtin = relabel(WRAP, key_envelope::MECHANISM, envelope)?;
-        key_envelope::Builtin.unwrap(wrapping_key, context, &builtin)
-    }
-}
+use jazz_e2ee::{RandomSource, Result, Zeroizing};
 
 struct Flaky {
     env: Env,
@@ -115,18 +29,10 @@ struct Flaky {
 }
 
 fn flaky() -> Flaky {
-    let signer_fails = Arc::new(AtomicBool::new(false));
-    let wrapper_fails = Arc::new(AtomicBool::new(false));
-    let mut registry = Registry::builtin();
-    registry
-        .register_signer(Arc::new(FlakySigner(signer_fails.clone())))
-        .unwrap();
-    registry
-        .register_key_wrapper(Arc::new(FlakyWrapper(wrapper_fails.clone())))
-        .unwrap();
+    let (registry, wrapper_fails, signer_fails) = flaky_registry_with_all_record_signer();
     let config = MechanismConfig {
-        signature: SIGN.into(),
-        key_wrap: WRAP.into(),
+        signature: FLAKY_SIGN.into(),
+        key_wrap: FLAKY_WRAP.into(),
         ..MechanismConfig::default()
     };
     Flaky {
