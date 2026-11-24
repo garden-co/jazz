@@ -298,7 +298,12 @@ impl Store {
         identity: Option<AuthorSubject>,
     ) -> Result<(crate::values::Column, Sql), Error> {
         whole_only(self, &cell.query.query.table, &cell.column.name)?;
-        let compiled = self.compile(&cell.query, identity, &ReadSpec::default())?;
+        let compiled = self.compile(
+            &cell.query,
+            identity,
+            &ReadSpec::default(),
+            self.read_namespace(&cell.query).await?,
+        )?;
         let value: Option<Sql> = (async {
             let mut statement = self.conn.prepare_cached(&compiled.sql)?;
             {
