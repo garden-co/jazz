@@ -1,6 +1,6 @@
 //! `InheritsFrom` shapes the engine cannot evaluate are refused when a
-//! deployment (or `jazz-tools validate`) checks its policies, with a typed
-//! error, rather than accepted and then failing every check.
+//! deployment (or `jazz-tools validate`) checks its policies, with a specific
+//! diagnostic, rather than accepted and then failing every check.
 //!
 //! Deployments use the registered system-table fragment with test policies.
 
@@ -11,7 +11,7 @@ use jazz::tools::deployment::{
     DeploymentCatalogue, DeploymentError, DeploymentRequest, prepare_deployment,
 };
 use jazz::tools::public_schema::{Schema as PublicSchema, SchemaHash, TableName, TablePolicies};
-use jazz::tools::public_schema_convert::{UnsupportedPolicy, check_deployable_policies};
+use jazz::tools::public_schema_convert::check_deployable_policies;
 use jazz::tools::{ColumnType, Operation, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
 
 fn inherits_from(operation: Operation, table: &str) -> PolicyExpr {
@@ -68,26 +68,25 @@ fn deploy(source: &PublicSchema) -> Result<(), DeploymentError> {
     .map(|_| ())
 }
 
-/// Refused by the deployment and by the validation it shares with
-/// `jazz-tools validate`, as `shape`.
+/// Assert that validation and deployment report the same policy path and
+/// refusal reason.
 #[track_caller]
-fn assert_refused(schema: &PublicSchema, shape: UnsupportedPolicy, path: &str) {
-    assert_validation_refused(schema, shape, path);
+pub(super) fn assert_refused(schema: &PublicSchema, message: &str, path: &str) {
+    let diagnostic = assert_validation_refused(schema, message, path);
     let deployed = deploy(schema).expect_err("the deployment is refused");
-    assert!(
-        matches!(deployed, DeploymentError::InvalidPermissions { .. }),
-        "{deployed}"
-    );
+    match deployed {
+        DeploymentError::InvalidPermissions { reason, .. } => assert_eq!(reason, diagnostic),
+        other => panic!("expected invalid permissions: {other}"),
+    }
 }
 
 #[track_caller]
-fn assert_validation_refused(schema: &PublicSchema, shape: UnsupportedPolicy, path: &str) {
+fn assert_validation_refused(schema: &PublicSchema, message: &str, path: &str) -> String {
     let error = check_deployable_policies(schema).expect_err("the policy is refused");
-    assert_eq!(error.unsupported_policy(), Some(shape), "{error}");
-    assert!(
-        error.to_string().contains(path),
-        "it names the path: {error}"
-    );
+    assert!(error.message().contains(message), "{error}");
+    let diagnostic = format!("{path}: {}", error.message());
+    assert_eq!(error.to_string(), diagnostic);
+    diagnostic
 }
 
 /// An `InheritsFrom` reaches one row's policy; a candidate whose policy has
@@ -116,8 +115,8 @@ fn an_inherits_from_whose_candidate_has_another_is_refused() {
     ]);
     assert_refused(
         &nested,
-        UnsupportedPolicy::NestedInheritsFrom,
-        "$.__e2ee_members.policies.insert.with_check",
+        "policy has an `InheritsFrom` of its own",
+        "$.__e2ee_members.policies.insert.with_check.InheritsFrom",
     );
 
     let itself = fixture([(
@@ -135,8 +134,8 @@ fn an_inherits_from_whose_candidate_has_another_is_refused() {
     )]);
     assert_refused(
         &itself,
-        UnsupportedPolicy::NestedInheritsFrom,
-        "$.__e2ee_members.policies.insert.with_check.Or[1]",
+        "policy has an `InheritsFrom` of its own",
+        "$.__e2ee_members.policies.insert.with_check.Or[1].InheritsFrom",
     );
 
     let one_level = fixture([
@@ -174,7 +173,7 @@ fn an_inherits_from_in_a_read_policy_is_refused() {
     let direct = members(inherits_from(Operation::Select, "projects"));
     assert_refused(
         &direct,
-        UnsupportedPolicy::InheritsFromInReadPolicy,
+        "`InheritsFrom` is not supported in a read policy",
         "$.__e2ee_members.policies.select.using",
     );
     assert_refused(
@@ -182,7 +181,7 @@ fn an_inherits_from_in_a_read_policy_is_refused() {
             mine(),
             inherits_from(Operation::Select, "projects"),
         ])),
-        UnsupportedPolicy::InheritsFromInReadPolicy,
+        "`InheritsFrom` is not supported in a read policy",
         "$.__e2ee_members.policies.select.using.Or[1]",
     );
 
@@ -222,7 +221,7 @@ fn a_read_policy_reaching_inherits_from_through_an_inherited_policy_is_refused()
             .table(table.policies(TablePolicies::new().with_select(read)))
             .build()
     };
-    let shape = UnsupportedPolicy::InheritsFromInReadPolicy;
+    let message = "`InheritsFrom` is not supported in a read policy";
     let path = "$.tasks.policies.select.using";
 
     // The fragment uses plain UUID addresses and the deploy forbids app
@@ -232,13 +231,13 @@ fn a_read_policy_reaching_inherits_from_through_an_inherited_policy_is_refused()
         TableSchemaBuilder::new("tasks").column("name", ColumnType::Text),
         PolicyExpr::inherits_referencing(Operation::Insert, SPACES, "identifier"),
     ));
-    assert_refused(&schema, shape, path);
+    assert_refused(&schema, message, path);
 
     schema.extend(tasks(
         TableSchemaBuilder::new("tasks").fk_column("spaceRow", SPACES),
         PolicyExpr::inherits(Operation::Insert, "spaceRow"),
     ));
-    assert_validation_refused(&schema, shape, path);
+    assert_validation_refused(&schema, message, path);
 }
 
 /// The creator clause's `exists`: the `projects` row this member row names,
@@ -288,7 +287,7 @@ fn inserted_by_this_transaction_outside_a_write_check_exists_is_refused() {
         deploy(&accepted).unwrap();
     }
 
-    let refused = UnsupportedPolicy::MisplacedInsertedByThisTransaction;
+    let refused = "`InsertedByThisTransaction` is supported only inside an `exists`";
     let insert_path = "$.__e2ee_members.policies.insert.with_check";
     assert_refused(
         &insert(inserted()),
@@ -311,7 +310,9 @@ fn inserted_by_this_transaction_outside_a_write_check_exists_is_refused() {
             not(PolicyExpr::Or(vec![mine(), created_here(inserted())])),
         ])),
         refused,
-        &format!("{insert_path}.And[1].Not.Or[1].Exists"),
+        &format!(
+            "{insert_path}.And[1].Not.Or[1].Exists.condition.And[1].InsertedByThisTransaction"
+        ),
     );
     for (policies, slot) in [
         (
@@ -331,7 +332,9 @@ fn inserted_by_this_transaction_outside_a_write_check_exists_is_refused() {
         assert_refused(
             &schema,
             refused,
-            &format!("$.__e2ee_members.policies.{slot}.Exists"),
+            &format!(
+                "$.__e2ee_members.policies.{slot}.Exists.condition.And[1].InsertedByThisTransaction"
+            ),
         );
     }
 
@@ -383,7 +386,7 @@ fn inserted_by_this_transaction_outside_a_write_check_exists_is_refused() {
 /// ```
 #[test]
 fn an_inherits_from_with_a_non_scalar_address_column_is_refused() {
-    let refused = UnsupportedPolicy::NonScalarAddressColumn;
+    let refused = "must be a scalar column";
     let uuids = || ColumnType::Array {
         element: Box::new(ColumnType::Uuid),
     };
