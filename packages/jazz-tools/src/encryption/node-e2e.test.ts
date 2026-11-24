@@ -31,17 +31,14 @@ import {
 // End to end on Node: device clients with their own private stores talk to a
 // real server through createJazz, which relays them and holds no keys.
 
-it.each(["../../tests/fixtures/encrypted/", "../../tests/browser/apps/encrypted-tab/"])(
-  "keeps the generated bindings for %s current",
-  async (path) => {
-    const directory = new URL(path, import.meta.url);
-    const [source, bindings] = await Promise.all([
-      readFile(new URL("jazz.app.json", directory), "utf8"),
-      readFile(new URL("jazz.generated.ts", directory)),
-    ]);
-    expect(Buffer.from(await generateTs(source)).equals(bindings)).toBe(true);
-  },
-);
+it("keeps the generated bindings for the shared encrypted fixture current", async () => {
+  const directory = new URL("../../tests/fixtures/encrypted/", import.meta.url);
+  const [source, bindings] = await Promise.all([
+    readFile(new URL("jazz.app.json", directory), "utf8"),
+    readFile(new URL("jazz.generated.ts", directory)),
+  ]);
+  expect(Buffer.from(await generateTs(source)).equals(bindings)).toBe(true);
+});
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(() => cleanUpTestApp(cleanups));

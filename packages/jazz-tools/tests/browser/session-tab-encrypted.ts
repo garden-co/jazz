@@ -3,7 +3,7 @@ import {
   openBrowserSessionCore,
   type BrowserJazzSession,
 } from "../../src/session/create-jazz-session.js";
-import { app } from "./apps/encrypted-tab/jazz.generated.js";
+import { app } from "../fixtures/encrypted/jazz.generated.js";
 import type { jazzAppRequest } from "./testing-server-node.js";
 
 export type EncryptedTabCommand = { id: string } & (

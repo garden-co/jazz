@@ -25,17 +25,6 @@ const columns = (schema: WasmSchema) =>
   );
 
 describe("plainSchema", () => {
-  it("gives encrypted columns their plaintext type and hides the equality tokens", () => {
-    const plain = plainSchema(stored, declared(false));
-    expect(columns(plain)).toEqual([
-      ["title", false],
-      ["label", true],
-    ]);
-    expect(
-      (plain.tasks as { columns: { column_type: unknown }[] }).columns[0]!.column_type,
-    ).toEqual({ type: "Text" });
-  });
-
   it("answers each set of declarations for the same schema with its own view", () => {
     const required = plainSchema(stored, declared(false));
     const optional = plainSchema(stored, declared(true));

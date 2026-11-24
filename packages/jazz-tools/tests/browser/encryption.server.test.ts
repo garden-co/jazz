@@ -26,8 +26,8 @@ import {
 // relaying them. The account's store is localStorage; reloading is closing the
 // session and opening another.
 
-import { app } from "./apps/encrypted-tab/jazz.generated.js";
-import permissions from "./apps/encrypted-tab/jazz.permissions.json";
+import { app } from "../fixtures/encrypted/jazz.generated.js";
+import permissions from "../fixtures/encrypted/jazz.permissions.json";
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {

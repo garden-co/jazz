@@ -1,9 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { acceptDeviceAccounts } from "../backend/index.js";
 import {
   cleanUpTestApp,
   memoryTestAccountStore as memoryStore,
-  serveEncryptedTestApp,
   storedBytes,
 } from "../testing/index.js";
 import type { AccountStore } from "../accounts/persistence.js";
@@ -29,6 +27,7 @@ import { SerializableWriteResult } from "../runtime/client.js";
 import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
 import fixturePermissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
 import { openBrowserSessionCore, type BrowserJazzSession } from "./create-jazz-session.js";
+import { gatedLoader, serveThinTestApp } from "../../tests/fixtures/thin-session.js";
 
 // A browser session of an app with end-to-end encrypted columns starts on the
 // thin client, which holds no keys. What touches an encrypted column waits for
@@ -63,22 +62,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-function serve() {
-  return serveEncryptedTestApp(
-    {
-      app,
-      permissions,
-      // The app's own sign-in (`Authorization: Bearer token-<user>`), and device accounts.
-      authenticate: (request: Request) => {
-        const match = /^Bearer token-(\w+)$/.exec(request.headers.get("authorization") ?? "");
-        return match
-          ? { userId: match[1]!, expiresAt: Math.floor(Date.now() / 1000) + 3600 }
-          : acceptDeviceAccounts(request);
-      },
-    },
-    cleanups,
-  );
-}
+const serve = () => serveThinTestApp(app, permissions, cleanups);
 type Host = Awaited<ReturnType<typeof serve>>;
 
 /**
@@ -99,22 +83,6 @@ function holdNewConnections(host: Host) {
 }
 
 const loadLocalFirst: LocalFirstLoader = async () => ({ createClient: createLocalFirstDb });
-
-/** A loader that loads only once `release()` is called, counting its calls. */
-function gatedLoader() {
-  let release!: () => void;
-  const released = new Promise<void>((resolve) => (release = resolve));
-  const gate = {
-    calls: 0,
-    release: () => release(),
-    loader: (async () => {
-      gate.calls++;
-      await released;
-      return { createClient: createLocalFirstDb };
-    }) as LocalFirstLoader,
-  };
-  return gate;
-}
 
 /** The page is still loading: the background upgrade waits for a load event that doesn't come. */
 function pageStillLoading() {
