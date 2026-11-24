@@ -14,6 +14,7 @@
  * It reads only the app's encryption declarations, never keys or
  * membership, and loads nothing of the local-first client.
  */
+import { EQUALITY_PREFIX, hasSystemTables } from "../encryption/table-names.js";
 import type { InsertValues, Value, WasmSchema } from "../drivers/types.js";
 import { declaredEntries } from "../encryption/plain-schema.js";
 import {
@@ -103,9 +104,6 @@ type Entry = {
   stored: Set<string>;
 };
 
-const EQUALITY_PREFIX = "__e2ee_eq_";
-const SYSTEM_PREFIX = "__e2ee_";
-
 /** Keys of a flat runtime query whose shape {@link EncryptedGuard} reads. */
 const FLAT_QUERY_KEYS = new Set([
   "table",
@@ -137,7 +135,7 @@ export class EncryptedGuard {
     private readonly reason: () => ThinRefusalReason = () => "no-loader",
   ) {
     const declared = declaredEntries(schema);
-    if (!declared && Object.keys(schema).some((table) => table.startsWith(SYSTEM_PREFIX))) {
+    if (!declared && hasSystemTables(schema)) {
       throw new Error(
         "This schema has end-to-end encryption tables but no encryption declarations, so the thin client can't tell which columns are encrypted. Open it with the app's generated bindings (`app` from jazz.generated.ts).",
       );

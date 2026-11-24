@@ -3,6 +3,7 @@
  * input of the Rust writer, which checks and prints the file. Nothing here
  * hashes or lowers a schema; Rust does.
  */
+import { EQUALITY_PREFIX } from "../encryption/table-names.js";
 import type { AnyColumnDefinition } from "../dsl.js";
 import {
   hasEncryptionDeclaration,
@@ -29,9 +30,6 @@ export interface ReadableApp {
   tables: { [table: string]: ReadableTable };
   transforms?: { [name: string]: { stored: ReadableJson; view: ReadableJson } };
 }
-
-/** The column holding an equality column's tokens (protocol §1.5). */
-export const EQUALITY_PREFIX = "__e2ee_eq_";
 
 const SCALAR_NAMES: Record<string, string> = {
   TEXT: "string",

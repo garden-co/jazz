@@ -24,7 +24,8 @@ import {
   unique,
   until,
   waitingBanner,
-  reportPages,
+  waitForReadMarker,
+  configureBandChatTests,
 } from "./support";
 import {
   serverMarkerCount,
@@ -34,10 +35,7 @@ import {
   storedBytes,
 } from "./server-snapshot";
 
-test.describe.configure({ timeout: 300_000 });
-// Playwright reads fixtures from a destructured first argument; this hook needs none.
-// eslint-disable-next-line no-empty-pattern
-test.afterEach(async ({}, testInfo) => reportPages(testInfo));
+configureBandChatTests();
 
 test("no message text or attachment reaches the server or the wire; a room name does", async ({
   browser,
@@ -81,16 +79,8 @@ test("no message text or attachment reaches the server or the wire; a room name 
   // Both readers' markers are written (their stored time is encrypted).
   const aliceId = await myAccountId(a.page);
   const bobId = await myAccountId(b.page);
-  await until(
-    "both read markers",
-    () => serverMarkerCount(roomId, aliceId),
-    (n) => n === 1,
-  );
-  await until(
-    "both read markers",
-    () => serverMarkerCount(roomId, bobId),
-    (n) => n === 1,
-  );
+  await waitForReadMarker(roomId, aliceId, "both read markers");
+  await waitForReadMarker(roomId, bobId, "both read markers");
 
   const secrets = [fromAlice, fromBob, fileName, fileText];
   // The control: a plain column is found, so a miss below means sealed bytes.
@@ -139,16 +129,8 @@ test("removing a member renews the room's key at once; they read nothing written
   // Every automatic marker write has settled: nobody writes from here on.
   const aliceId = await myAccountId(a.page);
   const bobId = await myAccountId(b.page);
-  await until(
-    "alice's marker",
-    () => serverMarkerCount(roomId, aliceId),
-    (n) => n === 1,
-  );
-  await until(
-    "bob's marker",
-    () => serverMarkerCount(roomId, bobId),
-    (n) => n === 1,
-  );
+  await waitForReadMarker(roomId, aliceId, "alice's marker");
+  await waitForReadMarker(roomId, bobId, "bob's marker");
   const before = await serverSuccessors(roomId);
   expect(before).toHaveLength(0);
   const roots = await serverSpaceRoot(roomId);
@@ -243,11 +225,7 @@ test("a read marker is written only once this browser can read the room", async 
   const page = await reopen(bobFirst);
   await page.goto(`/?join=${roomId}`);
   await expect(message(page, text)).toBeVisible({ timeout: T });
-  await until(
-    "bob's marker",
-    () => serverMarkerCount(roomId, bobId),
-    (n) => n === 1,
-  );
+  await waitForReadMarker(roomId, bobId, "bob's marker");
 });
 
 test("an active new member attempts no read marker until the room key arrives", async ({
@@ -304,10 +282,6 @@ test("an active new member attempts no read marker until the room key arrives", 
   expect(await keyNoticesSeen(b.page)).not.toContain("locked");
   a.wire.resumeOutgoing();
   await expect(message(b.page, text)).toBeVisible({ timeout: T });
-  await until(
-    "the read marker after the key arrived",
-    () => serverMarkerCount(roomId, bobId),
-    (count) => count === 1,
-  );
+  await waitForReadMarker(roomId, bobId, "the read marker after the key arrived");
   expect(await b.page.evaluate(() => window.bandChatMarkerWrites)).toHaveLength(1);
 });

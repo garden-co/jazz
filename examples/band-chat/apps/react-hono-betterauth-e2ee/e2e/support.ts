@@ -12,14 +12,17 @@ import {
 import { connect, type AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 import type { Db } from "jazz-tools";
+import { pollTestValue } from "jazz-tools/testing";
 import {
   expect,
+  test,
   type Browser,
   type BrowserContext,
   type Locator,
   type Page,
   type TestInfo,
 } from "@playwright/test";
+import { serverMarkerCount } from "./server-snapshot";
 
 /** How long a step that waits on Jazz's background passes may take. */
 export const T = 45_000;
@@ -209,7 +212,7 @@ const opened: Device[] = [];
  * After each test: on failure, saves a screenshot and the text of every page
  * the test opened; then closes its browsers and their proxies.
  */
-export async function reportPages(testInfo: TestInfo): Promise<void> {
+async function reportPages(testInfo: TestInfo): Promise<void> {
   const devices = opened.splice(0);
   try {
     if (testInfo.status !== testInfo.expectedStatus) await savePages(devices, testInfo);
@@ -219,6 +222,13 @@ export async function reportPages(testInfo: TestInfo): Promise<void> {
       await device.wire.close();
     }
   }
+}
+
+export function configureBandChatTests(): void {
+  test.describe.configure({ timeout: 300_000 });
+  // Playwright requires a destructured fixture argument.
+  // eslint-disable-next-line no-empty-pattern
+  test.afterEach(async ({}, testInfo) => reportPages(testInfo));
 }
 
 async function savePages(devices: Device[], testInfo: TestInfo): Promise<void> {
@@ -393,6 +403,21 @@ export function thisBrowserRow(dialog: Locator): Locator {
   return deviceRows(dialog).filter({ hasText: "This browser" });
 }
 
+export async function leaveBrowser(dialog: Locator): Promise<void> {
+  const name = "Leave this browser";
+  await thisBrowserRow(dialog).getByRole("button", { name }).click();
+  await dialog.getByRole("alertdialog").getByRole("button", { name }).click();
+}
+
+export async function confirmDeviceRemoval(confirm: Locator): Promise<void> {
+  await confirm.getByRole("button", { name: "Sign out other browsers and remove" }).click();
+}
+
+export async function removeLostDevice(dialog: Locator, row: Locator): Promise<void> {
+  await row.getByRole("button", { name: "Remove lost device" }).click();
+  await confirmDeviceRemoval(dialog.getByRole("alertdialog"));
+}
+
 /** This browser's device ID, from its own row in the devices panel. */
 export async function deviceIdOf(page: Page): Promise<string> {
   const dialog = await openDevices(page);
@@ -476,15 +501,29 @@ export async function until<V>(
   accept: (value: V) => boolean,
   timeout = T,
 ): Promise<V> {
-  const deadline = Date.now() + timeout;
   let last: V | undefined;
-  for (;;) {
-    last = await read();
-    if (accept(last)) return last;
-    if (Date.now() > deadline)
-      throw new Error(`Timed out waiting for ${what}; last value: ${JSON.stringify(last)}`);
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
+  const result = await pollTestValue(
+    async () => {
+      last = await read();
+      return accept(last) ? { value: last } : undefined;
+    },
+    () => `Timed out waiting for ${what}; last value: ${JSON.stringify(last)}`,
+    timeout,
+    { intervalMs: 500, retryErrors: false },
+  );
+  return result.value;
+}
+
+export async function waitForReadMarker(
+  roomId: string,
+  account: string,
+  what: string,
+): Promise<void> {
+  await until(
+    what,
+    () => serverMarkerCount(roomId, account),
+    (count) => count === 1,
+  );
 }
 
 /** Everything this origin keeps in the browser, as text. */

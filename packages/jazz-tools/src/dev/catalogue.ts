@@ -5,6 +5,7 @@
  * bindings ship, and the compiled permissions. This only sends it, leaving
  * out the versions and migrations the server already stores.
  */
+import { SYSTEM_PREFIX } from "../encryption/table-names.js";
 import type { SchemaSourceInput } from "../schema-source.js";
 import {
   publishDeployment,
@@ -107,7 +108,7 @@ export function permissionCoverageWarnings(deployment: DeploymentBody): string[]
   return Object.keys(tables)
     .filter((table) => {
       // Jazz's system tables get their policies from the encryption declarations.
-      if (table.startsWith("__e2ee_")) return false;
+      if (table.startsWith(SYSTEM_PREFIX)) return false;
       const operations = Object.values(permissions[table] ?? {});
       return !operations.some((policy) => policy?.using != null || policy?.with_check != null);
     })

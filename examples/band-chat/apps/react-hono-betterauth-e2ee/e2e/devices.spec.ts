@@ -22,16 +22,15 @@ import {
   signOut,
   signUp,
   T,
-  thisBrowserRow,
+  leaveBrowser,
+  confirmDeviceRemoval,
+  removeLostDevice,
   unique,
   waitingBanner,
-  reportPages,
+  configureBandChatTests,
 } from "./support";
 
-test.describe.configure({ timeout: 300_000 });
-// Playwright reads fixtures from a destructured first argument; this hook needs none.
-// eslint-disable-next-line no-empty-pattern
-test.afterEach(async ({}, testInfo) => reportPages(testInfo));
+configureBandChatTests();
 
 test("removes a lost device: every other sign-in ends first, the kept browser needs no approval", async ({
   browser,
@@ -77,7 +76,7 @@ test("removes a lost device: every other sign-in ends first, the kept browser ne
   await expect(confirm).toContainText(/is signed out first and has to sign in again/);
   await expect(confirm).toContainText(/keep their keys and need no new approval/);
   await expect(confirm).toContainText(/keeps the messages it already has/);
-  await confirm.getByRole("button", { name: "Sign out other browsers and remove" }).click();
+  await confirmDeviceRemoval(confirm);
   await expect(dialog.locator(`[data-device-id="${bId}"]`)).toHaveCount(0, { timeout: T });
   expect(routeCalls).toBe(1);
   expect(closedBeforeAnswer).toBe(true);
@@ -149,25 +148,14 @@ test("an interrupted lost-device removal is repeated, both steps again", async (
     else await route.fulfill({ response });
   });
   let dialog = await openDevices(a.page);
-  await dialog
-    .locator(`[data-device-id="${bId}"]`)
-    .getByRole("button", { name: "Remove lost device" })
-    .click();
-  await dialog
-    .getByRole("alertdialog")
-    .getByRole("button", { name: "Sign out other browsers and remove" })
-    .click();
+  await removeLostDevice(dialog, dialog.locator(`[data-device-id="${bId}"]`));
   await expect(signInHeading(b.page)).toBeVisible({ timeout: T });
   await a.page.reload();
 
   dialog = await openDevices(a.page);
   const row = dialog.locator(`[data-device-id="${bId}"]`);
   await expect(row).toHaveCount(1, { timeout: T });
-  await row.getByRole("button", { name: "Remove lost device" }).click();
-  await dialog
-    .getByRole("alertdialog")
-    .getByRole("button", { name: "Sign out other browsers and remove" })
-    .click();
+  await removeLostDevice(dialog, row);
   await expect(row).toHaveCount(0, { timeout: T });
   expect(routeCalls).toBe(2);
 });
@@ -263,8 +251,7 @@ test("leaves this browser: another device completes it and the browser signs its
   const bOld = await deviceIdOf(b.page);
 
   const panel = await openDevices(b.page);
-  await thisBrowserRow(panel).getByRole("button", { name: "Leave this browser" }).click();
-  await panel.getByRole("alertdialog").getByRole("button", { name: "Leave this browser" }).click();
+  await leaveBrowser(panel);
   // "Removal pending" may never show here: A can complete the request before
   // B's device list confirms it. The reload test below covers the pending state.
   await closeDialog(b.page);
@@ -305,8 +292,7 @@ test("leaves across a reload: the request is completed while the page is closed"
   // A is closed when B asks to leave.
   await a.page.close();
   const panel = await openDevices(b.page);
-  await thisBrowserRow(panel).getByRole("button", { name: "Leave this browser" }).click();
-  await panel.getByRole("alertdialog").getByRole("button", { name: "Leave this browser" }).click();
+  await leaveBrowser(panel);
   await expect(panel.getByText("Removal pending").first()).toBeVisible({ timeout: T });
   await b.page.close();
 
@@ -336,8 +322,7 @@ test("a sole device cannot leave, and its messages stay readable", async ({ brow
   await send(a.page, text);
 
   const panel = await openDevices(a.page);
-  await thisBrowserRow(panel).getByRole("button", { name: "Leave this browser" }).click();
-  await panel.getByRole("alertdialog").getByRole("button", { name: "Leave this browser" }).click();
+  await leaveBrowser(panel);
   await expect(panel.getByText(/This is your only device, so it can't leave/)).toBeVisible({
     timeout: T,
   });
@@ -369,8 +354,7 @@ test("signs out after closing the tab before the removal request returns", async
     };
   });
   const panel = await openDevices(b.page);
-  await thisBrowserRow(panel).getByRole("button", { name: "Leave this browser" }).click();
-  await panel.getByRole("alertdialog").getByRole("button", { name: "Leave this browser" }).click();
+  await leaveBrowser(panel);
   await b.page.waitForFunction(() => window.bandChatRemovalAccepted);
   await b.page.close();
 

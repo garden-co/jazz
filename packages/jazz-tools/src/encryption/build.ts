@@ -9,7 +9,6 @@ import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js
 import { boundApp } from "../typed-app.js";
 import { EncryptionStoreRequiredError } from "./index.js";
 import { servePrivateStore, type PrivateStore, type StoreTarget } from "./private-store.js";
-import { declaresEncryption } from "./plain-schema.js";
 
 /** The bindings' compiled app as the runtime reads it. */
 export function compiledBindings(app: SchemaSourceInput): string {
@@ -33,9 +32,8 @@ export interface EncryptionRuntimeClass {
 }
 
 /**
- * The native runtime for `app` and `accountId`, ready, or `undefined` for an
- * app that declares no encryption. An app that declares it needs the store:
- * without one this throws {@link EncryptionStoreRequiredError}.
+ * Builds the native runtime for an app that declares encryption.
+ * Without a store this throws {@link EncryptionStoreRequiredError}.
  */
 export async function buildEncryption(options: {
   host: EncryptionRuntimeClass;
@@ -46,8 +44,7 @@ export async function buildEncryption(options: {
   /** The device account's secret (`jazz-auth-v1:...`); it is the account's recovery secret. */
   deviceAccountSecret?: string;
   store: PrivateStore | undefined;
-}): Promise<{ runtime: StoreTarget; store: PrivateStore } | undefined> {
-  if (!declaresEncryption(options.app)) return undefined;
+}): Promise<{ runtime: StoreTarget; store: PrivateStore }> {
   const store = options.store;
   if (!store) throw new EncryptionStoreRequiredError();
   const runtime = options.host.fromBindings(

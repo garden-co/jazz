@@ -20,6 +20,7 @@
  */
 import { createRequire } from "node:module";
 import { assertNoEnumCases } from "../app-file-enums.js";
+import type { EQUALITY_PREFIX } from "../encryption/table-names.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { bindApp, boundApp, type App, type AppTypes, type BindAppOptions } from "../typed-app.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
@@ -187,7 +188,7 @@ type ColumnsOfSpec<T> = T extends { readonly columns: infer C extends object }
     ? FieldsOf<C>
     : {
         [
-          K in keyof FieldsOf<C> as K extends `__e2ee_eq_${string}` ? never : K
+          K in keyof FieldsOf<C> as K extends `${typeof EQUALITY_PREFIX}${string}` ? never : K
         ]: K extends keyof EncryptedOfSpec<T> ? EncryptedOfSpec<T>[K] : FieldsOf<C>[K];
       }
   : {};

@@ -1,21 +1,21 @@
 import { mkdtemp, readFile } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NapiDb } from "jazz-napi";
 import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
 import appFile from "../../tests/fixtures/encrypted/jazz.app.json";
 import permissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
-import { storedBytes } from "../../tests/stored-bytes.js";
-import { startTestJazz, testApp } from "../testing/index.js";
 import {
-  acceptDeviceAccounts,
-  createJazz,
-  createJazzClient,
-  memory,
-  sqlite,
-} from "../backend/index.js";
+  cleanUpTestApp,
+  memoryTestAccountStore as memoryStore,
+  openEncryptedTestDevice,
+  pollTestValue as until,
+  serveEncryptedTestApp,
+  startTestJazz,
+  storedBytes,
+  testApp,
+} from "../testing/index.js";
+import { acceptDeviceAccounts, createJazz, createJazzClient, sqlite } from "../backend/index.js";
 import { generateTs } from "../dev/codegen-napi.js";
 import type { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import type { AccountStore } from "../accounts/persistence.js";
@@ -44,61 +44,18 @@ it.each(["../../tests/fixtures/encrypted/", "../../tests/browser/apps/encrypted-
 );
 
 const cleanups: Array<() => Promise<unknown>> = [];
-afterEach(async () => {
-  while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
-});
+afterEach(() => cleanUpTestApp(cleanups));
 
 async function serve(
   again?: { dir: string; port: number },
   served = permissions,
   storage: "sqlite" | "memory" = "sqlite",
 ) {
-  const dir = again?.dir ?? (await mkdtemp(`${tmpdir()}/e2ee-server-`));
-  const jazz = await createJazz({
-    app,
-    permissions: served,
-    store: storage === "memory" ? memory() : sqlite({ path: `${dir}/core.sqlite` }),
-    authenticate: acceptDeviceAccounts,
-  }).ready();
-  cleanups.push(() => jazz.close());
-  const server: Server = createServer((req, res) =>
-    jazz.nodeHandler(req, res, () => {
-      res.statusCode = 404;
-      res.end();
-    }),
+  const host = await serveEncryptedTestApp(
+    { app, permissions: served, storage, ...again },
+    cleanups,
   );
-  await jazz.attach(server);
-  await new Promise<void>((resolve) => server.listen(again?.port ?? 0, "127.0.0.1", resolve));
-  cleanups.push(
-    () =>
-      new Promise((resolve) => {
-        server.closeAllConnections();
-        server.close(resolve);
-      }),
-  );
-  const port = (server.address() as AddressInfo).port;
-  return {
-    jazz,
-    permissions: served,
-    dir,
-    port,
-    storePath: `${dir}/core.sqlite`,
-    serverUrl: `http://127.0.0.1:${port}/jazz`,
-    /** Takes the server down, keeping its data. */
-    async stop() {
-      server.closeAllConnections();
-      await new Promise((resolve) => server.close(resolve));
-      await jazz.close();
-    },
-  };
-}
-
-function memoryStore(): AccountStore {
-  let stored: string | null = null;
-  return {
-    read: async () => stored,
-    update: async (transform) => void (stored = transform(stored)),
-  };
+  return { ...host, permissions: served };
 }
 
 type Server_ = Awaited<ReturnType<typeof serve>>;
@@ -114,26 +71,11 @@ async function device(
     wait?: boolean;
   } = {},
 ) {
-  const session = await createJazzClient({
-    serverUrl: host.serverUrl,
-    appId: host.jazz.appId,
-    app,
-    permissions: host.permissions ?? permissions,
-    store: options.accounts ?? memoryStore(),
-    initial: "device",
-    driver: options.dataPath
-      ? { type: "persistent", dataPath: options.dataPath }
-      : { type: "memory" },
-    encryption: { store: options.privateStore ?? memoryPrivateStore() },
-  });
-  cleanups.push(() => session.close());
-  if (options.key) await session.restoreDeviceAccount(options.key);
-  const db = session.db;
-  if (options.wait === false)
-    return { session, db, account: session.getSnapshot().user!.accountId };
-  const status = await db.encryption.ready({ timeoutMs: 20_000 });
-  expect(status).toBe("active");
-  return { session, db, account: session.getSnapshot().user!.accountId };
+  return openEncryptedTestDevice(
+    host,
+    { app, permissions: host.permissions ?? permissions, ...options },
+    cleanups,
+  );
 }
 
 type Device = Awaited<ReturnType<typeof device>>;
@@ -155,21 +97,6 @@ async function makeProject(owner: Device, name: string) {
 async function addMember(owner: Device, project: string, account: string) {
   const row = await owner.db.encryption.members.row({ table: "projects", id: project }, account);
   await owner.db.insert(app.__e2ee_members, row).wait({ tier: "global" });
-}
-
-/** Waits until `read` returns something. */
-async function until<T>(read: () => Promise<T | undefined>, what: string, ms = 20_000): Promise<T> {
-  const end = Date.now() + ms;
-  for (;;) {
-    let failure: unknown;
-    const value = await read().catch((error) => {
-      failure = error;
-      return undefined;
-    });
-    if (value !== undefined) return value;
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}: ${String(failure)}`);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
 }
 
 describe("encryption on Node, end to end", () => {

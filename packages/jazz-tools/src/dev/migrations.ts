@@ -1,3 +1,4 @@
+import { hasSystemTables } from "../encryption/table-names.js";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { structuralBigInt } from "../runtime/structural-values.js";
@@ -792,7 +793,7 @@ async function snapshotEntries(
     text = await readFile(join(migrationsDir, "snapshots", file), "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    if (!Object.keys(snapshot.schema).some((table) => table.startsWith("__e2ee_"))) return {};
+    if (!hasSystemTables(snapshot.schema)) return {};
     throw new Error(
       `migrations/snapshots/${snapshot.file}: version ${shortSchemaHash(snapshot.hash)} declares encryption ` +
         `(it has Jazz's system tables), but migrations/snapshots/${file}, which holds its encryption ` +
@@ -933,7 +934,7 @@ export async function loadMigrationHistory(options: {
   // encryption, a version without one can't be known to declare none.
   const declaresEncryption =
     Object.keys(currentEntries).length > 0 ||
-    snapshots.some((snapshot) => Object.keys(snapshot.schema).some((t) => t.startsWith("__e2ee_")));
+    snapshots.some((snapshot) => hasSystemTables(snapshot.schema));
   const failures = new Map<string, string>();
   for (let progress = true; progress;) {
     progress = false;
