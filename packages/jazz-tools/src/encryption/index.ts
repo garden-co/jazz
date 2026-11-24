@@ -177,6 +177,7 @@ export class Encryption {
   readonly keys: Keys;
   readonly members: Members;
   private readonly listeners = new Set<(report: EncryptionReport) => void>();
+  private readonly pendingReports: EncryptionReport[] = [];
   private timer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
@@ -351,7 +352,11 @@ export class Encryption {
           const failed = failure(error);
           // The loop owns the retries; only the wait for its first answer ran out.
           if (failed.code === "database" || failed.code === "store") continue;
-          this.emit({ type: "ready-failed", code: failed.code, message: failed.message });
+          this.pendingReports.push({
+            type: "ready-failed",
+            code: failed.code,
+            message: failed.message,
+          });
           return;
         }
       }
@@ -403,6 +408,7 @@ export class Encryption {
   }
 
   private deliver() {
+    for (const report of this.pendingReports.splice(0)) this.emit(report);
     for (const text of this.native.takeEncryptionReports()) {
       this.emit(JSON.parse(text) as EncryptionReport);
     }

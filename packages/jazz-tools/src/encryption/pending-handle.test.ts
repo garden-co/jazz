@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Encryption } from "./index.js";
+import { Encryption } from "./index.js";
 import { pendingEncryption, type PendingEncryptionHost } from "./pending-handle.js";
 
 function setup() {
@@ -31,6 +31,38 @@ function setup() {
 }
 
 describe("a handle taken while thin", () => {
+  it("counts a slow handover against the ready timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const real = new Encryption({
+        encryptionState: () => JSON.stringify({ status: "active" }),
+        encryptionCall: () =>
+          new Promise((resolve) => setTimeout(() => resolve(JSON.stringify("active")), 40)),
+        takeEncryptionReports: () => [],
+      });
+      const resolve = vi.fn(
+        () => new Promise<Encryption>((done) => setTimeout(() => done(real), 80)),
+      );
+      const handle = pendingEncryption({
+        live: () => undefined,
+        resolve,
+        refuseSync: (op) => new Error(op),
+        whenLocalFirst: () => () => {},
+      });
+      const failed = vi.fn();
+      const ready = handle.ready({ timeoutMs: 100 }).catch(failed);
+      expect(resolve).toHaveBeenCalledWith(100);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(failed).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(failed).toHaveBeenCalledWith(expect.objectContaining({ code: "database" }));
+      await vi.advanceTimersByTimeAsync(20);
+      await ready;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("refuses recovery.create() and ignores stop() before the upgrade", () => {
     const { handle, real, refuseSync } = setup();
     expect(() => handle.recovery.create()).toThrow("not-loaded");
@@ -86,7 +118,6 @@ describe("the stand-in's members", () => {
   });
 
   it("lists exactly the members of the real class", async () => {
-    const { Encryption } = await import("./index.js");
     const { PENDING_HANDLE_MEMBERS } = await import("./pending-handle.js");
     const real = new Encryption({} as never);
     const own = (o: object) =>

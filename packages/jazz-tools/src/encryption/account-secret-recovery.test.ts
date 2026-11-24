@@ -91,6 +91,35 @@ it("keeps the runtime's reason in the message of a refused operation", async () 
   });
 });
 
+it("keeps a startup failure for a listener that subscribes later", async () => {
+  vi.useFakeTimers();
+  const restore = vi.fn(async () => {
+    throw new Error("device-not-active: E2EE operation refused");
+  });
+  const { encryption } = awaitingDevice(restore);
+  try {
+    encryption.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(restore).toHaveBeenCalledOnce();
+
+    const listener = vi.fn();
+    encryption.onReport(listener);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(listener.mock.calls).toEqual([
+      [
+        {
+          type: "ready-failed",
+          code: "device-not-active",
+          message: "device-not-active: E2EE operation refused",
+        },
+      ],
+    ]);
+  } finally {
+    encryption.stop();
+    vi.useRealTimers();
+  }
+});
+
 it.each([true, false])(
   "honours each caller's deadline during shared verification (startup first: %s)",
   async (startupFirst) => {

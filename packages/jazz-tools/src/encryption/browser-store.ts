@@ -149,7 +149,9 @@ export function browserPrivateStore(options: BrowserPrivateStoreOptions = {}): P
   return {
     async load(scope, doc): Promise<StoredDocument | null> {
       const db = await database();
-      const row = (await wait(db.transaction(DOCS).objectStore(DOCS).get(docKey(scope, doc)))) as
+      const transaction = db.transaction([SCOPES, DOCS]);
+      if (!(await wait(transaction.objectStore(SCOPES).get(scope)))) return null;
+      const row = (await wait(transaction.objectStore(DOCS).get(docKey(scope, doc)))) as
         | DocRow
         | undefined;
       return row ? { bytes: new Uint8Array(row.bytes), revision: BigInt(row.revision) } : null;
@@ -208,8 +210,10 @@ export function browserPrivateStore(options: BrowserPrivateStoreOptions = {}): P
 
     async list(scope) {
       const db = await database();
+      const transaction = db.transaction([SCOPES, DOCS]);
+      if (!(await wait(transaction.objectStore(SCOPES).get(scope)))) return [];
       const rows = (await wait(
-        db.transaction(DOCS).objectStore(DOCS).index("scope").getAll(scope),
+        transaction.objectStore(DOCS).index("scope").getAll(scope),
       )) as DocRow[];
       return rows.map((row) => row.doc);
     },
