@@ -55,7 +55,7 @@ pub fn utf16_cmp(a: &str, b: &str) -> Ordering {
 
 /// Parses `bytes` and refuses anything whose re-encoding differs.
 fn parse_canonical(bytes: &[u8]) -> ProtocolResult<Value> {
-    canonical::parse_canonical(bytes)
+    canonical::parse_canonical_list(bytes)
         .map_err(|_| ProtocolError::InvalidRecord("non-canonical JSON"))
 }
 

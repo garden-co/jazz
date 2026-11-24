@@ -337,6 +337,13 @@ fn canonical_json() {
             "{text}"
         );
     }
+    // An invalid list shape takes precedence over delivery-pair validation.
+    for text in [b"[[true]]".as_slice(), b"[[{}]]", b"[[[[]]]]"] {
+        assert!(matches!(
+            json::decode_delivery_map(text),
+            Err(ProtocolError::InvalidRecord("non-canonical JSON"))
+        ));
+    }
 }
 
 fn keys() -> KeyColumns {

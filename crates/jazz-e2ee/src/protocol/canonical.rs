@@ -19,6 +19,8 @@ use super::json;
 pub(crate) const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 /// Nesting deeper than any record of the store is refused.
 const MAX_DEPTH: usize = 16;
+/// A delivery map has three array levels: pairs, each pair, and its bytes.
+const MAX_LIST_DEPTH: usize = 3;
 
 /// A JSON value of the shapes the protocol uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,6 +154,15 @@ pub(crate) fn framed(format: &str, value: Value) -> ProtocolResult<Vec<u8>> {
 
 /// Parses text that must be the canonical encoding of what it parses to.
 pub(crate) fn parse_canonical(bytes: &[u8]) -> ProtocolResult<Value> {
+    parse_canonical_with(bytes, false)
+}
+
+/// Parses canonical lists of arrays, strings and unsigned integers.
+pub(super) fn parse_canonical_list(bytes: &[u8]) -> ProtocolResult<Value> {
+    parse_canonical_with(bytes, true)
+}
+
+fn parse_canonical_with(bytes: &[u8], list_only: bool) -> ProtocolResult<Value> {
     fn sorted(value: &Value) -> bool {
         match value {
             Value::Array(items) => items.iter().all(sorted),
@@ -164,19 +175,19 @@ pub(crate) fn parse_canonical(bytes: &[u8]) -> ProtocolResult<Value> {
             _ => true,
         }
     }
-    let value = parse(bytes)?;
-    if !sorted(&value) || value.encode()? != bytes {
+    let value = parse(bytes, list_only)?;
+    if (!list_only && !sorted(&value)) || value.encode()? != bytes {
         return invalid("non-canonical JSON");
     }
     Ok(value)
 }
 
-/// Parses JSON text of the store's shapes.
-pub(crate) fn parse(bytes: &[u8]) -> ProtocolResult<Value> {
+fn parse(bytes: &[u8], list_only: bool) -> ProtocolResult<Value> {
     let mut parser = Parser {
         bytes,
         at: 0,
         lenient: false,
+        list_only,
     };
     let value = parser.value(0)?;
     if parser.at != bytes.len() {
@@ -197,6 +208,7 @@ pub(crate) fn parse_object_parts(bytes: &[u8]) -> ProtocolResult<Vec<ObjectPart<
         bytes,
         at: 0,
         lenient: true,
+        list_only: false,
     };
     parser.skip_whitespace();
     parser.expect(b'{')?;
@@ -231,6 +243,7 @@ pub(crate) fn parse_array_parts(bytes: &[u8]) -> ProtocolResult<Vec<(Value, &[u8
         bytes,
         at: 0,
         lenient: true,
+        list_only: false,
     };
     parser.skip_whitespace();
     parser.expect(b'[')?;
@@ -257,6 +270,7 @@ struct Parser<'a> {
     at: usize,
     /// Whitespace between tokens is skipped rather than refused.
     lenient: bool,
+    list_only: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -311,7 +325,7 @@ impl<'a> Parser<'a> {
         }
         match self.token() {
             Some(b'"') => self.string().map(Value::String),
-            Some(b'[') => {
+            Some(b'[') if !self.list_only || depth < MAX_LIST_DEPTH => {
                 self.at += 1;
                 let mut items = Vec::new();
                 if self.token() == Some(b']') {
@@ -330,7 +344,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            Some(b'{') => {
+            Some(b'{') if !self.list_only => {
                 self.at += 1;
                 let mut fields: Vec<(String, Value)> = Vec::new();
                 if self.token() == Some(b'}') {
@@ -355,8 +369,8 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            Some(b't') => self.literal(b"true").map(|()| Value::Bool(true)),
-            Some(b'f') => self.literal(b"false").map(|()| Value::Bool(false)),
+            Some(b't') if !self.list_only => self.literal(b"true").map(|()| Value::Bool(true)),
+            Some(b'f') if !self.list_only => self.literal(b"false").map(|()| Value::Bool(false)),
             Some(b'0'..=b'9') => self.number(),
             _ => invalid("malformed JSON"),
         }
