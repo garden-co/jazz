@@ -128,11 +128,14 @@ fn a_read_names_the_settled_reason_for_a_row_with_no_space_root() {
 
 /// Bob holds Alice's first key but lacks the one she rotated to while he
 /// was away. Executing his equality query reports the space once while its
-/// matches are partial. A delivery makes the query complete again.
+/// matches are partial. A non-member gets `key-unavailable` for the same
+/// partial results. A delivery after rejoining makes the query complete again.
 ///
 /// ```text
 /// alice ──first note and key──► bob
 /// alice ──rotate without bob──► second matching note
+/// bob ──rejoin, acquire──► learns the new epoch without its key
+/// bob ──leave, query──► first note, key-unavailable
 /// bob ──rejoin, query──► first note, key-pending
 /// alice ──deliver──► bob queries both notes, report withdrawn
 /// ```
@@ -181,8 +184,12 @@ fn executing_an_equality_query_reports_the_space_when_it_cannot_search_every_epo
     block_on(server.delete(MEMBERS, bob_member, Default::default())).unwrap();
     drive(&server, &[&alice_db], writer.rotate(&alice_db, &address)).unwrap();
     let second = write();
-    add_member(&server, &alice_db, space, bob);
+    let bob_member = add_member(&server, &alice_db, space, bob);
     assert_eq!(acquire(), SpaceKeyState::KeyPending);
+    block_on(bob_db.delete(MEMBERS, bob_member, Default::default())).unwrap();
+    pump(&server, &bob_db);
+    assert_eq!(count(&server, MEMBERS), 1);
+    assert_eq!(acquire(), SpaceKeyState::NoRoot);
 
     let prepared = bob_db.prepare_query(&notes(space)).unwrap();
     let _live = block_on(bob_db.subscribe(&prepared, Default::default())).unwrap();
@@ -191,6 +198,7 @@ fn executing_an_equality_query_reports_the_space_when_it_cannot_search_every_epo
     let events = reports.clone();
     reader.on_report(move |report| events.borrow_mut().push(report.clone()));
     let query = notes(space).filter(eq(col("body"), lit(text(SECRET))));
+    let nonmember = bob_db.prepare_query(&query).unwrap();
     let matches = |prepared| {
         let mut ids: Vec<_> = block_on(bob_db.all(prepared, local()))
             .unwrap()
@@ -200,6 +208,18 @@ fn executing_an_equality_query_reports_the_space_when_it_cannot_search_every_epo
         ids.sort();
         ids
     };
+    assert_eq!(matches(&nonmember), [first]);
+    reader.flush_reports();
+    assert!(reports.borrow().iter().any(|report| matches!(
+        report,
+        Report::Unreadable(u)
+            if u.table == "notes" && u.space.as_ref() == Some(&address)
+                && u.id.is_none() && u.column.is_none() && u.code == UnreadableCode::KeyUnavailable
+    )));
+
+    add_member(&server, &alice_db, space, bob);
+    assert_eq!(acquire(), SpaceKeyState::KeyPending);
+    reader.flush_reports();
     let pending_count = || {
         reports
             .borrow()
