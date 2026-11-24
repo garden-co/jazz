@@ -100,6 +100,15 @@ app encrypts data it already stores. References: the
   declarations of its two versions (§3). The deploy refuses a change even
   when the stored schema is unchanged, as it does for a plaintext type
   change.
+- **Known limit: the tooling sees only the app files.** `migrations create`,
+  `generate` and `validate` run the deploy's own checks on what the files
+  say, and the deploy has the final word. When the outcome depends on which
+  versions a server has deployed, the tooling accepts and the deploy
+  decides. For example, an index-only edit that shortens an encrypted enum
+  list is a sibling change in the files, but the server treats it as
+  narrowing a deployed descendant when that descendant is the only version
+  with the same row shape, and refuses it. The tooling never refuses a
+  change the deploy accepts.
 - The entries add nothing to the schema hash (H1); the deploy request carries
   every version's declarations so the server can check them.
 - **Declarations are fixed per version.** A server keeps the declarations a

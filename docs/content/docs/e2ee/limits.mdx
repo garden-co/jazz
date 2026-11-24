@@ -11,6 +11,11 @@ languageTabs: backend
   with `remote()`. The Worker holds no keys. Running a key-holding client on the Worker and
   deploying an encrypted schema to a Durable Object core are unsupported.
 - **The backend cannot compute on encrypted content.** It relays it and works on plain columns.
+- **The deploy has the final word on schema changes.** `migrations create` and `generate` check
+  encrypted columns using only your app files. A few changes depend on which versions your server
+  has already deployed, such as shortening an encrypted enum list in a version that only adds an
+  index. The tooling accepts those, and the deploy may still refuse them with an error naming the
+  column.
 - **A writer that hasn't loaded a row can move it to another space.** A write can't change an
   encrypted row's space, but the client or backend making the write checks this against its own
   copy of the row, and the server does not check it again. A writer that has never loaded the row
