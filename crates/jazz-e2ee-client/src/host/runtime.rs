@@ -31,6 +31,7 @@ use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 
 use super::bridge::JsStore;
 use serde_json::{Value, json};
+use zeroize::Zeroize;
 
 /// What a host passes to open an encrypted app's database.
 pub struct Options {
@@ -45,6 +46,12 @@ pub struct Options {
     pub device_account_secret: Option<String>,
     pub app_id: String,
     pub environment: String,
+}
+
+impl Drop for Options {
+    fn drop(&mut self) {
+        self.device_account_secret.zeroize();
+    }
 }
 
 /// The built runtime and its reports.
@@ -202,14 +209,24 @@ type Command = futures::channel::oneshot::Sender<Result<Value, String>>;
 /// The runtime for an encrypted app, built from the app's own declarations
 /// over the private store the app supplied (a JavaScript store, see
 /// `js_store`), for the account of its session.
-pub async fn build(
-    mut options: Options,
+/// The future owns the parsed secret so the host can wipe its options on drop.
+pub fn build(
+    options: &Options,
     account_id: String,
     store: Rc<JsStore>,
-) -> Result<Built, String> {
-    let declarations = declarations(&options)?;
-    let recovery = take_account_secret(&mut options)?;
-    build_client(declarations, account_id, store, recovery.as_ref()).await
+) -> impl Future<Output = Result<Built, String>> + use<> {
+    let prepared = declarations(options).and_then(|declarations| {
+        let recovery = options
+            .device_account_secret
+            .as_deref()
+            .map(secret)
+            .transpose()?;
+        Ok((declarations, recovery))
+    });
+    async move {
+        let (declarations, recovery) = prepared?;
+        build_client(declarations, account_id, store, recovery.as_ref()).await
+    }
 }
 
 /// What a native host passes to open an encrypted app's database: as
@@ -1238,13 +1255,6 @@ fn recovery_secret(args: &Value) -> Result<RecoverySecret, String> {
 }
 
 /// A recovery secret from its hexadecimal text.
-/// The account secret `options` carries, taken out of them: its text is
-/// wiped once read, and only the parsed secret (cleared on drop) is kept.
-fn take_account_secret(options: &mut Options) -> Result<Option<RecoverySecret>, String> {
-    let hex = jazz_e2ee::Zeroizing::new(options.device_account_secret.take());
-    hex.as_deref().map(secret).transpose()
-}
-
 fn secret(hex: &str) -> Result<RecoverySecret, String> {
     if hex.len() != 64 || !hex.is_ascii() {
         return Err("a recovery secret is 64 hexadecimal characters".to_owned());
