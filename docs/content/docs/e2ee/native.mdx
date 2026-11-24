@@ -76,6 +76,9 @@ let status = jazz.encryption().ready(std::time::Duration::from_secs(30)).await?;
 `MyStore` implements `jazz_e2ee_client::PrivateStore`. The closure runs once, on the client's thread.
 Turn on the `e2ee-client` feature of `jazz-app-support`.
 
+`JazzSession::open` returns `Error::EncryptedSessionUnsupported` for encrypted apps, even when
+starting signed out. Use `Jazz::open` with `Config::encryption` and your private store as shown above.
+
 **Swift**
 
 ```swift

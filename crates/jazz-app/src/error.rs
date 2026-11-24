@@ -93,6 +93,10 @@ pub enum Error {
     )]
     BundleMismatch { own: String, served: String },
 
+    /// Opening an app with end-to-end encryption through [`crate::JazzSession`].
+    #[error("opening an app with end-to-end encryption is not supported in JazzSession yet")]
+    EncryptedSessionUnsupported,
+
     /// An end-to-end encryption call failed. `code` is the runtime's
     /// (`approval-answered`, `no-challenge`, `approval-code-mismatch`,
     /// `device-no-longer-active`, `unsupported`, `store`, `closed`,
