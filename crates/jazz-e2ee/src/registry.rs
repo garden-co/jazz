@@ -85,9 +85,8 @@ fn allowed<T: MechanismImpl + ?Sized>(
 
 /// The registered mechanism an envelope names.
 fn routed<'r, T: MechanismImpl + ?Sized>(list: &'r [Arc<T>], envelope: &[u8]) -> Result<&'r T> {
-    let (id, version, _) = envelope::parse(envelope)?;
-    let id = core::str::from_utf8(id).map_err(|_| Error::InvalidCiphertext)?;
-    find(list, Mechanism::new(id, version))
+    let (mechanism, _) = envelope::parse(envelope)?;
+    find(list, mechanism)
         .map(|item| &**item)
         .ok_or(Error::UnsupportedFormat)
 }
@@ -315,8 +314,8 @@ impl Registry {
         let signer = self
             .signer(public.mechanism.as_mechanism())
             .map_err(|_| Error::UnsupportedFormat)?;
-        let same_mechanism = matches!(envelope::parse(signature), Ok((id, version, _))
-            if id == public.mechanism.id.as_bytes() && version == public.mechanism.version);
+        let same_mechanism = envelope::parse(signature)
+            .is_ok_and(|(mechanism, _)| mechanism == public.mechanism.as_mechanism());
         if !same_mechanism {
             return Ok(false);
         }

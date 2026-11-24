@@ -11,6 +11,7 @@
 //! (§3.2, §3.3), not here.
 
 use crate::context::CryptoContext;
+use crate::envelope::{self, Mechanism};
 
 use super::super::domain::AccountDomain;
 
@@ -163,9 +164,8 @@ row_id!(SpaceMember, SpaceRoot, SpaceSuccessor, SpaceDelivery);
 /// A root marker is an envelope of the mechanism the root's `mechanism` and
 /// `version` columns name.
 fn ensure_marker_mechanism(marker: &[u8], id: &str, version: u32) -> ProtocolResult<()> {
-    let matches = crate::envelope::parse(marker).is_ok_and(|(marker_id, marker_version, _)| {
-        marker_id == id.as_bytes() && marker_version == version
-    });
+    let matches = envelope::parse(marker)
+        .is_ok_and(|(mechanism, _)| mechanism == Mechanism::new(id, version));
     ensure(matches, "marker is not of the root's mechanism")
 }
 

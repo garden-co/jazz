@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 
 use zeroize::Zeroizing;
 
-use crate::envelope::{self, Mechanism};
+use crate::envelope;
 use crate::error::Error;
 use crate::registry::Registry;
 
@@ -615,9 +615,7 @@ fn sealed_to_non_derived<'k>(
     non_derived: &'k [NonDerivedSealingKey],
     row: &SpaceDelivery,
 ) -> Option<&'k NonDerivedSealingKey> {
-    let (id, version, _) = envelope::parse(&row.envelope).ok()?;
-    let id = core::str::from_utf8(id).ok()?;
-    let mechanism = Mechanism::new(id, version);
+    let (mechanism, _) = envelope::parse(&row.envelope).ok()?;
     non_derived
         .iter()
         .find(|record| record.is_selected_for(&row.recipient_account_epoch_id, mechanism))
