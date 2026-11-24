@@ -894,7 +894,7 @@ fn scopes(entries: &Entries) -> BTreeMap<&str, bool> {
 /// says whose entries they are: a version without declarations follows the
 /// nearest earlier ones, which can name a space table it dropped or renamed;
 /// a version's own entries name its own tables, which its entry checks
-/// ([`check_entry`]) refuse first, so for them this is a backstop.
+/// ([`check_version_entry`]) refuse first, so for them this is a backstop.
 pub fn check_space_tables(
     schema: &Schema,
     entries: &Entries,
