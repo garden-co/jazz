@@ -3465,3 +3465,41 @@ fn a_stream_into_a_new_self_space_row_publishes() {
     expected.sort_by_key(|(row, _)| *row);
     assert_eq!(secrets, expected);
 }
+
+/// Alice can write and read an ordinary column even when its name matches
+/// the equality-token prefix.
+#[tokio::test]
+async fn a_plain_column_with_the_token_prefix_is_projected() {
+    use jazz::tools::{
+        AppContext, ColumnType, JazzClient, SchemaBuilder, TableSchemaBuilder, Value,
+    };
+
+    use std::collections::HashMap;
+
+    let name = "__e2ee_eq_label";
+    let schema = SchemaBuilder::new()
+        .table(TableSchemaBuilder::new("notes").column(name, ColumnType::Text))
+        .build();
+    let alice = JazzClient::connect(AppContext::test(schema)).await.unwrap();
+    let (_, inserted, _) = alice
+        .insert(
+            "notes",
+            HashMap::from([(name.into(), Value::Text("plans".to_owned()))]),
+        )
+        .unwrap();
+    assert_eq!(inserted, vec![Value::Text("plans".to_owned())]);
+    for query in [Query::from("notes"), Query::from("notes").select([name])] {
+        let rows = alice
+            .query(query, jazz::tools::ReadTier::LocalFirst)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0]
+                .fields
+                .iter()
+                .any(|field| field.name == name && field.value == Value::Text("plans".to_owned()))
+        );
+    }
+    alice.shutdown().await.unwrap();
+}

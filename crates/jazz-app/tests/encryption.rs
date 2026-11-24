@@ -1266,36 +1266,6 @@ async fn native_insert_returns_omitted_encrypted_values() {
     app.stop().await;
 }
 
-/// Alice can write and read an ordinary column even when its name matches
-/// the equality-token prefix.
-#[tokio::test]
-async fn a_plain_column_with_the_token_prefix_is_projected() {
-    use jazz_app_support::jazz::tools::{
-        AppContext, ColumnType, JazzClient, SchemaBuilder, TableSchemaBuilder,
-    };
-
-    let name = "__e2ee_eq_label";
-    let schema = SchemaBuilder::new()
-        .table(TableSchemaBuilder::new("notes").column(name, ColumnType::Text))
-        .build();
-    let alice = JazzClient::connect(AppContext::test(schema)).await.unwrap();
-    let (_, inserted, _) = alice
-        .insert("notes", HashMap::from([(name.into(), text("plans"))]))
-        .unwrap();
-    assert_eq!(inserted, vec![text("plans")]);
-    for query in [Query::from("notes"), Query::from("notes").select([name])] {
-        let rows = alice.query(query, ReadTier::LocalFirst).await.unwrap();
-        assert_eq!(rows.len(), 1);
-        assert!(
-            rows[0]
-                .fields
-                .iter()
-                .any(|field| field.name == name && field.value == text("plans"))
-        );
-    }
-    alice.shutdown().await.unwrap();
-}
-
 /// Contract: a device account recovers from its own account key. A second
 /// device with the same key and a private store of its own is `active` at
 /// once, with no other device approving it, and reads what the first wrote
@@ -1343,58 +1313,6 @@ async fn a_device_account_recovers_a_new_device_from_its_own_key() {
 
     laptop.shutdown().await.unwrap();
     phone.shutdown().await.unwrap();
-    app.stop().await;
-}
-
-/// Contract: the start-up registration a device account's host runs
-/// (`recoveryRegister` with `automatic`) takes only the secret of the
-/// identity the device was opened as, like `start_device_account`: another
-/// identity's secret is refused with `recovery-root-mismatch` and registers
-/// no root, while the device's own key registers once.
-///
-/// ```text
-/// laptop (key K) ──ready──► root of K
-/// laptop ──recoveryRegister { secret: mallory's, automatic }──✗ recovery-root-mismatch
-/// laptop ──recoveryList──► still only the root of K
-/// ```
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_device_accounts_automatic_registration_refuses_another_identitys_secret() {
-    let app = App::start().await;
-    let laptop = app.device_of(DeviceKey::generate().unwrap()).await;
-    assert_eq!(
-        laptop
-            .encryption()
-            .ready(Duration::from_secs(30))
-            .await
-            .unwrap(),
-        "active"
-    );
-    let roots = || async {
-        laptop
-            .encryption()
-            .call("recoveryList", json!({}))
-            .await
-            .unwrap()
-    };
-    let before = roots().await;
-    assert_eq!(before.as_array().map(Vec::len), Some(1), "{before}");
-
-    // Not the laptop's key (that one is random): another identity's secret.
-    let mallory = jazz_e2ee_client::host::RecoverySecret::from_bytes([0x5f; 32]).format();
-    match laptop
-        .encryption()
-        .call(
-            "recoveryRegister",
-            json!({ "secret": mallory.as_str(), "automatic": true }),
-        )
-        .await
-    {
-        Err(Error::Encryption { code, .. }) => assert_eq!(code, "recovery-root-mismatch"),
-        other => panic!("expected a refusal, got {other:?}"),
-    }
-    assert_eq!(roots().await, before, "no root registered for it");
-
-    laptop.shutdown().await.unwrap();
     app.stop().await;
 }
 

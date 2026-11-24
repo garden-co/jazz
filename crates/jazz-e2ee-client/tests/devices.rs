@@ -1801,6 +1801,72 @@ fn lena_device(server: &Db, seed: u8, node: u8) -> (Device, AuthorSubject) {
     (attach(server, client, lena, node), lena)
 }
 
+/// Contract: the start-up registration a device account's host runs
+/// (`recoveryRegister` with `automatic`) takes only the secret of the
+/// identity the device was opened as, like `start_device_account`: another
+/// identity's secret is refused with `recovery-root-mismatch` and registers
+/// no root, while the device's own key registers once.
+///
+/// ```text
+/// laptop (key K) ──ready──► root of K
+/// laptop ──recoveryRegister { secret: mallory's, automatic }──✗ recovery-root-mismatch
+/// laptop ──recoveryList──► still only the root of K
+/// ```
+#[test]
+fn a_device_accounts_automatic_registration_refuses_another_identitys_secret() {
+    use jazz_e2ee_client::host::{RecoverySecret, bridge::JsStore, runtime};
+    use serde_json::json;
+
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (lena, _) = lena_device(&server, 0x4f, 1);
+        let own_secret = RecoverySecret::from_bytes([0x4f; 32]);
+        let client = Rc::new(lena.client);
+        let db = Rc::new(lena.db);
+        let runtime = runtime::Encryption::new(
+            runtime::Built {
+                spaces: json!({}),
+                client: Rc::clone(&client),
+                reports: Rc::default(),
+            },
+            Rc::new(JsStore::default()),
+            Rc::clone(&db),
+        );
+        assert_eq!(
+            drive(
+                &server,
+                &[&db],
+                client.start_device_account(&db, &own_secret)
+            )
+            .unwrap(),
+            AccountStatus::Active
+        );
+        let roots = || {
+            drive(
+                &server,
+                &[&db],
+                runtime.call("recoveryList".to_owned(), json!({})),
+            )
+            .unwrap()
+        };
+        let before = roots();
+        assert_eq!(before.as_array().map(Vec::len), Some(1), "{before}");
+
+        let mallory = RecoverySecret::from_bytes([0x5f; 32]).format();
+        let refusal = drive(
+            &server,
+            &[&db],
+            runtime.call(
+                "recoveryRegister".to_owned(),
+                json!({ "secret": mallory.as_str(), "automatic": true }),
+            ),
+        )
+        .unwrap_err();
+        assert!(refusal.starts_with("recovery-root-mismatch: "), "{refusal}");
+        assert_eq!(roots(), before, "no root registered for it");
+    });
+}
+
 /// Contract: a device account registers the recovery root its account
 /// secret derives when it starts (§2.9, "Register"), without the
 /// application asking: lena's first device starts, and a new device of hers
