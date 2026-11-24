@@ -405,132 +405,46 @@ mod plan {
         let _ = ready(Duration::from_secs(60)).await;
     }
 
-    /// The space a `key-pending` or `space-pending` failure names.
-    fn pending_space(error: &str) -> Option<(String, String)> {
-        let at = error
-            .find("key-pending: space ")
-            .map(|at| at + "key-pending: space ".len())
-            .or_else(|| {
-                error
-                    .find("space-pending: space ")
-                    .map(|at| at + "space-pending: space ".len())
-            })?;
-        let rest = &error[at..];
-        let end = rest
-            .find(|c: char| !(c.is_ascii_hexdigit() || c == '-' || c == '/'))
-            .unwrap_or(rest.len());
-        let (scope, identifier) = rest[..end].split_once('/')?;
-        Some((scope.to_owned(), identifier.to_owned()))
-    }
-
-    /// How long a write waits for a delivery before it fails `key-pending`.
-    const KEY_WAIT: Duration = Duration::from_secs(10);
-
-    /// Runs `operation`; if it fails for want of a key, makes the space ready
-    /// (the device's own space, or a member's delivery waited for) and tries
-    /// again within [`KEY_WAIT`]. The failed write stored nothing, so trying
-    /// again repeats nothing.
     pub(crate) async fn retry_after_key<T, E: From<jazz::tools::JazzError>>(
         mut operation: impl AsyncFnMut() -> std::result::Result<T, jazz::tools::JazzError>,
         preparation_error: impl Fn(Error) -> E,
     ) -> Result<T, E> {
-        let first = match operation().await {
-            Err(error) => error,
+        use host::WriteRetry;
+        use jazz::e2ee::E2eeRefusal;
+        use jazz::tools::JazzError;
+
+        let mut error = match operation().await {
             Ok(value) => return Ok(value),
+            Err(error) => error,
         };
-        let Some(runtime) = DEVICE.with(|device| device.borrow().clone()) else {
-            return Err(first.into());
-        };
-        let Some((scope_id, identifier)) = pending_space(&first.to_string()) else {
-            return Err(first.into());
-        };
-        let deadline = tokio::time::Instant::now() + KEY_WAIT;
-        let mut space = jazz::e2ee::SpaceAddress {
-            scope_id,
-            identifier,
-        };
-        let mut error = first;
+        let deadline = host::Encryption::write_deadline(Duration::ZERO);
+        let mut repeated = false;
+        let mut last = false;
         loop {
-            // Let this preparation finish even if the waiting write runs
-            // out of time. It can hold a serializable transaction open.
-            let preparing = Rc::clone(&runtime);
-            let at = space.clone();
-            let preparation = tokio::task::spawn_local(async move {
-                polled(
-                    &preparing,
-                    preparing.prepare_host_write(&at, Some(deadline.into_std())),
-                )
+            let JazzError::KeyRefusal { refusal, original } = error else {
+                return Err(error.into());
+            };
+            let Some(runtime) = DEVICE
+                .with(|device| device.borrow().clone())
+                .filter(|_| !last)
+            else {
+                return Err((*original).into());
+            };
+            let space = match refusal {
+                E2eeRefusal::NeedsKey { space } | E2eeRefusal::SpacePending { space } => space,
+            };
+            let decision = polled(&runtime, runtime.retry_write(&space, deadline, repeated))
                 .await
-            });
-            let Ok(result) = tokio::time::timeout_at(deadline, preparation).await else {
-                break;
-            };
-            let ready = match result
-                .map_err(|error| preparation_error(Error::Panicked(error.to_string())))?
-            {
-                Ok(ready) => ready,
-                Err(reason) => {
-                    if runtime
-                        .client
-                        .retry_with_current_key(&space, &reason)
-                        .map_err(|err| preparation_error(failure(err.to_string())))?
-                    {
-                        return operation().await.map_err(Into::into);
-                    }
-                    return Err(preparation_error(failure(reason)));
-                }
-            };
-            if ready {
-                match operation().await {
-                    Ok(value) => return Ok(value),
-                    Err(next) => {
-                        let Some((scope_id, identifier)) = pending_space(&next.to_string()) else {
-                            return Err(next.into());
-                        };
-                        space = jazz::e2ee::SpaceAddress {
-                            scope_id,
-                            identifier,
-                        };
-                        error = next;
-                    }
-                }
+                .map_err(|reason| preparation_error(failure(reason)))?;
+            if decision == WriteRetry::Stop {
+                return Err((*original).into());
             }
-            tokio::time::sleep_until(
-                deadline.min(tokio::time::Instant::now() + Duration::from_millis(200)),
-            )
-            .await;
-            if tokio::time::Instant::now() >= deadline {
-                break;
+            last = decision == WriteRetry::Last;
+            repeated = true;
+            match operation().await {
+                Ok(value) => return Ok(value),
+                Err(next) => error = next,
             }
-        }
-        if runtime
-            .client
-            .retry_with_current_key(&space, "rotation undecided at the write deadline")
-            .map_err(|err| preparation_error(failure(err.to_string())))?
-        {
-            return operation().await.map_err(Into::into);
-        }
-        Err(error.into())
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        /// Contract: the space a key failure names is read from the core's
-        /// message, and nothing else is taken for one.
-        #[test]
-        fn a_key_failure_names_its_space() {
-            let scope = "0190c3b6-1111-7000-8000-000000000001";
-            let id = "0190c3b6-2222-7000-8000-000000000002";
-            let message = format!("write: key-pending: space {scope}/{id} has no held key");
-            assert_eq!(
-                pending_space(&message),
-                Some((scope.to_owned(), id.to_owned()))
-            );
-            let message = format!("space-pending: space {scope}/{id} has no valid root");
-            assert!(pending_space(&message).is_some());
-            assert_eq!(pending_space("permission denied"), None);
         }
     }
 }

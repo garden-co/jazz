@@ -723,6 +723,30 @@ async fn typed_bindings_read_and_write_an_encrypted_column() {
     app.stop().await;
 }
 
+/// Alice's application exception can quote a key refusal. Only a typed
+/// refusal from the encryption hooks lets her device repeat the write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_quoting_a_key_refusal_is_returned_unchanged() {
+    let app = App::start().await;
+    let alice = app.device().await;
+    alice.with_client(|_| async {
+        let reason = "key-pending: space aa/bb is quoted by the application";
+        let mut attempts = 0;
+        let error = jazz_app_support::with_key_wait(|| {
+            attempts += 1;
+            Err::<(), _>(jazz::tools::JazzError::Write(reason.to_owned()))
+        }).await.unwrap_err();
+        assert!(
+            matches!(error, Error::Jazz(jazz::tools::JazzError::Write(ref text)) if text == reason),
+            "{error:?}"
+        );
+        assert_eq!(attempts, 1);
+        Ok(())
+    }).await.unwrap();
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// The first typed stream prepares the project key before polling its source.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn typed_streams_seal_siblings_and_refuse_an_indexed_text_target() {

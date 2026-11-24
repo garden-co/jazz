@@ -447,17 +447,18 @@ An answer is ok with its JSON, or not ok with `conflict` (the document's revisio
 Use `encryption_call(op, args_json)` for every operation. In C, pass `"encryptionCall"` to
 `jazz_call` with `{"op", "args"?}`.
 
-| Operations | Purpose |
-| --- | --- |
-| `waitUntilReady`, `state`, `reports` | Wait for account startup, inspect the loop, or drain pending reports as JSON objects. `waitUntilReady` takes an optional non-negative integer `timeoutMs` (default 30,000). |
-| `ready`, `resetAccount` | Verify the account on demand, or reset it when the app enables account reset. |
-| `deviceId`, `devices` | Read this device or list the account's devices. |
-| `challenge`, `answer`, `approvalCode`, `approve` | Approve a device after comparing codes. |
-| `remove`, `requestRemoval`, `completeRemovals` | Remove a device or process removal requests. |
-| `recoveryCreate`, `recoveryRegister`, `recoveryRestore`, `recoveryRetire`, `recoveryList` | Manage recovery. Register and restore accept a 24-word `phrase` or a 64-character hexadecimal `secret`. |
-| `keysDeliver`, `keysRotate`, `keysRecoverRotation` | Deliver keys or rotate a space's key. |
-| `spaceRow` | Resolve the address of a space. Pass its `table` and row `id`, then use the returned `scopeId` and `identifier` in the member row. |
-| `prepareSpace`, `retryWithCurrentKey` | Prepare a space for a write or retry the write with the current key. |
+| Operations                                                                                | Purpose                                                                                                                                                                     |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `waitUntilReady`, `state`, `reports`                                                      | Wait for account startup, inspect the loop, or drain pending reports as JSON objects. `waitUntilReady` takes an optional non-negative integer `timeoutMs` (default 30,000). |
+| `ready`, `resetAccount`                                                                   | Verify the account on demand, or reset it when the app enables account reset.                                                                                               |
+| `deviceId`, `devices`                                                                     | Read this device or list the account's devices.                                                                                                                             |
+| `challenge`, `answer`, `approvalCode`, `approve`                                          | Approve a device after comparing codes.                                                                                                                                     |
+| `remove`, `requestRemoval`, `completeRemovals`                                            | Remove a device or process removal requests.                                                                                                                                |
+| `recoveryCreate`, `recoveryRegister`, `recoveryRestore`, `recoveryRetire`, `recoveryList` | Manage recovery. Register and restore accept a 24-word `phrase` or a 64-character hexadecimal `secret`.                                                                     |
+| `keysDeliver`, `keysRotate`, `keysRecoverRotation`                                        | Deliver keys or rotate a space's key.                                                                                                                                       |
+| `spaceRow`                                                                                | Resolve the address of a space. Pass its `table` and row `id`, then use the returned `scopeId` and `identifier` in the member row.                                          |
+| `prepareSpace`, `retryWithCurrentKey`                                                     | Prepare a space for a write or retry the write with the current key.                                                                                                        |
+| `retryWrite`                                                                              | Wait for the refused write’s space. Returns `"retry"`, `"last"` (one attempt with the current key), or `"stop"`.                                                            |
 
 An encryption failure carries a `code` field. Store and database failures have the I/O kind. Other
 encryption failures have the refusal kind. A session (`jazz_session_open`) takes no store yet.

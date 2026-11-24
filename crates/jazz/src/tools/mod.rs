@@ -155,6 +155,14 @@ pub enum JazzError {
     #[error("Write error: {0}")]
     Write(String),
 
+    /// An encryption hook refused the write before it staged anything.
+    #[cfg(feature = "e2ee-client")]
+    #[error("{original}")]
+    KeyRefusal {
+        refusal: crate::e2ee::E2eeRefusal,
+        original: Box<JazzError>,
+    },
+
     #[error("Sync error: {0}")]
     Sync(String),
 
@@ -200,6 +208,10 @@ impl JazzError {
     /// another reason. For `jazz-app-support`'s mutation-error reporting.
     #[doc(hidden)]
     pub fn is_transaction_rejection(&self) -> bool {
+        #[cfg(feature = "e2ee-client")]
+        if let Self::KeyRefusal { original, .. } = self {
+            return original.is_transaction_rejection();
+        }
         matches!(self, Self::WriteRejected { .. })
             || matches!(self, Self::Sync(message) | Self::Write(message) if message.starts_with(REJECTED_BEFORE))
     }

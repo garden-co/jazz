@@ -1,93 +1,57 @@
-/**
- * A write to an encrypted space whose key this device does not hold yet
- * fails `key-pending` (or `space-pending`, while the space's first key is
- * being made). The device's own space is made ready, and a member's key is
- * waited for within a deadline (the first holder's delivery, or the pass
- * the runtime runs at natural moments); then the write is tried again. The
- * failed write stored nothing, so trying it again repeats nothing.
- */
-
-/** How long a write waits for a delivery before it fails `key-pending`. */
-export const KEY_WAIT_MS = 10_000;
-
-const PENDING = /(?:key-pending|space-pending): space ([0-9a-f-]+)\/([0-9a-f-]+)/;
-
 type Space = { scopeId: string; identifier: string };
+type WriteRetry = "retry" | "last" | "stop";
 
-/** The space a `key-pending` or `space-pending` failure names. */
-export function pendingSpace(error: unknown): { scopeId: string; identifier: string } | undefined {
-  const message = error instanceof Error ? error.message : undefined;
-  const found = message === undefined ? null : PENDING.exec(message);
-  return found ? { scopeId: found[1]!, identifier: found[2]! } : undefined;
+export function pendingSpace(error: unknown): Space | undefined {
+  if (
+    !(error instanceof Error) ||
+    !("reason" in error) ||
+    (error.reason !== "key-pending" && error.reason !== "space-pending") ||
+    !("space" in error)
+  ) {
+    return undefined;
+  }
+  const space = error.space;
+  if (
+    !space ||
+    typeof space !== "object" ||
+    !("scopeId" in space) ||
+    typeof space.scopeId !== "string" ||
+    !("identifier" in space) ||
+    typeof space.identifier !== "string"
+  )
+    return undefined;
+  return { scopeId: space.scopeId, identifier: space.identifier };
 }
 
-/**
- * Runs `operation`; if it fails for want of a key, makes the space ready
- * with `prepare` (true once the write can be tried again) and tries again,
- * until `waitMs` has passed.
- */
+/** Keep immediate writes synchronous. Rust decides whether and when to repeat a refusal. */
 export function retryAfterKey<T>(
   operation: () => T,
-  prepare: (space: Space, deadline?: number) => Promise<boolean>,
-  waitMs = KEY_WAIT_MS,
-  retryWithCurrentKey?: (space: Space, failure: string) => Promise<boolean>,
+  decide: (space: Space, startedAt: number, repeated: boolean) => Promise<WriteRetry>,
 ): T | Promise<T> {
   try {
     return operation();
   } catch (first) {
-    const initialSpace = pendingSpace(first);
-    if (!initialSpace) throw first;
+    const initial = pendingSpace(first);
+    if (!initial) throw first;
+    const startedAt = Date.now();
     return (async () => {
-      let space = initialSpace;
-      const deadline = Date.now() + waitMs;
-      let error: unknown = first;
-      do {
-        // Making the space ready is bounded by the same window.
-        const left = Math.max(0, deadline - Date.now());
-        let ready: boolean;
+      let space = initial;
+      let error = first;
+      let repeated = false;
+      for (;;) {
+        const decision = await decide(space, startedAt, repeated);
+        if (decision === "last") return operation();
+        if (decision !== "retry") throw error;
         try {
-          ready = await prepareWithin(
-            retryWithCurrentKey ? prepare(space, deadline) : prepare(space),
-            left,
-          );
-        } catch (failure) {
-          if (await retryWithCurrentKey?.(space, String(failure))) return operation();
-          throw failure;
+          return operation();
+        } catch (next) {
+          const address = pendingSpace(next);
+          if (!address) throw next;
+          space = address;
+          error = next;
+          repeated = true;
         }
-        if (ready) {
-          try {
-            return operation();
-          } catch (next) {
-            const nextSpace = pendingSpace(next);
-            if (!nextSpace) throw next;
-            space = nextSpace;
-            error = next;
-          }
-        }
-        const delay = Math.min(200, deadline - Date.now());
-        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
-      } while (Date.now() < deadline);
-      if (await retryWithCurrentKey?.(space, "rotation undecided at the write deadline")) {
-        return operation();
       }
-      throw error;
     })();
   }
-}
-
-/** A ready space, or `false` once the wait expires. Preparation failures propagate. */
-function prepareWithin(work: Promise<boolean>, ms: number): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => resolve(false), ms);
-    work.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
 }

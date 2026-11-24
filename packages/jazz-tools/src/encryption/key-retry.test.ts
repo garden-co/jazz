@@ -1,78 +1,62 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { retryAfterKey } from "./key-retry.js";
 
-const pending = () => new Error("NotObserved: key-pending: space aaaa-1/bbbb-2 has no held key");
+const space = { scopeId: "scope", identifier: "project" };
+const pending = (reason = "key-pending", address = space) =>
+  Object.assign(new Error("waiting"), { reason, space: address });
 
 describe("retryAfterKey", () => {
   it("runs a write that needs no key once", () => {
-    let calls = 0;
-    expect(
-      retryAfterKey(
-        () => ++calls,
-        async () => true,
-      ),
-    ).toBe(1);
+    const write = vi.fn(() => 1);
+    const decide = vi.fn();
+    expect(retryAfterKey(write, decide)).toBe(1);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(decide).not.toHaveBeenCalled();
   });
 
-  it("waits for the key, then tries again and succeeds", async () => {
-    let calls = 0;
-    let prepared = 0;
-    const result = await retryAfterKey(
-      () => {
-        if (++calls < 3) throw pending();
-        return "written";
-      },
-      async (space) => {
-        expect(space).toEqual({ scopeId: "aaaa-1", identifier: "bbbb-2" });
-        return ++prepared >= 2;
-      },
-      5_000,
-    );
-    expect(result).toBe("written");
-    expect(prepared).toBeGreaterThanOrEqual(2);
+  it("waits for each named key in the same window, then succeeds", async () => {
+    const second = { ...space, identifier: "another" };
+    const write = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw pending();
+      })
+      .mockImplementationOnce(() => {
+        throw pending("space-pending", second);
+      })
+      .mockReturnValue("written");
+    const decide = vi.fn<Parameters<typeof retryAfterKey>[1]>(async () => "retry");
+    await expect(retryAfterKey(write, decide)).resolves.toBe("written");
+    const start = decide.mock.calls[0]?.[1];
+    expect(decide.mock.calls).toEqual([
+      [space, expect.any(Number), false],
+      [second, start, true],
+    ]);
   });
 
-  it("never retries a refusal that is not about a key", () => {
-    let prepared = 0;
+  it("never retries an unrelated error even when its text names a pending key", () => {
+    const error = new Error("WriteRejected: key-pending: space aaaa/bbbb");
+    const decide = vi.fn();
     expect(() =>
-      retryAfterKey(
-        () => {
-          throw new Error("WriteRejected: authorization_denied: INSERT policy denied");
-        },
-        async () => {
-          prepared += 1;
-          return true;
-        },
-      ),
-    ).toThrow(/authorization_denied/);
-    expect(prepared).toBe(0);
+      retryAfterKey(() => {
+        throw error;
+      }, decide),
+    ).toThrow(error);
+    expect(decide).not.toHaveBeenCalled();
   });
 
-  it("gives up at the deadline with the key-pending error", async () => {
-    const started = Date.now();
-    await expect(
-      retryAfterKey(
-        () => {
-          throw pending();
-        },
-        async () => false,
-        400,
-      ),
-    ).rejects.toThrow(/key-pending/);
-    expect(Date.now() - started).toBeLessThan(2_000);
-  });
-
-  it("is bounded by the window even when making the space ready never answers", async () => {
-    const started = Date.now();
-    await expect(
-      retryAfterKey(
-        () => {
-          throw pending();
-        },
-        () => new Promise<boolean>(() => undefined),
-        400,
-      ),
-    ).rejects.toThrow(/key-pending/);
-    expect(Date.now() - started).toBeLessThan(2_000);
+  it("returns the last key refusal when the runtime stops waiting", async () => {
+    const last = pending("space-pending");
+    const write = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw pending();
+      })
+      .mockImplementation(() => {
+        throw last;
+      });
+    const decide = vi.fn().mockResolvedValueOnce("retry").mockResolvedValueOnce("stop");
+    await expect(retryAfterKey(write, decide)).rejects.toBe(last);
+    expect(write).toHaveBeenCalledTimes(2);
   });
 });
