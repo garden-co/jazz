@@ -8,7 +8,8 @@ name: Release artifacts
 #                      NPM-SHA256SUMS, rn-packages.json
 #   release-languages  libjazz_ffi-<platform>.tar.gz, jazz-ffi-bindings.tar.gz,
 #                      jazz-kotlin-<v>.jar, jazz-kotlin-android-<v>.aar,
-#                      libjazz_ffi-source.txt, SHA256SUMS-languages
+#                      libjazz_ffi-source.txt, SHA256SUMS-languages, and once
+#                      jazz-kotlin is Kotlin Multiplatform jazz-kotlin-maven-<v>.zip
 #   release-maven      the tools/jazz tree of a local Maven repository, signed
 #                      with a throwaway key (publish re-signs it)
 #   release-swift      JazzFFI.xcframework.zip, JazzFFI.xcframework.zip.checksum
@@ -216,7 +217,15 @@ jobs:
           test -s "release-languages/jazz-kotlin-${VERSION}.jar"
           test -s "release-languages/jazz-kotlin-android-${VERSION}.aar"
           # Two Gradle runs build these: what the GitHub release serves must be what the Maven tree publishes.
-          cmp "release-languages/jazz-kotlin-${VERSION}.jar" "release-maven/jazz-kotlin/${VERSION}/jazz-kotlin-${VERSION}.jar"
+          # Kotlin Multiplatform publishes the JVM jar as jazz-kotlin-jvm (the root jazz-kotlin is metadata).
+          jvm=jazz-kotlin
+          [ -d "release-maven/jazz-kotlin-jvm/${VERSION}" ] && jvm=jazz-kotlin-jvm
+          cmp "release-languages/jazz-kotlin-${VERSION}.jar" "release-maven/${jvm}/${VERSION}/${jvm}-${VERSION}.jar"
+          # With Kotlin Multiplatform, the release also ships the repository zip.
+          if [ "${jvm}" = jazz-kotlin-jvm ]; then
+            grep -q " jazz-kotlin-maven-${VERSION}.zip\$" release-languages/SHA256SUMS-languages ||
+              { echo "::error::jazz-kotlin is Kotlin Multiplatform but release-languages has no jazz-kotlin-maven-${VERSION}.zip"; exit 1; }
+          fi
           cmp "release-languages/jazz-kotlin-android-${VERSION}.aar" "release-maven/jazz-kotlin-android/${VERSION}/jazz-kotlin-android-${VERSION}.aar"
           (cd release-swift && echo "$(cat JazzFFI.xcframework.zip.checksum)  JazzFFI.xcframework.zip" | sha256sum -c -)
           grep -q "releases/download/v${VERSION}/JazzFFI.xcframework.zip" release-swift-mirror/Package.swift
