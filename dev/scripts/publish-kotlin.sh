@@ -50,14 +50,32 @@ source dev/scripts/kotlin-toolchain.sh
 gradle --version | grep -q '^Gradle 8\.14\.3$' || { gradle --version >&2; echo "not the pinned Gradle 8.14.3" >&2; exit 1; }
 
 m2="$HOME/.m2/repository/tools/jazz"
-rm -rf "$m2/jazz-kotlin/$version" "$m2/jazz-kotlin-android/$version"
+# Kotlin Multiplatform: one module, published as the root jazz-kotlin (Gradle
+# module metadata), jazz-kotlin-jvm (the jar) and jazz-kotlin-android (the AAR).
+kmp=false
+grep -q 'kotlin("multiplatform")' packages/jazz-kotlin/build.gradle.kts && kmp=true
+rm -rf "$m2/jazz-kotlin/$version" "$m2/jazz-kotlin-jvm/$version" "$m2/jazz-kotlin-android/$version"
 
-jvm=(gradle --no-daemon --console=plain -p packages/jazz-kotlin -PcargoProfile=release -PnativeLibs="$natives")
-[ -n "${KOTLIN_JVM_BINDINGS:-}" ] && jvm+=(-PuniffiBindings="$(cd "$KOTLIN_JVM_BINDINGS" && pwd)")
-tasks=(publishToMavenLocal)
-[ "$mode" = central ] && tasks+=(publishToMavenCentral)
-"${jvm[@]}" clean "${tasks[@]}"
-KOTLIN_ANDROID_TASKS="${tasks[*]}" CARGO_PROFILE=release-mobile bash dev/scripts/test-kotlin-android.sh
+if [ "$kmp" = true ]; then
+  # One Gradle run, in test-kotlin-android.sh (it brings the SDK and the
+  # prebuilt-jniLibs and bindings props); the JVM props reach it as
+  # ORG_GRADLE_PROJECT_*. Into the local Maven repository, as before.
+  tasks=(publishAllPublicationsToJazzLocalRepository)
+  [ "$mode" = central ] && tasks+=(publishToMavenCentral)
+  export ORG_GRADLE_PROJECT_jazzLocalRepo="$HOME/.m2/repository"
+  export ORG_GRADLE_PROJECT_nativeLibs="$natives" ORG_GRADLE_PROJECT_cargoProfile=release
+  [ -n "${KOTLIN_JVM_BINDINGS:-}" ] && export ORG_GRADLE_PROJECT_uniffiBindings="$(cd "$KOTLIN_JVM_BINDINGS" && pwd)"
+  KOTLIN_ANDROID_TASKS="${tasks[*]}" CARGO_PROFILE=release-mobile bash dev/scripts/test-kotlin-android.sh
+else
+  jvm=(gradle --no-daemon --console=plain -p packages/jazz-kotlin -PcargoProfile=release -PnativeLibs="$natives")
+  [ -n "${KOTLIN_JVM_BINDINGS:-}" ] && jvm+=(-PuniffiBindings="$(cd "$KOTLIN_JVM_BINDINGS" && pwd)")
+  tasks=(publishToMavenLocal)
+  [ "$mode" = central ] && tasks+=(publishToMavenCentral)
+  "${jvm[@]}" clean "${tasks[@]}"
+  KOTLIN_ANDROID_TASKS="${tasks[*]}" CARGO_PROFILE=release-mobile bash dev/scripts/test-kotlin-android.sh
+fi
+jvm_artifact=jazz-kotlin
+[ "$kmp" = true ] && jvm_artifact=jazz-kotlin-jvm
 
 # What Central will get: every file, signed by the key; the jar with every
 # platform's library, the AAR with every ABI's; POMs Central accepts.
@@ -67,40 +85,55 @@ printf '%s\n' "$ORG_GRADLE_PROJECT_signingInMemoryKey" | gpg --homedir "$gnupg" 
   printf '%s\n' "$ORG_GRADLE_PROJECT_signingInMemoryKey" | gpg --homedir "$gnupg" --batch --quiet --pinentry-mode loopback \
     --passphrase "${ORG_GRADLE_PROJECT_signingInMemoryKeyPassword:-}" --import
 fail() { echo "$*" >&2; exit 1; }
-for artifact in jazz-kotlin jazz-kotlin-android; do
+artifacts=(jazz-kotlin jazz-kotlin-android)
+[ "$kmp" = true ] && artifacts=(jazz-kotlin jazz-kotlin-jvm jazz-kotlin-android)
+for artifact in "${artifacts[@]}"; do
   dir="$m2/$artifact/$version"
   main=jar
   [ "$artifact" = jazz-kotlin-android ] && main=aar
+  # The KMP root is metadata: no JNA dependency, no generated bindings.
+  root=false
+  [ "$kmp" = true ] && [ "$artifact" = jazz-kotlin ] && root=true
   for file in "$artifact-$version.$main" "$artifact-$version-sources.jar" "$artifact-$version-javadoc.jar" \
     "$artifact-$version.pom" "$artifact-$version.module"; do
+    # The KMP root needs only its POM and Gradle module metadata; whatever
+    # else it publishes is checked too.
+    if [ "$root" = true ] && [ ! -e "$dir/$file" ]; then
+      case "$file" in *.pom | *.module) ;; *) continue ;; esac
+    fi
     [ -s "$dir/$file" ] || fail "$artifact lacks $file"
     gpg --homedir "$gnupg" --batch --quiet --verify "$dir/$file.asc" "$dir/$file" 2>/dev/null ||
       fail "$file's signature ($file.asc) doesn't verify"
   done
   pom="$dir/$artifact-$version.pom"
-  for field in "<name>$artifact</name>" "<description>" "<url>https://jazz.tools</url>" "<name>MIT License</name>" \
+  # Kotlin Multiplatform names every publication's POM after the project.
+  name="$artifact"
+  [ "$kmp" = true ] && name=jazz-kotlin
+  grep -qF "<name>$artifact</name>" "$pom" || grep -qF "<name>$name</name>" "$pom" || fail "$artifact's POM lacks <name>$artifact</name>"
+  for field in "<description>" "<url>https://jazz.tools</url>" "<name>MIT License</name>" \
     "<developer>" "<url>https://github.com/garden-co/jazz</url>" "<connection>scm:git:"; do
     grep -qF "$field" "$pom" || fail "$artifact's POM lacks $field"
   done
+  [ "$root" = true ] && continue
   # JNA is `implementation`: a runtime dependency, which consumers still get.
   tr -d ' \n' <"$pom" | grep -q '<artifactId>jna</artifactId><version>5.17.0</version>\(<type>aar</type>\)\?<scope>runtime</scope>' ||
     fail "$artifact's POM lacks JNA 5.17.0 at runtime scope"
   bash dev/scripts/check-kotlin-sources-jar.sh "$dir/$artifact-$version-sources.jar"
 done
-listing="$(unzip -l "$m2/jazz-kotlin/$version/jazz-kotlin-$version.jar")"
+listing="$(unzip -l "$m2/$jvm_artifact/$version/$jvm_artifact-$version.jar")"
 for platform in "${platforms[@]}"; do
   # The library itself: a directory entry alone would match "$platform/".
   grep -Eq " $platform/(lib)?jazz_ffi\.(so|dylib|dll)\$" <<<"$listing" ||
-    fail "jazz-kotlin-$version.jar lacks $platform's libjazz_ffi"
+    fail "$jvm_artifact-$version.jar lacks $platform's libjazz_ffi"
 done
-grep -q "uniffi/jazz_ffi/" <<<"$listing" || fail "jazz-kotlin-$version.jar lacks the UniFFI bindings"
+grep -q "uniffi/jazz_ffi/" <<<"$listing" || fail "$jvm_artifact-$version.jar lacks the UniFFI bindings"
 listing="$(unzip -l "$m2/jazz-kotlin-android/$version/jazz-kotlin-android-$version.aar")"
 for abi in arm64-v8a armeabi-v7a x86_64; do
   grep -q "jni/$abi/libjazz_ffi.so" <<<"$listing" || fail "jazz-kotlin-android-$version.aar lacks jni/$abi/libjazz_ffi.so"
 done
 grep -q '<type>aar</type>' "$m2/jazz-kotlin-android/$version/jazz-kotlin-android-$version.pom" ||
   fail "jazz-kotlin-android's POM must take JNA's AAR"
-echo "Checked tools.jazz:jazz-kotlin:$version and tools.jazz:jazz-kotlin-android:$version in $m2"
+echo "Checked tools.jazz:{${artifacts[*]}}:$version in $m2"
 
 if [ "$mode" = central ]; then
   echo "Uploaded both to the Central Portal: check the two deployments there and press Publish."

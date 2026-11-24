@@ -122,6 +122,53 @@ module: the Android Gradle plugin refuses a local AAR in a module that builds an
 Apply `kotlin("plugin.serialization")` for the generated bindings, and keep `tools.jazz.**`,
 `uniffi.jazz_ffi.**` and `com.sun.jna.**` if you minify.
 
+### Or: one dependency for the JVM and Android (experimental)
+
+From `2.0.0-beta.2`, the GitHub release also has `jazz-kotlin` as a Kotlin Multiplatform library
+for the JVM and Android, in a zipped Maven repository: `jazz-kotlin-maven-<version>.zip`. With
+Gradle, one dependency then works in a JVM project and in an Android one, and brings its own
+dependencies. It's new, like the rest of Kotlin support: the jar and the AAR above stay available.
+It has no Kotlin/Native or iOS target.
+
+Download the zip beside your `settings.gradle.kts`, check it against `SHA256SUMS-languages`, and
+unzip it:
+
+```bash title="Kotlin Multiplatform"
+VERSION=2.0.0-beta.2
+RELEASE="https://github.com/garden-co/jazz/releases/download/v$VERSION"
+FILE="jazz-kotlin-maven-$VERSION.zip"
+curl -fL -o "$FILE" "$RELEASE/$FILE" &&
+  curl -fL -o SHA256SUMS-languages "$RELEASE/SHA256SUMS-languages" &&
+  grep " $FILE\$" SHA256SUMS-languages | sha256sum -c - &&
+  unzip -q -o "$FILE" -d jazz-maven
+```
+
+Go on only if that prints `OK`. With the GitHub CLI, you can also check that our release workflow
+built it: `gh attestation verify "$FILE" --repo garden-co/jazz`. Then add the unzipped directory
+as a repository for `tools.jazz`
+only, and depend on `jazz-kotlin`:
+
+```kotlin title="build.gradle.kts"
+repositories {
+    exclusiveContent {
+        forRepository { maven { url = uri(rootDir.resolve("jazz-maven")) } }
+        filter { includeGroup("tools.jazz") }
+    }
+    mavenCentral() // for its dependencies
+}
+
+dependencies {
+    implementation("tools.jazz:jazz-kotlin:2.0.0-beta.2")
+}
+```
+
+Gradle picks `jazz-kotlin-jvm` in a JVM project and `jazz-kotlin-android` in an Android one,
+with the right JNA for each. The JVM variant has the same `libjazz_ffi`s inside as the jar above,
+and the Android one the same ABIs as the AAR. On Android, keep `google()` in your repositories, and
+apply `kotlin("plugin.serialization")` for the generated bindings. If your build declares its
+repositories in `settings.gradle.kts` (`dependencyResolutionManagement`), put the
+`exclusiveContent` block there, with `settingsDir` in place of `rootDir`.
+
 To build from source: in a Jazz checkout,
 `cargo build -p jazz-ffi --release`, then either build the jar with Gradle in `packages/jazz-kotlin`
 (it bundles your platform's library) or set `-Djna.library.path` to `target/release`.
