@@ -841,7 +841,7 @@ impl Core {
             let edits = whole_pages(&client, &name, id, edits).await?;
             let committed = client
                 .update_with_edits(&name, id, cells, edits)
-                .map_err(|error| match error {
+                .map_err(|error| match error.into_original() {
                     // As jazz-app-support reports an edit of a row this client
                     // cannot see.
                     jazz_app_support::jazz::tools::JazzError::Write(message)

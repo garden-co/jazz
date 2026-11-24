@@ -703,7 +703,22 @@ impl Encryption {
         self: &Rc<Self>,
         space: &SpaceAddress,
         deadline: web_time::Instant,
+        repeated: bool,
+    ) -> Result<WriteRetry, String> {
+        self.retry_write_with(space, deadline, repeated, |preparation| {
+            self.preparations.submit(preparation)
+        })
+        .await
+    }
+
+    /// Run each preparation on the caller's executor. Once started it must
+    /// finish even when the write times out.
+    pub async fn retry_write_with(
+        self: &Rc<Self>,
+        space: &SpaceAddress,
+        deadline: web_time::Instant,
         mut repeated: bool,
+        submit: impl Fn(LocalBoxFuture<'static, ()>),
     ) -> Result<WriteRetry, String> {
         let remaining = || deadline.saturating_duration_since(web_time::Instant::now());
         let fallback = |reason: &str| {
@@ -725,10 +740,10 @@ impl Encryption {
             let runtime = self.clone();
             let address = space.clone();
             let (send, answer) = futures::channel::oneshot::channel();
-            self.preparations.submit(async move {
+            submit(Box::pin(async move {
                 let result = runtime.prepare_host_write(&address, Some(deadline)).await;
                 let _ = send.send(result);
-            });
+            }));
             match within(answer, remaining()).await {
                 Some(Ok(Ok(true))) => return Ok(WriteRetry::Retry),
                 Some(Ok(Ok(false))) => repeated = true,
@@ -879,6 +894,33 @@ impl Encryption {
             self.stop();
             return Ok(Value::Null);
         }
+        let text = |name: &str| -> Result<String, String> {
+            args.get(name)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| format!("`{name}` is missing"))
+        };
+        match op {
+            "state" => return Ok(self.state()),
+            "spaces" => return Ok(self.spaces.clone()),
+            "useSpace" => {
+                let open = args
+                    .get("open")
+                    .and_then(Value::as_bool)
+                    .ok_or("`open` is missing")?;
+                self.use_space(open, text("table")?, text("id")?);
+                return Ok(Value::Null);
+            }
+            "setOnline" => {
+                let online = args
+                    .get("online")
+                    .and_then(Value::as_bool)
+                    .ok_or("`online` is missing")?;
+                self.set_online(online);
+                return Ok(Value::Null);
+            }
+            _ => {}
+        }
         self.client.ensure_open().map_err(describe)?;
         if op == "reportsForListener" {
             // Flush and take the queue before sampling the held reports. The
@@ -902,44 +944,14 @@ impl Encryption {
         // A space's row is a local catalogue lookup: it never waits for the
         // loop's work.
         let _turn = match op {
-            "keysDeliver"
-            | "retryWrite"
-            | "prepareSpace"
-            | "retryWithCurrentKey"
-            | "spaceRow"
-            | "state"
-            | "spaces"
-            | "useSpace"
-            | "setOnline" => None,
+            "keysDeliver" | "retryWrite" | "prepareSpace" | "retryWithCurrentKey" | "spaceRow" => {
+                None
+            }
             _ => Some(self.gate.enter().await),
         };
         let (client, db) = (&self.client, &*self.db);
         client.ensure_open().map_err(describe)?;
-        let text = |name: &str| -> Result<String, String> {
-            args.get(name)
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| format!("`{name}` is missing"))
-        };
         Ok(match op {
-            "state" => self.state(),
-            "spaces" => self.spaces.clone(),
-            "useSpace" => {
-                let open = args
-                    .get("open")
-                    .and_then(Value::as_bool)
-                    .ok_or("`open` is missing")?;
-                self.use_space(open, text("table")?, text("id")?);
-                Value::Null
-            }
-            "setOnline" => {
-                let online = args
-                    .get("online")
-                    .and_then(Value::as_bool)
-                    .ok_or("`online` is missing")?;
-                self.set_online(online);
-                Value::Null
-            }
             "deviceId" => json!(client.device().map_err(describe)?.id.clone()),
             "ready" => {
                 let status = client.ensure_account(db).await.map_err(describe)?;

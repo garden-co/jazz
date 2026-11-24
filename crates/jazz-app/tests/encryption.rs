@@ -1436,3 +1436,105 @@ async fn a_store_that_never_answers_fails_the_call_and_the_client_closes() {
         .unwrap();
     app.stop().await;
 }
+
+/// Before Alice's device has a key, an encrypted transaction insert
+/// returns the original write error with the project she wrote to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn key_refusal_on_transaction_write() {
+    let app = App::start().await;
+    let alice = app.device().await;
+    ready(&alice).await;
+    let project = ObjectId::new();
+    let error = alice
+        .transaction(move |tx| async move { tx.insert(bindings::NewTask::new(project, "private")) })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::Jazz(jazz::tools::JazzError::Write(reason))
+        if reason.contains("key-pending") && reason.contains(&project.to_string())),
+        "{error:?}"
+    );
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// Alice cannot create a root for a nonexistent project. Preparing the next
+/// write stops, and a transaction reports the original coded refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preparation_after_root_refusal() {
+    check_root_refusal(Duration::ZERO).await;
+}
+
+/// The mutation-error reporter can release the refusal before Alice's
+/// encryption runtime reads it. The comparison is in the cleanup build
+/// report at `e2ee-l12-evidence/plans/cleanup/build/feynman2/report.md`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "the rejected root's record can be discarded before encryption observes it"]
+async fn delayed_preparation_after_root_refusal() {
+    check_root_refusal(Duration::from_millis(250)).await;
+}
+
+async fn check_root_refusal(delay: Duration) {
+    let app = App::start().await;
+    let alice = app.device().await;
+    ready(&alice).await;
+    let project = ObjectId::new();
+    let space = alice
+        .encryption()
+        .call(
+            "spaceRow",
+            json!({"table": "projects", "id": project.to_string()}),
+        )
+        .await
+        .unwrap();
+    let first = add_task(&alice, &project.to_string(), "first")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&first, Error::WriteRejected { code, .. } if code == "permission_denied"),
+        "{first:?}"
+    );
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+    assert_eq!(
+        alice
+            .encryption()
+            .call("prepareSpace", space.clone())
+            .await
+            .unwrap(),
+        false
+    );
+    let next = alice
+        .transaction(move |tx| async move { tx.insert(bindings::NewTask::new(project, "next")) })
+        .await
+        .unwrap_err();
+    let edit = alice
+        .transaction(move |tx| async move {
+            tx.update_edited(
+                ObjectId::new(),
+                bindings::TaskUpdate {
+                    project_id: Some(project),
+                    title: Some("edited".into()),
+                    ..Default::default()
+                },
+                jazz_app_support::Edits::new(),
+            )
+        })
+        .await
+        .unwrap_err();
+    let expected = format!(
+        "space {}/{} has no valid root",
+        space["scopeId"].as_str().unwrap(),
+        project
+    );
+    for error in [next, edit] {
+        assert!(
+            matches!(&error, Error::WriteRejected { code, reason, .. }
+            if code == "write_rejected" && reason == &expected),
+            "{error:?}"
+        );
+    }
+    alice.shutdown().await.unwrap();
+    app.stop().await;
+}

@@ -137,7 +137,7 @@ pub enum Error {
 
 impl From<JazzError> for Error {
     fn from(error: JazzError) -> Self {
-        match error {
+        match error.into_original() {
             JazzError::WriteRejected { code, reason, .. } => Error::WriteRejected { code, reason },
             error => Error::Jazz(error),
         }

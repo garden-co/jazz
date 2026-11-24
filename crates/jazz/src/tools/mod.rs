@@ -203,6 +203,16 @@ pub(crate) const REJECTED_BEFORE: &str = "transaction was rejected before reachi
 
 #[cfg(feature = "runtime")]
 impl JazzError {
+    /// The original write error once the caller is done handling key retries.
+    #[doc(hidden)]
+    pub fn into_original(self) -> Self {
+        #[cfg(feature = "e2ee-client")]
+        if let Self::KeyRefusal { original, .. } = self {
+            return *original;
+        }
+        self
+    }
+
     /// Whether this is [`JazzClient::wait_for_transaction`]'s error for a
     /// transaction the server refused, rather than a wait that failed for
     /// another reason. For `jazz-app-support`'s mutation-error reporting.

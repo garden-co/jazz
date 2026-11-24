@@ -176,7 +176,7 @@ Policy JSON adds `InheritsFrom`, `InsertedByThisTransaction` and `TableIdentity`
 
 ### H9. Host-supplied private storage and randomness
 
-The host supplies durable private storage and a random source to the client runtime. Unwrapped private keys remain in Rust memory; the store protects persisted material. See the [store and random-source interfaces](../../jazz-e2ee-client/src/store.rs) and the [host interface](../../jazz-e2ee-client/src/host/mod.rs).
+The host supplies durable private storage and a random source to the client runtime. The runtime passes plaintext key documents to the host's private store, including JavaScript in the browser and Swift or Kotlin through UniFFI. The host store protects the documents at rest. On a UniFFI save, Rust wipes its temporary copy during serialization. UniFFI owns the serialized callback buffer, so the Rust store adapter cannot wipe it. See the [store and random-source interfaces](../../jazz-e2ee-client/src/store.rs) and the [host interface](../../jazz-e2ee-client/src/host/mod.rs).
 
 ### H10. Feature flag and build split
 
