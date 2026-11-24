@@ -21,9 +21,8 @@ pub trait Table: Sized + Send + 'static {
     const COMPUTED_FROM: &'static [&'static str] = &[];
     /// Values for a new row.
     type New: Insert<Row = Self>;
-    /// A partial update of a row: an [`Update`], or [`NoUpdate`] for a
-    /// table whose rows never change (the members table).
-    type Update;
+    /// A partial update of a row.
+    type Update: Update<Row = Self>;
 
     /// Reads a row from its fields, by column name.
     fn decode(row: &mut Fields<'_>) -> Result<Self>;
@@ -45,144 +44,6 @@ pub trait Update: Send + 'static {
     /// The cells it changes, by column name.
     fn into_cells(self, implementations: &Implementations) -> Result<Vec<(String, Value)>>;
 }
-
-/// The [`Table::Update`] of a table whose policy refuses every update:
-/// it has no values, so no update, upsert, restore, text edit, splice or
-/// update advice names the table.
-pub enum NoUpdate {}
-
-/// A table whose rows can be updated: its [`Table::Update`] is an
-/// [`Update`]. Upserts, restores, text edits and splices need it (a
-/// restore is checked against the update policy).
-///
-/// A [`NoUpdate`] table, such as the members table, still reads, inserts
-/// and deletes:
-///
-/// ```no_run
-/// # use std::collections::HashMap;
-/// # use jazz_app_support::{Column, Fields, Implementations, Insert, Jazz, NoUpdate, ObjectId, Result, Table};
-/// # use jazz_app_support::jazz::tools::Value;
-/// # struct Member { id: ObjectId }
-/// # struct NewMember;
-/// # impl Table for Member {
-/// #     const NAME: &'static str = "__e2ee_members";
-/// #     const COLUMNS: &'static [&'static str] = &[];
-/// #     type New = NewMember;
-/// #     type Update = NoUpdate;
-/// #     fn decode(_: &mut Fields<'_>) -> Result<Self> { unimplemented!() }
-/// #     fn id(&self) -> ObjectId { self.id }
-/// # }
-/// # impl Insert for NewMember {
-/// #     type Row = Member;
-/// #     fn into_cells(self, _: &Implementations) -> Result<HashMap<String, Value>> { Ok(HashMap::new()) }
-/// # }
-/// # async fn check(jazz: Jazz, id: ObjectId) -> Result<()> {
-/// jazz.insert(NewMember).await?;
-/// jazz.delete::<Member>(id).await?;
-/// # Ok(())
-/// # }
-/// ```
-///
-/// but none of the calls that change a row compile for it:
-///
-/// ```compile_fail
-/// # use std::collections::HashMap;
-/// # use jazz_app_support::{Column, Fields, Implementations, Insert, Jazz, NoUpdate, ObjectId, Result, Table};
-/// # use jazz_app_support::jazz::tools::Value;
-/// # struct Member { id: ObjectId }
-/// # struct NewMember;
-/// # impl Table for Member {
-/// #     const NAME: &'static str = "__e2ee_members";
-/// #     const COLUMNS: &'static [&'static str] = &[];
-/// #     type New = NewMember;
-/// #     type Update = NoUpdate;
-/// #     fn decode(_: &mut Fields<'_>) -> Result<Self> { unimplemented!() }
-/// #     fn id(&self) -> ObjectId { self.id }
-/// # }
-/// # impl Insert for NewMember {
-/// #     type Row = Member;
-/// #     fn into_cells(self, _: &Implementations) -> Result<HashMap<String, Value>> { Ok(HashMap::new()) }
-/// # }
-/// # async fn check(jazz: Jazz, id: ObjectId) -> Result<()> {
-/// jazz.upsert(id, NewMember).await?;
-/// # Ok(())
-/// # }
-/// ```
-///
-/// ```compile_fail
-/// # use std::collections::HashMap;
-/// # use jazz_app_support::{Column, Fields, Implementations, Insert, Jazz, NoUpdate, ObjectId, Result, Table};
-/// # use jazz_app_support::jazz::tools::Value;
-/// # struct Member { id: ObjectId }
-/// # struct NewMember;
-/// # impl Table for Member {
-/// #     const NAME: &'static str = "__e2ee_members";
-/// #     const COLUMNS: &'static [&'static str] = &[];
-/// #     type New = NewMember;
-/// #     type Update = NoUpdate;
-/// #     fn decode(_: &mut Fields<'_>) -> Result<Self> { unimplemented!() }
-/// #     fn id(&self) -> ObjectId { self.id }
-/// # }
-/// # impl Insert for NewMember {
-/// #     type Row = Member;
-/// #     fn into_cells(self, _: &Implementations) -> Result<HashMap<String, Value>> { Ok(HashMap::new()) }
-/// # }
-/// # async fn check(jazz: Jazz, id: ObjectId) -> Result<()> {
-/// jazz.restore::<Member>(id).await?;
-/// # Ok(())
-/// # }
-/// ```
-///
-/// ```compile_fail
-/// # use std::collections::HashMap;
-/// # use jazz_app_support::{Column, Fields, Implementations, Insert, Jazz, NoUpdate, ObjectId, Result, Table};
-/// # use jazz_app_support::jazz::tools::Value;
-/// # struct Member { id: ObjectId }
-/// # struct NewMember;
-/// # impl Table for Member {
-/// #     const NAME: &'static str = "__e2ee_members";
-/// #     const COLUMNS: &'static [&'static str] = &[];
-/// #     type New = NewMember;
-/// #     type Update = NoUpdate;
-/// #     fn decode(_: &mut Fields<'_>) -> Result<Self> { unimplemented!() }
-/// #     fn id(&self) -> ObjectId { self.id }
-/// # }
-/// # impl Insert for NewMember {
-/// #     type Row = Member;
-/// #     fn into_cells(self, _: &Implementations) -> Result<HashMap<String, Value>> { Ok(HashMap::new()) }
-/// # }
-/// # async fn check(jazz: Jazz, id: ObjectId) -> Result<()> {
-/// jazz.restore_with(id, NewMember).await?;
-/// # Ok(())
-/// # }
-/// ```
-///
-/// ```compile_fail
-/// # use std::collections::HashMap;
-/// # use jazz_app_support::{Column, Fields, Implementations, Insert, Jazz, NoUpdate, ObjectId, Result, Table};
-/// # use jazz_app_support::jazz::tools::Value;
-/// # struct Member { id: ObjectId }
-/// # struct NewMember;
-/// # impl Table for Member {
-/// #     const NAME: &'static str = "__e2ee_members";
-/// #     const COLUMNS: &'static [&'static str] = &[];
-/// #     type New = NewMember;
-/// #     type Update = NoUpdate;
-/// #     fn decode(_: &mut Fields<'_>) -> Result<Self> { unimplemented!() }
-/// #     fn id(&self) -> ObjectId { self.id }
-/// # }
-/// # impl Insert for NewMember {
-/// #     type Row = Member;
-/// #     fn into_cells(self, _: &Implementations) -> Result<HashMap<String, Value>> { Ok(HashMap::new()) }
-/// # }
-/// # async fn check(jazz: Jazz, id: ObjectId) -> Result<()> {
-/// jazz.edit_text(id, Column::<Member, String>::new("name"), "a", "b").await?;
-/// # Ok(())
-/// # }
-/// ```
-pub trait Updatable: Table<Update: Update<Row = Self>> {}
-
-impl<T: Table<Update: Update<Row = T>>> Updatable for T {}
 
 /// A row's fields, as a query delivered them.
 pub struct Fields<'a> {

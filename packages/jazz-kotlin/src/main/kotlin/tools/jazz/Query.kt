@@ -17,14 +17,13 @@ import kotlinx.serialization.json.put
 /**
  * A table, as generated bindings declare it: its name, how its rows and
  * inserts (de)serialize, and (in the generated object) its typed columns.
- * Its rows are read, inserted and deleted; a [Table] also updates them.
- * The members table's generated object is only this: its fixed policy
- * refuses every update.
+ * The patch factory creates a patch for updating a row.
  */
-public abstract class BaseTable<Row : Any, Insert : Any>(
+public abstract class Table<Row : Any, Insert : Any, P : Patch>(
     public val tableName: String,
     public val rowSerializer: KSerializer<Row>,
     public val insertSerializer: KSerializer<Insert>,
+    public val newPatch: () -> P,
 ) {
     /** Every row of the table; narrow it with [Query.where]. */
     public fun query(): Query<Row> = Query(tableName, rowSerializer, source = this)
@@ -49,18 +48,6 @@ public abstract class BaseTable<Row : Any, Insert : Any>(
     /** `query().include(...)`. */
     public fun include(vararg relations: Relation<Row, *>): Query<JazzRow<Row>> = query().include(*relations)
 }
-
-/**
- * A table whose rows can also be updated, upserted, restored, text-edited
- * and stream-updated: how its patches are made, besides what [BaseTable]
- * declares.
- */
-public abstract class Table<Row : Any, Insert : Any, P : Patch>(
-    tableName: String,
-    rowSerializer: KSerializer<Row>,
-    insertSerializer: KSerializer<Insert>,
-    public val newPatch: () -> P,
-) : BaseTable<Row, Insert>(tableName, rowSerializer, insertSerializer)
 
 /** What a query's `select` can read: a column ([Column]), or a part of a large one ([Column.range], [Column.at]). */
 public interface Selection {
@@ -153,7 +140,7 @@ public data class Query<Row : Any>(
     val includes: List<Relation<*, *>> = emptyList(),
     val columns: List<JsonElement>? = null,
     /** The table object it reads, for its transforms and computed fields. */
-    val source: BaseTable<*, *>? = null,
+    val source: Table<*, *, *>? = null,
     /** For [hopTo]: the query it hops from (whose rows' relations it follows), and the relations. */
     val hopFrom: Query<*>? = null,
     val hops: List<String> = emptyList(),
@@ -317,7 +304,7 @@ internal fun orderJson(orders: List<Order>): JsonArray = buildJsonArray {
 }
 
 /** [row] through [table]'s transforms and computed fields, and each included row through its own. */
-internal fun prepareRow(table: BaseTable<*, *>?, includes: List<Relation<*, *>>, row: JsonObject, implementations: Any?): JsonObject {
+internal fun prepareRow(table: Table<*, *, *>?, includes: List<Relation<*, *>>, row: JsonObject, implementations: Any?): JsonObject {
     if (table == null) return row
     var out = table.fromStored(row, implementations)
     if (includes.isEmpty()) return out

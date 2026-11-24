@@ -133,7 +133,7 @@ pub use session::{
     AuthFailure, Link, Offline, Session, SessionState, SyncError, SyncStatus, User, UserKind,
 };
 pub use subscription::{Added, Delta, Removed, Rows, Subscription, Updated, ValueSplice};
-pub use table::{Fields, Implementations, Insert, NoUpdate, Table, Updatable, Update};
+pub use table::{Fields, Implementations, Insert, Table, Update};
 pub use transaction::{OpenTransaction, Transaction};
 pub use value::{ColumnValue, Json, Timestamp};
 

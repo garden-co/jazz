@@ -73,11 +73,6 @@ public protocol Row: Codable, Hashable, Sendable, Identifiable where ID == Jazz.
     var id: Jazz.ID { get }
 }
 
-/// A row of a table whose rows can change: upserts, update advice, text
-/// edits, streamed updates and restores take only these. The members table's rows never change, so its row type
-/// isn't one (and it has no `Patch`).
-public protocol Updatable: Row {}
-
 /// A new row of a table.
 public protocol Insert: Encodable, Sendable {
     associatedtype Row: Jazz.Row

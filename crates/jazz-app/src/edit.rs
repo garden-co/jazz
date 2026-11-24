@@ -40,7 +40,7 @@ impl Jazz {
     /// it just makes the merge treat the difference as the writer's edit.
     /// A column without `"merge": "text"` is refused; a missing row fails
     /// with [`crate::Error::NotFound`].
-    pub async fn edit_text<T: crate::Updatable, V: TextColumn>(
+    pub async fn edit_text<T: crate::Table, V: TextColumn>(
         &self,
         id: ObjectId,
         column: Column<T, V>,
@@ -61,7 +61,7 @@ impl Jazz {
 
 impl Transaction {
     /// [`Jazz::edit_text`] staged in the transaction.
-    pub fn edit_text<T: crate::Updatable, V: TextColumn>(
+    pub fn edit_text<T: crate::Table, V: TextColumn>(
         &self,
         id: ObjectId,
         column: Column<T, V>,

@@ -85,7 +85,7 @@ public enum JazzApp {
     }
 
     /// A row of `canvases`.
-    public struct Canvas: Jazz.Row, Jazz.Updatable {
+    public struct Canvas: Jazz.Row {
         public static let table = "canvases"
         public let id: Jazz.ID
         public var chatId: Jazz.ID
@@ -170,7 +170,7 @@ public enum JazzApp {
     }
 
     /// A row of `chatMembers`.
-    public struct ChatMember: Jazz.Row, Jazz.Updatable {
+    public struct ChatMember: Jazz.Row {
         public static let table = "chatMembers"
         public let id: Jazz.ID
         public var chatId: Jazz.ID
@@ -276,7 +276,7 @@ public enum JazzApp {
     }
 
     /// A row of `chats`.
-    public struct Chat: Jazz.Row, Jazz.Updatable {
+    public struct Chat: Jazz.Row {
         public static let table = "chats"
         public let id: Jazz.ID
         public var name: Swift.String?
@@ -388,7 +388,7 @@ public enum JazzApp {
     }
 
     /// A row of `messages`.
-    public struct Message: Jazz.Row, Jazz.Updatable {
+    public struct Message: Jazz.Row {
         public static let table = "messages"
         public let id: Jazz.ID
         public var chatId: Jazz.ID
@@ -508,7 +508,7 @@ public enum JazzApp {
     }
 
     /// A row of `profiles`.
-    public struct Profile: Jazz.Row, Jazz.Updatable {
+    public struct Profile: Jazz.Row {
         public static let table = "profiles"
         public let id: Jazz.ID
         public var userId: Jazz.ID
@@ -610,7 +610,7 @@ public enum JazzApp {
     }
 
     /// A row of `reactions`.
-    public struct Reaction: Jazz.Row, Jazz.Updatable {
+    public struct Reaction: Jazz.Row {
         public static let table = "reactions"
         public let id: Jazz.ID
         public var messageId: Jazz.ID
@@ -716,7 +716,7 @@ public enum JazzApp {
     }
 
     /// A row of `strokes`.
-    public struct Stroke: Jazz.Row, Jazz.Updatable {
+    public struct Stroke: Jazz.Row {
         public static let table = "strokes"
         public let id: Jazz.ID
         public var canvasId: Jazz.ID

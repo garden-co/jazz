@@ -30,7 +30,7 @@ use crate::include::Row;
 use crate::query::{Column, Query};
 use crate::read::ReadOptions;
 use crate::subscription::{self, Subscription};
-use crate::table::{Insert, Table, Updatable, Update};
+use crate::table::{Insert, Table, Update};
 use crate::transaction::Transaction;
 use crate::value::ColumnValue;
 use crate::writes::read_back;
@@ -401,10 +401,7 @@ impl OnBranch {
 
     /// Writes the row with this id in the head branch, as [`Jazz::upsert`].
     /// Returns it as this view now sees it.
-    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
-    where
-        N::Row: Updatable,
-    {
+    pub async fn upsert<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
         let implementations = self.jazz.info.implementations.clone();
         let settle = self.jazz.settler()?;
         self.with_branch(move |client| async move {
@@ -428,22 +425,19 @@ impl OnBranch {
     }
 
     /// Brings back the row of `T` the head branch deleted, as it was.
-    pub async fn restore<T: Updatable>(&self, id: ObjectId) -> Result<T> {
+    pub async fn restore<T: Table>(&self, id: ObjectId) -> Result<T> {
         self.restore_cells::<T>(id, None).await
     }
 
     /// Brings back the row the head branch deleted, with `new`'s values, as
     /// [`Jazz::restore_with`].
-    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row>
-    where
-        N::Row: Updatable,
-    {
+    pub async fn restore_with<N: Insert>(&self, id: ObjectId, new: N) -> Result<N::Row> {
         let cells = new.into_cells(&self.jazz.info.implementations)?;
         self.restore_cells::<N::Row>(id, Some(cells.into_iter().collect()))
             .await
     }
 
-    async fn restore_cells<T: Updatable>(
+    async fn restore_cells<T: Table>(
         &self,
         id: ObjectId,
         cells: Option<Vec<(String, Value)>>,

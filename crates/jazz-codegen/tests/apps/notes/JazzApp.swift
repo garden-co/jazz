@@ -79,7 +79,7 @@ public enum JazzApp {
     }
 
     /// A row of `folders`.
-    public struct Folder: Jazz.Row, Jazz.Updatable {
+    public struct Folder: Jazz.Row {
         public static let table = "folders"
         public let id: Jazz.ID
         public var name: Swift.String
@@ -155,7 +155,7 @@ public enum JazzApp {
     }
 
     /// A row of `notes`.
-    public struct Note: Jazz.Row, Jazz.Updatable {
+    public struct Note: Jazz.Row {
         public static let table = "notes"
         public let id: Jazz.ID
         public var body: Swift.String
