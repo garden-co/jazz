@@ -57,7 +57,11 @@ command -v gradle >/dev/null || fail "no gradle"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/kmp-smoke.XXXXXX")"
 echo "work dir: $work"
-gradle_flags=(--no-daemon --console=plain --stacktrace -Dorg.gradle.jvmargs=-Xmx2g)
+gradle_flags=(--no-daemon --console=plain --stacktrace)
+# Small enough for a 4 GB machine: one JVM (the Kotlin compiler runs in Gradle's).
+gradle_properties="org.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m
+kotlin.compiler.execution.strategy=in-process
+org.gradle.workers.max=2"
 # Gradle's cache of tools.jazz from an earlier run must not answer for this zip.
 export GRADLE_USER_HOME="${KMP_SMOKE_GRADLE_HOME:-$work/gradle-home}"
 rm -rf "$GRADLE_USER_HOME/caches/modules-2/files-2.1/tools.jazz" "$GRADLE_USER_HOME/caches/modules-2/metadata-"*/descriptors/tools.jazz
@@ -90,6 +94,7 @@ step "JVM project"
 jvm="$work/jvm-app"
 mkdir -p "$jvm/src/main/kotlin/smoke"
 unzip -q "$zip" -d "$jvm/jazz-maven"
+echo "$gradle_properties" > "$jvm/gradle.properties"
 cat > "$jvm/settings.gradle.kts" <<'EOF'
 rootProject.name = "kmp-smoke-jvm"
 EOF
@@ -108,7 +113,11 @@ dependencies {
     implementation("tools.jazz:jazz-kotlin:$version")
 }
 
-kotlin { jvmToolchain(17) }
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
 application { mainClass.set("smoke.MainKt") }
 
 // What Gradle resolved tools.jazz:jazz-kotlin to, through its module metadata.
@@ -139,7 +148,7 @@ import kotlin.system.exitProcess
 fun main(args: Array<String>) = runBlocking {
     val dataDir = File(args[0])
     val title = "kmp smoke ${System.nanoTime()}"
-    val config = JazzConfig(storage = Storage.Persistent, dataDir = dataDir.path)
+    val config = JazzConfig(appId = "6f1c4a52-3d0e-4b7a-9c1e-5a2b8d7f0c31", storage = Storage.Persistent, dataDir = dataDir.path)
 
     val written = jazzapp.open(config).let { jazz ->
         try {
@@ -166,7 +175,7 @@ fun main(args: Array<String>) = runBlocking {
 }
 EOF
 
-(cd "$jvm" && gradle "${gradle_flags[@]}" -q jazzVariant) | tee "$work/jvm-variant.txt" || fail "JVM: Gradle couldn't resolve tools.jazz:jazz-kotlin:$version"
+(cd "$jvm" && gradle "${gradle_flags[@]}" -q jazzVariant) | tee "$work/jvm-variant.txt" || fail "JVM: Gradle failed resolving tools.jazz:jazz-kotlin:$version (above)"
 grep -q "^COMPONENT tools.jazz:jazz-kotlin:$version " "$work/jvm-variant.txt" || fail "JVM: tools.jazz:jazz-kotlin:$version not in the runtime classpath"
 grep -q "^COMPONENT tools.jazz:jazz-kotlin-jvm:$version " "$work/jvm-variant.txt" || fail "JVM: jazz-kotlin didn't resolve to jazz-kotlin-jvm through its module metadata"
 grep -q "^FILE jazz-kotlin-jvm-$version.jar$" "$work/jvm-variant.txt" || fail "JVM: jazz-kotlin-jvm-$version.jar isn't on the runtime classpath"
@@ -196,10 +205,7 @@ and="$work/android-app"
 mkdir -p "$and/app/src/main/kotlin/smoke"
 unzip -q "$zip" -d "$and/jazz-maven"
 echo "sdk.dir=$sdk" > "$and/local.properties"
-cat > "$and/gradle.properties" <<'EOF'
-android.useAndroidX=true
-org.gradle.jvmargs=-Xmx2g
-EOF
+printf '%s\nandroid.useAndroidX=true\n' "$gradle_properties" > "$and/gradle.properties"
 cat > "$and/settings.gradle.kts" <<'EOF'
 pluginManagement {
     repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -300,7 +306,7 @@ class SmokeActivity : Activity() {
         val dataDir = File(filesDir, "jazz")
         Thread {
             runBlocking {
-                val config = JazzConfig(storage = Storage.Persistent, dataDir = dataDir.path)
+                val config = JazzConfig(appId = "6f1c4a52-3d0e-4b7a-9c1e-5a2b8d7f0c31", storage = Storage.Persistent, dataDir = dataDir.path)
                 val jazz = jazzapp.open(config)
                 try {
                     val row = jazz.insert(Todos, NewTodo(title = "kmp smoke", done = false))
@@ -315,7 +321,7 @@ class SmokeActivity : Activity() {
 }
 EOF
 
-(cd "$and" && gradle "${gradle_flags[@]}" -q :app:jazzVariant) | tee "$work/android-variant.txt" || fail "Android: Gradle couldn't resolve tools.jazz:jazz-kotlin:$version"
+(cd "$and" && gradle "${gradle_flags[@]}" -q :app:jazzVariant) | tee "$work/android-variant.txt" || fail "Android: Gradle failed resolving tools.jazz:jazz-kotlin:$version (above)"
 grep -q "^COMPONENT tools.jazz:jazz-kotlin-android:$version " "$work/android-variant.txt" || fail "Android: jazz-kotlin didn't resolve to jazz-kotlin-android through its module metadata"
 grep -q "^COMPONENT tools.jazz:jazz-kotlin-jvm" "$work/android-variant.txt" && fail "Android: the JVM variant leaked into the Android classpath"
 echo "Android: jazz-kotlin -> jazz-kotlin-android ok"

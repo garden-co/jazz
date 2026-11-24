@@ -143,7 +143,9 @@ curl -fL -o "$FILE" "$RELEASE/$FILE" &&
   unzip -q -o "$FILE" -d jazz-maven
 ```
 
-Go on only if that prints `OK`. Then add the unzipped directory as a repository for `tools.jazz`
+Go on only if that prints `OK`. With the GitHub CLI, you can also check that our release workflow
+built it: `gh attestation verify "$FILE" --repo garden-co/jazz`. Then add the unzipped directory
+as a repository for `tools.jazz`
 only, and depend on `jazz-kotlin`:
 
 ```kotlin title="build.gradle.kts"
