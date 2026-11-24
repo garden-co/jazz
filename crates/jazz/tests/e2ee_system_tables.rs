@@ -953,11 +953,12 @@ fn a_public_approval_pairs_with_its_private_approval_by_row_id() {
 struct Founders(Vec<jazz::account_registry::AccountId>);
 
 impl jazz::db::AccountRegistryView for Founders {
-    fn founded_by_device_account(
-        &self,
+    fn founded_by_device_account<'a>(
+        &'a self,
+        _store: &'a jazz::storage::Storage,
         account: jazz::account_registry::AccountId,
-    ) -> Result<Option<bool>, String> {
-        Ok(Some(self.0.contains(&account)))
+    ) -> futures::future::LocalBoxFuture<'a, Result<Option<bool>, String>> {
+        Box::pin(async move { Ok(Some(self.0.contains(&account))) })
     }
 }
 
@@ -2410,18 +2411,20 @@ struct Namespaces {
 }
 
 impl jazz::db::AccountRegistryView for Namespaces {
-    fn founded_by_device_account(
-        &self,
+    fn founded_by_device_account<'a>(
+        &'a self,
+        _store: &'a jazz::storage::Storage,
         account: jazz::account_registry::AccountId,
-    ) -> Result<Option<bool>, String> {
-        Ok(Some(self.own.contains(&account)))
+    ) -> futures::future::LocalBoxFuture<'a, Result<Option<bool>, String>> {
+        Box::pin(async move { Ok(Some(self.own.contains(&account))) })
     }
 
-    fn founded_for_another_audience(
-        &self,
+    fn founded_for_another_audience<'a>(
+        &'a self,
+        _store: &'a jazz::storage::Storage,
         account: jazz::account_registry::AccountId,
-    ) -> Result<bool, String> {
-        Ok(self.other.contains(&account))
+    ) -> futures::future::LocalBoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move { Ok(self.other.contains(&account)) })
     }
 }
 

@@ -1066,12 +1066,12 @@ impl Owner {
         wake: std_mpsc::Sender<Work>,
         any_stored_catalogue: bool,
         app: Option<String>,
-        registry: Option<HostReader>,
+        registry_available: bool,
         initial: Option<InitialCatalogue>,
     ) -> Result<Self, CatalogueApplyError> {
         const REGISTRY_REQUIRED: &str = "this app encrypts columns, which needs the account registry \
             of an app's store: open the store for an app (`set_app`) with its host tables";
-        if (registry.is_none() || app.is_none())
+        if (!registry_available || app.is_none())
             && let Some((change, _)) = &initial
             && std::iter::once(&schema)
                 .chain(change.admit.iter().map(|(schema, _)| schema))
@@ -1104,11 +1104,11 @@ impl Owner {
         // account registry the store keeps beside the rows.
         // The registry names the app's founding namespace, parsed as device
         // accounts' ids derive from it (`device_account_founding_app`).
-        let installed = match (registry, owner.app.as_deref()) {
-            (Some(reader), Some(app)) => {
+        let installed = match (registry_available, owner.app.as_deref()) {
+            (true, Some(app)) => {
                 let app = crate::portable::accounts::device_account_founding_app(app);
                 owner.db.set_account_registry(Rc::new(
-                    crate::server::account_store::RegistryFounders::new(reader, *app.uuid()),
+                    crate::server::account_store::RegistryFounders::new(*app.uuid()),
                 ));
                 true
             }

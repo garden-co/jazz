@@ -2,6 +2,7 @@
 
 use crate::storage::Storage;
 use crate::values::CachedRow;
+use futures::future::LocalBoxFuture;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::{Rc, Weak};
@@ -1423,46 +1424,27 @@ fn rejected_for(reason: Reason, message: impl Into<String>) -> Error {
 /// no policy can read.
 pub trait AccountRegistryView {
     /// Whether `account` was founded by a device-account identity; `None`
-    /// when the registry holds no identity of it.
-    fn founded_by_device_account(
-        &self,
+    /// when the registry holds no identity of it. Read on the store's own
+    /// connection inside the write's transaction. A second connection to
+    /// a shared in-memory database is locked out while the store writes.
+    fn founded_by_device_account<'a>(
+        &'a self,
+        store: &'a Storage,
         account: jazz_types::account_registry::AccountId,
-    ) -> Result<Option<bool>, String>;
+    ) -> LocalBoxFuture<'a, Result<Option<bool>, String>>;
 
     /// Whether `account` was founded by a device-account identity for another
     /// audience than the app's own, whose accounts an encrypting app does
     /// not serve: with no record of which namespace founded it, such an
     /// account's kind (E2EE protocol R6) and reset rights (R5) cannot be
     /// told, so no account record is accepted for it. False by default.
-    fn founded_for_another_audience(
-        &self,
+    /// Reads on the same connection as [`Self::founded_by_device_account`].
+    fn founded_for_another_audience<'a>(
+        &'a self,
+        _store: &'a Storage,
         _account: jazz_types::account_registry::AccountId,
-    ) -> Result<bool, String> {
-        Ok(false)
-    }
-
-    /// [`Self::founded_by_device_account`], read on the store's own connection
-    /// `store`, which the check runs on inside the write's transaction. A
-    /// registry kept in the store's file reads its tables here: a second
-    /// connection to a shared in-memory database (no write-ahead log) is
-    /// locked out while the store's connection holds a write. By default,
-    /// the registry's own way of reading.
-    fn founded_by_device_account_on(
-        &self,
-        _store: &crate::storage::Storage,
-        account: jazz_types::account_registry::AccountId,
-    ) -> Result<Option<bool>, String> {
-        self.founded_by_device_account(account)
-    }
-
-    /// [`Self::founded_for_another_audience`], read on the store's own
-    /// connection (see [`Self::founded_by_device_account_on`]).
-    fn founded_for_another_audience_on(
-        &self,
-        _store: &crate::storage::Storage,
-        account: jazz_types::account_registry::AccountId,
-    ) -> Result<bool, String> {
-        self.founded_for_another_audience(account)
+    ) -> LocalBoxFuture<'a, Result<bool, String>> {
+        Box::pin(async { Ok(false) })
     }
 }
 
@@ -7798,7 +7780,8 @@ impl Store {
         let registry = self.account_registry.borrow().clone();
         if let Some(registry) = &registry
             && registry
-                .founded_for_another_audience_on(&self.conn, account)
+                .founded_for_another_audience(&self.conn, account)
+                .await
                 .map_err(|error| Error::new(ErrorCode::Storage, error))?
         {
             return Ok(false);
@@ -7807,10 +7790,11 @@ impl Store {
             check.author.principal_parts().0 == jazz_types::identity::DEVICE_ACCOUNT_ISSUER;
         // A store without the account, or without a registry, has no
         // links: the session's own login founded its account.
-        let founded_by_device_account = || -> Result<bool, Error> {
+        let founded_by_device_account = async || -> Result<bool, Error> {
             let known = match &registry {
                 Some(registry) => registry
-                    .founded_by_device_account_on(&self.conn, account)
+                    .founded_by_device_account(&self.conn, account)
+                    .await
                     .map_err(|error| Error::new(ErrorCode::Storage, error))?,
                 None => None,
             };
@@ -7821,7 +7805,7 @@ impl Store {
                 Some(Value::String(kind)) => kind,
                 _ => return Ok(false),
             };
-            let founded = if founded_by_device_account()? {
+            let founded = if founded_by_device_account().await? {
                 "device-account"
             } else {
                 "app"
@@ -7835,7 +7819,7 @@ impl Store {
         if generation == 0 {
             return Ok(true);
         }
-        if generation < 0 || device_account_session || founded_by_device_account()? {
+        if generation < 0 || device_account_session || founded_by_device_account().await? {
             return Ok(false);
         }
         // The account's own identity of the generation before.
