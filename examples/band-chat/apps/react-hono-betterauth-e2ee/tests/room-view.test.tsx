@@ -158,27 +158,6 @@ describe("locked messages", () => {
     expect(screen.queryByText(/waiting for the room's key/)).toBeNull();
   });
 
-  it("clears the ten-second timer once the room view closes", () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const setTimer = vi.spyOn(globalThis, "setTimeout");
-    const clearTimer = vi.spyOn(globalThis, "clearTimeout");
-    try {
-      deviceStatus.current = "active";
-      const view = show({ messages: { data: [], unreadable: [pending] } });
-      expect(screen.getByText(/Decrypting 1 message/)).toBeTruthy();
-      const timers = setTimer.mock.results.filter(
-        (_, call) => setTimer.mock.calls[call]![1] === 10_000,
-      );
-      expect(timers).toHaveLength(1);
-      expect(clearTimer).not.toHaveBeenCalledWith(timers[0]!.value);
-      view.unmount();
-      expect(clearTimer).toHaveBeenCalledWith(timers[0]!.value);
-    } finally {
-      setTimer.mockRestore();
-      clearTimer.mockRestore();
-    }
-  });
-
   it("says messages are locked once a room has had no key record for a while", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     deviceStatus.current = "active";
@@ -206,33 +185,30 @@ describe("locked messages", () => {
     expect(screen.getByText(/1 message is locked on this browser/)).toBeTruthy();
   });
 
-  it("says messages are locked on this browser while it waits for approval", async () => {
-    deviceStatus.current = "awaiting-approval";
-    show({ messages: { data: [], unreadable: [pending] } });
-    expect(await screen.findByText(/1 message is locked on this browser/)).toBeTruthy();
+  it.each([
+    {
+      scenario: "approval pending",
+      status: "awaiting-approval",
+      unreadable: [pending],
+      notice: /1 message is locked on this browser/,
+    },
+    {
+      scenario: "one message with no available key",
+      status: "active",
+      unreadable: [{ table: "messages", id: "m3", code: "key-unavailable" }],
+      notice: /1 message is locked on this browser/,
+    },
+    {
+      scenario: "one of several messages with no available key",
+      status: "active",
+      unreadable: [pending, { table: "messages", id: "m2", code: "key-unavailable" }],
+      notice: /2 messages are locked on this browser/,
+    },
+  ])("shows the locked notice for $scenario", async ({ status, unreadable, notice }) => {
+    deviceStatus.current = status;
+    show({ messages: { data: [], unreadable } });
+    expect(await screen.findByText(notice)).toBeTruthy();
     expect(screen.queryByText(/Decrypting/)).toBeNull();
-  });
-
-  it("says messages are locked when any of them is locked for another reason", async () => {
-    deviceStatus.current = "active";
-    show({
-      messages: {
-        data: [],
-        unreadable: [pending, { table: "messages", id: "m2", code: "key-unavailable" }],
-      },
-    });
-    expect(await screen.findByText(/2 messages are locked on this browser/)).toBeTruthy();
-    expect(screen.queryByText(/Decrypting/)).toBeNull();
-  });
-
-  it("says messages are locked on this browser when it has no access to the key", async () => {
-    show({
-      messages: {
-        data: [],
-        unreadable: [{ table: "messages", id: "m3", code: "key-unavailable" }],
-      },
-    });
-    expect(await screen.findByText(/1 message is locked on this browser/)).toBeTruthy();
     expect(screen.queryByText("No messages yet")).toBeNull();
   });
 

@@ -247,7 +247,6 @@ describe("the server holds no plaintext of an encrypted column", () => {
       .insert(app.readMarkers, { roomId, reader: alice.account, lastReadAt: new Date() })
       .wait({ tier: "global" });
 
-    // The app typed as the backend reads it: its encrypted columns are absent.
     const backendApp = keyless(app);
     const messages = await until(async () => {
       const rows = await host.jazz.db.all(backendApp.messages);
