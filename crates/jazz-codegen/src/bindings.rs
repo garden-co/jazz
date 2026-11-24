@@ -6,9 +6,11 @@
 
 use std::collections::BTreeMap;
 
-use jazz::tools::deployment::artifact::encryption::{DeclaredEncryption, Entries};
+use jazz::tools::deployment::artifact::encryption::{self, DeclaredEncryption, Entries};
 use jazz::tools::deployment::artifact::json::{self, Json};
-use jazz::tools::deployment::published::{PublishedSchema, parse_schema_hash};
+use jazz::tools::deployment::published::{
+    PublishMigrationRequest, PublishedSchema, parse_schema_hash,
+};
 use jazz::tools::public_schema::{Schema, SchemaHash};
 
 use crate::model::App;
@@ -88,18 +90,39 @@ pub(crate) fn check_declarations_of(
     Ok(())
 }
 
-/// For a current version that is the bindings' version with Jazz's system
-/// tables and indexes set aside (so its hash may differ): its declarations,
-/// `current` (`None` when it declares none), must be the recorded ones.
-pub(crate) fn check_current_declarations(
-    current: Option<&Entries>,
+/// With no migration, every table and column keeps its identity. A new hash
+/// may widen an encrypted enum, while a shipped hash keeps its declarations.
+pub(crate) fn check_index_transition(
     recorded: &Recorded,
+    to: &Schema,
+    entries: Option<&Entries>,
 ) -> Result<(), CodegenError> {
-    check_unchanged(
-        &recorded.current.to_string(),
-        &recorded.encryption,
-        current.unwrap_or(&Entries::new()),
+    if recorded.encryption.is_empty() && entries.is_none() {
+        return Ok(());
+    }
+    let target = SchemaHash::compute(to);
+    if target == recorded.current {
+        return check_unchanged(
+            &target.to_string(),
+            &recorded.encryption,
+            entries.unwrap_or(&Entries::new()),
+        );
+    }
+    encryption::check_transition(
+        (&recorded.current_schema, Some(&recorded.encryption)),
+        (to, entries),
+        &PublishMigrationRequest {
+            from_hash: recorded.current.to_string(),
+            to_hash: target.to_string(),
+            forward: Vec::new(),
+        },
     )
+    .map_err(|reason| {
+        CodegenError::new(format!(
+            "{}: {reason}",
+            jazz::tools::deployment::artifact::APP_FILE
+        ))
+    })
 }
 
 /// Refuse `after` as version `hash`'s declarations when they differ from
@@ -471,7 +494,14 @@ pub fn staleness(
     {
         // A change of single-column indexes changes the schema's hash, not
         // its version or its rows (#5494): regenerating is enough.
-        if differs_only_in_indexes(&recorded.current_schema, app.compiled.current_schema()) {
+        let to = app.compiled.current_schema();
+        if differs_only_in_indexes(&recorded.current_schema, to) {
+            let entries = app
+                .compiled
+                .encryption
+                .as_ref()
+                .and_then(|declared| declared.entries(&app.compiled.current.to_string()));
+            check_index_transition(&recorded, to, entries)?;
             return Ok(Some(Staleness::OutOfDate));
         }
         return Ok(Some(Staleness::SchemaChanged));
