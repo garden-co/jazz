@@ -1633,7 +1633,7 @@ impl ServerRuntimeHandle {
 
     /// [`Self::apply_catalogue`] that also keeps `kept` host-table values
     /// (table, key, value) in the same transaction: a key holding a different
-    /// value fails the whole change ([`Db::apply_catalogue_keeping`]).
+    /// value fails the whole change ([`Db::apply_catalogue_checked`]).
     pub async fn apply_catalogue_keeping(
         &self,
         change: CatalogueChange,

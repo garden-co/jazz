@@ -1229,7 +1229,7 @@ impl Owner {
     }
 
     /// [`Self::apply_catalogue`], keeping `kept` host-table values in the
-    /// same transaction (see [`Db::apply_catalogue_keeping`]).
+    /// same transaction (see [`Db::apply_catalogue_checked`]).
     fn apply_catalogue_keeping(
         &mut self,
         change: CatalogueChange,
