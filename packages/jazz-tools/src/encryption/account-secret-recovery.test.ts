@@ -30,7 +30,7 @@ it("asks for the automatic recovery and stays awaiting approval when there is no
   await expect(encryption.ready()).resolves.toBe("awaiting-approval");
   expect(calls[1]).toEqual({
     op: "recoveryRestore",
-    args: { secret: formatSecret(secret), automatic: true },
+    args: { secret: formatSecret(secret), automatic: true, verifiedStatus: "awaiting-approval" },
   });
 });
 
@@ -48,7 +48,7 @@ it("registers the account secret of an active device as the automatic start-up r
     encryptionCall: async (op: string, args: Record<string, unknown>) => {
       calls.push({ op, args });
       if (op === "ready") return JSON.stringify("active");
-      if (op === "recoveryRegister") return "null";
+      if (op === "recoveryRestore") return JSON.stringify("active");
       throw new Error(`unexpected op ${op}`);
     },
     takeEncryptionReports: () => [],
@@ -58,9 +58,27 @@ it("registers the account secret of an active device as the automatic start-up r
 
   await expect(encryption.ready()).resolves.toBe("active");
   expect(calls[1]).toEqual({
-    op: "recoveryRegister",
-    args: { secret: formatSecret(secret), automatic: true },
+    op: "recoveryRestore",
+    args: { secret: formatSecret(secret), automatic: true, verifiedStatus: "active" },
   });
+});
+
+it("returns a fresh reenrollment without waiting for a recovery call", async () => {
+  const call = vi.fn(async (op: string) => {
+    if (op === "ready") return JSON.stringify("reenrolled");
+    throw new Error(`unexpected ${op}`);
+  });
+  const encryption = new Encryption(
+    {
+      encryptionCall: call,
+      encryptionState: () => JSON.stringify({ status: "active" }),
+      takeEncryptionReports: () => [],
+    },
+    { accountSecret: () => formatSecret(secret) },
+  );
+
+  await expect(encryption.ready()).resolves.toBe("reenrolled");
+  expect(call.mock.calls).toEqual([["ready", {}]]);
 });
 
 it.each([
