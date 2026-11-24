@@ -4,16 +4,21 @@
 //! `tables` that needs a migration from one that doesn't, and how
 //! `migrations create` finds the version to migrate from.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::convert::Infallible;
+use std::pin::pin;
+use std::task::{Context, Poll, Waker};
 
-use jazz::tools::deployment::artifact::encryption::{self, DeclaredEncryption, Entries};
+use jazz::tools::deployment::artifact::encryption::{
+    self, DeclaredEncryption, Entries, MigrationNames,
+};
 use jazz::tools::deployment::artifact::json::{self, Json};
 use jazz::tools::deployment::published::{
     PublishMigrationRequest, PublishedSchema, parse_schema_hash,
 };
 use jazz::tools::public_schema::{Schema, SchemaHash};
 
-use crate::model::App;
+use crate::model::{App, Compiled};
 use crate::{CodegenError, Lang, ts};
 
 /// What committed bindings record of the app they were generated from.
@@ -90,8 +95,9 @@ pub(crate) fn check_declarations_of(
     Ok(())
 }
 
-/// With no migration, every table and column keeps its identity. A new hash
-/// may widen an encrypted enum, while a shipped hash keeps its declarations.
+/// With no migration, every table and column keeps its identity. A shipped
+/// hash keeps its declarations. A new hash is a sibling of the bindings'
+/// version to the deploy, since no migration leads to it.
 pub(crate) fn check_index_transition(
     recorded: &Recorded,
     to: &Schema,
@@ -108,16 +114,199 @@ pub(crate) fn check_index_transition(
             entries.unwrap_or(&Entries::new()),
         );
     }
-    encryption::check_transition(
-        (&recorded.current_schema, Some(&recorded.encryption)),
-        (to, entries),
-        &PublishMigrationRequest {
-            from_hash: recorded.current.to_string(),
-            to_hash: target.to_string(),
-            forward: Vec::new(),
-        },
+    let same = |name: &str| Some(name.to_owned());
+    let same_column = |_: &str, name: &str| Some(name.to_owned());
+    check_unlinked(
+        &recorded.encryption,
+        entries,
+        same,
+        same,
+        same_column,
+        same_column,
+        false,
     )
-    .map_err(|reason| {
+}
+
+/// Check the current version against the bindings' one, which is in the
+/// file's history, as the deploy will. This takes the bindings' version as
+/// deployed (codegen can't tell which versions are). A migration from it,
+/// written or implied, was checked when the file loaded. Otherwise the
+/// deploy compares the declarations of the columns both versions store,
+/// as a descendant when migrations lead from it to the current version and
+/// as a sibling when they don't. Codegen follows the file's migrations
+/// through their nearest common version to find those columns, and checks
+/// nothing when no single path connects the two versions.
+pub(crate) fn check_recorded_transition(
+    recorded: &Recorded,
+    compiled: &Compiled,
+) -> Result<(), CodegenError> {
+    let (from, to) = (recorded.current, compiled.current);
+    let entries = compiled
+        .encryption
+        .as_ref()
+        .and_then(|declared| declared.entries(&to.to_string()));
+    if from == to || recorded.encryption.is_empty() || entries.is_none() {
+        return Ok(());
+    }
+    if compiled
+        .migrations
+        .iter()
+        .any(|migration| ends(migration) == Some((from, to)))
+    {
+        return Ok(());
+    }
+    let Some(path) = only_path(compiled, from, to) else {
+        return Ok(());
+    };
+    let steps: Vec<(MigrationNames, bool)> = path
+        .iter()
+        .map(|(migration, forward)| {
+            let target = parse_schema_hash(&migration.to_hash).expect("loaded");
+            let schema = &compiled
+                .schemas
+                .iter()
+                .find(|(hash, _)| *hash == target)
+                .expect("loaded")
+                .1;
+            (
+                MigrationNames {
+                    migration,
+                    to: schema,
+                },
+                *forward,
+            )
+        })
+        .collect();
+    // Each step names a table and column in the next version along the path.
+    let step = |(names, forward): &(MigrationNames, bool), (table, column): (String, String)| {
+        if *forward {
+            Some((names.new_table(&table)?, names.new_name(&table, &column)?))
+        } else {
+            Some((names.old_table(&table)?, names.old_name(&table, &column)?))
+        }
+    };
+    let back = |(names, forward): &(MigrationNames, bool), (table, column): (String, String)| {
+        if *forward {
+            Some((names.old_table(&table)?, names.old_name(&table, &column)?))
+        } else {
+            Some((names.new_table(&table)?, names.new_name(&table, &column)?))
+        }
+    };
+    let table_only = |pair: Option<(String, String)>| pair.map(|(table, _)| table);
+    check_unlinked(
+        &recorded.encryption,
+        entries,
+        |table| {
+            table_only(
+                steps
+                    .iter()
+                    .rev()
+                    .try_fold((table.to_owned(), String::new()), |at, s| back(s, at)),
+            )
+        },
+        |table| {
+            table_only(
+                steps
+                    .iter()
+                    .try_fold((table.to_owned(), String::new()), |at, s| step(s, at)),
+            )
+        },
+        |table, name| {
+            steps
+                .iter()
+                .rev()
+                .try_fold((table.to_owned(), name.to_owned()), |at, s| back(s, at))
+                .map(|(_, name)| name)
+        },
+        |table, name| {
+            steps
+                .iter()
+                .try_fold((table.to_owned(), name.to_owned()), |at, s| step(s, at))
+                .map(|(_, name)| name)
+        },
+        path.iter().all(|(_, forward)| *forward),
+    )
+}
+
+/// The migrations from `from` to `to`, each with whether it runs that way,
+/// when exactly one path connects the two versions. With more, the
+/// deploy's stored identities depend on the order it admitted them in.
+fn only_path(
+    compiled: &Compiled,
+    from: SchemaHash,
+    to: SchemaHash,
+) -> Option<Vec<(&PublishMigrationRequest, bool)>> {
+    let mut reached = vec![from];
+    let mut parent = HashMap::new();
+    let mut next = 0;
+    while let Some(&at) = reached.get(next) {
+        next += 1;
+        for (index, migration) in compiled.migrations.iter().enumerate() {
+            let (other, forward) = match ends(migration) {
+                Some((source, target)) if source == at => (target, true),
+                Some((source, target)) if target == at => (source, false),
+                _ => continue,
+            };
+            if !reached.contains(&other) {
+                reached.push(other);
+                parent.insert(other, (at, index, forward));
+            }
+        }
+    }
+    // Connected versions with one migration fewer than versions form a tree.
+    let edges = compiled
+        .migrations
+        .iter()
+        .filter_map(ends)
+        .filter(|(source, _)| reached.contains(source))
+        .count();
+    if !reached.contains(&to) || edges + 1 != reached.len() {
+        return None;
+    }
+    let mut path = Vec::new();
+    let mut at = to;
+    while at != from {
+        let (previous, index, forward) = parent[&at];
+        path.push((&compiled.migrations[index], forward));
+        at = previous;
+    }
+    path.reverse();
+    Some(path)
+}
+
+fn ends(migration: &PublishMigrationRequest) -> Option<(SchemaHash, SchemaHash)> {
+    Some((
+        parse_schema_hash(&migration.from_hash).ok()?,
+        parse_schema_hash(&migration.to_hash).ok()?,
+    ))
+}
+
+/// The deploy's check of a version that no migration leads to from the
+/// bindings' version, with `precedes` true when migrations lead to it.
+fn check_unlinked(
+    recorded: &Entries,
+    entries: Option<&Entries>,
+    old_table: impl Fn(&str) -> Option<String>,
+    new_table: impl Fn(&str) -> Option<String>,
+    old_name: impl Fn(&str, &str) -> Option<String>,
+    new_name: impl Fn(&str, &str) -> Option<String>,
+    precedes: bool,
+) -> Result<(), CodegenError> {
+    let empty = Entries::new();
+    let check = encryption::check_unlinked_transition(
+        recorded,
+        entries.unwrap_or(&empty),
+        old_table,
+        new_table,
+        old_name,
+        new_name,
+        async || Ok::<_, Infallible>(precedes),
+    );
+    // Nothing in the check waits: its one callback answers at once.
+    let Poll::Ready(Ok(result)) = pin!(check).poll(&mut Context::from_waker(Waker::noop())) else {
+        unreachable!("the check runs to completion");
+    };
+    result.map_err(|reason| {
         CodegenError::new(format!(
             "{}: {reason}",
             jazz::tools::deployment::artifact::APP_FILE
@@ -506,6 +695,7 @@ pub fn staleness(
         }
         return Ok(Some(Staleness::SchemaChanged));
     }
+    check_recorded_transition(&recorded, &app.compiled)?;
     if recorded.source != app.source || recorded.format != lang.format() {
         return Ok(Some(Staleness::OutOfDate));
     }

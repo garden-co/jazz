@@ -804,3 +804,187 @@ describe("encrypted declarations across an index edit", () => {
     expect(await readFile(bindings)).toEqual(original);
   });
 });
+
+describe("encrypted declarations across sibling versions", () => {
+  const permissions = JSON.stringify({
+    format: 1,
+    tables: {
+      notes: {
+        read: "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)",
+      },
+    },
+  });
+  /** `notes` with its encrypted column `column` declared as `declaration`. */
+  function tables(column: string, declaration: unknown, indexes: string[]) {
+    return {
+      notes: {
+        columns: { title: "string", rank: "int", [column]: "bytes" },
+        indexes,
+        encryption: { scope: "notes", space: "id", columns: { [column]: declaration } },
+      },
+    };
+  }
+  const sealed = (...variants: string[]) => ({
+    type: { enum: variants },
+    sealedType: { enum: ["a"] },
+  });
+  const root = tables("detail", { enum: ["a"] }, []);
+  const app = (current: unknown, rest: Record<string, unknown> = {}) =>
+    JSON.stringify({ format: 1, tables: current, ...rest });
+
+  async function workspace() {
+    const { root: dir } = await createWorkspace();
+    const path = join(dir, "jazz.app.json");
+    const bindings = join(dir, "jazz.generated.ts");
+    return {
+      dir,
+      write: (text: string) => writeFile(path, text),
+      bindings: () => readFile(bindings),
+      async refused(column: string) {
+        const original = await readFile(bindings);
+        await expect(migrationsCreateForDir(dir, "edit")).rejects.toThrow(column);
+        await expect(generateForDir(dir)).rejects.toThrow(column);
+        await expect(generateForDir(dir, { check: true })).rejects.toThrow(column);
+        expect(await readFile(bindings)).toEqual(original);
+      },
+      async accepted() {
+        expect((await migrationsCreateForDir(dir, "edit")).changed).toBe(false);
+        expect((await generateForDir(dir)).written).toEqual(["jazz.generated.ts"]);
+        await generateForDir(dir, { check: true });
+      },
+      publish: async (server: Awaited<ReturnType<typeof startLocalJazzServer>>) =>
+        publishLoadedDeployment(
+          { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret },
+          (await loadAppFiles(await readFile(path, "utf8"), permissions)) as LoadedDeployment,
+        ),
+    };
+  }
+
+  /**
+   * The shipped version appends `b` to the root's enum, under `column` when its
+   * migration renames `detail`. The file then leads from the root to `current`
+   * on another branch and keeps the shipped version in history.
+   */
+  async function branchFromTheRoot(column: string, current: unknown) {
+    const project = await workspace();
+    const shipped = tables(column, sealed("a", "b"), ["title"]);
+    const toShipped = {
+      from: "root",
+      ...(column === "detail"
+        ? {}
+        : { migrate: { notes: { [column]: { renameFrom: "detail" } } } }),
+    };
+    await project.write(
+      app(shipped, { history: { root: { tables: root } }, migrations: [toShipped] }),
+    );
+    await generateForDir(project.dir);
+    await project.write(
+      app(current, {
+        history: { root: { tables: root }, shipped: { tables: shipped } },
+        migrations: [{ ...toShipped, to: "shipped" }, { from: "root" }],
+      }),
+    );
+    return project;
+  }
+
+  it("generates and deploys a sibling enum prefix after an index edit", async () => {
+    const project = await workspace();
+    const server = await startLocalJazzServer();
+    try {
+      await project.write(app(tables("detail", { enum: ["a"] }, ["rank"])));
+      await project.publish(server);
+      await project.write(app(tables("detail", sealed("a", "b"), [])));
+      await generateForDir(project.dir);
+      await project.publish(server);
+
+      await project.write(app(tables("detail", sealed("a"), ["title"])));
+      await project.accepted();
+      expect((await project.publish(server)).schema.status).toBe("published");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("refuses a divergent sibling enum after an index edit", async () => {
+    const project = await workspace();
+    await project.write(app(tables("detail", sealed("a", "b"), [])));
+    await generateForDir(project.dir);
+    await project.write(app(tables("detail", sealed("a", "c"), ["title"])));
+    await project.refused("notes.detail");
+  });
+
+  it("checks a parallel branch against the shipped version", async () => {
+    const extended = await branchFromTheRoot(
+      "detail",
+      tables("detail", sealed("a", "b", "c"), ["rank"]),
+    );
+    await extended.accepted();
+    const divergent = await branchFromTheRoot(
+      "detail",
+      tables("detail", sealed("a", "c"), ["rank"]),
+    );
+    await divergent.refused("notes.detail");
+  });
+
+  it("follows a rename on the shipped branch to the same stored column", async () => {
+    const project = await branchFromTheRoot("body", tables("detail", sealed("a", "c"), ["rank"]));
+    await project.refused("notes.detail");
+  });
+
+  it("refuses a retyped column on the step implied from history", async () => {
+    const project = await workspace();
+    const shipped = tables("detail", "string?", []);
+    await project.write(app(shipped));
+    await generateForDir(project.dir);
+    await project.write(
+      app(tables("detail", "int?", ["title"]), { history: { shipped: { tables: shipped } } }),
+    );
+    await project.refused("notes.detail");
+  });
+
+  it("agrees with the deploy on a root with several shipped branches", async () => {
+    const project = await workspace();
+    const server = await startLocalJazzServer();
+    try {
+      const shipped = tables("detail", sealed("a", "b"), ["title"]);
+      const extended = tables("detail", sealed("a", "b", "c"), ["rank"]);
+      await project.write(app(root));
+      await project.publish(server);
+      await project.write(
+        app(shipped, { history: { root: { tables: root } }, migrations: [{ from: "root" }] }),
+      );
+      await generateForDir(project.dir);
+      await project.publish(server);
+
+      // A second branch from the root extends the shipped enum: both accept it.
+      await project.write(
+        app(extended, {
+          history: { root: { tables: root }, shipped: { tables: shipped } },
+          migrations: [{ from: "root", to: "shipped" }, { from: "root" }],
+        }),
+      );
+      await project.accepted();
+      expect((await project.publish(server)).schema.status).toBe("published");
+
+      // A third diverges from both shipped branches: both refuse it.
+      await project.write(
+        app(tables("detail", sealed("a", "c"), ["title", "rank"]), {
+          history: {
+            root: { tables: root },
+            shipped: { tables: shipped },
+            extended: { tables: extended },
+          },
+          migrations: [
+            { from: "root", to: "shipped" },
+            { from: "root", to: "extended" },
+            { from: "root" },
+          ],
+        }),
+      );
+      await project.refused("notes.detail");
+      await expect(project.publish(server)).rejects.toThrow("notes.detail");
+    } finally {
+      await server.stop();
+    }
+  });
+});
