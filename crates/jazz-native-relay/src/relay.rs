@@ -1434,10 +1434,12 @@ impl RelayWorker {
         let encryption = runtime.map(|built| {
             let flag = Rc::clone(&dirty);
             built.store.set_wake(Box::new(move || flag.set(true)));
+            let wake_store = Rc::clone(&built.store);
             jazz_e2ee_client::host::runtime::Encryption::new_native(
                 built.built,
-                built.store,
+                Some(built.store),
                 Rc::clone(&binding.db),
+                Rc::new(move || wake_store.request_wake()),
             )
         });
         let mutation_errors = Rc::new(RefCell::new(Vec::new()));
@@ -2575,11 +2577,18 @@ fn foreground_command(
         }
         #[cfg(feature = "e2ee-client")]
         Request::TakeStoreRequests => Response::StoreRequests {
-            requests: foreground_encryption(client)?.store.take_requests(),
+            requests: foreground_encryption(client)?
+                .bridge_store()
+                .take_requests(),
         },
         #[cfg(feature = "e2ee-client")]
         Request::ReplyStore { id, ok, payload } => {
-            return reply_store(&foreground_encryption(client)?.store, &id, ok, &payload);
+            return reply_store(
+                foreground_encryption(client)?.bridge_store(),
+                &id,
+                ok,
+                &payload,
+            );
         }
         #[cfg(feature = "e2ee-client")]
         Request::EncryptionCall { op, args_json } => {

@@ -83,7 +83,7 @@ impl ForegroundEncryption {
                 environment: self.declarations.environment.clone(),
             },
             account,
-            Rc::clone(&store),
+            store.clone(),
             Some(&self.declarations),
         )
         .await?;

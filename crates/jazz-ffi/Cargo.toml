@@ -39,6 +39,7 @@ zeroize = { version = "1.8.2", default-features = false, features = ["alloc"] }
 uniffi = { version = "=0.32.2", default-features = false }
 
 [dev-dependencies]
+jazz-e2ee-client = { workspace = true, features = ["testing"] }
 jazz-server = { path = "../jazz-server", features = ["test"] }
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

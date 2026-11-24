@@ -360,7 +360,7 @@ impl WasmDb {
     #[wasm_bindgen(js_name = takeStoreRequests)]
     pub fn take_store_requests(&self) -> Result<Vec<String>, JsValue> {
         let encryption = self.encryption()?;
-        let requests = encryption.store.take_requests();
+        let requests = encryption.bridge_store().take_requests();
         // The host polls here, so a request the store never answers times out.
         encryption.drive();
         settle_promises();
@@ -375,7 +375,7 @@ impl WasmDb {
         let encryption = self.encryption()?;
         let accepted = id
             .parse()
-            .is_ok_and(|id| encryption.store.reply(id, ok, &payload));
+            .is_ok_and(|id| encryption.bridge_store().reply(id, ok, &payload));
         encryption.drive();
         settle_promises();
         encryption.wake_if_owed();

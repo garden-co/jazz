@@ -72,4 +72,7 @@ pub use spaces::{
 pub use spaces::{epoch_deliveries_query, successor_probe};
 pub use state::{MAX_REPORTS, Report};
 pub use store::{MemoryStore, PrivateStore, StoreError, Stored};
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub use values::CELL_TYPE_ENCODING;

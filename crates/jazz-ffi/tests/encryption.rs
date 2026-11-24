@@ -7,20 +7,22 @@
 //! is an in-process server whose backend holds no keys.
 
 mod common;
+#[path = "../../jazz-app/tests/relay/encrypted_app.rs"]
+mod encrypted_app;
 #[path = "../../jazz-app/tests/fixtures/encrypted/omitted_columns.rs"]
 mod omitted_columns;
 #[allow(dead_code)]
 #[path = "../../jazz-app/tests/relay/mod.rs"]
 mod relay;
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use common::parse;
+use encrypted_app::EncryptedApp as App;
+use jazz_e2ee_client::MemoryStore;
+use jazz_e2ee_client::testing::answer_memory_store;
 use jazz_ffi::{JazzError, JazzHandle, PrivateStore, StoreReply, generate_device_key};
 use serde_json::{Value, json};
 
@@ -29,80 +31,12 @@ const DIR: &str = concat!(
     "/../jazz-app/tests/fixtures/encrypted"
 );
 
-/// One scope of a host's store: its incarnation and its documents (bytes and revision).
-type Scope = (u64, HashMap<String, (Vec<u8>, u64)>);
-
-/// A host's private store: keys and revisions in memory, answering the
-/// request contract (`op`, bytes as base64, numbers as decimal text). A real
-/// host keeps these in a file protected by its platform's key store.
+/// A host-language store that records requests and can lose a save acknowledgement.
 #[derive(Default)]
 struct HostStore {
-    scopes: Mutex<HashMap<String, Scope>>,
+    memory: MemoryStore,
     calls: Mutex<Vec<String>>,
     lose_recovery_ack: AtomicBool,
-}
-
-impl HostStore {
-    fn answer(&self, request: &Value) -> Result<Value, String> {
-        let text = |name: &str| request[name].as_str().ok_or(format!("no {name}"));
-        let number =
-            |name: &str| -> Result<u64, String> { text(name)?.parse().map_err(|_| "bad".into()) };
-        let bytes = |name: &str| -> Result<Vec<u8>, String> {
-            STANDARD.decode(text(name)?).map_err(|e| e.to_string())
-        };
-        let mut scopes = self.scopes.lock().unwrap();
-        match text("op")? {
-            "openScope" => {
-                let next = scopes.len() as u64 + 1;
-                let scope = scopes.entry(text("scope")?.to_owned()).or_insert((
-                    // An incarnation that is never zero.
-                    next * 7919,
-                    HashMap::new(),
-                ));
-                Ok(json!(scope.0.to_string()))
-            }
-            "load" => Ok(scopes
-                .get(text("scope")?)
-                .and_then(|scope| scope.1.get(text("doc").ok()?))
-                .map_or(Value::Null, |(bytes, revision)| {
-                    json!({ "bytes": STANDARD.encode(bytes), "revision": revision.to_string() })
-                })),
-            "save" => {
-                let Some(scope) = scopes.get_mut(text("scope")?) else {
-                    return Err("wiped".into());
-                };
-                if scope.0 != number("incarnation")? {
-                    return Err("wiped".into());
-                }
-                let doc = text("doc")?.to_owned();
-                let expected = match request["expected"].as_str() {
-                    Some(_) => Some(number("expected")?),
-                    None => None,
-                };
-                let held = scope.1.get(&doc).map(|(_, revision)| *revision);
-                if held != expected {
-                    return Err("conflict".into());
-                }
-                let revision = held.unwrap_or(0) + 1;
-                scope.1.insert(doc, (bytes("bytes")?, revision));
-                Ok(json!(revision.to_string()))
-            }
-            "list" => Ok(json!(
-                scopes
-                    .get(text("scope")?)
-                    .map(|scope| scope.1.keys().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default()
-            )),
-            "delete" => {
-                scopes.remove(text("scope")?);
-                Ok(Value::Null)
-            }
-            // A real host protects the secret with its platform's key store.
-            "protect" => Ok(json!(text("secret")?)),
-            "unprotect" => Ok(json!(text("blob")?)),
-            other => Err(format!("unknown op {other}")),
-        }
-    }
 }
 
 impl PrivateStore for HostStore {
@@ -112,27 +46,16 @@ impl PrivateStore for HostStore {
             .lock()
             .unwrap()
             .push(parsed["op"].as_str().unwrap_or_default().to_owned());
-        match self.answer(&parsed) {
-            Ok(_)
-                if parsed["op"] == "save"
-                    && parsed["doc"] == "device"
-                    && parsed["expected"].is_string()
-                    && self.lose_recovery_ack.swap(false, Ordering::SeqCst) =>
-            {
-                StoreReply {
-                    ok: false,
-                    payload: "lost acknowledgement of the recovery nonce save".to_owned(),
-                }
-            }
-            Ok(value) => StoreReply {
-                ok: true,
-                payload: value.to_string(),
-            },
-            Err(message) => StoreReply {
+        let recovery_save =
+            parsed["op"] == "save" && parsed["doc"] == "device" && parsed["expected"].is_string();
+        let (ok, payload) = answer_memory_store(&self.memory, request);
+        if ok && recovery_save && self.lose_recovery_ack.swap(false, Ordering::SeqCst) {
+            return StoreReply {
                 ok: false,
-                payload: message,
-            },
+                payload: "lost acknowledgement of the recovery nonce save".to_owned(),
+            };
         }
+        StoreReply { ok, payload }
     }
 }
 
@@ -140,51 +63,8 @@ fn app_file() -> String {
     std::fs::read_to_string(format!("{DIR}/jazz.app.json")).unwrap()
 }
 
-struct App {
-    app_id: jazz_app_support::AppId,
-    server: jazz_server::JazzServer,
-    backend: jazz_app_support::Jazz,
-    relay: relay::Relay,
-}
-
-/// A server, the app's backend (which holds no keys) and its endpoint.
 async fn start() -> App {
-    start_with(jazz_app_support::AppFiles::read(DIR).unwrap()).await
-}
-
-async fn start_with(files: jazz_app_support::AppFiles) -> App {
-    let app_id = jazz_app_support::AppId::random();
-    let server = jazz_server::JazzServer::builder()
-        .with_app_id(app_id)
-        .start()
-        .await
-        .unwrap();
-    let backend = jazz_app_support::Jazz::open(
-        files,
-        jazz_app_support::Config::new(app_id)
-            .server(server.base_url())
-            .backend(jazz_app_support::Backend::new(
-                server.backend_secret(),
-                server.admin_secret(),
-                "service",
-            )),
-    )
-    .await
-    .expect("an encrypted app opens as a backend");
-    let relay = relay::start(
-        &server.base_url(),
-        app_id,
-        server.backend_secret(),
-        server.admin_secret(),
-        backend.bundle().unwrap(),
-    )
-    .await;
-    App {
-        app_id,
-        server,
-        backend,
-        relay,
-    }
+    App::start_with(jazz_app_support::AppFiles::read(DIR).unwrap()).await
 }
 
 impl App {
@@ -201,11 +81,6 @@ impl App {
             "environment": "test", "contract": 2,
         })
         .to_string()
-    }
-
-    async fn stop(self) {
-        self.backend.shutdown().await.unwrap();
-        self.server.shutdown().await;
     }
 }
 
@@ -392,7 +267,7 @@ async fn a_host_app_shares_an_encrypted_space_with_a_store_it_supplies() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ffi_insert_returns_omitted_encrypted_values() {
     let files = omitted_columns::app();
-    let app = start_with(jazz_app_support::AppFiles::new(
+    let app = App::start_with(jazz_app_support::AppFiles::new(
         files.app.clone(),
         Some(files.permissions.into_bytes()),
     ))

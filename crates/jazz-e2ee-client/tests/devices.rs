@@ -1239,7 +1239,7 @@ fn a_rotation_check_reports_storage_failure_even_when_rotation_succeeds() {
     within(|| {
         use jazz_e2ee_client::Report;
         let store = FaultyStore::default();
-        let mut shared = SharedSpace::with_store(Rc::new(store.clone()));
+        let mut shared = SharedSpace::with_store(store.store());
         shared
             .alice
             .client
@@ -2336,66 +2336,6 @@ fn the_stored_document_says_spent_after_an_answer() {
     });
 }
 
-/// A store that refuses to save the device document while `fail` is set.
-struct FailingSaves {
-    inner: MemoryStore,
-    fail: Rc<std::cell::Cell<bool>>,
-}
-
-type Boxed<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
-
-impl jazz_e2ee_client::PrivateStore for FailingSaves {
-    fn load<'a>(
-        &'a self,
-        scope: &'a str,
-        doc: &'a str,
-    ) -> Boxed<'a, Result<Option<jazz_e2ee_client::Stored>, jazz_e2ee_client::StoreError>> {
-        jazz_e2ee_client::PrivateStore::load(&self.inner, scope, doc)
-    }
-    fn open_scope<'a>(
-        &'a self,
-        scope: &'a str,
-    ) -> Boxed<'a, Result<u64, jazz_e2ee_client::StoreError>> {
-        jazz_e2ee_client::PrivateStore::open_scope(&self.inner, scope)
-    }
-    fn save<'a>(
-        &'a self,
-        scope: &'a str,
-        incarnation: u64,
-        doc: &'a str,
-        bytes: &'a [u8],
-        expected: Option<u64>,
-    ) -> Boxed<'a, Result<u64, jazz_e2ee_client::StoreError>> {
-        if self.fail.get() && doc == "device" {
-            return Box::pin(async {
-                Err(jazz_e2ee_client::StoreError::Failed("disk full".to_owned()))
-            });
-        }
-        jazz_e2ee_client::PrivateStore::save(&self.inner, scope, incarnation, doc, bytes, expected)
-    }
-    fn list<'a>(
-        &'a self,
-        scope: &'a str,
-    ) -> Boxed<'a, Result<Vec<String>, jazz_e2ee_client::StoreError>> {
-        jazz_e2ee_client::PrivateStore::list(&self.inner, scope)
-    }
-    fn delete<'a>(&'a self, scope: &'a str) -> Boxed<'a, Result<(), jazz_e2ee_client::StoreError>> {
-        jazz_e2ee_client::PrivateStore::delete(&self.inner, scope)
-    }
-    fn protect<'a>(
-        &'a self,
-        secret: &'a [u8],
-    ) -> Boxed<'a, Result<Vec<u8>, jazz_e2ee_client::StoreError>> {
-        jazz_e2ee_client::PrivateStore::protect(&self.inner, secret)
-    }
-    fn unprotect<'a>(
-        &'a self,
-        blob: &'a [u8],
-    ) -> Boxed<'a, Result<jazz_e2ee::Zeroizing<Vec<u8>>, jazz_e2ee_client::StoreError>> {
-        jazz_e2ee_client::PrivateStore::unprotect(&self.inner, blob)
-    }
-}
-
 /// Contract: the nonce is marked spent, and the store confirms, before the
 /// proof is published: when the store cannot save, the answer fails and no
 /// proof row reaches the authority (the nonce stays unrevealed); once the
@@ -2408,12 +2348,11 @@ fn a_store_that_cannot_save_publishes_no_proof() {
         let alice = account(0xa1);
         let first = device(&server, alice, memory(), 1, &settings);
         first.status(&server, &[]);
-        let fail = Rc::new(std::cell::Cell::new(false));
-        let store = Rc::new(FailingSaves {
-            inner: MemoryStore::new(),
-            fail: fail.clone(),
-        });
-        let second = device(&server, alice, store, 2, &settings);
+        let store = FaultyStore {
+            fail_doc: Some("device"),
+            ..FaultyStore::default()
+        };
+        let second = device(&server, alice, store.store(), 2, &settings);
         second.status(&server, &[&first]);
         let both = [&first.db, &second.db];
         drive(
@@ -2423,7 +2362,7 @@ fn a_store_that_cannot_save_publishes_no_proof() {
         )
         .unwrap();
 
-        fail.set(true);
+        store.failing.set(true);
         let refused = drive(&server, &both, second.client.answer_challenge(&second.db));
         assert!(matches!(refused, Err(ClientError::Store(_))), "{refused:?}");
         pump(&server, &second.db);
@@ -2433,7 +2372,7 @@ fn a_store_that_cannot_save_publishes_no_proof() {
             "no proof was published"
         );
 
-        fail.set(false);
+        store.failing.set(false);
         drive(&server, &both, second.client.answer_challenge(&second.db)).unwrap();
         pump(&server, &second.db);
         assert_eq!(count(&server, "__e2ee_device_proofs"), 1);

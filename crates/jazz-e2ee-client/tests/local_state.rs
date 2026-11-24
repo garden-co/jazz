@@ -443,7 +443,7 @@ fn unusable_mechanism_settings_are_refused_at_open() {
 fn a_key_whose_save_fails_is_not_usable() {
     let server = authority();
     let store = FaultyStore::default();
-    let client = open_client(Rc::new(store.clone()));
+    let client = open_client(store.store());
     let (db, _link, _) = online(&client, &server, None);
     let space = project(&db, "plans");
     let held = new_space_key(&client.device().unwrap(), &address(&db, space));
@@ -471,7 +471,7 @@ fn a_key_whose_save_fails_is_not_usable() {
 fn a_wipe_during_a_keep_closes_it() {
     let server = authority();
     let store = FaultyStore::default();
-    let client = open_client(Rc::new(store.clone()));
+    let client = open_client(store.store());
     let (db, _link, _) = online(&client, &server, None);
     let held = new_space_key(
         &client.device().unwrap(),
@@ -589,14 +589,14 @@ fn an_unknown_floor_format_is_never_overwritten() {
 #[test]
 fn opening_during_a_wipe_starts_afresh() {
     let store = FaultyStore::default();
-    let before = open_client(Rc::new(store.clone()));
+    let before = open_client(store.store());
     let old_device = before.device().unwrap().id.clone();
     drop(before);
     block_on(store.inner.delete(&scope())).unwrap();
     store.wiped_first.set(true);
-    let fresh = open_client(Rc::new(store.clone()));
+    let fresh = open_client(store.store());
     assert_ne!(fresh.device().unwrap().id, old_device);
     assert_eq!(store.inner.scopes(), [scope()]);
-    let reopened = open_client(Rc::new(store));
+    let reopened = open_client(store.store());
     assert_eq!(reopened.device().unwrap().id, fresh.device().unwrap().id);
 }

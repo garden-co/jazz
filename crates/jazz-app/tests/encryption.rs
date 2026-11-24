@@ -9,6 +9,8 @@
 #[allow(dead_code)]
 #[path = "bindings/encrypted.rs"]
 mod bindings;
+#[path = "relay/encrypted_app.rs"]
+mod encrypted_app;
 #[path = "fixtures/encrypted/omitted_columns.rs"]
 mod omitted_columns;
 #[allow(dead_code)]
@@ -18,12 +20,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
+use encrypted_app::EncryptedApp as App;
 use jazz_app_support::jazz::query::Query;
 use jazz_app_support::jazz::tools::{ObjectId, ReadTier, TableName, Value};
 use jazz_app_support::{
     AppFiles, AppId, Auth, Backend, Config, DeviceKey, EncryptionConfig, Error, Jazz, TokenReason,
 };
-use jazz_e2ee_client::MemoryStore;
+use jazz_e2ee_client::testing::{StoreWithSaveHook, answer_memory_store};
+use jazz_e2ee_client::{MemoryStore, StoreError};
 use jazz_server::JazzServer;
 use serde_json::json;
 
@@ -37,57 +41,10 @@ fn client_files() -> AppFiles {
     AppFiles::new(std::fs::read(format!("{DIR}/jazz.app.json")).unwrap(), None)
 }
 
-struct App {
-    app_id: AppId,
-    server: JazzServer,
-    backend: Jazz,
-    relay: relay::Relay,
-}
-
 impl App {
     /// A server, the app's backend (which holds no keys) and its endpoint.
     async fn start() -> Self {
         Self::start_with(backend_files()).await
-    }
-
-    async fn start_with(files: AppFiles) -> Self {
-        let app_id = AppId::random();
-        let server = JazzServer::builder()
-            .with_app_id(app_id)
-            .start()
-            .await
-            .expect("start a Jazz server");
-        Self::on_server(files, server).await
-    }
-
-    async fn on_server(files: AppFiles, server: JazzServer) -> Self {
-        let app_id = server.app_id();
-        let backend = Jazz::open(
-            files,
-            Config::new(app_id)
-                .server(server.base_url())
-                .backend(Backend::new(
-                    server.backend_secret(),
-                    server.admin_secret(),
-                    "service",
-                )),
-        )
-        .await
-        .expect("an encrypted app opens as a backend, which holds no keys");
-        let relay = relay::start(
-            &server.base_url(),
-            app_id,
-            server.backend_secret(),
-            server.admin_secret(),
-            backend.bundle().unwrap(),
-        )
-        .await;
-        Self {
-            app_id,
-            server,
-            backend,
-            relay,
-        }
     }
 
     fn user(&self, key: DeviceKey) -> Config {
@@ -109,11 +66,6 @@ impl App {
         Jazz::open(client_files(), config)
             .await
             .expect("open as a device with a private store")
-    }
-
-    async fn stop(self) {
-        self.backend.shutdown().await.unwrap();
-        self.server.shutdown().await;
     }
 }
 
@@ -264,21 +216,8 @@ async fn titles(jazz: &Jazz, count: usize) -> Vec<String> {
 }
 
 /// One app-supplied store that successive clients can use from their own threads.
-fn shared_private_store() -> (EncryptionConfig, impl AsyncFnOnce(MemoryStore) + Send) {
-    let (requests, mut receiver) =
-        tokio::sync::mpsc::unbounded_channel::<(String, std::sync::mpsc::Sender<(bool, String)>)>();
-    let config = EncryptionConfig::store_calls(move |request| {
-        let (reply, answer) = std::sync::mpsc::channel();
-        requests.send((request, reply)).unwrap();
-        answer.recv().unwrap()
-    });
-    let serve = async move |store| {
-        let handler = jazz_e2ee_client::host::bridge::serve(Rc::new(store));
-        while let Some((request, reply)) = receiver.recv().await {
-            reply.send(handler(request).await).unwrap();
-        }
-    };
-    (config, serve)
+fn shared_private_store(store: MemoryStore) -> EncryptionConfig {
+    EncryptionConfig::store_calls(move |request| answer_memory_store(&store, request))
 }
 
 /// Alice and Bob sign in on the same installation. Each opens their own local
@@ -289,9 +228,7 @@ async fn signing_in_opens_the_same_accounts_rows_and_keys() {
 
     let app = App::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let (store, serve) = shared_private_store();
-    let private_store =
-        std::thread::spawn(move || futures::executor::block_on(serve(MemoryStore::new())));
+    let store = shared_private_store(MemoryStore::new());
     let mut devices = HashMap::new();
     for user in ["alice", "bob", "alice"] {
         let config = Config::new(app.app_id)
@@ -356,8 +293,6 @@ async fn signing_in_opens_the_same_accounts_rows_and_keys() {
         }
         jazz.sign_out().await.unwrap();
     }
-    drop(store);
-    private_store.join().unwrap();
     app.stop().await;
 }
 
@@ -370,7 +305,7 @@ async fn deleting_client_storage_preserves_keys_and_decrypts_the_resynced_row() 
     let app = App::start().await;
     let dir = tempfile::tempdir().unwrap();
     let store = MemoryStore::new();
-    let (encryption, serve) = shared_private_store();
+    let encryption = shared_private_store(store.clone());
     let documents = async || {
         let mut docs = std::collections::BTreeMap::new();
         for scope in store.scopes() {
@@ -381,54 +316,51 @@ async fn deleting_client_storage_preserves_keys_and_decrypts_the_resynced_row() 
         }
         docs
     };
-    let device = async {
-        let config = Config::new(app.app_id)
-            .server(&app.relay.endpoint)
-            .user(Auth::bearer(|_| async {
-                Ok(Some("token-alice".to_owned()))
-            }))
-            .storage(jazz_app_support::Storage::Dir(dir.path().into()))
-            .encryption(encryption);
-        let alice = Jazz::open(client_files(), config.clone()).await.unwrap();
-        assert_eq!(
-            alice
-                .encryption()
-                .ready(Duration::from_secs(30))
-                .await
-                .unwrap(),
-            "active"
-        );
-        let project = make_project(&alice, "plans").await;
-        add_task(&alice, &project, "private draft").await.unwrap();
-        let database = dir
-            .path()
-            .join(alice.account().unwrap().0.to_string())
-            .join("jazz.sqlite");
-        assert!(database.is_file());
-        let before = documents().await;
-        assert!(before.keys().any(|(_, name)| name.starts_with("held-")));
+    let config = Config::new(app.app_id)
+        .server(&app.relay.endpoint)
+        .user(Auth::bearer(|_| async {
+            Ok(Some("token-alice".to_owned()))
+        }))
+        .storage(jazz_app_support::Storage::Dir(dir.path().into()))
+        .encryption(encryption);
+    let alice = Jazz::open(client_files(), config.clone()).await.unwrap();
+    assert_eq!(
+        alice
+            .encryption()
+            .ready(Duration::from_secs(30))
+            .await
+            .unwrap(),
+        "active"
+    );
+    let project = make_project(&alice, "plans").await;
+    add_task(&alice, &project, "private draft").await.unwrap();
+    let database = dir
+        .path()
+        .join(alice.account().unwrap().0.to_string())
+        .join("jazz.sqlite");
+    assert!(database.is_file());
+    let before = documents().await;
+    assert!(before.keys().any(|(_, name)| name.starts_with("held-")));
 
-        alice.delete_client_storage().await.unwrap();
-        assert!(!database.exists());
-        assert_eq!(
-            documents().await,
-            before,
-            "deletion changed the private store"
-        );
+    alice.delete_client_storage().await.unwrap();
+    assert!(!database.exists());
+    assert_eq!(
+        documents().await,
+        before,
+        "deletion changed the private store"
+    );
 
-        let reopened = Jazz::open(client_files(), config).await.unwrap();
-        assert_eq!(
-            reopened
-                .encryption()
-                .ready(Duration::from_secs(30))
-                .await
-                .unwrap(),
-            "active"
-        );
-        assert_eq!(titles(&reopened, 1).await, ["private draft"]);
-        reopened.shutdown().await.unwrap();
-    };
-    tokio::join!(serve(store.clone()), device);
+    let reopened = Jazz::open(client_files(), config).await.unwrap();
+    assert_eq!(
+        reopened
+            .encryption()
+            .ready(Duration::from_secs(30))
+            .await
+            .unwrap(),
+        "active"
+    );
+    assert_eq!(titles(&reopened, 1).await, ["private draft"]);
+    reopened.shutdown().await.unwrap();
     app.stop().await;
 }
 
@@ -1442,36 +1374,27 @@ async fn a_device_accounts_automatic_registration_refuses_another_identitys_secr
     app.stop().await;
 }
 
-/// A private store with a hook that can fail or hold selected requests.
+/// A private store with a hook that can fail or hold selected saves.
 fn store_with_hook(
-    hook: impl Fn(serde_json::Value) -> futures::future::LocalBoxFuture<'static, Option<String>>
+    hook: impl Fn(&str, Option<u64>) -> futures::future::LocalBoxFuture<'static, Result<(), StoreError>>
     + Send
     + Sync
     + 'static,
 ) -> EncryptionConfig {
-    use jazz_e2ee_client::host::bridge::{JsStore, serve};
-
     let hook = std::sync::Arc::new(hook);
     EncryptionConfig::store(move || {
         let hook = hook.clone();
-        let store = serve(Rc::new(MemoryStore::new()));
-        Rc::new(JsStore::served_by(Rc::new(move |request| {
-            let intercepted = hook(serde_json::from_str(&request).unwrap());
-            let store = store.clone();
-            Box::pin(async move {
-                match intercepted.await {
-                    Some(error) => (false, error),
-                    None => store(request).await,
-                }
-            })
-        })))
+        Rc::new(StoreWithSaveHook::new(
+            MemoryStore::new(),
+            move |_, doc, _, expected| hook(doc, expected),
+        ))
     })
 }
 
 /// Updating the stored device, after creation, marks its recovery nonce
 /// spent before publishing the device's approval.
-fn saving_recovery_nonce(request: &serde_json::Value) -> bool {
-    request["op"] == "save" && request["doc"] == "device" && request["expected"].is_string()
+fn saving_recovery_nonce(doc: &str, expected: Option<u64>) -> bool {
+    doc == "device" && expected.is_some()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1487,9 +1410,13 @@ async fn readiness_reports_the_store_failure_that_stopped_recovery() {
             .unwrap(),
         "active"
     );
-    let store = store_with_hook(|request| {
+    let store = store_with_hook(|doc, expected| {
+        let recovery = saving_recovery_nonce(doc, expected);
         Box::pin(async move {
-            saving_recovery_nonce(&request).then(|| "cannot save recovery nonce".to_owned())
+            if recovery {
+                return Err(StoreError::Failed("cannot save recovery nonce".to_owned()));
+            }
+            Ok(())
         })
     });
     let phone = Jazz::open(client_files(), app.user(key).encryption(store))
@@ -1537,15 +1464,16 @@ async fn readiness_has_its_own_deadline_while_startup_recovers_the_device() {
     let store = store_with_hook({
         let entered = entered.clone();
         let release = release.clone();
-        move |request| {
+        move |doc, expected| {
             let entered = entered.clone();
             let release = release.clone();
+            let recovery = saving_recovery_nonce(doc, expected);
             Box::pin(async move {
-                if saving_recovery_nonce(&request) {
+                if recovery {
                     entered.notify_one();
                     release.notified().await;
                 }
-                None
+                Ok(())
             })
         }
     });
@@ -1580,13 +1508,13 @@ async fn readiness_has_its_own_deadline_while_startup_recovers_the_device() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_encrypted_write_reports_a_failure_to_store_its_space_key() {
     let app = App::start().await;
-    let store = store_with_hook(|request| {
+    let store = store_with_hook(|doc, _| {
+        let held = doc.starts_with("held-");
         Box::pin(async move {
-            (request["op"] == "save"
-                && request["doc"]
-                    .as_str()
-                    .is_some_and(|doc| doc.starts_with("held-")))
-            .then(|| "cannot store the space key".to_owned())
+            if held {
+                return Err(StoreError::Failed("cannot store the space key".to_owned()));
+            }
+            Ok(())
         })
     });
     let config = app.user(DeviceKey::generate().unwrap()).encryption(store);
@@ -1627,18 +1555,15 @@ async fn a_store_that_never_answers_fails_the_call_and_the_client_closes() {
     let entered = Arc::new(Notify::new());
     let store = store_with_hook({
         let entered = entered.clone();
-        move |request| {
+        move |doc, _| {
             let entered = entered.clone();
+            let held = doc.starts_with("held-");
             Box::pin(async move {
-                if request["op"] == "save"
-                    && request["doc"]
-                        .as_str()
-                        .is_some_and(|doc| doc.starts_with("held-"))
-                {
+                if held {
                     entered.notify_one();
                     std::future::pending::<()>().await;
                 }
-                None
+                Ok(())
             })
         }
     });

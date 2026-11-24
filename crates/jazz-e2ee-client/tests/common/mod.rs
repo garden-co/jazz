@@ -38,6 +38,7 @@ use jazz_e2ee::protocol::space::AccountDirectory;
 use jazz_e2ee::protocol::space::build::{Author, RootRecords, SpaceWriter, space_root};
 use jazz_e2ee::protocol::{Accepted, Position};
 use jazz_e2ee::registry::Registry;
+use jazz_e2ee_client::testing::StoreWithSaveHook;
 use jazz_e2ee_client::{ClientConfig, E2eeClient, MemoryStore, PrivateStore, StoreError, Stored};
 
 pub const ALICE: &str = "a11ce000-0000-5000-8000-00000000a11c";
@@ -540,6 +541,8 @@ pub struct FaultyStore {
     pub inner: MemoryStore,
     /// Saves fail while set.
     pub failing: Rc<std::cell::Cell<bool>>,
+    /// Limit disk failures to this document, if specified.
+    pub fail_doc: Option<&'static str>,
     /// The next save yields once, then reports a conflict.
     pub contended: Rc<std::cell::Cell<bool>>,
     /// The next save first deletes its scope, as another tab's wipe would.
@@ -568,62 +571,29 @@ impl std::future::Future for YieldOnce {
     }
 }
 
-impl PrivateStore for FaultyStore {
-    fn load<'a>(
-        &'a self,
-        scope: &'a str,
-        doc: &'a str,
-    ) -> LocalBoxFuture<'a, Result<Option<Stored>, StoreError>> {
-        self.inner.load(scope, doc)
-    }
-
-    fn open_scope<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<u64, StoreError>> {
-        self.inner.open_scope(scope)
-    }
-
-    fn save<'a>(
-        &'a self,
-        scope: &'a str,
-        incarnation: u64,
-        doc: &'a str,
-        bytes: &'a [u8],
-        expected: Option<u64>,
-    ) -> LocalBoxFuture<'a, Result<u64, StoreError>> {
-        Box::pin(async move {
-            self.saves.set(self.saves.get() + 1);
-            if self.failing.get() {
-                return Err(StoreError::Failed("the disk is full".to_owned()));
-            }
-            if self.wiped_first.replace(false) {
-                self.inner.delete(scope).await?;
-            }
-            if self.contended.replace(false) {
-                YieldOnce(false).await;
-                return Err(StoreError::Conflict);
-            }
-            self.inner
-                .save(scope, incarnation, doc, bytes, expected)
-                .await
-        })
-    }
-
-    fn list<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<Vec<String>, StoreError>> {
-        self.inner.list(scope)
-    }
-
-    fn delete<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<(), StoreError>> {
-        self.inner.delete(scope)
-    }
-
-    fn protect<'a>(&'a self, secret: &'a [u8]) -> LocalBoxFuture<'a, Result<Vec<u8>, StoreError>> {
-        self.inner.protect(secret)
-    }
-
-    fn unprotect<'a>(
-        &'a self,
-        blob: &'a [u8],
-    ) -> LocalBoxFuture<'a, Result<Zeroizing<Vec<u8>>, StoreError>> {
-        self.inner.unprotect(blob)
+impl FaultyStore {
+    pub fn store(&self) -> Rc<dyn PrivateStore> {
+        let store = self.clone();
+        Rc::new(StoreWithSaveHook::new(
+            self.inner.clone(),
+            move |scope, doc, _, _| {
+                let store = store.clone();
+                Box::pin(async move {
+                    store.saves.set(store.saves.get() + 1);
+                    if store.failing.get() && store.fail_doc.is_none_or(|name| name == doc) {
+                        return Err(StoreError::Failed("the disk is full".to_owned()));
+                    }
+                    if store.wiped_first.replace(false) {
+                        store.inner.delete(scope).await?;
+                    }
+                    if store.contended.replace(false) {
+                        YieldOnce(false).await;
+                        return Err(StoreError::Conflict);
+                    }
+                    Ok(())
+                })
+            },
+        ))
     }
 }
 

@@ -134,7 +134,8 @@ enum Verification {
 /// The runtime and what the host keeps beside it.
 pub struct Encryption {
     pub client: Rc<E2eeClient>,
-    pub store: Rc<JsStore>,
+    bridge_store: Option<Rc<JsStore>>,
+    wake: Rc<dyn Fn()>,
     db: Rc<Db>,
     /// The reports of the runtime, as JSON, waiting for JS.
     reports: Rc<RefCell<ReportQueue>>,
@@ -219,7 +220,7 @@ pub fn build(
 pub async fn build_native(
     mut options: Options,
     account_id: String,
-    store: Rc<JsStore>,
+    store: Rc<dyn PrivateStore>,
     relay_declarations: Option<&E2eeDeclarations>,
 ) -> Result<NativeBuilt, String> {
     let recovery = options.device_account_secret.take();
@@ -256,7 +257,7 @@ fn declarations(options: &Options) -> Result<E2eeDeclarations, String> {
 async fn build_client(
     declarations: E2eeDeclarations,
     account_id: String,
-    store: Rc<JsStore>,
+    store: Rc<dyn PrivateStore>,
     recovery: Option<&RecoverySecret>,
 ) -> Result<Built, String> {
     let spaces = Value::Object(
@@ -275,7 +276,6 @@ async fn build_client(
         .map(DeviceAccountIdentity::from_secret)
         .transpose()
         .map_err(|error| error.to_string())?;
-    let store: Rc<dyn PrivateStore> = store;
     let client = E2eeClient::open(ClientConfig {
         store,
         declarations,
@@ -312,10 +312,22 @@ async fn build_client(
 
 impl Encryption {
     pub fn new(built: Built, store: Rc<JsStore>, db: Rc<Db>) -> Rc<Self> {
-        Self::start(built, store, db, None)
+        let bridge = Rc::clone(&store);
+        Self::start(
+            built,
+            Some(store),
+            db,
+            Rc::new(move || bridge.request_wake()),
+            None,
+        )
     }
 
-    pub fn new_native(built: NativeBuilt, store: Rc<JsStore>, db: Rc<Db>) -> Rc<Self> {
+    pub fn new_native(
+        built: NativeBuilt,
+        bridge_store: Option<Rc<JsStore>>,
+        db: Rc<Db>,
+        wake: Rc<dyn Fn()>,
+    ) -> Rc<Self> {
         let native = NativeReadiness {
             recovery: RefCell::new(built.recovery),
             result: RefCell::new(Verification::Pending),
@@ -324,13 +336,14 @@ impl Encryption {
             started: Cell::new(0),
             finished: Cell::new(0),
         };
-        Self::start(built.built, store, db, Some(native))
+        Self::start(built.built, bridge_store, db, wake, Some(native))
     }
 
     fn start(
         built: Built,
-        store: Rc<JsStore>,
+        bridge_store: Option<Rc<JsStore>>,
         db: Rc<Db>,
+        wake: Rc<dyn Fn()>,
         native: Option<NativeReadiness>,
     ) -> Rc<Self> {
         let Built {
@@ -340,7 +353,8 @@ impl Encryption {
         } = built;
         let encryption = Rc::new(Self {
             client,
-            store,
+            bridge_store,
+            wake,
             db,
             reports,
             approvals: RefCell::default(),
@@ -362,6 +376,13 @@ impl Encryption {
         encryption
     }
 
+    /// The request queue for hosts that supply their store over the bridge.
+    pub fn bridge_store(&self) -> &JsStore {
+        self.bridge_store
+            .as_deref()
+            .expect("host uses a store bridge")
+    }
+
     /// Asks the host for a tick when a read the runtime just asked is waiting
     /// to go upstream: its next remote read is asked from a continuation,
     /// after the last one was answered, and nothing else would send it.
@@ -373,7 +394,7 @@ impl Encryption {
     pub fn wake_if_owed(&self) {
         let batch = self.db.pending_upstream_send_batch();
         if self.woken_batch.replace(batch) != batch && batch.is_some() {
-            self.store.request_wake();
+            (self.wake)();
         }
     }
 
@@ -1390,7 +1411,7 @@ mod tests {
                         "columns": { "body": "string" } }
                 }
             } }"#;
-        let memory = crate::MemoryStore::new();
+        let answer = super::super::bridge::serve(Rc::new(crate::MemoryStore::new()));
         let mut building = Box::pin(build(&options(encrypted), account.clone(), store.clone()));
         let mut context = std::task::Context::from_waker(Waker::noop());
         let built = loop {
@@ -1400,12 +1421,9 @@ mod tests {
             // JavaScript's side: run each request against a store.
             for text in store.take_requests() {
                 let request: Value = serde_json::from_str(&text).unwrap();
-                let (ok, payload) = answer(&memory, &request);
-                assert!(store.reply(
-                    request["id"].as_str().unwrap().parse().unwrap(),
-                    ok,
-                    &payload,
-                ));
+                let id = request["id"].as_str().unwrap().parse().unwrap();
+                let (ok, payload) = run(answer(text));
+                assert!(store.reply(id, ok, &payload));
             }
         };
         assert_eq!(built.client.account_id(), account);
@@ -1435,13 +1453,10 @@ mod tests {
             app_id: "terminal-catalogue".to_owned(),
             environment: "test".to_owned(),
         };
-        let store = Rc::new(JsStore::served_by(super::super::bridge::serve(Rc::new(
-            crate::MemoryStore::new(),
-        ))));
         let built = run(build_native(
             options,
             uuid::Uuid::new_v4().to_string(),
-            Rc::clone(&store),
+            Rc::new(crate::MemoryStore::new()),
             None,
         ))
         .unwrap();
@@ -1466,7 +1481,7 @@ mod tests {
             .unwrap(),
         );
         jazz::db::block_on(db.set_authority()).unwrap();
-        Encryption::new_native(built, store, db)
+        Encryption::new_native(built, None, db, Rc::new(|| {}))
     }
 
     /// A space's row answers from the local catalogue, even while the loop's
@@ -1548,58 +1563,6 @@ mod tests {
             runtime.foreground_ready_outcome(second, true),
             Some(Err(closed))
         );
-    }
-
-    /// What the app's store answers a request with, as the TypeScript side
-    /// does it: here over an in-memory store.
-    fn answer(store: &crate::MemoryStore, request: &Value) -> (bool, String) {
-        use base64::Engine;
-        use base64::engine::general_purpose::STANDARD;
-        let text = |name: &str| request[name].as_str().unwrap().to_owned();
-        let number = |name: &str| request[name].as_str().unwrap().parse::<u64>().unwrap();
-        let result: Result<Value, crate::StoreError> = match request["op"].as_str() {
-            Some("openScope") => {
-                run(store.open_scope(&text("scope"))).map(|n| json!(n.to_string()))
-            }
-            Some("load") => {
-                run(store.load(&text("scope"), &text("doc"))).map(|found| match found {
-                    None => Value::Null,
-                    Some(found) => json!({
-                        "bytes": STANDARD.encode(found.bytes),
-                        "revision": found.revision.to_string(),
-                    }),
-                })
-            }
-            Some("save") => {
-                let bytes = STANDARD.decode(text("bytes")).unwrap();
-                let expected = request["expected"].as_str().map(|n| n.parse().unwrap());
-                run(store.save(
-                    &text("scope"),
-                    number("incarnation"),
-                    &text("doc"),
-                    &bytes,
-                    expected,
-                ))
-                .map(|n| json!(n.to_string()))
-            }
-            Some("list") => run(store.list(&text("scope"))).map(|names| json!(names)),
-            Some("delete") => run(store.delete(&text("scope"))).map(|()| Value::Null),
-            Some("protect") => {
-                let secret = STANDARD.decode(text("secret")).unwrap();
-                run(store.protect(&secret)).map(|blob| json!(STANDARD.encode(blob)))
-            }
-            Some("unprotect") => {
-                let blob = STANDARD.decode(text("blob")).unwrap();
-                run(store.unprotect(&blob)).map(|secret| json!(STANDARD.encode(&*secret)))
-            }
-            other => panic!("unknown store request {other:?}"),
-        };
-        match result {
-            Ok(value) => (true, value.to_string()),
-            Err(crate::StoreError::Conflict) => (false, "conflict".to_owned()),
-            Err(crate::StoreError::Wiped) => (false, "wiped".to_owned()),
-            Err(error) => (false, error.to_string()),
-        }
     }
 
     /// Alice's host delivers each report once and drains the client's raw copy
