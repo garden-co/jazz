@@ -30,7 +30,7 @@ it("asks for the automatic recovery and stays awaiting approval when there is no
   await expect(encryption.ready()).resolves.toBe("awaiting-approval");
   expect(calls[1]).toEqual({
     op: "recoveryRestore",
-    args: { secret: "07".repeat(32), automatic: true },
+    args: { secret: formatSecret(secret), automatic: true },
   });
 });
 
@@ -59,7 +59,7 @@ it("registers the account secret of an active device as the automatic start-up r
   await expect(encryption.ready()).resolves.toBe("active");
   expect(calls[1]).toEqual({
     op: "recoveryRegister",
-    args: { secret: "07".repeat(32), automatic: true },
+    args: { secret: formatSecret(secret), automatic: true },
   });
 });
 

@@ -142,8 +142,8 @@ export interface EncryptionOptions {
   reportIntervalMs?: number;
 }
 
-/** @internal Takes ownership of the decoded secret passed to the native host. */
-export function takeSecretHex(bytes: Uint8Array): string {
+/** Takes ownership of the decoded backup secret passed to the native host. */
+function takeSecretHex(bytes: Uint8Array): string {
   try {
     return bytesToHex(bytes);
   } finally {
@@ -300,18 +300,16 @@ export class Encryption {
       known.status === null ? await this.verified() : await this.call<AccountStatus>("ready", {});
     const secret = await this.options.accountSecret?.();
     if (secret !== undefined) {
-      const hex = takeSecretHex(parseSecret(secret));
       // `automatic`: a retired root of the account secret is not an error
       // here, so the device still starts.
-      if (status === "active")
-        await this.call("recoveryRegister", { secret: hex, automatic: true });
+      if (status === "active") await this.call("recoveryRegister", { secret, automatic: true });
       else if (status === "awaiting-approval") {
         // A device with no other to approve it recovers with the account
         // secret. `null`: nothing to recover from yet (no registered root
         // or delivery for it), so it stays awaiting approval. Any other
         // failure (store, database, a refused recovery) is the caller's.
         const restored = await this.call<AccountStatus | null>("recoveryRestore", {
-          secret: hex,
+          secret,
           automatic: true,
         });
         if (restored !== null) status = restored;

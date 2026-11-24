@@ -1002,7 +1002,7 @@ pub struct EncryptionRuntime {
 impl EncryptionRuntime {
     /// A runtime for the app whose files are `app_file`, for the account
     /// `account_id` of the session that will open the database;
-    /// `device_account_secret` (64 hexadecimal characters) for a device
+    /// `device_account_secret` (`jazz-auth-v1:…`) for a device
     /// account, whose secret is its recovery secret.
     #[napi(constructor)]
     pub fn new(
@@ -1011,7 +1011,7 @@ impl EncryptionRuntime {
         environment: String,
         account_id: String,
         device_account_secret: Option<String>,
-    ) -> Self {
+    ) -> napi::Result<Self> {
         Self::from_source(
             app_file.to_vec(),
             false,
@@ -1032,7 +1032,7 @@ impl EncryptionRuntime {
         environment: String,
         account_id: String,
         device_account_secret: Option<String>,
-    ) -> Self {
+    ) -> napi::Result<Self> {
         Self::from_source(
             bindings.into_bytes(),
             true,
@@ -1052,8 +1052,12 @@ impl EncryptionRuntime {
         environment: String,
         account_id: String,
         device_account_secret: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> napi::Result<Self> {
+        let device_account_secret = device_account_secret
+            .map(jazz::identity::DeviceAccountSecret::parse_owned)
+            .transpose()
+            .map_err(napi::Error::from_reason)?;
+        Ok(Self {
             store: Rc::default(),
             options: Rc::new(RefCell::new(Some(encryption::Options {
                 app_file,
@@ -1066,7 +1070,7 @@ impl EncryptionRuntime {
             account_id,
             app_id,
             built: Rc::default(),
-        }
+        })
     }
 
     fn build_future(&self) -> Option<encryption::JsonFuture> {
@@ -2923,9 +2927,12 @@ impl NapiDb {
         &self,
         env: &Env,
         op: String,
-        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] args: Option<JsonValue>,
+        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] args: Option<
+            Unknown<'_>,
+        >,
     ) -> js::Result<PromiseRaw<'static, String>> {
         let encryption = self.encryption()?;
+        let args = args.map(JsonValue::from_unknown).transpose()?;
         let future = encryption.call(op, json_or_null(args));
         let driver = Rc::clone(&encryption);
         let future: encryption::JsonFuture = Box::pin(async move {
@@ -3982,6 +3989,20 @@ mod encryption_tests {
     use jazz::binding_host::{OpenConfig, OpenIdentity};
     use jazz::ids::{AuthorSubject, NodeUuid};
 
+    /// Alice's malformed device secret is refused at binding construction, before
+    /// her application declarations or private store are read.
+    #[test]
+    fn device_secret_is_checked_before_readiness() {
+        let result = EncryptionRuntime::from_bindings(
+            "invalid app".into(),
+            "test".into(),
+            "test".into(),
+            "alice".into(),
+            Some("jazz-auth-v1:short".into()),
+        );
+        assert!(result.is_err_and(|error| error.reason == "invalid device account secret"));
+    }
+
     /// Alice can retry readiness after her private store refuses a request,
     /// and Bob's refused open leaves the built runtime available to Alice.
     /// Rust drives the same build future as `ready` because its JS promise
@@ -4000,8 +4021,13 @@ mod encryption_tests {
             "test".into(),
             "test".into(),
             alice.account_id().unwrap().0.to_string(),
-            Some("01".repeat(32)),
-        );
+            Some(
+                jazz::identity::DeviceAccountSecret::from_bytes([1; 32])
+                    .format()
+                    .to_string(),
+            ),
+        )
+        .unwrap();
         let mut context = Context::from_waker(Waker::noop());
         let mut failed = runtime.build_future().unwrap();
         assert!(failed.as_mut().poll(&mut context).is_pending());
@@ -4021,7 +4047,11 @@ mod encryption_tests {
         assert!(failure.contains("store unavailable"), "{failure}");
         assert!(
             runtime.options.borrow().as_ref().is_some_and(|options| {
-                options.device_account_secret.as_deref() == Some("01".repeat(32).as_str())
+                options
+                    .device_account_secret
+                    .as_ref()
+                    .map(|secret| secret.as_bytes())
+                    == Some(&[1; 32])
             }),
             "failed readiness preserves the recovery secret for a retry"
         );

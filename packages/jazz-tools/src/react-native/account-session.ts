@@ -4,8 +4,6 @@ import type { DbConfig } from "../runtime/db.js";
 import { clientScope } from "../runtime/client-scope.js";
 import type { Session } from "../runtime/context.js";
 import { assertAccountConfig } from "../accounts/config-capability.js";
-import { takeSecretHex } from "../encryption/index.js";
-import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import type { NativeForegroundFactory } from "./native-foreground-db.js";
 
 /** The same native account admission is used by contexts and device receipts. */
@@ -51,11 +49,7 @@ export function beginNativeAccountSession(
       issuer: session.issuer,
       subject: session.user_id,
       ...credential,
-      ...(deviceAccountSecret === undefined
-        ? {}
-        : {
-            device_account_secret: takeSecretHex(parseAuthSecret(deviceAccountSecret)),
-          }),
+      device_account_secret: deviceAccountSecret,
       claims: session.claims,
       server_url: config.serverUrl ?? null,
     }),

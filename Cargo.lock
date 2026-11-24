@@ -2375,6 +2375,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hpke",
  "jazz-e2ee",
+ "jazz-types",
  "libsodium-sys-stable",
  "rand_core 0.10.1",
  "sha1",
@@ -2634,7 +2635,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "zeroize",
 ]
 
 [[package]]
@@ -2849,6 +2849,7 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.18",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

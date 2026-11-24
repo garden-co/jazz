@@ -5,6 +5,7 @@ use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha512};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const KEY_NAMESPACE: Uuid = Uuid::from_bytes([
     0x6a, 0x61, 0x7a, 0x7a, 0x2d, 0x61, 0x75, 0x74, 0x68, 0x2d, 0x6b, 0x65, 0x79, 0x2d, 0x76, 0x31,
@@ -16,6 +17,59 @@ const SIGN_DOMAIN: &str = "jazz-auth-sign-v1";
 /// and is signed into every token, so it stays `urn:jazz:local-first`.
 pub const DEVICE_ACCOUNT_ISSUER: &str = "urn:jazz:local-first";
 pub const ANONYMOUS_ISSUER: &str = "urn:jazz:anonymous";
+
+/// The portable text prefix for a device account or recovery secret.
+pub const SECRET_PREFIX: &str = "jazz-auth-v1:";
+
+/// A 32-byte account or recovery secret, wiped on drop.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DeviceAccountSecret(Zeroizing<[u8; 32]>);
+
+impl std::fmt::Debug for DeviceAccountSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DeviceAccountSecret(..)")
+    }
+}
+
+impl DeviceAccountSecret {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Decode exactly 32 bytes of canonical, unpadded base64url.
+    pub fn parse(text: &str) -> Result<Self, &'static str> {
+        let invalid = "invalid device account secret";
+        let payload = text
+            .strip_prefix(SECRET_PREFIX)
+            .filter(|s| s.len() == 43)
+            .ok_or(invalid)?;
+        let mut bytes = Zeroizing::new([0; 32]);
+        URL_SAFE_NO_PAD
+            .decode_slice(payload, &mut *bytes)
+            .map_err(|_| invalid)?;
+        Ok(Self(bytes))
+    }
+
+    /// Take ownership of a host's text and wipe it on success or failure.
+    pub fn parse_owned(text: String) -> Result<Self, &'static str> {
+        Self::parse(&Zeroizing::new(text))
+    }
+
+    pub fn format(&self) -> Zeroizing<String> {
+        let mut payload = Zeroizing::new([0; 43]);
+        URL_SAFE_NO_PAD
+            .encode_slice(self.as_bytes(), &mut *payload)
+            .expect("32 bytes encode to 43 characters");
+        let mut text = Zeroizing::new(String::with_capacity(SECRET_PREFIX.len() + payload.len()));
+        text.push_str(SECRET_PREFIX);
+        text.push_str(std::str::from_utf8(&*payload).expect("base64url is ASCII"));
+        text
+    }
+}
 
 const KNOWN_SELF_SIGNED_ISSUERS: &[&str] = &[DEVICE_ACCOUNT_ISSUER, ANONYMOUS_ISSUER];
 

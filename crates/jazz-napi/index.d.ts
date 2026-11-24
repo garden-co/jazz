@@ -10,7 +10,7 @@ export declare class EncryptionRuntime {
   /**
    * A runtime for the app whose files are `app_file`, for the account
    * `account_id` of the session that will open the database;
-   * `device_account_secret` (64 hexadecimal characters) for a device
+   * `device_account_secret` (`jazz-auth-v1:…`) for a device
    * account, whose secret is its recovery secret.
    */
   constructor(appFile: Uint8Array, appId: string, environment: string, accountId: string, deviceAccountSecret?: string | undefined | null)
