@@ -5,6 +5,7 @@ import { expect, it } from "vitest";
 import { betterAuth } from "better-auth";
 import { hashPassword } from "better-auth/crypto";
 import { createJazz, type Jazz } from "../backend/create-jazz.js";
+import { files } from "../backend/blobs.js";
 import { sqlite } from "../backend/native-provider.js";
 import { compileTestApp, testApp } from "../testing/test-app.js";
 import { jazzAdapter } from "./index.js";
@@ -25,7 +26,7 @@ it("upgrades an existing issuer-era account through createJazz and signs in afte
   const newApp = testApp(currentAppFile);
   const permissions = denyAllPermissions;
   const path = await mkdtemp(join(tmpdir(), "jazz-better-auth-upgrade-"));
-  const store = sqlite({ path });
+  const store = sqlite({ path, blobs: files() });
   let jazz: Jazz | undefined;
   try {
     // Seed an actual predecessor store, with real persistent user/account rows.

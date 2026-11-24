@@ -3,7 +3,7 @@
 // guest on a device account. Run it with `pnpm backend`, then point the app at it
 // with EXPO_PUBLIC_JAZZ_SERVER_URL (see the README).
 import { createServer } from "node:http";
-import { acceptDeviceAccounts, createJazz, sqlite } from "jazz-tools/backend";
+import { acceptDeviceAccounts, createJazz, files, sqlite } from "jazz-tools/backend";
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
 
@@ -12,7 +12,7 @@ async function main() {
   const jazz = createJazz({
     app,
     permissions,
-    store: sqlite({ path: ".jazz" }),
+    store: sqlite({ path: ".jazz", blobs: files() }),
     // No sign-in: every device is a guest, so let guests sync.
     authenticate: acceptDeviceAccounts,
   });

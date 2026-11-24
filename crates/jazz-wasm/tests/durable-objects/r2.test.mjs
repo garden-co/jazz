@@ -46,10 +46,11 @@ function largeTitle(seed, bytes) {
  * the R2 binding `JAZZ_BLOBS`; `vars` adds bindings (`JAZZ_BLOBS_PREFIX`,
  * `FAIL_PUTS`).
  */
-function start(dirs, { blobs = true, vars = {} } = {}) {
+function start(dirs, { blobs = true, bindBucket = blobs, vars = {}, script } = {}) {
   return new Miniflare({
     modules: true,
     scriptPath: join(here, "r2-worker.mjs"),
+    ...(script && { script }),
     modulesRoot: join(here, "../.."),
     modulesRules: [
       { type: "ESModule", include: ["**/*.js", "**/*.mjs"] },
@@ -58,9 +59,14 @@ function start(dirs, { blobs = true, vars = {} } = {}) {
     compatibilityDate: "2026-04-01",
     durableObjects: { JAZZ: { className: "JazzCore", useSQLite: true } },
     durableObjectsPersist: dirs.objects,
-    r2Buckets: blobs ? ["JAZZ_BLOBS"] : [],
+    r2Buckets: bindBucket ? ["JAZZ_BLOBS"] : [],
     r2Persist: dirs.bucket,
-    bindings: { JAZZ_CORE_SECRET: SECRET, JAZZ_SCHEMA: SCHEMA, ...vars },
+    bindings: {
+      JAZZ_CORE_SECRET: SECRET,
+      JAZZ_SCHEMA: SCHEMA,
+      BLOB_MODE: blobs ? "r2" : "sqlite",
+      ...vars,
+    },
   });
 }
 
@@ -73,6 +79,30 @@ function scratch() {
     other: join(root, "other-objects"),
   };
 }
+
+test("omitting blobs fails even when an R2 bucket is bound", async () => {
+  const dirs = scratch();
+  const mf = start(dirs, {
+    script: `
+    import { createJazzCore, r2 } from "./do/index.js";
+    export const JazzCore = createJazzCore({blobs: (env) => r2(env.JAZZ_BLOBS)});
+    export default { fetch(request, env) {
+      if (!env.JAZZ_BLOBS) throw new Error("test needs an R2 binding");
+      try { createJazzCore({}); } catch (error) { return new Response(error.message); }
+      return new Response("accepted missing destination");
+    } };
+  `,
+  });
+  try {
+    assert.match(
+      await (await mf.dispatchFetch("http://core/check")).text(),
+      /createJazzCore\(\): blobs/,
+    );
+  } finally {
+    await mf.dispose();
+    rmSync(dirs.root, { recursive: true, force: true });
+  }
+});
 
 /** A socket to the core, its answers queued as they arrive. */
 async function connect(mf) {
@@ -303,10 +333,10 @@ test("failed puts keep the value in SQL and are retried until they land", async 
   }
 });
 
-test("a store with inline large values moves them to R2 once the binding is added, and needs it from then on", async () => {
+test("a store with inline large values moves them to R2 once the binding is selected, and needs it from then on", async () => {
   const dirs = scratch();
   const big = largeTitle(5, 300 * 1024);
-  let mf = start(dirs, { blobs: false });
+  let mf = start(dirs, { blobs: false, bindBucket: true });
   try {
     await write(mf, big);
     const before = await inline(mf);

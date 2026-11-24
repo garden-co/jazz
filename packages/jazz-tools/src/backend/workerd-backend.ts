@@ -8,7 +8,8 @@
  *
  * ```ts
  * import { createJazz, durableObjects, jazzBackend, routeToJazzBackend } from "jazz-tools/backend";
- * export { JazzCore } from "jazz-tools/durable-object";
+ * import { createJazzCore } from "jazz-tools/durable-object";
+ * export const JazzCore = createJazzCore({ blobs: "sqlite" });
  *
  * export const JazzBackend = jazzBackend((env: Env) => {
  *   const jazz = createJazz({

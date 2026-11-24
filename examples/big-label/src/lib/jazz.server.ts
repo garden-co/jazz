@@ -9,7 +9,7 @@ import { jazzConfig } from "./jazz-config";
 // asset into a route chunk.
 const createRequire =
   process.getBuiltinModule?.("module")?.createRequire ?? createRequireFromModule;
-const { createJazz, memory, remote, sqlite } = createRequire(import.meta.url)(
+const { createJazz, memory, remote, files, sqlite } = createRequire(import.meta.url)(
   "jazz-tools/backend",
 ) as typeof import("jazz-tools/backend");
 
@@ -33,7 +33,7 @@ export function jazz(): Promise<Jazz> {
       ? remote({ ...config.remote, appId: config.appId })
       : process.env.NODE_ENV === "test"
         ? memory()
-        : sqlite({ path: config.dataPath! }),
+        : sqlite({ path: config.dataPath!, blobs: files() }),
     // Better Auth's session cookie decides who the user is.
     authenticate: async (request) => {
       const { auth } = await import("./auth");

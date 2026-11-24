@@ -16,14 +16,14 @@ browsers and apps, and decides who each user is. Other trusted machines reach Ja
 ## Create Jazz once
 
 ```ts title="jazz.server.ts"
-import { createJazz, sqlite } from "jazz-tools/backend";
+import { createJazz, files, sqlite } from "jazz-tools/backend";
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
   permissions,
-  store: sqlite({ path: process.env.JAZZ_DATA_DIR ?? "./data/jazz" }),
+  store: sqlite({ path: process.env.JAZZ_DATA_DIR ?? "./data/jazz", blobs: files() }),
   // Read your session; return { userId, expiresAt, claims? } for a signed-in user, or null
   authenticate: async (request) => null,
 });
@@ -43,13 +43,13 @@ app and the backend.
 ### Large values
 
 Large values, such as files and long streams, are stored in chunks. Rows and the chunk index always
-stay in SQLite. By default `sqlite()` keeps the chunks as files in `<path>/blobs`. Choose where they
-go with `blobs`:
+stay in SQLite. Choose a destination with the required `blobs` option. For existing stores
+that used the previous default, pass `files()` to keep using `<path>/blobs`.
 
 ```ts
 import { files, s3, sqlite } from "jazz-tools/backend";
 
-sqlite({ path: "./data/jazz" }); // chunks in ./data/jazz/blobs
+sqlite({ path: "./data/jazz", blobs: files() }); // chunks in ./data/jazz/blobs
 sqlite({ path: "./data/jazz", blobs: files({ dir: "/mnt/blobs" }) }); // a directory of your choice
 sqlite({ path: "./data/jazz", blobs: s3() }); // an S3-compatible bucket
 sqlite({ path: "./data/jazz", blobs: "sqlite" }); // inside the SQLite database (not recommended)

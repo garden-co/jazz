@@ -9,6 +9,7 @@ import { testApp } from "../testing/index.js";
 import {
   createJazz,
   memory,
+  files,
   sqlite,
   type InspectEvent,
   type InspectGrant,
@@ -871,7 +872,7 @@ describe("agent tokens", () => {
     const options = (inspector: Parameters<typeof createJazz>[0]["inspector"] = {}) => ({
       app,
       permissions,
-      store: sqlite({ path: dir }),
+      store: sqlite({ path: dir, blobs: files() }),
       authenticate,
       inspect: staffOnly,
       inspector: { audit: () => {}, ...inspector },
@@ -1022,11 +1023,11 @@ describe("agent tokens", () => {
   it("survive a restart of a SQLite store, and need a secret where the store has none", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-inspect-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
-    const once = await start({ store: sqlite({ path: dir }) });
+    const once = await start({ store: sqlite({ path: dir, blobs: files() }) });
     const { token } = await mint(once.jazz);
     expect(((await stat(join(dir, "inspect-token-secret"))).mode & 0o777).toString(8)).toBe("600");
     await once.jazz.close();
-    const again = await start({ store: sqlite({ path: dir }) });
+    const again = await start({ store: sqlite({ path: dir, blobs: files() }) });
     expect(await ok(api(again.jazz, { op: "whoami" }, bearer(token)))).toMatchObject({
       via: "token",
     });

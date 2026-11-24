@@ -21,16 +21,16 @@
 // JAZZ_BLOBS (an R2 bucket for large values, recommended) and
 // JAZZ_BLOBS_PREFIX (where in it, default `jazz/<app id>/`).
 //
-// Large values: without JAZZ_BLOBS their bytes stay in the object's SQL,
-// which grows with every one. With it, each settled large-value node moves
+// Large values: with inline storage their bytes stay in the object's SQL,
+// which grows with every one. With R2 selected, each settled large-value node moves
 // to the bucket under the prefix, named by its SHA-256 (which every put
 // carries, so R2 refuses a corrupted body), and is deleted from there once
 // reclaimed. The engine hands out one batch of that work at a time; this
 // host runs it against the bucket and hands the outcome back, and a failed
 // op is retried in a later batch, with backoff. Bytes leave the SQL only
 // once their put succeeded, so a failing bucket never loses a value. A
-// store that holds large values inline moves them out once the binding is
-// added; one that moved them can't be opened without it. The prefix
+// store that holds large values inline moves them out once the bucket is
+// selected; one that moved them can't be opened without it. The prefix
 // belongs to one store: the first claims it with `.jazz-owner` (written
 // only if absent), and any other store is refused there (`/ready` answers
 // 503 saying so, and its values stay in its SQL).
@@ -296,20 +296,26 @@ function close(ws, code, reason) {
   } catch {}
 }
 
+// Bumped whenever the instance is replaced: a core made on an older one
+// is dropped, never called.
+let instance = 0;
+
 /**
  * The Durable Object class over `wasm`: jazz-wasm's durable-object build
  * (initialised), as `{ DurableObjectCore, reinstantiate }`, where
  * `reinstantiate()` replaces its wasm instance after a trap. `index.js`
  * exports it ready over the packaged build.
  */
-export function jazzCoreClass(wasm) {
-  // Bumped whenever the instance is replaced: a core made on an older one
-  // is dropped, never called.
-  let instance = 0;
+export function jazzCoreClass(wasm, blobs) {
   return class JazzCore extends DurableObject {
     constructor(ctx, env) {
       super(ctx, env);
       this.env = env;
+      const destination = typeof blobs === "function" ? blobs(env) : blobs;
+      if (destination !== "sqlite" && !(destination?.kind === "r2" && destination.bucket)) {
+        throw new Error('createJazzCore(): select "sqlite" or r2(bucket)');
+      }
+      this.blobBucket = destination === "sqlite" ? undefined : destination.bucket;
       this.core = null;
       this.sockets = new Map();
       this.flushTimer = undefined;
@@ -347,16 +353,16 @@ export function jazzCoreClass(wasm) {
             this.ctx.storage,
             this.env.JAZZ_CORE_SECRET,
             this.env.JAZZ_SCHEMA,
-            this.env.JAZZ_BLOBS !== undefined,
+            this.blobBucket !== undefined,
           ),
         );
         this.instance = instance;
         this.chunkIo.out = false;
         this.chunkFetches.out = false;
-        if (this.env.JAZZ_BLOBS !== undefined && this.bucket === null) {
+        if (this.blobBucket !== undefined && this.bucket === null) {
           const appId = this.core.appId();
           this.bucket = new LargeValueBucket(
-            this.env.JAZZ_BLOBS,
+            this.blobBucket,
             LargeValueBucket.prefix(this.env.JAZZ_BLOBS_PREFIX, appId),
             appId,
             claimedPrefix(this.ctx.storage.sql),

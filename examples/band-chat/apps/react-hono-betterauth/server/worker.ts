@@ -13,7 +13,8 @@ import { createJazz, durableObjects, jazzBackend, routeToJazzBackend } from "jaz
 import { app } from "../jazz.generated";
 import permissions from "../jazz.permissions.json" with { type: "json" };
 
-export { JazzCore } from "jazz-tools/durable-object";
+import { createJazzCore, r2 } from "jazz-tools/durable-object";
+export const JazzCore = createJazzCore({ blobs: (env) => r2(env.JAZZ_BLOBS!) });
 
 interface Env {
   /** The JazzCore namespace (its one object holds the app's data). */

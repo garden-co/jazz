@@ -8,16 +8,15 @@ import type { JazzCore } from "./core-provider.js";
 // nothing else, so the app sets no Jazz env vars and no secret exists.
 // Wake handling is adapted from garden-co/infra's v2 sync proxy (ADR 0004).
 
+import { posix } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { JazzCoreSocketEvent } from "jazz-napi";
 import {
-  connectedBlobStore,
+  type BlobStore,
+  type VercelBlobStore,
   resolveVercelBlob,
   resolveVercelS3,
-  vercelBlob,
-  type S3BlobStore,
   type VercelBlob,
-  type VercelBlobStore,
   type VercelS3,
 } from "./blobs.js";
 import { routeJazzCoreClient } from "./core-provider.js";
@@ -48,6 +47,8 @@ export interface VercelNamespaceContext {
  * one per deployment.
  */
 export type VercelNamespace = string | ((context: VercelNamespaceContext) => string | undefined);
+
+type SandboxBlobs = VercelS3 | VercelBlob | Extract<BlobStore, { kind: "files" }>;
 
 export interface VercelStoreOptions {
   /**
@@ -87,18 +88,10 @@ export interface VercelStoreOptions {
    */
   region: string;
   /**
-   * Where large values' bytes go:
-   * - `vercelBlob()`: the project's Blob store, written by the core
-   *   through `/jazz`. The default whenever a Blob store is connected to
-   *   the project (`BLOB_STORE_ID` is set).
-   * - `s3()`: a bucket connected through the Vercel Marketplace.
-   * - `"sqlite"`: the core's database file on its Drive, which grows with
-   *   every large value. The default without a Blob store.
-   *
-   * A core may move from `"sqlite"` to either of the others, never back or
-   * between them.
+   * Destination for large values on the deployed core. Use files() for
+   * files on the Drive, "sqlite" for inline storage, or an external store.
    */
-  blobs?: VercelBlobStore | S3BlobStore | "sqlite";
+  blobs: BlobStore | VercelBlobStore;
   /** vCPUs for the core (2 GB of memory each). Defaults to 1. Fixed at creation. */
   vcpus?: number;
   /** Drive size in bytes. Defaults to 10 GiB. Fixed at creation. */
@@ -353,7 +346,7 @@ export function startScript(
   version: string,
   tarballUrl: string,
   trust: TrustedWorkload,
-  blobs?: VercelS3 | VercelBlob,
+  blobs?: SandboxBlobs,
   /** @internal Prefix for /data and /tmp, for tests. */
   root = "",
 ): string {
@@ -457,10 +450,11 @@ exec node -e ${q(CORE_LAUNCHER)} "$addon" "$app_id" ${q(
  * Marketplace's role with the function's OIDC token, which every request
  * carries. With `vercelBlob()` that token is the Blob credential itself.
  */
-function blobsSetup(blobs: VercelS3 | VercelBlob | undefined, q: (s: string) => string): string {
+function blobsSetup(blobs: SandboxBlobs | undefined, q: (s: string) => string): string {
   if (!blobs) {
     return "\n# Large values stay in its SQLite file (they can move to Vercel Blob or S3 later).";
   }
+  if ("kind" in blobs) return "";
   if ("storeId" in blobs) {
     return "\n# Large values go to the project's Blob store, with the function's own OIDC token.";
   }
@@ -481,7 +475,7 @@ export function environmentOf(trust: TrustedWorkload): string | undefined {
 function coreOptions(
   dataDir: string,
   trust: TrustedWorkload,
-  blobs: VercelS3 | VercelBlob | undefined,
+  blobs: SandboxBlobs | undefined,
 ): Record<string, unknown> {
   // A bucket or Blob store is claimed for the core's environment: one
   // environment's OIDC token reaches the whole store, so preview and
@@ -493,51 +487,45 @@ function coreOptions(
     dataDir,
     blobs: !blobs
       ? { kind: "sqlite" }
-      : "storeId" in blobs
-        ? {
-            kind: "vercel-blob",
-            tokenFromWorkload: true,
-            storeId: blobs.storeId,
-            ...claim,
-            ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
-          }
-        : {
-            kind: "s3",
-            roleFromWorkload: true,
-            ...claim,
-            ...(blobs.endpoint === undefined ? {} : { endpoint: blobs.endpoint }),
-            ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
-          },
+      : "kind" in blobs
+        ? blobs
+        : "storeId" in blobs
+          ? {
+              kind: "vercel-blob",
+              tokenFromWorkload: true,
+              storeId: blobs.storeId,
+              ...claim,
+              ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
+            }
+          : {
+              kind: "s3",
+              roleFromWorkload: true,
+              ...claim,
+              ...(blobs.endpoint === undefined ? {} : { endpoint: blobs.endpoint }),
+              ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
+            },
     trustedWorkload: { issuer: trust.issuer, audience: trust.audience, subject: trust.subject },
   };
 }
 
-/**
- * Said once per process: a Next.js server bundles each route on its own, so
- * a module-level flag would say it once per route that opens Jazz.
- */
-const WARNED_NO_BLOB_STORE = Symbol.for("jazz-tools.vercel.warnedNoBlobStore");
-const warnedOnce = globalThis as { [WARNED_NO_BLOB_STORE]?: true };
-
-/**
- * Where a `vercel()` core keeps large values: as asked, or by default the
- * project's Blob store when one is connected, and its SQLite file when not.
- */
 export function resolveCoreBlobs(
   options: Pick<VercelStoreOptions, "blobs" | "region">,
   env: Record<string, string | undefined>,
   warn: (message: string) => void = console.warn,
-): VercelS3 | VercelBlob | undefined {
-  const blobs = options.blobs ?? (connectedBlobStore(env) ? vercelBlob() : undefined);
-  if (blobs === undefined && !warnedOnce[WARNED_NO_BLOB_STORE]) {
-    warnedOnce[WARNED_NO_BLOB_STORE] = true;
-    warn(
-      "vercel(): no Blob store is connected to this project, so large values stay in the core's SQLite file. Connect one (Storage tab in the Vercel dashboard) and they go there from then on.",
-    );
+): SandboxBlobs | undefined {
+  const { blobs } = options;
+  if (!blobs) throw new Error("vercel(): blobs is required");
+  if (blobs === "sqlite") return undefined;
+  if (blobs.kind === "files") {
+    if (blobs.dir === undefined) return { kind: "files" };
+    const dir = posix.resolve("/data/store", blobs.dir);
+    if (!dir.startsWith("/data/"))
+      throw new Error("vercel(): the blob directory must be on the /data Drive");
+    return { kind: "files", dir };
   }
-  if (blobs === undefined || blobs === "sqlite") return undefined;
   if (blobs.kind === "vercel-blob") return resolveVercelBlob(blobs, env);
-  return resolveVercelS3(blobs, options.region, env, warn);
+  if (blobs.kind === "s3") return resolveVercelS3(blobs, options.region, env, warn);
+  throw new Error('vercel(): blobs must be files(), s3(), vercelBlob() or "sqlite"');
 }
 
 /**
@@ -674,8 +662,8 @@ const PER_BRANCH_RECIPE =
 export function missingNamespaceError(): Error {
   return new Error(
     "vercel(): pass `namespace`, which names this deployment's core (its Sandbox is jazz-<project>-<namespace>). The usual choices:\n" +
-      '  vercel({ namespace: ({ environment }) => environment, region: "iad1" }) // one core per Vercel environment\n' +
-      `  vercel({ ${PER_BRANCH_RECIPE}, region: "iad1" }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
+      '  vercel({ blobs: "sqlite", namespace: ({ environment }) => environment, region: "iad1" }) // one core per Vercel environment\n' +
+      `  vercel({ blobs: "sqlite", ${PER_BRANCH_RECIPE}, region: "iad1" }) // production's core and one per preview branch, the cores earlier versions created (perBranch is exported by jazz-tools/backend)`,
   );
 }
 
@@ -687,7 +675,7 @@ export function missingRegionError(): Error {
   return new Error(
     "vercel(): pass `region`, the Vercel region this deployment's core runs and keeps its data in (its Sandbox and its Drive, fixed when the core is created). " +
       "Earlier versions created every core in iad1; to keep existing cores where they are, pass:\n" +
-      '  vercel({ namespace, region: "iad1" })\n' +
+      '  vercel({ blobs: "sqlite", namespace, region: "iad1" })\n' +
       `For a new app, pick the region your functions run in (see ${SANDBOX_REGIONS_DOCS}).`,
   );
 }
@@ -751,7 +739,7 @@ export function refuseVercelName(options: {
   if (!("name" in options)) return;
   const defaults =
     "To keep the cores earlier versions created by default (production's and one per preview branch), pass " +
-    `vercel({ ${PER_BRANCH_RECIPE}, region: "iad1" }) with perBranch from jazz-tools/backend.`;
+    `vercel({ blobs: "sqlite", ${PER_BRANCH_RECIPE}, region: "iad1" }) with perBranch from jazz-tools/backend.`;
   const project = options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
   const name = options.name;
   // The Sandbox a namespace names: "jazz-", the project id lowercased with
@@ -985,7 +973,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Jaz
   if (!options.backendCredential) refuseOtherEnvironment(trust, env);
   const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
   const blobs = resolveCoreBlobs(options, env);
-  if (blobs && environmentOf(trust) === undefined) {
+  if (blobs && !("kind" in blobs) && environmentOf(trust) === undefined) {
     console.warn(
       `vercel(): the core's workload ${trust.subject} names no Vercel environment, so its blob store is not claimed for one; make sure no other environment uses that store`,
     );

@@ -12,7 +12,8 @@ import {
 } from "jazz-tools/backend";
 import { app } from "./backend-app.generated.js";
 
-export { JazzCore } from "jazz-tools/durable-object";
+import { createJazzCore } from "jazz-tools/durable-object";
+export const JazzCore = createJazzCore({ blobs: "sqlite" });
 
 interface Env {
   JAZZ: Parameters<typeof durableObjects>[0] extends { binding: infer B } ? B : never;

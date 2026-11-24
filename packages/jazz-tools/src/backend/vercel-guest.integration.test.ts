@@ -322,6 +322,7 @@ async function deployment(
       permissions: permissionsFile,
       authenticate: auth,
       store: vercel({
+        blobs: "sqlite",
         namespace: ({ environment }) => environment,
         region: "iad1",
         sdk,

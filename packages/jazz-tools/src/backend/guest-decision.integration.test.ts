@@ -13,6 +13,7 @@ import {
   createJazzClient,
   memory,
   remote,
+  files,
   sqlite,
   vercel,
   type JazzStore,
@@ -192,6 +193,7 @@ async function deployedVercel(): Promise<JazzStore> {
     },
   };
   return vercel({
+    blobs: "sqlite",
     sdk,
     backendCredential: () => oidcToken(issuer),
     namespace: ({ environment }) => environment,
@@ -201,7 +203,7 @@ async function deployedVercel(): Promise<JazzStore> {
 
 const stores: Array<[string, () => Promise<JazzStore>]> = [
   ["memory", async () => memory()],
-  ["sqlite", async () => sqlite({ path: join(await tempDir(), "local") })],
+  ["sqlite", async () => sqlite({ path: join(await tempDir(), "local"), blobs: files() })],
   [
     "remote (a production core with only its secrets)",
     async () => {

@@ -2,7 +2,7 @@ import type { JazzCoreSocket } from "jazz-napi";
 import { randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { resolve } from "node:path";
-import { files, type BlobStore } from "./blobs.js";
+import type { BlobStore } from "./blobs.js";
 import { inProcessCore } from "./backend-native.js";
 import { onVercelHost, vercelWebSocketUpgrade } from "./vercel-host.js";
 import { newTokenSecret } from "./inspect.js";
@@ -62,21 +62,21 @@ class MemoryProvider implements JazzProvider {
  * (alpha.65's `jazz-alpha59-alpha60-import` leaves an alpha.59 app's id in
  * `<path>/app-id`, which the first open takes over). To
  * open a copy beside the original, detach it first: `jazz-tools store detach`. Large
- * values' bytes go to `blobs`, by default `files()` in `<path>/blobs`.
+ * values' bytes go to the chosen `blobs` destination. Use `files()` for `<path>/blobs`.
  *
  * Only one process can open `path` at a time (it holds `<path>/jazz.lock`
  * while the core is open); a second one fails with "already open". It
  * refuses to start on serverless hosts with no lasting disk (Vercel, AWS
  * Lambda, Netlify): use `vercel()` or `remote()` there.
  */
-export function sqlite(options: { path: string; blobs?: BlobStore }): SqliteProvider {
+export function sqlite(options: { path: string; blobs: BlobStore }): SqliteProvider {
   refuseStoreAppId("sqlite", options);
-  const blobs = options.blobs ?? files();
+  const { blobs } = options;
   if (
     blobs !== "sqlite" &&
-    (typeof blobs !== "object" || (blobs.kind !== "files" && blobs.kind !== "s3"))
+    (blobs == null || typeof blobs !== "object" || (blobs.kind !== "files" && blobs.kind !== "s3"))
   ) {
-    throw new Error('sqlite(): blobs must be files(), s3() or "sqlite"');
+    throw new Error('sqlite(): blobs is required and must be files(), s3() or "sqlite"');
   }
   return new SqliteProvider(options.path, blobs);
 }

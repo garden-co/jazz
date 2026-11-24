@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { testApp } from "../testing/index.js";
 import { Db } from "../runtime/db.js";
 import { earlyDb, earlyDbMethodKind, MAX_EARLY_WRITES } from "./early-db.js";
-import { createJazz, memory, sqlite, type Jazz } from "./index.js";
+import { createJazz, memory, files, sqlite, type Jazz } from "./index.js";
 import type { AppPermissionsFile } from "./create-jazz.js";
 
 // `createJazz` at a module's top level: it opens nothing until first use,
@@ -48,7 +48,7 @@ const as = (userId: string) => (_request: Request) => ({
 describe("createJazz, opened on first use", () => {
   it("opens nothing when called, and its db takes writes before the store opens", async () => {
     const path = await tempDir();
-    const jazz = createJazz({ app, permissions, store: sqlite({ path }) });
+    const jazz = createJazz({ app, permissions, store: sqlite({ path, blobs: files() }) });
     cleanups.push(() => jazz.close());
     // Nothing on disk, and no app id yet.
     await expect(readdir(path)).rejects.toThrow(/ENOENT/);
@@ -136,7 +136,7 @@ describe("createJazz, opened on first use", () => {
     const first = createJazz({
       app,
       permissions,
-      store: sqlite({ path }),
+      store: sqlite({ path, blobs: files() }),
       authenticate: as("alice"),
     });
     cleanups.push(() => first.close());
@@ -148,7 +148,7 @@ describe("createJazz, opened on first use", () => {
     const reloaded = createJazz({
       app,
       permissions,
-      store: sqlite({ path }),
+      store: sqlite({ path, blobs: files() }),
       authenticate: as("bob"),
       basePath: "/api/jazz",
     });
@@ -171,9 +171,13 @@ describe("createJazz, opened on first use", () => {
       (await jazz.forReqUser(request))
         .insert(app.todos, { title: "bob's", owner: bob! })
         .wait({ tier: "global" });
-    await expect(insertAsBob(asBob(sqlite({ path }), permissions))).resolves.toBeTruthy();
-    await expect(insertAsBob(asBob(sqlite({ path }), noInserts))).rejects.toThrow();
-    await expect(insertAsBob(asBob(sqlite({ path }), permissions))).resolves.toBeTruthy();
+    await expect(
+      insertAsBob(asBob(sqlite({ path, blobs: files() }), permissions)),
+    ).resolves.toBeTruthy();
+    await expect(insertAsBob(asBob(sqlite({ path, blobs: files() }), noInserts))).rejects.toThrow();
+    await expect(
+      insertAsBob(asBob(sqlite({ path, blobs: files() }), permissions)),
+    ).resolves.toBeTruthy();
 
     // Settings that would need another core are refused while it is open.
     expect(() =>
@@ -183,7 +187,7 @@ describe("createJazz, opened on first use", () => {
     // Closed, the next call opens the store again.
     await first.close();
     await expect(first.ready()).rejects.toThrow(/was closed/);
-    const again = createJazz({ app, permissions, store: sqlite({ path }) });
+    const again = createJazz({ app, permissions, store: sqlite({ path, blobs: files() }) });
     cleanups.push(() => again.close());
     expect(again).not.toBe(first);
     expect((await again.ready()).appId).toBe(appId);
@@ -191,7 +195,7 @@ describe("createJazz, opened on first use", () => {
 
   it("applies the writes made before a close, even one made while the store opens", async () => {
     const path = await tempDir();
-    const jazz = createJazz({ app, permissions, store: sqlite({ path }) });
+    const jazz = createJazz({ app, permissions, store: sqlite({ path, blobs: files() }) });
     const owner = randomUUID();
     // Never waited for, and the close comes while the store is still opening.
     const write = jazz.db.insert(app.todos, { title: "kept", owner });
@@ -204,7 +208,7 @@ describe("createJazz, opened on first use", () => {
     // rather than dropping it, and waited for it to reach the core.
     await expect(write.txId).resolves.toBeTruthy();
     // Reopened, the store has it.
-    const again = createJazz({ app, permissions, store: sqlite({ path }) });
+    const again = createJazz({ app, permissions, store: sqlite({ path, blobs: files() }) });
     cleanups.push(() => again.close());
     expect((await again.db.all(app.todos.where({ owner }))).map((todo) => todo.title)).toEqual([
       "kept",
@@ -214,21 +218,31 @@ describe("createJazz, opened on first use", () => {
   it("opens the store once for concurrent first uses, and once more after a close", async () => {
     const path = await tempDir();
     const request = new Request("http://app.test/api");
-    const jazz = createJazz({ app, permissions, store: sqlite({ path }), authenticate: as("a") });
+    const jazz = createJazz({
+      app,
+      permissions,
+      store: sqlite({ path, blobs: files() }),
+      authenticate: as("a"),
+    });
     const owner = randomUUID();
     // Two cores on one directory would fail on its lock: these share one.
     const [ready, rows, account, other] = await Promise.all([
       jazz.ready(),
       jazz.db.all(app.todos.where({ owner })),
       jazz.createAccountFor("a"),
-      createJazz({ app, permissions, store: sqlite({ path }), authenticate: as("a") }).ready(),
+      createJazz({
+        app,
+        permissions,
+        store: sqlite({ path, blobs: files() }),
+        authenticate: as("a"),
+      }).ready(),
     ]);
     expect(other).toBe(ready);
     expect(rows).toEqual([]);
     expect(account).toBeTruthy();
     // A createJazz while the close runs waits for it, not for a held lock.
     const closing = jazz.close();
-    const next = createJazz({ app, permissions, store: sqlite({ path }) });
+    const next = createJazz({ app, permissions, store: sqlite({ path, blobs: files() }) });
     cleanups.push(() => next.close());
     expect(next).not.toBe(jazz);
     const [opened] = await Promise.all([next.ready(), closing]);
@@ -245,7 +259,7 @@ describe("createJazz, opened on first use", () => {
     const jazz = createJazz({
       app,
       permissions: rules(),
-      store: sqlite({ path }),
+      store: sqlite({ path, blobs: files() }),
       authenticate: as("a"),
     });
     cleanups.push(() => jazz.close());
@@ -255,7 +269,12 @@ describe("createJazz, opened on first use", () => {
     const inFlight = jazz.db.insert(app.todos, { title: "in flight", owner });
 
     // A hot reload rebuilds equal permissions: the same bundle, the same session.
-    createJazz({ app, permissions: rules(), store: sqlite({ path }), authenticate: as("a") });
+    createJazz({
+      app,
+      permissions: rules(),
+      store: sqlite({ path, blobs: files() }),
+      authenticate: as("a"),
+    });
     await jazz.ready();
     await inFlight.wait({ tier: "global" });
     await userDb.insert(app.todos, { title: "same bundle", owner: user }).wait({ tier: "global" });
@@ -273,7 +292,12 @@ describe("createJazz, opened on first use", () => {
         },
       },
     };
-    createJazz({ app, permissions: changed, store: sqlite({ path }), authenticate: as("a") });
+    createJazz({
+      app,
+      permissions: changed,
+      store: sqlite({ path, blobs: files() }),
+      authenticate: as("a"),
+    });
     await jazz.ready();
     await pending.wait({ tier: "global" });
     await userDb.insert(app.todos, { title: "old bundle", owner: user }).wait({ tier: "global" });
@@ -309,7 +333,7 @@ describe("createJazz, opened on first use", () => {
     const path = await tempDir();
     const previous = process.env.VERCEL;
     process.env.VERCEL = "1";
-    const jazz = createJazz({ app, permissions, store: sqlite({ path }) });
+    const jazz = createJazz({ app, permissions, store: sqlite({ path, blobs: files() }) });
     cleanups.push(() => jazz.close());
     try {
       await expect(jazz.ready()).rejects.toThrow(/or remote\(/);
@@ -328,7 +352,7 @@ describe("createJazz, opened on first use", () => {
 
   it("serves requests before it has opened, and leaves other routes alone", async () => {
     const path = await tempDir();
-    const jazz: Jazz = createJazz({ app, permissions, store: sqlite({ path }) });
+    const jazz: Jazz = createJazz({ app, permissions, store: sqlite({ path, blobs: files() }) });
     cleanups.push(() => jazz.close());
     const server: Server = createServer((req, res) =>
       jazz.nodeHandler(req, res, () => {

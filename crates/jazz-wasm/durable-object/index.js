@@ -9,15 +9,28 @@ import { jazzCoreClass, routeJazzRequest } from "./host.js";
 
 initSync({ module: wasm });
 
-/** The Durable Object class holding an app's Jazz core. */
-export const JazzCore = jazzCoreClass({
-  DurableObjectCore,
-  reinstantiate: () => __jazzReinstantiate(wasm),
-});
+export function r2(bucket) {
+  if (
+    !bucket ||
+    typeof bucket.get !== "function" ||
+    typeof bucket.put !== "function" ||
+    typeof bucket.delete !== "function"
+  ) {
+    throw new Error("r2(): expected an R2 bucket binding");
+  }
+  return { kind: "r2", bucket };
+}
 
-/** `JazzCore`, for callers that prefer a factory. */
-export function createJazzCore() {
-  return JazzCore;
+export function createJazzCore(options) {
+  if (typeof options?.blobs !== "function" && options?.blobs !== "sqlite") {
+    throw new Error(
+      'createJazzCore(): blobs must be "sqlite" or a function selecting a blob store',
+    );
+  }
+  return jazzCoreClass(
+    { DurableObjectCore, reinstantiate: () => __jazzReinstantiate(wasm) },
+    options.blobs,
+  );
 }
 
 export { routeJazzRequest };

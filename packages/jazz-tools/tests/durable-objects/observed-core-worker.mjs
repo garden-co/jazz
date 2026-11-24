@@ -1,8 +1,8 @@
 // Expose constructor identity only in the fixture: a successful write through
 // a still-resident core cannot establish hibernation.
-import { JazzCore as Core, routeJazzRequest } from "jazz-tools/durable-object";
+import { createJazzCore, routeJazzRequest } from "jazz-tools/durable-object";
 
-export class JazzCore extends Core {
+export class JazzCore extends createJazzCore({ blobs: "sqlite" }) {
   generation = crypto.randomUUID();
 
   acceptHibernatingWebSocket(ws) {

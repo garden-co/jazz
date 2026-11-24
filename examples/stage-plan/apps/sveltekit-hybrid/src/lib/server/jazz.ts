@@ -1,4 +1,11 @@
-import { acceptDeviceAccounts, createJazz, remote, sqlite, type Jazz } from "jazz-tools/backend";
+import {
+  acceptDeviceAccounts,
+  createJazz,
+  remote,
+  files,
+  sqlite,
+  type Jazz,
+} from "jazz-tools/backend";
 import { app } from "../../../jazz.generated";
 import permissions from "../../../jazz.permissions.json" with { type: "json" };
 import { serverConfig } from "./config";
@@ -19,7 +26,7 @@ export function jazz(): Promise<Jazz> {
     permissions,
     store: config.remote
       ? remote({ url: config.remote.url, appId: config.appId, secret: config.remote.adminSecret })
-      : sqlite({ path: config.dataPath }),
+      : sqlite({ path: config.dataPath, blobs: files() }),
     // Better Auth's session cookie decides who the user is. Guests have no
     // session and keep their device account.
     authenticate: async (request) => {

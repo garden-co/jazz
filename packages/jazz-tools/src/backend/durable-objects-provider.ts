@@ -51,15 +51,15 @@ const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
  *
  * A core running in a Cloudflare Durable Object: one SQLite-backed object per
  * app, in a Worker you deploy that exports `JazzCore` and forwards requests to
- * it with `routeJazzRequest` (both from `jazz-tools/durable-object`). `url` is
+ * it with `routeJazzRequest`. Create that class with `createJazzCore` from
+ * `jazz-tools/durable-object`. `url` is
  * that Worker's origin (e.g. `https://my-app-jazz.example.workers.dev`) and
  * `secret` its `JAZZ_CORE_SECRET`: a random string of at least 32 characters
  * that stays the same across deployments. The object keeps its own app id,
  * which this backend asks it for when the store opens.
  *
  * Large values' bytes go where the core's Worker puts them, so there is no
- * `blobs` option here: bind an R2 bucket to that Worker as `JAZZ_BLOBS`
- * (recommended), or they stay in the object's SQLite.
+ * `blobs` option here: select an R2 binding or inline SQLite when calling `createJazzCore()`.
  *
  * The core admits only this backend, which holds the secret; browsers keep
  * talking to your backend. A Durable Object core doesn't run thin-client

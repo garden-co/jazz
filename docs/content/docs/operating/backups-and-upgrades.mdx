@@ -6,7 +6,7 @@ description: "Learn how to keep the data in your backend's Jazz directory safe a
 ## What the data directory holds
 
 Everything your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) stores lives in the directory you pass to
-`sqlite({ path })`:
+`sqlite({ path, blobs: files() })`:
 
 | File or folder                         | What it is                                                                                                                                       |
 | :------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -978,7 +978,7 @@ Then:
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
 returning user's old sign-in to their account, as `jazz:backend` with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) returns it), and to keep
 guests on their device accounts once the client is scoped to the alpha.59 app ID (step 5). The store keeps it in `jazz.sqlite`, so your code never needs
-it: `sqlite({ path })` runs as the old app. Pass
+it: `sqlite({ path, blobs: files() })` runs as the old app. Pass
 `--no-backend-identity-links` to skip that. The dump holds all your app's data, so store it like the
 data directory and delete it when you're done.
 

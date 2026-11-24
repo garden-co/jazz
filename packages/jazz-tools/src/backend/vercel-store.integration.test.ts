@@ -1,5 +1,6 @@
+import { createRequire } from "node:module";
 import { createHmac, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { onVercelHost } from "./vercel-host.js";
 import {
@@ -14,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { testApp } from "../testing/index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
-import { createJazz, memory, vercel, vercelBlob } from "./index.js";
+import { createJazz, files, memory, remote, vercel, vercelBlob } from "./index.js";
 import { HANDSHAKE_TIMEOUT_MS } from "../runtime/native-runtime/websocket.js";
 import {
   newerVersion,
@@ -22,6 +23,7 @@ import {
   openVercelCore,
   onVercelDeployment,
   refuseOtherEnvironment,
+  resolveCoreBlobs,
   startScript,
   workloadOf,
   type SandboxHandle,
@@ -243,6 +245,69 @@ function onVercel(env: Record<string, string>) {
 }
 
 describe("vercel() store", () => {
+  it("reopens large values from files on the same Drive after restarting the Sandbox core", async () => {
+    const root = await mkdtemp(join(tmpdir(), "jazz-sandbox-drive-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const issuer = await startIssuer();
+    const appId = randomUUID();
+    const blobs = resolveCoreBlobs({ region: "iad1", blobs: files() }, {});
+    const script = startScript(
+      "1.0.0",
+      "unused",
+      { issuer, audience: AUDIENCE, subject: SUBJECT },
+      blobs,
+      root,
+    );
+    // Run the same native entry and JSON options the script passes to the addon.
+    const { serveCore } = createRequire(import.meta.url)("jazz-napi") as typeof import("jazz-napi");
+    const options = JSON.parse(script.match(/"\$app_id" '(.*)'\s*$/)![1]!);
+    const start = async () => {
+      const listener = createNetServer();
+      await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve));
+      const port = (listener.address() as AddressInfo).port;
+      await new Promise<void>((resolve) => listener.close(() => resolve()));
+      const core = serveCore({ ...options, port, appId });
+      const closed = core.closed();
+      const stop = async () => {
+        core.stop();
+        await closed;
+      };
+      cleanups.push(stop);
+      const url = `http://127.0.0.1:${port}`;
+      await expect
+        .poll(async () =>
+          fetch(url + "/health").then(
+            (r) => r.ok,
+            () => false,
+          ),
+        )
+        .toBe(true);
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: remote({ url, appId, backendCredential: () => oidcToken(issuer) }),
+      }).ready();
+      cleanups.push(() => jazz.close());
+      return { jazz, stop };
+    };
+    const text = "on the Drive ".repeat(30000);
+    const first = await start();
+    const row = await first.jazz.db.insert(app.notes, { text }).wait({ tier: "global" });
+    await expect
+      .poll(
+        async () =>
+          (await readdir(join(root, "data/store/blobs"), { recursive: true })).some((p) =>
+            /[0-9a-f]{64}$/.test(p),
+          ),
+        { timeout: 20000 },
+      )
+      .toBe(true);
+    await first.jazz.close();
+    await first.stop();
+    const next = await start();
+    expect((await next.jazz.db.all(app.notes.where({ id: row.id })))[0]?.text).toBe(text);
+  }, 60000);
+
   it("creates the app's Sandbox and Drive on first use and serves through it", async () => {
     const appId = randomUUID();
     const core = await startTrustedCore(appId);
@@ -258,6 +323,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -290,6 +356,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -306,7 +373,13 @@ describe("vercel() store", () => {
     const core = await startTrustedCore(appId);
     const { sdk } = fakeVercel({ ...core, appId });
     onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
-    const options = { namespace: "test", region: "iad1", sdk, backendCredential: core.credential };
+    const options = {
+      blobs: "sqlite" as const,
+      namespace: "test",
+      region: "iad1",
+      sdk,
+      backendCredential: core.credential,
+    };
     const jazz = await createJazz({ app, permissions, store: vercel(options) }).ready();
     cleanups.push(() => jazz.close());
 
@@ -335,6 +408,7 @@ describe("vercel() store", () => {
         app,
         permissions,
         store: vercel({
+          blobs: "sqlite",
           namespace: legacyNamespace,
           region: "iad1",
           sdk: fresh.sdk,
@@ -359,6 +433,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -379,6 +454,7 @@ describe("vercel() store", () => {
         app,
         permissions,
         store: vercel({
+          blobs: "sqlite",
           namespace: legacyNamespace,
           region: "iad1",
           sdk: fake.sdk,
@@ -408,6 +484,7 @@ describe("vercel() store", () => {
         app,
         permissions,
         store: vercel({
+          blobs: "sqlite",
           namespace: legacyNamespace,
           region: "iad1",
           sdk: fake.sdk,
@@ -434,7 +511,12 @@ describe("vercel() store", () => {
       createJazz({
         app,
         permissions,
-        store: vercel({ namespace: legacyNamespace, region: "iad1", sdk: fake.sdk }),
+        store: vercel({
+          blobs: "sqlite",
+          namespace: legacyNamespace,
+          region: "iad1",
+          sdk: fake.sdk,
+        }),
       }).ready(),
     ).rejects.toThrow(/preview deployment's OIDC token is for .*environment:production/);
     expect(fake.calls).toEqual([]);
@@ -466,6 +548,7 @@ describe("vercel() store", () => {
       options: {
         sdk: fake.sdk,
         backendCredential: () => credential,
+        blobs: "sqlite",
         namespace: "test",
         region: "iad1",
       },
@@ -537,6 +620,7 @@ describe("vercel() store", () => {
       options: {
         sdk: fake.sdk,
         backendCredential: () => credential,
+        blobs: "sqlite",
         namespace: "test",
         region: "iad1",
       },
@@ -577,6 +661,7 @@ describe("vercel() store", () => {
       options: {
         sdk: fake.sdk,
         backendCredential: core.credential,
+        blobs: "sqlite",
         namespace: "test",
         region: "iad1",
       },
@@ -672,6 +757,7 @@ describe("vercel() store", () => {
       options: {
         sdk: fake.sdk,
         backendCredential: core.credential,
+        blobs: "sqlite",
         namespace: "test",
         region: "iad1",
       },
@@ -692,6 +778,7 @@ describe("vercel() store", () => {
       options: {
         sdk: fake.sdk,
         backendCredential: core.credential,
+        blobs: "sqlite",
         namespace: "test",
         region: "fra1",
       },
@@ -716,6 +803,7 @@ describe("vercel() store", () => {
       options: {
         sdk: fake.sdk,
         backendCredential: core.credential,
+        blobs: "sqlite",
         namespace: "test",
         region: "iad1",
       },
@@ -740,6 +828,7 @@ describe("vercel() store", () => {
           options: {
             sdk: fake.sdk,
             backendCredential: core.credential,
+            blobs: "sqlite",
             namespace: "test",
             region: "fra1",
           },
@@ -761,7 +850,13 @@ describe("vercel() store", () => {
     const core = await startTrustedCore(appId);
     const open = (sdk: SandboxSdk, region: string) =>
       openVercelCore({
-        options: { sdk, backendCredential: core.credential, namespace: "test", region },
+        options: {
+          blobs: "sqlite",
+          sdk,
+          backendCredential: core.credential,
+          namespace: "test",
+          region,
+        },
         openRemote: ({ url }) =>
           ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
         version: "1.2.3",
@@ -799,6 +894,7 @@ describe("vercel() store", () => {
         options: {
           sdk: fake.sdk,
           backendCredential: core.credential,
+          blobs: "sqlite",
           namespace: "test",
           region: "fra1",
         },
@@ -827,6 +923,7 @@ describe("vercel() store", () => {
       options: {
         sdk: fake.sdk,
         backendCredential: core.credential,
+        blobs: "sqlite",
         namespace: "test",
         region: "iad1",
       },
@@ -864,6 +961,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -949,6 +1047,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -1029,6 +1128,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -1098,6 +1198,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -1167,6 +1268,7 @@ describe("vercel() store", () => {
             options: {
               sdk: fake.sdk,
               backendCredential: () => credential,
+              blobs: "sqlite",
               namespace: "test",
               region: "iad1",
             },
@@ -1200,6 +1302,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -1227,6 +1330,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -1245,6 +1349,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,
@@ -1263,7 +1368,12 @@ describe("vercel() store", () => {
         createJazz({
           app,
           permissions,
-          store: vercel({ namespace: legacyNamespace, region: "iad1", local: memory() }),
+          store: vercel({
+            blobs: "sqlite",
+            namespace: legacyNamespace,
+            region: "iad1",
+            local: memory(),
+          }),
         }),
       ).toThrow(/vercel\(\) requires a Vercel production or preview deployment/);
     } finally {
@@ -1282,7 +1392,13 @@ describe("vercel() store", () => {
     const jazz = await createJazz({
       app,
       permissions,
-      store: vercel({ namespace: legacyNamespace, region: "iad1", sdk: fake.sdk, local: memory() }),
+      store: vercel({
+        blobs: "sqlite",
+        namespace: legacyNamespace,
+        region: "iad1",
+        sdk: fake.sdk,
+        local: memory(),
+      }),
     }).ready();
     cleanups.push(() => jazz.close());
     await jazz.db.insert(app.notes, { text: "local" }).wait({ tier: "global" });
@@ -1300,6 +1416,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: older.sdk,
@@ -1318,6 +1435,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: newer.sdk,
@@ -1344,6 +1462,7 @@ describe("vercel() store", () => {
       app,
       permissions,
       store: vercel({
+        blobs: "sqlite",
         namespace: legacyNamespace,
         region: "iad1",
         sdk: fake.sdk,

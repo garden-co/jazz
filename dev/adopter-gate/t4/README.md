@@ -10,7 +10,7 @@ An adopter-style regression check for a Jazz release. A Next.js 16 app with Bett
 - `scripts/`:
   - `run-t4.sh <version> [app67]`: the whole run. It prints PASS/FAIL/FINDING lines and exits 1 if a required step failed.
   - `rc-deps.sh <app> <version>`: downloads the 4 npm tarballs and checks them against `NPM-SHA256SUMS`. Runs the shipped `newerVersion` cases (`check-newer.mjs`). Sets `package.json` and pnpm `overrides`, installs, then checks that every jazz entry in the lockfile is on `<version>`.
-  - `no-region-check.sh <app> [port]`: with `vercel()` lacking `region`, `next build` must fail. The script then runs `next dev` and requires `/jazz` to throw the missing-region error, naming `vercel({ namespace, region: "iad1" })` and the Sandbox regions page.
+  - `no-region-check.sh <app> [port]`: with `vercel()` lacking `region`, `next build` must fail. The script then runs `next dev` and requires `/jazz` to throw the missing-region error, naming `vercel({ blobs: "sqlite", namespace, region: "iad1" })` and the Sandbox regions page.
   - `set-region.sh <app> [region]`: adds `region` to the `vercel({ … })` call.
   - `build.sh <app>`: `jazz-tools generate --check` (or `validate --check` before .66), then `next build`, then sizes (`sizes.py`: first-load JS per route and the shipped wasm, raw and gzip).
   - `deploy.sh <app>`: `vercel deploy --prod` to the eval project.

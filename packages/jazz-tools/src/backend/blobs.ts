@@ -23,7 +23,7 @@ export interface S3BlobStore {
 /**
  * Where a store keeps the bytes of large values once they settle. Rows and
  * the chunk index stay in the database either way.
- * - `files()`: one file per chunk in a directory (the default for `sqlite()`).
+ * - `files()`: one file per chunk in a directory.
  * - `s3()`: one object per chunk in an S3-compatible bucket.
  * - `"sqlite"`: inside the database file. Works, but the file grows with
  *   every large value, so it is not recommended.
@@ -84,8 +84,7 @@ export interface VercelBlobStore {
 }
 
 /**
- * Large-value bytes in a Vercel Blob store, for a `vercel()` core (and its
- * default whenever `BLOB_STORE_ID` is set). Browsers send and fetch large
+ * On Vercel `vercelBlob()` selects the connected store. Browsers send and fetch large
  * values through the app's `/jazz` route; the core writes and reads the
  * blobs itself, so nothing but connecting a Blob store is needed. It
  * authenticates with the function's own OIDC token, which reaches it with

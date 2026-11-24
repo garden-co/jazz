@@ -26,14 +26,14 @@ Kubernetes all do. List each machine you trust in `backendClients`, naming it by
 audience and the claims only that machine has:
 
 ```ts title="jazz.server.ts"
-import { createJazz, sqlite, trustWorkload } from "jazz-tools/backend";
+import { createJazz, files, sqlite, trustWorkload } from "jazz-tools/backend";
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
 
 export const jazz = createJazz({
   app,
   permissions,
-  store: sqlite({ path: "./data/jazz" }),
+  store: sqlite({ path: "./data/jazz", blobs: files() }),
   authenticate: async (request) => /* your users' sessions */ null,
   backendClients: [
     // The nightly import job in this repo's production environment: a trusted machine.

@@ -26,9 +26,9 @@ the Jazz core makes the Worker about 6 MB, well under Workers' 64 MiB limit. Its
 exports the object's class and forwards every request to it:
 
 ```ts title="worker/index.ts"
-import { JazzCore, routeJazzRequest } from "jazz-tools/durable-object";
+import { createJazzCore, r2, routeJazzRequest } from "jazz-tools/durable-object";
 
-export { JazzCore };
+export const JazzCore = createJazzCore({ blobs: (env) => r2(env.JAZZ_BLOBS!) });
 export default { fetch: routeJazzRequest };
 ```
 
@@ -61,7 +61,7 @@ npx wrangler deploy
 
 Bind an R2 bucket to the Worker as `JAZZ_BLOBS`, as above. The core then keeps the bytes of large
 values (anything over 64 KiB: files, long text) in the bucket and only their index in the Durable
-Object's SQLite, which stays small. Without the binding the bytes stay in SQLite, which grows with
+Object's SQLite, which stays small. Choose `createJazzCore({ blobs: "sqlite" })` to keep the bytes in SQLite, which grows with
 every large value, against Durable Objects' per-object storage limit. R2 has to be enabled on your Cloudflare account
 once (Dashboard → R2 Object Storage), which asks for a payment method even within R2's free tier;
 `wrangler r2 bucket create` fails until it is.
@@ -77,8 +77,8 @@ once (Dashboard → R2 Object Storage), which asks for a payment method even wit
   has claimed its prefix, binding another bucket or changing `JAZZ_BLOBS_PREFIX` doesn't move them:
   the core refuses that bucket (its `/ready` answers 503 saying what changed) until you set the
   binding back. Moving a core's large values to another bucket isn't supported yet.
-- **Moving to R2:** a core that already holds large values in SQLite keeps working when you add the
-  binding and moves them to the bucket in the background. Once it has, it needs the binding: a core
+- **Moving to R2:** a core that already holds large values in SQLite keeps working when you select the
+  binding with `r2()` and moves them to the bucket in the background. Once it has, it needs the binding: a core
   whose bucket binding is removed refuses to start rather than lose track of its values.
 - **Failures:** a value stays in SQLite until its upload has succeeded, and failed uploads are
   retried with backoff (logged to the Worker's logs), so an unreachable bucket never loses data.
@@ -103,7 +103,8 @@ import { createJazz, durableObjects, jazzBackend, routeToJazzBackend } from "jaz
 import { app } from "./jazz.generated";
 import permissions from "./jazz.permissions.json" with { type: "json" };
 
-export { JazzCore } from "jazz-tools/durable-object";
+import { createJazzCore, r2 } from "jazz-tools/durable-object";
+export const JazzCore = createJazzCore({ blobs: (env) => r2(env.JAZZ_BLOBS!) });
 
 export const JazzBackend = jazzBackend((env: Env) => {
   const jazz = createJazz({

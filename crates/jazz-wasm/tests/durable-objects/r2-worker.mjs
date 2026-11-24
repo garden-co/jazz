@@ -2,7 +2,7 @@
 // `r2.test.mjs`. With `FAIL_PUTS` set, the first that many large-value
 // puts to `JAZZ_BLOBS` fail, as a bucket that is briefly unreachable does;
 // each failure leaves a `test-failed-puts/<n>` marker at the bucket's root.
-import { JazzCore as Core, routeJazzRequest } from "./do/index.js";
+import { createJazzCore, r2, routeJazzRequest } from "./do/index.js";
 
 function flaky(bucket, failures) {
   let left = Number(failures);
@@ -24,15 +24,11 @@ function flaky(bucket, failures) {
   });
 }
 
-export class JazzCore extends Core {
-  constructor(ctx, env) {
-    super(
-      ctx,
-      env.JAZZ_BLOBS !== undefined && env.FAIL_PUTS
-        ? { ...env, JAZZ_BLOBS: flaky(env.JAZZ_BLOBS, env.FAIL_PUTS) }
-        : env,
-    );
-  }
-}
+export const JazzCore = createJazzCore({
+  blobs: (env) =>
+    env.BLOB_MODE === "sqlite"
+      ? "sqlite"
+      : r2(env.FAIL_PUTS ? flaky(env.JAZZ_BLOBS, env.FAIL_PUTS) : env.JAZZ_BLOBS),
+});
 
 export default { fetch: routeJazzRequest };

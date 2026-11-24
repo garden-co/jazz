@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { connectedBlobStore, resolveVercelBlob, resolveVercelS3, s3, vercelBlob } from "./blobs.js";
+import {
+  files,
+  connectedBlobStore,
+  resolveVercelBlob,
+  resolveVercelS3,
+  s3,
+  vercelBlob,
+} from "./blobs.js";
 import { environmentOf, resolveCoreBlobs } from "./vercel-store.js";
 
 describe("s3()", () => {
@@ -49,18 +56,22 @@ describe("vercelBlob()", () => {
     expect(() => resolveVercelBlob(vercelBlob(), {})).toThrow(/BLOB_STORE_ID is not set/);
   });
 
-  it("is a vercel() core's default once a Blob store is connected", () => {
-    const warn = vi.fn();
-    expect(resolveCoreBlobs({ region: "iad1" }, { BLOB_STORE_ID: "abc" }, warn)).toEqual({
+  it("requires an explicit destination even with a connected Blob store", () => {
+    const env = { BLOB_STORE_ID: "abc" };
+    // @ts-expect-error JavaScript callers can omit blobs.
+    expect(() => resolveCoreBlobs({ region: "iad1" }, env)).toThrow(/blobs is required/);
+    expect(resolveCoreBlobs({ blobs: "sqlite", region: "iad1" }, env)).toBeUndefined();
+    expect(resolveCoreBlobs({ blobs: vercelBlob(), region: "iad1" }, env)).toEqual({
       storeId: "abc",
     });
-    expect(
-      resolveCoreBlobs({ blobs: "sqlite", region: "iad1" }, { BLOB_STORE_ID: "abc" }, warn),
-    ).toBeUndefined();
-    expect(warn).not.toHaveBeenCalled();
-    // Without one, large values stay in SQLite, and the core says how to move them.
-    expect(resolveCoreBlobs({ region: "iad1" }, {}, warn)).toBeUndefined();
-    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/no Blob store is connected/));
+  });
+
+  it("keeps Sandbox blob directories on its persistent Drive", () => {
+    const destination = (dir: string) =>
+      resolveCoreBlobs({ region: "iad1", blobs: files({ dir }) }, {});
+    expect(destination("chunks")).toEqual(files({ dir: "/data/store/chunks" }));
+    expect(destination("/data/shared/chunks")).toEqual(files({ dir: "/data/shared/chunks" }));
+    expect(() => destination("../../tmp")).toThrow(/persistent|Drive/);
   });
 
   it("checks an s3() bucket against the core's configured region", () => {
@@ -74,19 +85,6 @@ describe("vercelBlob()", () => {
     expect(warn).not.toHaveBeenCalled();
     resolveCoreBlobs({ blobs: s3(), region: "iad1" }, env, warn);
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/eu-central-1.*iad1 \(us-east-1\)/));
-  });
-
-  it("says a vercel() core has no Blob store once per process, however many copies of jazz-tools load", async () => {
-    // Said here, or already by an earlier test in this process.
-    resolveCoreBlobs({ region: "iad1" }, {}, () => {});
-    const warn = vi.fn();
-    resolveCoreBlobs({ region: "iad1" }, {}, warn);
-    // Next.js bundles each route on its own: another copy of this module.
-    vi.resetModules();
-    const copy = await import("./vercel-store.js");
-    expect(copy.resolveCoreBlobs).not.toBe(resolveCoreBlobs);
-    copy.resolveCoreBlobs({ region: "iad1" }, {}, warn);
-    expect(warn).not.toHaveBeenCalled();
   });
 });
 

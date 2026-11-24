@@ -1,3 +1,4 @@
+import { files } from "./blobs.js";
 import { isDeepStrictEqual } from "node:util";
 import { vercelWebSocketUpgrade } from "./vercel-host.js";
 import {
@@ -18,7 +19,7 @@ import type { JazzCoreOpenContext, JazzProvider } from "./core-provider.js";
 
 /**
  * The store for apps deployed on Vercel. Use it in dev too: in local Node development (`next dev`, `vercel dev`, tests) it runs
- * `local`, by default `sqlite({ path: ".jazz/local" })`.
+ * `local`, by default `sqlite({ path: ".jazz/local", blobs: files() })`.
  *
  * Deployed, it runs a core in a persistent Vercel Sandbox in your own Vercel
  * project, with its data on a Drive, in `region` (required, e.g. `"iad1"`,
@@ -56,9 +57,10 @@ export function vercel(
   refuseVercelName(options ?? {});
   checkNamespaceOption(options ?? {});
   checkRegionOption(options ?? {});
+  if (!options.blobs) throw new Error("vercel(): blobs is required");
   const { local, ...rest } = options;
   if (backendNative().host === "node" && !serverlessHost()) {
-    return local ?? sqlite({ path: ".jazz/local" });
+    return local ?? sqlite({ path: ".jazz/local", blobs: files() });
   }
   return new VercelProvider(rest);
 }

@@ -2,7 +2,7 @@
 import { serve } from "@hono/node-server";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
-import { sqlite } from "jazz-tools/backend";
+import { files, sqlite } from "jazz-tools/backend";
 import { Jazz, JazzBackend } from "jazz-tools/effect/backend";
 import { app as schemaApp } from "../jazz.generated.js";
 import permissions from "../jazz.permissions.json" with { type: "json" };
@@ -17,7 +17,7 @@ declare function currentUser(
 const JazzLive = JazzBackend.layer({
   app: schemaApp,
   permissions,
-  store: sqlite({ path: "./data/jazz" }),
+  store: sqlite({ path: "./data/jazz", blobs: files() }),
   async authenticate(request) {
     const user = await currentUser(request);
     return user ? { userId: user.id, expiresAt: user.sessionExpiresAt } : null;

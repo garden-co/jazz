@@ -9,7 +9,7 @@ export interface JazzCoreEnv {
   /** A public schema's JSON, served until one is published (optional). */
   JAZZ_SCHEMA?: string;
   /**
-   * An R2 bucket for large values' bytes (recommended): without it they stay
+   * An R2 bucket available to select with r2(). With explicit SQLite storage, bytes stay
    * in the object's SQLite. Objects go under `JAZZ_BLOBS_PREFIX`, claimed for
    * this app by a `.jazz-owner` object.
    */
@@ -18,11 +18,12 @@ export interface JazzCoreEnv {
   JAZZ_BLOBS_PREFIX?: string;
 }
 
-/** The Durable Object class holding an app's Jazz core. */
-export declare const JazzCore: typeof DurableObject<JazzCoreEnv>;
+/** Select an existing R2 bucket for the core's large values. */
+export declare function r2(bucket: R2Bucket): { kind: "r2"; bucket: R2Bucket };
 
-/** `JazzCore`, for callers that prefer a factory. */
-export declare function createJazzCore(): typeof JazzCore;
+export declare function createJazzCore<Env extends JazzCoreEnv = JazzCoreEnv>(options: {
+  blobs: "sqlite" | ((env: Env) => "sqlite" | ReturnType<typeof r2>);
+}): typeof DurableObject<Env>;
 
 /** The Worker's fetch: answers /health locally and forwards core requests to the object. */
 export declare function routeJazzRequest(request: Request, env: JazzCoreEnv): Promise<Response>;
