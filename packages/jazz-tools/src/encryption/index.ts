@@ -307,26 +307,16 @@ export class Encryption {
 
   private async verifyOnce(): Promise<AccountStatus> {
     const known = JSON.parse(this.native.encryptionState()) as { status: AccountStatus | null };
-    let status =
+    const status =
       known.status === null ? await this.verified() : await this.call<AccountStatus>("ready", {});
     const secret = await this.options.accountSecret?.();
-    if (secret !== undefined) {
-      // `automatic`: a retired root of the account secret is not an error
-      // here, so the device still starts.
-      if (status === "active") await this.call("recoveryRegister", { secret, automatic: true });
-      else if (status === "awaiting-approval") {
-        // A device with no other to approve it recovers with the account
-        // secret. `null`: nothing to recover from yet (no registered root
-        // or delivery for it), so it stays awaiting approval. Any other
-        // failure (store, database, a refused recovery) is the caller's.
-        const restored = await this.call<AccountStatus | null>("recoveryRestore", {
-          secret,
-          automatic: true,
-        });
-        if (restored !== null) status = restored;
-      }
-    }
-    return status;
+    if (secret === undefined || status === "reenrolled") return status;
+    const restored = await this.call<AccountStatus | null>("recoveryRestore", {
+      secret,
+      automatic: true,
+      verifiedStatus: status,
+    });
+    return restored ?? status;
   }
 
   private runner: { stopped: boolean } | undefined;

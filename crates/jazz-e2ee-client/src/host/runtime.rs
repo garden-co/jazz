@@ -692,31 +692,35 @@ impl Encryption {
         }
     }
 
-    /// The startup recovery step for native hosts. `None` means the device
-    /// is awaiting approval and should try automatic recovery again.
-    async fn verify_native(
+    /// Run one recovery step for the status the host just verified. With no
+    /// recovery evidence yet, the host decides whether to wait or return.
+    async fn recover_after_verification(
         &self,
-        native: &NativeReadiness,
         status: AccountStatus,
+        secret: &RecoverySecret,
+        verify_registration: bool,
     ) -> Result<Option<AccountStatus>, ClientError> {
-        let Some(secret) = native.recovery.borrow().clone() else {
-            return Ok(Some(status));
-        };
         match status {
-            // The start-up registration of the device account's own secret
-            // (the runtime was opened with the identity that secret derives).
-            AccountStatus::Active => self
-                .client
-                .start_device_account(&self.db, &secret)
-                .await
-                .map(Some),
-            // Not what `start_device_account` does: a device awaiting
-            // approval recovers with the secret when the root and its
-            // delivery are there, and waits (`None`) while they are not.
+            AccountStatus::Active => {
+                // Native startup verifies again around registration. JS returns the
+                // status it already verified once the registration succeeds.
+                if verify_registration {
+                    self.client
+                        .start_device_account(&self.db, secret)
+                        .await
+                        .map(Some)
+                } else {
+                    self.client.refuse_foreign_device_secret(secret)?;
+                    self.client
+                        .register_recovery_at_start(&self.db, secret)
+                        .await?;
+                    Ok(Some(status))
+                }
+            }
             AccountStatus::AwaitingApproval => {
                 match self
                     .client
-                    .recover_device_when_available(&self.db, &secret)
+                    .recover_device_when_available(&self.db, secret)
                     .await
                 {
                     Err(ClientError::ApprovalAnswered) => {
@@ -916,47 +920,47 @@ impl Encryption {
                 let phrase = super::phrase::from_secret(&bytes);
                 json!({ "phrase": phrase.as_str() })
             }
-            // `automatic`: the start-up registration of a device account's
-            // own secret, for which a retired root is not an error. As in
-            // `start_device_account`, a secret of another identity than the
-            // device account the runtime was opened as is refused
-            // (`recovery-root-mismatch`) and nothing is written. Otherwise a
-            // retired root is refused (`recovery-root-mismatch`).
+            // Older automatic calls selected registration or restoration by
+            // name. A readiness caller now supplies the status it observed.
+            "recoveryRegister" | "recoveryRestore"
+                if args.get("automatic").and_then(Value::as_bool) == Some(true) =>
+            {
+                let status = match args.get("verifiedStatus").and_then(Value::as_str) {
+                    Some("active") => AccountStatus::Active,
+                    Some("awaiting-approval") => AccountStatus::AwaitingApproval,
+                    Some(_) => return Err("unknown verified account status".to_owned()),
+                    None if op == "recoveryRegister" => AccountStatus::Active,
+                    None => AccountStatus::AwaitingApproval,
+                };
+                let secret = recovery_secret(args, secret)?;
+                let restored = self
+                    .recover_after_verification(status, &secret, false)
+                    .await
+                    .map_err(describe)?;
+                if status == AccountStatus::AwaitingApproval
+                    && let Some(restored) = restored
+                {
+                    self.status.set(Some(restored));
+                }
+                if op == "recoveryRegister" {
+                    Value::Null
+                } else {
+                    json!(restored.map(status_name))
+                }
+            }
             "recoveryRegister" => {
                 let secret = recovery_secret(args, secret)?;
-                if args.get("automatic").and_then(Value::as_bool) == Some(true) {
-                    match client.refuse_foreign_device_secret(&secret) {
-                        Ok(()) => client.register_recovery_at_start(db, &secret).await,
-                        Err(refused) => Err(refused),
-                    }
-                } else {
-                    client.register_recovery(db, &secret).await
-                }
-                .map_err(describe)?;
+                client
+                    .register_recovery(db, &secret)
+                    .await
+                    .map_err(describe)?;
                 Value::Null
             }
-            // `automatic`: the device's own recovery with its account secret,
-            // as native readiness runs it. `null`: nothing to recover from
-            // (yet), so the device stays awaiting approval.
             "recoveryRestore" => {
                 let secret = recovery_secret(args, secret)?;
-                let restored = if args.get("automatic").and_then(Value::as_bool) == Some(true) {
-                    match client.recover_device_when_available(db, &secret).await {
-                        Err(ClientError::ApprovalAnswered) => {
-                            client.ensure_account(db).await.map(Some)
-                        }
-                        outcome => outcome,
-                    }
-                } else {
-                    client.recover_device(db, &secret).await.map(Some)
-                };
-                match restored.map_err(describe)? {
-                    Some(status) => {
-                        self.status.set(Some(status));
-                        json!(status_name(status))
-                    }
-                    None => Value::Null,
-                }
+                let status = client.recover_device(db, &secret).await.map_err(describe)?;
+                self.status.set(Some(status));
+                json!(status_name(status))
             }
             "recoveryRetire" => {
                 client
@@ -1145,7 +1149,11 @@ async fn main_loop(this: Rc<Encryption>) {
             if let (Ok(Some(status)), Some(native)) = (&verified, recovering) {
                 this.status.set(Some(*status));
                 this.stage.set("preparing account-secret recovery");
-                verified = Box::pin(this.verify_native(native, *status)).await;
+                let secret = native.recovery.borrow().clone();
+                if let Some(secret) = secret {
+                    verified =
+                        Box::pin(this.recover_after_verification(*status, &secret, true)).await;
+                }
             }
             if let Some(native) = &this.native {
                 native.finished.set(native.started.get());
