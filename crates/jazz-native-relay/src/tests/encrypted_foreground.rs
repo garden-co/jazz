@@ -59,6 +59,25 @@ fn a_leased_foreground_opens_with_the_apps_async_private_store() {
                 .unwrap()
                 .is_empty()
         );
+        for (op, args_json) in [
+            ("state", "{}"),
+            (
+                "useSpace",
+                r#"{"open":true,"table":"projects","id":"alice"}"#,
+            ),
+            ("setOnline", r#"{"online":true}"#),
+        ] {
+            assert!(
+                matches!(
+                    execute(Request::EncryptionCall {
+                        op: op.to_owned(),
+                        args_json: args_json.to_owned(),
+                    }),
+                    Response::EncryptionResult { .. },
+                ),
+                "{op} is handled by the encryption runtime"
+            );
+        }
         let relay = foreground_relay(&*lease, foreground);
         let sibling_lease = jazz_native_relay_host_retain(host, 2);
         let mut sibling_request: serde_json::Value = serde_json::from_slice(&request).unwrap();

@@ -665,7 +665,14 @@ impl Encryption {
         // A space's row is a local catalogue lookup: it never waits for the
         // loop's work.
         let _turn = match op {
-            "keysDeliver" | "prepareSpace" | "retryWithCurrentKey" | "spaceRow" => None,
+            "keysDeliver"
+            | "prepareSpace"
+            | "retryWithCurrentKey"
+            | "spaceRow"
+            | "state"
+            | "spaces"
+            | "useSpace"
+            | "setOnline" => None,
             _ => Some(self.gate.enter().await),
         };
         let (client, db) = (&self.client, &*self.db);
@@ -677,6 +684,24 @@ impl Encryption {
                 .ok_or_else(|| format!("`{name}` is missing"))
         };
         Ok(match op {
+            "state" => self.state(),
+            "spaces" => self.spaces.clone(),
+            "useSpace" => {
+                let open = args
+                    .get("open")
+                    .and_then(Value::as_bool)
+                    .ok_or("`open` is missing")?;
+                self.use_space(open, text("table")?, text("id")?);
+                Value::Null
+            }
+            "setOnline" => {
+                let online = args
+                    .get("online")
+                    .and_then(Value::as_bool)
+                    .ok_or("`online` is missing")?;
+                self.set_online(online);
+                Value::Null
+            }
             "deviceId" => json!(client.device().map_err(describe)?.id.clone()),
             "ready" => {
                 let status = client.ensure_account(db).await.map_err(describe)?;
