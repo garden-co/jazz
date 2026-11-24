@@ -26,6 +26,13 @@ use crate::values::ColumnCodec;
 /// first (protocol §4.3 keeps a bounded set of the same size).
 pub const MAX_REPORTS: usize = 10_000;
 
+/// Keeps a queue bounded, returning its oldest item when it was full.
+pub(crate) fn push_bounded<T>(queue: &mut VecDeque<T>, item: T, cap: usize) -> Option<T> {
+    let dropped = (queue.len() == cap).then(|| queue.pop_front()).flatten();
+    queue.push_back(item);
+    dropped
+}
+
 /// How long a staged member row is waited for before the write is taken as
 /// rejected or abandoned: a space such a row would have changed is served at
 /// the next natural moment anyway.
@@ -213,9 +220,7 @@ impl Published {
         if !self.events.insert(key.clone()) {
             return false;
         }
-        self.event_order.push_back(key);
-        if self.events.len() > MAX_REPORTS {
-            let oldest = self.event_order.pop_front().unwrap();
+        if let Some(oldest) = push_bounded(&mut self.event_order, key, MAX_REPORTS) {
             self.events.remove(&oldest);
         }
         true
@@ -734,6 +739,44 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    pub(crate) fn new(
+        registry: Registry,
+        selected: MechanismConfig,
+        domain: AppDomain,
+        account_id: String,
+        plans: BTreeMap<String, TablePlan>,
+        device: LocalDevice,
+        random: Box<dyn RandomSource>,
+    ) -> Self {
+        Self {
+            content: domain.shared(),
+            registry,
+            selected,
+            domain,
+            account_id,
+            plans,
+            device: Some(device).into(),
+            keys: KeyState {
+                online: true,
+                ..KeyState::default()
+            }
+            .into(),
+            random: RefCell::new(random),
+            outbox: Default::default(),
+            published: Default::default(),
+            creations: Default::default(),
+            missing: Default::default(),
+            settle_backoff: Default::default(),
+            member_changes: Default::default(),
+            member_removals: Default::default(),
+            held_clock: Default::default(),
+            collectors: Default::default(),
+            next_write: Default::default(),
+            member_watch: Default::default(),
+            written: Default::default(),
+        }
+    }
+
     pub(crate) fn recent_writes(&self) -> BTreeSet<SpaceAddress> {
         let now = self.now();
         let mut recent = self.written.borrow_mut();
@@ -813,18 +856,16 @@ impl Shared {
 /// Queues `missing`, at most `cap` entries. A full queue drops its oldest
 /// entry of a space that is not backed off: a backed-off space's entries
 /// are the rows its reads are unresolved for (re-queued ahead of newer
-/// ones), so they go last. When every entry is backed off, `missing` itself
-/// is dropped, never silently: the report a row left out for want of a key
-/// gets is returned for it (a later read queues it again).
-#[must_use]
+/// ones), so they go last. If every entry is backed off, `missing` is dropped;
+/// the read that found it already reports the missing key.
 fn enqueue_missing(
     queue: &mut VecDeque<Missing>,
     backoff: &BTreeMap<SpaceAddress, SettleBackoff>,
     missing: Missing,
     cap: usize,
-) -> Option<Report> {
+) {
     if queue.contains(&missing) {
-        return None;
+        return;
     }
     if queue.len() >= cap {
         match queue
@@ -835,16 +876,11 @@ fn enqueue_missing(
                 queue.remove(oldest);
             }
             None => {
-                return Some(Report::MissingKey {
-                    table: missing.table,
-                    space: db_address(&missing.space),
-                    epoch_id: missing.epoch_id,
-                });
+                return;
             }
         }
     }
     queue.push_back(missing);
-    None
 }
 
 impl Shared {
@@ -864,10 +900,7 @@ impl Shared {
 
     pub(crate) fn report(&self, report: Report) {
         let mut outbox = self.outbox.borrow_mut();
-        if outbox.len() == MAX_REPORTS {
-            outbox.pop_front();
-        }
-        outbox.push_back(report);
+        push_bounded(&mut outbox, report, MAX_REPORTS);
     }
 
     /// Notes that `column` of the row opened under a refused creation's key
@@ -899,15 +932,12 @@ impl Shared {
     }
 
     pub(crate) fn missing(&self, missing: Missing) {
-        let dropped = enqueue_missing(
+        enqueue_missing(
             &mut self.missing.borrow_mut(),
             &self.settle_backoff.borrow(),
             missing,
             MAX_REPORTS,
         );
-        if let Some(report) = dropped {
-            self.report(report);
-        }
     }
 
     /// Delivers what the hooks reported since the last call to the
@@ -1125,10 +1155,7 @@ mod missing_queue_tests {
         let backoff = BTreeMap::from([backed_off("held")]);
         let mut queue = VecDeque::new();
         for (space, n) in [("held", 1), ("other", 2), ("other", 3), ("other", 4)] {
-            assert_eq!(
-                enqueue_missing(&mut queue, &backoff, entry(space, n), 3),
-                None
-            );
+            enqueue_missing(&mut queue, &backoff, entry(space, n), 3);
         }
         let ids: Vec<u8> = queue.iter().map(|e| e.id.as_bytes()[0]).collect();
         assert_eq!(ids, [1, 3, 4]);
@@ -1136,37 +1163,14 @@ mod missing_queue_tests {
 
     /// When every queued entry is backed off, the newcomer is dropped.
     #[test]
-    fn a_queue_of_only_backed_off_rows_drops_the_newcomer() {
+    fn a_queue_of_only_backed_off_rows_keeps_its_entries_when_full() {
         let backoff = BTreeMap::from([backed_off("held")]);
         let mut queue = VecDeque::new();
         for n in 1..=3 {
-            let _ = enqueue_missing(&mut queue, &backoff, entry("held", n), 3);
+            enqueue_missing(&mut queue, &backoff, entry("held", n), 3);
         }
-        let _ = enqueue_missing(&mut queue, &backoff, entry("other", 4), 3);
+        enqueue_missing(&mut queue, &backoff, entry("other", 4), 3);
         let ids: Vec<u8> = queue.iter().map(|e| e.id.as_bytes()[0]).collect();
         assert_eq!(ids, [1, 2, 3]);
-    }
-
-    /// A newcomer a full queue of backed-off rows drops is not dropped
-    /// silently: it gets the report of a row left out for want of a key.
-    #[test]
-    fn a_dropped_newcomer_is_reported() {
-        let backoff = BTreeMap::from([backed_off("held")]);
-        let mut queue = VecDeque::new();
-        for n in 1..=3 {
-            assert_eq!(
-                enqueue_missing(&mut queue, &backoff, entry("held", n), 3),
-                None
-            );
-        }
-        let dropped = entry("other", 4);
-        assert_eq!(
-            enqueue_missing(&mut queue, &backoff, dropped.clone(), 3),
-            Some(Report::MissingKey {
-                table: dropped.table,
-                space: db_address(&dropped.space),
-                epoch_id: dropped.epoch_id,
-            })
-        );
     }
 }

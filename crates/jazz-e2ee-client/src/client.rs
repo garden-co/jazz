@@ -41,6 +41,16 @@ const FLOOR_PREFIX: &str = "floor-";
 /// Attempts of a save that keeps meeting another writer's save.
 const SAVE_ATTEMPTS: usize = 3;
 
+struct DeviceLoad<'a> {
+    store: &'a dyn PrivateStore,
+    incarnation: u64,
+    registry: &'a Registry,
+    selected: &'a jazz_e2ee::agility::MechanismConfig,
+    domain: &'a AppDomain,
+    account_id: &'a str,
+    scope: &'a str,
+}
+
 /// What a runtime opens with.
 pub struct ClientConfig<'a> {
     pub store: Rc<dyn PrivateStore>,
@@ -115,6 +125,15 @@ impl RandomSource for SharedRandom<'_> {
 fn floor_format(bytes: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     Some(value.get("format")?.as_str()?.to_owned())
+}
+
+/// Saves retry when another writer changed the document first.
+fn retry_save<T>(result: Result<T, StoreError>) -> Result<Option<T>, StoreError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(StoreError::Conflict) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn rejection(record: &Rejected) -> String {
@@ -211,13 +230,15 @@ impl E2eeClient {
         for _ in 0..SAVE_ATTEMPTS {
             let incarnation = store.open_scope(&scope).await?;
             match Self::load_device(
-                &*store,
-                incarnation,
-                &registry,
-                &selected,
-                &domain,
-                &account_id,
-                &scope,
+                DeviceLoad {
+                    store: &*store,
+                    incarnation,
+                    registry: &registry,
+                    selected: &selected,
+                    domain: &domain,
+                    account_id: &account_id,
+                    scope: &scope,
+                },
                 &mut SharedRandom(&random),
             )
             .await
@@ -231,33 +252,15 @@ impl E2eeClient {
             }
         }
         let (incarnation, device) = opened.ok_or(ClientError::Store(StoreError::Wiped))?;
-        let shared = Rc::new(Shared {
-            content: domain.shared(),
+        let shared = Rc::new(Shared::new(
             registry,
             selected,
             domain,
             account_id,
             plans,
-            device: Some(device).into(),
-            keys: KeyState {
-                online: true,
-                ..KeyState::default()
-            }
-            .into(),
-            random,
-            outbox: Default::default(),
-            published: Default::default(),
-            creations: Default::default(),
-            missing: Default::default(),
-            settle_backoff: Default::default(),
-            member_changes: Default::default(),
-            member_removals: Default::default(),
-            held_clock: Default::default(),
-            collectors: Default::default(),
-            next_write: Default::default(),
-            member_watch: Default::default(),
-            written: Default::default(),
-        });
+            device,
+            random.into_inner(),
+        ));
         let client = Self {
             hooks: Rc::new(Hooks {
                 declarations,
@@ -277,17 +280,19 @@ impl E2eeClient {
         Ok(client)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn load_device(
-        store: &dyn PrivateStore,
-        incarnation: u64,
-        registry: &Registry,
-        selected: &jazz_e2ee::agility::MechanismConfig,
-        domain: &AppDomain,
-        account_id: &str,
-        scope: &str,
+        load: DeviceLoad<'_>,
         random: &mut dyn RandomSource,
     ) -> Result<LocalDevice, ClientError> {
+        let DeviceLoad {
+            store,
+            incarnation,
+            registry,
+            selected,
+            domain,
+            account_id,
+            scope,
+        } = load;
         let unrecognised = || ClientError::UnrecognisedDocument(DEVICE_DOCUMENT.to_owned());
         for _ in 0..SAVE_ATTEMPTS {
             let stored = store.load(scope, DEVICE_DOCUMENT).await?;
@@ -339,14 +344,15 @@ impl E2eeClient {
                 },
             }
             .encode_document()?;
-            match store
-                .save(scope, incarnation, DEVICE_DOCUMENT, &document, expected)
-                .await
-            {
-                Ok(_) => return Ok(device),
+            match retry_save(
+                store
+                    .save(scope, incarnation, DEVICE_DOCUMENT, &document, expected)
+                    .await,
+            ) {
+                Ok(Some(_)) => return Ok(device),
+                Ok(None) => continue,
                 // Another writer stored a device first: the store keeps one
                 // device per scope, so load that one.
-                Err(StoreError::Conflict) => continue,
                 Err(StoreError::Wiped) => return Err(ClientError::Closed),
                 Err(error) => return Err(error.into()),
             }
@@ -642,18 +648,18 @@ impl E2eeClient {
             }
             device.approval = StoredApproval::Spent;
             let bytes = device.encode_document()?;
-            match self
-                .store
-                .save(
-                    &self.scope,
-                    self.incarnation.get(),
-                    DEVICE_DOCUMENT,
-                    &bytes,
-                    Some(stored.revision),
-                )
-                .await
-            {
-                Ok(_) => {
+            match retry_save(
+                self.store
+                    .save(
+                        &self.scope,
+                        self.incarnation.get(),
+                        DEVICE_DOCUMENT,
+                        &bytes,
+                        Some(stored.revision),
+                    )
+                    .await,
+            ) {
+                Ok(Some(_)) => {
                     self.ensure_open()?;
                     if let Some(device) = self.shared.device.borrow_mut().as_mut() {
                         device.approval_nonce.take();
@@ -661,7 +667,7 @@ impl E2eeClient {
                     drop(documents);
                     return Ok(());
                 }
-                Err(StoreError::Conflict) => continue,
+                Ok(None) => continue,
                 Err(StoreError::Wiped) => return Err(self.close()),
                 Err(error) => return Err(error.into()),
             }
@@ -772,25 +778,25 @@ impl E2eeClient {
                     )?
                     .encode()?
             };
-            match self
-                .store
-                .save(
-                    &self.scope,
-                    self.incarnation.get(),
-                    &name,
-                    &bytes,
-                    state.revision,
-                )
-                .await
-            {
-                Ok(revision) => {
+            match retry_save(
+                self.store
+                    .save(
+                        &self.scope,
+                        self.incarnation.get(),
+                        &name,
+                        &bytes,
+                        state.revision,
+                    )
+                    .await,
+            ) {
+                Ok(Some(revision)) => {
                     state.revision = Some(revision);
                     state.lineage = None;
                     self.ensure_open()?;
                     self.shared.keys.borrow_mut().held.hold(staged)?;
                     return Ok(());
                 }
-                Err(StoreError::Conflict) => {
+                Ok(None) => {
                     // Another writer saved this root's document: take its
                     // keys too, then write both.
                     documents.held.remove(&root_id);
@@ -860,19 +866,19 @@ impl E2eeClient {
                     .seal_floor(account_id, floor)?
                     .encode()?
             };
-            match self
-                .store
-                .save(&self.scope, self.incarnation.get(), &name, &bytes, revision)
-                .await
-            {
-                Ok(revision) => {
+            match retry_save(
+                self.store
+                    .save(&self.scope, self.incarnation.get(), &name, &bytes, revision)
+                    .await,
+            ) {
+                Ok(Some(revision)) => {
                     self.ensure_open()?;
                     documents
                         .floors
                         .insert(account_id.to_owned(), (Some(floor.clone()), revision));
                     return Ok(());
                 }
-                Err(StoreError::Conflict) => {
+                Ok(None) => {
                     documents.floors.remove(account_id);
                     self.load_floor(&mut documents, &name, account_id).await?;
                 }
@@ -920,13 +926,15 @@ impl E2eeClient {
             self.store.delete(&self.scope).await?;
             let incarnation = self.store.open_scope(&self.scope).await?;
             let device = Self::load_device(
-                &*self.store,
-                incarnation,
-                &self.shared.registry,
-                &self.shared.selected,
-                &self.shared.domain,
-                &self.shared.account_id,
-                &self.scope,
+                DeviceLoad {
+                    store: &*self.store,
+                    incarnation,
+                    registry: &self.shared.registry,
+                    selected: &self.shared.selected,
+                    domain: &self.shared.domain,
+                    account_id: &self.shared.account_id,
+                    scope: &self.scope,
+                },
                 &mut SharedRandom(&self.shared.random),
             )
             .await?;
