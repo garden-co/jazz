@@ -225,16 +225,6 @@ struct LargeColumn {
     inline_max: usize,
 }
 
-/// Where a policy's catalogue identities come from: the namespace the
-/// authority mints them in (`names::identity`), once this store knows it
-/// and its schema's names are the authority's, else `None`. It never mints
-/// one.
-pub trait IdentitySource {
-    /// The namespace `schema`'s identities derive from, or `None` while
-    /// this store does not know them.
-    fn identity_namespace(&self, schema: &Schema) -> Result<Option<[u8; 16]>, Error>;
-}
-
 /// SQL text plus its positional parameters.
 pub struct Ctx<'a> {
     pub schema: &'a Schema,
@@ -272,13 +262,8 @@ pub struct Ctx<'a> {
     /// rows keeps it rather than listing every row the policy grants.
     lift_row_keys: bool,
     next_alias: usize,
-    /// Where catalogue identities ([`PolicyValue::TableIdentity`]) come
-    /// from: asked once, the first time a policy names one. Without a
-    /// source, or while it knows no namespace, no identity is bound, so a
-    /// comparison with one holds for no row, and a `NOT` over it for none
-    /// either (see `unknown_identities`).
-    catalogue: Option<&'a dyn IdentitySource>,
-    namespace: Option<Option<[u8; 16]>>,
+    /// The namespace for table identities under the governing policy schema.
+    namespace: Option<[u8; 16]>,
     /// How many table identities this compile could not bind. A `NOT`
     /// whose operand counted one is false: an unknown identity grants
     /// nothing, whichever way it is compared.
@@ -432,16 +417,14 @@ impl<'a> Ctx<'a> {
             overlay_tables: BTreeSet::new(),
             lift_row_keys: false,
             next_alias: 0,
-            catalogue: None,
             namespace: None,
             in_inherits_from: false,
             unknown_identities: 0,
         }
     }
 
-    /// Bind catalogue identities from `catalogue` (see [`Ctx::catalogue`]).
-    pub fn with_catalogue(mut self, catalogue: &'a dyn IdentitySource) -> Self {
-        self.catalogue = Some(catalogue);
+    pub fn with_namespace(mut self, namespace: Option<[u8; 16]>) -> Self {
+        self.namespace = namespace;
         self
     }
 
@@ -2400,19 +2383,9 @@ impl<'a> Ctx<'a> {
     /// no rows, so the table is no dependency.
     fn table_identity(&mut self, name: &str) -> Result<Term, Error> {
         let stored = &self.schema.table(name)?.stored;
-        let namespace = match self.namespace {
-            Some(namespace) => namespace,
-            None => {
-                let namespace = match self.catalogue {
-                    Some(catalogue) => catalogue.identity_namespace(self.schema)?,
-                    None => None,
-                };
-                self.namespace = Some(namespace);
-                namespace
-            }
-        };
-        let identity =
-            namespace.map(|namespace| Value::Uuid(crate::names::identity(namespace, stored, None)));
+        let identity = self
+            .namespace
+            .map(|namespace| Value::Uuid(crate::names::identity(namespace, stored, None)));
         if identity.is_none() {
             self.unknown_identities += 1;
         }

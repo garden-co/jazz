@@ -97,17 +97,8 @@ pub(crate) fn open_tag_undo(conn: &Storage) {
 thread_local! {
     /// By connection: each open savepoint's undo log, innermost last: the
     /// enum columns whose tags changed inside it, as they were before.
-    static TAG_UNDO: RefCell<std::collections::HashMap<usize, Vec<Vec<Undo>>>> =
+    static TAG_UNDO: RefCell<std::collections::HashMap<usize, Vec<Vec<(ColumnTags, EnumTags)>>>> =
         RefCell::default();
-}
-
-/// What a savepoint puts back in memory if it rolls back.
-enum Undo {
-    /// An enum column's tags, as they were before.
-    Tags(ColumnTags, EnumTags),
-    /// A store's in-memory namespace, which was unknown before (it is
-    /// written once: see [`namespace_set`]).
-    Namespace(Rc<std::cell::Cell<Option<[u8; 16]>>>),
 }
 
 /// A store's key in [`TAG_UNDO`] ([`Storage::key`]).
@@ -158,38 +149,9 @@ pub(crate) fn tags_changing(conn: &Storage, tags: &ColumnTags) {
             .borrow_mut()
             .get_mut(&undo_key(conn))
             .and_then(|frames| frames.last_mut())
-            && !frame.iter().any(|logged| logs_tags(logged, tags))
+            && !frame.iter().any(|(logged, _)| Rc::ptr_eq(logged, tags))
         {
-            frame.push(Undo::Tags(tags.clone(), tags.borrow().clone()));
-        }
-    });
-}
-
-fn logs_tags(logged: &Undo, tags: &ColumnTags) -> bool {
-    matches!(logged, Undo::Tags(logged, _) if Rc::ptr_eq(logged, tags))
-}
-
-/// `conn` holds `namespace` as the authority namespace, read or written
-/// now: keep it in `known`. Inside an open savepoint the value may be one
-/// that savepoint wrote, so the savepoint's log forgets it again if it
-/// rolls back; a namespace is written once and never changes, so what it
-/// puts back is `None`.
-pub(crate) fn namespace_set(
-    conn: &Storage,
-    known: &Rc<std::cell::Cell<Option<[u8; 16]>>>,
-    namespace: [u8; 16],
-) {
-    if known.get() == Some(namespace) {
-        return;
-    }
-    known.set(Some(namespace));
-    TAG_UNDO.with(|undo| {
-        if let Some(frame) = undo
-            .borrow_mut()
-            .get_mut(&undo_key(conn))
-            .and_then(|frames| frames.last_mut())
-        {
-            frame.push(Undo::Namespace(known.clone()));
+            frame.push((tags.clone(), tags.borrow().clone()));
         }
     });
 }
@@ -212,23 +174,17 @@ pub(crate) fn close_tag_undo(conn: &Storage, kept: bool, all: bool) {
             };
             match (kept, frames.last_mut()) {
                 (true, Some(parent)) => {
-                    for logged in frame {
-                        match &logged {
-                            Undo::Tags(tags, _) if parent.iter().any(|p| logs_tags(p, tags)) => {}
-                            _ => parent.push(logged),
+                    for (tags, before) in frame {
+                        if !parent.iter().any(|(logged, _)| Rc::ptr_eq(logged, &tags)) {
+                            parent.push((tags, before));
                         }
                     }
                 }
                 (true, None) => {}
                 (false, _) => {
-                    for logged in frame.into_iter().rev() {
-                        match logged {
-                            Undo::Tags(tags, before) => {
-                                *tags.borrow_mut() = before;
-                                tags_changed();
-                            }
-                            Undo::Namespace(known) => known.set(None),
-                        }
+                    for (tags, before) in frame.into_iter().rev() {
+                        *tags.borrow_mut() = before;
+                        tags_changed();
                     }
                 }
             }

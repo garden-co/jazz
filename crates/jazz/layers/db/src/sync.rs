@@ -4658,6 +4658,7 @@ impl Store {
         &self,
         active_schema: &Rc<Schema>,
         query: &Query,
+        namespace: Option<[u8; 16]>,
     ) -> Result<Vec<Support>, Error> {
         // History reads take no relationships.
         if is_history_table(&query.table) {
@@ -4667,7 +4668,7 @@ impl Store {
         if let Some(plan) = crate::db::union_plan(query, active_schema)? {
             let mut support = Vec::new();
             for (_, arm) in &plan.arms {
-                support.extend(self.support_of(active_schema, arm)?);
+                support.extend(self.support_of(active_schema, arm, namespace)?);
             }
             return Ok(support);
         }
@@ -4690,6 +4691,7 @@ impl Store {
             table,
             crate::compile::DEFAULT_INHERITS_DEPTH,
             &mut SupportMemo::new(),
+            namespace,
         )?);
         for via in &query.reachable {
             // Seed rows that reference the rows the walk starts from.
@@ -4752,9 +4754,10 @@ impl Store {
         table: &crate::values::Table,
         depth: usize,
         memo: &mut SupportMemo,
+        namespace: Option<[u8; 16]>,
     ) -> Result<Vec<Support>, Error> {
-        let mut support = self.inherited_support(active_schema, table, depth, memo)?;
-        support.extend(self.exists_support(active_schema, table, depth, memo)?);
+        let mut support = self.inherited_support(active_schema, table, depth, memo, namespace)?;
+        support.extend(self.exists_support(active_schema, table, depth, memo, namespace)?);
         Ok(support)
     }
 
@@ -4765,12 +4768,13 @@ impl Store {
         table: &crate::values::Table,
         depth: usize,
         memo: &mut SupportMemo,
+        namespace: Option<[u8; 16]>,
     ) -> Result<Rc<Vec<Support>>, Error> {
         let key = (table.stored.clone(), depth);
         if let Some(shared) = memo.get(&key) {
             return Ok(Rc::clone(shared));
         }
-        let support = Rc::new(self.policy_support(active_schema, table, depth, memo)?);
+        let support = Rc::new(self.policy_support(active_schema, table, depth, memo, namespace)?);
         memo.insert(key, Rc::clone(&support));
         Ok(support)
     }
@@ -4785,6 +4789,7 @@ impl Store {
         table: &crate::values::Table,
         depth: usize,
         memo: &mut SupportMemo,
+        namespace: Option<[u8; 16]>,
     ) -> Result<Vec<Support>, Error> {
         use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
         /// The `(inner, outer)` columns each outer-row equality among an
@@ -4877,7 +4882,7 @@ impl Store {
                 identities(condition, &mut named);
                 for (inner, name) in named {
                     if let Some(value) =
-                        self.identity_cell(active_schema, consulted, inner, name)?
+                        Self::identity_cell(active_schema, consulted, inner, name, namespace)
                     {
                         composite.push(Also {
                             inner: consulted.stored_name(inner).to_owned(),
@@ -4895,7 +4900,13 @@ impl Store {
                 outer: table.stored_name(outer).to_owned(),
                 outer_array: crate::compile::is_array(table, outer),
                 inner_array: crate::compile::is_array(consulted, inner),
-                nested: self.shared_support(active_schema, consulted, depth - 1, memo)?,
+                nested: self.shared_support(
+                    active_schema,
+                    consulted,
+                    depth - 1,
+                    memo,
+                    namespace,
+                )?,
                 policy_depth: Some(depth - 1),
                 composite,
             });
@@ -4912,6 +4923,7 @@ impl Store {
         table: &crate::values::Table,
         depth: usize,
         memo: &mut SupportMemo,
+        namespace: Option<[u8; 16]>,
     ) -> Result<Vec<Support>, Error> {
         use crate::tools::{Operation, PolicyExpr};
         fn hops<'p>(policy: &'p PolicyExpr, out: &mut Vec<(&'p str, Option<usize>)>) {
@@ -4955,7 +4967,7 @@ impl Store {
                 // The parent's read rests on its own policy's support,
                 // its correlated `EXISTS` clauses included, not just on its
                 // parents in turn.
-                nested: self.shared_support(active_schema, parent, depth - 1, memo)?,
+                nested: self.shared_support(active_schema, parent, depth - 1, memo, namespace)?,
                 policy_depth: Some(depth - 1),
                 composite: Vec::new(),
             });
@@ -7880,8 +7892,7 @@ impl Store {
         Ok(Some(minted))
     }
 
-    /// The namespace `_jazz_meta` holds, minting none, kept in memory too
-    /// ([`Store::known_namespace`]).
+    /// The namespace `_jazz_meta` holds, without minting one.
     pub(super) async fn stored_namespace(&self) -> Result<Option<[u8; 16]>, Error> {
         let stored = match self
             .conn
@@ -7900,9 +7911,6 @@ impl Store {
             Err(crate::storage::SqlError::QueryReturnedNoRows) => None,
             Err(error) => return Err(storage(error)),
         };
-        if let Some(namespace) = stored {
-            crate::values::namespace_set(&self.conn, &self.known_namespace, namespace);
-        }
         Ok(stored)
     }
 
@@ -7913,7 +7921,6 @@ impl Store {
         )
         .await
         .map_err(storage)?;
-        crate::values::namespace_set(&self.conn, &self.known_namespace, namespace);
         Ok(())
     }
 
@@ -8839,7 +8846,12 @@ impl Store {
         // Membership inputs: every table the read and its policies read
         // (its own included: a filter or policy may read other rows of
         // it), and the supporting tables with their policies' inputs.
-        let mut inputs = self.read_dependencies_in(prepared, identity, read)?;
+        let mut inputs = self.read_dependencies_in(
+            prepared,
+            identity,
+            read,
+            self.read_namespace(prepared).await?,
+        )?;
         // The policies that govern the read: a pinned session's bundle's,
         // as `read_dependencies_in` takes them.
         let owner_schema = self.owner();
@@ -13902,10 +13914,9 @@ impl Db {
         let tables = self
             .with_claims(vouched, async || {
                 let prepared = db.prepare_query_bound(query, binding.clone()).ok()?;
-                self.inner
-                    .without_overlay()
-                    .read_dependencies(&prepared, policy)
-                    .ok()
+                let inner = self.inner.without_overlay();
+                let namespace = inner.read_namespace(&prepared).await.ok()?;
+                inner.read_dependencies(&prepared, policy, namespace).ok()
             })
             .await;
         // An unadmitted version may be admitted without the owner schema
@@ -15483,7 +15494,8 @@ impl Db {
                         );
                 }
                 let inner = db.inner.without_overlay();
-                let support = Rc::new(inner.support_of(&active_schema, &query)?);
+                let namespace = inner.identity_namespace(&active_schema).await?;
+                let support = Rc::new(inner.support_of(&active_schema, &query, namespace)?);
                 let authority = inner.authority.get();
                 let dormant = inner.sessions.borrow()[index].restoring
                     && upstream.is_none()
@@ -15880,8 +15892,10 @@ impl Db {
                     view: viewed.view,
                     splices: Vec::new(),
                 };
-                let support =
-                    inner.support_of(prepared.source_schema(&inner.owner()), &prepared.query)?;
+                let owner = inner.owner();
+                let schema = prepared.source_schema(&owner);
+                let namespace = inner.identity_namespace(schema).await?;
+                let support = inner.support_of(schema, &prepared.query, namespace)?;
                 let resume = if at.is_none()
                     && matches!(opts.read_view.source, ReadViewSourceSpec::Current)
                 {
@@ -16032,7 +16046,12 @@ impl Db {
                 let schema = prepared.schema.clone().unwrap_or_else(|| inner.owner());
                 let mut hidden = Vec::new();
                 let masks = if read.view.as_ref().is_some_and(|view| view.base.is_some()) {
-                    let tables = inner.read_dependencies_in(&prepared, policy, &read)?;
+                    let tables = inner.read_dependencies_in(
+                        &prepared,
+                        policy,
+                        &read,
+                        inner.read_namespace(&prepared).await?,
+                    )?;
                     fanout::view_masks(&schema, &prepared, &read, &tables)
                 } else {
                     Vec::new()
@@ -18131,13 +18150,12 @@ impl Store {
     /// it, or when `inner` is not a scalar `uuid` column, whose cells could
     /// not equal it.
     fn identity_cell(
-        &self,
         schema: &Schema,
         consulted: &crate::values::Table,
         inner: &str,
         name: &str,
-    ) -> Result<Option<Sql>, Error> {
-        use crate::compile::IdentitySource;
+        namespace: Option<[u8; 16]>,
+    ) -> Option<Sql> {
         use crate::records::ValueType;
         let uuid = inner == "id"
             || (!crate::compile::is_array(consulted, inner)
@@ -18148,36 +18166,26 @@ impl Store {
                     }
                     column.name == inner && column.tags.is_none() && matches!(ty, ValueType::Uuid)
                 }));
-        let Ok(target) = schema.table(name) else {
-            return Ok(None);
-        };
+        let target = schema.table(name).ok()?;
         if !uuid {
-            return Ok(None);
+            return None;
         }
-        Ok(self.identity_namespace(schema)?.map(|namespace| {
+        namespace.map(|namespace| {
             Sql::Blob(
                 crate::names::identity(namespace, &target.stored, None)
                     .as_bytes()
                     .to_vec(),
             )
-        }))
+        })
     }
-}
 
-/// A policy's catalogue identities on this store: as [`Db::table_identity`]
-/// has them, the authority's namespace once this store holds it and its
-/// schema's names are confirmed (on the authority, always once a version is
-/// admitted). Before that, none: such a policy grants nothing through an
-/// identity (a comparison with it holds for no row, and a `NOT` over one is
-/// false) until the names are confirmed, when it is compiled again. Only a
-/// store that is not the authority lacks them, and in the shipped topology
-/// only Core, the authority, evaluates policies.
-///
-/// The namespace is the one `_jazz_meta` holds, as the store keeps it in
-/// memory ([`Store::known_namespace`]): compiling cannot await a read.
-impl crate::compile::IdentitySource for Store {
-    fn identity_namespace(&self, schema: &Schema) -> Result<Option<[u8; 16]>, Error> {
-        let Some(namespace) = self.known_namespace.get() else {
+    /// The namespace used by policies whose names come from `schema`.
+    /// A replica can bind identities once it knows both the namespace and the names.
+    pub(super) async fn identity_namespace(
+        &self,
+        schema: &Schema,
+    ) -> Result<Option<[u8; 16]>, Error> {
+        let Some(namespace) = self.stored_namespace().await? else {
             return Ok(None);
         };
         // The owner's version id is kept; hashing a schema per check is not.
@@ -18837,13 +18845,11 @@ mod tests {
     }
 
     /// Alice's store writes the authority namespace inside a savepoint that
-    /// rolls back: the file holds none, so the store must remember none, or
-    /// policies would compile stored identities for a namespace that was
-    /// never kept. Kept, it is remembered.
+    /// rolls back. Only a committed namespace can be read afterward.
     ///
     /// A unit test: no public call rolls back a savepoint after the
     /// namespace is written in it, so this drives the store's own
-    /// savepoint and reads the namespace it keeps in memory.
+    /// savepoint and reads its stored metadata.
     #[test]
     fn a_rolled_back_savepoint_forgets_the_namespace_it_wrote() {
         use crate::db::{Db, DbConfig, DbIdentity};
@@ -18862,23 +18868,21 @@ mod tests {
         )))
         .unwrap();
         let store = alice.inner.as_ref();
-        assert_eq!(store.known_namespace.get(), None);
+        assert_eq!(block_on(store.stored_namespace()).unwrap(), None);
 
         block_on(store.conn.db_scope_then("namespace", async || {
             store.persist_namespace([7; 16]).await.unwrap();
-            assert_eq!(store.known_namespace.get(), Some([7; 16]));
+            assert_eq!(store.stored_namespace().await.unwrap(), Some([7; 16]));
             Scoped::Undo(())
         }))
         .unwrap();
         assert_eq!(block_on(store.stored_namespace()).unwrap(), None);
-        assert_eq!(store.known_namespace.get(), None);
 
         block_on(store.conn.db_scope_then("namespace", async || {
             store.persist_namespace([8; 16]).await.unwrap();
             Scoped::Keep(())
         }))
         .unwrap();
-        assert_eq!(store.known_namespace.get(), Some([8; 16]));
         assert_eq!(block_on(store.stored_namespace()).unwrap(), Some([8; 16]));
     }
 }
