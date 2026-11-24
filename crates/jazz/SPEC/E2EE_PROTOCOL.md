@@ -1531,11 +1531,15 @@ the 32 secret bytes, created and read with user verification required
     retires the old root. See the [runtime's recovery operations](../../jazz-e2ee-client/src/host/runtime.rs#L759-L798).
   - **Device accounts:** the account secret is the account, and it cannot
     be rotated without becoming a different account. The SDK refuses to retire
-    the root derived from that secret (`device-account-root-required`), so the secret
-    can still recover the account after every device is lost. A device signed
-    in with the account secret can retire any other root. A linked device
-    without the secret cannot distinguish the account's root from another
-    derived (version 8) root. It refuses to retire a derived root with
+    the root derived from that secret (`device-account-root-required`). The secret
+    can recover the account after every device is lost unless another client
+    retired that root. The standard client derives the protected root ID from
+    the account secret. `AccountWriter` trusts raw callers to supply that ID
+    and does not verify its derivation. Replay honours valid historical
+    retirements of the root. A device signed in with the account secret can
+    retire any other root. A linked device without the secret cannot
+    distinguish the account's root from another derived (version 8) root.
+    It refuses to retire a derived root with
     `device-account-secret-required` and asks the user to sign in with the
     account secret. It can still retire an independently generated root.
     Anyone who holds a leaked account secret can still sign in as the account.

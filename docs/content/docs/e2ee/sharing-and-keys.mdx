@@ -120,8 +120,10 @@ db.encryption.onReport((report) => {
 
 On Node, the database from `createJazz` can add, list and remove members through `db.encryption.members`.
 When Jazz verifies its own account and finds a signed sealing-key record that does not derive
-from the account key, it ignores the record. `onReport` emits `conflicting-account-key` once per
-record, with `recordId`, the signing device’s `signerId` and `epochId`. See the
+from the account key, it ignores the record. `onReport` emits `conflicting-account-key` with
+`recordId`, the signing device’s `signerId` and `epochId`. Jazz remembers the last 10,000 distinct
+event identities and suppresses repeats while an identity is in that history. When a new identity
+displaces the oldest, Jazz can report the evicted conflict again. See the
 [conflicting account key test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/accounts.rs#L110).
 
 The backend holds no encryption keys. Use a device client to rotate keys or manage devices and recovery.
