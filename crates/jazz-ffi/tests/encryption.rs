@@ -480,24 +480,15 @@ async fn recovery_continues_after_reopening_with_a_stranded_nonce() {
     result.unwrap();
 }
 
-/// Contract: a device account whose account-secret root was retired still
-/// starts: an active device reopened on its store is active (the retired
-/// root is not registered again), and a new device with the same secret
-/// stays awaiting approval, answering well before its deadline instead of
-/// waiting for a recovery that cannot come.
-///
-/// ```text
-/// laptop ──ready: registers the secret's root──► retire it ──► close
-/// laptop (same store) ──reopen──► active
-/// phone (same secret, new store) ──ready──► awaiting-approval, at once
-/// ```
+/// Alice's laptop receives a typed refusal when retiring the account-secret
+/// root. Her phone can still recover from the secret after the laptop closes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_device_account_starts_after_its_secrets_root_is_retired() {
+async fn retiring_the_device_account_root_is_refused() {
     let app = start().await;
     let config = app.config();
     let result = tokio::task::spawn_blocking(move || {
         let store = Arc::new(HostStore::default());
-        let laptop = JazzHandle::open_with_store(config.clone(), store.clone(), None).unwrap();
+        let laptop = JazzHandle::open_with_store(config.clone(), store, None).unwrap();
         assert_eq!(laptop.encryption_ready(30_000).unwrap(), "active");
         // The verified account predates the root its start registered: read
         // it again until the root is there.
@@ -519,29 +510,26 @@ async fn a_device_account_starts_after_its_secrets_root_is_retired() {
             std::thread::sleep(Duration::from_millis(50));
         };
         assert_eq!(roots.as_array().unwrap().len(), 1, "{roots}");
-        laptop
+        let error = laptop
             .encryption_call(
                 "recoveryRetire".into(),
                 json!({ "rootId": roots[0]["id"] }).to_string(),
             )
-            .unwrap();
+            .unwrap_err();
+        let JazzError::Refused { reason } = error else {
+            panic!("expected a refusal, got {error:?}");
+        };
+        assert!(
+            reason.starts_with("encryption (device-account-root-required):"),
+            "{reason}"
+        );
+        assert!(reason.contains("prevent recovery"), "{reason}");
         laptop.shutdown().unwrap();
-
-        let reopened = JazzHandle::open_with_store(config.clone(), store, None).unwrap();
-        assert_eq!(reopened.encryption_ready(15_000).unwrap(), "active");
-
         let phone =
             JazzHandle::open_with_store(config, Arc::new(HostStore::default()), None).unwrap();
-        let started = std::time::Instant::now();
-        assert_eq!(phone.encryption_ready(30_000).unwrap(), "awaiting-approval");
-        assert!(
-            started.elapsed() < Duration::from_secs(15),
-            "it did not wait out its deadline: {:?}",
-            started.elapsed()
-        );
+        assert_eq!(phone.encryption_ready(30_000).unwrap(), "active");
 
         phone.shutdown().unwrap();
-        reopened.shutdown().unwrap();
     })
     .await;
     app.stop().await;

@@ -87,7 +87,9 @@ If a user loses every approved device and has no usable recovery phrase, their n
 call `await db.encryption.resetAccount()` while it is awaiting approval. This is available to
 accounts that use your app’s sign-in. In `schema.ts`, pass
 `{ encryption: { allowAccountReset: true } }` as the second argument to `s.defineSchema`.
-Run `npx jazz-tools generate` and deploy the generated app files. The setting is off by default. Device accounts always recover using their account secret.
+Run `npx jazz-tools generate` and deploy the generated app files. The setting is off by default. Device accounts always recover using their account secret. Jazz refuses to retire the
+recovery root derived from that secret. To retire a different derived root on a linked device,
+sign in with the account secret first.
 
 Reset starts a new account generation. Other members’ clients can send the new device the
 keys, including past keys, for spaces the account still belongs to. Enable reset only if your

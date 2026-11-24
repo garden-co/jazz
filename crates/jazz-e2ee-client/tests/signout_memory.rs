@@ -28,7 +28,7 @@ fn shutdown_drains_the_private_store_and_clears_held_keys() {
 
 fn assert_shutdown(
     who: jazz::ids::AuthorSubject,
-    identity: Option<jazz_e2ee::protocol::device_account::DeviceAccountIdentity>,
+    identity: Option<jazz_e2ee::protocol::derive::RecoverySecret>,
 ) {
     let has_identity = identity.is_some();
     let memory = Rc::new(MemoryStore::new());

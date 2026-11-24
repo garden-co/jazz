@@ -113,6 +113,8 @@ pub enum RefusalCode {
     NoOtherDevice,
     UnsupportedRecipient,
     AccountResetNotAllowed,
+    DeviceAccountRootRequired,
+    DeviceAccountSecretRequired,
     SpacePending,
     SpaceCreateRefused,
     RotationNeedsKey,
@@ -139,6 +141,8 @@ impl RefusalCode {
             Self::SelfRemoval => "self-removal",
             Self::NoOtherDevice => "no-other-device",
             Self::UnsupportedRecipient => "unsupported-recipient",
+            Self::DeviceAccountRootRequired => "device-account-root-required",
+            Self::DeviceAccountSecretRequired => "device-account-secret-required",
             Self::AccountResetNotAllowed => "account-reset-not-allowed",
             Self::SpacePending => "space-pending",
             Self::SpaceCreateRefused => "space-create-refused",
@@ -202,6 +206,8 @@ pub enum ProtocolError {
     #[error("{}", match .0 {
         RefusalCode::RotationNeedsKey => "This device does not hold the space's current key yet",
         RefusalCode::RotationKeyStateUnconfirmed => "This device cannot confirm the space's key state",
+        RefusalCode::DeviceAccountRootRequired => "Retiring this root would prevent recovery with the device account secret",
+        RefusalCode::DeviceAccountSecretRequired => "Sign in with the account secret to retire a derived recovery root",
         RefusalCode::NotAMember => "Your account is not a member of this space",
         _ => "E2EE operation refused",
     })]
