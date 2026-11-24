@@ -110,18 +110,6 @@ public interface Native : AutoCloseable {
     public fun encryptionCall(op: String, argsJson: String): String =
         throw JazzException.NotSupported("end-to-end encryption through this native core")
 
-    /** Verifies the account and enrols or recovers this device, waiting up to [timeoutMs]. */
-    public fun encryptionReady(timeoutMs: Long): String =
-        throw JazzException.NotSupported("end-to-end encryption through this native core")
-
-    /** What the encryption runtime's loop is doing, as JSON. */
-    public fun encryptionState(): String =
-        throw JazzException.NotSupported("end-to-end encryption through this native core")
-
-    /** The encryption reports waiting, each as a JSON text. */
-    public fun encryptionReports(): List<String> =
-        throw JazzException.NotSupported("end-to-end encryption through this native core")
-
     /** Opens native handles from a config JSON (the contract's open config). */
     public fun interface Opener {
         public fun open(configJson: String): Native
@@ -132,9 +120,9 @@ public interface Native : AutoCloseable {
 
         /**
          * Opens an app that declares end-to-end encryption, with [store] answering the device's
-         * private store requests (JSON, see [PrivateStoreBridge]); [tokens] for a bearer sign-in.
+         * private store requests; [tokens] for a bearer sign-in.
          */
-        public fun openWithStore(configJson: String, store: (String) -> StoreReply, tokens: ((String) -> String?)?): Native =
+        public fun openWithStore(configJson: String, store: PrivateStore, tokens: ((String) -> String?)?): Native =
             throw JazzException.NotSupported("end-to-end encryption through this opener")
     }
 }

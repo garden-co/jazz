@@ -113,6 +113,9 @@ pub use include::{
     Include, IntoInclude, Nullability, OneInclude, Partial, Pick, RefsInclude, Row, Selection, With,
 };
 pub use jazz::tools::MutationError;
+#[cfg(feature = "e2ee-client")]
+#[doc(hidden)]
+pub use jazz_e2ee_client::{PrivateStore, StoreError, Stored};
 pub use jazz_session::{
     Initial, JazzSession, Recovery, SessionConfig, SessionError, SessionSnapshot, SessionStatus,
 };

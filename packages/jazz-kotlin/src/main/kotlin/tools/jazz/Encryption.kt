@@ -1,18 +1,16 @@
 package tools.jazz
 
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
-import java.util.Base64
 
 // End-to-end encryption for an app that declares it. A device keeps its keys
 // in a private store the app supplies ([JazzEncryption.store]): Jazz ships
@@ -75,77 +73,8 @@ public data class JazzEncryption(
     val environment: String = "dev",
 )
 
-/** A private store's answer to jazz-ffi: [ok] with the result as JSON, or not ok with `conflict`, `wiped` or a message. */
-public class StoreReply(public val ok: Boolean, public val payload: String)
-
-/**
- * Answers jazz-ffi's store requests (JSON text: `op`, bytes as base64, numbers that
- * may exceed 2^53 as decimal text) with a [PrivateStore].
- *
- * Requests and answers carry key bytes. The arrays this bridge owns (the secret it decodes
- * for `protect`, the secret `unprotect` returns) are zeroed once used. JVM strings (the
- * request and answer texts, the base64 in them) and the parsed JSON are immutable and stay
- * until the garbage collector reuses their memory. jazz-ffi wipes its own copies.
- */
-internal class PrivateStoreBridge(private val store: PrivateStore) {
-    fun call(request: String): StoreReply {
-        return try {
-            val parsed = jazzJson.parseToJsonElement(request).jsonObject
-            fun text(name: String): String =
-                parsed[name]?.jsonPrimitive?.contentOrNull ?: error("the private store request has no $name")
-            fun number(name: String): Long = java.lang.Long.parseUnsignedLong(text(name))
-            fun bytes(name: String): ByteArray = Base64.getDecoder().decode(text(name))
-            val result: JsonElement = when (val op = text("op")) {
-                "openScope" -> JsonPrimitive(java.lang.Long.toUnsignedString(store.openScope(text("scope"))))
-                "load" -> store.load(text("scope"), text("doc"))?.let {
-                    buildJsonObject {
-                        put("bytes", Base64.getEncoder().encodeToString(it.bytes))
-                        put("revision", java.lang.Long.toUnsignedString(it.revision))
-                    }
-                } ?: JsonNull
-                "save" -> {
-                    val expected = if (parsed["expected"] is JsonPrimitive && parsed["expected"] !is JsonNull) number("expected") else null
-                    JsonPrimitive(
-                        java.lang.Long.toUnsignedString(
-                            store.save(text("scope"), number("incarnation"), text("doc"), bytes("bytes"), expected),
-                        ),
-                    )
-                }
-                "list" -> JsonArray(store.list(text("scope")).map { JsonPrimitive(it) })
-                "delete" -> {
-                    store.delete(text("scope"))
-                    JsonNull
-                }
-                "protect" -> {
-                    val secret = bytes("secret")
-                    try {
-                        JsonPrimitive(Base64.getEncoder().encodeToString(store.protect(secret)))
-                    } finally {
-                        secret.fill(0)
-                    }
-                }
-                "unprotect" -> {
-                    val secret = store.unprotect(bytes("blob"))
-                    try {
-                        JsonPrimitive(Base64.getEncoder().encodeToString(secret))
-                    } finally {
-                        secret.fill(0)
-                    }
-                }
-                else -> return StoreReply(false, "unknown private store operation $op")
-            }
-            StoreReply(true, result.toString())
-        } catch (e: PrivateStoreException.Conflict) {
-            StoreReply(false, "conflict")
-        } catch (e: PrivateStoreException.Wiped) {
-            StoreReply(false, "wiped")
-        } catch (e: Throwable) {
-            StoreReply(false, e.message ?: e.toString())
-        }
-    }
-}
-
 /** A device of the account: active (`status` `active`), or waiting for approval (`waiting`). */
+@Serializable
 public data class Device(
     val id: String,
     val status: String,
@@ -169,11 +98,7 @@ public class Encryption internal constructor(
     public companion object {
         /** The code of an encryption failure (`approval-code-mismatch`, `no-challenge`, ...), or `null`. */
         @JvmStatic
-        public fun codeOf(error: Throwable): String? {
-            val message = error.message ?: return null
-            if (!message.startsWith("encryption (")) return null
-            return message.removePrefix("encryption (").substringBefore(")")
-        }
+        public fun codeOf(error: Throwable): String? = (error as? JazzException)?.encryptionCode
     }
 
     /** One of the runtime's operations by name (see the README), with its result as JSON. */
@@ -187,17 +112,14 @@ public class Encryption internal constructor(
     public suspend fun ready(timeoutMs: Long = 30_000): String {
         // A negative timeout would be read as an unsigned number, a wait of centuries.
         if (timeoutMs < 0) throw JazzException.Refused("the readiness timeout must not be negative")
-        return blocking { native.encryptionReady(timeoutMs) }
+        return call("waitUntilReady", buildJsonObject { put("timeoutMs", timeoutMs) }).jsonPrimitive.content
     }
 
     /** What the runtime's loop is doing now, as JSON (`status`, `error`, `stage`). */
-    public suspend fun state(): JsonObject = jazzJson.parseToJsonElement(blocking { native.encryptionState() }).jsonObject
+    public suspend fun state(): JsonObject = call("state").jsonObject
 
     /** The reports waiting (`type`: `unreadable`, `missing-key`, `challenged`, `ready-failed`, ...). */
-    public suspend fun reports(): List<JsonObject> {
-        val texts = blocking { native.encryptionReports().joinToString(separator = "\n") }
-        return texts.lines().filter { it.isNotBlank() }.map { jazzJson.parseToJsonElement(it).jsonObject }
-    }
+    public suspend fun reports(): List<JsonObject> = call("reports").jsonArray.map { it.jsonObject }
 
     private suspend fun text(op: String, args: JsonObject = JsonObject(emptyMap())): String? =
         (call(op, args) as? JsonPrimitive)?.contentOrNull
@@ -207,14 +129,7 @@ public class Encryption internal constructor(
 
     /** The account's devices. */
     public suspend fun devices(): List<Device> =
-        (call("devices") as? JsonArray).orEmpty().map {
-            val device = it.jsonObject
-            Device(
-                device["id"]!!.jsonPrimitive.content,
-                device["status"]!!.jsonPrimitive.content,
-                device["removalRequested"]!!.jsonPrimitive.boolean,
-            )
-        }
+        jazzJson.decodeFromJsonElement(ListSerializer(Device.serializer()), call("devices"))
 
     /**
      * Starts approving a waiting device (on an approved one); [approvalCode] then [approve]

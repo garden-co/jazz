@@ -38,12 +38,12 @@ internal fun openReflectively(
     className: String,
     config: String,
     tokens: ((String) -> String?)? = null,
-    store: ((String) -> StoreReply)? = null,
+    store: PrivateStore? = null,
 ): Native {
     val native = Class.forName(className)
     return try {
         if (store != null) {
-            native.getMethod("openWithStore", String::class.java, Function1::class.java, Function1::class.java)
+            native.getMethod("openWithStore", String::class.java, PrivateStore::class.java, Function1::class.java)
                 .invoke(null, config, store, tokens) as Native
         } else if (tokens == null) {
             native.getMethod("open", String::class.java).invoke(null, config) as Native
@@ -106,7 +106,7 @@ public class Jazz internal constructor(
             override fun openWithTokens(configJson: String, tokens: (String) -> String?): Native =
                 openReflectively("tools.jazz.UniffiNative", configJson, tokens)
 
-            override fun openWithStore(configJson: String, store: (String) -> StoreReply, tokens: ((String) -> String?)?): Native =
+            override fun openWithStore(configJson: String, store: PrivateStore, tokens: ((String) -> String?)?): Native =
                 openReflectively("tools.jazz.UniffiNative", configJson, tokens, store)
         }
 
@@ -125,8 +125,7 @@ public class Jazz internal constructor(
                     { reason: String -> runBlocking { auth.token(TokenReason.of(reason)) } }
                 }
                 val native = if (encryption != null) {
-                    val bridge = PrivateStoreBridge(encryption.store)
-                    opener.openWithStore(json, bridge::call, bearer)
+                    opener.openWithStore(json, encryption.store, bearer)
                 } else when (val auth = config.auth) {
                     // The native core asks on a thread of its own: blocking there is fine.
                     is JazzAuth.Bearer -> opener.openWithTokens(json) { reason ->

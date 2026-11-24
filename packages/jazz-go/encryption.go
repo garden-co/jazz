@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -249,12 +248,7 @@ func EncryptionCode(err error) string {
 	if !errors.As(err, &e) {
 		return ""
 	}
-	rest, ok := strings.CutPrefix(e.Message, "encryption (")
-	if !ok {
-		return ""
-	}
-	code, _, _ := strings.Cut(rest, ")")
-	return code
+	return e.Code
 }
 
 // Call runs one of the runtime's operations by name (see the README) with
@@ -267,7 +261,7 @@ func (e *Encryption) Call(ctx context.Context, op string, args, out any) error {
 // to timeout: "active", "awaiting-approval" or "reenrolled".
 func (e *Encryption) Ready(ctx context.Context, timeout time.Duration) (string, error) {
 	var status string
-	err := e.db.call(ctx, "encryptionReady", map[string]any{"timeoutMs": timeout.Milliseconds()}, &status)
+	err := e.Call(ctx, "waitUntilReady", map[string]any{"timeoutMs": timeout.Milliseconds()}, &status)
 	return status, err
 }
 
@@ -281,22 +275,16 @@ type EncryptionState struct {
 // State is what the runtime's loop is doing now.
 func (e *Encryption) State(ctx context.Context) (EncryptionState, error) {
 	var s EncryptionState
-	err := e.db.call(ctx, "encryptionState", map[string]any{}, &s)
+	err := e.Call(ctx, "state", map[string]any{}, &s)
 	return s, err
 }
 
 // Reports are the reports waiting (type "unreadable", "missing-key",
 // "challenged", "ready-failed", ...), each as JSON.
 func (e *Encryption) Reports(ctx context.Context) ([]json.RawMessage, error) {
-	var texts []string
-	if err := e.db.call(ctx, "encryptionReports", map[string]any{}, &texts); err != nil {
-		return nil, err
-	}
-	reports := make([]json.RawMessage, len(texts))
-	for i, text := range texts {
-		reports[i] = json.RawMessage(text)
-	}
-	return reports, nil
+	var reports []json.RawMessage
+	err := e.Call(ctx, "reports", nil, &reports)
+	return reports, err
 }
 
 // DeviceID is this installation's device ID.

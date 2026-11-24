@@ -148,11 +148,11 @@ func TestThePrivateStoreAnswersTheRuntimesRequests(t *testing.T) {
 }
 
 func TestEncryptionCodeNamesTheFailure(t *testing.T) {
-	err := &Error{Kind: KindRefused, Message: "encryption (approval-code-mismatch): the code differs"}
+	err := parseError(`{"kind":"refused","message":"the code differs","code":"approval-code-mismatch"}`)
 	if got := EncryptionCode(err); got != "approval-code-mismatch" {
 		t.Fatalf("code = %q", got)
 	}
-	if got := EncryptionCode(&Error{Kind: KindRefused, Message: "something else"}); got != "" {
+	if got := EncryptionCode(&Error{Kind: KindRefused, Message: "encryption (approval-code-mismatch): the code differs"}); got != "" {
 		t.Fatalf("code = %q", got)
 	}
 }
@@ -241,7 +241,6 @@ func TestEncryptedShutdownReleasesCallbacksAfterDraining(t *testing.T) {
 		t.Error("shutdown retained its private store")
 	}
 }
-
 func TestDeviceListKeepsRemovalRequests(t *testing.T) {
 	var devices []Device
 	if err := json.Unmarshal([]byte(`[{"id":"a","status":"active","removalRequested":false},{"id":"b","status":"active","removalRequested":true}]`), &devices); err != nil {

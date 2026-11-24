@@ -10,6 +10,13 @@ pub enum JazzError {
     /// Storage, the network or the sync server failed.
     #[error("{reason}")]
     Io { reason: String },
+    /// Encryption refused the operation, or hit an I/O failure.
+    #[error("{reason}")]
+    Encryption {
+        code: String,
+        reason: String,
+        io: bool,
+    },
     /// The app was closed, or (for a subscription) the subscription ended.
     #[error("the app is closed")]
     Closed,
@@ -76,7 +83,8 @@ impl JazzError {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Refused { .. } => "refused",
-            Self::Io { .. } => "io",
+            Self::Io { .. } | Self::Encryption { io: true, .. } => "io",
+            Self::Encryption { .. } => "refused",
             Self::Closed => "closed",
             Self::Permission { .. } => "permission",
             Self::NotSupported { .. } => "notSupported",
@@ -106,6 +114,11 @@ pub(crate) type FfiError = JazzErrorKind;
 pub(crate) enum JazzErrorKind {
     Refused(String),
     Io(String),
+    Encryption {
+        code: String,
+        reason: String,
+        io: bool,
+    },
     Closed,
     Permission(String),
     NotSupported(String),
@@ -135,6 +148,7 @@ impl From<JazzErrorKind> for JazzError {
         match kind {
             JazzErrorKind::Refused(reason) => Self::Refused { reason },
             JazzErrorKind::Io(reason) => Self::Io { reason },
+            JazzErrorKind::Encryption { code, reason, io } => Self::Encryption { code, reason, io },
             JazzErrorKind::Closed => Self::Closed,
             JazzErrorKind::Permission(reason) => Self::Permission { reason },
             JazzErrorKind::NotSupported(reason) => Self::NotSupported { reason },
@@ -212,13 +226,11 @@ impl From<jazz_app_support::Error> for JazzErrorKind {
                 _ => Self::Refused(message),
             },
             E::Unsupported(what) => unsupported(what),
-            // An encryption call's failure keeps its code in the message
-            // (`encryption (approval-code-mismatch): ...`) for the host's
-            // wrapper to name; a store or database failure may pass.
-            E::Encryption { code, .. } if code == "store" || code == "database" => {
-                Self::Io(message)
-            }
-            E::Encryption { .. } => Self::Refused(message),
+            E::Encryption { code, .. } => Self::Encryption {
+                io: matches!(code.as_str(), "store" | "database"),
+                code,
+                reason: message,
+            },
             // E::Refused: the backend refused who the client is (a credential
             // trusted neither way, a refused link); `for_user` reports its
             // 403 as `Permission` itself.
@@ -274,6 +286,21 @@ impl From<jazz_app_support::Error> for JazzErrorKind {
 /// message shape is checked directly.
 #[cfg(test)]
 mod tests {
+    use super::{JazzError, JazzErrorKind};
+
+    /// The mapping is checked here because a foreign store's failure is
+    /// already exercised through the runtime in jazz-app's tests.
+    #[test]
+    fn a_private_store_failure_reaches_the_host_as_coded_io() {
+        let error = jazz_app_support::Error::Encryption {
+            code: "store".into(),
+            message: "cannot save the recovery nonce".into(),
+        };
+        let error = JazzError::from(JazzErrorKind::from(error));
+        assert_eq!(error.kind(), "io");
+        assert!(matches!(error, JazzError::Encryption { code, .. } if code == "store"));
+    }
+
     #[test]
     fn not_found_messages_are_recognised() {
         assert!(super::is_not_found(
