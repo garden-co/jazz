@@ -48,14 +48,14 @@ fn change() -> CatalogueChange {
 fn a_change_keeps_host_values_with_it_or_not_at_all() {
     let db = open();
     let kept = |value: &[u8]| vec![(KEPT, b"k".to_vec(), value.to_vec())];
-    block_on(db.apply_catalogue_keeping(change(), &kept(b"a"))).unwrap();
+    block_on(db.apply_catalogue_checked(change(), &kept(b"a"), async |_| Ok(()))).unwrap();
     assert_eq!(
         jazz::db::block_on(db.host_get(KEPT, b"k")).unwrap(),
         Some(b"a".to_vec())
     );
     assert_eq!(jazz::db::block_on(db.catalogue()).unwrap().schemas.len(), 1);
     // The same value again is not a conflict.
-    block_on(db.apply_catalogue_keeping(change(), &kept(b"a"))).unwrap();
+    block_on(db.apply_catalogue_checked(change(), &kept(b"a"), async |_| Ok(()))).unwrap();
 
     let other = {
         let schema = SchemaBuilder::new()
@@ -69,7 +69,7 @@ fn a_change_keeps_host_values_with_it_or_not_at_all() {
             ..Default::default()
         }
     };
-    let error = block_on(db.apply_catalogue_keeping(other, &kept(b"b")))
+    let error = block_on(db.apply_catalogue_checked(other, &kept(b"b"), async |_| Ok(())))
         .expect_err("a different value for a kept key");
     assert_eq!(error.code, jazz::db::ErrorCode::Schema, "{error}");
     assert_eq!(
@@ -93,9 +93,10 @@ fn a_change_keeps_host_values_with_it_or_not_at_all() {
 #[test]
 fn a_failed_change_leaves_no_earlier_kept_value_behind() {
     let db = open();
-    block_on(db.apply_catalogue_keeping(
+    block_on(db.apply_catalogue_checked(
         CatalogueChange::default(),
         &[(KEPT, b"k".to_vec(), b"a".to_vec())],
+        async |_| Ok(()),
     ))
     .unwrap();
     let before = jazz::db::block_on(db.catalogue()).unwrap().schemas.len();
@@ -115,7 +116,8 @@ fn a_failed_change_leaves_no_earlier_kept_value_behind() {
         (KEPT, b"first".to_vec(), b"1".to_vec()),
         (KEPT, b"k".to_vec(), b"conflicting".to_vec()),
     ];
-    block_on(db.apply_catalogue_keeping(other, &kept)).expect_err("the second entry conflicts");
+    block_on(db.apply_catalogue_checked(other, &kept, async |_| Ok(())))
+        .expect_err("the second entry conflicts");
     assert_eq!(
         jazz::db::block_on(db.host_get(KEPT, b"first")).unwrap(),
         None,

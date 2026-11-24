@@ -1847,21 +1847,11 @@ impl Db {
         file: crate::host::StoreFile,
         change: crate::catalogue::CatalogueChange,
     ) -> Result<Self, Error> {
-        Self::open_file_with_catalogue_keeping(config, file, change, &[]).await
+        Self::open_file_with_catalogue_checked(config, file, change, &[], async |_| Ok(())).await
     }
 
-    /// Initialize and publish the first catalogue together with its host-table values.
-    pub async fn open_file_with_catalogue_keeping(
-        config: DbConfig,
-        file: crate::host::StoreFile,
-        change: crate::catalogue::CatalogueChange,
-        kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
-    ) -> Result<Self, Error> {
-        Self::open_file_with_catalogue_checked(config, file, change, kept, async |_| Ok(())).await
-    }
-
-    /// As [`Self::open_file_with_catalogue_keeping`], checking the newly
-    /// admitted catalogue before committing any part of initialization.
+    /// Initialize and publish the first catalogue together with its host-table
+    /// values, checking the admitted catalogue before committing.
     pub async fn open_file_with_catalogue_checked(
         config: DbConfig,
         file: crate::host::StoreFile,
@@ -4430,28 +4420,15 @@ impl Db {
         &self,
         change: crate::catalogue::CatalogueChange,
     ) -> Result<(), Error> {
-        self.apply_catalogue_keeping(change, &[]).await
-    }
-
-    /// [`Self::apply_catalogue`] that also keeps `kept` (host table, key,
-    /// value) in the same transaction: each is written unless its key holds
-    /// a value already, and a key that holds a different value fails the
-    /// whole change (code `Schema`), leaving the file and this database as
-    /// they were. The transaction is the one this call owns and ends before
-    /// it returns.
-    pub async fn apply_catalogue_keeping(
-        &self,
-        change: crate::catalogue::CatalogueChange,
-        kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
-    ) -> Result<(), Error> {
-        self.apply_catalogue_checked(change, kept, async |_| Ok(()))
+        self.apply_catalogue_checked(change, &[], async |_| Ok(()))
             .await
     }
 
-    /// As [`Self::apply_catalogue_keeping`], running a host's check after
-    /// admission assigns stored names and before the transaction keeps its
-    /// new host values. A failed check rolls the whole change back. The
-    /// check runs inside this call's operation, on a handle of its own.
+    /// Apply a catalogue change and run a host's check after admission
+    /// assigns stored names. Then keep the new host values in the same
+    /// transaction. A failed check or conflicting host value rolls the whole
+    /// change back. The check runs inside this call's operation, on a handle
+    /// of its own.
     pub async fn apply_catalogue_checked(
         &self,
         change: crate::catalogue::CatalogueChange,
@@ -4582,15 +4559,6 @@ impl Db {
     ) -> Result<HashSet<jazz_model::model::public_schema::SchemaHash>, Error> {
         let _operation = self.write_operation().await;
         crate::catalogue::descendants(&self.inner.without_overlay().conn, hash).await
-    }
-
-    /// The admitted table and column names used for storage by a published
-    /// schema hash, including hashes that share a runtime schema version.
-    pub async fn catalogue_stored_names(
-        &self,
-        hash: &jazz_model::model::public_schema::SchemaHash,
-    ) -> Result<crate::values::StoredNames, Error> {
-        Ok(self.catalogue_schema_and_stored_names(hash).await?.1)
     }
 
     /// A published schema and the identities of its tables and columns,
