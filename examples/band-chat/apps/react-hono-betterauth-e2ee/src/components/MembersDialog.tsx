@@ -14,6 +14,7 @@ import {
   VStack,
 } from "@astryxdesign/core";
 import { app, type E2eeMember, type JoinRequest } from "../../jazz.generated";
+import { failureOf } from "../lib/device-state";
 import { admitMember, removeMember, renewRoomKey } from "../lib/membership";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
 import { roomLink } from "../lib/url-state";
@@ -53,8 +54,6 @@ export function MembersDialog({
     { kind: "delivery"; reason?: string } | { kind: "rotation" } | null
   >(null);
 
-  const describe = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
-
   // The member row and the profile membership commit with the cleared
   // request, then keys are delivered. A delivery that reports a failure
   // leaves the person admitted but unable to read yet.
@@ -67,14 +66,16 @@ export function MembersDialog({
       memberAuthor,
       memberProfileId,
       requestIds: requests.filter((r) => r.requester === memberAuthor).map((r) => r.id),
-    }).then(retryDelivery, (cause: unknown) => setError(`Admission refused: ${describe(cause)}`));
+    }).then(retryDelivery, (cause: unknown) =>
+      setError(`Admission refused: ${failureOf(cause).message}`),
+    );
   }
 
   function retryDelivery() {
     setNotice(null);
     db.encryption.keys.deliver().then(
       (delivery) => setNotice(delivery.failed > 0 ? { kind: "delivery" } : null),
-      (cause: unknown) => setNotice({ kind: "delivery", reason: describe(cause) }),
+      (cause: unknown) => setNotice({ kind: "delivery", reason: failureOf(cause).message }),
     );
   }
 
@@ -95,7 +96,7 @@ export function MembersDialog({
         }
         renewKey();
       },
-      (cause: unknown) => setError(`Could not remove them: ${describe(cause)}`),
+      (cause: unknown) => setError(`Could not remove them: ${failureOf(cause).message}`),
     );
   }
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useAll } from "jazz-tools/react";
 import { PersistedWriteRejectedError, type Db } from "jazz-tools";
 import { app, type E2eeMember } from "../../jazz.generated";
+import { failureOf } from "./device-state";
 
 const roomSpace = (roomId: string) => ({ table: "rooms", id: roomId });
 
@@ -25,8 +26,7 @@ export function useRoomMembers(roomId: string): {
     setError(undefined);
     db.encryption.members.where(roomSpace(roomId)).then(
       (found) => isLive && setFilter(found),
-      (cause: unknown) =>
-        isLive && setError(cause instanceof Error ? cause.message : String(cause)),
+      (cause: unknown) => isLive && setError(failureOf(cause).message),
     );
     return () => {
       isLive = false;
@@ -49,7 +49,7 @@ const ATTEMPTS = 3;
  * resolves only when the authority has answered. Resolves with the number of
  * member rows removed. A conflict with a concurrent write (for example an
  * admission of the same account) is run again on fresh rows; a refusal is
- * thrown. `alsoDelete` names further rows of the departing account (a
+ * thrown. `deleteMarkers` names further rows of the departing account (a
  * leaver's read markers) to drop in the same transaction.
  */
 export async function removeMember({

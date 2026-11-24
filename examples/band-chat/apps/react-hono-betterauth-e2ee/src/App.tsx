@@ -7,7 +7,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { BandChat } from "./BandChat";
 import { EncryptionNotices } from "./components/EncryptionNotices";
 import { authClient } from "./lib/auth-client";
-import { DeviceStateProvider, useDeviceState } from "./lib/device-state";
+import { DeviceStateProvider, failureOf, useDeviceState } from "./lib/device-state";
 import { clearLeaveRecord } from "./lib/leave-record";
 
 /** Signed out: the sign-in form. Signed in: BandChat, synced through `/jazz`. */
@@ -36,11 +36,7 @@ function Dashboard({ name }: { name: string }) {
   const accountId = useJazzSession().user?.accountId;
   // An ordinary sign-out keeps this browser's keys and device record. It
   // also drops a wish to leave, so a later sign-in is not signed out again.
-  const onSignOut = () => {
-    clearLeaveRecord();
-    void signOut();
-  };
-  const chat = <BandChat defaultDisplayName={name} onSignOut={onSignOut} />;
+  const chat = <BandChat defaultDisplayName={name} onSignOut={signOut} />;
   if (!accountId) return chat;
   return (
     <DeviceStateProvider encryption={db.encryption} accountId={accountId}>
@@ -70,7 +66,7 @@ function SignOutWhenLeft({ children }: { children: React.ReactNode }) {
       if (error) throw new Error(error.message ?? error.statusText);
     } catch (cause) {
       // The button tries again; the effect does not loop on it.
-      setFailure(cause instanceof Error ? cause.message : String(cause));
+      setFailure(failureOf(cause).message);
       return;
     }
     clearLeaveRecord();
