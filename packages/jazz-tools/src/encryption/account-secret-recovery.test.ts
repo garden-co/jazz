@@ -225,6 +225,83 @@ it("replays all active reports to the first listener even after the event queue 
   }
 });
 
+it("reports queue overflow before replaying active unreadable rows", async () => {
+  vi.useFakeTimers();
+  const report = {
+    type: "unreadable",
+    table: "tasks",
+    id: "task",
+    column: "title",
+    code: "key-pending",
+    space: null,
+  };
+  const dropped = { type: "reports-dropped", count: 1 };
+  const encryption = new Encryption({
+    encryptionCall: async () =>
+      JSON.stringify({
+        active: [report],
+        queued: [JSON.stringify(dropped), JSON.stringify(report)],
+      }),
+    encryptionState: vi.fn(),
+    takeEncryptionReports: () => [],
+  });
+  try {
+    const listener = vi.fn();
+    encryption.onReport(listener);
+    await vi.advanceTimersByTimeAsync(25);
+    expect(listener.mock.calls).toEqual([[dropped], [report]]);
+  } finally {
+    encryption.stop();
+    vi.useRealTimers();
+  }
+});
+
+it("keeps polling established listeners while a new listener's snapshot fails", async () => {
+  vi.useFakeTimers();
+  const challenge = { type: "challenged" };
+  const queued: string[] = [];
+  let rejectSnapshot!: (error: Error) => void;
+  const snapshot = new Promise<string>((_, reject) => {
+    rejectSnapshot = reject;
+  });
+  const encryption = new Encryption({
+    encryptionCall: vi
+      .fn()
+      .mockResolvedValueOnce(JSON.stringify({ active: [], queued: [] }))
+      .mockReturnValue(snapshot),
+    encryptionState: vi.fn(),
+    takeEncryptionReports: () => queued.splice(0),
+  });
+  try {
+    const established = vi.fn();
+    encryption.onReport(established);
+    await vi.advanceTimersByTimeAsync(25);
+
+    const late = vi.fn();
+    encryption.onReport(late);
+    queued.push(JSON.stringify(challenge));
+    await vi.advanceTimersByTimeAsync(25);
+    expect.soft(established).toHaveBeenCalledExactlyOnceWith(challenge);
+
+    rejectSnapshot(new Error("database: snapshot unavailable"));
+    await vi.advanceTimersByTimeAsync(25);
+    const failed = {
+      type: "report-replay-failed",
+      code: "database",
+      message: "snapshot unavailable",
+    };
+    expect.soft(late).toHaveBeenCalledExactlyOnceWith(failed);
+
+    queued.push(JSON.stringify(challenge));
+    await vi.advanceTimersByTimeAsync(25);
+    expect(established.mock.calls).toEqual([[challenge], [challenge]]);
+    expect(late.mock.calls).toEqual([[failed], [challenge]]);
+  } finally {
+    encryption.stop();
+    vi.useRealTimers();
+  }
+});
+
 it.each([true, false])(
   "honours each caller's deadline during shared verification (startup first: %s)",
   async (startupFirst) => {
