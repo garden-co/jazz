@@ -4,7 +4,9 @@
 use std::collections::BTreeMap;
 
 use super::{Db, PreparedQuery, ReadSpec, Store, UnreadableRow};
-use crate::e2ee::{E2eeRefusal, EpochId, OpenOutcome, ReadSite, SpaceAddress, UnreadableCode};
+#[cfg(feature = "e2ee-client")]
+use crate::e2ee::UnreadableCode;
+use crate::e2ee::{E2eeRefusal, EpochId, OpenOutcome, ReadSite, SpaceAddress};
 use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode};
 use crate::records::Value;
@@ -15,6 +17,7 @@ pub(super) type MissingReadKeys = BTreeMap<SpaceAddress, BTreeMap<RowUuid, Epoch
 
 impl Db {
     /// Update the reasons already reported for `space` in live results.
+    #[cfg(feature = "e2ee-client")]
     pub async fn update_unreadable_reasons(
         &self,
         space: &SpaceAddress,
@@ -29,6 +32,7 @@ impl Db {
     /// Re-run every live result that reads one of `tables`, so rows the
     /// encryption hooks can open now (a key arrived) reach their
     /// subscribers as additions, and rows they no longer can leave.
+    #[cfg(feature = "e2ee-client")]
     pub async fn refresh_reads_of(&self, tables: &[&str]) -> Result<(), Error> {
         let _operation = self.write_operation().await;
         let schema = self.operation_schema();
@@ -47,6 +51,7 @@ impl Db {
     /// columns [`ReadSite::is_lens_default`] can hold. A column created
     /// with its table, or one this schema declares itself, is not among
     /// them.
+    #[cfg(feature = "e2ee-client")]
     pub fn lens_added_columns(
         &self,
         table: &str,
@@ -76,7 +81,7 @@ impl Store {
         rows: &mut Vec<CurrentRow>,
         missing: Option<&mut MissingReadKeys>,
     ) -> Result<Vec<UnreadableRow>, Error> {
-        let Some(hooks) = self.e2ee.clone() else {
+        let Some(hooks) = self.e2ee_hooks().cloned() else {
             return Ok(Vec::new());
         };
         let table = prepared.query.table.as_str();
@@ -113,7 +118,11 @@ impl Store {
         if let Some(planned) = &prepared.planned {
             planned.residual.apply(rows)?;
         }
-        if let Some(space) = prepared.e2ee_incomplete() {
+        if let Some(space) = prepared
+            .planned
+            .as_ref()
+            .and_then(|plan| plan.incomplete.as_ref())
+        {
             hooks.report_incomplete_query(table, space);
         }
         Ok(left_out(&outcome, missing))

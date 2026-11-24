@@ -39,10 +39,11 @@ use crate::query::{Predicate, Query};
 use crate::records::{Value, ValueType};
 use crate::values::CurrentRow;
 
+#[cfg(feature = "e2ee-client")]
 pub use crate::db::e2ee_ledger::{LedgerRead, Provisional, ProvisionalRead, TransactionFate};
-pub use jazz_model::model::public_api::types::{
-    E2eeDeclarations, EncryptedColumn, EncryptionEntry, EncryptionSettings, PlainType,
-};
+pub use jazz_model::model::public_api::types::{E2eeDeclarations, EncryptionEntry};
+#[cfg(feature = "e2ee-client")]
+pub use jazz_model::model::public_api::types::{EncryptedColumn, EncryptionSettings, PlainType};
 
 pub use crate::options::SpaceAddress;
 

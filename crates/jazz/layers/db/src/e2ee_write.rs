@@ -22,7 +22,7 @@ use crate::values::{CachedRow, Sql};
 
 impl Db {
     /// Counts retained staging state that a row read cannot observe.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(all(feature = "e2ee-client", any(test, feature = "testing")))]
     #[doc(hidden)]
     pub fn staged_checks_and_chunks_for_test(&self, id: OpenTransactionId) -> (usize, usize) {
         let batches = self.inner.batches.borrow();
@@ -76,9 +76,9 @@ impl Db {
                 if let Some(batch) = inner.batches.borrow_mut().get_mut(&id) {
                     batch.restore(checkpoint);
                 }
-                inner.e2ee.clone()
+                inner.e2ee_hooks().cloned()
             } else {
-                let hooks = inner.e2ee.clone();
+                let hooks = inner.e2ee_hooks().cloned();
                 if let Some(batch) = inner.batches.borrow_mut().get_mut(&id) {
                     batch.companions.stage(hooks, names.iter().cloned());
                 }
@@ -209,7 +209,7 @@ impl Store {
         op: &mut StagedOp,
         streamed: Option<StreamedSeal<'_>>,
     ) -> Result<Vec<StagedOp>, Error> {
-        let Some(hooks) = self.e2ee.clone() else {
+        let Some(hooks) = self.e2ee_hooks().cloned() else {
             return Ok(Vec::new());
         };
         let identity = op.identity();
@@ -391,7 +391,7 @@ impl Store {
     /// splice, an append, a streamed value) of an encrypted column: its
     /// cell is sealed and opened whole.
     pub(crate) fn refuse_encrypted_part(&self, table: &str, column: &str) -> Result<(), Error> {
-        let encrypted = self.e2ee.as_ref().is_some_and(|hooks| {
+        let encrypted = self.e2ee_hooks().is_some_and(|hooks| {
             hooks
                 .declarations()
                 .tables
@@ -418,8 +418,7 @@ impl Store {
         cells: &BTreeMap<String, Value>,
     ) -> Result<(), Error> {
         let Some(entry) = self
-            .e2ee
-            .as_ref()
+            .e2ee_hooks()
             .and_then(|hooks| hooks.declarations().tables.get(table))
         else {
             return Ok(());
@@ -448,8 +447,7 @@ impl Store {
         mutation: Option<StreamingMutationKind>,
     ) -> Result<(), Error> {
         let Some(entry) = self
-            .e2ee
-            .as_ref()
+            .e2ee_hooks()
             .and_then(|hooks| hooks.declarations().tables.get(table))
         else {
             return Ok(());
@@ -487,7 +485,7 @@ impl Store {
         cells: &mut BTreeMap<String, Value>,
         target: &WriteTarget,
     ) -> Result<(), Error> {
-        let Some(hooks) = &self.e2ee else {
+        let Some(hooks) = self.e2ee_hooks() else {
             return Ok(());
         };
         let table = &upload.table;
@@ -615,7 +613,7 @@ impl Store {
         row: RowUuid,
         cells: &BTreeMap<String, Value>,
     ) -> Option<Value> {
-        let hooks = self.e2ee.as_ref()?;
+        let hooks = self.e2ee_hooks()?;
         let entry = hooks.declarations().tables.get(table)?;
         if entry.is_own_space() {
             return Some(Value::Uuid(row.0));

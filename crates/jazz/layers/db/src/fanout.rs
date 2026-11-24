@@ -34,7 +34,6 @@
 //! an update or delete stamp, a recursive `INHERITS` chain) watches every
 //! table it reads whole, as do branch views.
 
-#[cfg(feature = "e2ee-client")]
 use super::e2ee_read::MissingReadKeys;
 use super::*;
 #[cfg(feature = "e2ee-client")]
@@ -462,7 +461,6 @@ struct GroupKey {
     /// A rewritten query's residual (its filter and window on opened rows,
     /// outside the SQL), as a digest: queries that differ only in it share
     /// SQL but not rows.
-    #[cfg(feature = "e2ee-client")]
     residual: Option<[u8; 32]>,
 }
 
@@ -513,7 +511,6 @@ pub(super) struct Group {
     /// hooks could not open them, as of `rows` (protocol §4.3). Replaced
     /// only when it changes, so a pointer comparison tells a change.
     pub(super) unreadable: Arc<[UnreadableRow]>,
-    #[cfg(feature = "e2ee-client")]
     missing_read_keys: MissingReadKeys,
     /// The list the members were last told ([`Group::push`]).
     told_unreadable: Arc<[UnreadableRow]>,
@@ -1001,7 +998,6 @@ impl Store {
             partial: format!("{:?}", compiled.partial),
             splices: read.splices.clone(),
             position: format!("{:?}", read.position),
-            #[cfg(feature = "e2ee-client")]
             residual: prepared
                 .planned
                 .as_ref()
@@ -1150,7 +1146,6 @@ impl Store {
             members: Vec::new(),
             told_unreadable: Arc::clone(&unreadable),
             unreadable,
-            #[cfg(feature = "e2ee-client")]
             missing_read_keys: MissingReadKeys::new(),
             watches,
             evidence,
@@ -1209,21 +1204,16 @@ impl Store {
                 .await
             }
         };
-        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
         let mut unreadable = Vec::new();
         let (rows, awaiting) = match (async {
-            #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
             let mut rows = run?;
-            #[cfg(feature = "e2ee-client")]
-            {
-                unreadable = self.open_read(
-                    prepared,
-                    &visible,
-                    false,
-                    &mut rows,
-                    Some(&mut group.missing_read_keys),
-                )?;
-            }
+            unreadable = self.open_read(
+                prepared,
+                &visible,
+                false,
+                &mut rows,
+                Some(&mut group.missing_read_keys),
+            )?;
             self.nest_relations(prepared, identity, &visible, rows)
                 .await
         })
@@ -2492,7 +2482,6 @@ impl Store {
     ) -> Option<Result<Option<SubscriptionEvent>, Error>> {
         // A rewritten query filters and windows its opened rows: only a
         // full run applies that.
-        #[cfg(feature = "e2ee-client")]
         if group.prepared.planned.is_some() {
             return None;
         }
@@ -2573,15 +2562,13 @@ impl Store {
                 Err(error) => return Some(Err(error)),
             },
         };
-        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
         let mut fresh = match self.execute(&narrowed, &group.prepared.query.table).await {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
         // The changed rows leave toward the subscription's members: opened
         // as a full run's are.
-        #[cfg(feature = "e2ee-client")]
-        {
+        if self.e2ee_hooks().is_some() {
             let mut missing_read_keys = MissingReadKeys::new();
             let left_out = match self.open_read(
                 &group.prepared,
@@ -2942,11 +2929,8 @@ impl Store {
     ) -> Result<(Vec<CurrentRow>, Vec<UnreadableRow>), Error> {
         let read = self.visible_read(&group.read, &group.tables);
         group.applied = cut_of(&read);
-        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
         let mut rows = self.run(&group.prepared, group.identity, &read).await?;
-        #[cfg(feature = "e2ee-client")]
         let mut missing_read_keys = MissingReadKeys::new();
-        #[cfg(feature = "e2ee-client")]
         let unreadable = self.open_read(
             &group.prepared,
             &read,
@@ -2954,8 +2938,6 @@ impl Store {
             &mut rows,
             Some(&mut missing_read_keys),
         )?;
-        #[cfg(not(feature = "e2ee-client"))]
-        let unreadable = Vec::new();
         let rows = self
             .nest_relations_kept(
                 &group.prepared,
@@ -2965,10 +2947,7 @@ impl Store {
                 &mut group.plans,
             )
             .await?;
-        #[cfg(feature = "e2ee-client")]
-        {
-            group.missing_read_keys = missing_read_keys;
-        }
+        group.missing_read_keys = missing_read_keys;
         Ok((rows, unreadable))
     }
 

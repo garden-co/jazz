@@ -2,6 +2,7 @@
 //! equality filters on encrypted columns become token filters before a
 //! query is validated, stored or sent.
 
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use super::{PreparedQuery, Store};
@@ -67,12 +68,14 @@ impl PreparedQuery {
     /// For a query the encryption hooks rewrote: a space whose known chain
     /// has epochs this device does not hold, so the result may miss rows
     /// of it (protocol §4.5).
+    #[cfg(feature = "e2ee-client")]
     pub fn e2ee_incomplete(&self) -> Option<&SpaceAddress> {
         self.planned.as_ref()?.incomplete.as_ref()
     }
 
     /// For a query the encryption hooks rewrote: the held epochs its
     /// tokens were computed for. A new held epoch needs a new preparation.
+    #[cfg(feature = "e2ee-client")]
     pub fn e2ee_epochs(&self) -> Option<EpochSetId> {
         self.planned.as_ref().map(|planned| planned.epochs)
     }
@@ -81,13 +84,13 @@ impl PreparedQuery {
 impl Store {
     /// Plan `query`, under `schema`, with the encryption hooks: the query
     /// to prepare, and what its execution applies after opening its rows.
-    pub(crate) fn plan_query(
+    pub(crate) fn plan_query<'a>(
         &self,
         schema: &Schema,
-        query: &Query,
-    ) -> Result<(Query, Option<Rc<Planned>>), Error> {
-        let Some(hooks) = &self.e2ee else {
-            return Ok((query.clone(), None));
+        query: &'a Query,
+    ) -> Result<(Cow<'a, Query>, Option<Rc<Planned>>), Error> {
+        let Some(hooks) = self.e2ee_hooks() else {
+            return Ok((Cow::Borrowed(query), None));
         };
         self.refuse_reads(schema, hooks.as_ref(), query, true)?;
         let plan = hooks.plan_query(query)?;
@@ -113,14 +116,14 @@ impl Store {
             QueryPlan::NeedsKey { .. } => {}
         }
         match plan {
-            QueryPlan::Plain => Ok((query.clone(), None)),
+            QueryPlan::Plain => Ok((Cow::Borrowed(query), None)),
             QueryPlan::Rewritten {
                 physical,
                 residual,
                 epochs,
                 incomplete,
             } => Ok((
-                *physical,
+                Cow::Owned(*physical),
                 Some(Rc::new(Planned {
                     residual_key: residual_key(&self.e2ee_salt, &residual),
                     residual,
