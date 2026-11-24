@@ -22,12 +22,13 @@
 use std::collections::BTreeMap;
 
 use jazz::db::{Db, ErrorCode, ReadOpts, ReadTier, Reason};
-use jazz::e2ee::{E2eeRefusal, SpaceAddress};
+use jazz::e2ee::{E2eeRefusal, SpaceAddress as DbSpaceAddress};
 use jazz::ids::RowUuid;
 use jazz::query::{Operand, Predicate, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::content::{KeyMark, WriteChoice};
+use jazz_e2ee::protocol::records::space::SpaceAddress;
 use jazz_e2ee::protocol::space::members::DELIVERY_BATCH;
 
 use super::{ATTEMPTS, protocol_address};
@@ -73,14 +74,11 @@ impl Drop for Collecting<'_> {
 impl E2eeClient {
     /// Whether this device holds a key of `space` that is `refused`.
     pub(crate) fn holds_refused_key(&self, space: &SpaceAddress) -> bool {
-        let Ok(address) = protocol_address(space) else {
-            return false;
-        };
         self.shared
             .keys
             .borrow()
             .held
-            .roots_of(&address)
+            .roots_of(space)
             .iter()
             .any(|held| held.held().any(|(_, mark)| *mark == KeyMark::Refused))
     }
@@ -98,18 +96,29 @@ impl E2eeClient {
     /// decide) the natural moments stop repairing the space for the rest of the
     /// run, and this call, which always attempts, returns the refusal. How
     /// many rows it rewrote.
-    pub async fn repair_space(&self, db: &Db, space: &SpaceAddress) -> Result<usize, ClientError> {
+    pub async fn repair_space(
+        &self,
+        db: &Db,
+        space: &DbSpaceAddress,
+    ) -> Result<usize, ClientError> {
+        self.ensure_open()?;
+        let Ok(space) = protocol_address(space) else {
+            return Ok(0);
+        };
+        self.repair(db, &space).await
+    }
+
+    async fn repair(&self, db: &Db, space: &SpaceAddress) -> Result<usize, ClientError> {
         self.ensure_open()?;
         if !self.holds_refused_key(space) {
             return Ok(0);
         }
-        let address = protocol_address(space)?;
         let mut written = 0;
         for _ in 0..ROUNDS {
             // Without a real key the rewrite would be refused: wait.
             let ready = {
                 let keys = self.shared.keys.borrow();
-                matches!(keys.held.write_key(&address, false), WriteChoice::Key(_))
+                matches!(keys.held.write_key(space, false), WriteChoice::Key(_))
             };
             if !ready || !self.shared.keys.borrow().online {
                 return Ok(written);
@@ -117,7 +126,7 @@ impl E2eeClient {
             // A rewrite seals like any write: a space whose mark this runtime
             // has not evaluated is read first, and rotated if a removed device
             // may hold its version (protocol §3.5).
-            let unevaluated = self.shared.keys.borrow().needs_evaluation(&address);
+            let unevaluated = self.shared.keys.borrow().needs_evaluation(space);
             if unevaluated {
                 self.make_ready(db, space, None, None).await?;
             }
@@ -152,7 +161,7 @@ impl E2eeClient {
                                 .keys
                                 .borrow_mut()
                                 .repair_refused
-                                .insert(address.clone());
+                                .insert(space.clone());
                             return Err(ClientError::Database(error));
                         }
                         Err(error) => return Err(error),
@@ -173,11 +182,10 @@ impl E2eeClient {
         db: &Db,
         space: &SpaceAddress,
     ) -> Result<usize, ClientError> {
-        let address = protocol_address(space)?;
-        if self.shared.keys.borrow().repair_refused.contains(&address) {
+        if self.shared.keys.borrow().repair_refused.contains(space) {
             return Ok(0);
         }
-        self.repair_space(db, space).await
+        self.repair(db, space).await
     }
 
     /// The query for the rows of `table` that belong to `space`.
@@ -187,11 +195,7 @@ impl E2eeClient {
             .plans
             .get(table)
             .ok_or_else(|| ClientError::Unsupported(format!("`{table}` is not encrypted")))?;
-        let column = if plan.self_space() {
-            "id"
-        } else {
-            plan.entry.space.as_str()
-        };
+        let column = plan.entry.space.as_str();
         let id = uuid::Uuid::parse_str(&space.identifier).map_err(|_| {
             ClientError::Unsupported("a space identifier that is not a UUID".to_owned())
         })?;

@@ -15,22 +15,23 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{Db, Error, ErrorCode};
-use jazz::e2ee::{SpaceAddress, Unreadable, UnreadableCode};
+use jazz::e2ee::{SpaceAddress as DbSpaceAddress, Unreadable, UnreadableCode};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::account::{AccountFloor, PublicAccountLedger};
 use jazz_e2ee::protocol::content::{HeldSpace, KeyMark, MissingKey};
 use jazz_e2ee::protocol::error::UnsupportedCapability;
-use jazz_e2ee::protocol::records::space::{SpaceAddress as ProtocolAddress, SpaceDelivery};
+use jazz_e2ee::protocol::records::space::{SpaceAddress, SpaceDelivery};
 use jazz_e2ee::protocol::space::members::{CurrentVersion, ReplayedSpaceChain};
 use jazz_e2ee::protocol::space::{AccountDirectory, SpaceLedger, acquire};
 use jazz_e2ee::protocol::{Position, ProtocolError};
 
-use crate::account::rows::{self, uuid_cell};
+use crate::account::has_removed_devices;
+use crate::account::rows::{self, account_id_cell, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
 use crate::hooks::code;
-use crate::state::{Missing, Report, SettleBackoff, Shared};
+use crate::state::{Missing, Report, SettleBackoff, Shared, db_address};
 
 pub use delivery::MEMBER_LIMIT;
 pub use watch::{SpaceWatch, account_watch_queries, watch_queries};
@@ -102,12 +103,12 @@ pub(super) enum SpaceReadPurpose {
     Rotate,
 }
 
-pub(crate) fn protocol_address(space: &SpaceAddress) -> Result<ProtocolAddress, ClientError> {
-    Ok(ProtocolAddress::new(&space.scope_id, &space.identifier)?)
+pub(crate) fn protocol_address(space: &DbSpaceAddress) -> Result<SpaceAddress, ClientError> {
+    Ok(SpaceAddress::new(&space.scope_id, &space.identifier)?)
 }
 
 #[doc(hidden)]
-pub fn successor_probe(address: &ProtocolAddress, epoch: &str) -> Result<Query, ClientError> {
+pub fn successor_probe(address: &SpaceAddress, epoch: &str) -> Result<Query, ClientError> {
     let id = |s| uuid_cell(s).ok_or(ProtocolError::InconsistentEvidence);
     Ok(Query::from(rows::SPACE_SUCCESSORS)
         .filter(eq(col("scopeId"), lit(id(&address.scope_id)?)))
@@ -120,7 +121,7 @@ pub fn successor_probe(address: &ProtocolAddress, epoch: &str) -> Result<Query, 
 /// acquisition by one account and decisions about all recipients.
 #[doc(hidden)]
 pub fn epoch_deliveries_query(
-    address: &ProtocolAddress,
+    address: &SpaceAddress,
     epoch: &str,
     account: Option<&str>,
 ) -> Result<Query, ClientError> {
@@ -153,7 +154,7 @@ impl E2eeClient {
         &self,
         db: &Db,
         tx: OpenTransactionId,
-        address: &ProtocolAddress,
+        address: &SpaceAddress,
     ) -> Result<SpaceRead, ClientError> {
         self.read_space_of(db, tx, address, SpaceReadPurpose::Acquire)
             .await
@@ -165,7 +166,7 @@ impl E2eeClient {
         &self,
         db: &Db,
         tx: OpenTransactionId,
-        address: &ProtocolAddress,
+        address: &SpaceAddress,
         purpose: SpaceReadPurpose,
     ) -> Result<SpaceRead, ClientError> {
         let skipped = Cell::new(0);
@@ -176,8 +177,7 @@ impl E2eeClient {
         let identifier = uuid_cell(&address.identifier).ok_or(ProtocolError::InvalidRecord(
             "the space's identifier is not a UUID",
         ))?;
-        let account =
-            uuid_cell(&own).ok_or(ProtocolError::InvalidRecord("the account ID is not a UUID"))?;
+        let account = account_id_cell(&own)?;
         let of_space = |table: &str| {
             Query::from(table)
                 .filter(eq(col("scopeId"), lit(scope.clone())))
@@ -348,7 +348,7 @@ impl E2eeClient {
         &self,
         db: &Db,
         tx: OpenTransactionId,
-        address: &ProtocolAddress,
+        address: &SpaceAddress,
         version: &CurrentVersion,
     ) -> Result<bool, ClientError> {
         let skipped = Cell::new(0);
@@ -398,9 +398,8 @@ impl E2eeClient {
         &self,
         db: &Db,
         space: &SpaceAddress,
-        address: &ProtocolAddress,
     ) -> Result<bool, ClientError> {
-        if self.shared.keys.borrow().rotation_refused.contains(address) {
+        if self.shared.keys.borrow().rotation_refused.contains(space) {
             return Ok(false);
         }
         crate::account::serializable(db, ATTEMPTS, async |tx| {
@@ -408,11 +407,11 @@ impl E2eeClient {
                 Query::from(table)
                     .filter(eq(
                         col("scopeId"),
-                        lit(uuid_cell(&address.scope_id).expect("validated address")),
+                        lit(uuid_cell(&space.scope_id).expect("validated address")),
                     ))
                     .filter(eq(
                         col("identifier"),
-                        lit(uuid_cell(&address.identifier).expect("validated address")),
+                        lit(uuid_cell(&space.identifier).expect("validated address")),
                     ))
             };
             let cached = self
@@ -423,19 +422,19 @@ impl E2eeClient {
                 .get(space)
                 .and_then(|deps| deps.version.clone());
             let version = match cached {
-                Some(version) if self.still_current(db, tx, address, &version).await? => version,
+                Some(version) if self.still_current(db, tx, space, &version).await? => version,
                 _ => {
                     #[cfg(any(test, feature = "testing"))]
                     {
                         self.shared.member_watch.borrow_mut().chain_reads += 1;
                     }
                     let read = self
-                        .read_space_of(db, tx, address, SpaceReadPurpose::WriteCheck)
+                        .read_space_of(db, tx, space, SpaceReadPurpose::WriteCheck)
                         .await?;
                     if read.skipped != 0 {
                         return Err(ProtocolError::InconsistentEvidence.into());
                     }
-                    let acquired = self.take_space(db, space, address, read).await?;
+                    let acquired = self.take_space(db, space, read).await?;
                     let Some(chain) = acquired.chain else {
                         return Ok(false);
                     };
@@ -463,7 +462,7 @@ impl E2eeClient {
                 }
                 return Ok(false);
             }
-            let query = epoch_deliveries_query(address, version.epoch(), None)?;
+            let query = epoch_deliveries_query(space, version.epoch(), None)?;
             let (deliveries, _) = self
                 .read_rows::<SpaceDelivery>(db, tx, &skipped, query)
                 .await?;
@@ -517,7 +516,7 @@ impl E2eeClient {
             }
             let floors = self.check_others(&accounts, through, &directory).await?;
             let marked = version
-                .rotation_mark(address, through, &members, &deliveries, &directory)?
+                .rotation_mark(space, through, &members, &deliveries, &directory)?
                 .needs_rotation();
             for (id, floor) in floors {
                 self.advance_floor(&id, &floor).await?;
@@ -530,7 +529,7 @@ impl E2eeClient {
             let removals = holders
                 .iter()
                 .any(|account| match directory.current(account) {
-                    Ok(Some(state)) => !state.removed.is_empty() || state.generation > 0,
+                    Ok(Some(state)) => has_removed_devices(&state),
                     Ok(None) => false,
                     Err(_) => true,
                 });
@@ -541,14 +540,10 @@ impl E2eeClient {
                 deps.members = members;
                 deps.holders = holders;
             }
-            let mut keys = self.shared.keys.borrow_mut();
-            keys.rotation_evaluated.insert(address.clone());
-            keys.space_removals.insert(address.clone(), removals);
-            if marked {
-                keys.rotation_pending.insert(address.clone());
-            } else {
-                keys.rotation_pending.remove(address);
-            }
+            self.shared
+                .keys
+                .borrow_mut()
+                .mark_rotation(space, marked, Some(removals));
             Ok(true)
         })
         .await
@@ -688,9 +683,13 @@ impl E2eeClient {
     pub async fn acquire(
         &self,
         db: &Db,
-        space: &SpaceAddress,
+        space: &DbSpaceAddress,
     ) -> Result<SpaceKeyState, ClientError> {
-        Ok(self.acquire_full(db, space).await?.state)
+        self.ensure_open()?;
+        Ok(self
+            .acquire_full(db, &protocol_address(space)?)
+            .await?
+            .state)
     }
 
     pub(crate) async fn acquire_full(
@@ -699,10 +698,9 @@ impl E2eeClient {
         space: &SpaceAddress,
     ) -> Result<Acquired, ClientError> {
         self.ensure_open()?;
-        let address = protocol_address(space)?;
         // A creation of this device that is neither accepted nor refused
         // yet has rows no ledger read can show: its own key serves.
-        if self.settle_creations(db, &address, None).await? {
+        if self.settle_creations(db, space, None).await? {
             return Ok(Acquired {
                 state: SpaceKeyState::Held,
                 chain: None,
@@ -713,12 +711,12 @@ impl E2eeClient {
             return Err(offline());
         }
         let read = crate::account::serializable(db, ATTEMPTS, async |tx| {
-            self.read_space(db, tx, &address)
+            self.read_space(db, tx, space)
                 .await
                 .map_err(|error| self.forget_account_on(error))
         })
         .await?;
-        self.take_space(db, space, &address, read).await
+        self.take_space(db, space, read).await
     }
 
     /// Takes what `read` shows of a space: the chain this device now knows,
@@ -727,7 +725,6 @@ impl E2eeClient {
         &self,
         db: &Db,
         space: &SpaceAddress,
-        address: &ProtocolAddress,
         mut read: SpaceRead,
     ) -> Result<Acquired, ClientError> {
         let Replayed {
@@ -747,7 +744,7 @@ impl E2eeClient {
                 self.shared.event(
                     format!("delivery:{}", bad.delivery_id),
                     Report::InvalidDelivery {
-                        space: space.clone(),
+                        space: db_address(space),
                         sender: bad.sender_account_id.clone(),
                         recipient: bad.recipient_account_id.clone(),
                         key_epoch_id: bad.key_epoch_id.clone(),
@@ -758,7 +755,7 @@ impl E2eeClient {
                 self.shared.event(
                     format!("history:{}", broken.successor_id),
                     Report::BrokenHistory {
-                        space: space.clone(),
+                        space: db_address(space),
                         key_epoch_id: broken.key_epoch_id.clone(),
                         author: broken.author_account_id.clone(),
                     },
@@ -767,14 +764,14 @@ impl E2eeClient {
         }
         let incomplete = read.skipped > 0;
         let Some(chain) = chain else {
-            self.settle_creations(db, address, None).await?;
+            self.settle_creations(db, space, None).await?;
             let state = if incomplete {
                 SpaceKeyState::Incomplete
             } else {
                 SpaceKeyState::NoRoot
             };
-            if self.record_space_read(space, address, state, member) {
-                self.update_unreadable_reasons(db, space, address).await;
+            if self.record_space_read(space, state, member) {
+                self.update_unreadable_reasons(db, space).await;
             }
             return Ok(Acquired {
                 state,
@@ -785,7 +782,7 @@ impl E2eeClient {
         let known = |client: &Self| {
             let keys = client.shared.keys.borrow();
             keys.held
-                .roots_of(address)
+                .roots_of(space)
                 .iter()
                 .map(|space| space.held().count())
                 .sum::<usize>()
@@ -795,7 +792,7 @@ impl E2eeClient {
         if let Some(held) = held {
             self.keep(held).await?;
         }
-        self.settle_creations(db, address, Some(&chain.root.row.id))
+        self.settle_creations(db, space, Some(&chain.root.row.id))
             .await?;
         let state = match chain.current() {
             Err(ProtocolError::Unsupported(capability)) => SpaceKeyState::Unresolved(capability),
@@ -806,7 +803,7 @@ impl E2eeClient {
                     .keys
                     .borrow()
                     .held
-                    .holds(address, &current.epoch_id)
+                    .holds(space, &current.epoch_id)
                 {
                     SpaceKeyState::Held
                 } else if member {
@@ -822,14 +819,14 @@ impl E2eeClient {
             }
             other => other,
         };
-        let reason_changed = self.record_space_read(space, address, state, member);
+        let reason_changed = self.record_space_read(space, state, member);
         if known(self) != before {
             self.shared.forget_missing_keys(space);
             let tables = self.tables_of(space);
             let tables: Vec<&str> = tables.iter().map(String::as_str).collect();
             db.refresh_reads_of(&tables).await?;
         } else if reason_changed {
-            self.update_unreadable_reasons(db, space, address).await;
+            self.update_unreadable_reasons(db, space).await;
         }
         Ok(Acquired {
             state,
@@ -844,20 +841,14 @@ impl E2eeClient {
     /// longer `space-pending`, one whose key arrived is neither
     /// `key-pending` nor `key-unavailable`, a member is no longer
     /// `key-unavailable`.
-    fn record_space_read(
-        &self,
-        space: &SpaceAddress,
-        address: &ProtocolAddress,
-        state: SpaceKeyState,
-        member: bool,
-    ) -> bool {
+    fn record_space_read(&self, space: &SpaceAddress, state: SpaceKeyState, member: bool) -> bool {
         let (incomplete, reason_changed) = {
             let mut keys = self.shared.keys.borrow_mut();
             let previous = keys.missing_key_code(space);
             keys.space_reads.insert(space.clone(), (state, member));
             let incomplete = keys
                 .held
-                .incomplete(address)
+                .incomplete(space)
                 .then(|| keys.incomplete_query_code(space));
             (incomplete, previous != keys.missing_key_code(space))
         };
@@ -880,17 +871,12 @@ impl E2eeClient {
         reason_changed
     }
 
-    async fn update_unreadable_reasons(
-        &self,
-        db: &Db,
-        space: &SpaceAddress,
-        address: &ProtocolAddress,
-    ) {
-        db.update_unreadable_reasons(space, |epoch| {
+    async fn update_unreadable_reasons(&self, db: &Db, space: &SpaceAddress) {
+        db.update_unreadable_reasons(&db_address(space), |epoch| {
             let keys = self.shared.keys.borrow();
             if keys
                 .held
-                .known(address)
+                .known(space)
                 .is_some_and(|known| known.is_absent(epoch))
             {
                 UnreadableCode::InvalidCiphertext
@@ -997,7 +983,6 @@ impl E2eeClient {
         entries: &[Missing],
     ) -> Result<(Vec<Report>, bool), ClientError> {
         let acquired = self.acquire_full(db, space).await?;
-        let address = protocol_address(space)?;
         let mut reports = Vec::new();
         let mut held = false;
         if acquired.state == SpaceKeyState::Incomplete {
@@ -1013,7 +998,7 @@ impl E2eeClient {
                     id: None,
                     column: None,
                     code: UnreadableCode::UnsupportedFormat,
-                    space: Some(space.clone()),
+                    space: Some(db_address(space)),
                 }));
             }
             return Ok((reports, held));
@@ -1021,7 +1006,7 @@ impl E2eeClient {
         let mut invalid_epoch = false;
         for entry in entries {
             let settled = self.shared.keys.borrow_mut().held.settle_missing(
-                &address,
+                space,
                 &entry.epoch_id,
                 acquired.chain.as_deref(),
                 acquired.member,
@@ -1032,7 +1017,7 @@ impl E2eeClient {
                     id: row.then_some(entry.id),
                     column: row.then(|| entry.column.clone()),
                     code,
-                    space: Some(space.clone()),
+                    space: Some(db_address(space)),
                 })
             };
             match settled {
@@ -1052,7 +1037,7 @@ impl E2eeClient {
             }
         }
         if invalid_epoch {
-            self.update_unreadable_reasons(db, space, &address).await;
+            self.update_unreadable_reasons(db, space).await;
         }
         Ok((reports, held))
     }
@@ -1076,7 +1061,7 @@ impl E2eeClient {
     pub async fn prepare_host_write(
         &self,
         db: &Db,
-        space: &SpaceAddress,
+        space: &DbSpaceAddress,
         deadline: Option<web_time::Instant>,
     ) -> Result<bool, ClientError> {
         self.ensure_open()?;
@@ -1087,10 +1072,14 @@ impl E2eeClient {
         let call = WritePreparation::enter(&self.shared);
         self.reconcile_once(db).await?;
         self.begin_attempt(db).await?;
-        if !self.make_ready(db, space, Some(call.id), deadline).await? || expired() {
+        let address = protocol_address(space)?;
+        if !self
+            .make_ready(db, &address, Some(call.id), deadline)
+            .await?
+            || expired()
+        {
             return Ok(false);
         }
-        let address = protocol_address(space)?;
         let mut keys = self.shared.keys.borrow_mut();
         if keys
             .rotation_tried
@@ -1105,7 +1094,7 @@ impl E2eeClient {
     /// attention. The normal seal checks the key again and consumes the mark.
     pub fn retry_with_current_key(
         &self,
-        space: &SpaceAddress,
+        space: &DbSpaceAddress,
         failure: &str,
     ) -> Result<bool, ClientError> {
         self.ensure_open()?;
@@ -1191,7 +1180,6 @@ impl E2eeClient {
         call: Option<u64>,
         deadline: Option<web_time::Instant>,
     ) -> Result<bool, ClientError> {
-        let address = protocol_address(space)?;
         let online = self.shared.keys.borrow().online;
         // A space whose mark this runtime has not evaluated, where a removed
         // device may hold its version (see `KeyState::needs_evaluation`), is
@@ -1200,35 +1188,35 @@ impl E2eeClient {
         // account, or this device before the runtime opened) is known only
         // once a pass has read it. A pass that fails marks the space (fail
         // closed), as after a removal.
-        self.shared.note_write(&address);
+        self.shared.note_write(space);
         self.shared.notice_member_changes();
-        let unevaluated = |keys: &crate::state::KeyState| keys.needs_evaluation(&address);
+        let unevaluated = |keys: &crate::state::KeyState| keys.needs_evaluation(space);
         let mut ready = false;
         if online && unevaluated(&self.shared.keys.borrow()) {
             self.shared
                 .keys
                 .borrow_mut()
                 .rotation_tried
-                .insert((call, address.clone()));
+                .insert((call, space.clone()));
             let unverified = self.account.borrow().is_none();
             let checked = async {
                 if unverified {
                     self.ensure_account(db).await?;
                 }
                 if unevaluated(&self.shared.keys.borrow()) {
-                    ready = self.check_write_version(db, space, &address).await?;
+                    ready = self.check_write_version(db, space).await?;
                 }
                 Ok::<_, ClientError>(())
             }
             .await;
             if let Err(error) = checked {
                 self.shared.flush(vec![Report::RotationCheckFailed {
-                    space: space.clone(),
+                    space: db_address(space),
                     reason: error.to_string(),
                 }]);
                 let mut keys = self.shared.keys.borrow_mut();
-                if !keys.rotation_refused.contains(&address) {
-                    keys.rotation_pending.insert(address.clone());
+                if !keys.rotation_refused.contains(space) {
+                    keys.rotation_pending.insert(space.clone());
                 }
             }
         }
@@ -1242,9 +1230,9 @@ impl E2eeClient {
         let removal = !self.shared.member_removals.borrow().is_empty();
         let pending = {
             let mut keys = self.shared.keys.borrow_mut();
-            let pending = keys.rotation_pending.contains(&address);
+            let pending = keys.rotation_pending.contains(space);
             if pending || removal {
-                keys.rotation_tried.insert((call, address.clone()));
+                keys.rotation_tried.insert((call, space.clone()));
             }
             pending
         };
@@ -1259,7 +1247,7 @@ impl E2eeClient {
                 && let Err(error) = self.rotate_before(db, space, deadline).await
             {
                 self.shared.flush(vec![Report::RotationFailed {
-                    space: space.clone(),
+                    space: db_address(space),
                     reason: error.to_string(),
                 }]);
             }
@@ -1269,7 +1257,7 @@ impl E2eeClient {
             // below: told to try again now, it would fail the same way.
             let holds_current = {
                 let keys = self.shared.keys.borrow();
-                crate::hooks::write_key(&keys, &self.shared.creations.borrow().dropped, &address)
+                crate::hooks::write_key(&keys, &self.shared.creations.borrow().dropped, space)
                     .is_ok()
             };
             if holds_current {
@@ -1290,21 +1278,15 @@ impl E2eeClient {
                 _ => return Ok(false),
             }
         }
-        if self
-            .shared
-            .keys
-            .borrow()
-            .creation_refused
-            .contains(&address)
-        {
+        if self.shared.keys.borrow().creation_refused.contains(space) {
             return Ok(false);
         }
         // A read that shows no root while this device holds a key of the
         // space is a read that hides it: no second root.
-        if self.holds_live_key(&address) {
+        if self.holds_live_key(space) {
             return Ok(false);
         }
-        self.prepare_creation(&address).await?;
+        self.prepare_creation(space).await?;
         Ok(true)
     }
 

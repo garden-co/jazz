@@ -7,13 +7,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{Db, ErrorCode};
-use jazz::e2ee::{EncryptionEntry, SpaceAddress, Unreadable, UnreadableCode};
+use jazz::e2ee::{EncryptionEntry, SpaceAddress as DbSpaceAddress, Unreadable, UnreadableCode};
 use jazz::ids::RowUuid;
 use jazz_e2ee::RandomSource;
 use jazz_e2ee::agility::MechanismConfig;
 use jazz_e2ee::protocol::account::build::LocalDevice;
 use jazz_e2ee::protocol::content::HeldKeys;
 use jazz_e2ee::protocol::domain::{AppDomain, SharedDomain};
+use jazz_e2ee::protocol::records::space::SpaceAddress;
 use jazz_e2ee::protocol::records::space::SpaceRoot;
 use jazz_e2ee::registry::Registry;
 
@@ -76,7 +77,7 @@ pub enum Report {
     /// its cell names: the runtime acquires it (protocol §4.2).
     MissingKey {
         table: String,
-        space: SpaceAddress,
+        space: DbSpaceAddress,
         epoch_id: String,
     },
     /// A record of the private store that failed its load checks and was
@@ -98,7 +99,7 @@ pub enum Report {
     /// authenticate (protocol §3.4): nothing is written; the member stays
     /// `key-pending` until an updater rotates.
     InvalidDelivery {
-        space: SpaceAddress,
+        space: DbSpaceAddress,
         sender: String,
         recipient: String,
         key_epoch_id: String,
@@ -107,7 +108,7 @@ pub enum Report {
     /// history fails further back (protocol §3.4): the fault is the named
     /// successor's author's; the remedy is a recovery rotation.
     BrokenHistory {
-        space: SpaceAddress,
+        space: DbSpaceAddress,
         key_epoch_id: String,
         author: String,
     },
@@ -115,19 +116,28 @@ pub enum Report {
     /// was reset (protocol §2.11), once per space, account and generation.
     AccountReset {
         account: String,
-        space: SpaceAddress,
+        space: DbSpaceAddress,
         generation: u64,
     },
     /// A space with more member accounts than the design limit
     /// (protocol §3.8), once per space.
-    SpaceOverMemberLimit { space: SpaceAddress, members: usize },
+    SpaceOverMemberLimit {
+        space: DbSpaceAddress,
+        members: usize,
+    },
     /// The runtime could not verify whether the space needs rotation before a write.
-    RotationCheckFailed { space: SpaceAddress, reason: String },
+    RotationCheckFailed {
+        space: DbSpaceAddress,
+        reason: String,
+    },
     /// A rotation the runtime tried before a write to `space`, which failed
     /// or was refused, with its reason. The write is sealed under the
     /// space's current version all the same (protocol §3.5), which a
     /// removed member or device may hold. Told once per failed attempt.
-    RotationFailed { space: SpaceAddress, reason: String },
+    RotationFailed {
+        space: DbSpaceAddress,
+        reason: String,
+    },
     /// A report ([`Report::Unreadable`], per space or per row) that no
     /// longer holds: the key was obtained, or the space now has a valid
     /// root, or the account is now a member (protocol §4.3). `id` and
@@ -136,7 +146,7 @@ pub enum Report {
         table: String,
         id: Option<RowUuid>,
         column: Option<String>,
-        space: SpaceAddress,
+        space: DbSpaceAddress,
         code: UnreadableCode,
     },
 }
@@ -175,7 +185,7 @@ impl ReportKey {
             id: unreadable.id,
             column: unreadable.column.clone(),
             code: unreadable.code,
-            space: unreadable.space.clone(),
+            space: unreadable.space.as_ref().map(unchecked_address),
         }
     }
 }
@@ -288,7 +298,7 @@ impl Published {
             .into_values()
             .filter_map(|key| {
                 Some(Report::Withdrawn {
-                    space: key.space?,
+                    space: db_address(&key.space?),
                     table: key.table,
                     id: key.id,
                     column: key.column,
@@ -325,7 +335,7 @@ impl Published {
                 table: key.table,
                 id: key.id,
                 column: key.column,
-                space: space.clone(),
+                space: db_address(space),
                 code: key.code,
             });
         }
@@ -467,10 +477,10 @@ pub(crate) struct KeyState {
     pub(crate) online: bool,
     /// Spaces whose creation by this device was refused while the client
     /// runs (protocol §3.2).
-    pub(crate) creation_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    pub(crate) creation_refused: BTreeSet<SpaceAddress>,
     /// Spaces the last pass found to need rotation (protocol §3.5): the
     /// next encrypted write rotates them first.
-    pub(crate) rotation_pending: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    pub(crate) rotation_pending: BTreeSet<SpaceAddress>,
     /// Spaces a pass of this runtime has evaluated the mark of since it
     /// opened and since this account's current epoch last changed. The mark
     /// lives only in memory: a removal another runtime made, on this device
@@ -478,7 +488,7 @@ pub(crate) struct KeyState {
     /// through a pass. So the first online write to a space under a key
     /// other than a creation of this run runs one first, in an account that
     /// ever removed a device (protocol §3.5).
-    pub(crate) rotation_evaluated: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    pub(crate) rotation_evaluated: BTreeSet<SpaceAddress>,
     /// The account epoch `rotation_evaluated` was evaluated against: a
     /// verification that finds another one empties it.
     pub(crate) evaluated_epoch: Option<String>,
@@ -486,25 +496,39 @@ pub(crate) struct KeyState {
     /// was reset, as the last pass over it read them; `true` again when a
     /// member account changed since. A space whose members never did skips
     /// the read before a write: no removed device can hold its versions.
-    pub(crate) space_removals: BTreeMap<jazz_e2ee::protocol::records::space::SpaceAddress, bool>,
+    pub(crate) space_removals: BTreeMap<SpaceAddress, bool>,
     /// Spaces whose repair the authority refused (this device may not update
     /// the rows it wrote): the natural moments stop repairing them while the
     /// client runs; an explicit call always attempts (protocol §3.2).
-    pub(crate) repair_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    pub(crate) repair_refused: BTreeSet<SpaceAddress>,
     /// Rotation attempts made during a host preparation (`Some` of its
     /// number), and grants that its next retry consumes when sealing (`None`).
-    pub(crate) rotation_tried: BTreeSet<(
-        Option<u64>,
-        jazz_e2ee::protocol::records::space::SpaceAddress,
-    )>,
+    pub(crate) rotation_tried: BTreeSet<(Option<u64>, SpaceAddress)>,
     /// Spaces whose rotation by this device was refused while the client
     /// runs: no automatic rotation, and no evaluation of the mark.
-    pub(crate) rotation_refused: BTreeSet<jazz_e2ee::protocol::records::space::SpaceAddress>,
+    pub(crate) rotation_refused: BTreeSet<SpaceAddress>,
     /// Set once the store is wiped: nothing more is sealed or opened.
     pub(crate) closed: bool,
 }
 
 impl KeyState {
+    pub(crate) fn mark_rotation(
+        &mut self,
+        address: &SpaceAddress,
+        marked: bool,
+        removals: Option<bool>,
+    ) {
+        if let Some(removals) = removals {
+            self.rotation_evaluated.insert(address.clone());
+            self.space_removals.insert(address.clone(), removals);
+        }
+        if marked {
+            self.rotation_pending.insert(address.clone());
+        } else {
+            self.rotation_pending.remove(address);
+        }
+    }
+
     pub(crate) fn missing_key_code(&self, space: &SpaceAddress) -> UnreadableCode {
         match self.space_reads.get(space) {
             Some((SpaceKeyState::Incomplete, _)) => UnreadableCode::UnsupportedFormat,
@@ -523,10 +547,7 @@ impl KeyState {
 
     /// Missing evidence about this space requires a read, including on a
     /// device that first encountered another member during this run.
-    pub(crate) fn needs_evaluation(
-        &self,
-        address: &jazz_e2ee::protocol::records::space::SpaceAddress,
-    ) -> bool {
+    pub(crate) fn needs_evaluation(&self, address: &SpaceAddress) -> bool {
         if self.rotation_refused.contains(address) || self.rotation_evaluated.contains(address) {
             return false;
         }
@@ -638,10 +659,8 @@ impl MemberWatch {
         self.covered.clear();
         for (space, deps) in &mut self.spaces {
             deps.version = None;
-            if let Ok(address) = crate::spaces::protocol_address(space) {
-                keys.rotation_evaluated.remove(&address);
-                keys.space_removals.remove(&address);
-            }
+            keys.rotation_evaluated.remove(space);
+            keys.space_removals.remove(space);
             self.changed.insert(space.clone());
         }
     }
@@ -652,7 +671,7 @@ impl MemberWatch {
 pub(crate) struct Creations {
     /// Roots prepared, with their keys held `unpublished`, that the next
     /// write to their space stages.
-    pub(crate) prepared: BTreeMap<jazz_e2ee::protocol::records::space::SpaceAddress, SpaceRoot>,
+    pub(crate) prepared: BTreeMap<SpaceAddress, SpaceRoot>,
     /// Roots staged in this run whose transaction may not have committed
     /// yet: a root absent from the store is not yet known to be lost.
     pub(crate) staged: BTreeSet<String>,
@@ -698,11 +717,9 @@ pub(crate) struct Shared {
     /// (`NeedsKey`) until the queue is served. A deleted row the local store
     /// does not show after [`MEMBER_CHANGE_WAIT`] is dropped.
     pub(crate) member_removals: RefCell<VecDeque<(RowUuid, web_time::Instant)>>,
-    /// The settle back-off's clock when a test holds it still (`None`: the
+    /// The runtime clock when a test holds it still (`None`: the
     /// real one), so a wait is stepped, not slept.
     pub(crate) held_clock: std::cell::Cell<Option<web_time::Instant>>,
-    /// How long a staged member row is waited for (tests shorten it).
-    pub(crate) member_change_wait: std::cell::Cell<std::time::Duration>,
     /// The collectors of the repair reads in flight, each registered for the
     /// duration of its read (protocol §3.2).
     pub(crate) collectors: RefCell<BTreeMap<uuid::Uuid, Collector>>,
@@ -724,12 +741,11 @@ impl Shared {
         recent.keys().cloned().collect()
     }
 
-    pub(crate) fn note_write(&self, address: &jazz_e2ee::protocol::records::space::SpaceAddress) {
-        let space = db_address(address);
+    pub(crate) fn note_write(&self, address: &SpaceAddress) {
         let now = self.now();
-        let last = self.written.borrow_mut().insert(space.clone(), now);
+        let last = self.written.borrow_mut().insert(address.clone(), now);
         let watch = self.member_watch.borrow();
-        let subscribed = watch.covered.contains(&space) && watch.subscribed.contains(&space);
+        let subscribed = watch.covered.contains(address) && watch.subscribed.contains(address);
         drop(watch);
         if !subscribed
             && last
@@ -738,7 +754,7 @@ impl Shared {
             self.member_watch
                 .borrow_mut()
                 .spaces
-                .entry(space)
+                .entry(address.clone())
                 .or_default()
                 .version = None;
             let mut keys = self.keys.borrow_mut();
@@ -751,10 +767,7 @@ impl Shared {
         let mut watch = self.member_watch.borrow_mut();
         let mut changed = BTreeSet::new();
         watch.streams.retain(|&table, sub| {
-            let (mut accounts, closed) = sub.rows.changes(|row| match row.cell("accountId") {
-                Some(jazz::records::Value::Uuid(id)) => Some(id.to_string()),
-                _ => None,
-            });
+            let (mut accounts, closed) = sub.rows.changes(crate::account::rows::row_account_id);
             if closed {
                 accounts.extend(sub.accounts.iter().cloned());
             }
@@ -790,10 +803,8 @@ impl Shared {
             watch.invalidate_coverage(&mut keys);
         }
         for space in affected {
-            if let Ok(address) = crate::spaces::protocol_address(&space) {
-                keys.rotation_evaluated.remove(&address);
-                keys.space_removals.insert(address, true);
-            }
+            keys.rotation_evaluated.remove(&space);
+            keys.space_removals.insert(space.clone(), true);
             watch.changed.insert(space);
         }
     }
@@ -826,7 +837,7 @@ fn enqueue_missing(
             None => {
                 return Some(Report::MissingKey {
                     table: missing.table,
-                    space: missing.space,
+                    space: db_address(&missing.space),
                     epoch_id: missing.epoch_id,
                 });
             }
@@ -883,7 +894,6 @@ impl Shared {
         }
     }
 
-    /// The settle back-off's clock.
     pub(crate) fn now(&self) -> web_time::Instant {
         self.held_clock.get().unwrap_or_else(web_time::Instant::now)
     }
@@ -1010,9 +1020,16 @@ impl Shared {
 }
 
 /// The core's form of a space address.
-pub(crate) fn db_address(
-    address: &jazz_e2ee::protocol::records::space::SpaceAddress,
-) -> SpaceAddress {
+pub(crate) fn db_address(address: &SpaceAddress) -> DbSpaceAddress {
+    DbSpaceAddress {
+        scope_id: address.scope_id.clone(),
+        identifier: address.identifier.clone(),
+    }
+}
+
+/// Copies a coordinate without validating it. The watch reports invalid
+/// input during sync, and report identities retain whatever was reported.
+pub(crate) fn unchecked_address(address: &DbSpaceAddress) -> SpaceAddress {
     SpaceAddress {
         scope_id: address.scope_id.clone(),
         identifier: address.identifier.clone(),
@@ -1038,7 +1055,7 @@ mod event_tests {
         let space = Unreadable {
             id: None,
             column: None,
-            space: Some(SpaceAddress {
+            space: Some(DbSpaceAddress {
                 scope_id: "projects".into(),
                 identifier: "plans".into(),
             }),
@@ -1147,7 +1164,7 @@ mod missing_queue_tests {
             enqueue_missing(&mut queue, &backoff, dropped.clone(), 3),
             Some(Report::MissingKey {
                 table: dropped.table,
-                space: dropped.space,
+                space: db_address(&dropped.space),
                 epoch_id: dropped.epoch_id,
             })
         );

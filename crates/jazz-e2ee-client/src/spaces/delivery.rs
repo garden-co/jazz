@@ -14,11 +14,11 @@
 use std::collections::BTreeSet;
 
 use jazz::db::{Db, Reason};
-use jazz::e2ee::SpaceAddress;
+use jazz::e2ee::SpaceAddress as DbSpaceAddress;
 use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::error::RefusalCode;
-use jazz_e2ee::protocol::records::space::SpaceAddress as ProtocolAddress;
+use jazz_e2ee::protocol::records::space::SpaceAddress;
 use jazz_e2ee::protocol::space::AccountDirectory;
 use jazz_e2ee::protocol::space::build::{Author, SpaceWriter, deliver, recover_rotation, rotate};
 use jazz_e2ee::protocol::space::members::{
@@ -26,6 +26,7 @@ use jazz_e2ee::protocol::space::members::{
 };
 
 use super::{ATTEMPTS, Replayed, SpaceReadPurpose, offline, protocol_address};
+use crate::account::has_removed_devices;
 use crate::client::{E2eeClient, SharedRandom};
 use crate::error::ClientError;
 use crate::state::{Report, db_address};
@@ -54,18 +55,17 @@ impl E2eeClient {
         &self,
         db: &Db,
         tx: OpenTransactionId,
-        address: &ProtocolAddress,
         space: &SpaceAddress,
     ) -> Result<usize, ClientError> {
         let mut read = self
-            .read_space_of(db, tx, address, SpaceReadPurpose::Deliver)
+            .read_space_of(db, tx, space, SpaceReadPurpose::Deliver)
             .await?;
         let members = read.ledger.member_accounts().len();
         if members > MEMBER_LIMIT {
             self.shared.event(
                 format!("members:{}/{}", space.scope_id, space.identifier),
                 Report::SpaceOverMemberLimit {
-                    space: space.clone(),
+                    space: db_address(space),
                     members,
                 },
             );
@@ -108,7 +108,7 @@ impl E2eeClient {
                     ),
                     Report::AccountReset {
                         account: account.clone(),
-                        space: space.clone(),
+                        space: db_address(space),
                         generation: state.generation,
                     },
                 );
@@ -121,7 +121,7 @@ impl E2eeClient {
             return Ok(0);
         };
         let eligible = acquisition.has_current(&chain)
-            && !self.shared.keys.borrow().rotation_refused.contains(address);
+            && !self.shared.keys.borrow().rotation_refused.contains(space);
         if eligible {
             if self.shared.member_watch.borrow().covered.contains(space) {
                 deps.version =
@@ -144,29 +144,20 @@ impl E2eeClient {
                 .holders
                 .iter()
                 .any(|account| match directory.current(account) {
-                    Ok(Some(state)) => !state.removed.is_empty() || state.generation > 0,
+                    Ok(Some(state)) => has_removed_devices(&state),
                     Ok(None) => false,
                     Err(_) => true,
                 });
-            let mut keys = self.shared.keys.borrow_mut();
             // Only a watched space keeps this answer, since only its watch
             // reports later removals; the first-write and 60 s re-checks in
             // `note_write` also make an unwatched space's write re-read it.
-            if self.shared.member_watch.borrow().spaces.contains_key(space) {
-                keys.rotation_evaluated.insert(address.clone());
-                keys.space_removals.insert(address.clone(), removals);
-            }
-            if marked {
-                keys.rotation_pending.insert(address.clone());
-            } else {
-                keys.rotation_pending.remove(address);
-            }
-        } else {
+            let watched = self.shared.member_watch.borrow().spaces.contains_key(space);
             self.shared
                 .keys
                 .borrow_mut()
-                .rotation_pending
-                .remove(address);
+                .mark_rotation(space, marked, watched.then_some(removals));
+        } else {
+            self.shared.keys.borrow_mut().rotation_pending.remove(space);
         }
         let lacking = lacking_held(&chain, &read.ledger, &directory, &acquisition.keys)?;
         let suite = self.shared.registry.select(&self.shared.selected)?;
@@ -230,14 +221,13 @@ impl E2eeClient {
         space: &SpaceAddress,
     ) -> Result<usize, ClientError> {
         self.ensure_open()?;
-        let address = protocol_address(space)?;
         if !self.shared.keys.borrow().online {
             return Err(offline());
         }
         let mut total = 0;
         for _ in 0..MAX_BATCHES {
             let outcome = crate::account::serializable(db, ATTEMPTS, async |tx| {
-                self.deliver_step(db, tx, &address, space).await
+                self.deliver_step(db, tx, space).await
             })
             .await;
             match outcome {
@@ -257,7 +247,7 @@ impl E2eeClient {
     pub async fn deliver_keys(
         &self,
         db: &Db,
-    ) -> Result<Vec<(SpaceAddress, Result<usize, ClientError>)>, ClientError> {
+    ) -> Result<Vec<(DbSpaceAddress, Result<usize, ClientError>)>, ClientError> {
         let held: BTreeSet<SpaceAddress> = self
             .shared
             .keys
@@ -265,7 +255,7 @@ impl E2eeClient {
             .held
             .spaces()
             .iter()
-            .map(|space| db_address(space.address()))
+            .map(|space| space.address().clone())
             .collect();
         let mut results = Vec::new();
         for space in held {
@@ -276,7 +266,7 @@ impl E2eeClient {
             {
                 outcome = Err(error);
             }
-            results.push((space, outcome));
+            results.push((db_address(&space), outcome));
         }
         Ok(results)
     }
@@ -300,7 +290,7 @@ impl E2eeClient {
             .map(|space| space.address().clone())
             .collect();
         for address in held {
-            if self.deliver_pass(db, &db_address(&address)).await.is_err() {
+            if self.deliver_pass(db, &address).await.is_err() {
                 let mut keys = self.shared.keys.borrow_mut();
                 if !keys.rotation_refused.contains(&address) {
                     keys.rotation_pending.insert(address);
@@ -314,7 +304,7 @@ impl E2eeClient {
     /// account epoch a removal superseded. A write to it is then preceded by
     /// a rotation. Evaluated by the pass, so after a removal it is known as
     /// soon as the pass has read the space.
-    pub fn needs_rotation(&self, space: &SpaceAddress) -> Result<bool, ClientError> {
+    pub fn needs_rotation(&self, space: &DbSpaceAddress) -> Result<bool, ClientError> {
         let address = protocol_address(space)?;
         Ok(self
             .shared
@@ -331,8 +321,10 @@ impl E2eeClient {
     /// authority stops the automatic rotation of the space while the client
     /// runs; an explicit call always attempts. How many deliveries were
     /// written, or zero if the space has no key yet. Needs the authority.
-    pub async fn rotate(&self, db: &Db, space: &SpaceAddress) -> Result<usize, ClientError> {
-        self.rotate_before(db, space, None).await
+    pub async fn rotate(&self, db: &Db, space: &DbSpaceAddress) -> Result<usize, ClientError> {
+        self.ensure_open()?;
+        self.rotate_before(db, &protocol_address(space)?, None)
+            .await
     }
 
     pub(super) async fn rotate_before(
@@ -352,9 +344,11 @@ impl E2eeClient {
     pub async fn recover_rotation(
         &self,
         db: &Db,
-        space: &SpaceAddress,
+        space: &DbSpaceAddress,
     ) -> Result<usize, ClientError> {
-        self.rotate_with(db, space, Rotation::Recovery, None).await
+        self.ensure_open()?;
+        self.rotate_with(db, &protocol_address(space)?, Rotation::Recovery, None)
+            .await
     }
 
     async fn rotate_with(
@@ -365,12 +359,11 @@ impl E2eeClient {
         deadline: Option<web_time::Instant>,
     ) -> Result<usize, ClientError> {
         self.ensure_open()?;
-        let address = protocol_address(space)?;
         if !self.shared.keys.borrow().online {
             return Err(offline());
         }
         let rotated = crate::account::serializable(db, ATTEMPTS, async |tx| {
-            self.rotate_step(db, tx, &address, kind, deadline).await
+            self.rotate_step(db, tx, space, kind, deadline).await
         })
         .await;
         let (first, rest) = match rotated {
@@ -383,8 +376,8 @@ impl E2eeClient {
                 if let Some(deps) = self.shared.member_watch.borrow_mut().spaces.get_mut(space) {
                     deps.holders.clear();
                 }
-                keys.rotation_refused.insert(address.clone());
-                keys.rotation_pending.remove(&address);
+                keys.rotation_refused.insert(space.clone());
+                keys.rotation_pending.remove(space);
                 return Err(ClientError::Database(error));
             }
             Err(error) => return Err(self.forget_account_on(error)),
@@ -396,17 +389,17 @@ impl E2eeClient {
         self.acquire_full(db, space).await?;
         {
             let mut keys = self.shared.keys.borrow_mut();
-            keys.rotation_pending.remove(&address);
+            keys.rotation_pending.remove(space);
             // The new version is sealed to the members' current account
             // epochs: nothing a removal superseded holds it. As above, only a
             // watched space keeps this answer.
             if self.shared.member_watch.borrow().spaces.contains_key(space) {
-                keys.rotation_evaluated.insert(address.clone());
+                keys.rotation_evaluated.insert(space.clone());
             }
         }
         let mut written = first;
         for batch in rest.chunks(DELIVERY_BATCH) {
-            written += self.deliver_batch(db, &address, batch).await?;
+            written += self.deliver_batch(db, space, batch).await?;
         }
         Ok(written)
     }
@@ -418,7 +411,7 @@ impl E2eeClient {
         &self,
         db: &Db,
         tx: OpenTransactionId,
-        address: &ProtocolAddress,
+        address: &SpaceAddress,
         kind: Rotation,
         deadline: Option<web_time::Instant>,
     ) -> Result<Option<(usize, Vec<String>)>, ClientError> {
@@ -503,7 +496,7 @@ impl E2eeClient {
     async fn deliver_batch(
         &self,
         db: &Db,
-        address: &ProtocolAddress,
+        address: &SpaceAddress,
         accounts: &[String],
     ) -> Result<usize, ClientError> {
         crate::account::serializable(db, ATTEMPTS, async |tx| {
@@ -516,7 +509,7 @@ impl E2eeClient {
         &self,
         db: &Db,
         tx: OpenTransactionId,
-        address: &ProtocolAddress,
+        address: &SpaceAddress,
         accounts: &[String],
     ) -> Result<usize, ClientError> {
         let mut read = self

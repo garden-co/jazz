@@ -29,8 +29,8 @@ use jazz_e2ee::protocol::account::{
     PrivateAccountLedger, PublicAccountLedger, verify_private,
 };
 use jazz_e2ee::protocol::records::account::{
-    AccountRoot, DeviceRemovalRequest, DeviceRequest, PublicAccountSuccessor, PublicDeviceApproval,
-    RecoveryRoot,
+    AccountRoot, AccountSealingKey, DeviceRemovalRequest, DeviceRequest, PublicAccountSuccessor,
+    PublicDeviceApproval, RecoveryRoot,
 };
 use jazz_e2ee::protocol::{Accepted, Position, ProtocolError};
 
@@ -39,11 +39,20 @@ pub use devices::{ApprovedBy, DeviceInfo, DeviceStatus, PendingApproval};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
 use crate::state::Report;
-use rows::{Row, uuid_cell};
+use rows::{Row, account_id_cell, uuid_cell};
 
 /// Reads and publications that keep meeting concurrent writes give up
 /// after this many attempts.
 const ATTEMPTS: usize = 5;
+
+const PUBLIC_ACCOUNT_TABLES: [&str; 6] = [
+    AccountRoot::TABLE,
+    PublicDeviceApproval::TABLE,
+    PublicAccountSuccessor::TABLE,
+    RecoveryRoot::TABLE,
+    AccountSealingKey::TABLE,
+    DeviceRemovalRequest::TABLE,
+];
 
 /// Where this device stands in its account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +87,10 @@ impl std::fmt::Debug for OwnAccount {
             .field("epoch", &self.state.epoch_id())
             .finish_non_exhaustive()
     }
+}
+
+pub(crate) fn has_removed_devices(state: &AccountState) -> bool {
+    !state.removed.is_empty() || state.generation > 0
 }
 
 /// The account's rows of one read.
@@ -176,11 +189,7 @@ impl E2eeClient {
     ) -> Result<Vec<PublicAccountLedger>, ClientError> {
         let accounts: Vec<Operand> = account_ids
             .iter()
-            .map(|id| {
-                uuid_cell(id)
-                    .map(Operand::Literal)
-                    .ok_or(ProtocolError::InvalidRecord("the account ID is not a UUID"))
-            })
+            .map(|id| account_id_cell(id).map(Operand::Literal))
             .collect::<Result<_, _>>()?;
         let of = |table: &str| {
             Query::from(table).filter(Predicate::In(
@@ -189,32 +198,22 @@ impl E2eeClient {
             ))
         };
         let (roots, through) = self
-            .read_rows::<AccountRoot>(db, tx, skipped, of(rows::ACCOUNT_ROOTS))
+            .read_rows::<AccountRoot>(db, tx, skipped, of(AccountRoot::TABLE))
             .await?;
         let (approvals, _) = self
-            .read_rows::<PublicDeviceApproval>(db, tx, skipped, of(rows::PUBLIC_DEVICE_APPROVALS))
+            .read_rows::<PublicDeviceApproval>(db, tx, skipped, of(PublicDeviceApproval::TABLE))
             .await?;
         let (successors, _) = self
-            .read_rows::<PublicAccountSuccessor>(
-                db,
-                tx,
-                skipped,
-                of(rows::PUBLIC_ACCOUNT_SUCCESSORS),
-            )
+            .read_rows::<PublicAccountSuccessor>(db, tx, skipped, of(PublicAccountSuccessor::TABLE))
             .await?;
         let (recovery_roots, _) = self
-            .read_rows::<RecoveryRoot>(db, tx, skipped, of(rows::RECOVERY_ROOTS))
+            .read_rows::<RecoveryRoot>(db, tx, skipped, of(RecoveryRoot::TABLE))
             .await?;
         let (account_keys, _) = self
-            .read_rows::<jazz_e2ee::protocol::records::account::AccountSealingKey>(
-                db,
-                tx,
-                skipped,
-                of(rows::ACCOUNT_KEYS),
-            )
+            .read_rows::<AccountSealingKey>(db, tx, skipped, of(AccountSealingKey::TABLE))
             .await?;
         let (removal_requests, _) = self
-            .read_rows::<DeviceRemovalRequest>(db, tx, skipped, of(rows::DEVICE_REMOVAL_REQUESTS))
+            .read_rows::<DeviceRemovalRequest>(db, tx, skipped, of(DeviceRemovalRequest::TABLE))
             .await?;
 
         let mut by_account: std::collections::BTreeMap<String, PublicAccountLedger> = account_ids
@@ -322,8 +321,7 @@ impl E2eeClient {
         let (deliveries, _) = self
             .read_rows(db, tx, &skipped, Query::from(rows::DEVICE_DELIVERIES))
             .await?;
-        let account = uuid_cell(&account_id)
-            .ok_or(ProtocolError::InvalidRecord("the account ID is not a UUID"))?;
+        let account = account_id_cell(&account_id)?;
         let (private_successors, _) = self
             .read_rows(
                 db,
@@ -521,7 +519,7 @@ impl E2eeClient {
             // sealed to: each space's mark is evaluated again before this
             // runtime's next write to it.
             let mut keys = self.shared.keys.borrow_mut();
-            let removals = !state.removed.is_empty() || state.generation > 0;
+            let removals = has_removed_devices(&state);
             if keys.evaluated_epoch.as_deref() != Some(state.epoch_id()) {
                 keys.rotation_evaluated.clear();
                 keys.evaluated_epoch = Some(state.epoch_id().to_owned());
@@ -693,17 +691,9 @@ impl E2eeClient {
     /// removal requests (core hooks note H6). When one changes, the caller
     /// verifies the account again ([`E2eeClient::ensure_account`]).
     pub async fn watch_account(&self, db: &Db) -> Result<AccountWatch, ClientError> {
-        let account = uuid_cell(&self.shared.account_id)
-            .ok_or(ProtocolError::InvalidRecord("the account ID is not a UUID"))?;
+        let account = account_id_cell(&self.shared.account_id)?;
         let mut streams = Vec::new();
-        for table in [
-            rows::ACCOUNT_ROOTS,
-            rows::PUBLIC_DEVICE_APPROVALS,
-            rows::PUBLIC_ACCOUNT_SUCCESSORS,
-            rows::RECOVERY_ROOTS,
-            rows::ACCOUNT_KEYS,
-            rows::DEVICE_REMOVAL_REQUESTS,
-        ] {
+        for table in PUBLIC_ACCOUNT_TABLES {
             let prepared = db.prepare_query(&by_account(table, &account))?;
             streams.push(db.subscribe(&prepared, Default::default()).await?);
         }

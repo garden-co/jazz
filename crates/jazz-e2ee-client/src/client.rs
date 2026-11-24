@@ -24,6 +24,8 @@ use jazz_e2ee::protocol::content::store::{
 use jazz_e2ee::protocol::derive;
 use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 use jazz_e2ee::protocol::domain::AppDomain;
+#[cfg(any(test, feature = "testing"))]
+use jazz_e2ee::protocol::records::space::SpaceAddress;
 use jazz_e2ee::registry::Registry;
 
 use crate::account::OwnAccount;
@@ -251,7 +253,6 @@ impl E2eeClient {
             member_changes: Default::default(),
             member_removals: Default::default(),
             held_clock: Default::default(),
-            member_change_wait: std::cell::Cell::new(crate::state::MEMBER_CHANGE_WAIT),
             collectors: Default::default(),
             next_write: Default::default(),
             member_watch: Default::default(),
@@ -542,10 +543,7 @@ impl E2eeClient {
     /// an authority ledger. Record the check made by their fixture setup.
     #[doc(hidden)]
     #[cfg(any(test, feature = "testing"))]
-    pub fn record_fixture_rotation_check(
-        &self,
-        address: &jazz_e2ee::protocol::records::space::SpaceAddress,
-    ) {
+    pub fn record_fixture_rotation_check(&self, address: &SpaceAddress) {
         self.shared.note_write(address);
         self.shared
             .keys
@@ -563,12 +561,13 @@ impl E2eeClient {
         &self,
         space: &jazz::e2ee::SpaceAddress,
     ) -> Vec<(&'static str, String)> {
+        let space = crate::state::unchecked_address(space);
         let watch = self.shared.member_watch.borrow();
         watch
             .by_account
             .iter()
             .filter(|((table, account), spaces)| {
-                spaces.contains(space)
+                spaces.contains(&space)
                     && watch
                         .streams
                         .get(table)
@@ -598,20 +597,13 @@ impl E2eeClient {
         self.shared.member_watch.borrow().delivery_mark_checks
     }
 
-    /// Holds the settle back-off's clock still, or moves it on by `by` when
+    /// Holds the runtime clock still, or moves it on by `by` when
     /// already held (tests: a wait is stepped, never slept).
     #[doc(hidden)]
     #[cfg(any(test, feature = "testing"))]
     pub fn advance_settle_clock(&self, by: std::time::Duration) {
         let now = self.shared.now();
         self.shared.held_clock.set(Some(now + by));
-    }
-
-    /// Changes how long tests wait for a staged member row.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "testing"))]
-    pub fn set_member_change_wait(&self, wait: std::time::Duration) {
-        self.shared.member_change_wait.set(wait);
     }
 
     /// This device: its ID and key pairs. [`ClientError::Closed`] once the

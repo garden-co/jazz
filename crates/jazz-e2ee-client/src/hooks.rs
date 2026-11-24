@@ -33,9 +33,10 @@ use jazz_e2ee::protocol::content::{
 use jazz_e2ee::protocol::records::space::SpaceAddress;
 use jazz_e2ee::records::{EqualityValue, RecordKind, read_stored_record};
 
-use crate::account::rows::{Row, SPACE_ROOTS};
+use crate::account::rows::{Row, SPACE_ROOTS, unwrap_optional};
 use crate::state::{
     Catalogue, KeyState, Missing, Report, Shared, TablePlan, db_address, not_observed,
+    unchecked_address,
 };
 use crate::values::ColumnCodec;
 
@@ -68,13 +69,9 @@ pub(crate) fn unsupported_query(what: &str, table: &str) -> Error {
 
 /// A space cell's row ID, `None` when it is null or absent.
 fn identifier(value: Option<&Value>) -> Result<Option<String>, ()> {
-    match value {
-        None | Some(Value::Nullable(None)) => Ok(None),
+    match value.and_then(unwrap_optional) {
+        None => Ok(None),
         Some(Value::Uuid(id)) => Ok(Some(id.to_string())),
-        Some(Value::Nullable(Some(inner))) => match &**inner {
-            Value::Uuid(id) => Ok(Some(id.to_string())),
-            _ => Err(()),
-        },
         Some(_) => Err(()),
     }
 }
@@ -326,11 +323,11 @@ impl E2eeHooks for Hooks {
             }
             changes.push_back((
                 write.row,
-                jazz::e2ee::SpaceAddress {
+                SpaceAddress {
                     scope_id: scope.to_string(),
                     identifier: id.to_string(),
                 },
-                web_time::Instant::now(),
+                self.shared.now(),
             ));
         }
         // A member row this client deletes, a removal: the space is served
@@ -345,7 +342,7 @@ impl E2eeHooks for Hooks {
             if removals.len() == crate::state::MAX_REPORTS {
                 removals.pop_front();
             }
-            removals.push_back((write.row, web_time::Instant::now()));
+            removals.push_back((write.row, self.shared.now()));
         }
         let Some(plan) = self.plan(write.table) else {
             return Ok(());
@@ -591,17 +588,13 @@ impl E2eeHooks for Hooks {
                 // A stored cell is bytes; a physical null reads like the
                 // empty value, "never written"; anything else no writer
                 // could have sealed.
-                let stored = match cell {
-                    Value::Bytes(bytes) => Ok(Some(bytes)),
-                    Value::Nullable(None) => Ok(None),
-                    Value::Nullable(Some(inner)) => match *inner {
-                        Value::Bytes(bytes) => Ok(Some(bytes)),
-                        _ => Err(()),
-                    },
-                    _ => Err(()),
+                let stored = match unwrap_optional(&cell) {
+                    Some(Value::Bytes(bytes)) => Ok(Some(bytes.as_slice())),
+                    None => Ok(None),
+                    Some(_) => Err(()),
                 };
                 let column = column(catalogue, site.table, name, codec)?;
-                let opened = match &stored {
+                let opened = match stored {
                     Err(()) => Opened::Unreadable(DataError::InvalidCiphertext),
                     Ok(None) => Opened::Empty,
                     Ok(Some(stored)) => {
@@ -610,7 +603,7 @@ impl E2eeHooks for Hooks {
                     }
                 };
                 let stored = stored.ok().flatten();
-                let streamed = stored.as_deref().is_some_and(|stored| {
+                let streamed = stored.is_some_and(|stored| {
                     read_stored_record(stored).is_ok_and(|record| record.kind == RecordKind::Stream)
                 });
                 let notice = |code: UnreadableCode, space: &SpaceAddress| Unreadable {
@@ -654,7 +647,7 @@ impl E2eeHooks for Hooks {
                             table: site.table.to_owned(),
                             id: row_uuid,
                             column: name.clone(),
-                            space: space.clone(),
+                            space: address.clone(),
                             epoch_id: epoch_id.clone(),
                         });
                         outcome
@@ -662,7 +655,7 @@ impl E2eeHooks for Hooks {
                             .insert(outcome.unreadable.len(), epoch_id.clone());
                         outcome
                             .unreadable
-                            .push(notice(keys.missing_key_code(&space), &address));
+                            .push(notice(keys.missing_key_code(&address), &address));
                         outcome.missing_epochs.push((space, epoch_id));
                         readable = false;
                         None
@@ -697,11 +690,11 @@ impl E2eeHooks for Hooks {
                 row.set_cell(name, Some(decoded), codec.value_type.clone());
                 // A cell that opened under the key of a refused or lost
                 // creation is for the repair to rewrite (protocol §3.2).
-                if let Some(stored) = stored.as_deref()
+                if let Some(stored) = stored
                     && under_refused_key(&keys, &address, stored)
                 {
                     self.shared
-                        .note_repairable(site.table, row_uuid, &db_address(&address), name);
+                        .note_repairable(site.table, row_uuid, &address, name);
                 }
                 if let Some(space) = stale {
                     report(&mut outcome, notice(UnreadableCode::StaleSpace, &space));
@@ -760,11 +753,7 @@ impl E2eeHooks for Hooks {
         if searched.is_empty() {
             return Ok(QueryPlan::Plain);
         }
-        let space_column = if plan.self_space() {
-            "id"
-        } else {
-            plan.entry.space.as_str()
-        };
+        let space_column = plan.entry.space.as_str();
         let identifier = query.filters.iter().find_map(|filter| match filter {
             Predicate::Eq(Operand::Column(name), Operand::Literal(Value::Uuid(id)))
                 if name == space_column =>
@@ -879,7 +868,11 @@ impl E2eeHooks for Hooks {
     }
 
     fn report_incomplete_query(&self, table: &str, space: &jazz::e2ee::SpaceAddress) {
-        let code = self.shared.keys.borrow().incomplete_query_code(space);
+        let code = self
+            .shared
+            .keys
+            .borrow()
+            .incomplete_query_code(&unchecked_address(space));
         self.shared.report(Report::Unreadable(Unreadable {
             table: table.to_owned(),
             id: None,

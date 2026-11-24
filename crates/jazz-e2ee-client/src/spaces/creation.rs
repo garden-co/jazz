@@ -19,7 +19,7 @@ use jazz::query::{Query, col, eq, lit};
 use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::content::{CreationFate, HeldSpace};
-use jazz_e2ee::protocol::records::space::SpaceAddress as ProtocolAddress;
+use jazz_e2ee::protocol::records::space::SpaceAddress;
 use jazz_e2ee::protocol::space::AccountDirectory;
 use jazz_e2ee::protocol::space::build::{Author, SpaceWriter, space_root};
 
@@ -27,17 +27,13 @@ use super::{has_live_key, has_unpublished};
 use crate::account::rows::{self, uuid_cell};
 use crate::client::{E2eeClient, SharedRandom};
 use crate::error::ClientError;
-use crate::state::db_address;
 
 impl E2eeClient {
     /// Prepares a root for `address` from this device's last verified
     /// account: its key is kept `unpublished` (and stored) before anything
     /// stages the root, so a write never rests on a key this device could
     /// lose. The next write to the space stages the root with itself.
-    pub(crate) async fn prepare_creation(
-        &self,
-        address: &ProtocolAddress,
-    ) -> Result<(), ClientError> {
+    pub(crate) async fn prepare_creation(&self, address: &SpaceAddress) -> Result<(), ClientError> {
         let records = {
             let account = self.account.borrow();
             let account = account.as_ref().ok_or(ClientError::NoAccount)?;
@@ -85,7 +81,7 @@ impl E2eeClient {
     pub(crate) async fn settle_creations(
         &self,
         db: &Db,
-        address: &ProtocolAddress,
+        address: &SpaceAddress,
         root: Option<&str>,
     ) -> Result<bool, ClientError> {
         let roots: Vec<String> = self
@@ -126,7 +122,7 @@ impl E2eeClient {
     }
 
     /// Whether this device holds a key of `address` that is not `refused`.
-    pub(crate) fn holds_live_key(&self, address: &ProtocolAddress) -> bool {
+    pub(crate) fn holds_live_key(&self, address: &SpaceAddress) -> bool {
         self.shared
             .keys
             .borrow()
@@ -139,7 +135,7 @@ impl E2eeClient {
     /// Stops the automatic paths for `address` when `error` is the
     /// authority refusing a transaction that carried this device's root
     /// (protocol §3.2).
-    fn note_refusal(&self, address: &ProtocolAddress, error: Option<&jazz::db::Error>) {
+    fn note_refusal(&self, address: &SpaceAddress, error: Option<&jazz::db::Error>) {
         if error.is_some_and(|error| error.reason == Some(Reason::AuthorizationDenied)) {
             self.shared
                 .keys
@@ -152,7 +148,7 @@ impl E2eeClient {
     /// Settles the creations of this run that the authority has since
     /// accepted or refused.
     pub(crate) async fn settle_pending(&self, db: &Db) -> Result<(), ClientError> {
-        let addresses: Vec<ProtocolAddress> = self
+        let addresses: Vec<SpaceAddress> = self
             .shared
             .keys
             .borrow()
@@ -175,7 +171,7 @@ impl E2eeClient {
     async fn root_at_authority(
         &self,
         db: &Db,
-        address: &ProtocolAddress,
+        address: &SpaceAddress,
         root_id: &str,
     ) -> Result<CreationFate, ClientError> {
         if !self.shared.keys.borrow().online {
@@ -214,7 +210,7 @@ impl E2eeClient {
     async fn creation_fate(
         &self,
         db: &Db,
-        address: &ProtocolAddress,
+        address: &SpaceAddress,
         root_id: &str,
     ) -> Result<CreationFate, ClientError> {
         let in_flight = {
@@ -294,7 +290,7 @@ impl E2eeClient {
     /// automatic path, and may be called again.
     pub async fn reconcile(&self, db: &Db) -> Result<(), ClientError> {
         self.ensure_open()?;
-        let addresses: Vec<ProtocolAddress> = self
+        let addresses: Vec<SpaceAddress> = self
             .shared
             .keys
             .borrow()
@@ -309,7 +305,7 @@ impl E2eeClient {
             if online {
                 // Reads the space too, to learn whether an accepted root
                 // is the space's root.
-                self.acquire_full(db, &db_address(&address)).await?;
+                self.acquire_full(db, &address).await?;
             } else {
                 self.settle_creations(db, &address, None).await?;
             }
