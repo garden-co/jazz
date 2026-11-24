@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { Encryption, type EncryptionNative } from "./index.js";
 import { formatSecret } from "../local-first-auth/secret.js";
 
@@ -89,4 +89,66 @@ it("keeps the runtime's reason in the message of a refused operation", async () 
     code: "device-not-active",
     message: expect.stringContaining("device-not-active"),
   });
+});
+
+it.each([true, false])(
+  "honours each caller's deadline during shared verification (startup first: %s)",
+  async (startupFirst) => {
+    vi.useFakeTimers();
+    try {
+      let status: string | null = null;
+      const call = vi.fn(async (op: string) => {
+        if (op === "recoveryRestore") return JSON.stringify("active");
+        throw new Error(`unexpected ${op}`);
+      });
+      const encryption = new Encryption(
+        {
+          encryptionCall: call,
+          encryptionState: () => JSON.stringify({ status, stage: "initial sync" }),
+          takeEncryptionReports: () => [],
+        },
+        { accountSecret: () => formatSecret(secret) },
+      );
+      if (startupFirst) encryption.start();
+      const short = vi.fn();
+      void encryption.ready({ timeoutMs: 10 }).catch(short);
+      const long = encryption.ready({ timeoutMs: startupFirst ? 500 : 2 ** 31 });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(short).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "database",
+          message: expect.stringContaining("initial sync"),
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      status = "awaiting-approval";
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(long).resolves.toBe("active");
+      expect(call.mock.calls).toEqual([["recoveryRestore", expect.anything()]]);
+      encryption.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+it("lets a caller time out during recovery while another waits for the same result", async () => {
+  vi.useFakeTimers();
+  try {
+    let finish!: (result: string) => void;
+    const restoring = new Promise<string>((resolve) => {
+      finish = resolve;
+    });
+    const { encryption, calls } = awaitingDevice(() => restoring);
+    const long = encryption.ready();
+    const short = vi.fn();
+    void encryption.ready({ timeoutMs: 10 }).catch(short);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(short).toHaveBeenCalledWith(expect.objectContaining({ code: "database" }));
+    finish(JSON.stringify("active"));
+    await expect(long).resolves.toBe("active");
+    expect(calls.map(({ op }) => op)).toEqual(["ready", "recoveryRestore"]);
+  } finally {
+    vi.useRealTimers();
+  }
 });

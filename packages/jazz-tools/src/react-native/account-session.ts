@@ -4,7 +4,7 @@ import type { DbConfig } from "../runtime/db.js";
 import { clientScope } from "../runtime/client-scope.js";
 import type { Session } from "../runtime/context.js";
 import { assertAccountConfig } from "../accounts/config-capability.js";
-import { bytesToHex } from "../runtime/hex.js";
+import { takeSecretHex } from "../encryption/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import type { NativeForegroundFactory } from "./native-foreground-db.js";
 
@@ -54,7 +54,7 @@ export function beginNativeAccountSession(
       ...(deviceAccountSecret === undefined
         ? {}
         : {
-            device_account_secret: bytesToHex(parseAuthSecret(deviceAccountSecret)),
+            device_account_secret: takeSecretHex(parseAuthSecret(deviceAccountSecret)),
           }),
       claims: session.claims,
       server_url: config.serverUrl ?? null,
