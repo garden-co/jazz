@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { DevicesPanel } from "../src/components/DevicesPanel";
 import { EncryptionNotices } from "../src/components/EncryptionNotices";
-import { DeviceStateProvider } from "../src/lib/device-state";
+import { DeviceStateProvider, isWaitingForApproval } from "../src/lib/device-state";
 import { readLeaveRecord, writeLeaveRecord } from "../src/lib/leave-record";
 import { encryptionError, fakeEncryption } from "./fake-encryption";
 
@@ -50,6 +50,13 @@ const threeDevices = () =>
       { id: "device-new", status: "waiting" },
     ],
   });
+
+it("recognizes both account states that wait for device approval", () => {
+  expect(isWaitingForApproval("awaiting-approval")).toBe(true);
+  expect(isWaitingForApproval("reenrolled")).toBe(true);
+  expect(isWaitingForApproval("active")).toBe(false);
+  expect(isWaitingForApproval(null)).toBe(false);
+});
 
 describe("removing a lost device", () => {
   it("is offered on other active devices only, never on this browser or a waiting one", async () => {
@@ -177,17 +184,13 @@ describe("approving a new browser", () => {
 });
 
 describe("a browser waiting for approval", () => {
-  for (const status of ["awaiting-approval", "reenrolled"] as const) {
-    it(`shows it is waiting (${status}) and offers every way forward`, async () => {
-      show(fakeEncryption({ status }));
-      await screen.findAllByText("This browser is waiting for approval");
-      expect(screen.getAllByRole("button", { name: "Show approval code" }).length).toBeGreaterThan(
-        0,
-      );
-      expect(screen.getByLabelText("Recovery phrase")).not.toBeNull();
-      expect(screen.getByRole("button", { name: "Restore with passkey" })).not.toBeNull();
-    });
-  }
+  it("shows it is waiting and offers every way forward", async () => {
+    show(fakeEncryption({ status: "awaiting-approval" }));
+    expect(await screen.findAllByText("This browser is waiting for approval")).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Show approval code" }).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Recovery phrase")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Restore with passkey" })).not.toBeNull();
+  });
 
   it("answers a challenge and shows the code to type on the other device", async () => {
     const fake = fakeEncryption({ status: "awaiting-approval" });
@@ -259,9 +262,7 @@ describe("a key check that gave up", () => {
     act(() =>
       fake.report({ type: "ready-failed", code: "protocol", message: "refused by the server" }),
     );
-    expect(
-      (await screen.findAllByText("This browser could not check its keys")).length,
-    ).toBeGreaterThan(0);
+    expect(await screen.findAllByText("This browser could not check its keys")).toHaveLength(2);
     fireEvent.click(screen.getAllByRole("button", { name: "Check again" })[0]!);
     await waitFor(() =>
       expect(screen.queryAllByText("This browser could not check its keys")).toHaveLength(0),

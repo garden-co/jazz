@@ -9,8 +9,7 @@ const PROD = process.env.JAZZ_E2E_PROD === "1";
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
-  // The smoke test takes ~5 s. A step that hangs (an input that never
-  // appears) fails within the action timeout, not after minutes.
+  // Fail a test if the app or one of its controls stops responding.
   timeout: 60_000,
   fullyParallel: false,
   workers: 1,

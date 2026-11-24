@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { unreadableRows, useDb } from "jazz-tools/react";
 import { Banner, Button, Skeleton, Thumbnail, Token, useLightbox } from "@astryxdesign/core";
 import { app } from "../../jazz.generated";
+import { failureOf } from "../lib/device-state";
 import { downloadBytes, formatBytes, isAudioType, isImageType } from "../lib/attachments";
 import { useObjectUrl } from "../lib/use-object-url";
 import type { MessageSummary } from "./RoomView";
@@ -41,8 +42,7 @@ function useAttachmentBytes(messageId: string, isEnabled: boolean) {
 
   useEffect(() => {
     if (!isEnabled) return;
-    const onError = (error: unknown) =>
-      setResult({ reason: error instanceof Error ? error.message : String(error) });
+    const onError = (error: unknown) => setResult({ reason: failureOf(error).message });
     try {
       return db.subscribe(app.messages.where({ id: messageId }).select("roomId", "attachment"), {
         onUpdate(rows) {
@@ -154,7 +154,7 @@ function FileAttachment({ message }: { message: MessageSummary }) {
       downloadBytes(bytes, name, message.attachmentType);
       setReason(undefined);
     } catch (error) {
-      setReason(error instanceof Error ? error.message : String(error));
+      setReason(failureOf(error).message);
     } finally {
       setLoading(false);
     }

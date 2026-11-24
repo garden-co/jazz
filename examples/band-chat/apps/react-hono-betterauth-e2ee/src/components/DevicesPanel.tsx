@@ -15,6 +15,7 @@ import {
 } from "@astryxdesign/core";
 import {
   failureOf,
+  isWaitingForApproval,
   useDeviceState,
   useDeviceStateIfAny,
   type DeviceInfo,
@@ -23,6 +24,7 @@ import {
 } from "../lib/device-state";
 import { endOtherSignIns } from "../lib/end-other-sign-ins";
 import { clearLeaveRecord, writeLeaveRecord } from "../lib/leave-record";
+import { KeyCheckFailedBanner, WaitingForApprovalBanner } from "./DeviceBanners";
 
 /** How BandChat names itself on the recovery passkey. */
 const APP_NAME = "BandChat";
@@ -66,26 +68,10 @@ function ThisBrowserStatus() {
           title="Removal pending"
           description="Waiting for another of your devices to remove this browser. Once one is online it does so by itself; then this browser's keys are erased and it signs out. You can keep using BandChat here until then."
         />
-      ) : leaving === "unfinished" ? null : status === "awaiting-approval" ||
-        status === "reenrolled" ? (
-        <Banner
-          status="warning"
-          container="section"
-          collapsible={false}
-          title="This browser is waiting for approval"
-          description="Messages stay locked here until another of your devices approves this browser, or you restore access with your recovery phrase or passkey."
-        />
+      ) : leaving === "unfinished" ? null : isWaitingForApproval(status) ? (
+        <WaitingForApprovalBanner description="Messages stay locked here until another of your devices approves this browser, or you restore access with your recovery phrase or passkey." />
       ) : null}
-      {readyFailed ? (
-        <Banner
-          status="error"
-          container="section"
-          collapsible={false}
-          title="This browser could not check its keys"
-          description={readyFailed.message}
-          endContent={<Button label="Check again" onClick={() => void retryReady()} />}
-        />
-      ) : null}
+      {readyFailed ? <KeyCheckFailedBanner failure={readyFailed} retry={retryReady} /> : null}
       {failure && leaving !== "unfinished" ? (
         <Banner
           status="error"
@@ -153,37 +139,73 @@ function DeviceRow({ device }: { device: DeviceInfo }) {
   );
 }
 
-function Confirm({
+function ConfirmedAction({
+  buttonLabel,
   title,
   description,
   actionLabel,
-  isBusy,
   onConfirm,
-  onCancel,
+  isDestructive = false,
 }: {
+  buttonLabel: string;
   title: string;
   description: string;
   actionLabel: string;
-  isBusy: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
+  onConfirm: (setError: (error: string) => void) => Promise<void>;
+  isDestructive?: boolean;
 }) {
+  const [isConfirming, setConfirming] = useState(false);
+  const [isBusy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function confirm() {
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm(setError);
+    } catch (cause) {
+      setError(failureOf(cause).message);
+    } finally {
+      setConfirming(false);
+      setBusy(false);
+    }
+  }
+
   return (
-    <Card width="100%">
-      <VStack gap={2} role="alertdialog" aria-label={title}>
-        <Text weight="semibold">{title}</Text>
-        <Text>{description}</Text>
-        <HStack gap={2} justify="end">
-          <Button label="Cancel" variant="ghost" onClick={onCancel} isDisabled={isBusy} />
+    <VStack gap={2}>
+      {isConfirming ? (
+        <Card width="100%">
+          <VStack gap={2} role="alertdialog" aria-label={title}>
+            <Text weight="semibold">{title}</Text>
+            <Text>{description}</Text>
+            <HStack gap={2} justify="end">
+              <Button
+                label="Cancel"
+                variant="ghost"
+                onClick={() => setConfirming(false)}
+                isDisabled={isBusy}
+              />
+              <Button
+                label={actionLabel}
+                variant="destructive"
+                isLoading={isBusy}
+                onClick={() => void confirm()}
+              />
+            </HStack>
+          </VStack>
+        </Card>
+      ) : (
+        <HStack>
           <Button
-            label={actionLabel}
-            variant="destructive"
-            isLoading={isBusy}
-            onClick={onConfirm}
+            label={buttonLabel}
+            size="sm"
+            variant={isDestructive ? "destructive" : undefined}
+            onClick={() => setConfirming(true)}
           />
         </HStack>
-      </VStack>
-    </Card>
+      )}
+      {error ? <ErrorText>{error}</ErrorText> : null}
+    </VStack>
   );
 }
 
@@ -198,14 +220,9 @@ function ErrorText({ children }: { children: string }) {
 /** Leaving is a removal request that another of the user's devices completes. */
 function LeaveThisBrowser({ device }: { device: DeviceInfo }) {
   const { encryption, accountId, refresh, reloadLeaveRecord } = useDeviceState();
-  const [isConfirming, setConfirming] = useState(false);
-  const [isBusy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   // #region bandchat-leave-browser
-  async function leave() {
-    setBusy(true);
-    setError(null);
+  async function leave(setError: (error: string) => void) {
     try {
       // A tab can close before the authority's answer reaches it. Keep the
       // intent so the next page can sign out after Jazz changes its device ID.
@@ -228,31 +245,19 @@ function LeaveThisBrowser({ device }: { device: DeviceInfo }) {
           : `Could not ask to leave: ${failed.message}`,
       );
     } finally {
-      setConfirming(false);
-      setBusy(false);
       void refresh();
     }
   }
   // #endregion bandchat-leave-browser
 
   return (
-    <VStack gap={2}>
-      {isConfirming ? (
-        <Confirm
-          title="Leave this browser?"
-          description="Another of your devices removes this browser the next time it's online. Then this browser's keys for your account are erased and it signs out; until then you can keep using it. Your other devices will then list this browser as a new device waiting for approval: ignore it, or approve it to let this browser back in."
-          actionLabel="Leave this browser"
-          isBusy={isBusy}
-          onConfirm={() => void leave()}
-          onCancel={() => setConfirming(false)}
-        />
-      ) : (
-        <HStack>
-          <Button label="Leave this browser" size="sm" onClick={() => setConfirming(true)} />
-        </HStack>
-      )}
-      {error ? <ErrorText>{error}</ErrorText> : null}
-    </VStack>
+    <ConfirmedAction
+      buttonLabel="Leave this browser"
+      title="Leave this browser?"
+      description="Another of your devices removes this browser the next time it's online. Then this browser's keys for your account are erased and it signs out; until then you can keep using it. Your other devices will then list this browser as a new device waiting for approval: ignore it, or approve it to let this browser back in."
+      actionLabel="Leave this browser"
+      onConfirm={leave}
+    />
   );
 }
 
@@ -263,62 +268,38 @@ function LeaveThisBrowser({ device }: { device: DeviceInfo }) {
  */
 function RemoveLostDevice({ device }: { device: DeviceInfo }) {
   const { encryption, refresh } = useDeviceState();
-  const [isConfirming, setConfirming] = useState(false);
-  const [isBusy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   // #region bandchat-remove-lost-device
-  async function remove() {
-    setBusy(true);
-    setError(null);
+  async function remove(setError: (error: string) => void) {
     try {
-      try {
-        await endOtherSignIns();
-      } catch (cause) {
-        setError(
-          `Sign-out could not be confirmed. Your other browsers may have been signed out. ${failureOf(cause).message} Try again to finish removing the device.`,
-        );
-        return;
-      }
-      try {
-        await encryption.devices.remove(device.id);
-      } catch (cause) {
-        setError(
-          `Your other browsers were signed out, but the device was not removed: ${failureOf(cause).message} Remove it again to finish.`,
-        );
-        return;
-      }
-      void refresh();
-    } finally {
-      setBusy(false);
-      setConfirming(false);
+      await endOtherSignIns();
+    } catch (cause) {
+      setError(
+        `Sign-out could not be confirmed. Your other browsers may have been signed out. ${failureOf(cause).message} Try again to finish removing the device.`,
+      );
+      return;
     }
+    try {
+      await encryption.devices.remove(device.id);
+    } catch (cause) {
+      setError(
+        `Your other browsers were signed out, but the device was not removed: ${failureOf(cause).message} Remove it again to finish.`,
+      );
+      return;
+    }
+    void refresh();
   }
   // #endregion bandchat-remove-lost-device
 
   return (
-    <VStack gap={2}>
-      {isConfirming ? (
-        <Confirm
-          title="Remove this lost device?"
-          description="Every other browser where you're signed in to BandChat is signed out first and has to sign in again. They keep their keys and need no new approval, but changes they haven't synced yet may be lost. The removed device gets no new keys; it keeps the messages it already has."
-          actionLabel="Sign out other browsers and remove"
-          isBusy={isBusy}
-          onConfirm={() => void remove()}
-          onCancel={() => setConfirming(false)}
-        />
-      ) : (
-        <HStack>
-          <Button
-            label="Remove lost device"
-            size="sm"
-            variant="destructive"
-            onClick={() => setConfirming(true)}
-          />
-        </HStack>
-      )}
-      {error ? <ErrorText>{error}</ErrorText> : null}
-    </VStack>
+    <ConfirmedAction
+      buttonLabel="Remove lost device"
+      title="Remove this lost device?"
+      description="Every other browser where you're signed in to BandChat is signed out first and has to sign in again. They keep their keys and need no new approval, but changes they haven't synced yet may be lost. The removed device gets no new keys; it keeps the messages it already has."
+      actionLabel="Sign out other browsers and remove"
+      onConfirm={remove}
+      isDestructive
+    />
   );
 }
 

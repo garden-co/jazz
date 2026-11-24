@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { JazzClientConfig } from "jazz-tools";
 import { JazzProvider, useAll, useJazzSession } from "jazz-tools/react";
 import { AppShell, Button, Center, EmptyState, Spinner } from "@astryxdesign/core";
 import { app, type Profile } from "../jazz.generated";
-import { ThemeProvider } from "../components/theme-provider";
 import { JoinRoom } from "./components/JoinRoom";
 import { NewRoomDialog } from "./components/NewRoomDialog";
 import { ProfileDialog, ProfileSetup } from "./components/ProfileDialog";
@@ -13,7 +11,7 @@ import { RoomView, usePrefetchRoom } from "./components/RoomView";
 import { UnsentMessagesProvider, UnsentNotices } from "./components/UnsentNotices";
 import { ProfileDirectoryProvider } from "./lib/profiles";
 import { summariseRooms, type NewestMessage } from "./lib/room-summaries";
-import { memoryStore, ParamStoreProvider, useSearchParam } from "./lib/url-state";
+import { useSearchParam } from "./lib/url-state";
 
 export interface BandChatProps {
   /** Pre-fills the display name on first run (e.g. the Better Auth user name). */
@@ -21,32 +19,11 @@ export interface BandChatProps {
   onSignOut?: () => void;
 }
 
-/** Rendered inside the external-auth provider in the Next dashboard. */
+/** Rendered inside the Better Auth provider. */
 export function BandChat(props: BandChatProps) {
   const session = useJazzSession();
   const author = session.user?.accountId;
   return author ? <Workspace author={author} {...props} /> : <Loading label="Loading identity…" />;
-}
-
-/** Browser receipt entrypoint. The production dashboard never uses device accounts here. */
-export function BandChatPreview({
-  config,
-  initialParams,
-}: {
-  config: JazzClientConfig;
-  /** Query-string state for this preview, e.g. `{ join: roomId }` for a room link. */
-  initialParams?: Record<string, string>;
-}) {
-  const [store] = useState(() => memoryStore(initialParams));
-  return (
-    <ThemeProvider>
-      <ParamStoreProvider store={store}>
-        <JazzProvider config={config} loading={<Loading label="Opening local stage…" />}>
-          <BandChat />
-        </JazzProvider>
-      </ParamStoreProvider>
-    </ThemeProvider>
-  );
 }
 
 function Loading({ label }: { label: string }) {
