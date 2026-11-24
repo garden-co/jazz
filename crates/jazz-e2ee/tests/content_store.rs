@@ -512,33 +512,45 @@ fn resign_lineage(world: &World, mut record: LineageRecord) -> LineageRecord {
     record
 }
 
-/// The reasons the key records of `keys` are skipped, with `lineage`.
-fn key_rejections(
-    world: &World,
+fn assert_only_good_key_loads(
+    owner: &StoreOwner<'_>,
     lineage: &LineageRecord,
-    keys: Vec<HeldKeyRecord>,
-) -> Vec<Option<Rejection>> {
-    let count = keys.len();
-    let loaded = owner(world, ALICE)
+    bad: Option<HeldKeyRecord>,
+    good: &HeldKeyRecord,
+    reason: Rejection,
+) {
+    let epoch_id = bad.as_ref().map(|record| record.epoch_id.clone());
+    let loaded = owner
         .load(&DecodedDocument {
             revision: 0,
             lineage: Some(lineage.clone()),
-            keys: keys.into_iter().map(Some).collect(),
+            keys: vec![bad, Some(good.clone())],
         })
         .unwrap();
-    (0..count)
-        .map(|index| {
-            loaded
-                .rejected
-                .iter()
-                .find(|rejected| {
-                    matches!(&rejected.record, RejectedRecord::Key { index: at, .. } if *at == index)
-                })
-                .map(|rejected| rejected.reason)
-        })
-        .collect()
+    assert_eq!(
+        loaded.rejected,
+        [Rejected {
+            record: RejectedRecord::Key { index: 0, epoch_id },
+            reason,
+        }]
+    );
+
+    let held = loaded
+        .space
+        .unwrap_or_else(|| panic!("the good key must load after {reason:?}"));
+    assert_eq!(
+        held.held()
+            .map(|(depth, _)| (depth, held.epoch_at(depth)))
+            .collect::<Vec<_>>(),
+        [(
+            usize::try_from(good.depth).unwrap(),
+            Some(good.epoch_id.as_str())
+        )],
+        "{reason:?}"
+    );
 }
 
+/// Alice's store skips a bad record and keeps the following rotation key.
 #[test]
 fn every_held_key_check_skips_only_its_record() {
     let (world, space, _) = alice_holding(3);
@@ -628,33 +640,9 @@ fn every_held_key_check_skips_only_its_record() {
         ),
     ];
     for (record, reason) in cases {
-        // The bad record first, then the good one: only the bad one is
-        // skipped.
-        assert_eq!(
-            key_rejections(&world, &lineage, vec![record, good.clone()]),
-            vec![Some(reason), None],
-            "{reason:?}"
-        );
+        assert_only_good_key_loads(&owner, &lineage, Some(record), &good, reason);
     }
-    // An undecodable record is skipped too.
-    let loaded = owner
-        .load(&DecodedDocument {
-            revision: 0,
-            lineage: Some(lineage.clone()),
-            keys: vec![None, Some(good.clone())],
-        })
-        .unwrap();
-    assert_eq!(
-        loaded.rejected,
-        vec![Rejected {
-            record: RejectedRecord::Key {
-                index: 0,
-                epoch_id: None
-            },
-            reason: Rejection::Malformed
-        }]
-    );
-    assert_eq!(loaded.space.unwrap().held().count(), 1);
+    assert_only_good_key_loads(&owner, &lineage, None, &good, Rejection::Malformed);
 }
 
 #[test]
@@ -833,13 +821,12 @@ fn a_key_record_of_a_mechanism_this_reader_does_not_route_is_unsupported() {
     let good = document.keys[1].clone();
     let mut unrouted = good.clone();
     unrouted.envelope = relabelled(key_seal::MECHANISM, UNROUTED_SEAL, &unrouted.envelope);
-    assert_eq!(
-        key_rejections(
-            &world,
-            &document.lineage,
-            vec![resign_key(&world, unrouted), good]
-        ),
-        vec![Some(Rejection::Unsupported), None]
+    assert_only_good_key_loads(
+        &owner_alice,
+        &document.lineage,
+        Some(resign_key(&world, unrouted)),
+        &good,
+        Rejection::Unsupported,
     );
 
     // A marker of a key-wrap mechanism this reader does not route: the
