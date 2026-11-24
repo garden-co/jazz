@@ -707,7 +707,8 @@ fn check_encryption(
         return Ok(Vec::new());
     };
     let target_schema = &schemas[&target.0];
-    declared::check_space_tables(target_schema, entries)
+    let inherited = encryption.entries(&target.to_string()).is_none();
+    declared::check_space_tables(target_schema, entries, inherited)
         .map_err(|reason| invalid(target, reason))?;
     declared::check_space_read_rules(&permissions, entries).map_err(refused)?;
     // Only the columns the target itself declares encrypted: one that is
