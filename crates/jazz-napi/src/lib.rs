@@ -2900,7 +2900,7 @@ impl NapiDb {
     #[napi(js_name = "takeStoreRequests")]
     pub fn take_store_requests(&self) -> js::Result<Vec<String>> {
         let encryption = self.encryption()?;
-        let requests = encryption.store.take_requests();
+        let requests = encryption.bridge_store().take_requests();
         // The host polls here, so a request the store never answers times out.
         encryption.drive();
         settle_promises();
@@ -2914,7 +2914,7 @@ impl NapiDb {
         let encryption = self.encryption()?;
         let accepted = id
             .parse()
-            .is_ok_and(|id| encryption.store.reply(id, ok, &payload));
+            .is_ok_and(|id| encryption.bridge_store().reply(id, ok, &payload));
         encryption.drive();
         settle_promises();
         Ok(accepted)

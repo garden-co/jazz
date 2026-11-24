@@ -9,8 +9,8 @@
 //!
 //! A host that can answer on the spot (a native app, a foreign-language
 //! callback) gives the store a [`Handler`] instead ([`JsStore::served_by`]):
-//! the same request texts and answers, with no queue to drain. [`serve`]
-//! makes a handler of a Rust [`PrivateStore`].
+//! the same request texts and answers, with no queue to drain. A Rust app
+//! can use [`DeadlineStore`] to pass typed calls straight to its store.
 //!
 //! Request and answer texts carry key bytes (`protect`'s secret,
 //! `unprotect`'s answer, the device's saved documents). What Rust holds of
@@ -130,50 +130,15 @@ impl JsStore {
                 self.0.replies.borrow_mut().remove(&self.1);
             }
         }
-        let late = || {
-            Err(StoreError::Failed(format!(
-                "the private store did not answer `{op}` in time"
-            )))
-        };
         if let Some(handler) = &self.handler {
             args["op"] = json!(op);
-            // The same deadline as a queued request. A handler that runs
-            // synchronously (a foreign callback) has answered before this
-            // point and cannot be interrupted; an asynchronous one that never
-            // answers, or never wakes its task, fails here, its late answer
-            // dropped with its future. While it waits, the call is polled
-            // when the handler wakes it or at the deadline, never in a loop.
-            let deadline = Instant::now() + self.timeout.get().unwrap_or(ANSWER_TIMEOUT);
-            let text = text_of(&args);
-            wipe(&mut args);
-            let mut answer = handler(text);
-            // The waker the timer holds for this call, and its entry there:
-            // dropping the entry (a new waker, or the call done or dropped)
-            // takes the waker out of the timer at once.
-            let mut timed: Option<(Waker, Timed)> = None;
-            return std::future::poll_fn(|context| {
-                if let Poll::Ready((ok, mut payload)) = answer.as_mut().poll(context) {
-                    timed = None;
-                    let result = decode(ok, &payload);
-                    payload.zeroize();
-                    return Poll::Ready(result);
-                }
-                if Instant::now() >= deadline {
-                    timed = None;
-                    return Poll::Ready(late());
-                }
-                // Nothing else is bound to wake this call at its deadline.
-                if timed
-                    .as_ref()
-                    .is_none_or(|(waker, _)| !waker.will_wake(context.waker()))
-                {
-                    timed = None;
-                    match wake_at(deadline, context.waker().clone()) {
-                        Some(entry) => timed = Some((context.waker().clone(), entry)),
-                        None => context.waker().wake_by_ref(),
-                    }
-                }
-                Poll::Pending
+            return with_deadline(op, self.timeout.get().unwrap_or(ANSWER_TIMEOUT), async {
+                let text = text_of(&args);
+                wipe(&mut args);
+                let (ok, mut payload) = handler(text).await;
+                let result = decode(ok, &payload);
+                payload.zeroize();
+                result
             })
             .await;
         }
@@ -194,10 +159,125 @@ impl JsStore {
         let deadline = Instant::now() + self.timeout.get().unwrap_or(ANSWER_TIMEOUT);
         std::future::poll_fn(|_| match self.replies.borrow_mut().remove(&id) {
             Some(result) => Poll::Ready(result),
-            None if Instant::now() >= deadline => Poll::Ready(late()),
+            None if Instant::now() >= deadline => Poll::Ready(Err(late(op))),
             None => Poll::Pending,
         })
         .await
+    }
+}
+
+fn late(op: &str) -> StoreError {
+    StoreError::Failed(format!("the private store did not answer `{op}` in time"))
+}
+
+/// Wake even if the store never wakes its task. Dropping the timer entry
+/// takes the waker out of the timer when the call finishes or is cancelled.
+/// Synchronous work within a store call cannot be interrupted.
+async fn with_deadline<T>(
+    op: &str,
+    timeout: Duration,
+    answer: impl Future<Output = Result<T, StoreError>>,
+) -> Result<T, StoreError> {
+    let deadline = Instant::now() + timeout;
+    let mut answer = std::pin::pin!(answer);
+    let mut timed: Option<(Waker, Timed)> = None;
+    std::future::poll_fn(|context| {
+        if let Poll::Ready(result) = answer.as_mut().poll(context) {
+            return Poll::Ready(result);
+        }
+        if Instant::now() >= deadline {
+            return Poll::Ready(Err(late(op)));
+        }
+        if timed
+            .as_ref()
+            .is_none_or(|(waker, _)| !waker.will_wake(context.waker()))
+        {
+            timed = None;
+            match wake_at(deadline, context.waker().clone()) {
+                Some(entry) => timed = Some((context.waker().clone(), entry)),
+                None => context.waker().wake_by_ref(),
+            }
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+/// Applies the store-call deadline to a Rust store's typed calls.
+pub struct DeadlineStore {
+    store: Rc<dyn PrivateStore>,
+    timeout: Duration,
+}
+
+impl DeadlineStore {
+    pub fn new(store: Rc<dyn PrivateStore>) -> Self {
+        Self {
+            store,
+            timeout: ANSWER_TIMEOUT,
+        }
+    }
+
+    async fn call<T>(
+        &self,
+        op: &str,
+        answer: impl Future<Output = Result<T, StoreError>>,
+    ) -> Result<T, StoreError> {
+        with_deadline(op, self.timeout, async {
+            answer.await.map_err(|error| match error {
+                // Preserve the error text previously returned through the callback.
+                StoreError::Failed(_) => StoreError::Failed(error.to_string()),
+                other => other,
+            })
+        })
+        .await
+    }
+}
+
+impl PrivateStore for DeadlineStore {
+    fn load<'a>(
+        &'a self,
+        scope: &'a str,
+        doc: &'a str,
+    ) -> LocalBoxFuture<'a, Result<Option<Stored>, StoreError>> {
+        Box::pin(self.call("load", async { self.store.load(scope, doc).await }))
+    }
+
+    fn open_scope<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<u64, StoreError>> {
+        Box::pin(self.call("openScope", async { self.store.open_scope(scope).await }))
+    }
+
+    fn save<'a>(
+        &'a self,
+        scope: &'a str,
+        incarnation: u64,
+        doc: &'a str,
+        bytes: &'a [u8],
+        expected: Option<u64>,
+    ) -> LocalBoxFuture<'a, Result<u64, StoreError>> {
+        Box::pin(self.call("save", async move {
+            self.store
+                .save(scope, incarnation, doc, bytes, expected)
+                .await
+        }))
+    }
+
+    fn list<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<Vec<String>, StoreError>> {
+        Box::pin(self.call("list", async { self.store.list(scope).await }))
+    }
+
+    fn delete<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(self.call("delete", async { self.store.delete(scope).await }))
+    }
+
+    fn protect<'a>(&'a self, secret: &'a [u8]) -> LocalBoxFuture<'a, Result<Vec<u8>, StoreError>> {
+        Box::pin(self.call("protect", async { self.store.protect(secret).await }))
+    }
+
+    fn unprotect<'a>(
+        &'a self,
+        blob: &'a [u8],
+    ) -> LocalBoxFuture<'a, Result<Zeroizing<Vec<u8>>, StoreError>> {
+        Box::pin(self.call("unprotect", async { self.store.unprotect(blob).await }))
     }
 }
 
@@ -618,6 +698,46 @@ mod tests {
             matches!(&result, Err(StoreError::Failed(message)) if message.contains("did not answer")),
             "{result:?}"
         );
+    }
+
+    /// A native call that never wakes still reaches the store-call deadline.
+    /// The bridge queue stands in for a pending future so the test can
+    /// also observe that the deadline drops the in-flight store operation.
+    #[test]
+    fn a_silent_native_store_fails_the_call_in_time() {
+        let (done, outcome) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let silent = Rc::new(JsStore::default());
+            let store = DeadlineStore {
+                store: silent.clone(),
+                timeout: Duration::from_millis(20),
+            };
+            let result = futures::executor::block_on(store.load("device", "doc"));
+            done.send((result, silent.take_requests().is_empty())).ok();
+        });
+        let (result, cancelled) = outcome
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the native call ends at its deadline");
+        assert_eq!(result, Err(late("load")));
+        assert!(cancelled);
+    }
+
+    /// A Rust app's save borrows the original bytes through the deadline
+    /// adapter. Only this layer can tell whether the store got a copy.
+    #[test]
+    fn a_native_store_save_borrows_the_original_bytes() {
+        let bytes = [1, 2, 3];
+        let original = bytes.as_ptr();
+        let inner = crate::testing::StoreWithSaveHook::new(
+            crate::MemoryStore::new(),
+            move |_, _, borrowed, _| {
+                assert_eq!(borrowed.as_ptr(), original);
+                Box::pin(async { Ok(()) })
+            },
+        );
+        let store = DeadlineStore::new(Rc::new(inner));
+        let scope = futures::executor::block_on(store.open_scope("device")).unwrap();
+        futures::executor::block_on(store.save("device", scope, "doc", &bytes, None)).unwrap();
     }
 
     /// Contract: a call answered before its deadline leaves nothing with the

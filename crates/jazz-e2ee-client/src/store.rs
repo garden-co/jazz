@@ -26,9 +26,8 @@
 //! or what the application supplies elsewhere: Jazz ships no default store,
 //! the application brings its own.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use futures::future::LocalBoxFuture;
 use jazz_e2ee::Zeroizing;
@@ -147,7 +146,7 @@ fn check_name(doc: &str) -> Result<(), StoreError> {
 /// [`PrivateStore::protect`] keeps secrets as they are.
 #[derive(Clone, Default)]
 pub struct MemoryStore {
-    scopes: Rc<RefCell<BTreeMap<String, MemoryScope>>>,
+    scopes: Arc<Mutex<BTreeMap<String, MemoryScope>>>,
 }
 
 #[derive(Default)]
@@ -164,7 +163,7 @@ impl MemoryStore {
     /// Replaces a stored document's bytes as they are, keeping its
     /// revision: what a damaged or tampered store looks like.
     pub fn overwrite(&self, scope: &str, doc: &str, bytes: Vec<u8>) {
-        let mut scopes = self.scopes.borrow_mut();
+        let mut scopes = self.scopes.lock().unwrap();
         let docs = &mut scopes
             .entry(scope.to_owned())
             .or_insert_with(|| MemoryScope {
@@ -179,7 +178,8 @@ impl MemoryStore {
     /// The scopes that hold at least one document.
     pub fn scopes(&self) -> Vec<String> {
         self.scopes
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .filter(|(_, scope)| !scope.docs.is_empty())
             .map(|(scope, _)| scope.clone())
@@ -196,7 +196,8 @@ impl PrivateStore for MemoryStore {
         Box::pin(async move {
             Ok(self
                 .scopes
-                .borrow()
+                .lock()
+                .unwrap()
                 .get(scope)
                 .and_then(|scope| scope.docs.get(doc))
                 .cloned())
@@ -207,7 +208,8 @@ impl PrivateStore for MemoryStore {
         Box::pin(async move {
             Ok(self
                 .scopes
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .entry(scope.to_owned())
                 .or_insert_with(|| MemoryScope {
                     incarnation: new_incarnation(),
@@ -227,7 +229,7 @@ impl PrivateStore for MemoryStore {
     ) -> LocalBoxFuture<'a, Result<u64, StoreError>> {
         Box::pin(async move {
             check_name(doc)?;
-            let mut scopes = self.scopes.borrow_mut();
+            let mut scopes = self.scopes.lock().unwrap();
             let docs = match scopes.get_mut(scope) {
                 Some(scope) if scope.incarnation == incarnation => &mut scope.docs,
                 _ => return Err(StoreError::Wiped),
@@ -252,7 +254,8 @@ impl PrivateStore for MemoryStore {
         Box::pin(async move {
             Ok(self
                 .scopes
-                .borrow()
+                .lock()
+                .unwrap()
                 .get(scope)
                 .map(|scope| scope.docs.keys().cloned().collect())
                 .unwrap_or_default())
@@ -261,7 +264,7 @@ impl PrivateStore for MemoryStore {
 
     fn delete<'a>(&'a self, scope: &'a str) -> LocalBoxFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
-            self.scopes.borrow_mut().remove(scope);
+            self.scopes.lock().unwrap().remove(scope);
             Ok(())
         })
     }

@@ -170,7 +170,8 @@ mod plan {
 
     use jazz::tools::public_schema::E2eeDeclarations;
     use jazz::tools::{ClientEncryption, EncryptionRuntime};
-    use jazz_e2ee_client::host::bridge::{self, JsStore};
+    use jazz_e2ee_client::PrivateStore;
+    use jazz_e2ee_client::host::bridge::{DeadlineStore, JsStore};
     use jazz_e2ee_client::host::runtime as host;
 
     use super::*;
@@ -234,16 +235,16 @@ mod plan {
             let Some(config) = &self.config else {
                 return Err(Error::App(NEEDS_DEVICE.to_owned()));
             };
-            let store: Rc<JsStore> = Rc::new(match &config.store {
-                StoreSource::Native(make) => JsStore::served_by(bridge::serve(make())),
+            let store: Rc<dyn PrivateStore> = match &config.store {
+                StoreSource::Native(make) => Rc::new(DeadlineStore::new(make())),
                 StoreSource::Calls(call) => {
                     let call = Arc::clone(call);
-                    JsStore::served_by(Rc::new(move |text| {
+                    Rc::new(JsStore::served_by(Rc::new(move |text| {
                         let answer = call(text);
                         Box::pin(async move { answer })
-                    }))
+                    })))
                 }
-            });
+            };
             // The secret goes straight into a `RecoverySecret`, which
             // zeroizes it when dropped: no hexadecimal or other copy.
             let device_account_secret = secret
@@ -257,7 +258,7 @@ mod plan {
                     environment: config.environment.clone(),
                 },
                 account.0.to_string(),
-                Rc::clone(&store),
+                store,
                 None,
             )
             .await
@@ -267,8 +268,7 @@ mod plan {
             })?;
             let hooks = built.client().hooks();
             let start: jazz::tools::StartEncryption = Box::new(move |db, wake| {
-                store.set_wake(Box::new(move || wake()));
-                let runtime = host::Encryption::new_native(built, store, db);
+                let runtime = host::Encryption::new_native(built, None, db, wake);
                 DEVICE.with(|device| {
                     *device.borrow_mut() = Some(Rc::clone(&runtime));
                 });
