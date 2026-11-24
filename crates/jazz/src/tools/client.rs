@@ -95,12 +95,14 @@ pub trait EncryptionRuntime {
     /// can without waiting, and asks for a tick if it owes one.
     fn after_tick(&self);
     /// Open an upload, preparing the space first when the hooks ask.
+    /// Await each attempt before starting another.
     fn begin_streaming_upload<'a>(
         &self,
-        begin: &'a mut dyn FnMut() -> Result<crate::db::StreamingValueUpload>,
-    ) -> futures::future::LocalBoxFuture<'a, Result<crate::db::StreamingValueUpload>> {
-        Box::pin(async move { begin() })
-    }
+        begin: &'a mut dyn FnMut() -> futures::future::LocalBoxFuture<
+            'a,
+            Result<crate::db::StreamingValueUpload>,
+        >,
+    ) -> futures::future::LocalBoxFuture<'a, Result<crate::db::StreamingValueUpload>>;
     /// Called when the client shuts down: ends the loop.
     fn stop(&self);
 }
@@ -1682,31 +1684,44 @@ impl JazzClient {
         let db = self.db()?;
         let row = object_id.map_or_else(|| db.next_row_id(), |id| RowUuid(*id.uuid()));
         let transaction = self.open_transaction()?;
-        let mut cells = self.core_cells(table, values)?;
-        let mut begin = || {
-            match transaction {
-                Some(id) => crate::db::block_on(db.tx_ref(id).begin_streaming_value_upload_for(
-                    kind,
-                    table,
-                    row,
-                    &mut cells,
-                    column,
-                    &WriteTarget::Root,
-                )),
-                None => crate::db::block_on(db.begin_streaming_value_upload_for(
-                    kind,
-                    table,
-                    row,
-                    &mut cells,
-                    column,
-                    &WriteTarget::Root,
-                )),
-            }
-            .map_err(write_error)
+        let cells = Cell::new(self.core_cells(table, values)?);
+        let begin = || async {
+            let mut attempt_cells = cells.take();
+            let result = match transaction {
+                Some(id) => {
+                    db.tx_ref(id)
+                        .begin_streaming_value_upload_for(
+                            kind,
+                            table,
+                            row,
+                            &mut attempt_cells,
+                            column,
+                            &WriteTarget::Root,
+                        )
+                        .await
+                }
+                None => {
+                    db.begin_streaming_value_upload_for(
+                        kind,
+                        table,
+                        row,
+                        &mut attempt_cells,
+                        column,
+                        &WriteTarget::Root,
+                    )
+                    .await
+                }
+            };
+            cells.set(attempt_cells);
+            result.map_err(write_error)
         };
         let upload = match &self.shared.encryption {
-            Some(runtime) => runtime.begin_streaming_upload(&mut begin).await?,
-            None => begin()?,
+            Some(runtime) => {
+                runtime
+                    .begin_streaming_upload(&mut || Box::pin(begin()))
+                    .await?
+            }
+            None => begin().await?,
         };
         Ok((
             ObjectId::from_uuid(row.0),
@@ -1714,7 +1729,7 @@ impl JazzClient {
                 upload,
                 table: table.to_owned(),
                 column: column.to_owned(),
-                cells,
+                cells: cells.into_inner(),
                 transaction,
             },
         ))
@@ -2362,11 +2377,11 @@ impl JazzClient {
     /// protocol §1.3). Fails until the client has seen the authority's
     /// catalogue with this schema version in it (code `NotObserved`), and
     /// for a table the schema doesn't have.
-    pub fn table_identity(&self, table: &str) -> Result<ObjectId> {
-        match crate::db::block_on(self.db()?.table_identity(table)) {
+    pub async fn table_identity(&self, table: &str) -> Result<ObjectId> {
+        match self.db()?.table_identity(table).await {
             Ok(Some(identity)) => Ok(ObjectId::from_uuid(identity.0)),
             Ok(None) => Err(JazzError::Schema(format!("no table {table}"))),
-            Err(error) => Err(JazzError::Query(error.to_string())),
+            Err(error) => Err(JazzError::QueryFailed(error)),
         }
     }
 
@@ -3688,6 +3703,56 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use tokio::sync::oneshot;
+
+    /// Alice's upload yields while another write holds the database operation
+    /// lock, so that write can finish on the same thread. The client fixture
+    /// uses the core directly to hold the lock across polls.
+    #[cfg(feature = "e2ee-client")]
+    #[test]
+    fn streaming_upload_begin_yields_while_a_write_holds_the_lock() {
+        use crate::db::{ErrorCode, StreamingMutationKind};
+        use crate::time::TxTime;
+
+        let (finished, result) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let schema = SchemaBuilder::new()
+                    .table(TableSchema::builder("notes").column("title", ColumnType::Text))
+                    .build();
+                let alice = JazzClient::test_client(schema).await;
+                let db = alice.db().unwrap();
+                let (release, released) = oneshot::channel();
+                let key = TxId::new(TxTime(1), NodeUuid(Uuid::new_v4()));
+                let mut write = pin!(db.write_as_origin(key, &AuthorSubject::SYSTEM, async |_| {
+                    released.await.unwrap();
+                    Err(CoreError::new(ErrorCode::WriteRejected, "abandoned write"))
+                }));
+                assert!(futures::poll!(&mut write).is_pending());
+
+                let mut upload = pin!(alice.begin_streaming_upload_for(
+                    StreamingMutationKind::Insert,
+                    "notes",
+                    None,
+                    HashMap::new(),
+                    "title",
+                ));
+                assert!(futures::poll!(&mut upload).is_pending());
+                release.send(()).unwrap();
+                assert!(write.await.is_err());
+                assert!(upload.await.is_ok());
+            });
+            finished.send(()).unwrap();
+        });
+        assert_ne!(
+            result.recv_timeout(Duration::from_secs(5)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "upload begin blocked Alice's thread"
+        );
+        worker.join().unwrap();
+    }
 
     struct NoopTransport;
 

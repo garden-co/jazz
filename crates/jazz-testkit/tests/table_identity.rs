@@ -10,9 +10,12 @@
 
 use std::time::Duration;
 
-use jazz::tools::{ColumnType, JazzClient, ObjectId, Schema, SchemaBuilder, TableSchema};
+use jazz::db::ErrorCode;
+use jazz::tools::{
+    ColumnType, JazzClient, JazzError, ObjectId, Schema, SchemaBuilder, TableSchema,
+};
 use jazz_server::JazzServer;
-use jazz_testkit::publish_allow_all_permissions;
+use jazz_testkit::{publish_allow_all_permissions, wait_for};
 use uuid::Uuid;
 
 fn schema() -> Schema {
@@ -24,16 +27,18 @@ fn schema() -> Schema {
 
 /// The identity once the client has the server's catalogue.
 async fn observed(client: &JazzClient, table: &str) -> ObjectId {
-    for _ in 0..200 {
-        match client.table_identity(table) {
-            Ok(identity) => return identity,
-            Err(error) if error.to_string().contains("NotObserved") => {
-                tokio::time::sleep(Duration::from_millis(25)).await;
+    wait_for(
+        Duration::from_secs(5),
+        format!("{table}'s identity"),
+        || async {
+            match client.table_identity(table).await {
+                Ok(identity) => Some(identity),
+                Err(JazzError::QueryFailed(error)) if error.code == ErrorCode::NotObserved => None,
+                Err(error) => panic!("{error}"),
             }
-            Err(error) => panic!("{error}"),
-        }
-    }
-    panic!("the client never observed {table}'s identity");
+        },
+    )
+    .await
 }
 
 /// Two clients of one server read the same identity for a table, and
@@ -63,8 +68,12 @@ async fn clients_of_one_server_read_the_same_table_identity() {
             assert_ne!(observed(&alice, "boards").await, projects);
             let error = alice
                 .table_identity("nope")
+                .await
                 .expect_err("a table the schema lacks");
-            assert!(error.to_string().contains("no table nope"), "{error}");
+            assert!(
+                matches!(error, JazzError::Schema(ref message) if message == "no table nope"),
+                "{error}"
+            );
         })
         .await;
 }
@@ -76,6 +85,10 @@ async fn an_offline_client_has_not_observed_the_identity() {
     let client = JazzClient::test_client(schema()).await;
     let error = client
         .table_identity("projects")
+        .await
         .expect_err("no catalogue yet");
-    assert!(error.to_string().contains("NotObserved"), "{error}");
+    assert!(
+        matches!(error, JazzError::QueryFailed(ref core) if core.code == ErrorCode::NotObserved),
+        "{error}"
+    );
 }
