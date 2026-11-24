@@ -101,7 +101,11 @@ impl E2eeClient {
             ..Default::default()
         };
         for account in &deps.members {
-            if let Ok(Some(state)) = directory.current(account)
+            let state = match directory.current(account) {
+                Err(ProtocolError::Unsupported(_) | ProtocolError::Intrinsic(_)) => continue,
+                result => result?,
+            };
+            if let Some(state) = state
                 && state.generation > 0
             {
                 self.shared.event(

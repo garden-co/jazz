@@ -62,6 +62,9 @@ export class EncryptionError extends Error {
     | "device-account-secret-required"
     | "no-account"
     | (string & Record<never, never>);
+  declare readonly stage?: "account-reset";
+  declare readonly outcome?: "refused" | "unknown";
+  declare readonly recordIds?: readonly [string, string, string];
   constructor(code: string, message: string) {
     super(message);
     this.name = "EncryptionError";
@@ -116,6 +119,8 @@ export type EncryptionReport =
    * reports are challenges, only a new challenge can replace the oldest.
    */
   | { type: "reports-dropped"; count: number }
+  /** A new listener could not replay existing reports and will receive live reports. */
+  | { type: "report-replay-failed"; code: string; message: string }
   | { type: string; [key: string]: unknown };
 
 /** The native calls the handle is built on. */
@@ -177,8 +182,6 @@ function verificationTimeout(state: { error?: string | null; stage?: string }): 
   );
 }
 
-const MAX_ACTIVE_REPORTS = 10_000;
-
 /** The handle an app uses; see the docs. */
 export class Encryption {
   readonly devices: Devices;
@@ -187,7 +190,8 @@ export class Encryption {
   readonly members: Members;
   private readonly listeners = new Set<(report: EncryptionReport) => void>();
   private readonly pendingReports: EncryptionReport[] = [];
-  private readonly activeReports = new Map<string, EncryptionReport>();
+  private readonly waitingListeners = new Set<(report: EncryptionReport) => void>();
+  private reportsDuringReplay: EncryptionReport[] | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   private closed = false;
   private readonly assertOpen = () => {
@@ -376,54 +380,30 @@ export class Encryption {
     })();
   }
 
-  /** Closes this handle and stops background verification and report delivery. */
+  /** Permanently closes this handle at teardown, ending verification and report delivery. */
   stop(): void {
     this.closed = true;
     if (this.runner) this.runner.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     this.listeners.clear();
-    this.activeReports.clear();
+    this.waitingListeners.clear();
   }
 
   private emit(report: EncryptionReport) {
-    if (report.type === "unreadable" || report.type === "withdrawn") {
-      const space = report.space as ReportSpace | null;
-      const key = JSON.stringify([
-        report.table,
-        report.id,
-        report.column,
-        report.code,
-        space?.scopeId,
-        space?.id,
-      ]);
-      this.activeReports.delete(key);
-      if (report.type === "unreadable") {
-        this.activeReports.set(key, report);
-        if (this.activeReports.size > MAX_ACTIVE_REPORTS)
-          this.activeReports.delete(this.activeReports.keys().next().value!);
-      }
-    }
     for (const listener of this.listeners) listener(report);
   }
 
   /** Listens to reports; returns the function that stops it. */
   onReport(listener: (report: EncryptionReport) => void): () => void {
     this.assertOpen();
-    if (!this.listeners.has(listener) && this.activeReports.size > 0) {
-      queueMicrotask(() => {
-        for (const report of this.activeReports.values()) {
-          if (!this.listeners.has(listener)) break;
-          listener(report);
-        }
-      });
-    }
-    this.listeners.add(listener);
+    if (!this.listeners.has(listener)) this.waitingListeners.add(listener);
     this.timer ??= setInterval(() => this.deliver(), this.options.reportIntervalMs ?? 25);
     (this.timer as { unref?: () => void }).unref?.();
     return () => {
       this.listeners.delete(listener);
-      if (this.listeners.size === 0 && this.timer) {
+      this.waitingListeners.delete(listener);
+      if (this.listeners.size === 0 && this.waitingListeners.size === 0 && this.timer) {
         clearInterval(this.timer);
         this.timer = undefined;
       }
@@ -448,11 +428,65 @@ export class Encryption {
   }
 
   private deliver() {
-    for (const report of this.pendingReports.splice(0)) this.emit(report);
+    if (!this.reportsDuringReplay && this.waitingListeners.size > 0) {
+      void this.replayReports();
+    }
+    // With no established listeners, leave the queue for the snapshot.
+    if (this.listeners.size === 0) return;
+    for (const report of this.pendingReports.splice(0)) {
+      this.reportsDuringReplay?.push(report);
+      this.emit(report);
+    }
     for (const text of this.native.takeEncryptionReports()) {
-      this.emit(JSON.parse(text) as EncryptionReport);
+      const report = JSON.parse(text) as EncryptionReport;
+      this.reportsDuringReplay?.push(report);
+      this.emit(report);
     }
   }
+
+  private readonly replayReports = async () => {
+    const reportsDuringReplay: EncryptionReport[] = [];
+    this.reportsDuringReplay = reportsDuringReplay;
+    try {
+      const snapshot = await this.call<{ active: EncryptionReport[]; queued: string[] }>(
+        "reportsForListener",
+        {},
+      ).catch((error: EncryptionError) => ({ error }));
+      if (this.closed) return;
+
+      const waiting = [...this.waitingListeners];
+      let replay: EncryptionReport[];
+      if ("error" in snapshot) {
+        const { code, message } = snapshot.error;
+        replay = [{ type: "report-replay-failed", code, message }];
+      } else {
+        const queued = snapshot.queued.map((text) => JSON.parse(text) as EncryptionReport);
+        const pending = this.pendingReports.splice(0);
+        for (const report of [...pending, ...queued]) this.emit(report);
+
+        // The native queue puts the overflow notice first.
+        const dropped = queued[0]?.type === "reports-dropped" ? queued.splice(0, 1) : [];
+        // The active set already accounts for queued unreadables and withdrawals.
+        replay = [
+          ...dropped,
+          ...snapshot.active,
+          ...pending,
+          ...queued.filter((report) => report.type !== "unreadable" && report.type !== "withdrawn"),
+          ...reportsDuringReplay,
+        ];
+      }
+      for (const listener of waiting) {
+        if (!this.waitingListeners.delete(listener)) continue;
+        this.listeners.add(listener);
+        for (const report of replay) {
+          if (!this.listeners.has(listener)) break;
+          listener(report);
+        }
+      }
+    } finally {
+      this.reportsDuringReplay = undefined;
+    }
+  };
 }
 
 type Call = <T>(op: string, args?: Record<string, unknown>) => Promise<T>;

@@ -2789,6 +2789,78 @@ fn a_delivery_sealed_to_a_non_derived_record_is_reported_against_the_record() {
     );
 }
 
+/// Alice seals her copy of a new space root with the derived key even when
+/// the first valid public record names a different key signed by her device.
+#[test]
+fn a_root_self_envelope_skips_an_earlier_non_derived_sealing_key() {
+    let mut world = World::new(51);
+    world.account(ALICE);
+    world.add_member(ALICE);
+    let wrong = derive::account_sealing_key_pair(&key_seal::Builtin, &[9; 32]).unwrap();
+    let conflicting_id = world.with_account(ALICE, |entry, rng| {
+        let later = entry.ledger.next();
+        let genuine = &mut entry.ledger.public.account_keys[0];
+        let earlier = std::mem::replace(&mut genuine.position, later);
+        let mut conflict = genuine.row.clone();
+        conflict.id = ids::random_v4(rng).unwrap();
+        assert_ne!(conflict.public_key, wrong.public.bytes);
+        conflict.public_key = wrong.public.bytes.clone();
+        let bytes = conflict.signed_bytes(&entry.env.application()).unwrap();
+        let signer = entry
+            .env
+            .registry
+            .signer(entry.device.signing.public.mechanism.as_mechanism())
+            .unwrap();
+        conflict.signature = signer.sign(&entry.device.signing, &bytes).unwrap();
+        let id = conflict.id.clone();
+        entry
+            .ledger
+            .public
+            .account_keys
+            .insert(0, Accepted::new(earlier, conflict));
+        id
+    });
+    let read = world.read();
+    let directory = read.directory(&world);
+    assert_eq!(
+        directory
+            .recipient(ALICE, BUILTIN)
+            .unwrap()
+            .unwrap()
+            .sealing_key()
+            .row
+            .id,
+        conflicting_id
+    );
+
+    let own = world.own(ALICE);
+    let device = world.accounts[ALICE].device.clone();
+    let records = world.build_root(ROW, ALICE, &device).unwrap();
+    let account = &world.accounts[ALICE];
+    let context = records
+        .root
+        .account_envelope_context(&account.env.application())
+        .unwrap();
+    let envelope = &records.root.account_envelope;
+    let derived = derive::account_sealing_key_pair(&key_seal::Builtin, own.key.key()).unwrap();
+    assert_eq!(
+        *account
+            .env
+            .registry
+            .open_sealed(&[derived], &context, envelope)
+            .unwrap(),
+        *records.key
+    );
+    assert_eq!(
+        account
+            .env
+            .registry
+            .open_sealed(&[wrong], &context, envelope)
+            .unwrap_err(),
+        jazz_e2ee::Error::InvalidCiphertext
+    );
+}
+
 /// Attribution is decided against the read being replayed, not against a
 /// report the account's keys carry from an earlier read: a non-derived
 /// record published after the device last took its keys still takes the

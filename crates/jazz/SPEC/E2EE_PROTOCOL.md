@@ -1527,11 +1527,15 @@ the 32 secret bytes, created and read with user verification required
     retires the old root. See the [runtime's recovery operations](../../jazz-e2ee-client/src/host/runtime.rs#L759-L798).
   - **Device accounts:** the account secret is the account, and it cannot
     be rotated without becoming a different account. The SDK refuses to retire
-    the root derived from that secret (`device-account-root-required`), so the secret
-    can still recover the account after every device is lost. A device signed
-    in with the account secret can retire any other root. A linked device
-    without the secret cannot distinguish the account's root from another
-    derived (version 8) root. It refuses to retire a derived root with
+    the root derived from that secret (`device-account-root-required`). The secret
+    can recover the account after every device is lost unless another client
+    retired that root. The standard client derives the protected root ID from
+    the account secret. `AccountWriter` trusts raw callers to supply that ID
+    and does not verify its derivation. Replay honours valid historical
+    retirements of the root. A device signed in with the account secret can
+    retire any other root. A linked device without the secret cannot
+    distinguish the account's root from another derived (version 8) root.
+    It refuses to retire a derived root with
     `device-account-secret-required` and asks the user to sign in with the
     account secret. It can still retire an independently generated root.
     Anyone who holds a leaked account secret can still sign in as the account.
@@ -2892,7 +2896,7 @@ state the device already verified.
 | Unsupported capability      | `ledger-version`, `signing-mechanism`, `signing-version`, `account-key-envelope`                                                                                                                 | Leave the dependent state unresolved                                                                | Treat the record as invalid                                                                    |
 | Intrinsic contradiction     | `conflicting-roots`, `conflicting-device-keys`, `missing-root-key`, `missing-signer-key`                                                                                                         | Fail current replay; skip only a candidate decided at a fixed signed cutoff                         | Pick one of the conflicting rows                                                               |
 | Unknown publication outcome | Publication outcome `unknown`                                                                                                                                                                    | Reconcile the original operation by its record IDs                                                  | Resubmit blindly or replay a callback or source                                                |
-| Recovery failures           | `recovery-cancelled`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                                                                   | Only candidate failures permit trying another delivery                                              | Attach private material to the error                                                           |
+| Recovery failures           | `recovery-cancelled`, `recovery-root-mismatch`, `recovery-delivery-missing`, `recovery-delivery-unusable`                                                                                        | Only candidate failures permit trying another delivery                                              | Attach private material to the error                                                           |
 | Unsupported shape           | An unsupported-query error naming the operation                                                                                                                                                  | Name the operation                                                                                  | Fall back to a scan                                                                            |
 | Timeout / cancellation      | Timeout, cancellation                                                                                                                                                                            | Erase owned secrets; stop unsubmitted work                                                          | Claim a submitted operation failed                                                             |
 
@@ -2929,32 +2933,32 @@ browser callback rerun in §5.6 applies only to a refusal before commit.
 
 Refusal codes:
 
-| Code                               | Refusal                                                                                                                                                                   |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `account-has-history`              | Bootstrap found existing account evidence (§2.3).                                                                                                                         |
-| `device-identity-conflict`         | A device request or key row exists with different keys (§2.2).                                                                                                            |
-| `device-keys-mismatch`             | The device's keys do not match its accepted request.                                                                                                                      |
-| `no-device-request`                | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                                                     |
-| `reset-device-active`              | An account reset by a device that is still active in the current generation (§2.11).                                                                                      |
-| `device-not-active`                | The acting device is not an active device of the account.                                                                                                                 |
-| `device-removed`                   | The device was removed and needs a new device ID.                                                                                                                         |
-| `stale-challenge`                  | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                                                 |
-| `approval-closed`                  | The approval handle was closed or belongs to another operation.                                                                                                           |
-| `invalid-possession-proof`         | The requesting device's possession proof failed (§2.5).                                                                                                                   |
-| `invalid-challenge`                | A challenge not signed, over the requesting device's own keys, by an active device of the account (§2.5).                                                                 |
-| `target-not-active`                | The device or recovery root to remove or retire is not active (§2.8).                                                                                                     |
-| `self-removal`                     | A device tried to remove itself; another active device must remove it (§2.8).                                                                                             |
-| `no-other-device`                  | A removal request with no other active device to complete it (§2.8).                                                                                                      |
-| `device-account-root-required`     | Retiring the device account's own recovery root would prevent recovery with its account secret (§2.9).                                                                    |
-| `device-account-secret-required`   | A linked device needs the account secret to distinguish other derived roots from the device account's own (§2.9).                                                         |
-| `unsupported-recipient`            | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                            |
-| `account-reset-not-allowed`        | An account reset by a device-account session, or where the application has not enabled `allowAccountReset` (§2.11).                                                       |
-| `space-pending`                    | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2).            |
-| `space-create-refused`             | The authority refused the root itself, staged with a write (§3.2); only that transaction fails, and the device stops automatic creation of the space. |
-| `rotation-needs-key`               | No confirmed current key, or no held version for recovery (§3.5). Ordinary rotation returns zero when an active member confirms the space has no root.                    |
-| `no-account`                       | The device has no verified account, including a device awaiting approval that asks to rotate a space (§3.5).                                                              |
-| `not-a-member`                     | The account asking to rotate the space has no current member row (§3.5).                                                                                                  |
-| `device-account-identity-mismatch` | A device-account root written with an identity whose key does not derive the account ID (§2.3).                                                                           |
+| Code                               | Refusal                                                                                                                                                        |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `account-has-history`              | Bootstrap found existing account evidence (§2.3).                                                                                                              |
+| `device-identity-conflict`         | A device request or key row exists with different keys (§2.2).                                                                                                 |
+| `device-keys-mismatch`             | The device's keys do not match its accepted request.                                                                                                           |
+| `no-device-request`                | Bootstrap or reset found no request (or more than one) for this device (§2.3, §2.11).                                                                          |
+| `reset-device-active`              | An account reset by a device that is still active in the current generation (§2.11).                                                                           |
+| `device-not-active`                | The acting device is not an active device of the account.                                                                                                      |
+| `device-removed`                   | The device was removed and needs a new device ID.                                                                                                              |
+| `stale-challenge`                  | The challenge is unknown, for another device, or not of the current account epoch (§2.5).                                                                      |
+| `approval-closed`                  | The approval handle was closed or belongs to another operation.                                                                                                |
+| `invalid-possession-proof`         | The requesting device's possession proof failed (§2.5).                                                                                                        |
+| `invalid-challenge`                | A challenge not signed, over the requesting device's own keys, by an active device of the account (§2.5).                                                      |
+| `target-not-active`                | The device or recovery root to remove or retire is not active (§2.8).                                                                                          |
+| `self-removal`                     | A device tried to remove itself; another active device must remove it (§2.8).                                                                                  |
+| `no-other-device`                  | A removal request with no other active device to complete it (§2.8).                                                                                           |
+| `device-account-root-required`     | Retiring the device account's own recovery root would prevent recovery with its account secret (§2.9).                                                         |
+| `device-account-secret-required`   | A linked device needs the account secret to distinguish other derived roots from the device account's own (§2.9).                                              |
+| `unsupported-recipient`            | A recipient device, recovery root or account has no key of the selected mechanism (§0, §2.12).                                                                 |
+| `account-reset-not-allowed`        | An account reset by a device-account session, or where the application has not enabled `allowAccountReset` (§2.11).                                            |
+| `space-pending`                    | A write to a space with no valid root after this device's creation was refused in this run (§3.2), or offline with competing roots before a chain read (§5.2). |
+| `space-create-refused`             | The authority refused the root itself, staged with a write (§3.2); only that transaction fails, and the device stops automatic creation of the space.          |
+| `rotation-needs-key`               | No confirmed current key, or no held version for recovery (§3.5). Ordinary rotation returns zero when an active member confirms the space has no root.         |
+| `no-account`                       | The device has no verified account, including a device awaiting approval that asks to rotate a space (§3.5).                                                   |
+| `not-a-member`                     | The account asking to rotate the space has no current member row (§3.5).                                                                                       |
+| `device-account-identity-mismatch` | A device-account root written with an identity whose key does not derive the account ID (§2.3).                                                                |
 
 ## 8. Security properties and limits
 

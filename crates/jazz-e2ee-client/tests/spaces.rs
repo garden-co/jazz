@@ -5,6 +5,9 @@
 //! settled into the reports of §4.3.
 
 mod common;
+#[allow(dead_code)]
+#[path = "../../jazz-e2ee/tests/common/mechanisms.rs"]
+mod mechanisms;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -4230,6 +4233,172 @@ fn a_watched_rootless_space_reports_a_members_reset() {
                 generation: 1
             }));
         }
+        assert_eq!(count(&server, SPACES), 0);
+    });
+}
+
+/// Alice skips Carol's unsupported account ledger and still delivers the
+/// space key to Bob, who can then read Alice's note.
+#[test]
+fn an_unsupported_member_does_not_block_delivery_to_another_member() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.sqlite");
+        let carol = account(0xc0);
+        {
+            let server = secure_authority_with(&settings, Some(&path));
+            device(&server, carol, MemoryStore::new(), 3).activate(&server);
+        }
+        tamper(&path, "__e2ee_account_roots", "ledgerVersion", 2i64);
+
+        let server = secure_authority_with(&settings, Some(&path));
+        let (alice, bob, space) = shared_space(&server);
+        add_member(&server, &alice, space, &account_id(carol));
+        assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+        pump(&server, &bob.db);
+        let rows = read_notes(&server, &bob, space).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cell("body"), Some(text(SECRET)));
+    });
+}
+
+/// Alice skips Carol's account because its root has no device keys and still
+/// delivers the space key to Bob, who can then read Alice's note.
+#[test]
+fn a_member_missing_root_device_keys_does_not_block_delivery_to_another_member() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.sqlite");
+        let carol = account(0xc0);
+        {
+            let server = secure_authority_with(&settings, Some(&path));
+            device(&server, carol, MemoryStore::new(), 3).activate(&server);
+        }
+        let deleted = rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute("DELETE FROM __e2ee_device_keys", [])
+            .unwrap();
+        assert!(deleted > 0);
+
+        let server = secure_authority_with(&settings, Some(&path));
+        let (alice, bob, space) = shared_space(&server);
+        add_member(&server, &alice, space, &account_id(carol));
+        assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+        pump(&server, &bob.db);
+        let rows = read_notes(&server, &bob, space).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cell("body"), Some(text(SECRET)));
+    });
+}
+
+/// When Alice's provider cannot verify Bob's device approval, delivery in
+/// their rootless space returns the provider error. A retry after the provider
+/// recovers finds that the space still has no root.
+///
+/// ```text
+/// bob ──approves──► second device
+/// alice ──deliver──► provider failure ──retry──► zero deliveries
+/// ```
+#[test]
+fn a_rootless_delivery_pass_preserves_a_members_replay_failure() {
+    use jazz_e2ee::OsRandom;
+    use jazz_e2ee::registry::Registry;
+    use jazz_e2ee_client::ClientConfig;
+    use mechanisms::{FLAKY_SIGN, FlakySigner};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    within(|| {
+        let signing = serde_json::json!({ "id": FLAKY_SIGN.id, "version": FLAKY_SIGN.version });
+        let settings = EncryptionSettings {
+            mechanisms: Some(serde_json::json!({
+                "selected": { "signature": signing }, "allowed": { "signature": [signing] }
+            })),
+            ..Default::default()
+        };
+        let server = secure_authority_with(&settings, None);
+        let make_device = |who, node, fails| {
+            let mut registry = Registry::builtin();
+            registry
+                .register_signer(Arc::new(FlakySigner {
+                    fails,
+                    record_marker: Some(b"jazz.e2ee.public-device-approval.v1"),
+                }))
+                .unwrap();
+            let client = block_on(E2eeClient::open(ClientConfig {
+                store: Rc::new(MemoryStore::new()),
+                declarations: declarations_with(settings.clone()),
+                account_id: account_id(who),
+                registry,
+                random: Box::new(OsRandom),
+                device_account: None,
+            }))
+            .unwrap();
+            let (db, link) = session(&client, &server, who, &settings, node, None);
+            Device {
+                who,
+                client,
+                db,
+                _link: Some(link),
+                live: Default::default(),
+            }
+        };
+        let alice_fails = Arc::new(AtomicBool::new(false));
+        let alice = make_device(account(0xa1), 1, alice_fails.clone());
+        let bob_fails = Arc::new(AtomicBool::new(false));
+        let bob = make_device(account(0xb0), 2, bob_fails.clone());
+        let second = make_device(bob.who, 3, bob_fails);
+        alice.activate(&server);
+        bob.activate(&server);
+
+        let bob_dbs = [&bob.db, &second.db];
+        assert_eq!(
+            drive(&server, &bob_dbs, second.client.ensure_account(&second.db)).unwrap(),
+            AccountStatus::AwaitingApproval
+        );
+        let pending = drive(
+            &server,
+            &bob_dbs,
+            bob.client
+                .challenge_device(&bob.db, &second.client.device().unwrap().id),
+        )
+        .unwrap();
+        let code = drive(
+            &server,
+            &bob_dbs,
+            second.client.answer_challenge(&second.db),
+        )
+        .unwrap();
+        drive(
+            &server,
+            &bob_dbs,
+            bob.client.approve_device(&bob.db, &pending, &code),
+        )
+        .unwrap();
+
+        let space = new_project(&server, &alice, "plans");
+        add_member(&server, &alice, space, &bob.id());
+        let address = space_address(&alice, space);
+        let sync = || {
+            let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
+            watch.use_space(&address);
+            alice
+                .sync_spaces(&server, &mut watch)
+                .unwrap()
+                .into_iter()
+                .find(|(space, _)| space == &address)
+                .unwrap()
+                .1
+        };
+        alice_fails.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            sync(),
+            Err(ClientError::Protocol(ProtocolError::ProviderFailure))
+        ));
+        alice_fails.store(false, Ordering::SeqCst);
+        assert_eq!(sync().unwrap(), SpaceKeyState::NoRoot);
         assert_eq!(count(&server, SPACES), 0);
     });
 }

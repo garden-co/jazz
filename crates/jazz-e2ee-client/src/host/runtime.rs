@@ -880,6 +880,24 @@ impl Encryption {
             return Ok(Value::Null);
         }
         self.client.ensure_open().map_err(describe)?;
+        if op == "reportsForListener" {
+            // Flush and take the queue before sampling the held reports. The
+            // reports produced after this call go in the next poll.
+            let queued = self.take_reports();
+            let keys = self.client.shared.keys.borrow();
+            let active: Vec<_> = self
+                .client
+                .shared
+                .held_reports()
+                .iter()
+                .map(|report| {
+                    report_json(report, |scope| {
+                        keys.catalogue.as_ref()?.table_names.get(scope).cloned()
+                    })
+                })
+                .collect();
+            return Ok(json!({ "active": active, "queued": queued }));
+        }
         // The delivery pass belongs to the loop, which takes its turn itself.
         // A space's row is a local catalogue lookup: it never waits for the
         // loop's work.
@@ -1666,6 +1684,10 @@ fn report_json(report: &Report, table_name: impl Fn(&str) -> Option<String>) -> 
 pub type JsonFuture = Pin<Box<dyn Future<Output = Result<Value, String>>>>;
 
 #[cfg(test)]
+#[path = "../../../jazz/layers/types/tests/support/zeroized_allocation.rs"]
+mod zeroized_allocation;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1738,6 +1760,25 @@ mod tests {
         assert!(secret(&"ab".repeat(32)).is_ok());
         assert!(secret("ab").is_err());
         assert!(secret(&"zz".repeat(32)).is_err());
+    }
+
+    /// Alice's owned mnemonic is wiped before its buffer is freed on success
+    /// or parse failure. The argument boundary is tested directly so the
+    /// assertion can identify the exact allocation handed to the parser.
+    #[test]
+    fn an_owned_recovery_phrase_is_wiped_on_success_and_failure() {
+        use super::zeroized_allocation::assert_zeroized;
+
+        let phrase = super::super::phrase::from_secret(&[5; 32]);
+        let parse = |phrase| {
+            let mut args = Value::Object(serde_json::Map::from_iter([(
+                "phrase".to_owned(),
+                Value::String(phrase),
+            )]));
+            take_recovery_phrase(&mut args).unwrap()
+        };
+        assert!(assert_zeroized(phrase.as_str().to_owned(), parse).is_ok());
+        assert!(assert_zeroized("one word".to_owned(), parse).is_err());
     }
 
     /// Alice's mnemonic is consumed before either recovery call can wait
@@ -2005,6 +2046,39 @@ mod tests {
             runtime.foreground_ready_outcome(second, true),
             Some(Err(closed))
         );
+    }
+
+    /// Alice's first listener gets all 10,000 active unreadables even when
+    /// the host's event queue overflowed. Inject reports at the runtime to
+    /// exercise both limits without 10,000 database reads.
+    #[test]
+    fn a_new_listener_gets_the_active_set_after_event_queue_overflow() {
+        use jazz::e2ee::{Unreadable, UnreadableCode};
+        use jazz::ids::RowUuid;
+
+        let runtime = native_runtime_with_catalogue(true);
+        for id in 1..=10_000 {
+            runtime.client.shared.report(Report::Unreadable(Unreadable {
+                table: "notes".into(),
+                id: Some(RowUuid(uuid::Uuid::from_u128(id))),
+                column: Some("body".into()),
+                code: UnreadableCode::InvalidCiphertext,
+                space: None,
+            }));
+        }
+        let snapshot = run(runtime.call("reportsForListener".into(), Value::Null)).unwrap();
+        let active = snapshot["active"].as_array().unwrap();
+        assert_eq!(active.len(), 10_000);
+        assert_eq!(active[0]["id"], uuid::Uuid::from_u128(1).to_string());
+        let queued = snapshot["queued"].as_array().unwrap();
+        assert_eq!(queued.len(), MAX_REPORTS + 1);
+        let dropped: Value = serde_json::from_str(queued[0].as_str().unwrap()).unwrap();
+        assert_eq!(
+            dropped,
+            json!({ "type": "reports-dropped", "count": 10_000 - MAX_REPORTS })
+        );
+        assert!(runtime.take_reports().is_empty());
+        runtime.stop();
     }
 
     /// Alice's host delivers the client's report on its next drive.
