@@ -1,4 +1,4 @@
-//! The canonical JSON of the private store's records (`E2EE_PROTOCOL.md`
+//! The protocol's canonical JSON (`E2EE_PROTOCOL.md`
 //! §6.2): ECMAScript `JSON.stringify` output as UTF-8, without whitespace,
 //! with object keys sorted by UTF-16 code unit, absent fields dropped,
 //! bytes as arrays of numbers and big integers as decimal strings.
@@ -11,8 +11,8 @@
 //! [`parse_object_parts`] and [`parse_array_parts`], which also accept
 //! whitespace, so that each record is checked on its own.
 
-use super::super::error::{ProtocolError, ProtocolResult};
-use super::super::json;
+use super::error::{ProtocolError, ProtocolResult};
+use super::json;
 
 /// The largest integer ECMAScript represents exactly; larger numbers are
 /// written as decimal strings.
@@ -20,7 +20,7 @@ pub(crate) const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 /// Nesting deeper than any record of the store is refused.
 const MAX_DEPTH: usize = 16;
 
-/// A JSON value of the shapes the store uses.
+/// A JSON value of the shapes the protocol uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Value {
     Bool(bool),
@@ -32,7 +32,7 @@ pub(crate) enum Value {
     Object(Vec<(String, Value)>),
 }
 
-fn invalid<T>(what: &'static str) -> ProtocolResult<T> {
+pub(super) fn invalid<T>(what: &'static str) -> ProtocolResult<T> {
     Err(ProtocolError::InvalidRecord(what))
 }
 
@@ -148,6 +148,27 @@ impl Value {
 /// `B(f, x) = UTF8(json(canonical([f, x])))`.
 pub(crate) fn framed(format: &str, value: Value) -> ProtocolResult<Vec<u8>> {
     Value::Array(vec![Value::string(format), value]).encode()
+}
+
+/// Parses text that must be the canonical encoding of what it parses to.
+pub(crate) fn parse_canonical(bytes: &[u8]) -> ProtocolResult<Value> {
+    fn sorted(value: &Value) -> bool {
+        match value {
+            Value::Array(items) => items.iter().all(sorted),
+            Value::Object(fields) => {
+                fields
+                    .windows(2)
+                    .all(|pair| json::utf16_cmp(&pair[0].0, &pair[1].0).is_lt())
+                    && fields.iter().all(|(_, value)| sorted(value))
+            }
+            _ => true,
+        }
+    }
+    let value = parse(bytes)?;
+    if !sorted(&value) || value.encode()? != bytes {
+        return invalid("non-canonical JSON");
+    }
+    Ok(value)
 }
 
 /// Parses JSON text of the store's shapes.

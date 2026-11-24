@@ -36,13 +36,13 @@ use crate::agility::{KeyPair, MechanismId, PublicKey, SecretKey};
 
 use super::super::account::AccountFloor;
 use super::super::account::build::{ApprovalNonce, LocalDevice};
+use super::super::canonical::{self, Value, invalid, parse_canonical};
 use super::super::error::{ProtocolError, ProtocolResult};
 use super::super::position::Position;
 use super::super::records::KeyColumns;
 use super::super::records::account::nonce_commitment;
-use super::canonical::{self, Value};
 use super::store::{Rejection, StoreOwner};
-use super::stored::{Binding, Fields, UnrecognisedDocument, ensure_canonical, parse_canonical};
+use super::stored::{Binding, Fields, UnrecognisedDocument, ensure_canonical};
 
 /// The format of the device document.
 pub const DEVICE_DOCUMENT_FORMAT: &str = "jazz-e2ee-local-devices-v3";
@@ -50,10 +50,6 @@ pub const DEVICE_DOCUMENT_FORMAT: &str = "jazz-e2ee-local-devices-v3";
 pub const APPROVAL_NONCE_FORMAT: &str = "jazz-e2ee-approval-nonce-v1";
 /// The format of a floor record.
 pub const FLOOR_FORMAT: &str = "jazz-e2ee-floor-v1";
-
-fn invalid<T>(what: &'static str) -> ProtocolResult<T> {
-    Err(ProtocolError::InvalidRecord(what))
-}
 
 fn decimal(value: u64) -> Value {
     Value::String(value.to_string())

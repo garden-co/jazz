@@ -12,7 +12,7 @@
 //!                      envelope, signature }
 //! ```
 //!
-//! Every value is canonical JSON ([`super::canonical`]); `B(f, x) =
+//! Every value is canonical JSON ([`super::super::canonical`]); `B(f, x) =
 //! UTF8(json(canonical([f, x])))`. Stored root and successor rows are
 //! objects of their §1.3 columns plus `id`, bytes as arrays. A decoder
 //! rebuilds each record and refuses input whose canonical encoding differs;
@@ -22,9 +22,9 @@
 use crate::agility::{MechanismId, PublicKey};
 use crate::primitives::hash::sha256;
 
+use super::super::canonical::{self, MAX_SAFE_INTEGER, Value, invalid, parse_canonical};
 use super::super::error::{ProtocolError, ProtocolResult};
 use super::super::records::space::{SpaceRoot, SpaceSuccessor};
-use super::canonical::{self, MAX_SAFE_INTEGER, Value};
 
 /// The format of a held-key document (one per space root).
 pub const DOCUMENT_FORMAT: &str = "jazz-e2ee-held-space-v1";
@@ -36,10 +36,6 @@ pub const KEY_FORMAT: &str = "jazz-e2ee-held-key-v3";
 pub const DEVICE_HASH_FORMAT: &str = "jazz-e2ee-held-device-v1";
 /// The format `B` names in the lineage prefix hash.
 pub const PREFIX_FORMAT: &str = "jazz-e2ee-held-prefix-v1";
-
-fn invalid<T>(what: &'static str) -> ProtocolResult<T> {
-    Err(ProtocolError::InvalidRecord(what))
-}
 
 /// Lowercase hex.
 fn hex(bytes: &[u8]) -> String {
@@ -411,27 +407,6 @@ impl HeldKeyRecord {
         ensure_canonical(value, &record.value(true, true))?;
         Ok(record)
     }
-}
-
-/// Parses text that must be the canonical encoding of what it parses to.
-pub(super) fn parse_canonical(bytes: &[u8]) -> ProtocolResult<Value> {
-    fn sorted(value: &Value) -> bool {
-        match value {
-            Value::Array(items) => items.iter().all(sorted),
-            Value::Object(fields) => {
-                fields
-                    .windows(2)
-                    .all(|pair| super::super::json::utf16_cmp(&pair[0].0, &pair[1].0).is_lt())
-                    && fields.iter().all(|(_, value)| sorted(value))
-            }
-            _ => true,
-        }
-    }
-    let value = canonical::parse(bytes)?;
-    if !sorted(&value) || value.encode()? != bytes {
-        return invalid("non-canonical JSON");
-    }
-    Ok(value)
 }
 
 /// One held-key document: `{ format, revision, lineage, keys }`.

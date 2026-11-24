@@ -18,7 +18,6 @@
 //! - [`local`]: the device document, with its approval nonce state, and
 //!   the signed floor records of the private store (§6.1, §6.3a).
 
-mod canonical;
 pub mod cells;
 pub mod equality;
 pub mod held;
