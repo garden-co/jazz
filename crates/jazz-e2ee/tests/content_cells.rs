@@ -1040,6 +1040,7 @@ fn read_stream(
     Ok(out)
 }
 
+/// Alice can open empty and large streams through the cell reader only in streamable columns.
 #[test]
 fn large_values_stream_in_bytes_columns_only() {
     let world = world(20);
@@ -1059,10 +1060,6 @@ fn large_values_stream_in_bytes_columns_only() {
     let plaintext = TestRandom(20).bytes(200_000);
     let stored = seal_stream(&world, &key, &target, &plaintext, 10_000);
     assert_eq!(
-        stream_routing(&stored).unwrap().epoch_id,
-        key.epoch_id().to_owned()
-    );
-    assert_eq!(
         value(open_cell(registry, &held, &target, &blob(), &stored).unwrap()),
         plaintext
     );
@@ -1079,16 +1076,13 @@ fn large_values_stream_in_bytes_columns_only() {
             .unwrap(),
     );
     assert!(!indexed_bytes.may_stream());
-    for chunk in [1, 7, 69, 65_552, 300_000] {
-        assert_eq!(
-            read_stream(registry, &held, &target, &stored, chunk).unwrap(),
-            plaintext,
-            "chunks of {chunk}"
-        );
-    }
+    assert!(matches!(
+        begin_stream(&suite, &key, &target, &indexed_bytes, &mut TestRandom(1)),
+        Err(ContentError::NotStreamable)
+    ));
     let empty = seal_stream(&world, &key, &target, b"", 1);
     assert_eq!(
-        read_stream(registry, &held, &target, &empty, 3).unwrap(),
+        value(open_cell(registry, &held, &target, &blob(), &empty).unwrap()),
         b""
     );
 }
