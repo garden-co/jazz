@@ -4436,7 +4436,6 @@ fn from_wire_error(error: WireError) -> Error {
             code: ErrorCode::WriteRejected,
             reason: reason.as_deref().and_then(Reason::from_name),
             message,
-            #[cfg(feature = "e2ee-client")]
             space: None,
         },
         WireError::Other(m) => Error::new(ErrorCode::Protocol, m),
@@ -8842,8 +8841,7 @@ impl Store {
         since: u64,
         request_claims: bool,
     ) -> Result<Option<Resume>, Error> {
-        #[cfg(feature = "e2ee-client")]
-        if self.e2ee.is_some() {
+        if self.e2ee_hooks().is_some() {
             return Ok(None);
         }
         let query = &prepared.query;
@@ -9427,7 +9425,6 @@ fn schema_version_not_deployed() -> Error {
         message: "this write was made through a schema version the server has not deployed: \
                   deploy the schema before releasing the app that writes through it"
             .to_owned(),
-        #[cfg(feature = "e2ee-client")]
         space: None,
     }
 }
@@ -9655,7 +9652,6 @@ impl Db {
             binding_id: Binding([0; 16]),
             request_claims: None,
             schema: self.view.clone(),
-            #[cfg(feature = "e2ee-client")]
             planned: None,
         };
         // The answer lists the result as of `through`: rows that arrived
@@ -17031,7 +17027,6 @@ impl Db {
                     binding_id: Binding([0; 16]),
                     request_claims: None,
                     schema: Some(schema),
-                    #[cfg(feature = "e2ee-client")]
                     planned: None,
                 };
                 // A branch read is evaluated through its view (jazz#5806):

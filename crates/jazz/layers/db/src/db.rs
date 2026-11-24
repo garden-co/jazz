@@ -60,13 +60,10 @@ pub use sync::{ORIGIN_ENTRY_RETENTION_MS, origin_node};
 #[cfg(feature = "e2ee-client")]
 #[path = "e2ee_ledger.rs"]
 pub(crate) mod e2ee_ledger;
-#[cfg(feature = "e2ee-client")]
 #[path = "e2ee_query.rs"]
 mod e2ee_query;
-#[cfg(feature = "e2ee-client")]
 #[path = "e2ee_read.rs"]
 mod e2ee_read;
-#[cfg(feature = "e2ee-client")]
 #[path = "e2ee_write.rs"]
 mod e2ee_write;
 #[path = "shard.rs"]
@@ -124,7 +121,6 @@ pub struct PreparedQuery {
     /// The schema view that prepared it; `None` follows the owner schema.
     schema: Option<Rc<Schema>>,
     /// What the encryption hooks keep of a query they rewrote.
-    #[cfg(feature = "e2ee-client")]
     planned: Option<Rc<e2ee_query::Planned>>,
 }
 
@@ -2218,11 +2214,12 @@ impl Db {
                 account_registry: RefCell::default(),
                 #[cfg(feature = "e2ee-client")]
                 e2ee: config.e2ee,
-                #[cfg(feature = "e2ee-client")]
                 e2ee_salt: {
                     let mut salt = [0; 32];
-                    salt[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-                    salt[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                    if cfg!(feature = "e2ee-client") {
+                        salt[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                        salt[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+                    }
                     salt
                 },
 
@@ -2479,8 +2476,7 @@ impl Db {
     pub async fn set_authority(&self) -> Result<(), Error> {
         let _operation = self.write_operation().await;
         let inner = self.inner.without_overlay();
-        #[cfg(feature = "e2ee-client")]
-        if inner.e2ee.is_some() {
+        if inner.e2ee_hooks().is_some() {
             return Err(Error::new(
                 ErrorCode::Protocol,
                 "a database with encryption hooks cannot serve as the authority",
@@ -3619,16 +3615,12 @@ impl Db {
         let query = normalized.as_ref().unwrap_or(query);
         // Encrypted equality filters become token filters before anything
         // validates, stores or uploads the query.
-        #[cfg(feature = "e2ee-client")]
         let (physical, planned) = self.inner.plan_query(&schema, query)?;
-        #[cfg(feature = "e2ee-client")]
-        let query = &physical;
-        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
+        let query = physical.as_ref();
         let mut shape = format!("{query:?}{:?}", schema.jazz.version_id());
         // The held epochs a rewritten query's tokens were computed for: a
         // new one is a new query, even offline, where its text is the same.
         // So is a new residual: its filter and window are not in the text.
-        #[cfg(feature = "e2ee-client")]
         if let Some(planned) = &planned {
             shape.push_str(&format!("{:?}{:?}", planned.epochs, planned.residual_key));
         }
@@ -3650,13 +3642,12 @@ impl Db {
             validated.insert(key);
         }
         Ok(PreparedQuery {
-            query: query.clone(),
+            query: physical.into_owned(),
             binding,
             shape: Shape(short(shape)),
             binding_id: Binding(short(bound)),
             request_claims: None,
             schema: self.view.clone(),
-            #[cfg(feature = "e2ee-client")]
             planned,
         })
     }
@@ -4140,15 +4131,12 @@ impl Db {
         let row = op.row().map(|row| *row.0.as_bytes());
         // Boxed: a sealed write's state stays off the caller's stack,
         // which a client thread keeps small.
-        #[cfg(feature = "e2ee-client")]
-        if self.inner.e2ee.is_some() {
+        if self.inner.e2ee_hooks().is_some() {
             return Box::pin(self.fetching_with(row.as_slice(), op, async |op| {
                 self.write_sealed(op, who, streamed).await
             }))
             .await;
         }
-        #[cfg(not(feature = "e2ee-client"))]
-        let _ = streamed;
         let op = {
             let _operation = self.write_operation().await;
             self.prepare_write(op)?
@@ -4215,7 +4203,6 @@ impl Db {
 
     /// Seal a write and commit its internal companion rows before it, in
     /// the same transaction.
-    #[cfg(feature = "e2ee-client")]
     async fn write_sealed(
         &self,
         mut op: StagedOp,
@@ -4249,7 +4236,7 @@ impl Db {
             .await;
         if written.is_err()
             && !companions.is_empty()
-            && let Some(hooks) = &self.inner.e2ee
+            && let Some(hooks) = self.inner.e2ee_hooks()
         {
             hooks.companions_dropped(&companions);
         }
@@ -5735,12 +5722,8 @@ impl Store {
         read: &ReadSpec,
         strict: bool,
     ) -> Result<(Vec<CurrentRow>, Vec<UnreadableRow>), Error> {
-        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
         let mut rows = self.run(prepared, identity, read).await?;
-        #[cfg(feature = "e2ee-client")]
         let unreadable = self.open_read(prepared, read, strict, &mut rows, None)?;
-        #[cfg(not(feature = "e2ee-client"))]
-        let (unreadable, _) = (Vec::new(), strict);
         Ok((rows, unreadable))
     }
 
@@ -11281,11 +11264,22 @@ struct Store {
     e2ee: Option<Rc<dyn crate::e2ee::E2eeHooks>>,
     /// Keys this database's digests of plaintext search values, chosen at
     /// random when it opens: a digest confirms no guessed value elsewhere.
-    #[cfg(feature = "e2ee-client")]
     e2ee_salt: [u8; 32],
 }
 
 impl Store {
+    #[inline]
+    fn e2ee_hooks(&self) -> Option<&Rc<dyn crate::e2ee::E2eeHooks>> {
+        #[cfg(feature = "e2ee-client")]
+        {
+            self.e2ee.as_ref()
+        }
+        #[cfg(not(feature = "e2ee-client"))]
+        {
+            None
+        }
+    }
+
     /// Delete up to `budget` large-value nodes no cell or branch references.
     /// A pass runs only when one could find work: a row changed since the
     /// last pass that emptied the queue, or an upload was dropped.
@@ -11403,7 +11397,6 @@ struct Batch {
     claims: Option<BTreeMap<String, Value>>,
     /// The companion rows its sealed writes staged, told to the encryption
     /// hooks if the batch goes without committing them.
-    #[cfg(feature = "e2ee-client")]
     companions: e2ee_write::StagedCompanions,
 }
 
@@ -12268,7 +12261,6 @@ impl Db {
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
                 claims: None,
-                #[cfg(feature = "e2ee-client")]
                 companions: Default::default(),
             },
         );
@@ -12561,7 +12553,6 @@ impl Db {
         let receipt = self
             .with_upload(async || self.commit_ops_now(batch, kind).await)
             .await?;
-        #[cfg(feature = "e2ee-client")]
         batch.companions.committed();
         Ok(receipt)
     }
@@ -13017,11 +13008,9 @@ impl Db {
         edits: LargeEdits,
         streamed: Option<large_ops::StreamedSeal<'_>>,
     ) -> Result<(), Error> {
-        #[cfg(feature = "e2ee-client")]
-        return self.stage_sealed(id, op, edits, streamed).await;
-        #[cfg(not(feature = "e2ee-client"))]
-        {
-            let _ = streamed;
+        if cfg!(feature = "e2ee-client") {
+            self.stage_sealed(id, op, edits, streamed).await
+        } else {
             self.stage_chunked(id, op, edits).await
         }
     }

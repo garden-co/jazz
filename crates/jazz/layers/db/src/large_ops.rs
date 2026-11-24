@@ -239,7 +239,6 @@ impl PreparedCell {
             // Read under the schema this handle serves (a pinned session's
             // view and its bundle's policies), as its own reads are.
             schema: Some(schema),
-            #[cfg(feature = "e2ee-client")]
             planned: None,
         };
         Ok(Self {
@@ -1111,8 +1110,7 @@ impl Db {
     /// encryption hooks it is sealed like any update, its encrypted cells
     /// sealed and its space checked before anything stores it.
     async fn write_edited(&self, op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
-        #[cfg(feature = "e2ee-client")]
-        if self.inner.e2ee.is_some() {
+        if self.inner.e2ee_hooks().is_some() {
             return self.write_sealed(op, who, None).await;
         }
         let prepared = self.prepare_write(op)?;
@@ -1243,7 +1241,6 @@ impl Db {
             ));
         }
         whole_only(&self.inner, table, column)?;
-        #[cfg(feature = "e2ee-client")]
         self.inner.check_rowless_stream(table, cells, None)?;
         self.begin_upload(table, cells, column)
     }
@@ -1284,10 +1281,8 @@ impl Db {
                 "database is closing or closed",
             ));
         }
-        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_mut))]
         let mut upload = self.begin_upload(table, cells, column)?;
-        #[cfg(feature = "e2ee-client")]
-        {
+        if cfg!(feature = "e2ee-client") {
             let schema = self.operation_schema();
             let mut prepare = async |inner: &Store| {
                 inner
@@ -1303,8 +1298,6 @@ impl Db {
                 None => prepare(self.inner.without_overlay()).await?,
             }
         }
-        #[cfg(not(feature = "e2ee-client"))]
-        let _ = (transaction, mutation, row, target);
         Ok(upload)
     }
 
@@ -1321,7 +1314,6 @@ impl Db {
                 format!("{table}.{column} is streamed, so the other cells cannot also set it"),
             ));
         }
-        #[cfg(feature = "e2ee-client")]
         self.inner
             .validate_stream_siblings(&self.operation_schema(), table, cells)?;
         let kind = crate::large::kind(&col);
@@ -1356,9 +1348,7 @@ impl Db {
                 }),
             )),
             emitted,
-            #[cfg(feature = "e2ee-client")]
             sealer: None,
-            #[cfg(feature = "e2ee-client")]
             sealed_for: None,
         })
     }
@@ -1373,7 +1363,6 @@ impl Db {
     ) -> Result<(), Error> {
         let _operation = self.write_operation().await;
         // An encrypted value is sealed before the chunker sees it.
-        #[cfg(feature = "e2ee-client")]
         if let Some(sealer) = upload.sealer.as_mut() {
             let sealed = sealer.push(bytes)?;
             return self.stage_streaming_bytes(upload, &sealed).await;
@@ -1496,7 +1485,6 @@ impl Db {
         // The value was sealed as it streamed: this write, and no other,
         // leaves the column to the hooks as it is, in the row and space it
         // was sealed for.
-        #[cfg(feature = "e2ee-client")]
         let sealed_for = upload.sealed_for.take();
         let result = async {
             if mutation == StreamingMutationKind::Insert && base.is_some() {
@@ -1505,8 +1493,7 @@ impl Db {
                 ));
             }
             let op = mutation.staged(table, row, cells, identity, now_ms, head, base);
-            #[cfg(feature = "e2ee-client")]
-            if self.inner.e2ee.is_some() {
+            if self.inner.e2ee_hooks().is_some() {
                 return self
                     .fetching_with(&[], op, async |op| {
                         self.inner
@@ -1573,7 +1560,6 @@ impl Db {
         // Refused here early when the finish names another row, target or
         // space; the write's staging, which sees its transaction's own
         // writes, checks the space it is sealed in (`Store::seal_op`).
-        #[cfg(feature = "e2ee-client")]
         if let Some(sealed) = &mut upload.sealed_for {
             if mutation != sealed.mutation {
                 return Err(rejected(
@@ -1597,14 +1583,11 @@ impl Db {
             self.inner
                 .check_rowless_stream(table, cells, Some(mutation))?;
         }
-        #[cfg(not(feature = "e2ee-client"))]
-        let _ = (mutation, row, target);
         if cells.contains_key(column) {
             return Err(rejected(
                 "the streamed column is also set in the other cells",
             ));
         }
-        #[cfg(feature = "e2ee-client")]
         if let Some(sealer) = upload.sealer.take() {
             let tail = sealer.finish()?;
             self.stage_streaming_bytes(upload, &tail).await?;
@@ -1799,12 +1782,10 @@ pub struct StreamingValueUpload {
     preparation: Option<lv::PushStreamingPreparation<Stage>>,
     emitted: Rc<RefCell<Vec<lv::StagedChunk>>>,
     /// Seals an encrypted column's value as it streams.
-    #[cfg(feature = "e2ee-client")]
     pub(super) sealer: Option<Box<dyn crate::e2ee::StreamSealer>>,
     /// The row, target and space the value was sealed for as it streamed:
     /// only a write of that row, to that target, in that space publishes
     /// it, and leaves it to the hooks as it is.
-    #[cfg(feature = "e2ee-client")]
     pub(super) sealed_for: Option<SealedFor>,
 }
 
@@ -1812,7 +1793,6 @@ pub(crate) type StreamedSeal<'a> = &'a SealedFor;
 
 /// The refusal of a sealed stream published anywhere but where it was
 /// sealed for: there it would never open, and nothing would seal it again.
-#[cfg(feature = "e2ee-client")]
 pub(crate) fn sealed_elsewhere() -> Error {
     schema_error(
         "a sealed streaming upload is published to the row, target and space it was sealed for",
@@ -1821,7 +1801,6 @@ pub(crate) fn sealed_elsewhere() -> Error {
 
 /// What a sealed stream was sealed for (see
 /// [`Db::begin_streaming_value_upload_for`]).
-#[cfg_attr(not(feature = "e2ee-client"), allow(dead_code))]
 pub(crate) struct SealedFor {
     pub(super) row: RowUuid,
     pub(super) mutation: StreamingMutationKind,
@@ -1866,13 +1845,7 @@ pub(crate) async fn renew_upload_leases(
 /// encrypted: a range, a JSON pointer, a delta, an edit or a streamed
 /// value (protocol §5.5).
 fn whole_only(inner: &Store, table: &str, column: &str) -> Result<(), Error> {
-    #[cfg(feature = "e2ee-client")]
-    return inner.refuse_encrypted_part(table, column);
-    #[cfg(not(feature = "e2ee-client"))]
-    {
-        let _ = (inner, table, column);
-        Ok(())
-    }
+    inner.refuse_encrypted_part(table, column)
 }
 
 fn streaming_column(table: &Table, column: &str) -> Result<crate::values::Column, Error> {
@@ -2259,12 +2232,8 @@ impl TxRef<'_> {
         // The value was sealed as it streamed: this write, and no other,
         // leaves the column to the hooks as it is, in the row and space it
         // was sealed for.
-        #[cfg(feature = "e2ee-client")]
         let sealed_for = upload.sealed_for.take();
-        #[cfg(feature = "e2ee-client")]
         let streamed = sealed_for.as_ref();
-        #[cfg(not(feature = "e2ee-client"))]
-        let streamed = None;
         self.db.stage_streamed(self.id, op, edits, streamed).await?;
         // An inline value is in its cell: its upload ends as the handle drops.
         if held {

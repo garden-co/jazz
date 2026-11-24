@@ -42,6 +42,10 @@ pub mod db;
 mod durable_object_limits;
 #[cfg(feature = "e2ee-client")]
 pub mod e2ee;
+// The shared database paths compile against the hook contract in either build.
+#[cfg(not(feature = "e2ee-client"))]
+#[allow(dead_code)]
+mod e2ee;
 pub mod format;
 pub mod host;
 pub(crate) mod large;

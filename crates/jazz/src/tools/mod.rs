@@ -383,7 +383,6 @@ mod rejection_code_tests {
             code: ErrorCode::WriteRejected,
             reason,
             message: message.to_owned(),
-            #[cfg(feature = "e2ee-client")]
             space: None,
         }
     }
@@ -429,7 +428,6 @@ mod rejection_code_tests {
             code: ErrorCode::TransactionConflict,
             reason: None,
             message: "read changed".to_owned(),
-            #[cfg(feature = "e2ee-client")]
             space: None,
         };
         assert_eq!(
@@ -440,7 +438,6 @@ mod rejection_code_tests {
             code: ErrorCode::Storage,
             reason: None,
             message: "disk".to_owned(),
-            #[cfg(feature = "e2ee-client")]
             space: None,
         };
         assert_eq!(pair(&other), None);
