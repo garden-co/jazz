@@ -38,7 +38,7 @@ async function admit(
 async function interleave(
   db: Db,
   afterReadOf: string,
-  effect: () => Promise<void>,
+  effect: () => Promise<unknown>,
   run: (transaction: ReturnType<typeof vi.spyOn>) => Promise<void>,
 ) {
   const transaction = db.serializableTransaction.bind(db);
