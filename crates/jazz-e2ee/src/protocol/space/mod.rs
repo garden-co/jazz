@@ -33,14 +33,4 @@ pub use members::{
     VersionEnvelope,
 };
 
-use super::json;
-use super::position::{Accepted, RowId};
-
-/// Sorts rows by accepted position, then by row ID.
-fn by_position_then_id<T: RowId>(rows: &mut [&Accepted<T>]) {
-    rows.sort_by(|a, b| {
-        a.position
-            .cmp(&b.position)
-            .then_with(|| json::utf16_cmp(a.row.row_id(), b.row.row_id()))
-    });
-}
+use super::position::by_position_then_id;

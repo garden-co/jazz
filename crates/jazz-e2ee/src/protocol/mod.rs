@@ -37,10 +37,12 @@ pub mod domain;
 pub mod error;
 pub mod ids;
 pub mod json;
+mod key_crypto;
 pub mod position;
 pub mod records;
 pub mod signing;
 pub mod space;
 
 pub use error::{ProtocolError, ProtocolResult};
+pub use key_crypto::Key32;
 pub use position::{Accepted, Position};

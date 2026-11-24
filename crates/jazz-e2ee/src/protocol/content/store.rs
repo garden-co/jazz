@@ -28,8 +28,8 @@ use crate::registry::Registry;
 use super::super::account::build::LocalDevice;
 use super::super::domain::{AccountDomain, AppDomain};
 use super::super::error::{ProtocolError, ProtocolResult};
-use super::super::signing;
 use super::super::space::keys::{Outcome, marker};
+use super::super::{key_crypto, signing};
 use super::held::{HeldEntry, HeldSpace, KeyMark};
 pub use super::stored::{
     Binding, DecodedDocument, HeldDocument, HeldKeyRecord, LineageRecord, UnrecognisedDocument,
@@ -146,21 +146,7 @@ impl StoreOwner<'_> {
     /// Signs with the device's signing key and verifies the signature
     /// again; a failure to read it back is a provider failure.
     pub(super) fn sign(&self, bytes: &[u8]) -> ProtocolResult<Vec<u8>> {
-        let signer = self
-            .registry
-            .signer(self.device.signing.public.mechanism.as_mechanism())?;
-        let signature = signing::sign(signer, &self.device.signing, bytes)?;
-        let verified = signing::verify(
-            self.registry,
-            &self.device.signing.public,
-            bytes,
-            &signature,
-        )
-        .map_err(|_| ProtocolError::ProviderFailure)?;
-        if !verified {
-            return Err(ProtocolError::ProviderFailure);
-        }
-        Ok(signature)
+        key_crypto::sign(self.registry, &self.device.signing, bytes)
     }
 
     pub(super) fn verify(&self, bytes: &[u8], signature: &[u8]) -> ProtocolResult<Checked<()>> {
@@ -225,13 +211,7 @@ impl StoreOwner<'_> {
             .registry
             .key_sealer(sealing.public.mechanism.as_mechanism())?;
         let envelope = sealer.seal(&sealing.public, &body, &entry.key, rng)?;
-        let opened = self
-            .registry
-            .open_sealed(core::slice::from_ref(sealing), &body, &envelope)
-            .map_err(|_| ProtocolError::ProviderFailure)?;
-        if *opened != *entry.key {
-            return Err(ProtocolError::ProviderFailure);
-        }
+        key_crypto::check_sealed(self.registry, sealing, &body, &envelope, &entry.key)?;
         record.envelope = envelope;
         record.signature = self.sign(&record.signed_bytes()?)?;
         Ok(record)

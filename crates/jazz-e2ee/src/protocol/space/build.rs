@@ -18,8 +18,6 @@
 //! each builder states, so that read-set validation (§0 item 5) refuses
 //! the transaction if that evidence changed before it commits.
 
-use zeroize::Zeroizing;
-
 use crate::agility::PublicKey;
 use crate::error::Error;
 use crate::random::RandomSource;
@@ -32,33 +30,13 @@ use super::super::derive;
 use super::super::domain::AppDomain;
 use super::super::error::{ProtocolError, ProtocolResult, RefusalCode};
 use super::super::ids;
+use super::super::key_crypto::{self, Key32, Z32, provider_check, random_key, refuse};
 use super::super::position::Position;
 use super::super::records::space::{SpaceAddress, SpaceDelivery, SpaceRoot, SpaceSuccessor};
-use super::super::signing;
 use super::chain::SpaceChain;
-use super::keys::{HeldVersion, Outcome, SpaceKeys, open_account_envelope, unwrap};
+use super::keys::{HeldVersion, Outcome, SpaceKeys, open_account_envelope};
 use super::ledger::{AccountDirectory, Recipient};
 use super::members::DELIVERY_BATCH;
-
-const Z32: [u8; 32] = [0; 32];
-
-fn refuse<T>(code: RefusalCode) -> ProtocolResult<T> {
-    Err(ProtocolError::Refused(code))
-}
-
-fn provider_check(ok: bool) -> ProtocolResult<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(ProtocolError::ProviderFailure)
-    }
-}
-
-fn random_key(rng: &mut dyn RandomSource) -> ProtocolResult<Zeroizing<[u8; 32]>> {
-    let mut key = Zeroizing::new([0u8; 32]);
-    rng.fill(&mut key[..])?;
-    Ok(key)
-}
 
 /// What a writer of space records needs: the configured mechanisms, the
 /// registry to read back with, the application, and the writing account.
@@ -149,12 +127,20 @@ impl SpaceWriter<'_> {
         payload: &[u8; 32],
         rng: &mut dyn RandomSource,
     ) -> ProtocolResult<Vec<u8>> {
-        let wrapped = self.suite.key_wrap.wrap(key, context, payload, rng)?;
-        match unwrap(self.registry, key, context, &wrapped)? {
-            Outcome::Ok(value) => provider_check(*value == *payload)?,
-            _ => return Err(ProtocolError::ProviderFailure),
-        }
-        Ok(wrapped)
+        key_crypto::wrap(
+            &self.suite,
+            self.registry,
+            key,
+            context,
+            payload,
+            rng,
+            |error| match error {
+                Error::InvalidCiphertext | Error::NoKeyForMechanism | Error::UnsupportedFormat => {
+                    ProtocolError::ProviderFailure
+                }
+                other => other.into(),
+            },
+        )
     }
 
     /// Seals `key` to `recipient`; a key of another mechanism than the
@@ -166,13 +152,7 @@ impl SpaceWriter<'_> {
         key: &[u8; 32],
         rng: &mut dyn RandomSource,
     ) -> ProtocolResult<Vec<u8>> {
-        match self
-            .suite
-            .seal_to(core::slice::from_ref(recipient), context, key, rng)
-        {
-            Err(Error::RecipientUnsupported) => refuse(RefusalCode::UnsupportedRecipient),
-            other => Ok(other?),
-        }
+        key_crypto::seal(&self.suite, recipient, context, key, rng)
     }
 
     /// Seals `key` to the author's own account sealing key of its current
@@ -196,32 +176,17 @@ impl SpaceWriter<'_> {
     /// Signs with the device's signing key and verifies the signature
     /// again.
     fn sign(&self, device: &LocalDevice, bytes: &[u8]) -> ProtocolResult<Vec<u8>> {
-        let signer = self
-            .registry
-            .signer(device.signing.public.mechanism.as_mechanism())?;
-        let signature = signing::sign(signer, &device.signing, bytes)?;
-        let verified = signing::verify(self.registry, &device.signing.public, bytes, &signature)
-            .map_err(|_| ProtocolError::ProviderFailure)?;
-        provider_check(verified)?;
-        Ok(signature)
+        key_crypto::sign(self.registry, &device.signing, bytes)
     }
 }
 
 /// A new space root (§3.2) and its key `K₀`, which the creating device
 /// keeps as an `unpublished` held key until the root is accepted as the
 /// space's root (§5.4). The key is never printed.
+#[derive(Debug)]
 pub struct RootRecords {
     pub root: SpaceRoot,
-    pub key: Zeroizing<[u8; 32]>,
-}
-
-impl core::fmt::Debug for RootRecords {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RootRecords")
-            .field("root", &self.root)
-            .field("key", &"..")
-            .finish()
-    }
+    pub key: Key32,
 }
 
 /// A root of the space at `address` (§3.1, §3.2), by an active device of
@@ -273,27 +238,21 @@ pub fn space_root(
         rng,
     )?;
     root.signature = writer.sign(author.device, &root.signed_bytes(&application)?)?;
-    Ok(RootRecords { root, key })
+    Ok(RootRecords {
+        root,
+        key: key.into(),
+    })
 }
 
 /// A rotation (§3.5): the successor and the deliveries of its new key, in
 /// one transaction. The new key is never printed.
+#[derive(Debug)]
 pub struct RotationRecords {
     pub successor: SpaceSuccessor,
     /// One delivery of the new version to each recipient given: at most
     /// [`DELIVERY_BATCH`].
     pub deliveries: Vec<SpaceDelivery>,
-    pub key: Zeroizing<[u8; 32]>,
-}
-
-impl core::fmt::Debug for RotationRecords {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RotationRecords")
-            .field("successor", &self.successor)
-            .field("deliveries", &self.deliveries)
-            .field("key", &"..")
-            .finish()
-    }
+    pub key: Key32,
 }
 
 /// A rotation (§3.5) by an active device of the writer's account that holds
@@ -444,7 +403,7 @@ fn successor(
     Ok(RotationRecords {
         successor,
         deliveries,
-        key,
+        key: key.into(),
     })
 }
 
