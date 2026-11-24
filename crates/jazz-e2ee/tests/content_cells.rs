@@ -16,7 +16,7 @@ use jazz_e2ee::envelope::{self, Mechanism};
 use jazz_e2ee::mechanisms::{cell, equality};
 use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::content::cells::{
-    CellInput, EqualityValueBuf, Opened, begin_stream, min_cell_record_len, open_cell, seal_cells,
+    CellInput, Opened, begin_stream, min_cell_record_len, open_cell, seal_cells,
 };
 use jazz_e2ee::protocol::content::{
     ContentError, CreationFate, DataError, HeldKeys, HeldSpace, KeyMark, MissingKey, RowTarget,
@@ -83,7 +83,7 @@ fn seal_title(
         &[CellInput {
             column,
             value: text.as_bytes(),
-            equality: Some(EqualityValue::Text(text)),
+            equality: Some(&EqualityValue::Text(text.to_owned())),
         }],
         &mut TestRandom(SEED.fetch_add(1, Ordering::SeqCst)),
     )
@@ -964,6 +964,8 @@ fn sealing_refuses_mixed_or_incomplete_inputs() {
         equality,
     };
     let target = row(&domain, &address, ROW_1);
+    let text = EqualityValue::Text("v".into());
+    let int = EqualityValue::Int(1);
     assert_eq!(
         seal(&row(&domain, &other, ROW_1), &[cell(notes(), None)]),
         Err(ContentError::Protocol(ProtocolError::InconsistentEvidence))
@@ -972,14 +974,8 @@ fn sealing_refuses_mixed_or_incomplete_inputs() {
         Error::InvalidInput,
     )));
     assert_eq!(seal(&target, &[cell(title(), None)]), invalid);
-    assert_eq!(
-        seal(&target, &[cell(notes(), Some(EqualityValue::Text("v")))]),
-        invalid
-    );
-    assert_eq!(
-        seal(&target, &[cell(title(), Some(EqualityValue::Int(1)))]),
-        invalid
-    );
+    assert_eq!(seal(&target, &[cell(notes(), Some(&text))]), invalid);
+    assert_eq!(seal(&target, &[cell(title(), Some(&int))]), invalid);
     assert_eq!(
         seal(&target, &[cell(notes(), None), cell(notes(), None)]),
         invalid
@@ -1157,10 +1153,11 @@ fn plaintext_and_equality_values_never_print() {
         value: Zeroizing::new(secret.to_vec()),
         space: space(OTHER_ROW),
     };
+    let equality = EqualityValue::Text(text.to_owned());
     let input = CellInput {
         column: title(),
         value: secret,
-        equality: Some(EqualityValue::Text(text)),
+        equality: Some(&equality),
     };
     let stored = seal_stream(&world, &write_key(&held, &address), &target, secret, 64);
     let stream = open_cell(registry, &held, &target, &blob(), &stored).unwrap();
@@ -1170,24 +1167,11 @@ fn plaintext_and_equality_values_never_print() {
         format!("{stale:?}"),
         format!("{input:?}"),
         format!("{stream:?}"),
-        format!("{:?}", EqualityValueBuf::Text(text.to_owned())),
-        format!("{:?}", EqualityValueBuf::Bytes(secret.to_vec())),
-        format!("{:?}", EqualityValueBuf::Enum(text.to_owned())),
-        format!("{:?}", EqualityValue::Text(text)),
-        format!("{:?}", EqualityValue::Bytes(secret)),
-        format!("{:?}", EqualityValue::Enum(text)),
-        format!("{:?}", EqualityValueBuf::Json(text.to_owned())),
-        format!(
-            "{:?}",
-            EqualityValueBuf::Array(vec![EqualityValueBuf::Text(text.to_owned())])
-        ),
-        format!("{:?}", EqualityValue::Json(text)),
-        format!(
-            "{:?}",
-            EqualityValue::Array(jazz_e2ee::records::EqualityItems::Values(&[
-                EqualityValue::Text(text)
-            ]))
-        ),
+        format!("{equality:?}"),
+        format!("{:?}", EqualityValue::Bytes(secret.to_vec())),
+        format!("{:?}", EqualityValue::Enum(text.to_owned())),
+        format!("{:?}", EqualityValue::Json(text.to_owned())),
+        format!("{:?}", EqualityValue::Array(vec![equality.clone()])),
     ] {
         assert_redacted(&debug, secret);
     }

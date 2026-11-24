@@ -763,8 +763,8 @@ fn spec_wrapper_examples() {
 #[test]
 fn equality_values() {
     use records::{EqualityValue as E, equality_value};
-    let hex = |value: &E<'_>| to_hex(&equality_value(value).unwrap());
-    let cases: [(E<'_>, &str); 12] = [
+    let hex = |value: &E| to_hex(&equality_value(value).unwrap());
+    let cases: [(E, &str); 12] = [
         (E::Null, "00"),
         (E::Bool(false), "0100"),
         (E::Bool(true), "0101"),
@@ -778,14 +778,14 @@ fn equality_values() {
             E::Float(f64::from_bits(0xfff0_0000_0000_0001)),
             "017ff8000000000000",
         ),
-        (E::Text(""), "01"),
-        (E::Text("é"), "01c3a9"),
+        (E::Text("".into()), "01"),
+        (E::Text("é".into()), "01c3a9"),
     ];
     for (value, encoded) in cases {
         assert_eq!(hex(&value), encoded, "{value:?}");
     }
-    assert_eq!(hex(&E::Text("e\u{301}")), "0165cc81");
-    assert_eq!(hex(&E::Bytes(&[0, 1])), "010001");
+    assert_eq!(hex(&E::Text("e\u{301}".into())), "0165cc81");
+    assert_eq!(hex(&E::Bytes(vec![0, 1])), "010001");
     assert_eq!(
         hex(&E::Uuid([0xab; 16])),
         "01abababababababababababababababab"
@@ -793,9 +793,9 @@ fn equality_values() {
     // An enum value is encoded by its variant name's exact UTF-8 bytes, like
     // text; the column's type bytes (which list the variants) keep it apart
     // from a text column.
-    assert_eq!(hex(&E::Enum("open")), "016f70656e");
-    assert_eq!(hex(&E::Enum("done")), "01646f6e65");
-    assert_eq!(hex(&E::Enum("é")), "01c3a9");
+    assert_eq!(hex(&E::Enum("open".into())), "016f70656e");
+    assert_eq!(hex(&E::Enum("done".into())), "01646f6e65");
+    assert_eq!(hex(&E::Enum("é".into())), "01c3a9");
 
     let identity = records::EqualityIdentity {
         application: IDENTITY.application,
@@ -806,7 +806,7 @@ fn equality_values() {
         epoch_id: IDENTITY.epoch_id,
     };
     let float_type = br#"{"column_type":{"type":"Double"},"nullable":true}"#;
-    let token_in = |column: records::EqualityColumnType, value: E<'_>| {
+    let token_in = |column: records::EqualityColumnType, value: E| {
         records::equality_token_of(
             &equality::Builtin,
             &root(),
@@ -817,16 +817,16 @@ fn equality_values() {
         )
         .map(|token| to_hex(&token))
     };
-    let token = |value: E<'_>| token_in(records::EqualityColumnType::Double, value).unwrap();
-    let text = |value: E<'_>| token_in(records::EqualityColumnType::Text, value).unwrap();
+    let token = |value: E| token_in(records::EqualityColumnType::Double, value).unwrap();
+    let text = |value: E| token_in(records::EqualityColumnType::Text, value).unwrap();
     assert_eq!(token(E::Float(0.0)), token(E::Float(-0.0)));
     assert_eq!(token(E::Float(f64::NAN)), token(E::Float(-f64::NAN)));
     assert_ne!(token(E::Float(0.0)), token(E::Null));
-    assert_ne!(text(E::Text("é")), text(E::Text("e\u{301}")));
+    assert_ne!(text(E::Text("é".into())), text(E::Text("e\u{301}".into())));
     // A value of another type than the declared column's is refused, and so
     // is an integer column's value beyond 32 bits.
     assert_eq!(
-        token_in(records::EqualityColumnType::Double, E::Text("1")),
+        token_in(records::EqualityColumnType::Double, E::Text("1".into())),
         Err(Error::InvalidInput)
     );
     assert_eq!(
@@ -838,7 +838,7 @@ fn equality_values() {
     let enum_type =
         br#"{"column_type":{"type":"Enum","variants":["open","done"]},"nullable":false}"#;
     let enum_column = records::EqualityColumn::declare(records::EqualityColumnType::Enum).unwrap();
-    let enum_token = |value: E<'_>| {
+    let enum_token = |value: E| {
         records::equality_token_of(
             &equality::Builtin,
             &root(),
@@ -850,20 +850,20 @@ fn equality_values() {
         .map(|token| to_hex(&token))
     };
     assert_ne!(
-        enum_token(E::Enum("open")).unwrap(),
-        enum_token(E::Enum("done")).unwrap()
+        enum_token(E::Enum("open".into())).unwrap(),
+        enum_token(E::Enum("done".into())).unwrap()
     );
     assert_eq!(
-        enum_token(E::Enum("open")).unwrap(),
-        enum_token(E::Enum("open")).unwrap()
+        enum_token(E::Enum("open".into())).unwrap(),
+        enum_token(E::Enum("open".into())).unwrap()
     );
-    assert_eq!(enum_token(E::Text("open")), Err(Error::InvalidInput));
+    assert_eq!(enum_token(E::Text("open".into())), Err(Error::InvalidInput));
     assert_eq!(
-        token_in(records::EqualityColumnType::Text, E::Enum("open")),
+        token_in(records::EqualityColumnType::Text, E::Enum("open".into())),
         Err(Error::InvalidInput)
     );
     assert_eq!(
-        enum_token(E::Enum("open")).unwrap(),
+        enum_token(E::Enum("open".into())).unwrap(),
         "4a45324501146a617a7a2e736f6469756d2e657175616c69747900000001b27f5fa9cdb35413706405ad7a8a7dd81a93bbec0a0308a5c35eb154e128273d"
     );
     assert_eq!(
@@ -920,63 +920,44 @@ fn equality_values() {
 /// with the encodings that existed before unchanged.
 #[test]
 fn equality_values_of_json_and_arrays() {
-    use records::{EqualityItems as Items, EqualityValue as E, equality_value};
-    let hex = |value: &E<'_>| to_hex(&equality_value(value).unwrap());
+    use records::{EqualityValue as E, equality_value};
+    let hex = |value: &E| to_hex(&equality_value(value).unwrap());
     // JSON: `01` and the text's bytes; differently written JSON differs.
-    assert_eq!(hex(&E::Json(r#"{"a":1}"#)), "017b2261223a317d");
-    assert_eq!(hex(&E::Json(r#"{"a": 1}"#)), "017b2261223a20317d");
+    assert_eq!(hex(&E::Json(r#"{"a":1}"#.into())), "017b2261223a317d");
+    assert_eq!(hex(&E::Json(r#"{"a": 1}"#.into())), "017b2261223a20317d");
     // No trimming, no reordering: the text is hashed as written.
-    assert_eq!(hex(&E::Json(" {\"a\":1}\n")), "01207b2261223a317d0a");
+    assert_eq!(hex(&E::Json(" {\"a\":1}\n".into())), "01207b2261223a317d0a");
     assert_eq!(
-        hex(&E::Json(r#"{"b":1,"a":2}"#)),
+        hex(&E::Json(r#"{"b":1,"a":2}"#.into())),
         "017b2262223a312c2261223a327d"
     );
-    assert_eq!(hex(&E::Json("")), "01");
+    assert_eq!(hex(&E::Json("".into())), "01");
     assert_eq!(hex(&E::Null), "00");
     // Arrays: `01`, the count, then each element's `V` behind its length.
-    let a = [E::Text("a"), E::Text("b")];
+    let a = E::Array(vec![E::Text("a".into()), E::Text("b".into())]);
+    assert_eq!(hex(&a), "0100000002000000020161000000020162");
+    assert_eq!(hex(&E::Array(vec![])), "0100000000");
+    let with_null = vec![E::Null, E::Text("a".into())];
     assert_eq!(
-        hex(&E::Array(Items::Values(&a))),
-        "0100000002000000020161000000020162"
-    );
-    assert_eq!(hex(&E::Array(Items::Values(&[]))), "0100000000");
-    let with_null = [E::Null, E::Text("a")];
-    assert_eq!(
-        hex(&E::Array(Items::Values(&with_null))),
+        hex(&E::Array(with_null)),
         "01000000020000000100000000020161"
     );
     // The framing keeps ["a", "bc"] apart from ["ab", "c"].
-    let (left, right) = ([E::Text("a"), E::Text("bc")], [E::Text("ab"), E::Text("c")]);
+    let left = E::Array(vec![E::Text("a".into()), E::Text("bc".into())]);
+    let right = E::Array(vec![E::Text("ab".into()), E::Text("c".into())]);
+    assert_eq!(hex(&left), "010000000200000002016100000003016263");
+    assert_eq!(hex(&right), "010000000200000003016162000000020163");
+    let ints = vec![E::Int(1), E::Int(-2)];
     assert_eq!(
-        hex(&E::Array(Items::Values(&left))),
-        "010000000200000002016100000003016263"
-    );
-    assert_eq!(
-        hex(&E::Array(Items::Values(&right))),
-        "010000000200000003016162000000020163"
-    );
-    let ints = [E::Int(1), E::Int(-2)];
-    assert_eq!(
-        hex(&E::Array(Items::Values(&ints))),
+        hex(&E::Array(ints)),
         "0100000002000000090100000000000000010000000901fffffffffffffffe"
     );
     // Arrays nest: each inner array is an element behind its length.
-    let (inner_a, inner_empty) = ([E::Text("a")], [E::Array(Items::Values(&[]))]);
-    let nested = [E::Array(Items::Values(&inner_a)), inner_empty[0]];
+    let nested = E::Array(vec![E::Array(vec![E::Text("a".into())]), E::Array(vec![])]);
     assert_eq!(
-        hex(&E::Array(Items::Values(&nested))),
+        hex(&nested),
         "01000000020000000b0100000001000000020161000000050100000000"
     );
-    // An owned array encodes as the borrowed one does.
-    let owned = vec![
-        jazz_e2ee::protocol::content::EqualityValueBuf::Text("a".to_owned()),
-        jazz_e2ee::protocol::content::EqualityValueBuf::Text("b".to_owned()),
-    ];
-    assert_eq!(
-        hex(&E::Array(Items::Bufs(&owned))),
-        "0100000002000000020161000000020162"
-    );
-
     // Declared columns take JSON, and arrays of a searchable element type.
     let identity = records::EqualityIdentity {
         application: IDENTITY.application,
@@ -997,7 +978,7 @@ fn equality_values_of_json_and_arrays() {
     let nested_texts = records::EqualityColumn::array_of(texts).unwrap();
     assert_eq!(json.column_type(), records::EqualityColumnType::Json);
     assert_eq!(texts.column_type(), records::EqualityColumnType::Array);
-    let token = |column: &records::EqualityColumn, value: E<'_>| {
+    let token = |column: &records::EqualityColumn, value: E| {
         records::equality_token_of(
             &equality::Builtin,
             &root(),
@@ -1009,37 +990,28 @@ fn equality_values_of_json_and_arrays() {
         .map(|token| to_hex(&token))
     };
     assert_ne!(
-        token(&json, E::Json(r#"{"a":1}"#)).unwrap(),
-        token(&json, E::Json(r#"{"a": 1}"#)).unwrap()
+        token(&json, E::Json(r#"{"a":1}"#.into())).unwrap(),
+        token(&json, E::Json(r#"{"a": 1}"#.into())).unwrap()
     );
     assert_eq!(
-        token(&json, E::Json(r#"{"a":1}"#)).unwrap(),
-        token(&json, E::Json(r#"{"a":1}"#)).unwrap()
+        token(&json, E::Json(r#"{"a":1}"#.into())).unwrap(),
+        token(&json, E::Json(r#"{"a":1}"#.into())).unwrap()
     );
-    assert_ne!(
-        token(&texts, E::Array(Items::Values(&left))).unwrap(),
-        token(&texts, E::Array(Items::Values(&right))).unwrap()
-    );
+    assert_ne!(token(&texts, left).unwrap(), token(&texts, right).unwrap());
     // A value of another shape is refused: JSON in a text column, an array
     // in a scalar column, a scalar in an array column, an element beyond an
     // integer column's 32 bits, an array one level too deep or too shallow.
     let text_column = declare(records::EqualityColumnType::Text).unwrap();
-    assert_eq!(token(&text_column, E::Json("{}")), Err(Error::InvalidInput));
     assert_eq!(
-        token(&text_column, E::Array(Items::Values(&a))),
+        token(&text_column, E::Json("{}".into())),
         Err(Error::InvalidInput)
     );
-    assert_eq!(token(&texts, E::Text("a")), Err(Error::InvalidInput));
-    assert_eq!(token(&json, E::Text("{}")), Err(Error::InvalidInput));
-    let big = [E::Int(1 << 40)];
-    assert_eq!(
-        token(&ints32, E::Array(Items::Values(&big))),
-        Err(Error::InvalidInput)
-    );
-    assert_eq!(
-        token(&nested_texts, E::Array(Items::Values(&a))),
-        Err(Error::InvalidInput)
-    );
-    assert!(token(&nested_texts, E::Array(Items::Values(&nested))).is_ok());
+    assert_eq!(token(&text_column, a.clone()), Err(Error::InvalidInput));
+    assert_eq!(token(&texts, E::Text("a".into())), Err(Error::InvalidInput));
+    assert_eq!(token(&json, E::Text("{}".into())), Err(Error::InvalidInput));
+    let big = vec![E::Int(1 << 40)];
+    assert_eq!(token(&ints32, E::Array(big)), Err(Error::InvalidInput));
+    assert_eq!(token(&nested_texts, a), Err(Error::InvalidInput));
+    assert!(token(&nested_texts, nested).is_ok());
     assert!(token(&texts, E::Null).is_ok());
 }

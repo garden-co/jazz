@@ -28,11 +28,10 @@ use jazz_e2ee::protocol::content::equality::{
     QueryPlan as EqualityPlan, TableTarget, plan_equality,
 };
 use jazz_e2ee::protocol::content::{
-    ContentError, DataError, EncryptedColumn, EqualityValueBuf, KeyMark, RowTarget, WriteChoice,
-    WriteKey,
+    ContentError, DataError, EncryptedColumn, KeyMark, RowTarget, WriteChoice, WriteKey,
 };
 use jazz_e2ee::protocol::records::space::SpaceAddress;
-use jazz_e2ee::records::{RecordKind, read_stored_record};
+use jazz_e2ee::records::{EqualityValue, RecordKind, read_stored_record};
 
 use crate::account::rows::{Row, SPACE_ROOTS};
 use crate::state::{
@@ -430,7 +429,7 @@ impl E2eeHooks for Hooks {
             .ok_or(SealError::Refused(not_observed()))?;
         let table_id = catalogue.table(write.table).map_err(SealError::Refused)?;
         let mut plaintexts = Vec::with_capacity(encrypted.len());
-        let mut equalities: Vec<Option<EqualityValueBuf>> = Vec::with_capacity(encrypted.len());
+        let mut equalities: Vec<Option<EqualityValue>> = Vec::with_capacity(encrypted.len());
         let mut columns = Vec::with_capacity(encrypted.len());
         for name in &encrypted {
             let codec = &plan.columns[name];
@@ -450,7 +449,7 @@ impl E2eeHooks for Hooks {
             .map(|((column, value), equality)| CellInput {
                 column: *column,
                 value,
-                equality: equality.as_ref().map(EqualityValueBuf::as_value),
+                equality: equality.as_ref(),
             })
             .collect();
         let suite = self
@@ -844,15 +843,8 @@ impl E2eeHooks for Hooks {
                 )
             })?;
             let column = column(catalogue, table, &name, codec)?;
-            match plan_equality(
-                tagger,
-                &keys.held,
-                &target,
-                &column,
-                &equality.as_value(),
-                keys.online,
-            )
-            .map_err(failed)?
+            match plan_equality(tagger, &keys.held, &target, &column, &equality, keys.online)
+                .map_err(failed)?
             {
                 EqualityPlan::Tokens(tokens) => {
                     physical.filters[index] = Predicate::In(

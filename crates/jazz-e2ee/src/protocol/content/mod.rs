@@ -31,10 +31,7 @@ use super::domain::SharedDomain;
 use super::error::ProtocolError;
 use super::records::space::SpaceAddress;
 
-pub use cells::{
-    CellInput, EqualityValueBuf, Opened, SealedCell, SealedCells, begin_stream, open_cell,
-    seal_cells,
-};
+pub use cells::{CellInput, Opened, SealedCell, SealedCells, begin_stream, open_cell, seal_cells};
 pub use equality::{QueryPlan, QueryTokens, TableTarget, UnsupportedQuery, plan_equality};
 pub use held::{
     CreationFate, HeldKeys, HeldSpace, KeyMark, KnownChain, MissingKey, WriteChoice, WriteKey,

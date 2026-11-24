@@ -104,7 +104,7 @@ pub fn plan_equality(
     held: &HeldKeys,
     table: &TableTarget<'_>,
     column: &EncryptedColumn<'_>,
-    value: &EqualityValue<'_>,
+    value: &EqualityValue,
     online: bool,
 ) -> ContentResult<QueryPlan> {
     let index = column.equality.ok_or(UnsupportedQuery::UnindexedEquality)?;
