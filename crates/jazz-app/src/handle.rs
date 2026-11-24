@@ -993,7 +993,7 @@ async fn connect(
     let mut loaded = files.load(Some((config.app_id, &environment)))?;
     #[cfg(not(feature = "e2ee-client"))]
     let mut loaded = files.load(None)?;
-    let plan = crate::encryption::Plan::new(loaded.declarations.take(), &config, &files);
+    let plan = crate::encryption::Plan::new(loaded.declarations.take(), &config);
     let backend_side = config.backend.is_some() || matches!(config.user, Some(Auth::Credential(_)));
     let participation = plan.participation(backend_side);
     // Only an end user's device holds keys; a client with no user (local

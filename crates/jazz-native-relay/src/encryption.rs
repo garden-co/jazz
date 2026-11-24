@@ -10,7 +10,6 @@
 //! A UI peer attached without one is keyless like the relay.
 
 use std::rc::Rc;
-use std::sync::Arc;
 
 use jazz::tools::public_schema::E2eeDeclarations;
 use jazz_e2ee_client::host::bridge::JsStore;
@@ -26,7 +25,6 @@ pub type Declarations = E2eeDeclarations;
 #[derive(Clone)]
 pub(super) struct ForegroundEncryption {
     pub declarations: Declarations,
-    bindings: Arc<[u8]>,
 }
 
 impl ForegroundEncryption {
@@ -45,10 +43,7 @@ impl ForegroundEncryption {
             return Err(Status::LifecycleFailure);
         }
         let declarations = declarations.ok_or(Status::LifecycleFailure)?;
-        Ok(Self {
-            declarations,
-            bindings: Arc::from(bindings.as_bytes()),
-        })
+        Ok(Self { declarations })
     }
 
     pub async fn build(
@@ -58,16 +53,10 @@ impl ForegroundEncryption {
         store: Rc<JsStore>,
     ) -> Result<Built, String> {
         let built = host::build_native(
-            host::Options {
-                app_file: self.bindings.to_vec(),
-                from_bindings: true,
-                device_account_secret,
-                app_id: self.declarations.app_id.uuid().to_string(),
-                environment: self.declarations.environment.clone(),
-            },
+            self.declarations,
             account,
             store.clone(),
-            Some(&self.declarations),
+            device_account_secret,
         )
         .await?;
         Ok(Built { built, store })

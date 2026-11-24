@@ -30,13 +30,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
 
-/// The hooks a worker's database opens with: keyless ones, for an app that
-/// declares encryption.
-#[cfg(all(target_arch = "wasm32", feature = "e2ee-client"))]
-type BrowserHooks = Rc<dyn jazz::e2ee::E2eeHooks>;
-#[cfg(all(target_arch = "wasm32", not(feature = "e2ee-client")))]
-type BrowserHooks = std::convert::Infallible;
-
 // What a backend's `createJazz` needs to run on this build; never in the
 // Durable Object core's build, which is sized for the Workers Free plan.
 #[cfg(all(feature = "backend", feature = "durable-object"))]
@@ -1073,6 +1066,26 @@ impl Drop for WasmDb {
     }
 }
 
+impl WasmDb {
+    fn open_memory_with(
+        schema: &[u8],
+        config: &[u8],
+        how: OpenAs<'_>,
+        configure: impl FnOnce(
+            jazz::db::DbConfig,
+            jazz::db::DbIdentity,
+        ) -> Result<jazz::db::DbConfig, JsValue>,
+    ) -> Result<Self, JsValue> {
+        initialize_wasm_tracing();
+        let (config, identity, trusted) = Self::prepare_open(schema, config, how)?;
+        let db = block_on(binding_host::open_memory(configure(config, identity)?))
+            .map_err(to_js_error)?;
+        Ok(Self::runtime_owner(block_on(Binding::new(
+            db, identity, trusted,
+        ))))
+    }
+}
+
 #[wasm_bindgen]
 impl WasmDb {
     fn open_inner(&self) -> Result<WasmDbInner, JsValue> {
@@ -1370,12 +1383,7 @@ impl WasmDb {
     }
 
     fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {
-        initialize_wasm_tracing();
-        let (db_config, identity, trusted) = Self::prepare_open(schema, config, how)?;
-        let db = block_on(binding_host::open_memory(db_config)).map_err(to_js_error)?;
-        Ok(Self::runtime_owner(block_on(Binding::new(
-            db, identity, trusted,
-        ))))
+        Self::open_memory_with(schema, config, how, |config, _| Ok(config))
     }
 
     #[wasm_bindgen(js_name = openMemory)]
@@ -1425,7 +1433,10 @@ impl WasmDb {
         config: Vec<u8>,
         database: String,
     ) -> Result<WasmDb, JsValue> {
-        Self::open_browser_as(storage, schema, config, database, OpenAs::Untrusted, None).await
+        Self::open_browser_as(storage, schema, config, database, OpenAs::Untrusted, |db| {
+            db
+        })
+        .await
     }
 
     /// Open the durable store a browser worker owns for an app that declares
@@ -1445,23 +1456,19 @@ impl WasmDb {
         bindings: String,
         app_id: String,
         environment: String,
-        token: Option<String>,
-        claimed_author: Option<String>,
+        proof: JsValue,
     ) -> Result<WasmDb, JsValue> {
         let hooks = jazz_e2ee_client::KeylessHooks::relay(encryption::keyless_declarations(
             &bindings,
             &app_id,
             &environment,
         )?);
-        let how = match (&token, &claimed_author) {
-            (Some(token), Some(claimed_author)) => OpenAs::SelfSigned {
-                token,
-                app_id: &app_id,
-                claimed_author,
-            },
-            _ => OpenAs::Untrusted,
-        };
-        Self::open_browser_as(storage, schema, config, database, how, Some(hooks)).await
+        let proof = encryption::SessionProof::read(&proof);
+        let how = proof.for_app(&app_id);
+        Self::open_browser_as(storage, schema, config, database, how, |db| {
+            db.with_e2ee(hooks)
+        })
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1480,7 +1487,7 @@ impl WasmDb {
             app_id: &app_id,
             claimed_author: &claimed_author,
         };
-        Self::open_browser_as(storage, schema, config, database, how, None).await
+        Self::open_browser_as(storage, schema, config, database, how, |db| db).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1490,7 +1497,7 @@ impl WasmDb {
         config: Vec<u8>,
         database: String,
         how: OpenAs<'_>,
-        keyless: Option<BrowserHooks>,
+        configure: impl FnOnce(jazz::db::DbConfig) -> jazz::db::DbConfig,
     ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         let (schema, mut config) =
@@ -1505,14 +1512,7 @@ impl WasmDb {
             config.migrations.as_deref(),
         )
         .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
-        #[cfg(feature = "e2ee-client")]
-        let db_config = match keyless {
-            Some(hooks) => db_config.with_e2ee(hooks),
-            None => db_config,
-        };
-        #[cfg(not(feature = "e2ee-client"))]
-        let _ = keyless;
-        let (db, store) = browser::open(&spec, db_config).await?;
+        let (db, store) = browser::open(&spec, configure(db_config)).await?;
         // Commits reach IndexedDB only after they return.
         db.defer_durability_acks();
         let owner = Self::runtime_owner(Binding::new(db, identity, trusted).await);

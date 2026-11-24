@@ -8,7 +8,7 @@
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { boundApp } from "../typed-app.js";
 import { EncryptionStoreRequiredError } from "./index.js";
-import { servePrivateStore, type PrivateStore } from "./private-store.js";
+import { servePrivateStore, type PrivateStore, type StoreTarget } from "./private-store.js";
 
 interface Declared {
   schema: {
@@ -67,7 +67,7 @@ export async function buildEncryption(options: {
   /** The device account's secret (`jazz-auth-v1:...`); it is the account's recovery secret. */
   deviceAccountSecret?: string;
   store: PrivateStore | undefined;
-}): Promise<{ runtime: unknown; store: PrivateStore } | undefined> {
+}): Promise<{ runtime: StoreTarget; store: PrivateStore } | undefined> {
   if (!declaresEncryption(options.app)) return undefined;
   const store = options.store;
   if (!store) throw new EncryptionStoreRequiredError();

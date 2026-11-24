@@ -1,3 +1,4 @@
+import { compiledBindings } from "../encryption/build.js";
 import { EncryptionRuntime } from "jazz-napi";
 import { describe, expect, it } from "vitest";
 import { testApp } from "../testing/index.js";
@@ -18,11 +19,11 @@ const file = {
     },
   },
 };
-testApp(file);
+const app = testApp(file);
 
 function runtime() {
-  return new EncryptionRuntime(
-    new TextEncoder().encode(JSON.stringify(file)),
+  return EncryptionRuntime.fromBindings(
+    compiledBindings(app),
     "store-bridge-test",
     "test",
     testAccountId("bridge"),

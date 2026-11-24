@@ -168,8 +168,7 @@ declare module "jazz-wasm" {
       bindings: string,
       appId: string,
       environment: string,
-      token?: string | null,
-      claimedAuthor?: string | null,
+      proof?: { token: string; claimedAuthor: string; appId: string } | null,
     ): Promise<WasmDb>;
     /** An encrypted app's in-memory database with its runtime installed. */
     static openMemoryEncrypted(
@@ -178,8 +177,6 @@ declare module "jazz-wasm" {
       runtime: EncryptionRuntime,
       proof?: { token: string; claimedAuthor: string } | null,
     ): WasmDb;
-    takeStoreRequests(): string[];
-    replyStore(id: string, ok: boolean, payload: string): boolean;
     encryptionCall(op: string, args?: unknown): Promise<string>;
     takeEncryptionReports(): string[];
     encryptionState(): string;

@@ -1289,8 +1289,7 @@ async function initialize(context: RuntimeContext): Promise<void> {
           keyless.bindings,
           options.appId,
           keyless.environment,
-          proof?.token,
-          proof?.claimedAuthor,
+          proof ?? null,
         )
       : proof
         ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(

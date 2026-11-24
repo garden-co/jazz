@@ -33,18 +33,136 @@ use super::bridge::JsStore;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-/// What a host passes to open an encrypted app's database.
-pub struct Options {
-    /// The app's `jazz.app.json`, or its generated bindings' compiled app
-    /// (`from_bindings`), from which the declarations are read.
-    pub app_file: Vec<u8>,
-    pub from_bindings: bool,
-    /// The runtime derives the founding signing key from this secret. Native hosts
-    /// also use the secret to register or restore recovery at startup.
-    /// `None` for an account the app signs in itself.
-    pub device_account_secret: Option<RecoverySecret>,
+/// A JavaScript host builds its client before opening the database. Once
+/// attached, the store bridge drives the same runtime through a weak reference.
+pub struct RuntimeBuilder {
     pub app_id: String,
-    pub environment: String,
+    account_id: String,
+    environment: String,
+    options: Rc<RefCell<Option<BuildOptions>>>,
+    building: Rc<Cell<bool>>,
+    built: Rc<RefCell<Option<Built>>>,
+    store: Rc<JsStore>,
+    attached: RefCell<std::rc::Weak<Encryption>>,
+}
+
+struct BuildOptions {
+    bindings: String,
+    secret: Option<RecoverySecret>,
+}
+
+impl RuntimeBuilder {
+    pub fn from_bindings(
+        bindings: String,
+        app_id: String,
+        environment: String,
+        account_id: String,
+        device_account_secret: Option<String>,
+    ) -> Result<Self, String> {
+        let secret = device_account_secret
+            .map(jazz::identity::DeviceAccountSecret::parse_owned)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            app_id,
+            environment,
+            account_id,
+            options: Rc::new(RefCell::new(Some(BuildOptions { bindings, secret }))),
+            building: Rc::default(),
+            built: Rc::default(),
+            store: Rc::default(),
+            attached: RefCell::default(),
+        })
+    }
+
+    pub fn build_future(&self) -> Option<JsonFuture> {
+        if self.building.get() {
+            return None;
+        }
+        let options = self.options.borrow();
+        let source = options.as_ref()?;
+        let declarations = bound_declarations(
+            source.bindings.as_bytes(),
+            &self.app_id,
+            &self.environment,
+            false,
+        )
+        .and_then(|(_, declarations)| {
+            declarations.ok_or_else(|| "the app's files declare no encryption".to_owned())
+        });
+        let recovery = source.secret.clone();
+        let account = self.account_id.clone();
+        let store = self.store.clone();
+        let options = Rc::downgrade(&self.options);
+        let building = self.building.clone();
+        let slot = self.built.clone();
+        Some(Box::pin(async move {
+            building.set(true);
+            let result = match declarations {
+                Ok(declarations) => {
+                    build_client(declarations, account, store, recovery.as_ref()).await
+                }
+                Err(error) => Err(error),
+            };
+            building.set(false);
+            let built = result?;
+            if let Some(options) = options.upgrade() {
+                options.borrow_mut().take();
+            }
+            *slot.borrow_mut() = Some(built);
+            Ok(Value::Null)
+        }))
+    }
+
+    pub fn hooks(
+        &self,
+        identity: jazz::db::DbIdentity,
+    ) -> Result<Rc<dyn jazz::e2ee::E2eeHooks>, &'static str> {
+        let slot = self.built.borrow();
+        let built = slot.as_ref().ok_or("the encryption runtime is not ready")?;
+        if identity
+            .author
+            .account_id()
+            .map(|id| id.0.to_string())
+            .as_deref()
+            != Some(&self.account_id)
+        {
+            return Err("the encryption runtime is for another account than this session's");
+        }
+        Ok(built.client.hooks())
+    }
+
+    /// Called after a successful open, so a failed open leaves the built client available.
+    pub fn attach(&self, db: Rc<Db>, wake: Box<dyn Fn()>) -> Rc<Encryption> {
+        let built = self
+            .built
+            .borrow_mut()
+            .take()
+            .expect("runtime checked before open");
+        self.store.set_wake(wake);
+        let runtime = Encryption::new(built, self.store.clone(), db);
+        self.attached.replace(Rc::downgrade(&runtime));
+        runtime
+    }
+
+    pub fn take_requests(&self) -> Vec<String> {
+        self.store.take_requests()
+    }
+
+    pub fn reply(&self, id: &str, ok: bool, payload: &str) -> bool {
+        id.parse().is_ok_and(|id| self.store.reply(id, ok, payload))
+    }
+
+    pub fn drive(&self, settle: impl FnOnce()) {
+        let runtime = self.attached.borrow().upgrade();
+        if let Some(runtime) = &runtime {
+            runtime.drive();
+        }
+        settle();
+        if let Some(runtime) = runtime {
+            runtime.wake_if_owed();
+        }
+    }
 }
 
 /// The built runtime and its reports.
@@ -200,34 +318,13 @@ impl Gate {
 /// delivery pass over every space this device holds keys of, answered here.
 type Command = futures::channel::oneshot::Sender<Result<Value, String>>;
 
-/// The runtime for an encrypted app, built from the app's own declarations
-/// over the private store the app supplied (a JavaScript store, see
-/// `js_store`), for the account of its session.
-/// The future owns the parsed secret so the host can wipe its options on drop.
-pub fn build(
-    options: &Options,
-    account_id: String,
-    store: Rc<JsStore>,
-) -> impl Future<Output = Result<Built, String>> + use<> {
-    let recovery = options.device_account_secret.clone();
-    let declarations = declarations(options);
-    async move { build_client(declarations?, account_id, store, recovery.as_ref()).await }
-}
-
-/// Build a native device runtime that handles account-secret recovery at
-/// startup. When a keyless relay supplies its declarations, the device must
-/// use those same declarations, including the app and environment.
+/// Build the native device from the declarations admitted for its database.
 pub async fn build_native(
-    mut options: Options,
+    declarations: E2eeDeclarations,
     account_id: String,
     store: Rc<dyn PrivateStore>,
-    relay_declarations: Option<&E2eeDeclarations>,
+    recovery: Option<RecoverySecret>,
 ) -> Result<NativeBuilt, String> {
-    let recovery = options.device_account_secret.take();
-    let declarations = declarations(&options)?;
-    if relay_declarations.is_some_and(|expected| *expected != declarations) {
-        return Err("the device's encryption declarations do not match the relay".to_owned());
-    }
     let built = build_client(declarations, account_id, store, recovery.as_ref()).await?;
     Ok(NativeBuilt { built, recovery })
 }
@@ -263,27 +360,6 @@ pub fn keyless_declarations(
     bound_declarations(bindings.as_bytes(), app_id, environment, false)?
         .1
         .ok_or_else(|| "the app's bindings declare no encryption".to_owned())
-}
-
-fn declarations(options: &Options) -> Result<E2eeDeclarations, String> {
-    let declarations = if options.from_bindings {
-        bound_declarations(
-            &options.app_file,
-            &options.app_id,
-            &options.environment,
-            false,
-        )?
-        .1
-    } else {
-        jazz::tools::deployment::artifact::load_client_encrypted(
-            &options.app_file,
-            jazz::tools::AppId::from_text(&options.app_id),
-            &options.environment,
-        )
-        .map_err(|error| error.to_string())?
-        .2
-    };
-    declarations.ok_or_else(|| "the app's files declare no encryption".to_owned())
 }
 
 async fn build_client(
@@ -681,6 +757,16 @@ impl Encryption {
         Box::pin(async move {
             this.run(&op, &args, secret.as_ref().map(|text| text.as_str()))
                 .await
+        })
+    }
+
+    pub fn call_driven(self: &Rc<Self>, op: String, args: Value) -> JsonFuture {
+        let future = self.call(op, args);
+        let runtime = self.clone();
+        Box::pin(async move {
+            let result = future.await;
+            runtime.drive();
+            result
         })
     }
 
@@ -1395,6 +1481,54 @@ mod tests {
         jazz::db::block_on(future)
     }
 
+    fn bindings_for(file: &[u8]) -> String {
+        let app = jazz::tools::deployment::artifact::load_app(file).unwrap();
+        json!({
+            "schema": { "current": app.current_hash(),
+                "schemas": [{ "hash": app.current_hash(), "schema": app.current_schema() }],
+                "migrations": [], "encryption": app.encryption() },
+            "relations": {}
+        })
+        .to_string()
+    }
+
+    /// Alice can retry a failed store request with her original device-account
+    /// secret. Inspect the pending builder because a successful local build
+    /// alone cannot distinguish a device account from an app-login account.
+    #[test]
+    fn store_failure_preserves_the_device_account_secret_for_retry() {
+        let bindings = bindings_for(include_bytes!(
+            "../../../jazz-codegen/tests/apps/encrypted/jazz.app.json"
+        ));
+        let builder = RuntimeBuilder::from_bindings(
+            bindings,
+            "test".into(),
+            "test".into(),
+            uuid::Uuid::new_v4().to_string(),
+            Some(RecoverySecret::from_bytes([1; 32]).format().to_string()),
+        )
+        .unwrap();
+        let mut attempt = builder.build_future().unwrap();
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(attempt.as_mut().poll(&mut context).is_pending());
+        let requests = builder.take_requests();
+        assert_eq!(requests.len(), 1);
+        let request: Value = serde_json::from_str(&requests[0]).unwrap();
+        assert!(builder.reply(request["id"].as_str().unwrap(), false, "unavailable"));
+        assert!(matches!(
+            attempt.as_mut().poll(&mut context),
+            Poll::Ready(Err(_))
+        ));
+        assert!(
+            builder
+                .options
+                .borrow()
+                .as_ref()
+                .and_then(|options| options.secret.as_ref())
+                .is_some_and(|secret| secret.as_bytes() == &[1; 32])
+        );
+    }
+
     /// Contract: a call that waits on the loop gets an answer or `None` at
     /// its limit, never a hang (white-box: the loop's watch cannot be made to
     /// fail from outside).
@@ -1422,16 +1556,22 @@ mod tests {
     fn the_runtime_is_built_from_the_apps_own_declarations() {
         let plain = br#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
             "tables": { "projects": { "columns": { "name": "string" } } } }"#;
-        let options = |file: &[u8]| Options {
-            app_file: file.to_vec(),
-            from_bindings: false,
-            device_account_secret: None,
-            app_id: "napi-encryption".to_owned(),
-            environment: "test".to_owned(),
-        };
         let account = uuid::Uuid::new_v4().to_string();
-        let store = Rc::new(JsStore::default());
-        assert!(run(build(&options(plain), account.clone(), store.clone())).is_err());
+        let runtime = |file: &[u8]| {
+            RuntimeBuilder::from_bindings(
+                bindings_for(file),
+                "napi-encryption".into(),
+                "test".into(),
+                account.clone(),
+                None,
+            )
+            .unwrap()
+        };
+        assert!(
+            run(runtime(plain).build_future().unwrap())
+                .unwrap_err()
+                .contains("declare no encryption")
+        );
         let encrypted = br#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
             "tables": {
                 "projects": { "columns": { "name": "string" } },
@@ -1444,20 +1584,24 @@ mod tests {
                 }
             } }"#;
         let answer = super::super::bridge::serve(Rc::new(crate::MemoryStore::new()));
-        let mut building = Box::pin(build(&options(encrypted), account.clone(), store.clone()));
+        let builder = runtime(encrypted);
+        let mut building = builder.build_future().unwrap();
         let mut context = std::task::Context::from_waker(Waker::noop());
-        let built = loop {
-            if let Poll::Ready(built) = building.as_mut().poll(&mut context) {
-                break built.unwrap();
+        loop {
+            if let Poll::Ready(result) = building.as_mut().poll(&mut context) {
+                result.unwrap();
+                break;
             }
             // JavaScript's side: run each request against a store.
-            for text in store.take_requests() {
+            for text in builder.take_requests() {
                 let request: Value = serde_json::from_str(&text).unwrap();
-                let id = request["id"].as_str().unwrap().parse().unwrap();
+                let id = request["id"].as_str().unwrap();
                 let (ok, payload) = run(answer(text));
-                assert!(store.reply(id, ok, &payload));
+                assert!(builder.reply(id, ok, &payload));
             }
-        };
+        }
+        let slot = builder.built.borrow();
+        let built = slot.as_ref().unwrap();
         assert_eq!(built.client.account_id(), account);
         assert!(built.reports.borrow().is_empty());
     }
@@ -1468,8 +1612,7 @@ mod tests {
         use jazz::schema::JazzSchema;
         use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
-        let options = Options {
-            app_file: br#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+        let file = br#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
                 "tables": {
                     "projects": { "columns": { "name": "string" } },
                     "notes": {
@@ -1478,15 +1621,17 @@ mod tests {
                         "encryption": { "space": "projectId", "scope": "projects",
                             "columns": { "body": "string" } }
                     }
-                } }"#
-                .to_vec(),
-            from_bindings: false,
-            device_account_secret: None,
-            app_id: "terminal-catalogue".to_owned(),
-            environment: "test".to_owned(),
-        };
+                } }"#;
+        let declarations = jazz::tools::deployment::artifact::load_client_encrypted(
+            file,
+            jazz::tools::AppId::from_name("terminal-catalogue"),
+            "test",
+        )
+        .unwrap()
+        .2
+        .unwrap();
         let built = run(build_native(
-            options,
+            declarations,
             uuid::Uuid::new_v4().to_string(),
             Rc::new(crate::MemoryStore::new()),
             None,

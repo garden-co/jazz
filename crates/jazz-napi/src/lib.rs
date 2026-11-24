@@ -68,7 +68,6 @@ use jazz_server::{
     AuthConfig, JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
 };
 mod embedded;
-use jazz_e2ee_client::host::bridge as js_store;
 use jazz_e2ee_client::host::runtime as encryption;
 
 use napi::bindgen_prelude::*;
@@ -950,15 +949,8 @@ enum Hooks<'a> {
 pub struct EncryptionProof {
     pub token: String,
     pub claimed_author: String,
-}
-
-/// A Jazz self-signed client identity for a keyless open: the token, the
-/// app it is for and the author it claims, as the plain open takes them.
-#[napi(object)]
-pub struct KeylessProof {
-    pub token: String,
-    pub app_id: String,
-    pub claimed_author: String,
+    /// The session proof names its app. A device open always uses its runtime's app.
+    pub app_id: Option<String>,
 }
 
 /// The end-to-end encryption runtime of an app, built over the private store
@@ -967,38 +959,11 @@ pub struct KeylessProof {
 /// with `replyStore` (see `js_store`).
 #[napi]
 pub struct EncryptionRuntime {
-    store: Rc<js_store::JsStore>,
-    options: Rc<RefCell<Option<encryption::Options>>>,
-    building: Rc<Cell<bool>>,
-    account_id: String,
-    app_id: String,
-    built: Rc<RefCell<Option<encryption::Built>>>,
+    builder: encryption::RuntimeBuilder,
 }
 
 #[napi]
 impl EncryptionRuntime {
-    /// A runtime for the app whose files are `app_file`, for the account
-    /// `account_id` of the session that will open the database;
-    /// `device_account_secret` (`jazz-auth-v1:…`) for a device
-    /// account, whose secret is its recovery secret.
-    #[napi(constructor)]
-    pub fn new(
-        app_file: Uint8Array,
-        app_id: String,
-        environment: String,
-        account_id: String,
-        device_account_secret: Option<String>,
-    ) -> napi::Result<Self> {
-        Self::from_source(
-            app_file.to_vec(),
-            false,
-            app_id,
-            environment,
-            account_id,
-            device_account_secret,
-        )
-    }
-
     /// A runtime for the app whose generated bindings embed the compiled app
     /// `bindings` (JSON of `{ schema, relations }`, the options they pass to
     /// `bindApp`): what a deployed app has in place of `jazz.app.json`.
@@ -1010,79 +975,24 @@ impl EncryptionRuntime {
         account_id: String,
         device_account_secret: Option<String>,
     ) -> napi::Result<Self> {
-        Self::from_source(
-            bindings.into_bytes(),
-            true,
-            app_id,
-            environment,
-            account_id,
-            device_account_secret,
-        )
-    }
-}
-
-impl EncryptionRuntime {
-    fn from_source(
-        app_file: Vec<u8>,
-        from_bindings: bool,
-        app_id: String,
-        environment: String,
-        account_id: String,
-        device_account_secret: Option<String>,
-    ) -> napi::Result<Self> {
-        let device_account_secret = device_account_secret
-            .map(jazz::identity::DeviceAccountSecret::parse_owned)
-            .transpose()
-            .map_err(napi::Error::from_reason)?;
         Ok(Self {
-            store: Rc::default(),
-            options: Rc::new(RefCell::new(Some(encryption::Options {
-                app_file,
-                from_bindings,
-                device_account_secret,
-                app_id: app_id.clone(),
+            builder: encryption::RuntimeBuilder::from_bindings(
+                bindings,
+                app_id,
                 environment,
-            }))),
-            building: Rc::default(),
-            account_id,
-            app_id,
-            built: Rc::default(),
+                account_id,
+                device_account_secret,
+            )
+            .map_err(napi::Error::from_reason)?,
         })
     }
 
-    fn build_future(&self) -> Option<encryption::JsonFuture> {
-        if self.building.get() {
-            return None;
-        }
-        let build = encryption::build(
-            self.options.borrow().as_ref()?,
-            self.account_id.clone(),
-            Rc::clone(&self.store),
-        );
-        let options = Rc::downgrade(&self.options);
-        let building = Rc::clone(&self.building);
-        let slot = Rc::clone(&self.built);
-        Some(Box::pin(async move {
-            building.set(true);
-            let result = build.await;
-            building.set(false);
-            let built = result?;
-            if let Some(options) = options.upgrade() {
-                options.borrow_mut().take();
-            }
-            *slot.borrow_mut() = Some(built);
-            Ok(serde_json::Value::Null)
-        }))
-    }
-}
-
-#[napi]
-impl EncryptionRuntime {
     /// Builds the runtime: settles when its device is loaded or made, which
     /// takes the app's store (answer its requests while waiting).
     #[napi(ts_return_type = "Promise<string>")]
     pub fn ready(&self, env: &Env) -> js::Result<PromiseRaw<'static, String>> {
         let future = self
+            .builder
             .build_future()
             .ok_or_else(|| napi::Error::from_reason("the runtime is already built"))?;
         Ok(json_promise(env, future)?)
@@ -1091,8 +1001,8 @@ impl EncryptionRuntime {
     /// The store requests queued since the last call, each a JSON text.
     #[napi(js_name = "takeStoreRequests")]
     pub fn take_store_requests(&self) -> Vec<String> {
-        let requests = self.store.take_requests();
-        settle_promises();
+        let requests = self.builder.take_requests();
+        self.builder.drive(settle_promises);
         requests
     }
 
@@ -1100,10 +1010,8 @@ impl EncryptionRuntime {
     /// outstanding (the answer is dropped).
     #[napi(js_name = "replyStore")]
     pub fn reply_store(&self, id: String, ok: bool, payload: String) -> bool {
-        let accepted = id
-            .parse()
-            .is_ok_and(|id| self.store.reply(id, ok, &payload));
-        settle_promises();
+        let accepted = self.builder.reply(&id, ok, &payload);
+        self.builder.drive(settle_promises);
         accepted
     }
 }
@@ -2077,19 +1985,32 @@ impl NapiDb {
         Ok(jazz_e2ee_client::KeylessHooks::hooks(declarations))
     }
 
-    fn encrypted_how<'a>(
-        token: &'a Option<String>,
-        author: &'a Option<String>,
-        app_id: &'a str,
-    ) -> OpenAs<'a> {
-        match (token, author) {
-            (Some(token), Some(author)) => OpenAs::SelfSigned {
-                token,
-                app_id,
-                claimed_author: author,
-            },
-            _ => OpenAs::Untrusted,
-        }
+    fn open_keyless(
+        schema: &[u8],
+        config: &[u8],
+        path: Option<&str>,
+        bindings: &str,
+        app_id: &str,
+        environment: &str,
+        how: OpenAs<'_>,
+    ) -> napi::Result<Self> {
+        let hooks = Self::keyless_hooks(bindings, app_id, environment)?;
+        Self::open_with(schema, config, path, how, Some(Hooks::Keyless(hooks)))
+    }
+
+    fn open_encrypted(
+        schema: &[u8],
+        config: &[u8],
+        path: Option<&str>,
+        runtime: &EncryptionRuntime,
+        proof: Option<&EncryptionProof>,
+    ) -> napi::Result<Self> {
+        let how = proof.map_or(OpenAs::Untrusted, |proof| OpenAs::SelfSigned {
+            token: &proof.token,
+            app_id: &runtime.builder.app_id,
+            claimed_author: &proof.claimed_author,
+        });
+        Self::open_with(schema, config, path, how, Some(Hooks::Client(runtime)))
     }
 
     fn open_inner(&self) -> napi::Result<Inner> {
@@ -2112,6 +2033,15 @@ impl NapiDb {
         config: &[u8],
         data_path: Option<&str>,
         how: OpenAs<'_>,
+    ) -> napi::Result<Self> {
+        Self::open_with(schema, config, data_path, how, None)
+    }
+
+    fn open_with(
+        schema: &[u8],
+        config: &[u8],
+        data_path: Option<&str>,
+        how: OpenAs<'_>,
         encrypted: Option<Hooks<'_>>,
     ) -> napi::Result<Self> {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
@@ -2129,21 +2059,12 @@ impl NapiDb {
             db_config = db_config.with_e2ee(Rc::clone(hooks));
         }
         if let Some(Hooks::Client(encrypted)) = encrypted {
-            let slot = encrypted.built.borrow();
-            let built = slot
-                .as_ref()
-                .ok_or_else(|| napi::Error::from_reason("the encryption runtime is not ready"))?;
-            if identity
-                .author
-                .account_id()
-                .map(|account| account.0.to_string())
-                != Some(encrypted.account_id.clone())
-            {
-                return Err(napi::Error::from_reason(
-                    "the encryption runtime is for another account than this session's",
-                ));
-            }
-            db_config = db_config.with_e2ee(built.client.hooks());
+            db_config = db_config.with_e2ee(
+                encrypted
+                    .builder
+                    .hooks(identity)
+                    .map_err(napi::Error::from_reason)?,
+            );
             runtime = Some(encrypted);
         }
         let db = match data_path {
@@ -2158,24 +2079,16 @@ impl NapiDb {
         let binding = block_on(Binding::new(db, identity, trusted));
         let owner = Self::runtime_owner(binding);
         if let Some(runtime) = runtime {
-            let built = runtime
-                .built
-                .borrow_mut()
-                .take()
-                .expect("runtime checked before open");
-            let store = Rc::clone(&runtime.store);
             let inner = owner.inner.borrow();
             let inner = inner.as_ref().expect("just opened");
             let host = Rc::downgrade(&inner.host);
-            store.set_wake(Box::new(move || {
-                if let Some(host) = host.upgrade() {
-                    host.request_tick();
-                }
-            }));
-            *inner.host.encryption.borrow_mut() = Some(encryption::Encryption::new(
-                built,
-                store,
+            *inner.host.encryption.borrow_mut() = Some(runtime.builder.attach(
                 Rc::clone(&inner.binding.db),
+                Box::new(move || {
+                    if let Some(host) = host.upgrade() {
+                        host.request_tick();
+                    }
+                }),
             ));
         }
         Ok(owner)
@@ -2617,13 +2530,14 @@ impl NapiDb {
         app_id: String,
         environment: String,
     ) -> js::Result<Self> {
-        let hooks = Self::keyless_hooks(&bindings, &app_id, &environment)?;
-        Ok(Self::open_as(
+        Ok(Self::open_keyless(
             &schema,
             &config,
             None,
+            &bindings,
+            &app_id,
+            &environment,
             OpenAs::Backend,
-            Some(Hooks::Keyless(hooks)),
         )?)
     }
 
@@ -2639,20 +2553,27 @@ impl NapiDb {
         bindings: String,
         app_id: String,
         environment: String,
-        proof: Option<KeylessProof>,
+        proof: Option<EncryptionProof>,
     ) -> js::Result<Self> {
-        let hooks = Self::keyless_hooks(&bindings, &app_id, &environment)?;
-        let (token, author, proof_app) = match proof {
-            Some(proof) => (Some(proof.token), Some(proof.claimed_author), proof.app_id),
-            None => (None, None, app_id),
+        let how = match &proof {
+            Some(proof) => OpenAs::SelfSigned {
+                token: &proof.token,
+                app_id: proof
+                    .app_id
+                    .as_deref()
+                    .ok_or_else(|| napi::Error::from_reason("missing proof appId"))?,
+                claimed_author: &proof.claimed_author,
+            },
+            None => OpenAs::Untrusted,
         };
-        let how = Self::encrypted_how(&token, &author, &proof_app);
-        Ok(Self::open_as(
+        Ok(Self::open_keyless(
             &schema,
             &config,
             None,
+            &bindings,
+            &app_id,
+            &environment,
             how,
-            Some(Hooks::Keyless(hooks)),
         )?)
     }
 
@@ -2667,38 +2588,27 @@ impl NapiDb {
         app_id: String,
         environment: String,
     ) -> js::Result<Self> {
-        let hooks = Self::keyless_hooks(&bindings, &app_id, &environment)?;
-        Ok(Self::open_as(
+        Ok(Self::open_keyless(
             &schema,
             &config,
             Some(&data_path),
+            &bindings,
+            &app_id,
+            &environment,
             OpenAs::Backend,
-            Some(Hooks::Keyless(hooks)),
         )?)
     }
 
     #[napi(factory, js_name = "openMemory")]
     pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> js::Result<Self> {
-        Ok(Self::open_as(
-            &schema,
-            &config,
-            None,
-            OpenAs::Untrusted,
-            None,
-        )?)
+        Ok(Self::open_as(&schema, &config, None, OpenAs::Untrusted)?)
     }
 
     /// Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
     /// this explicit ABI derives the canonical system author.
     #[napi(factory, js_name = "openMemoryAsBackend")]
     pub fn open_memory_as_backend(schema: Uint8Array, config: Uint8Array) -> js::Result<Self> {
-        Ok(Self::open_as(
-            &schema,
-            &config,
-            None,
-            OpenAs::Backend,
-            None,
-        )?)
+        Ok(Self::open_as(&schema, &config, None, OpenAs::Backend)?)
     }
 
     /// Open with a verified Jazz self-signed client identity. This is a
@@ -2718,7 +2628,7 @@ impl NapiDb {
             app_id: &app_id,
             claimed_author: &claimed_author,
         };
-        Ok(Self::open_as(&schema, &config, None, how, None)?)
+        Ok(Self::open_as(&schema, &config, None, how)?)
     }
 
     /// Open the durable store in directory `data_path` (one SQLite file).
@@ -2733,7 +2643,6 @@ impl NapiDb {
             &config,
             Some(&data_path),
             OpenAs::Untrusted,
-            None,
         )?)
     }
 
@@ -2750,7 +2659,6 @@ impl NapiDb {
             &config,
             Some(&data_path),
             OpenAs::Backend,
-            None,
         )?)
     }
 
@@ -2768,13 +2676,7 @@ impl NapiDb {
             app_id: &app_id,
             claimed_author: &claimed_author,
         };
-        Ok(Self::open_as(
-            &schema,
-            &config,
-            Some(&data_path),
-            how,
-            None,
-        )?)
+        Ok(Self::open_as(&schema, &config, Some(&data_path), how)?)
     }
 
     /// Open an encrypted app's in-memory database with its runtime
@@ -2786,15 +2688,12 @@ impl NapiDb {
         runtime: &EncryptionRuntime,
         proof: Option<EncryptionProof>,
     ) -> js::Result<Self> {
-        let (token, author) =
-            proof.map_or((None, None), |p| (Some(p.token), Some(p.claimed_author)));
-        let how = Self::encrypted_how(&token, &author, &runtime.app_id);
-        Ok(Self::open_as(
+        Ok(Self::open_encrypted(
             &schema,
             &config,
             None,
-            how,
-            Some(Hooks::Client(runtime)),
+            runtime,
+            proof.as_ref(),
         )?)
     }
 
@@ -2808,40 +2707,13 @@ impl NapiDb {
         runtime: &EncryptionRuntime,
         proof: Option<EncryptionProof>,
     ) -> js::Result<Self> {
-        let (token, author) =
-            proof.map_or((None, None), |p| (Some(p.token), Some(p.claimed_author)));
-        let how = Self::encrypted_how(&token, &author, &runtime.app_id);
-        Ok(Self::open_as(
+        Ok(Self::open_encrypted(
             &schema,
             &config,
             Some(&data_path),
-            how,
-            Some(Hooks::Client(runtime)),
+            runtime,
+            proof.as_ref(),
         )?)
-    }
-
-    /// The private-store requests queued since the last call, each a JSON text.
-    #[napi(js_name = "takeStoreRequests")]
-    pub fn take_store_requests(&self) -> js::Result<Vec<String>> {
-        let encryption = self.encryption()?;
-        let requests = encryption.bridge_store().take_requests();
-        // The host polls here, so a request the store never answers times out.
-        encryption.drive();
-        settle_promises();
-        Ok(requests)
-    }
-
-    /// The app's answer to a private-store request; `false` when no such
-    /// request is outstanding (the answer is dropped).
-    #[napi(js_name = "replyStore")]
-    pub fn reply_store(&self, id: String, ok: bool, payload: String) -> js::Result<bool> {
-        let encryption = self.encryption()?;
-        let accepted = id
-            .parse()
-            .is_ok_and(|id| encryption.bridge_store().reply(id, ok, &payload));
-        encryption.drive();
-        settle_promises();
-        Ok(accepted)
     }
 
     /// Run one end-to-end encryption operation: its name and arguments (JSON),
@@ -2857,13 +2729,7 @@ impl NapiDb {
     ) -> js::Result<PromiseRaw<'static, String>> {
         let encryption = self.encryption()?;
         let args = args.map(JsonValue::from_unknown).transpose()?;
-        let future = encryption.call(op, json_or_null(args));
-        let driver = Rc::clone(&encryption);
-        let future: encryption::JsonFuture = Box::pin(async move {
-            let result = future.await;
-            driver.drive();
-            result
-        });
+        let future = encryption.call_driven(op, json_or_null(args));
         let promise = json_promise(env, future)?;
         encryption.drive();
         settle_promises();
@@ -3938,9 +3804,8 @@ mod encryption_tests {
         let schema = serde_json::to_vec(definition.current_schema()).unwrap();
         let alice = AuthorSubject::for_test_bytes([1; 16]);
         let bob = AuthorSubject::for_test_bytes([2; 16]);
-        let runtime = EncryptionRuntime::from_source(
-            app.to_vec(),
-            false,
+        let runtime = EncryptionRuntime::from_bindings(
+            jazz_codegen::compile_app(app).unwrap(),
             "test".into(),
             "test".into(),
             alice.account_id().unwrap().0.to_string(),
@@ -3952,9 +3817,12 @@ mod encryption_tests {
         )
         .unwrap();
         let mut context = Context::from_waker(Waker::noop());
-        let mut failed = runtime.build_future().unwrap();
+        let mut failed = runtime.builder.build_future().unwrap();
         assert!(failed.as_mut().poll(&mut context).is_pending());
-        assert!(runtime.build_future().is_none(), "build in progress");
+        assert!(
+            runtime.builder.build_future().is_none(),
+            "build in progress"
+        );
         let id = |request: &str| {
             serde_json::from_str::<JsonValue>(request).unwrap()["id"]
                 .as_str()
@@ -3968,19 +3836,12 @@ mod encryption_tests {
             panic!("readiness should report the failed store request");
         };
         assert!(failure.contains("store unavailable"), "{failure}");
-        assert!(
-            runtime.options.borrow().as_ref().is_some_and(|options| {
-                options
-                    .device_account_secret
-                    .as_ref()
-                    .map(|secret| secret.as_bytes())
-                    == Some(&[1; 32])
-            }),
-            "failed readiness preserves the recovery secret for a retry"
-        );
-
-        let store = js_store::serve(Rc::new(jazz_e2ee_client::MemoryStore::new()));
-        let mut retry = runtime.build_future().expect("readiness can be retried");
+        let store =
+            jazz_e2ee_client::host::bridge::serve(Rc::new(jazz_e2ee_client::MemoryStore::new()));
+        let mut retry = runtime
+            .builder
+            .build_future()
+            .expect("readiness can be retried");
         loop {
             if let Poll::Ready(result) = retry.as_mut().poll(&mut context) {
                 result.expect("the recovered store builds the runtime");
@@ -3995,7 +3856,7 @@ mod encryption_tests {
                 assert!(runtime.reply_store(request_id, ok, payload));
             }
         }
-        assert!(runtime.build_future().is_none(), "build completed");
+        assert!(runtime.builder.build_future().is_none(), "build completed");
 
         let open = |author| {
             let config = postcard::to_allocvec(&OpenConfig {
@@ -4010,7 +3871,7 @@ mod encryption_tests {
                 system_node: None,
             })
             .unwrap();
-            NapiDb::open_as(
+            NapiDb::open_with(
                 &schema,
                 &config,
                 None,

@@ -1,7 +1,11 @@
 import { createOpenTransactionId, StreamingPublicationTimeoutError } from "../client.js";
 import type { ClientMigrations } from "../client-migrations.js";
 import type { Encryption, EncryptionNative } from "../../encryption/index.js";
-import { servePrivateStore, type PrivateStore } from "../../encryption/private-store.js";
+import {
+  servePrivateStore,
+  type PrivateStore,
+  type StoreTarget,
+} from "../../encryption/private-store.js";
 import { KEY_WAIT_MS, retryAfterKey } from "../../encryption/key-retry.js";
 import { plainSchema, type PlainEntries } from "../../encryption/plain-schema.js";
 import { SpaceUse, type SubscriptionSpaceUse } from "../../encryption/space-use.js";
@@ -252,7 +256,7 @@ type NativeDbConstructor = {
  */
 export type NativeEncryptionOptions = {
   /** The native `EncryptionRuntime`, built and ready. */
-  runtime: unknown;
+  runtime: StoreTarget;
   store: PrivateStore;
   /** Builds the device's public handle. The keyless broker has no handle. */
   createHandle: EncryptionHandleFactory;
@@ -262,8 +266,6 @@ type EncryptionHandleFactory = (native: EncryptionNative) => Encryption;
 
 /** What a database that has the runtime installed adds to the native calls. */
 type NativeEncryptionDb = EncryptionNative & {
-  takeStoreRequests(): string[];
-  replyStore(id: string, ok: boolean, payload: string): boolean;
   encryptionUseSpace(table: string, id: string, open: boolean): void;
   encryptionSpaces(): string;
   encryptionSetOnline(online: boolean): void;
@@ -1211,7 +1213,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private serveEncryption(options: NativeEncryptionOptions): void {
     const native = this.db as unknown as NativeEncryptionDb;
-    const serving = servePrivateStore(native, options.store);
+    const serving = servePrivateStore(options.runtime, options.store);
     try {
       this.bindEncryption(native, serving, options.createHandle);
       // Verify the account in the background; the app may await `ready()` too.

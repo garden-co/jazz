@@ -39,7 +39,9 @@ export async function buildNodeEncryption(options: {
   /** The device account's secret (`jazz-auth-v1:...`); it is the account's recovery secret. */
   deviceAccountSecret?: string;
   encryption: NodeEncryptionConfig | undefined;
-}): Promise<{ runtime: unknown; store: PrivateStore } | undefined> {
+}): Promise<
+  { runtime: import("./private-store.js").StoreTarget; store: PrivateStore } | undefined
+> {
   if (!declaresEncryption(options.app)) return undefined;
   const host = backendNative().EncryptionRuntime;
   if (!host) {

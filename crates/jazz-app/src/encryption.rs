@@ -131,7 +131,6 @@ mod plan {
         pub(crate) fn new(
             _declarations: Option<jazz::tools::public_schema::E2eeDeclarations>,
             _config: &crate::Config,
-            _files: &crate::AppFiles,
         ) -> Self {
             Plan
         }
@@ -188,21 +187,13 @@ mod plan {
     pub(crate) struct Plan {
         declarations: Option<E2eeDeclarations>,
         config: Option<EncryptionConfig>,
-        app_file: Vec<u8>,
-        app_id: jazz::tools::AppId,
     }
 
     impl Plan {
-        pub(crate) fn new(
-            declarations: Option<E2eeDeclarations>,
-            config: &crate::Config,
-            files: &crate::AppFiles,
-        ) -> Self {
+        pub(crate) fn new(declarations: Option<E2eeDeclarations>, config: &crate::Config) -> Self {
             Self {
                 declarations,
                 config: config.encryption.clone(),
-                app_file: files.app_bytes().to_vec(),
-                app_id: config.app_id,
             }
         }
 
@@ -229,9 +220,9 @@ mod plan {
             account: crate::AccountId,
             secret: Option<&crate::DeviceKey>,
         ) -> Result<Option<ClientEncryption>> {
-            if self.declarations.is_none() {
+            let Some(declarations) = &self.declarations else {
                 return Ok(None);
-            }
+            };
             let Some(config) = &self.config else {
                 return Err(Error::App(NEEDS_DEVICE.to_owned()));
             };
@@ -250,16 +241,10 @@ mod plan {
             let device_account_secret = secret
                 .map(|key| jazz_e2ee_client::host::RecoverySecret::from_bytes(key.to_bytes()));
             let built = host::build_native(
-                host::Options {
-                    app_file: self.app_file.clone(),
-                    from_bindings: false,
-                    device_account_secret,
-                    app_id: self.app_id.to_string(),
-                    environment: config.environment.clone(),
-                },
+                declarations.clone(),
                 account.0.to_string(),
                 store,
-                None,
+                device_account_secret,
             )
             .await
             .map_err(|message| Error::Encryption {

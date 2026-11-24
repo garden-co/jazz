@@ -8,13 +8,6 @@
  */
 export declare class EncryptionRuntime {
   /**
-   * A runtime for the app whose files are `app_file`, for the account
-   * `account_id` of the session that will open the database;
-   * `device_account_secret` (`jazz-auth-v1:…`) for a device
-   * account, whose secret is its recovery secret.
-   */
-  constructor(appFile: Uint8Array, appId: string, environment: string, accountId: string, deviceAccountSecret?: string | undefined | null)
-  /**
    * A runtime for the app whose generated bindings embed the compiled app
    * `bindings` (JSON of `{ schema, relations }`, the options they pass to
    * `bindApp`): what a deployed app has in place of `jazz.app.json`.
@@ -142,7 +135,7 @@ export declare class NapiDb {
    * client a backend serves a thin session's transactions with. Encrypted
    * writes are refused, encrypted cells unreadable, plain data normal.
    */
-  static openMemoryKeyless(schema: Uint8Array, config: Uint8Array, bindings: string, appId: string, environment: string, proof?: KeylessProof | undefined | null): NapiDb
+  static openMemoryKeyless(schema: Uint8Array, config: Uint8Array, bindings: string, appId: string, environment: string, proof?: EncryptionProof | undefined | null): NapiDb
   /**
    * [`Self::open_memory_as_backend_keyless`] over a durable store in
    * directory `data_path`.
@@ -179,13 +172,6 @@ export declare class NapiDb {
    * with its runtime installed. The private store is the app's.
    */
   static openPersistentEncrypted(dataPath: string, schema: Uint8Array, config: Uint8Array, runtime: EncryptionRuntime, proof?: EncryptionProof | undefined | null): NapiDb
-  /** The private-store requests queued since the last call, each a JSON text. */
-  takeStoreRequests(): Array<string>
-  /**
-   * The app's answer to a private-store request; `false` when no such
-   * request is outstanding (the answer is dropped).
-   */
-  replyStore(id: string, ok: boolean, payload: string): boolean
   /**
    * Run one end-to-end encryption operation: its name and arguments (JSON),
    * answered with the JSON text of its result.
@@ -646,6 +632,8 @@ export interface DirOutcome {
 export interface EncryptionProof {
   token: string
   claimedAuthor: string
+  /** The session proof names its app. A device open always uses its runtime's app. */
+  appId?: string
 }
 
 /** The Inspector's `explain`: how many clauses the read policy has, and the rows found. */
@@ -714,16 +702,6 @@ export interface JazzCoreSocketEvent {
  */
 export type JsonValue =
   any
-
-/**
- * A Jazz self-signed client identity for a keyless open: the token, the
- * app it is for and the author it claims, as the plain open takes them.
- */
-export interface KeylessProof {
-  token: string
-  appId: string
-  claimedAuthor: string
-}
 
 /**
  * Read and check an app's `jazz.app.json` (`app`) and

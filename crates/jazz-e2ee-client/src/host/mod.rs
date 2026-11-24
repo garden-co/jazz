@@ -17,8 +17,7 @@ pub mod bridge;
 pub mod phrase;
 pub mod runtime;
 
-/// The device account's secret as native hosts pass it (see
-/// [`runtime::Options`]): its bytes are zeroized when it is dropped.
+/// The device account's secret as native hosts pass it: its bytes are zeroized when it is dropped.
 pub use jazz_e2ee::protocol::derive::RecoverySecret;
 
 /// Futures that settle JavaScript promises on the binding's owning thread.
