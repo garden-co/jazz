@@ -92,14 +92,44 @@ fn routed<'r, T: MechanismImpl + ?Sized>(list: &'r [Arc<T>], envelope: &[u8]) ->
         .ok_or(Error::UnsupportedFormat)
 }
 
-macro_rules! role {
-    ($field:ident, $trait:ident, $register:ident, $insert:ident, $get:ident, $route:ident, $what:literal) => {
+macro_rules! role_insert {
+    (yes, $field:ident, $trait:ident, $insert:ident) => {
         /// Registers any valid mechanism, reserved IDs included, for the
         /// conformance kit.
         #[allow(dead_code)]
         pub(crate) fn $insert(&mut self, mechanism: Arc<dyn $trait>) -> Result<()> {
             insert(&mut self.$field, mechanism)
         }
+    };
+    (no, $field:ident, $trait:ident, $insert:ident) => {};
+}
+
+macro_rules! role_get {
+    (yes, $field:ident, $trait:ident, $get:ident, $what:literal) => {
+        #[doc = concat!("The registered ", $what, " for `mechanism`.")]
+        pub fn $get(&self, mechanism: Mechanism<'_>) -> Result<&dyn $trait> {
+            find(&self.$field, mechanism)
+                .map(|item| &**item)
+                .ok_or(Error::UnknownMechanism)
+        }
+    };
+    (no, $field:ident, $trait:ident, $get:ident, $what:literal) => {};
+}
+
+macro_rules! role_route {
+    (yes, $field:ident, $trait:ident, $route:ident, $what:literal) => {
+        #[doc = concat!("The registered ", $what, " named by `envelope`'s header.")]
+        pub fn $route(&self, envelope: &[u8]) -> Result<&dyn $trait> {
+            routed(&self.$field, envelope)
+        }
+    };
+    (no, $field:ident, $trait:ident, $route:ident, $what:literal) => {};
+}
+
+macro_rules! role {
+    ($field:ident, $trait:ident, $register:ident, $insert:ident, $get:ident, $route:ident,
+     $insert_enabled:ident, $get_enabled:ident, $route_enabled:ident, $what:literal) => {
+        role_insert!($insert_enabled, $field, $trait, $insert);
 
         #[doc = concat!("Registers a custom ", $what, ". Its ID must be a reverse-DNS name")]
         #[doc = "outside the reserved `jazz.` namespace, and its ID and version must"]
@@ -108,17 +138,8 @@ macro_rules! role {
             custom(&mut self.$field, mechanism)
         }
 
-        #[doc = concat!("The registered ", $what, " for `mechanism`.")]
-        pub fn $get(&self, mechanism: Mechanism<'_>) -> Result<&dyn $trait> {
-            find(&self.$field, mechanism)
-                .map(|item| &**item)
-                .ok_or(Error::UnknownMechanism)
-        }
-
-        #[doc = concat!("The registered ", $what, " named by `envelope`'s header.")]
-        pub fn $route(&self, envelope: &[u8]) -> Result<&dyn $trait> {
-            routed(&self.$field, envelope)
-        }
+        role_get!($get_enabled, $field, $trait, $get, $what);
+        role_route!($route_enabled, $field, $trait, $route, $what);
     };
 }
 
@@ -152,6 +173,9 @@ impl Registry {
         insert_cell_cipher,
         cell_cipher,
         cell_cipher_for,
+        yes,
+        no,
+        yes,
         "cell cipher"
     );
     role!(
@@ -161,6 +185,9 @@ impl Registry {
         insert_key_wrapper,
         key_wrapper,
         key_wrapper_for,
+        no,
+        no,
+        yes,
         "key wrapper"
     );
     role!(
@@ -170,6 +197,9 @@ impl Registry {
         insert_key_sealer,
         key_sealer,
         key_sealer_for,
+        yes,
+        yes,
+        yes,
         "key sealer"
     );
     role!(
@@ -179,6 +209,9 @@ impl Registry {
         insert_signer,
         signer,
         signer_for,
+        yes,
+        yes,
+        no,
         "signer"
     );
     role!(
@@ -188,6 +221,9 @@ impl Registry {
         insert_equality_tagger,
         equality_tagger,
         equality_tagger_for,
+        no,
+        no,
+        no,
         "equality tagger"
     );
     role!(
@@ -197,6 +233,9 @@ impl Registry {
         insert_stream_cipher,
         stream_cipher,
         stream_cipher_for,
+        yes,
+        no,
+        yes,
         "stream cipher"
     );
 
