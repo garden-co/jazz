@@ -2215,6 +2215,20 @@ pub fn unreadable_json(rows: &[UnreadableRow]) -> String {
     .to_string()
 }
 
+/// Keep omitted rows with their read until JavaScript asks for them.
+pub fn reporting_read(
+    future: HostFuture<(Vec<u8>, Vec<UnreadableRow>)>,
+    unreadable: Rc<RefCell<Option<String>>>,
+) -> HostFuture<Vec<u8>> {
+    Box::pin(async move {
+        let (bytes, rows) = future.await?;
+        if !rows.is_empty() {
+            *unreadable.borrow_mut() = Some(unreadable_json(&rows));
+        }
+        Ok(bytes)
+    })
+}
+
 /// Encode one subscription event.
 pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
     Ok(match event {

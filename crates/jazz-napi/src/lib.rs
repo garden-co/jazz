@@ -859,52 +859,36 @@ fn closed() -> napi::Error {
 
 // ---- promises --------------------------------------------------------------------------
 
-/// A JavaScript promise waiting on a binding future.
-struct PendingPromise {
-    env: sys::napi_env,
-    deferred: sys::napi_deferred,
-    future: HostFuture<()>,
-}
-
 thread_local! {
-    /// Promises whose futures were pending when last polled. Each database
-    /// is owned by one JavaScript thread, and so are its promises.
-    static PENDING_PROMISES: RefCell<Vec<PendingPromise>> = const { RefCell::new(Vec::new()) };
+    static PENDING_PROMISES: jazz_e2ee_client::host::PromiseQueue = Default::default();
 }
 
-/// A promise settled by `future`: at once when it is ready, otherwise by a
-/// later [`settle_promises`].
-fn host_promise(env: &Env, future: HostFuture<()>) -> napi::Result<PromiseRaw<'static, ()>> {
+fn promise_for<T, R: 'static>(
+    env: &Env,
+    future: impl std::future::Future<Output = R> + 'static,
+    settle: impl FnOnce(sys::napi_env, sys::napi_deferred, R) + 'static,
+    failure: &str,
+) -> napi::Result<PromiseRaw<'static, T>> {
     let env = env.raw();
     let mut deferred = std::ptr::null_mut();
     let mut promise = std::ptr::null_mut();
-    let status = unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) };
-    if status != sys::Status::napi_ok {
-        return Err(napi::Error::from_reason(
-            "failed to create a write wait promise",
-        ));
+    if unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) } != sys::Status::napi_ok
+    {
+        return Err(napi::Error::from_reason(failure.to_owned()));
     }
-    let mut pending = PendingPromise {
-        env,
-        deferred,
-        future,
-    };
-    if !pending.poll() {
-        PENDING_PROMISES.with(|promises| promises.borrow_mut().push(pending));
-    }
+    PENDING_PROMISES.with(|queue| {
+        queue.submit(async move {
+            settle(env, deferred, future.await);
+        })
+    });
     Ok(PromiseRaw::new(env, promise))
 }
 
-impl PendingPromise {
-    /// Settle the promise if its future is ready; `false` while pending.
-    fn poll(&mut self) -> bool {
-        let mut context = Context::from_waker(Waker::noop());
-        let result = match self.future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => result,
-            Poll::Pending => return false,
-        };
-        let (env, deferred) = (self.env, self.deferred);
-        match result {
+fn host_promise(env: &Env, future: HostFuture<()>) -> napi::Result<PromiseRaw<'static, ()>> {
+    promise_for(
+        env,
+        future,
+        |env, deferred, result| match result {
             Ok(()) => {
                 let mut undefined = std::ptr::null_mut();
                 if unsafe { sys::napi_get_undefined(env, &mut undefined) } == sys::Status::napi_ok {
@@ -915,9 +899,9 @@ impl PendingPromise {
                 let rejection = js_error_value(env, &host_error(error));
                 unsafe { sys::napi_reject_deferred(env, deferred, rejection) };
             }
-        }
-        true
-    }
+        },
+        "failed to create a write wait promise",
+    )
 }
 
 /// A JavaScript `Error` with `error`'s message, code and, for a core error
@@ -950,14 +934,7 @@ fn js_error_value(env: sys::napi_env, error: &napi::Error) -> sys::napi_value {
 /// tick, a local write or a claims change made progress, so every call that
 /// can do so ends here.
 fn settle_promises() {
-    settle_json_promises();
-    let mut pending = PENDING_PROMISES.with(|promises| std::mem::take(&mut *promises.borrow_mut()));
-    pending.retain_mut(|promise| !promise.poll());
-    PENDING_PROMISES.with(|promises| {
-        let mut promises = promises.borrow_mut();
-        pending.append(&mut promises);
-        *promises = pending;
-    });
+    PENDING_PROMISES.with(|queue| queue.settle());
 }
 
 /// The encryption hooks an open installs: a client's, over its runtime, or a
@@ -1131,85 +1108,46 @@ impl EncryptionRuntime {
     }
 }
 
-/// A JavaScript promise waiting on a runtime call, settled with its JSON
-/// result (a text) or an error.
-struct PendingJsonPromise {
-    env: sys::napi_env,
-    deferred: sys::napi_deferred,
-    future: encryption::JsonFuture,
-}
-
-thread_local! {
-    static PENDING_JSON_PROMISES: RefCell<Vec<PendingJsonPromise>> = const { RefCell::new(Vec::new()) };
-}
-
 fn json_promise(
     env: &Env,
     future: encryption::JsonFuture,
 ) -> napi::Result<PromiseRaw<'static, String>> {
-    let env = env.raw();
-    let mut deferred = std::ptr::null_mut();
-    let mut promise = std::ptr::null_mut();
-    if unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) } != sys::Status::napi_ok
-    {
-        return Err(napi::Error::from_reason("failed to create a promise"));
-    }
-    let mut pending = PendingJsonPromise {
+    promise_for(
         env,
-        deferred,
         future,
-    };
-    if !pending.poll() {
-        PENDING_JSON_PROMISES.with(|promises| promises.borrow_mut().push(pending));
-    }
-    Ok(PromiseRaw::new(env, promise))
-}
-
-impl PendingJsonPromise {
-    fn poll(&mut self) -> bool {
-        let mut context = Context::from_waker(Waker::noop());
-        let result = match self.future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => result,
-            Poll::Pending => return false,
-        };
-        let (env, deferred) = (self.env, self.deferred);
-        let string = |text: &str| {
-            let mut value = std::ptr::null_mut();
-            unsafe {
-                sys::napi_create_string_utf8(
-                    env,
-                    text.as_ptr().cast(),
-                    text.len() as isize,
-                    &mut value,
-                )
-            };
-            value
-        };
-        match result {
-            Ok(value) => unsafe {
-                sys::napi_resolve_deferred(env, deferred, string(&value.to_string()));
-            },
-            Err(message) => {
-                let mut error = std::ptr::null_mut();
+        |env, deferred, result| {
+            let string = |text: &str| {
+                let mut value = std::ptr::null_mut();
                 unsafe {
-                    sys::napi_create_error(env, std::ptr::null_mut(), string(&message), &mut error)
+                    sys::napi_create_string_utf8(
+                        env,
+                        text.as_ptr().cast(),
+                        text.len() as isize,
+                        &mut value,
+                    )
                 };
-                unsafe { sys::napi_reject_deferred(env, deferred, error) };
+                value
+            };
+            match result {
+                Ok(value) => unsafe {
+                    sys::napi_resolve_deferred(env, deferred, string(&value.to_string()));
+                },
+                Err(message) => {
+                    let mut error = std::ptr::null_mut();
+                    unsafe {
+                        sys::napi_create_error(
+                            env,
+                            std::ptr::null_mut(),
+                            string(&message),
+                            &mut error,
+                        )
+                    };
+                    unsafe { sys::napi_reject_deferred(env, deferred, error) };
+                }
             }
-        }
-        true
-    }
-}
-
-fn settle_json_promises() {
-    let mut pending =
-        PENDING_JSON_PROMISES.with(|promises| std::mem::take(&mut *promises.borrow_mut()));
-    pending.retain_mut(|promise| !promise.poll());
-    PENDING_JSON_PROMISES.with(|promises| {
-        let mut promises = promises.borrow_mut();
-        pending.append(&mut promises);
-        *promises = pending;
-    });
+        },
+        "failed to create a promise",
+    )
 }
 
 // ---- host hooks ------------------------------------------------------------------
@@ -1503,14 +1441,7 @@ fn reporting_read_or_pending(
     future: HostFuture<(Vec<u8>, Vec<jazz::db::UnreadableRow>)>,
 ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
     let unreadable = Rc::<RefCell<Option<String>>>::default();
-    let slot = Rc::clone(&unreadable);
-    let future: ReadFuture = Box::pin(async move {
-        let (bytes, rows) = future.await?;
-        if !rows.is_empty() {
-            *slot.borrow_mut() = Some(binding_host::unreadable_json(&rows));
-        }
-        Ok(bytes)
-    });
+    let future = binding_host::reporting_read(future, Rc::clone(&unreadable));
     let pending = PendingNativeRead {
         unreadable,
         ..PendingNativeRead::new(future)

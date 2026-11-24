@@ -2282,14 +2282,8 @@ fn wasm_reporting_read_or_pending(
     future: binding_host::HostFuture<(Vec<u8>, Vec<jazz::db::UnreadableRow>)>,
 ) -> Result<JsValue, JsValue> {
     let unreadable = Rc::<RefCell<Option<String>>>::default();
-    let slot = Rc::clone(&unreadable);
-    let future: WasmReadFuture = Box::pin(async move {
-        let (bytes, rows) = future.await.map_err(host_error)?;
-        if !rows.is_empty() {
-            *slot.borrow_mut() = Some(binding_host::unreadable_json(&rows));
-        }
-        Ok(bytes)
-    });
+    let future = binding_host::reporting_read(future, Rc::clone(&unreadable));
+    let future = Box::pin(async move { future.await.map_err(host_error) });
     let pending = WasmPendingNativeRead {
         unreadable,
         ..WasmPendingNativeRead::new(future)

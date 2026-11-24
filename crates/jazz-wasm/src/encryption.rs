@@ -9,7 +9,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
 
 use jazz_e2ee_client::host::bridge::JsStore;
 use jazz_e2ee_client::host::runtime::{self, Built, Encryption, JsonFuture, Options};
@@ -19,66 +18,31 @@ use super::{WasmDb, WasmDbInner};
 use jazz::binding_host::{self, Binding, OpenAs};
 use jazz::db::block_on;
 
-/// A promise waiting on a runtime call, settled with the JSON text of its
-/// result or an error.
-struct PendingJson {
-    future: JsonFuture,
-    resolve: js_sys::Function,
-    reject: js_sys::Function,
-}
-
 thread_local! {
-    static PENDING: RefCell<Vec<PendingJson>> = const { RefCell::new(Vec::new()) };
-}
-
-impl PendingJson {
-    /// Whether the call finished (and its promise was settled).
-    fn poll(&mut self) -> bool {
-        let mut context = Context::from_waker(Waker::noop());
-        let result = match self.future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => result,
-            Poll::Pending => return false,
-        };
-        match result {
-            Ok(value) => {
-                let _ = self
-                    .resolve
-                    .call1(&JsValue::NULL, &JsValue::from_str(&value.to_string()));
-            }
-            Err(message) => {
-                let _ = self
-                    .reject
-                    .call1(&JsValue::NULL, &js_sys::Error::new(&message));
-            }
-        }
-        true
-    }
+    static PENDING: jazz_e2ee_client::host::PromiseQueue = Default::default();
 }
 
 fn json_promise(future: JsonFuture) -> js_sys::Promise {
     let mut settle = None;
     let promise = js_sys::Promise::new(&mut |resolve, reject| settle = Some((resolve, reject)));
     let (resolve, reject) = settle.expect("a promise runs its executor at once");
-    let mut pending = PendingJson {
-        future,
-        resolve,
-        reject,
-    };
-    if !pending.poll() {
-        PENDING.with(|pending_calls| pending_calls.borrow_mut().push(pending));
-    }
+    PENDING.with(|queue| {
+        queue.submit(async move {
+            match future.await {
+                Ok(value) => {
+                    let _ = resolve.call1(&JsValue::NULL, &JsValue::from_str(&value.to_string()));
+                }
+                Err(message) => {
+                    let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new(&message));
+                }
+            }
+        })
+    });
     promise
 }
 
-/// Poll every call that waits: the answer it needs may have arrived.
 fn settle_promises() {
-    let mut pending = PENDING.with(|calls| std::mem::take(&mut *calls.borrow_mut()));
-    pending.retain_mut(|call| !call.poll());
-    PENDING.with(|calls| {
-        let mut calls = calls.borrow_mut();
-        pending.append(&mut calls);
-        *calls = pending;
-    });
+    PENDING.with(|queue| queue.settle());
 }
 
 /// The runtime of an app, built over the private store the page supplies,
