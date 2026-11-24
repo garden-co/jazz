@@ -159,6 +159,10 @@ function failure(error: unknown, operation?: string): EncryptionError {
   const match = /^([a-z-]+): ([\s\S]*)$/.exec(message);
   if (!match) return new EncryptionError("error", message);
   const [, code, detail] = match;
+  if (operation === "resetAccount" && code === "publication") {
+    const { code, message, stage, outcome, recordIds } = JSON.parse(detail!);
+    return Object.assign(new EncryptionError(code, message), { stage, outcome, recordIds });
+  }
   // For a protocol refusal, the runtime gives its reason in the code.
   return new EncryptionError(code!, detail === "E2EE operation refused" ? message : detail!);
 }

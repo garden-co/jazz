@@ -112,11 +112,17 @@ pub(crate) async fn serializable<T>(
         // polls it.
         let outcome = Box::pin(step(tx)).await;
         let _ = db.abandon_transaction_handle(tx);
-        match outcome {
-            Err(ClientError::Database(error)) if conflict(&error) => {
-                last = Some(ClientError::Database(error));
+        let retry = match &outcome {
+            Err(ClientError::Database(error)) => conflict(error),
+            Err(ClientError::AccountResetPublication { source, .. }) => {
+                matches!(source.as_ref(), ClientError::Database(error) if conflict(error))
             }
-            other => return other,
+            _ => false,
+        };
+        if retry {
+            last = outcome.err();
+        } else {
+            return outcome;
         }
     }
     Err(last.expect("an attempt was made"))
@@ -599,11 +605,26 @@ impl E2eeClient {
             RootAuthority::App,
             &mut **self.shared.random.borrow_mut(),
         )?;
-        self.stage(db, tx, &records.identity).await?;
-        self.stage(db, tx, &records.root).await?;
-        self.stage(db, tx, &records.account_key).await?;
-        self.publish(db, tx).await?;
-        Ok(())
+        let publication_error = |source, refused| ClientError::AccountResetPublication {
+            record_ids: Box::new([
+                records.identity.id.clone(),
+                records.root.id.clone(),
+                records.account_key.id.clone(),
+            ]),
+            refused,
+            source: Box::new(source),
+        };
+        async {
+            self.stage(db, tx, &records.identity).await?;
+            self.stage(db, tx, &records.root).await?;
+            self.stage(db, tx, &records.account_key).await
+        }
+        .await
+        .map_err(|error| publication_error(error, true))?;
+        self.publish(db, tx).await.map_err(|error| {
+            let refused = error.code == ErrorCode::WriteRejected || conflict(&error);
+            publication_error(error.into(), refused)
+        })
     }
 
     /// Checks `read` against this device's floor for its account, if it has
