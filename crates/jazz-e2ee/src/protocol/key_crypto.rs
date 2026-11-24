@@ -8,6 +8,30 @@ use crate::registry::{Registry, Suite};
 use super::error::{ProtocolError, ProtocolResult, RefusalCode};
 use super::signing;
 
+/// A 32-byte secret that is cleared on drop and redacted in debug output.
+#[derive(Clone)]
+pub struct Key32(Zeroizing<[u8; 32]>);
+
+impl From<Zeroizing<[u8; 32]>> for Key32 {
+    fn from(key: Zeroizing<[u8; 32]>) -> Self {
+        Self(key)
+    }
+}
+
+impl core::ops::Deref for Key32 {
+    type Target = [u8; 32];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl core::fmt::Debug for Key32 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt("..", f)
+    }
+}
+
 pub(super) const Z32: [u8; 32] = [0; 32];
 
 pub(super) fn refuse<T>(code: RefusalCode) -> ProtocolResult<T> {

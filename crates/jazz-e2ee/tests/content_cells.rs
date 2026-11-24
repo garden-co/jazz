@@ -937,7 +937,7 @@ fn a_creation_key_must_pass_its_roots_marker() {
         HeldSpace::from_creation(&world.shared.registry, &world.shared.domain, &records, ""),
         Err(ProtocolError::InvalidRecord(_))
     ));
-    records.key = Zeroizing::new([9; 32]);
+    records.key = Zeroizing::new([9; 32]).into();
     assert!(matches!(
         HeldSpace::from_creation(&world.shared.registry, &world.shared.domain, &records, "tx"),
         Err(ProtocolError::InvalidRecord(_))

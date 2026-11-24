@@ -44,4 +44,5 @@ pub mod signing;
 pub mod space;
 
 pub use error::{ProtocolError, ProtocolResult};
+pub use key_crypto::Key32;
 pub use position::{Accepted, Position};

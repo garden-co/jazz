@@ -18,8 +18,6 @@
 //! each builder states, so that read-set validation (§0 item 5) refuses
 //! the transaction if that evidence changed before it commits.
 
-use zeroize::Zeroizing;
-
 use crate::agility::PublicKey;
 use crate::error::Error;
 use crate::random::RandomSource;
@@ -32,7 +30,7 @@ use super::super::derive;
 use super::super::domain::AppDomain;
 use super::super::error::{ProtocolError, ProtocolResult, RefusalCode};
 use super::super::ids;
-use super::super::key_crypto::{self, Z32, provider_check, random_key, refuse};
+use super::super::key_crypto::{self, Key32, Z32, provider_check, random_key, refuse};
 use super::super::position::Position;
 use super::super::records::space::{SpaceAddress, SpaceDelivery, SpaceRoot, SpaceSuccessor};
 use super::chain::SpaceChain;
@@ -185,18 +183,10 @@ impl SpaceWriter<'_> {
 /// A new space root (§3.2) and its key `K₀`, which the creating device
 /// keeps as an `unpublished` held key until the root is accepted as the
 /// space's root (§5.4). The key is never printed.
+#[derive(Debug)]
 pub struct RootRecords {
     pub root: SpaceRoot,
-    pub key: Zeroizing<[u8; 32]>,
-}
-
-impl core::fmt::Debug for RootRecords {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RootRecords")
-            .field("root", &self.root)
-            .field("key", &"..")
-            .finish()
-    }
+    pub key: Key32,
 }
 
 /// A root of the space at `address` (§3.1, §3.2), by an active device of
@@ -248,27 +238,21 @@ pub fn space_root(
         rng,
     )?;
     root.signature = writer.sign(author.device, &root.signed_bytes(&application)?)?;
-    Ok(RootRecords { root, key })
+    Ok(RootRecords {
+        root,
+        key: key.into(),
+    })
 }
 
 /// A rotation (§3.5): the successor and the deliveries of its new key, in
 /// one transaction. The new key is never printed.
+#[derive(Debug)]
 pub struct RotationRecords {
     pub successor: SpaceSuccessor,
     /// One delivery of the new version to each recipient given: at most
     /// [`DELIVERY_BATCH`].
     pub deliveries: Vec<SpaceDelivery>,
-    pub key: Zeroizing<[u8; 32]>,
-}
-
-impl core::fmt::Debug for RotationRecords {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RotationRecords")
-            .field("successor", &self.successor)
-            .field("deliveries", &self.deliveries)
-            .field("key", &"..")
-            .finish()
-    }
+    pub key: Key32,
 }
 
 /// A rotation (§3.5) by an active device of the writer's account that holds
@@ -419,7 +403,7 @@ fn successor(
     Ok(RotationRecords {
         successor,
         deliveries,
-        key,
+        key: key.into(),
     })
 }
 

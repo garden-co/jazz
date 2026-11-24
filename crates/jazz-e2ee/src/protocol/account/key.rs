@@ -28,7 +28,7 @@ use super::super::derive::RecoveryKeys;
 use super::super::domain::AccountDomain;
 use super::super::error::{ProtocolError, ProtocolResult, RecoveryFailure, UnsupportedCapability};
 use super::super::json;
-use super::super::key_crypto::{self, Outcome};
+use super::super::key_crypto::{self, Key32, Outcome};
 use super::super::position::{Accepted, Position};
 use super::super::records::account::{
     AccountSuccessor, RecoveryDelivery, approval_context, delivery_marker_context,
@@ -59,8 +59,9 @@ pub struct AuthenticatedAccountKey {
 
 /// An account key with what authenticated it, obtainable only by
 /// authentication. The key is cleared on drop and never printed.
+#[derive(Debug)]
 pub struct AccountKey {
-    key: Zeroizing<[u8; 32]>,
+    key: Key32,
     authenticated: AuthenticatedAccountKey,
 }
 
@@ -75,15 +76,6 @@ impl AccountKey {
 
     pub fn epoch_id(&self) -> &str {
         &self.authenticated.epoch_id
-    }
-}
-
-impl core::fmt::Debug for AccountKey {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("AccountKey")
-            .field("key", &"..")
-            .field("authenticated", &self.authenticated)
-            .finish()
     }
 }
 
@@ -536,7 +528,10 @@ impl AccountKeyEvidence<'_> {
             Err(error) => return Err(error.into()),
         };
         match self.authenticate(&key, delivery_approval) {
-            Ok(authenticated) => Ok(Some(AccountKey { key, authenticated })),
+            Ok(authenticated) => Ok(Some(AccountKey {
+                key: key.into(),
+                authenticated,
+            })),
             Err(ProtocolError::AccountKeyUnavailable) => Ok(None),
             Err(error) => Err(error),
         }

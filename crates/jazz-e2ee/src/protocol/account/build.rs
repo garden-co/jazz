@@ -23,7 +23,9 @@ use super::super::error::{
 };
 use super::super::ids;
 use super::super::json;
-use super::super::key_crypto::{self, Outcome, Z32, provider_check, random_key, read_back, refuse};
+use super::super::key_crypto::{
+    self, Key32, Outcome, Z32, provider_check, random_key, read_back, refuse,
+};
 use super::super::records::KeyColumns;
 use super::super::records::account::{
     AccountAction, AccountIdentity, AccountKind, AccountRoot, AccountSealingKey, AccountSuccessor,
@@ -222,22 +224,12 @@ impl AccountWriter<'_> {
 /// A new account root: its private identity, its public root, the sealing
 /// key record of its epoch (§2.12) and the epoch key. The key is never
 /// printed.
+#[derive(Debug)]
 pub struct RootRecords {
     pub identity: AccountIdentity,
     pub root: AccountRoot,
     pub account_key: AccountSealingKey,
-    pub key: Zeroizing<[u8; 32]>,
-}
-
-impl core::fmt::Debug for RootRecords {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RootRecords")
-            .field("identity", &self.identity)
-            .field("root", &self.root)
-            .field("account_key", &self.account_key)
-            .field("key", &"..")
-            .finish()
-    }
+    pub key: Key32,
 }
 
 /// Permission to write a root of `generation`, granted only by
@@ -415,7 +407,7 @@ pub fn account_root(
         },
         root,
         account_key,
-        key,
+        key: key.into(),
     })
 }
 
@@ -916,24 +908,13 @@ pub enum RotationTarget {
 
 /// The rows of an account rotation, the sealing key record of its new
 /// epoch (§2.12) and its new key, which is never printed.
+#[derive(Debug)]
 pub struct RotationRecords {
     pub private: AccountSuccessor,
     pub public: PublicAccountSuccessor,
     pub recovery_deliveries: Vec<RecoveryDelivery>,
     pub account_key: AccountSealingKey,
-    pub key: Zeroizing<[u8; 32]>,
-}
-
-impl core::fmt::Debug for RotationRecords {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RotationRecords")
-            .field("private", &self.private)
-            .field("public", &self.public)
-            .field("recovery_deliveries", &self.recovery_deliveries)
-            .field("account_key", &self.account_key)
-            .field("key", &"..")
-            .finish()
-    }
+    pub key: Key32,
 }
 
 /// An account rotation (§2.8) by an active author holding the current
@@ -1064,7 +1045,7 @@ pub fn rotate(
         public,
         recovery_deliveries,
         account_key,
-        key,
+        key: key.into(),
     })
 }
 
