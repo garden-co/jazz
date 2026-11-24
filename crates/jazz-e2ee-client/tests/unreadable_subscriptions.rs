@@ -145,17 +145,18 @@ fn a_subscription_names_the_rows_it_left_out_and_keeps_the_list_current() {
     );
 
     let c = sealed(&db, space, "c");
-    let mut quiet = Told {
-        rows: told.rows.clone(),
-        ..Told::default()
+    let event = stream.try_next_event().expect("the readable row arrives");
+    let SubscriptionEvent::Delta {
+        added, unreadable, ..
+    } = event
+    else {
+        panic!("{event:?}");
     };
-    quiet.take(&mut stream);
-    assert_eq!(quiet.rows, [a, c]);
-    assert!(
-        quiet.unreadable.is_empty(),
-        "a delta that leaves the list as it was does not restate it"
-    );
-    told.rows = quiet.rows;
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), c);
+    assert_eq!(unreadable, None, "the unreadable list has not changed");
+    told.rows.insert(added[0].index, c);
+    assert_eq!(told.rows, [a, c]);
     pump(&server, &db);
     told.take(&mut stream);
 

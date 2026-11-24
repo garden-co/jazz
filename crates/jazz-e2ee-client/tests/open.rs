@@ -1,9 +1,6 @@
-//! Opening an encrypted app with the runtime's hooks (the hooks-only open of
-//! `DbConfig::with_e2ee`): the database accepts the runtime's hooks, which
-//! are built from the app's own declarations, refuses the app without them,
-//! and accepts the runtime of a version that keeps the system tables but
-//! declares no encrypted column (its declarations name no table); an account
-//! then starts through a database opened that way.
+//! Opening an encrypted app with `DbConfig::with_e2ee`. The refusal without
+//! hooks is covered by `a_client_refuses_an_encrypted_app_until_it_has_hooks`
+//! in `crates/jazz/tests/e2ee_declarations.rs`.
 
 mod common;
 
@@ -13,13 +10,11 @@ use jazz::db::{DbConfig, DbIdentity, block_on};
 use jazz::e2ee::EncryptionSettings;
 use jazz_e2ee_client::{AccountStatus, MemoryStore};
 
-/// Contract: an encrypted app opens through the host entry points with the
-/// runtime's hooks and not without them; a version that keeps the system
-/// tables without declaring an encrypted column opens with the runtime built
-/// from its (empty) declarations; the account starts on the database opened
-/// with the runtime's hooks.
+/// The host opens with runtime hooks even when the declarations name no
+/// encrypted columns. With the app's full declarations, Alice's account
+/// starts through the opened database.
 #[test]
-fn an_encrypted_app_opens_only_with_the_runtimes_hooks() {
+fn an_encrypted_app_opens_with_the_runtimes_hooks() {
     let settings = EncryptionSettings::default();
     let alice = account(0xa1);
     let client = open_account(

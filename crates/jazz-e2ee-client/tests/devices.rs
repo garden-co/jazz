@@ -9,7 +9,7 @@ mod common;
 use std::rc::Rc;
 
 use common::*;
-use jazz::db::{Db, block_on};
+use jazz::db::{Db, SubscriptionStream, block_on};
 use jazz::e2ee::EncryptionSettings;
 use jazz::ids::AuthorSubject;
 use jazz::query::{Query, col, eq, lit};
@@ -34,6 +34,7 @@ fn within(test: impl FnOnce() + Send + 'static) {
 
 /// One device of an account: its runtime and its client database.
 struct Device {
+    notes: Option<SubscriptionStream>,
     client: E2eeClient,
     db: Db,
     _link: jazz::db::Upstream,
@@ -51,6 +52,7 @@ fn device(
     Device {
         client,
         db,
+        notes: None,
         _link: link,
     }
 }
@@ -70,10 +72,9 @@ impl Device {
         drive(server, &dbs, self.client.ensure_account(&self.db)).unwrap()
     }
 
-    fn follow_notes(&self, server: &Db) {
+    fn follow_notes(&mut self, server: &Db) {
         let prepared = self.db.prepare_query(&Query::from("notes")).unwrap();
-        let stream = block_on(self.db.subscribe(&prepared, Default::default())).unwrap();
-        std::mem::forget(stream);
+        self.notes = Some(block_on(self.db.subscribe(&prepared, Default::default())).unwrap());
         pump(server, &self.db);
     }
 }
@@ -180,7 +181,7 @@ fn a_second_device_is_approved_and_reads() {
         assert_eq!(first.status(&server, &[]), AccountStatus::Active);
         let space = space_with_a_note(&server, &first, &account_id(alice));
 
-        let second = device(&server, alice, memory(), 2, &settings);
+        let mut second = device(&server, alice, memory(), 2, &settings);
         assert_eq!(
             second.status(&server, &[&first]),
             AccountStatus::AwaitingApproval
@@ -191,6 +192,14 @@ fn a_second_device_is_approved_and_reads() {
         let rows = notes_of(&server, &second, space);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].cell("body"), Some(text(SECRET)));
+
+        // Keep the database alive to check that dropping the device ends its read.
+        assert_eq!(second.db.runtime_stats_for_test().active_subscriptions, 1);
+        let db = {
+            let second = second;
+            second.db
+        };
+        assert_eq!(db.runtime_stats_for_test().active_subscriptions, 0);
     });
 }
 
@@ -262,7 +271,7 @@ fn a_removed_device_cannot_read_rows_written_after_the_rotation() {
         let first = device(&server, alice, memory(), 1, &settings);
         first.status(&server, &[]);
         let space = space_with_a_note(&server, &first, &account_id(alice));
-        let second = device(&server, alice, memory(), 2, &settings);
+        let mut second = device(&server, alice, memory(), 2, &settings);
         second.status(&server, &[&first]);
         approve(&server, &first, &second);
         second.status(&server, &[&first]);
@@ -402,7 +411,7 @@ fn a_runtime_opened_after_a_removal_rotates_before_its_first_write() {
         let first = device(&server, alice, first_store.clone(), 1, &settings);
         first.status(&server, &[]);
         let space = space_with_a_note(&server, &first, &account_id(alice));
-        let second = device(&server, alice, memory(), 2, &settings);
+        let mut second = device(&server, alice, memory(), 2, &settings);
         second.status(&server, &[&first]);
         approve(&server, &first, &second);
         second.status(&server, &[&first]);
@@ -453,7 +462,7 @@ fn another_device_of_the_account_rotates_after_a_removal_it_did_not_make() {
         let first = device(&server, alice, memory(), 1, &settings);
         first.status(&server, &[]);
         let space = space_with_a_note(&server, &first, &account_id(alice));
-        let second = device(&server, alice, memory(), 2, &settings);
+        let mut second = device(&server, alice, memory(), 2, &settings);
         second.status(&server, &[&first]);
         approve(&server, &first, &second);
         second.status(&server, &[&first]);
@@ -527,7 +536,7 @@ impl SharedSpace {
         let space = space_with_a_note(&server, &alice, &account_id(alice_id));
         let bob_first = device(&server, bob_id, memory(), 2, &settings);
         assert_eq!(bob_first.status(&server, &[]), AccountStatus::Active);
-        let bob_second = device(&server, bob_id, memory(), 3, &settings);
+        let mut bob_second = device(&server, bob_id, memory(), 3, &settings);
         bob_second.status(&server, &[&bob_first]);
         approve(&server, &bob_first, &bob_second);
         assert_eq!(
@@ -1665,7 +1674,7 @@ fn a_recovery_restores_access_and_its_root_is_retired_with_the_device() {
             Some(1)
         );
 
-        let recovered = device(&server, alice, memory(), 2, &settings);
+        let mut recovered = device(&server, alice, memory(), 2, &settings);
         assert_eq!(
             recovered.status(&server, &[&first]),
             AccountStatus::AwaitingApproval
@@ -1856,7 +1865,7 @@ fn a_device_account_registers_its_recovery_root_at_start() {
         pump(&server, &first.db);
         assert_eq!(rows(), before, "nothing written for it");
 
-        let (second, _) = lena_device(&server, 0x4f, 2);
+        let (mut second, _) = lena_device(&server, 0x4f, 2);
         assert_eq!(
             drive(
                 &server,
@@ -2526,6 +2535,7 @@ fn one_failing_removal_request_does_not_block_the_others() {
         let first = Device {
             client,
             db,
+            notes: None,
             _link: link,
         };
         first.status(&server, &[]);
@@ -2994,6 +3004,7 @@ fn attach(server: &Db, client: E2eeClient, who: AuthorSubject, node: u8) -> Devi
     Device {
         client,
         db,
+        notes: None,
         _link: link,
     }
 }
