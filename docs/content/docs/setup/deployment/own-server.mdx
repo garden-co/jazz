@@ -47,11 +47,12 @@ stay in SQLite. Choose a destination with the required `blobs` option. For exist
 that used the previous default, pass `files()` to keep using `<path>/blobs`.
 
 ```ts
-import { files, s3, sqlite } from "jazz-tools/backend";
+import { files, s3, sqlite, vercelBlob } from "jazz-tools/backend";
 
 sqlite({ path: "./data/jazz", blobs: files() }); // chunks in ./data/jazz/blobs
 sqlite({ path: "./data/jazz", blobs: files({ dir: "/mnt/blobs" }) }); // a directory of your choice
 sqlite({ path: "./data/jazz", blobs: s3() }); // an S3-compatible bucket
+sqlite({ path: "./data/jazz", blobs: vercelBlob() }); // private Vercel Blob store
 sqlite({ path: "./data/jazz", blobs: "sqlite" }); // inside the SQLite database (not recommended)
 ```
 
@@ -75,7 +76,9 @@ s3({
 });
 ```
 
-The backend finds its credentials the way the AWS SDKs do, taking the first of:
+To supply S3 credentials directly, pass `credentials: { accessKeyId, secretAccessKey }`
+to `s3()`. Include `sessionToken` when using temporary keys. When you omit
+`credentials`, the backend takes the first available source below.
 
 1. `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (with `AWS_SESSION_TOKEN` for session keys).
 2. `AWS_ROLE_ARN` with `AWS_WEB_IDENTITY_TOKEN_FILE`, such as an EKS service account's role.
@@ -94,8 +97,12 @@ directory keeps its objects under its own prefix, claims that prefix the first t
 deletes the chunks it no longer needs. Another data directory is refused on a prefix that is
 already claimed.
 
+For Vercel Blob, pass `vercelBlob({ credentials: { readWriteToken } })` or set
+`BLOB_READ_WRITE_TOKEN`. A standard read-write token identifies its store.
+You can also set `storeId` and `prefix` explicitly.
+
 The store records its choice in its `jazz.sqlite`. You can move an existing directory
-from `"sqlite"` to `files()` or `s3()` later; any other switch is not supported yet and refuses to
+from `"sqlite"` to `files()`, `s3()`, or `vercelBlob()` later; any other switch is not supported yet and refuses to
 start, so treat it as a one-way choice. A blob directory belongs to exactly one data directory, so two data directories can't share
 one. To copy a data directory, run `npx jazz-tools store detach <path>` on the stopped copy before it
 first starts, or it claims the original's chunks. A `blobs/` directory copied inside it becomes the

@@ -212,7 +212,8 @@ fn container_uri_allowed(uri: &str) -> bool {
 }
 
 /// One set of AWS keys.
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Keys {
     pub access_key_id: String,
     pub secret_access_key: String,
@@ -351,6 +352,18 @@ impl S3Options {
         endpoint: Option<String>,
         prefix: Option<String>,
     ) -> Result<Self, String> {
+        Self::with_credentials(bucket, region, endpoint, prefix, None)
+    }
+
+    /// Resolve the bucket and region as in `from_env`, using supplied credentials
+    /// in preference to the host's credential chain.
+    pub fn with_credentials(
+        bucket: Option<String>,
+        region: Option<String>,
+        endpoint: Option<String>,
+        prefix: Option<String>,
+        credentials: Option<S3Credentials>,
+    ) -> Result<Self, String> {
         let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
         let bucket = bucket
             .or_else(|| env("S3_BUCKET_NAME"))
@@ -360,7 +373,10 @@ impl S3Options {
             .or_else(|| env("AWS_DEFAULT_REGION"))
             .or_else(|| endpoint.as_ref().map(|_| "auto".to_owned()))
             .ok_or("s3 blobs: no region (set AWS_REGION or pass one)")?;
-        let credentials = S3Credentials::from_env()?;
+        let credentials = match credentials {
+            Some(credentials) => credentials,
+            None => S3Credentials::from_env()?,
+        };
         Ok(Self {
             bucket,
             region,

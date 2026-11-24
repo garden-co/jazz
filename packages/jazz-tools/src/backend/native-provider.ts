@@ -74,9 +74,24 @@ export function sqlite(options: { path: string; blobs: BlobStore }): SqliteProvi
   const { blobs } = options;
   if (
     blobs !== "sqlite" &&
-    (blobs == null || typeof blobs !== "object" || (blobs.kind !== "files" && blobs.kind !== "s3"))
+    (blobs == null ||
+      typeof blobs !== "object" ||
+      (blobs.kind !== "files" && blobs.kind !== "s3" && blobs.kind !== "vercel-blob"))
   ) {
-    throw new Error('sqlite(): blobs is required and must be files(), s3() or "sqlite"');
+    throw new Error(
+      'sqlite(): blobs is required and must be files(), s3(), vercelBlob() or "sqlite"',
+    );
+  }
+  if (blobs !== "sqlite" && blobs.kind !== "files" && blobs.credentials !== undefined) {
+    if (blobs.kind === "s3") {
+      requireCredential("accessKeyId", blobs.credentials?.accessKeyId);
+      requireCredential("secretAccessKey", blobs.credentials?.secretAccessKey);
+      if (blobs.credentials.sessionToken !== undefined) {
+        requireCredential("sessionToken", blobs.credentials.sessionToken);
+      }
+    } else {
+      requireCredential("readWriteToken", blobs.credentials?.readWriteToken);
+    }
   }
   return new SqliteProvider(options.path, blobs);
 }
@@ -99,25 +114,10 @@ function refuseStoreAppId(store: string, options: unknown): void {
   }
 }
 
-function blobOptions(blobs: BlobStore): {
-  blobs: "files" | "s3" | "sqlite";
-  blobsDir?: string;
-  s3Bucket?: string;
-  s3Region?: string;
-  s3Endpoint?: string;
-  s3Prefix?: string;
-} {
-  if (blobs === "sqlite") return { blobs: "sqlite" };
-  if (blobs.kind === "s3") {
-    return {
-      blobs: "s3",
-      ...(blobs.bucket === undefined ? {} : { s3Bucket: blobs.bucket }),
-      ...(blobs.region === undefined ? {} : { s3Region: blobs.region }),
-      ...(blobs.endpoint === undefined ? {} : { s3Endpoint: blobs.endpoint }),
-      ...(blobs.prefix === undefined ? {} : { s3Prefix: blobs.prefix }),
-    };
+function requireCredential(field: string, value: unknown) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`sqlite(): blobs.credentials.${field} must be a nonempty string`);
   }
-  return { blobs: "files", ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }) };
 }
 
 function nativeSocket(socket: JazzCoreSocket): CoreSocket {
@@ -137,12 +137,16 @@ async function openInProcessCore(
   // start, so the app's identities stay the same across restarts (and
   // restores of the file) without the app naming an id.
   const core = await inProcessCore(store.kind).open({
-    ...(store.kind === "sqlite" ? {} : { appId: randomUUID() }),
     backendSecret,
     adminSecret,
-    ...(store.kind === "sqlite"
-      ? { dataDir: store.path, ...blobOptions(store.blobs) }
-      : { inMemory: true }),
+    storage:
+      store.kind === "sqlite"
+        ? {
+            kind: "sqlite",
+            path: store.path,
+            blobs: store.blobs === "sqlite" ? { kind: "sqlite" } : store.blobs,
+          }
+        : { kind: "memory", appId: randomUUID() },
   });
   const connection = context.connect(
     {

@@ -93,8 +93,17 @@ impl VercelBlobOptions {
         credentials: Option<VercelBlobCredentials>,
     ) -> Result<Self, String> {
         let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-        let read_write = env("BLOB_READ_WRITE_TOKEN");
+        let read_write = if matches!(credentials, Some(VercelBlobCredentials::ReadWriteToken(_))) {
+            None
+        } else {
+            env("BLOB_READ_WRITE_TOKEN")
+        };
+        let token_store = match &credentials {
+            Some(VercelBlobCredentials::ReadWriteToken(token)) => store_of_read_write_token(token),
+            _ => None,
+        };
         let store_id = store_id
+            .or(token_store)
             .or_else(|| env("BLOB_STORE_ID"))
             .or_else(|| read_write.as_deref().and_then(store_of_read_write_token))
             .ok_or(
@@ -148,8 +157,9 @@ fn normalize_store_id(id: &str) -> String {
 /// The store a read-write token is for: `vercel_blob_rw_<store>_<secret>`.
 fn store_of_read_write_token(token: &str) -> Option<String> {
     token
-        .split('_')
-        .nth(3)
+        .strip_prefix("vercel_blob_rw_")?
+        .split_once('_')
+        .map(|(store, _)| store)
         .filter(|id| !id.is_empty())
         .map(str::to_owned)
 }

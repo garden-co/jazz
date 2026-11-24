@@ -17,7 +17,7 @@ export type E2eeSodiumStream = E2EeSodiumStream
 
 export declare class JazzCore {
   /** Open the core's storage and serve it in this process. */
-  static open(options: { appId?: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  static open(options: { backendSecret: string; adminSecret: string; telemetryCollectorUrl?: string; storage: { kind: "memory"; appId: string } | { kind: "sqlite"; path: string; appId?: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; credentials?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string } } | { kind: "vercel-blob"; storeId?: string; prefix?: string; credentials?: { readWriteToken: string } } } }): Promise<JazzCore>
   /**
    * The app this core serves: the one its store keeps, or the one it was
    * opened with in memory.

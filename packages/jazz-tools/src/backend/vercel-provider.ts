@@ -58,6 +58,13 @@ export function vercel(
   checkNamespaceOption(options ?? {});
   checkRegionOption(options ?? {});
   if (!options.blobs) throw new Error("vercel(): blobs is required");
+  if (
+    options.blobs !== "sqlite" &&
+    "credentials" in options.blobs &&
+    options.blobs.credentials !== undefined
+  ) {
+    throw new Error("vercel(): explicit blob credentials are currently supported only by sqlite()");
+  }
   const { local, ...rest } = options;
   if (backendNative().host === "node" && !serverlessHost()) {
     return local ?? sqlite({ path: ".jazz/local", blobs: files() });

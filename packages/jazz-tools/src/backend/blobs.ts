@@ -3,6 +3,12 @@
 /** An S3-compatible bucket for large-value bytes; see {@link s3}. */
 export interface S3BlobStore {
   readonly kind: "s3";
+  /** Native SQLite uses these keys in place of the host's AWS credential chain. */
+  readonly credentials?: {
+    readonly accessKeyId: string;
+    readonly secretAccessKey: string;
+    readonly sessionToken?: string;
+  };
   /** Defaults to `S3_BUCKET_NAME`. */
   readonly bucket?: string;
   /** Defaults to `AWS_REGION`; `auto` for R2. */
@@ -25,10 +31,15 @@ export interface S3BlobStore {
  * the chunk index stay in the database either way.
  * - `files()`: one file per chunk in a directory.
  * - `s3()`: one object per chunk in an S3-compatible bucket.
+ * - `vercelBlob()`: one private blob per chunk in a Vercel Blob store.
  * - `"sqlite"`: inside the database file. Works, but the file grows with
  *   every large value, so it is not recommended.
  */
-export type BlobStore = { readonly kind: "files"; readonly dir?: string } | S3BlobStore | "sqlite";
+export type BlobStore =
+  | { readonly kind: "files"; readonly dir?: string }
+  | S3BlobStore
+  | VercelBlobStore
+  | "sqlite";
 
 /**
  * Large-value bytes as files in `dir`, by default `blobs/` in the store's
@@ -71,6 +82,8 @@ export function s3(options: Omit<S3BlobStore, "kind"> = {}): S3BlobStore {
 /** A Vercel Blob store for large-value bytes; see {@link vercelBlob}. */
 export interface VercelBlobStore {
   readonly kind: "vercel-blob";
+  /** Native SQLite uses this token in place of ambient credentials. */
+  readonly credentials?: { readonly readWriteToken: string };
   /** Defaults to `BLOB_STORE_ID`, set when a Blob store is connected to the project. */
   readonly storeId?: string;
   /**
@@ -84,6 +97,8 @@ export interface VercelBlobStore {
 }
 
 /**
+ * Large-value bytes in a private Vercel Blob store. With `sqlite()`, supply
+ * `credentials: { readWriteToken }` or set `BLOB_READ_WRITE_TOKEN`.
  * On Vercel `vercelBlob()` selects the connected store. Browsers send and fetch large
  * values through the app's `/jazz` route; the core writes and reads the
  * blobs itself, so nothing but connecting a Blob store is needed. It

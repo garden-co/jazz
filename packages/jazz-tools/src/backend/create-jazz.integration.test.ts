@@ -43,8 +43,10 @@ import {
   isRequestAuthenticationError,
   memory,
   remote,
+  s3,
   sqlite,
   vercel,
+  vercelBlob,
   type Jazz,
   type JazzProvider,
   type RequestAuthenticationError,
@@ -3519,11 +3521,9 @@ describe("createJazz", () => {
     // Another core holding it (in production, another process) is refused,
     // with why and what to do.
     const other = await JazzCore.open({
-      appId,
       backendSecret: randomUUID(),
       adminSecret: randomUUID(),
-      dataDir: dir,
-      blobs: "files",
+      storage: { kind: "sqlite", path: dir, appId, blobs: files() },
     });
     const refused = createJazz({ app, permissions, store: sqlite({ path: dir, blobs: files() }) });
     expect(refused).not.toBe(first);
@@ -3849,9 +3849,100 @@ describe("createJazz", () => {
     expect(rows.map((todo) => todo.id).sort()).toEqual(written.map((todo) => todo.id).sort());
   }, 60_000);
 
+  it("rejects invalid native storage options before creating the store", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-invalid-storage-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const auth = { backendSecret: randomUUID(), adminSecret: randomUUID() };
+    await expect(
+      // @ts-expect-error Persistent storage requires a blob destination.
+      JazzCore.open({ ...auth, storage: { kind: "sqlite", path: dir } }),
+    ).rejects.toThrow(/missing field `blobs`/);
+    await expect(
+      // @ts-expect-error A memory store cannot have a persistent path.
+      JazzCore.open({ ...auth, storage: { kind: "memory", appId: randomUUID(), path: dir } }),
+    ).rejects.toThrow(/unknown field `path`/);
+    await expect(
+      JazzCore.open({
+        ...auth,
+        // @ts-expect-error An inline blob store cannot have bucket credentials.
+        storage: { kind: "sqlite", path: dir, blobs: { kind: "sqlite", credentials: {} } },
+      }),
+    ).rejects.toThrow(/unknown field `credentials`/);
+    expect(await readdir(dir)).toEqual([]);
+  });
+
   it("requires sqlite callers to choose a blob store", () => {
     // @ts-expect-error JavaScript callers can omit the required option.
     expect(() => sqlite({ path: "unused" })).toThrow(/blobs is required/);
+  });
+
+  it("uses the supplied S3 session keys when the native core claims its prefix", async () => {
+    vi.stubEnv("AWS_ACCESS_KEY_ID", "ambient-key");
+    vi.stubEnv("AWS_SECRET_ACCESS_KEY", "ambient-secret");
+    cleanups.push(async () => vi.unstubAllEnvs());
+    const dir = await mkdtemp(join(tmpdir(), "jazz-s3-credentials-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const requests: { authorization?: string; token?: string | string[]; path?: string }[] = [];
+    const bucket = createServer((req, res) => {
+      requests.push({
+        authorization: req.headers.authorization,
+        token: req.headers["x-amz-security-token"],
+        path: req.url,
+      });
+      // An existing claim also verifies that the native ownership check ran.
+      res.end("another-store");
+    });
+    await new Promise<void>((resolve) => bucket.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => bucket.close(resolve)));
+    const blobs = s3({
+      bucket: "chunks",
+      endpoint: `http://127.0.0.1:${(bucket.address() as AddressInfo).port}`,
+      prefix: "app/",
+      credentials: {
+        accessKeyId: "test-key",
+        secretAccessKey: "test-secret",
+        sessionToken: "test-session",
+      },
+    });
+    await expect(
+      createJazz({ app, permissions, store: sqlite({ path: dir, blobs }) }).ready(),
+    ).rejects.toThrow(/belongs to store another-store/);
+    expect(requests).toContainEqual({
+      authorization: expect.stringContaining("Credential=test-key/"),
+      token: "test-session",
+      path: "/chunks/app/.jazz-owner",
+    });
+  });
+
+  it("resolves a native Vercel Blob destination from the supplied token", async () => {
+    vi.stubEnv("BLOB_STORE_ID", "store_ambient");
+    cleanups.push(async () => vi.unstubAllEnvs());
+    const dir = await mkdtemp(join(tmpdir(), "jazz-vercel-blob-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const first = await createJazz({
+      app,
+      permissions,
+      store: sqlite({ path: dir, blobs: files() }),
+    }).ready();
+    await first.close();
+    const blobs = vercelBlob({
+      prefix: "app/",
+      credentials: { readWriteToken: "vercel_blob_rw_teststore_secret" },
+    });
+    // Changing an existing file store fails before the first network request.
+    await expect(
+      createJazz({ app, permissions, store: sqlite({ path: dir, blobs }) }).ready(),
+    ).rejects.toThrow(/moving them to "vercel-blob teststore\/app\/" is not supported/);
+  });
+
+  it("names an empty explicit credential instead of falling back to ambient credentials", () => {
+    const path = "unused";
+    expect(() =>
+      sqlite({ path, blobs: s3({ credentials: { accessKeyId: "key", secretAccessKey: "" } }) }),
+    ).toThrow("blobs.credentials.secretAccessKey");
+    expect(() =>
+      sqlite({ path, blobs: vercelBlob({ credentials: { readWriteToken: "" } }) }),
+    ).toThrow("blobs.credentials.readWriteToken");
   });
 
   it("keeps a sqlite store's large values as files, and keeps that choice", async () => {

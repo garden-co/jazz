@@ -13,7 +13,6 @@ import { createHash, randomUUID } from "node:crypto";
 import type { JazzCoreSocketEvent } from "jazz-napi";
 import {
   type BlobStore,
-  type VercelBlobStore,
   resolveVercelBlob,
   resolveVercelS3,
   type VercelBlob,
@@ -91,7 +90,7 @@ export interface VercelStoreOptions {
    * Destination for large values on the deployed core. Use files() for
    * files on the Drive, "sqlite" for inline storage, or an external store.
    */
-  blobs: BlobStore | VercelBlobStore;
+  blobs: BlobStore;
   /** vCPUs for the core (2 GB of memory each). Defaults to 1. Fixed at creation. */
   vcpus?: number;
   /** Drive size in bytes. Defaults to 10 GiB. Fixed at creation. */
