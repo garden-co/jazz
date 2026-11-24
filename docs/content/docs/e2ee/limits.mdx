@@ -21,8 +21,8 @@ languageTabs: backend
   read rule from the members table if any inherited entry using `rooms` encrypts a column.
   You can drop an encrypted table unless it is itself an inherited space table. To drop or
   rename a space table, declare encryption in the new version. Even one entry with no encrypted
-  columns makes the new version follow its own declarations. If your server already has that
-  version without declarations, make the change in another new version: a deployed version's
+  columns makes the new version follow its own declarations. If you have already deployed
+  that version without declarations, make the change in another new version: a deployed version's
   declarations can't change.
 - **A writer that hasn't loaded a row can move it to another space.** A write can't change an
   encrypted row's space, but the client or backend making the write checks this against its own
