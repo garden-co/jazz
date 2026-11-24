@@ -127,6 +127,11 @@ languageTabs: backend
   user of the browser profile or a script on your origin can use them as above. With persistent
   storage and `clearOnSignOut: true`, the last tab to release the account’s store wipes the saved keys
   with the account’s local data. See [Signing out](/docs/e2ee/browser#signing-out).
+- **Secret cleanup covers the buffers Jazz owns.** Closing the encryption host drops the runtime's
+  in-memory secret state. When the Rust host takes ownership of a device-account secret as text, it
+  wipes that text after parsing and holds the decoded bytes in memory that is wiped on drop. Debug
+  output for the decoded secret omits its value. A JavaScript string cannot be wiped in place, and
+  the host cannot erase copies held by the caller.
 
 ## Copied stores
 
