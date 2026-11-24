@@ -49,9 +49,6 @@ jazz-e2ee = { path = ".", features = ["conformance"] }
 # bundles libsodium 1.0.22, the one `crates/jazz/SPEC/fixtures/e2ee-vectors.c`
 # is built against and checks for.
 libsodium-sys-stable = "=1.24.0"
-# Build records outside the writer's rules, to test the reader.
-aead-stream = { version = "0.6.0", default-features = false, features = ["alloc"] }
-chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 
 [[example]]
 name = "custom_mechanism"
