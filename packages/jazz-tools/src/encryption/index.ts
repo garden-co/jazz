@@ -110,7 +110,8 @@ export type EncryptionReport =
   | { type: "rotation-failed"; space: ReportSpace; reason: string }
   /**
    * Reports Jazz kept for the app while nothing took them, past its limit:
-   * `count` older ones were dropped (a challenge never is).
+   * `count` reports were dropped. Ordinary reports go first. If all queued
+   * reports are challenges, only a new challenge can replace the oldest.
    */
   | { type: "reports-dropped"; count: number }
   | { type: string; [key: string]: unknown };

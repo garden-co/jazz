@@ -817,7 +817,7 @@ pub fn stored_bytes(path: &std::path::Path) -> Vec<u8> {
 
 /// Overwrites every stored cell of `column` in `table` of the SQLite
 /// database at `path` with `value`: a server altering its own rows.
-pub fn tamper(path: &std::path::Path, table: &str, column: &str, value: &[u8]) {
+pub fn tamper(path: &std::path::Path, table: &str, column: &str, value: impl rusqlite::ToSql) {
     let conn = rusqlite::Connection::open(path).unwrap();
     let stored: String = conn
         .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))

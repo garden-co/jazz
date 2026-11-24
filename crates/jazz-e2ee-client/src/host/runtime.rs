@@ -61,9 +61,9 @@ pub const MAX_REPORTS: usize = 1024;
 
 /// The reports waiting for JS, as JSON texts: at most [`MAX_REPORTS`]. An
 /// app that reads none (no listener) holds no more than that; past it the
-/// oldest report goes (never a challenge, which the device must answer)
-/// and the next take starts with one `reports-dropped` report counting
-/// those that went.
+/// oldest ordinary report goes first. If only challenges are waiting, a
+/// new challenge replaces the oldest and an ordinary report is dropped.
+/// The next take reports the number dropped.
 #[derive(Debug, Default)]
 pub struct ReportQueue {
     /// Each report, and whether it is a challenge.
@@ -75,13 +75,16 @@ impl ReportQueue {
     pub fn push(&mut self, report: Value) {
         let challenge = report["type"] == "challenged";
         if self.waiting.len() >= MAX_REPORTS {
-            let oldest = self
-                .waiting
-                .iter()
-                .position(|(challenge, _)| !challenge)
-                .unwrap_or(0);
-            self.waiting.remove(oldest);
             self.dropped += 1;
+            match self.waiting.iter().position(|(challenge, _)| !challenge) {
+                Some(oldest) => {
+                    self.waiting.remove(oldest);
+                }
+                None if challenge => {
+                    self.waiting.pop_front();
+                }
+                None => return,
+            }
         }
         self.waiting.push_back((challenge, report.to_string()));
     }
@@ -405,6 +408,11 @@ impl Encryption {
             native.recovery.borrow_mut().take();
             *native.result.borrow_mut() = Verification::Failed(ClientError::Closed);
         }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pending_approval_count(&self) -> usize {
+        self.approvals.borrow().len()
     }
 
     /// The reports waiting, as JSON texts.
@@ -1341,6 +1349,14 @@ fn report_json(report: &Report, table_name: impl Fn(&str) -> Option<String>) -> 
             "type": "conflicting-account-key", "recordId": record_id,
             "signerId": signer_id, "epochId": epoch_id,
         }),
+        Report::UnsupportedAccountKey {
+            record_id,
+            signer_id,
+            capability,
+        } => json!({
+            "type": "unsupported-account-key", "recordId": record_id,
+            "signerId": signer_id, "capability": capability.code(),
+        }),
         Report::InvalidDelivery {
             space: at,
             sender,
@@ -1732,6 +1748,31 @@ mod tests {
         assert!(queue.take().is_empty(), "the count is reported once");
     }
 
+    /// Alice's full queue of challenges drops an ordinary arrival; a new
+    /// challenge replaces the oldest. The bounded host queue owns that choice.
+    #[test]
+    fn a_full_queue_of_challenges_keeps_challenges_first() {
+        let mut queue = ReportQueue::default();
+        for index in 0..MAX_REPORTS {
+            queue.push(json!({ "type": "challenged", "index": index }));
+        }
+        queue.push(json!({ "type": "unreadable" }));
+        assert!(queue.waiting.iter().all(|(challenge, _)| *challenge));
+        queue.push(json!({ "type": "challenged", "index": MAX_REPORTS }));
+        let reports = queue.take();
+        assert_eq!(reports.len(), MAX_REPORTS + 1);
+        assert_eq!(
+            reports[0],
+            json!({ "type": "reports-dropped", "count": 2 }).to_string()
+        );
+        for (index, report) in reports.iter().enumerate().skip(1) {
+            assert_eq!(
+                *report,
+                json!({ "type": "challenged", "index": index }).to_string()
+            );
+        }
+    }
+
     /// Contract: a protocol failure that has a code of its own reaches JS
     /// with that code, so a caller can tell an expected refusal (nothing to
     /// recover from) from a failure; one without keeps `protocol`.
@@ -1747,6 +1788,24 @@ mod tests {
         );
         let described = describe(ClientError::Protocol(ProtocolError::ProviderFailure));
         assert!(described.starts_with("protocol: "), "{described}");
+    }
+
+    /// Alice's host receives the skipped record, its signer and the capability
+    /// needed to check it. The JSON serializer defines this binding contract.
+    #[test]
+    fn an_unsupported_account_key_names_its_signer_and_capability_in_json() {
+        let report = Report::UnsupportedAccountKey {
+            record_id: "record".into(),
+            signer_id: "signer".into(),
+            capability: jazz_e2ee::protocol::error::UnsupportedCapability::SigningVersion,
+        };
+        assert_eq!(
+            report_json(&report, |_| None),
+            json!({
+                "type": "unsupported-account-key", "recordId": "record",
+                "signerId": "signer", "capability": "signing-version"
+            })
+        );
     }
 
     /// A report on an obsolete scope still identifies the space after its table went away.

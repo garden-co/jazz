@@ -474,8 +474,9 @@ impl E2eeClient {
             let mut state = self.acquire(db, &space).await;
             // A subscriber waiting for its key still watches the members' roots.
             // The shared membership subscription supplies these rows locally.
+            let needs_pass = matches!(state, Ok(SpaceKeyState::Held | SpaceKeyState::NoRoot));
             if state.is_ok()
-                && !matches!(state, Ok(SpaceKeyState::Held))
+                && !needs_pass
                 && self
                     .shared
                     .member_watch
@@ -504,9 +505,7 @@ impl E2eeClient {
                 }
             }
             // The pass: members that lack a version this device holds.
-            if matches!(state, Ok(SpaceKeyState::Held))
-                && let Err(error) = self.deliver_pass(db, &space).await
-            {
+            if needs_pass && let Err(error) = self.deliver_pass(db, &space).await {
                 state = Err(error);
             }
             // Rows written under a refused creation's key, now that the real

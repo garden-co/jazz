@@ -368,6 +368,11 @@ async fn a_host_app_shares_an_encrypted_space_with_a_store_it_supplies() {
         assert!(found[0].get("__e2ee_eq_title").is_none(), "{found}");
         assert!(by_title("nobody's").as_array().unwrap().is_empty());
 
+        // The generic native operation reaches the account's reset policy.
+        assert!(
+            matches!(alice.encryption_call("resetAccount".into(), "{}".into()),
+            Err(JazzError::Refused { reason }) if reason.contains("account-reset-not-allowed"))
+        );
         // An encryption call that names nothing is refused with its code.
         match alice.encryption_call("noSuchCall".into(), "{}".into()) {
             Err(JazzError::Refused { reason }) => {
@@ -628,6 +633,21 @@ async fn the_c_abi_opens_an_encrypted_app_with_a_store_callback() {
             );
             assert!(call(handle, "encryptionCall", json!({ "op": "deviceId" })).is_string());
             assert!(store.calls.lock().unwrap().iter().any(|op| op == "save"));
+            let mut err = std::ptr::null_mut();
+            let reset = jazz_ffi::c_abi::jazz_call(
+                handle,
+                c"encryptionCall".as_ptr(),
+                c"{\"op\":\"resetAccount\"}".as_ptr(),
+                &mut err,
+            );
+            assert!(reset.is_null() && !err.is_null());
+            assert!(
+                CStr::from_ptr(err)
+                    .to_str()
+                    .unwrap()
+                    .contains("account-reset-not-allowed")
+            );
+            jazz_ffi::c_abi::jazz_string_free(err);
             // A negative readiness timeout is refused, not read as the default.
             let (method, args) = (c"encryptionReady", c"{\"timeoutMs\": -1}");
             let mut err: *mut c_char = std::ptr::null_mut();

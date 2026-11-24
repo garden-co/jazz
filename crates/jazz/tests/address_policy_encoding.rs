@@ -118,4 +118,31 @@ fn a_query_carrying_a_table_identity_is_refused() {
             .contains("a table identity is not supported in a query"),
         "{error:?}"
     );
+
+    block_on(db.set_authority()).unwrap();
+    let (mut peer, endpoint) = jazz::db::duplex();
+    block_on(db.accept_subscriber(endpoint, AuthorSubject::for_test_bytes([2; 16]))).unwrap();
+    peer.send(jazz::db::SyncMessage::Read {
+        id: 1,
+        query: Box::new(query),
+        binding: Default::default(),
+        include_deleted: false,
+        tier: jazz::db::ReadTier::Remote,
+        wait: None,
+        view: Box::new(jazz::protocol::ReadViewSourceSpec::Current),
+        since: None,
+        span: jazz::db::ReadSpan::Once { at: None },
+    })
+    .unwrap();
+    block_on(db.tick()).unwrap();
+    let reply = std::iter::from_fn(|| peer.try_recv())
+        .find_map(|message| match message {
+            jazz::db::SyncMessage::Refused { id: 1, message, .. } => Some(message),
+            _ => None,
+        })
+        .expect("the authority refuses the peer's read");
+    assert!(
+        reply.contains("a table identity is not supported in a query"),
+        "{reply}"
+    );
 }

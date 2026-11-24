@@ -741,6 +741,9 @@ impl E2eeClient {
             Err(error) => return Err(self.forget_account_on(error)),
         };
         if let Some(acquisition) = &acquisition {
+            for delivery in &acquisition.non_derived_deliveries {
+                self.shared.conflicting_account_key(&delivery.sealing_key);
+            }
             for bad in &acquisition.invalid_deliveries {
                 self.shared.event(
                     format!("delivery:{}", bad.delivery_id),

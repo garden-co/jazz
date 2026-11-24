@@ -1607,7 +1607,9 @@ rows decide, as for every member (§8). Members see the reset: each member's
 runtime reads the public roots (R10) of the space's members and, for a
 member whose current generation is above 0, emits an `account-reset`
 encryption event `{account, space, generation}` once per space, account and
-generation, next to the unreadable-row reports (§4.3), so the application
+generation within the runtime’s event history (the last 10,000 distinct event identities,
+oldest evicted first). Re-enrolment starts a fresh history. The event appears
+next to the unreadable-row reports (§4.3), so the application
 can show "<account>'s encryption was reset". An account that reset before
 it joined the space is shown the same way. Member devices watch the public
 roots of the space's members (§3.8), so a reset is seen, and redelivered
@@ -2934,7 +2936,11 @@ stage fresh rows: the runtime's own publications (space creation outside an
 application transaction, rotation, deliveries and the repair of refused or
 lost creations, §3.2), and a staging call retried after "needs key" before submission
 (§5.6). Application transaction conflicts go back to the caller. Unknown
-publication outcomes are reconciled by transaction identity. The thin
+publication outcomes are reconciled by transaction identity while the call is
+alive. A reset waits for its transaction’s global acknowledgement. After a
+process restart, the client replays the account at the authority. If the
+reset committed, the requesting device is active in the new generation and
+can continue. If it still awaits approval, the user can request a reset again. The thin
 browser callback rerun in §5.6 applies only to a refusal before commit.
 
 Refusal codes:

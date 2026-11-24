@@ -670,6 +670,51 @@ fn retired_recovery_root_no_longer_approves() {
     assert!(!ledger.state(&env).is_active(&replacement.id));
 }
 
+/// Alice's replacement device must have its own matching request and a
+/// representable next generation. Check overflow at the protocol boundary
+/// because reaching the maximum through successive resets is impractical.
+#[test]
+fn reset_requires_matching_device_evidence_and_a_next_generation() {
+    let env = Env::new(ALICE);
+    let mut rng = TestRandom(12);
+    let laptop = env.device(&mut rng);
+    let phone = env.device(&mut rng);
+    let mut ledger = Ledger::new(ALICE);
+    ledger.request(&laptop, &mut rng);
+    ledger.root(&env, &laptop, 0, &mut rng);
+    let mut state = ledger.state(&env);
+    let check = |state: &_, ledger: &Ledger| {
+        build::check_reset(
+            &env.writer(),
+            ResetPolicy {
+                device_account: false,
+                allow_account_reset: true,
+            },
+            state,
+            &phone,
+            &ledger.public,
+            &ledger.private,
+        )
+    };
+    assert_eq!(
+        check(&state, &ledger),
+        Err(refused(RefusalCode::NoDeviceRequest))
+    );
+    ledger.request(&phone, &mut rng);
+    assert_eq!(check(&state, &ledger).unwrap().generation(), 1);
+    let mut mismatched = ledger.clone();
+    mismatched.private.requests.last_mut().unwrap().row.keys = laptop.request().keys;
+    assert_eq!(
+        check(&state, &mismatched),
+        Err(refused(RefusalCode::DeviceKeysMismatch))
+    );
+    state.generation = u64::MAX;
+    assert_eq!(
+        check(&state, &ledger),
+        Err(ProtocolError::InvalidRecord("generation overflow"))
+    );
+}
+
 /// An account reset starts a new generation: the new root's device is the
 /// only active one, earlier devices and recovery roots are inactive, and the
 /// state as of a position before the reset is still generation 0.

@@ -93,4 +93,8 @@ Reset starts a new account generation. Other members’ clients can send the new
 keys, including past keys, for spaces the account still belongs to. Enable reset only if your
 app’s sign-in is enough to grant this access. Anyone who can sign in as the user can reset the
 account on a new device and receive those space keys.
+
+A member’s device reports a reset once per space, account and generation.
+It remembers the last 10,000 distinct event identities and drops the oldest
+when a new one arrives. Re-enrolment starts a fresh event history.
 See the [schema generation test](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/src/schema-dsl/encryption.test.ts#L89-L105), the [account reset test](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/src/encryption/node-e2e.test.ts#L175-L229) and the [key redelivery test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/spaces.rs#L4652-L4691).
