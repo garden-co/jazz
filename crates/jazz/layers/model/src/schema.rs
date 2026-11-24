@@ -87,6 +87,31 @@ pub fn is_system_table(name: &str) -> bool {
 /// deleted (rows of every system table are never updated).
 pub const MEMBERS_TABLE: &str = "__e2ee_members";
 
+/// Optional, null-defaulted columns added by Jazz, by fragment version
+/// and table. Schema construction and runtime lens admission share the
+/// full descriptor so that a different type or default cannot be admitted.
+pub fn system_table_column_additions() -> impl Iterator<
+    Item = (
+        usize,
+        &'static str,
+        crate::model::public_schema::ColumnDescriptor,
+    ),
+> {
+    [
+        #[cfg(any(test, feature = "testing"))]
+        (
+            2,
+            MEMBERS_TABLE,
+            crate::model::public_schema::ColumnDescriptor::new(
+                "label",
+                crate::model::public_schema::ColumnType::Text,
+            )
+            .nullable(),
+        ),
+    ]
+    .into_iter()
+}
+
 /// The system table of private account identities, whose inserts core
 /// also checks beside their policy (E2EE protocol R5).
 pub const ACCOUNT_IDENTITIES_TABLE: &str = "__e2ee_account_identities";

@@ -17,6 +17,12 @@
     "$comment": {
       "type": "string"
     },
+    "systemTablesVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "The version of Jazz’s system tables for this schema when it carries them. Omitted for version 1."
+    },
     "tables": {
       "allOf": [
         {
@@ -36,6 +42,9 @@
         "additionalProperties": false,
         "required": ["tables"],
         "properties": {
+          "systemTablesVersion": {
+            "$ref": "#/properties/systemTablesVersion"
+          },
           "tables": {
             "$ref": "#/$defs/tables"
           },

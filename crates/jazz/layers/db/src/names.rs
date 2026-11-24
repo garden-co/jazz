@@ -1224,16 +1224,40 @@ impl Names {
         // version this store admitted, as every store picks it (see
         // `migration_path`); else the base.
         into.sort_by_key(|lens| lens.source);
-        // A system table is carried between versions unchanged: core finds
-        // it by the name the admitted versions give it and reads its columns
-        // by name, so a lens that renamed it or changed its columns would
-        // give an older version's uploads another layout.
+        // Older versions address these rows and columns by name. Only
+        // Jazz's declared optional additions can change a carried table.
         for lens in &into {
             if let Some(table) = lens.table_lenses().iter().find(|table| {
-                (table.source_table != table.target_table || !table.ops.is_empty())
-                    && [&table.source_table, &table.target_table]
-                        .into_iter()
-                        .any(|name| jazz_model::schema::is_system_table(name))
+                if !jazz_model::schema::is_system_table(&table.source_table)
+                    && !jazz_model::schema::is_system_table(&table.target_table)
+                {
+                    return false;
+                }
+                table.source_table != table.target_table
+                    || table.ops.iter().any(|op| {
+                        let LensOp::AddColumn {
+                            column,
+                            default: Value::Nullable(None),
+                        } = op
+                        else {
+                            return true;
+                        };
+                        let name = &table.target_table;
+                        let descriptor = schema
+                            .public_schema()
+                            .get(&name.as_str().into())
+                            .and_then(|t| t.columns.column(column));
+                        let already_present = self
+                            .get(&lens.source)
+                            .and_then(|names| names.tables.get(name))
+                            .is_some_and(|(_, columns)| columns.contains_key(column));
+                        already_present
+                            || !jazz_model::schema::system_table_column_additions().any(
+                                |(_, table, addition)| {
+                                    name == table && descriptor == Some(&addition)
+                                },
+                            )
+                    })
             }) {
                 return Err(schema_error(format!(
                     "a lens changes `{}` (to `{}`), but Jazz's system tables are carried between versions unchanged",

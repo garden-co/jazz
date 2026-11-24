@@ -288,6 +288,8 @@ mod system_only_policy_nodes;
 mod system_table_joins;
 #[path = "../system_table_row_id_joins.rs"]
 mod system_table_row_id_joins;
+#[path = "../system_table_upgrade.rs"]
+mod system_table_upgrade;
 #[path = "../text_affix_predicates.rs"]
 mod text_affix_predicates;
 #[path = "../text_merge.rs"]

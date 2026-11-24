@@ -3,7 +3,7 @@
 //!
 //! Their names carry the reserved prefix [`SYSTEM_TABLE_PREFIX`]. An app
 //! that declares encryption gets them in every schema version that
-//! declares it: the loaders append [`e2ee_system_tables_v1`] before hashing,
+//! carries it. The loaders add the tables of the recorded version before hashing,
 //! so a client, a backend and the server compute one schema and one hash.
 //! Their policies are never written by the app:
 //! [`derive_e2ee_policies`] works them out from the app's encryption
@@ -11,7 +11,9 @@
 //! on the server, so both reach the same permissions bundle.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
 
+use super::super::published::{PublishLensOp, PublishTableLens};
 use crate::catalogue::Permissions;
 use crate::tools::public_schema::{
     CmpOp, ColumnDescriptor, ColumnType, EncryptionEntry, EncryptionSettings, HistoryRetention,
@@ -393,19 +395,81 @@ pub fn e2ee_system_tables_v1() -> Schema {
         .collect()
 }
 
-/// `schema` with the system tables added: what every loader does to a
-/// schema version that declares encryption, before hashing it.
-pub fn with_e2ee_fragment(schema: &Schema) -> Schema {
-    let mut schema = schema.clone();
-    schema.extend(e2ee_system_tables_v1());
-    schema
+#[cfg(feature = "testing")]
+const TEST_EVENTS: &str = "__e2ee_test_events";
+
+// Entries are append-only. Each successor adds tables or optional columns
+// to its predecessor. Position + 1 is the version in jazz.app.json.
+static FRAGMENTS: LazyLock<Vec<Schema>> = LazyLock::new(|| {
+    vec![
+        e2ee_system_tables_v1(),
+        #[cfg(feature = "testing")]
+        {
+            let mut schema = e2ee_system_tables_v1();
+            for (_, table, column) in crate::schema::system_table_column_additions()
+                .filter(|(version, _, _)| *version == 2)
+            {
+                schema
+                    .get_mut(&TableName::from(table))
+                    .unwrap()
+                    .columns
+                    .columns
+                    .push(column);
+            }
+            schema.insert(
+                TableName::from(TEST_EVENTS),
+                table(&[req("event", Text)], &[], &[]),
+            );
+            schema
+        },
+    ]
+});
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(in crate::tools::deployment) struct FragmentVersion(usize);
+
+impl FragmentVersion {
+    pub(super) const V1: Self = Self(1);
+
+    pub(super) fn latest() -> Self {
+        Self(FRAGMENTS.len())
+    }
+
+    pub(super) fn known(number: usize) -> Result<Self, String> {
+        if (1..=FRAGMENTS.len()).contains(&number) {
+            Ok(Self(number))
+        } else {
+            Err(format!(
+                "unknown system tables version {number}; upgrade the loader"
+            ))
+        }
+    }
+
+    pub(super) fn number(self) -> usize {
+        self.0
+    }
+
+    pub(super) fn add_to(self, schema: &Schema) -> Schema {
+        let mut schema = schema.clone();
+        schema.extend(FRAGMENTS[self.0 - 1].clone());
+        schema
+    }
 }
 
-/// Whether `schema` holds system tables, and if it does, that they are
-/// exactly [`e2ee_system_tables_v1`] (their policies aside) and that no app
-/// table references one. `Ok(true)` when the fragment is there, `Ok(false)`
-/// when the schema has no system table.
+/// Add the original system tables to a schema.
+pub fn with_e2ee_fragment(schema: &Schema) -> Schema {
+    FragmentVersion::V1.add_to(schema)
+}
+
+/// Check the system tables and app references to them.
 pub fn check_e2ee_fragment(schema: &Schema) -> Result<bool, String> {
+    fragment_version(schema).map(|version| version.is_some())
+}
+
+/// Recognize a published version by its exact tables, ignoring derived policies.
+pub(in crate::tools::deployment) fn fragment_version(
+    schema: &Schema,
+) -> Result<Option<FragmentVersion>, String> {
     for (name, table) in schema.iter() {
         if is_system_table(name.as_str()) {
             continue;
@@ -425,34 +489,85 @@ pub fn check_e2ee_fragment(schema: &Schema) -> Result<bool, String> {
         }
     }
     if !schema.keys().any(|name| is_system_table(name.as_str())) {
-        return Ok(false);
+        return Ok(None);
     }
-    let fragment = e2ee_system_tables_v1();
-    for name in schema.keys().filter(|name| is_system_table(name.as_str())) {
-        if !fragment.contains_key(name) {
-            return Err(format!(
-                "table {name} has the reserved prefix `{SYSTEM_TABLE_PREFIX}`, which only Jazz's \
-                 own system tables use; rename it"
-            ));
-        }
+    let system: Schema = schema
+        .iter()
+        .filter(|(name, _)| is_system_table(name.as_str()))
+        .map(|(name, given)| {
+            let mut table = given.clone();
+            table.policies = TablePolicies::default();
+            (*name, table)
+        })
+        .collect();
+    if let Some(index) = FRAGMENTS.iter().position(|tables| *tables == system) {
+        return Ok(Some(FragmentVersion(index + 1)));
     }
-    for (name, expected) in fragment.iter() {
-        let Some(given) = schema.get(name) else {
-            return Err(format!(
-                "the schema has Jazz's system tables but lacks {name}; build it with a loader of \
-                 this version of Jazz"
-            ));
-        };
-        let mut given = given.clone();
-        given.policies = TablePolicies::default();
-        if given != *expected {
-            return Err(format!(
-                "table {name} is not the definition of Jazz's system table; build the schema \
-                 with a loader of this version of Jazz"
-            ));
-        }
+    let closest = FRAGMENTS
+        .iter()
+        .find(|tables| tables.keys().eq(system.keys()))
+        .unwrap_or(&FRAGMENTS[0]);
+    let detail = if let Some(name) = system.keys().find(|name| !closest.contains_key(name)) {
+        format!("table {name} has the reserved prefix `{SYSTEM_TABLE_PREFIX}`")
+    } else if let Some(name) = closest.keys().find(|name| !system.contains_key(name)) {
+        format!("the schema has Jazz's system tables but lacks {name}")
+    } else {
+        let (name, _) = system
+            .iter()
+            .find(|(name, given)| closest[*name] != **given)
+            .unwrap();
+        format!("table {name} is not the definition of Jazz's system table")
+    };
+    Err(format!(
+        "{detail}; unknown system table fragment: upgrade the server"
+    ))
+}
+
+/// Derive only Jazz's additive steps from two known fragments. Deployment
+/// and the source loader both use this list, including for a first install.
+pub(in crate::tools::deployment) fn upgrade_lenses(
+    from: Option<FragmentVersion>,
+    to: Option<FragmentVersion>,
+) -> Vec<PublishTableLens> {
+    if from == to {
+        return Vec::new();
     }
-    Ok(true)
+    let Some(to) = to else {
+        return Vec::new();
+    };
+    let before = from.map(|v| &FRAGMENTS[v.0 - 1]);
+    FRAGMENTS[to.0 - 1]
+        .iter()
+        .filter_map(|(name, table)| {
+            let old = before.and_then(|s| s.get(name));
+            let mut operations = Vec::new();
+            if let Some(old) = old {
+                for column in &table.columns.columns {
+                    if old.columns.column(column.name_str()).is_none() {
+                        assert!(
+                            column.nullable,
+                            "system table upgrades add only optional columns"
+                        );
+                        operations.push(PublishLensOp::Introduce {
+                            column: column.name_str().to_owned(),
+                            column_type: column.column_type.clone(),
+                            value: Value::Null,
+                        });
+                    }
+                }
+                if operations.is_empty() {
+                    return None;
+                }
+            }
+            Some(PublishTableLens {
+                table: name.as_str().to_owned(),
+                added: old.is_none(),
+                removed: false,
+                renamed_from: None,
+                operations,
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -915,9 +1030,16 @@ pub fn derive_e2ee_policies(
             ]),
         ),
     );
+    #[cfg(feature = "testing")]
+    if schema.contains_key(&TableName::from(TEST_EVENTS)) {
+        put(TEST_EVENTS, immutable(PolicyExpr::False, PolicyExpr::False));
+    }
     debug_assert_eq!(
         policies.keys().collect::<BTreeSet<_>>(),
-        e2ee_system_tables_v1().keys().collect::<BTreeSet<_>>()
+        schema
+            .keys()
+            .filter(|table| is_system_table(table.as_str()))
+            .collect::<BTreeSet<_>>()
     );
     Ok(policies)
 }

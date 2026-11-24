@@ -2595,3 +2595,48 @@ async fn encryption_turned_on_by_a_later_deployment_refuses_foreign_founders_at_
     );
     assert_eq!(found(None, 3).await, StatusCode::OK);
 }
+
+/// Alice publishes a legacy app to a fresh server, upgrades, then tries the
+/// old bundle again. Another fresh server can install the whole history at once.
+#[tokio::test]
+async fn system_table_upgrade_accepts_legacy_history_and_refuses_rollback() {
+    let old = loaded("ownerId = session.user");
+    let perms = permissions(MEMBERS_RULE, "ownerId = session.user");
+    let file = APP_V2.replacen(r#""tables""#, r#""systemTablesVersion": 2, "tables""#, 1);
+    let new = artifact::load(file.as_bytes(), perms.as_bytes()).unwrap();
+    assert_eq!(new.schemas()[0].0, old.current_hash());
+    let canonical = artifact::rewrite(file.as_bytes(), perms.as_bytes(), None).unwrap();
+    let round_trip =
+        artifact::load(canonical.app.as_bytes(), canonical.permissions.as_bytes()).unwrap();
+    assert_eq!(round_trip.bundle(), new.bundle());
+    let fresh = router().await;
+    for app in [&old, &new] {
+        let (status, body) = publish(&fresh, app.deployment_body(false)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["bundle"], app.bundle().to_hex());
+    }
+    let (status, body) = publish(&fresh, old.deployment_body(true)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("cannot roll back"),
+        "{body}"
+    );
+    let (status, body) = publish(&router().await, new.deployment_body(false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // A client can post raw lenses independently of the source loader.
+    let mut forged = new.deployment_body(false);
+    let operations = forged["migrations"][0]["forward"].as_array_mut().unwrap();
+    let members = operations
+        .iter_mut()
+        .find(|op| op["table"] == "__e2ee_members")
+        .unwrap();
+    members["operations"][0]["value"] =
+        serde_json::to_value(jazz::tools::Value::Text("forged".into())).unwrap();
+    let (status, body) = publish(&router().await, forged).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("may not change"),
+        "{body}"
+    );
+}

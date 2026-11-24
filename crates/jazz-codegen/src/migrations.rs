@@ -84,15 +84,11 @@ pub fn create(
     // The current version as the file will load once the migration below
     // leads to it from the bindings' version: with Jazz's system tables
     // when it declares encryption or that version has them.
-    let mut to = artifact::read_current_schema(app_json).map_err(CodegenError::from_artifact)?;
+    let (to, fragment) =
+        artifact::migration_target_schema(app_json, from).map_err(CodegenError::from_artifact)?;
     let current_declared = versions
         .last()
         .and_then(|current| declared.as_ref()?.entries(&current.to_string()));
-    if (current_declared.is_some() || artifact::has_system_tables(from))
-        && !artifact::has_system_tables(&to)
-    {
-        to = artifact::system_tables::with_e2ee_fragment(&to);
-    }
     let to = &to;
     // Single-column indexes change the hash, not the version or the rows
     // (#5494): there is nothing to migrate, as `bindings::staleness` says.
@@ -114,6 +110,12 @@ pub fn create(
     let Json::Object(top) = &mut root else {
         unreachable!("read above")
     };
+    if let Some(version) = fragment.filter(|version| *version > 1) {
+        *entry(top, "systemTablesVersion", || Json::Null, "tables") =
+            Json::Number(version.to_string());
+    } else {
+        top.retain(|(key, _)| key != "systemTablesVersion");
+    }
     let history = entry(top, "history", || Json::Object(Vec::new()), "tables");
     let Json::Object(versions) = history else {
         unreachable!("read above")
@@ -127,9 +129,9 @@ pub fn create(
     }
     // The version keeps its own encryption declarations: without them the
     // deploy would read its encrypted columns as plaintext ones.
-    let tables = artifact::declared_version_tables(from, &recorded.encryption)
+    let history_version = artifact::declared_history_version(from, &recorded.encryption)
         .map_err(CodegenError::from_artifact)?;
-    versions.push((version.clone(), Json::object(vec![("tables", tables)])));
+    versions.push((version.clone(), history_version));
     // Every migration written without `to` was written for the bindings'
     // version, which is in `history` now: name it, so the edited `tables`
     // don't become its target.
@@ -152,7 +154,11 @@ pub fn create(
     ];
     // Jazz's system tables are Jazz's: the loader adds or drops them with
     // the encryption declarations, so the authored diff leaves them out.
-    migration.extend(diff(&authored_tables(from), &authored_tables(to))?);
+    let source_tables = authored_tables(from);
+    let target_tables = authored_tables(to);
+    if source_tables != target_tables {
+        migration.extend(diff(&source_tables, &target_tables)?);
+    }
     let migrations = entry(top, "migrations", || Json::Array(Vec::new()), "history");
     let Json::Array(items) = migrations else {
         unreachable!("loaded above")
