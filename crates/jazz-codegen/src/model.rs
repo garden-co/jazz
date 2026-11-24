@@ -49,10 +49,6 @@ pub struct Table {
     pub relations: Vec<Relation>,
     /// In declared order.
     pub computed: Vec<Computed>,
-    /// Whether its rows can be updated. The members table's fixed policy
-    /// refuses every update, so its bindings have no update, upsert or
-    /// update advice.
-    pub updatable: bool,
 }
 
 /// A type and whether `null` is a value of it.
@@ -341,7 +337,6 @@ fn table(
         columns,
         relations,
         computed,
-        updatable: !is_members_table(name),
     }
 }
 

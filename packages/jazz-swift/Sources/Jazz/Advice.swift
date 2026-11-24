@@ -16,7 +16,7 @@ extension Client {
         try await can(P.Row.table, "update") { ["id": .string(id), "row": try Coding.value(patch, userInfo)] }
     }
 
-    public func canUpdate<R: Updatable>(_ type: R.Type, id: Jazz.ID) async throws -> Bool? {
+    public func canUpdate<R: Row>(_ type: R.Type, id: Jazz.ID) async throws -> Bool? {
         try await can(R.table, "update") { ["id": .string(id)] }
     }
 

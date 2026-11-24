@@ -24,10 +24,10 @@ import kotlinx.serialization.json.put
 public sealed class Relation<Owner : Any, Target : Any>(
     /** The relation's name in `jazz.app.json`. */
     public val name: String,
-    target: () -> BaseTable<Target, *>,
+    target: () -> Table<Target, *, *>,
 ) {
     /** The table the relation leads to (resolved lazily: table objects refer to each other). */
-    public val target: BaseTable<Target, *> by lazy(target)
+    public val target: Table<Target, *, *> by lazy(target)
 
     internal abstract fun spec(): JsonObject
 
@@ -37,12 +37,12 @@ public sealed class Relation<Owner : Any, Target : Any>(
 /** A forward relation: this row's column references at most one [Target] row. */
 public class One<Owner : Any, Target : Any> private constructor(
     name: String,
-    private val targetFn: () -> BaseTable<Target, *>,
+    private val targetFn: () -> Table<Target, *, *>,
     private val isRequired: Boolean,
     private val columns: List<String>?,
     private val includes: List<Relation<Target, *>>,
 ) : Relation<Owner, Target>(name, targetFn) {
-    public constructor(name: String, target: () -> BaseTable<Target, *>) :
+    public constructor(name: String, target: () -> Table<Target, *, *>) :
         this(name, target, false, null, emptyList())
 
     /** Keep only rows whose referenced row exists and is readable (TS's `requireIncludes`). */
@@ -64,14 +64,14 @@ public class One<Owner : Any, Target : Any> private constructor(
 /** A reverse relation: the [Target] rows whose forward relation points at this row. */
 public class Many<Owner : Any, Target : Any> private constructor(
     name: String,
-    private val targetFn: () -> BaseTable<Target, *>,
+    private val targetFn: () -> Table<Target, *, *>,
     private val conditions: List<Condition>,
     private val orders: List<Order>,
     private val limit: Int?,
     private val columns: List<String>?,
     private val includes: List<Relation<Target, *>>,
 ) : Relation<Owner, Target>(name, targetFn) {
-    public constructor(name: String, target: () -> BaseTable<Target, *>) :
+    public constructor(name: String, target: () -> Table<Target, *, *>) :
         this(name, target, emptyList(), emptyList(), null, null, emptyList())
 
     private fun copy(

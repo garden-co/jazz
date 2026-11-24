@@ -152,7 +152,7 @@ public enum JazzApp {
     }
 
     /// A row of `activity`.
-    public struct Activity: Jazz.Row, Jazz.Updatable {
+    public struct Activity: Jazz.Row {
         public static let table = "activity"
         public let id: Jazz.ID
         public var showId: Jazz.ID
@@ -302,7 +302,7 @@ public enum JazzApp {
     }
 
     /// A row of `checklistItems`.
-    public struct ChecklistItem: Jazz.Row, Jazz.Updatable {
+    public struct ChecklistItem: Jazz.Row {
         public static let table = "checklistItems"
         public let id: Jazz.ID
         public var title: Swift.String
@@ -387,7 +387,7 @@ public enum JazzApp {
     }
 
     /// A row of `comments`.
-    public struct Comment: Jazz.Row, Jazz.Updatable {
+    public struct Comment: Jazz.Row {
         public static let table = "comments"
         public let id: Jazz.ID
         public var taskId: Jazz.ID
@@ -502,7 +502,7 @@ public enum JazzApp {
     }
 
     /// A row of `crew`.
-    public struct Crew: Jazz.Row, Jazz.Updatable {
+    public struct Crew: Jazz.Row {
         public static let table = "crew"
         public let id: Jazz.ID
         public var account: Jazz.ID
@@ -596,7 +596,7 @@ public enum JazzApp {
     }
 
     /// A row of `showCrew`.
-    public struct ShowCrew: Jazz.Row, Jazz.Updatable {
+    public struct ShowCrew: Jazz.Row {
         public static let table = "showCrew"
         public let id: Jazz.ID
         public var showId: Jazz.ID
@@ -737,7 +737,7 @@ public enum JazzApp {
     }
 
     /// A row of `showInvites`.
-    public struct ShowInvite: Jazz.Row, Jazz.Updatable {
+    public struct ShowInvite: Jazz.Row {
         public static let table = "showInvites"
         public let id: Jazz.ID
         public var showId: Jazz.ID
@@ -830,7 +830,7 @@ public enum JazzApp {
     }
 
     /// A row of `shows`.
-    public struct Show: Jazz.Row, Jazz.Updatable {
+    public struct Show: Jazz.Row {
         public static let table = "shows"
         public let id: Jazz.ID
         public var name: Swift.String
@@ -973,7 +973,7 @@ public enum JazzApp {
     }
 
     /// A row of `tasks`.
-    public struct Task: Jazz.Row, Jazz.Updatable {
+    public struct Task: Jazz.Row {
         public static let table = "tasks"
         public let id: Jazz.ID
         public var showId: Jazz.ID

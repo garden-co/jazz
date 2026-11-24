@@ -60,11 +60,22 @@ public data class NewE2eeMember(
     val accountId: kotlin.String,
 )
 
+/** Changes to a row of `__e2ee_members`: columns not set are left as they are. */
+public class E2eeMemberPatch : tools.jazz.Patch() {
+    /** Sets `scopeId`. */
+    public fun scopeId(value: kotlin.String): E2eeMemberPatch = apply { set("scopeId", value, kotlinx.serialization.serializer<kotlin.String>()) }
+    /** Sets `identifier`. */
+    public fun identifier(value: kotlin.String): E2eeMemberPatch = apply { set("identifier", value, kotlinx.serialization.serializer<kotlin.String>()) }
+    /** Sets `accountId`. */
+    public fun accountId(value: kotlin.String): E2eeMemberPatch = apply { set("accountId", value, kotlinx.serialization.serializer<kotlin.String>()) }
+}
+
 /** Table `__e2ee_members`: its columns, and queries with `query()`. */
-public object E2eeMembers : tools.jazz.BaseTable<E2eeMember, NewE2eeMember>(
+public object E2eeMembers : tools.jazz.Table<E2eeMember, NewE2eeMember, E2eeMemberPatch>(
     "__e2ee_members",
     E2eeMember.serializer(),
     NewE2eeMember.serializer(),
+    ::E2eeMemberPatch,
 ) {
     /** The row's id. */
     public val id: tools.jazz.Column<kotlin.String> =

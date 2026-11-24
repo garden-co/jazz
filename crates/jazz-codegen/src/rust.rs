@@ -401,21 +401,19 @@ impl<'a> Writer<'a> {
         }
         out.push_str("        }\n    }\n}\n\n");
 
-        // Updates: none for a table whose rows never change.
-        if table.updatable {
-            let _ = writeln!(
-                out,
-                "/// Changes to a row of `{}`: a `None` field leaves its column as it is.",
-                table.name
-            );
-            out.push_str("#[derive(Debug, Clone, PartialEq, Default)]\n");
-            let _ = writeln!(out, "pub struct {update} {{");
-            for field in &fields {
-                field.doc(&mut out);
-                let _ = writeln!(out, "    pub {}: {OPTION}<{}>,", field.ident, field.view);
-            }
-            out.push_str("}\n\n");
+        // Updates.
+        let _ = writeln!(
+            out,
+            "/// Changes to a row of `{}`: a `None` field leaves its column as it is.",
+            table.name
+        );
+        out.push_str("#[derive(Debug, Clone, PartialEq, Default)]\n");
+        let _ = writeln!(out, "pub struct {update} {{");
+        for field in &fields {
+            field.doc(&mut out);
+            let _ = writeln!(out, "    pub {}: {OPTION}<{}>,", field.ident, field.view);
         }
+        out.push_str("}\n\n");
 
         let uses_impl = !computed.is_empty() || fields.iter().any(|f| f.transform.is_some());
 
@@ -451,11 +449,7 @@ impl<'a> Writer<'a> {
             );
         }
         let _ = writeln!(out, "    type New = {new};");
-        if table.updatable {
-            let _ = writeln!(out, "    type Update = {update};\n");
-        } else {
-            let _ = writeln!(out, "    type Update = {RT}::NoUpdate;\n");
-        }
+        let _ = writeln!(out, "    type Update = {update};\n");
         let _ = writeln!(
             out,
             "    fn decode(row: &mut {RT}::Fields<'_>) -> {RT}::Result<Self> {{"
@@ -542,30 +536,26 @@ impl<'a> Writer<'a> {
         let _ = write!(out, "        {OK}(cells)\n    }}\n}}\n\n");
 
         // Update.
-        if table.updatable {
-            let _ = writeln!(out, "impl {RT}::Update for {update} {{");
-            let _ = writeln!(out, "    type Row = {row};\n");
+        let _ = writeln!(out, "impl {RT}::Update for {update} {{");
+        let _ = writeln!(out, "    type Row = {row};\n");
+        let _ = writeln!(
+            out,
+            "    fn into_cells(\n        self,\n        {implementations}: &{RT}::Implementations,\n    ) -> {RT}::Result<{VEC}<({STRING}, {value})>> {{"
+        );
+        if uses_impl {
+            out.push_str("        let computed = &implementations.get::<Implementations>()?.0;\n");
+        }
+        let _ = writeln!(out, "        let mut cells = {VEC}::new();");
+        for field in &fields {
             let _ = writeln!(
                 out,
-                "    fn into_cells(\n        self,\n        {implementations}: &{RT}::Implementations,\n    ) -> {RT}::Result<{VEC}<({STRING}, {value})>> {{"
+                "        if let {SOME}(value) = self.{} {{\n            cells.push(({:?}.to_owned(), {}));\n        }}",
+                field.ident,
+                field.name,
+                field.stored_value("value")
             );
-            if uses_impl {
-                out.push_str(
-                    "        let computed = &implementations.get::<Implementations>()?.0;\n",
-                );
-            }
-            let _ = writeln!(out, "        let mut cells = {VEC}::new();");
-            for field in &fields {
-                let _ = writeln!(
-                    out,
-                    "        if let {SOME}(value) = self.{} {{\n            cells.push(({:?}.to_owned(), {}));\n        }}",
-                    field.ident,
-                    field.name,
-                    field.stored_value("value")
-                );
-            }
-            let _ = write!(out, "        {OK}(cells)\n    }}\n}}\n\n");
         }
+        let _ = write!(out, "        {OK}(cells)\n    }}\n}}\n\n");
 
         // The table's module.
         let _ = writeln!(
