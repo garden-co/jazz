@@ -88,13 +88,10 @@ pub(crate) async fn deploy_body(
              the server's runtime has none",
         ));
     }
-    let kept_values: Vec<_> = match &kept {
-        Some(_) => deployment
-            .first_declared
-            .iter()
-            .map(|(version, stored)| (DECLARATIONS, version.0.to_vec(), stored.clone()))
-            .collect(),
-        None => Vec::new(),
+    let kept_values = if kept.is_some() {
+        deployment.kept_values()
+    } else {
+        Vec::new()
     };
     if !staged.response.changed && kept_values.is_empty() {
         // A deployment may have committed before its runtime reloaded the

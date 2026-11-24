@@ -596,7 +596,7 @@ impl AppStore {
         &self,
         schema: JazzSchema,
         change: CatalogueChange,
-        kept: Vec<(HostTable, Vec<u8>, Vec<u8>)>,
+        kept: crate::portable::deployment::KeptValues,
     ) -> Result<ServerRuntimeHandle, CatalogueApplyError> {
         self.start_with_catalogue(schema, NodeRole::Core, true, false, Some((change, kept)))
     }
@@ -1638,7 +1638,7 @@ impl ServerRuntimeHandle {
         &self,
         change: CatalogueChange,
         supersedes: Option<jazz::catalogue::BundleId>,
-        kept: Vec<(jazz::host::HostTable, Vec<u8>, Vec<u8>)>,
+        kept: crate::portable::deployment::KeptValues,
     ) -> Result<(), CatalogueApplyError> {
         let (ended, result) = self
             .run(move |owner| Ok(owner.apply_catalogue_keeping(change, supersedes, &kept)))
@@ -1660,7 +1660,7 @@ impl ServerRuntimeHandle {
 
     /// Whether the app the runtime serves has Jazz's E2EE system tables.
     pub async fn encrypts(&self) -> Result<bool, String> {
-        self.run(|owner| owner.encrypts()).await
+        self.run(|owner| Ok(owner.encrypts())).await
     }
 
     /// Whether the runtime has the account registry its checks read, which
