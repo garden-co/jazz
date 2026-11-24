@@ -5,10 +5,11 @@ import { afterEach, beforeAll, vi } from "vitest";
 import {
   createJazz,
   createJazzClient,
-  durableObjects,
+  remote,
   type CreateJazzOptions,
 } from "../../src/backend/index.js";
 import { testApp, testPermissions } from "../../src/testing/index.js";
+import { networkTransport } from "../../src/backend/core-transport.js";
 import { bundleWorker } from "./bundle.js";
 import { startDurableObjectCore } from "./harness.js";
 
@@ -51,13 +52,21 @@ export function setupTestApp(lifecycle: "hibernate" | "while-connected") {
       script,
     });
     cleanups.push(() => core.dispose());
+    const transport = networkTransport();
     const jazz = await createJazz({
       app,
       permissions: permissionsFile,
-      store: durableObjects({
+      store: remote({
+        appId: await core.appId(),
         url: core.url,
         secret: core.secret,
-        lifecycle,
+        ...(lifecycle === "hibernate" && {
+          transport: {
+            fetch: transport.fetch,
+            openWebSocket: (url, headers) =>
+              transport.openWebSocket(url, { ...headers, "x-jazz-socket-lifecycle": lifecycle }),
+          },
+        }),
       }),
       authenticate,
     }).ready();

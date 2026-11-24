@@ -1,23 +1,21 @@
+import type {
+  JazzStore,
+  JazzCore,
+  JazzCoreTransport,
+  JazzCoreOpenContext,
+  CoreSocket,
+  BackendAccess,
+} from "./core-provider.js";
+
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { verifyChallenge } from "../local-first-auth/server.js";
 import { BACKEND_SIGNING_KEY_ROUTE, backendSigningKeys } from "./signing-key.js";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Http2SecureServer, Http2Server } from "node:http2";
 import type { Duplex } from "node:stream";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
 import type { JazzCoreSocketEvent } from "jazz-napi";
-import { backendNative, inProcessCore } from "./backend-native.js";
-import {
-  BINDING_ORIGIN,
-  bindingTransport,
-  networkTransport,
-  refuseRedirect,
-  type CoreBinding,
-  type CoreTransport,
-  type CoreWebSocket,
-} from "./core-transport.js";
-import { registerInProcessTransport } from "../runtime/in-process-transport.js";
+import { backendNative } from "./backend-native.js";
+import { routeJazzCoreClient } from "./core-provider.js";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
 import { AUTHENTICATE_EXPIRES_AT_MISSING } from "../accounts/registry-client.js";
 import { LOCAL_FIRST_JWT_ISSUER, parseJwtPayload } from "../runtime/client-session.js";
@@ -80,44 +78,14 @@ import {
 import { BACKEND_USER_ISSUER } from "./backend-issuer.js";
 import { earlyDb, type EarlyDb } from "./early-db.js";
 import {
-  checkNamespaceOption,
-  checkRegionOption,
-  coreName,
-  onVercelDeployment,
-  onVercelHost,
-  openVercelCore,
-  refuseVercelAppId,
-  refuseVercelName,
-  type VercelStoreOptions,
-} from "./vercel-store.js";
-import { logStoreOpened } from "./store-log.js";
-
-export type {
-  VercelNamespace,
-  VercelNamespaceContext,
-  VercelStoreOptions,
-} from "./vercel-store.js";
-export { perBranch } from "./vercel-store.js";
-
-import { files, type BlobStore } from "./blobs.js";
-import {
   createInspector,
   inspectorSettings,
-  newTokenSecret,
   type InspectHook,
   type InspectorOptions,
 } from "./inspect.js";
 import { createInspectorUi } from "./inspect-ui.js";
 import type { InspectSessionInfo } from "../inspect/protocol.js";
 export type { InspectEvent, InspectGrant, InspectHook, InspectorOptions } from "./inspect.js";
-export {
-  files,
-  s3,
-  vercelBlob,
-  type BlobStore,
-  type S3BlobStore,
-  type VercelBlobStore,
-} from "./blobs.js";
 import {
   AuthenticateExpiresAtError,
   reauthenticateAt,
@@ -132,363 +100,7 @@ import {
   isAuthenticationUnavailableError,
   RequestAuthenticationError,
 } from "./request-auth.js";
-import { optionalPeerImportError } from "./optional-peer.js";
-import { closingBeforeDeadline } from "./socket-deadline.js";
-import { importWs, vercelUpgradesSockets } from "./ws-peer.js";
-
-type DurableObjectLifecycle = "while-connected" | "hibernate";
-
-/** Where the core keeps its data. */
-export type JazzStore =
-  | {
-      readonly kind: "sqlite";
-      readonly path: string;
-      readonly blobs: BlobStore;
-    }
-  | { readonly kind: "memory" }
-  | {
-      readonly kind: "remote";
-      readonly url: string;
-      /** The app this core serves. */
-      readonly appId: string;
-      /** This backend's credential for the core, asked for each request and socket. */
-      readonly backendCredential: BackendCredential;
-      /** The app's secret, when `remote()` was given one: agent tokens are signed with a key derived from it. */
-      readonly secret?: string;
-    }
-  | {
-      readonly kind: "durableObjects";
-      readonly lifecycle?: DurableObjectLifecycle;
-      /** The Worker's origin, or a label for a binding. */
-      readonly url: string;
-      /** The core's Durable Object binding, in this Worker. */
-      readonly binding?: CoreBinding;
-      /** The Worker's `JAZZ_CORE_SECRET`. */
-      readonly secret: string;
-    }
-  | {
-      readonly kind: "vercel";
-      readonly options: VercelStoreOptions;
-      /**
-       * What runs outside a Vercel deployment, e.g. under `next dev`
-       * (default: `sqlite({ path: ".jazz/local" })`).
-       */
-      readonly local: Extract<JazzStore, { kind: "sqlite" | "memory" }>;
-    };
-
-/**
- * A SQLite core in this process, kept in the directory `path`. It generates
- * its app id on first start and keeps it in its own file, `<path>/jazz.sqlite`,
- * with the rest of its identity, so a copy of that file is the same store
- * (alpha.65's `jazz-alpha59-alpha60-import` leaves an alpha.59 app's id in
- * `<path>/app-id`, which the first open takes over). To
- * open a copy beside the original, detach it first: `jazz-tools store detach`. Large
- * values' bytes go to `blobs`, by default `files()` in `<path>/blobs`.
- *
- * Only one process can open `path` at a time (it holds `<path>/jazz.lock`
- * while the core is open); a second one fails with "already open". It
- * refuses to start on serverless hosts with no lasting disk (Vercel, AWS
- * Lambda, Netlify): use `vercel()` or `remote()` there.
- */
-export function sqlite(options: {
-  path: string;
-  blobs?: BlobStore;
-}): Extract<JazzStore, { kind: "sqlite" }> {
-  refuseStoreAppId("sqlite", options);
-  const blobs = options.blobs ?? files();
-  if (
-    blobs !== "sqlite" &&
-    (typeof blobs !== "object" || (blobs.kind !== "files" && blobs.kind !== "s3"))
-  ) {
-    throw new Error('sqlite(): blobs must be files(), s3() or "sqlite"');
-  }
-  return { kind: "sqlite", path: options.path, blobs };
-}
-
-/**
- * An in-memory core in this process: for tests and throwaway previews. Each
- * one is its own store, with a new app id.
- */
-export function memory(options?: { appId?: never }): Extract<JazzStore, { kind: "memory" }> {
-  refuseStoreAppId("memory", options);
-  return { kind: "memory" };
-}
-
-/** Stores keep their own app id; one passed from JavaScript is refused, not ignored. */
-function refuseStoreAppId(store: string, options: unknown): void {
-  if (typeof options === "object" && options !== null && "appId" in options) {
-    throw new Error(
-      `${store}(): appId is not an option: the store keeps its own app id. To keep an alpha.59 app's id, import its data with \`jazz-alpha59-alpha60-import import --app-id\` from the v2.0.0-alpha.65 release.`,
-    );
-  }
-}
-
-/**
- * The credential this backend presents to its core, fresh for each request
- * and socket: the app's secret, or a token that proves which workload this
- * is (a sync server started with `--trusted-workload-*` accepts its
- * platform's OIDC token, such as a Vercel function's).
- */
-export type BackendCredential = () => string | Promise<string>;
-
-/**
- * A core running elsewhere (Jazz Cloud, or a sync server you run), serving
- * the app `appId`, reached from this backend with the app's one secret (its
- * admin secret), or with a `backendCredential` of your own. Browsers still
- * talk only to your backend: it decides who each user is, and the core
- * trusts it to say so. The secret never leaves your server.
- */
-export function remote(
-  options:
-    | { url: string; appId: string; secret: string }
-    | { url: string; appId: string; backendCredential: BackendCredential },
-): Extract<JazzStore, { kind: "remote" }> {
-  const appId = options.appId;
-  if (typeof appId !== "string" || !appId.trim()) {
-    throw new Error("remote(): appId must name the app the core serves (it is empty)");
-  }
-  let backendCredential: BackendCredential;
-  let secret: string | undefined;
-  if ("backendCredential" in options) {
-    backendCredential = options.backendCredential;
-  } else {
-    secret = options.secret;
-    if (secret === undefined && "adminSecret" in options) {
-      throw new Error(
-        "remote(): `adminSecret` and `backendSecret` were replaced by one `secret`, the app's admin secret",
-      );
-    }
-    if (typeof secret !== "string" || !secret.trim()) {
-      throw new Error("remote(): secret must be the app's admin secret (it is empty)");
-    }
-    const given = secret;
-    backendCredential = () => given;
-  }
-  return {
-    kind: "remote",
-    url: options.url.replace(/\/+$/, ""),
-    appId,
-    backendCredential,
-    ...(secret === undefined ? {} : { secret }),
-  };
-}
-
-/** The shortest core secret a Durable Object core accepts. */
-const DURABLE_OBJECT_SECRET_MIN_LENGTH = 32;
-/** The hosts a `durableObjects()` url may reach over plain http. */
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
-/** How long the store waits for the core to name its app. */
-const DURABLE_OBJECT_APP_TIMEOUT_MS = 30_000;
-/** An app id the core may name: no path separators, dots or line breaks. */
-const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
-
-/**
- * A core running in a Cloudflare Durable Object: one SQLite-backed object per
- * app, in a Worker you deploy that exports `JazzCore` and forwards requests to
- * it with `routeJazzRequest` (both from `jazz-tools/durable-object`). `url` is
- * that Worker's origin (e.g. `https://my-app-jazz.example.workers.dev`) and
- * `secret` its `JAZZ_CORE_SECRET`: a random string of at least 32 characters
- * that stays the same across deployments. The object keeps its own app id,
- * which this backend asks it for when the store opens.
- *
- * Large values' bytes go where the core's Worker puts them, so there is no
- * `blobs` option here: bind an R2 bucket to that Worker as `JAZZ_BLOBS`
- * (recommended), or they stay in the object's SQLite.
- *
- * The core admits only this backend, which holds the secret; browsers keep
- * talking to your backend. A Durable Object core doesn't run thin-client
- * transactions (your backend runs them, as with any core) and has no
- * HTTP-stream fallback for the backend's own sockets.
- *
- * @experimental Durable Object cores are new; the options and the Worker's
- * bindings may still change.
- */
-export function durableObjects(
-  options: { lifecycle?: DurableObjectLifecycle } & (
-    | { url: string; secret: string; appId?: never }
-    | { binding: CoreBinding; secret: string; appId?: never }
-  ),
-): Extract<JazzStore, { kind: "durableObjects" }> {
-  if (typeof options === "object" && options !== null && "appId" in options) {
-    throw new Error(
-      "durableObjects(): appId is not an option: the store keeps its own app id, in the Worker's Durable Object",
-    );
-  }
-  const lifecycle = options?.lifecycle;
-  if (lifecycle !== undefined && lifecycle !== "while-connected" && lifecycle !== "hibernate") {
-    throw new TypeError('durableObjects(): lifecycle must be "while-connected" or "hibernate"');
-  }
-  if (typeof options === "object" && options !== null && "binding" in options) {
-    const { binding, secret } = options;
-    if (
-      typeof binding !== "object" ||
-      binding === null ||
-      (typeof (binding as { fetch?: unknown }).fetch !== "function" &&
-        typeof (binding as { idFromName?: unknown }).idFromName !== "function")
-    ) {
-      throw new Error(
-        "durableObjects(): binding must be the Worker's JazzCore Durable Object binding, e.g. env.JAZZ",
-      );
-    }
-    checkCoreSecret(secret);
-    return {
-      kind: "durableObjects",
-      url: BINDING_ORIGIN,
-      binding,
-      secret,
-      ...(lifecycle && { lifecycle }),
-    };
-  }
-  const { url, secret } = (options ?? {}) as { url: string; secret: string };
-  let origin: URL | undefined;
-  try {
-    origin = new URL(url);
-  } catch {
-    // Refused below.
-  }
-  if (
-    !origin ||
-    (origin.protocol !== "https:" && origin.protocol !== "http:") ||
-    origin.pathname.replace(/\/+$/, "") !== "" ||
-    origin.search ||
-    origin.hash
-  ) {
-    throw new Error(
-      `durableObjects(): url must be the Worker's origin, like "https://my-app-jazz.example.workers.dev"; got ${JSON.stringify(url)}`,
-    );
-  }
-  if (origin.username || origin.password) {
-    throw new Error(
-      "durableObjects(): url must not carry a user name or password; the core secret is the only credential",
-    );
-  }
-  // The secret goes with every request: in the clear only to this machine
-  // (`wrangler dev`, tests).
-  if (origin.protocol === "http:" && !LOOPBACK_HOSTS.has(origin.hostname)) {
-    throw new Error(
-      `durableObjects(): url must be https:// (http:// only for localhost, 127.0.0.1 or [::1]); got ${JSON.stringify(url)}`,
-    );
-  }
-  checkCoreSecret(secret);
-  return { kind: "durableObjects", url: origin.origin, secret, ...(lifecycle && { lifecycle }) };
-}
-
-function checkCoreSecret(secret: unknown): void {
-  if (typeof secret !== "string" || secret.length < DURABLE_OBJECT_SECRET_MIN_LENGTH) {
-    throw new Error(
-      `durableObjects(): secret must be the Worker's JAZZ_CORE_SECRET, a random string of at least ${DURABLE_OBJECT_SECRET_MIN_LENGTH} characters`,
-    );
-  }
-}
-
-/**
- * The `remote()` store a `durableObjects()` store opens as: the Worker's
- * object tells this backend its app id (`GET /app`, with the core secret).
- */
-async function durableObjectCore(store: Extract<JazzStore, { kind: "durableObjects" }>) {
-  const transport = store.binding ? bindingTransport(store.binding) : networkTransport();
-  let response: Response;
-  let body: { appId?: unknown } | undefined;
-  try {
-    response = await transport.fetch(`${store.url}/app`, {
-      headers: { [CREDENTIAL_HEADER]: store.secret },
-      redirect: "manual",
-      signal: AbortSignal.timeout(DURABLE_OBJECT_APP_TIMEOUT_MS),
-    });
-    await refuseRedirect(store.url, `${store.url}/app`, response, "durableObjects()");
-    body = (await response.json().catch(() => undefined)) as typeof body;
-  } catch (error) {
-    if ((error as { name?: unknown } | null)?.name === "TimeoutError") {
-      throw new Error(
-        `createJazz: the Durable Object core at ${store.url} did not answer within ${DURABLE_OBJECT_APP_TIMEOUT_MS / 1000}s; this Jazz tries again on its next use`,
-        { cause: error },
-      );
-    }
-    throw unreachableCore(store.url, error);
-  }
-  if (response.status === 401 || response.status === 403) {
-    throw new Error(
-      `createJazz: the Durable Object core at ${store.url} refused the secret: durableObjects()'s secret must be the Worker's JAZZ_CORE_SECRET`,
-    );
-  }
-  // The id goes into request paths and log lines: only a plain one.
-  if (!response.ok || typeof body?.appId !== "string" || !DURABLE_OBJECT_APP_ID.test(body.appId)) {
-    throw new Error(
-      `createJazz: ${store.url} did not answer as a Jazz Durable Object core (GET /app: ${response.status}); is url the Worker that exports JazzCore, on this jazz-tools version?`,
-    );
-  }
-  return {
-    ...remote({ url: store.url, appId: body.appId, secret: store.secret }),
-    transport,
-    lifecycle: store.lifecycle,
-  };
-}
-
-/**
- * The store for apps deployed on Vercel. Use it in dev too: outside a
- * production or preview deployment (`next dev`, `vercel dev`, tests) it runs
- * `local`, by default `sqlite({ path: ".jazz/local" })`.
- *
- * Deployed, it runs a core in a persistent Vercel Sandbox in your own Vercel
- * project, with its data on a Drive, in `region` (required, e.g. `"iad1"`,
- * where earlier versions created every core; fixed at creation, and a
- * different region for an existing core throws). `namespace` (required) says which: the
- * Sandbox is `jazz-<project>-<namespace>`, e.g. one core per environment
- * with `namespace: ({ environment }) => environment`, or production's core
- * and one per preview branch with
- * `namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch)`.
- * It is created on first use, wakes when a request needs it (about a second)
- * and stops after `idleMs` without requests or sockets. The function's Vercel
- * OIDC token is its only credential, so there are no secrets and no env vars:
- * the core admits only tokens naming the workload its first start pinned
- * (team, project and environment by name), and a deployment of another
- * environment refuses to start or retarget it. All previews share one
- * workload, so preview branches' cores are kept apart, not secured from each
- * other. Anyone with Sandbox access to the project controls its cores. The
- * token comes with each request (it can't be read at module scope), so the
- * core opens on the first request, not when `createJazz` is called; work
- * between requests uses the freshest one seen, and open sockets outlive its
- * expiry. A team or project rename (or
- * a change of OIDC issuer mode) changes the workload: delete `/data/trust` in
- * the Sandbox to re-pin the core. Install `@vercel/sandbox` and
- * `@vercel/functions` next to `jazz-tools`. A deployment of a newer jazz-tools
- * restarts the core on its version, and an older deployment never moves it
- * back. Branch cores are not deleted when a branch merges yet: each keeps its
- * Sandbox and a Drive of up to `maxDriveBytes` until you remove them.
- */
-export function vercel(
-  options: VercelStoreOptions & { local?: Extract<JazzStore, { kind: "sqlite" | "memory" }> },
-): JazzStore {
-  // Refused here, not on the first deployed request: in dev the local
-  // store runs and would never read them.
-  refuseVercelAppId(options ?? {});
-  refuseVercelName(options ?? {});
-  checkNamespaceOption(options ?? {});
-  checkRegionOption(options ?? {});
-  const { local, ...rest } = options;
-  return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
-}
-
-function blobOptions(blobs: BlobStore): {
-  blobs: "files" | "s3" | "sqlite";
-  blobsDir?: string;
-  s3Bucket?: string;
-  s3Region?: string;
-  s3Endpoint?: string;
-  s3Prefix?: string;
-} {
-  if (blobs === "sqlite") return { blobs: "sqlite" };
-  if (blobs.kind === "s3") {
-    return {
-      blobs: "s3",
-      ...(blobs.bucket === undefined ? {} : { s3Bucket: blobs.bucket }),
-      ...(blobs.region === undefined ? {} : { s3Region: blobs.region }),
-      ...(blobs.endpoint === undefined ? {} : { s3Endpoint: blobs.endpoint }),
-      ...(blobs.prefix === undefined ? {} : { s3Prefix: blobs.prefix }),
-    };
-  }
-  return { blobs: "files", ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }) };
-}
+import { importWs } from "./ws-peer.js";
 
 declare const localFirstGuestBrand: unique symbol;
 
@@ -1074,21 +686,9 @@ const STRIPPED_HEADERS = [
   "x-jazz-backend-access",
   "x-jazz-internal-workload-vouched",
 ];
-const CREDENTIAL_HEADER = "x-jazz-backend-credential";
-const ACCESS_HEADER = "x-jazz-backend-access";
 // What the secret slots carry to a remote core: the access stated next to
 // the backend credential decides what a request gets, not these.
 const STAND_IN_SECRET = "stated-by-backend-credential";
-
-/**
- * The app's secret, when this backend holds it: `remote()`'s `secret`, or
- * an in-process core's own. A core reached with a backend credential holds
- * only {@link STAND_IN_SECRET}, which is no secret.
- */
-function appSecretOf(store: JazzStore, core: { adminSecret: string }): string | undefined {
-  if (store.kind === "remote" && store.secret) return store.secret;
-  return core.adminSecret === STAND_IN_SECRET ? undefined : core.adminSecret;
-}
 
 /**
  * The refusal of every local-first identity by a core that admits none: one
@@ -1148,73 +748,6 @@ const MAX_STREAM_MESSAGE_BYTES = 2 * 1024 * 1024;
  * client ignored flow control and its session ends.
  */
 const MAX_WAITING_SESSION_BYTES = 32 * 1024 * 1024;
-
-interface CoreReply {
-  status: number;
-  headers: string[][];
-  body: Uint8Array;
-}
-
-/** One sync session on the core. */
-export interface CoreSocket {
-  /** False once the session ended. */
-  send(data: Uint8Array): boolean;
-  /**
-   * `send`, resolving once the session has read enough of the messages
-   * before it, so a host that awaits it holds a fast client back. A core
-   * without it takes `send`'s word. Don't call `send` while a
-   * `sendWithRoom` is pending: it can overtake the waiting message.
-   */
-  sendWithRoom?(data: Uint8Array): Promise<boolean>;
-  close(): void;
-  /**
-   * Resolves once the session reaches the core. A session that never does
-   * ends with its close event instead, and this stays pending. Without it,
-   * the session counts as open at once (a core in this process).
-   */
-  readonly opened?: Promise<void>;
-}
-
-/**
- * The access this backend states for a request or socket: `admin` (schema,
- * permissions and account admin calls), `backend` (its own client, and
- * sessions it vouches for) or `session` (a guest's session, or a public
- * route, relayed as is).
- */
-type BackendAccess = "admin" | "backend" | "session";
-
-/** The core this backend fronts: in this process, or reached over the network. */
-interface Core {
-  /**
-   * The app the core serves: the one `remote()` names, or the id an
-   * in-process or Vercel core keeps with its data.
-   */
-  readonly appId: string;
-  /** What an in-process SQLite core keeps for signing agent tokens. */
-  readonly tokenSecret?: string;
-  /** Where this process's own clients reach it. */
-  readonly serverUrl: string;
-  /**
-   * What requests and preludes carry in their secret slots: the core's own
-   * secrets in this process. A remote core replaces them by the `access`
-   * stated next to the backend credential.
-   */
-  readonly adminSecret: string;
-  readonly backendSecret: string;
-  handle(
-    method: string,
-    path: string,
-    headers: string[][],
-    body: Uint8Array,
-    access?: BackendAccess,
-  ): Promise<CoreReply>;
-  openSocket(
-    headers: string[][],
-    onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
-    access?: BackendAccess,
-  ): CoreSocket;
-  close(): Promise<void>;
-}
 
 /** What `inspector` is when createJazz isn't given one: one object, so the Inspector reads it once. */
 const NO_INSPECTOR_OPTIONS: InspectorOptions = Object.freeze({});
@@ -1318,9 +851,7 @@ function inProcessWebSocket(
       try {
         while (this.outbox.length > 0 && this.readyState === 1 && this.session) {
           const data = this.outbox.shift()!;
-          const sent = this.session.sendWithRoom
-            ? await this.session.sendWithRoom(data)
-            : this.session.send(data);
+          const sent = await this.session.send(data);
           if (!sent) break;
         }
       } catch (error) {
@@ -1430,11 +961,6 @@ export function pinnedSocket(socket: CoreSocket, bundle: () => string | undefine
       const pinned = pin(data);
       return pinned !== null && socket.send(pinned);
     },
-    async sendWithRoom(data) {
-      const pinned = pin(data);
-      if (pinned === null) return false;
-      return socket.sendWithRoom ? socket.sendWithRoom(pinned) : socket.send(pinned);
-    },
     close: () => socket.close(),
     ...(socket.opened ? { opened: socket.opened } : {}),
   };
@@ -1459,85 +985,6 @@ function withBundle(prelude: Uint8Array, bundle: string | undefined): Uint8Array
   );
 }
 
-/** `bundle` is the published bundle every socket the core opens is pinned to. */
-async function openInProcessCore(
-  store: Extract<JazzStore, { kind: "sqlite" | "memory" }>,
-  bundle: () => string | undefined,
-): Promise<Core> {
-  const backendSecret = randomBytes(32).toString("base64url");
-  const adminSecret = randomBytes(32).toString("base64url");
-  // The core holds `<path>/jazz.lock` with an OS lock while it's open.
-  if (store.kind === "sqlite") refuseServerlessDisk(store.path);
-  // A SQLite store keeps its app id in its own file: a new one on first
-  // start, so the app's identities stay the same across restarts (and
-  // restores of the file) without the app naming an id.
-  const core = await inProcessCore(store.kind).open({
-    ...(store.kind === "sqlite" ? {} : { appId: randomUUID() }),
-    backendSecret,
-    adminSecret,
-    ...(store.kind === "sqlite"
-      ? { dataDir: store.path, ...blobOptions(store.blobs) }
-      : { inMemory: true }),
-  });
-  const handle = async (method: string, path: string, headers: string[][], body: Uint8Array) =>
-    core.handle(method, path, headers, Buffer.from(body));
-  const serverUrl = `http://jazz-${randomUUID()}.invalid`;
-  const unregister = registerInProcessTransport(serverUrl, {
-    fetch: async (input, init) => {
-      const request = new Request(input, init);
-      const url = new URL(request.url);
-      return coreResponse(
-        await handle(
-          request.method,
-          url.pathname + url.search,
-          [...request.headers].map(([name, value]) => [name, value]),
-          new Uint8Array(await request.arrayBuffer()),
-        ),
-      );
-    },
-    // This process's own clients: no handshake deadline, as a burst of
-    // synchronous writes right after one opens holds its Hello back.
-    WebSocket: inProcessWebSocket((_url, onEvent) =>
-      pinnedSocket(core.openInProcessSocket(onEvent), bundle),
-    ),
-  });
-  const appId = core.appId;
-  const opened: Core = {
-    appId,
-    ...(core.tokenSecret == null ? {} : { tokenSecret: core.tokenSecret }),
-    serverUrl,
-    adminSecret,
-    backendSecret,
-    handle,
-    openSocket: (headers, onEvent) => pinnedSocket(core.openSocket(headers, onEvent), bundle),
-    async close() {
-      unregister();
-      await core.close();
-    },
-  };
-  return opened;
-}
-
-/**
- * Serverless functions have no disk that outlives an instance (or none
- * writable at all), so a sqlite store there loses data silently.
- */
-function refuseServerlessDisk(dir: string): void {
-  const host = onVercelHost()
-    ? "Vercel"
-    : process.env.AWS_LAMBDA_FUNCTION_NAME
-      ? "AWS Lambda"
-      : process.env.NETLIFY
-        ? "Netlify"
-        : undefined;
-  if (!host) return;
-  throw new Error(
-    `sqlite({ path: ${JSON.stringify(dir)} }) can't keep data on ${host}: its functions have no lasting disk. ` +
-      (host === "Vercel" ? "Use vercel(), whose local store runs sqlite() in dev, or " : "Use ") +
-      "remote({ url, appId, secret }) to a sync server or Jazz Cloud.",
-  );
-}
-
 /** The access a request from this process's own clients asks for, by the secret slot it fills. */
 function accessOffered(headers: Headers): BackendAccess {
   if (headers.has("x-jazz-admin-secret")) return "admin";
@@ -1545,158 +992,28 @@ function accessOffered(headers: Headers): BackendAccess {
   return "session";
 }
 
-/**
- * A core reached over the network. Every request and socket carries the
- * backend credential and the access it states; a core that trusts a workload
- * admits nothing else, and either way the secrets a request offers itself
- * never count next to it. `secrets` fill the secret slots (stand-ins unless
- * the caller holds the real ones).
- */
-function openRemoteCore(
-  appId: string,
-  target: {
-    url: string;
-    backendCredential: BackendCredential;
-    secrets?: { adminSecret: string; backendSecret: string };
-    transport?: CoreTransport;
-    lifecycle?: DurableObjectLifecycle;
-  },
+/** Register the backend client's local route and pin all sockets to the published bundle. */
+function attachCore(
+  connection: JazzCoreTransport,
   bundle: () => string | undefined,
-): Core {
-  const socketUrl = `${target.url.replace(/^http/, "ws")}/apps/${encodeURIComponent(appId)}/ws`;
-  const transport = target.transport ?? networkTransport();
-  const credentialHeaders = async (access: BackendAccess): Promise<string[][]> => {
-    const credential = await target.backendCredential();
-    if (typeof credential !== "string" || !credential) {
-      throw new Error("backendCredential() returned no credential");
-    }
-    return access === "session"
-      ? [[CREDENTIAL_HEADER, credential]]
-      : [
-          [CREDENTIAL_HEADER, credential],
-          [ACCESS_HEADER, access],
-        ];
-  };
-  const withoutStated = (headers: string[][]) =>
-    headers.filter(([name]) => {
-      const lower = name!.toLowerCase();
-      return lower !== CREDENTIAL_HEADER && lower !== ACCESS_HEADER;
-    });
-
-  const core: Core = {
-    appId,
-    serverUrl: `http://jazz-remote-${randomUUID()}.invalid`,
-    adminSecret: target.secrets?.adminSecret ?? STAND_IN_SECRET,
-    backendSecret: target.secrets?.backendSecret ?? STAND_IN_SECRET,
-    async handle(method, path, headers, body, access = "session") {
-      const requestUrl = `${target.url}${path}`;
-      const response = await transport.fetch(requestUrl, {
-        method,
-        // The request carries this backend's credential: never to another
-        // URL. ("manual", not "error", which workerd doesn't implement.)
-        redirect: "manual",
-        headers: [...withoutStated(headers), ...(await credentialHeaders(access))].map(
-          ([name, value]) => [name!, value!] as [string, string],
-        ),
-        ...(method === "GET" || method === "HEAD" ? {} : { body: body as BodyInit }),
-      });
-      await refuseRedirect(target.url, requestUrl, response);
-      const replyHeaders: string[][] = [];
-      response.headers.forEach((value, name) => {
-        // fetch already decoded the body.
-        if (name !== "content-encoding" && name !== "content-length") {
-          replyHeaders.push([name, value]);
-        }
-      });
-      return {
-        status: response.status,
-        headers: replyHeaders,
-        body: new Uint8Array(await response.arrayBuffer()),
-      };
-    },
-    openSocket: (_headers, onEvent, access = "session") =>
-      pinnedSocket(connect(socketUrl, onEvent, access), bundle),
-    async close() {
-      unregister();
-    },
-  };
-  // Browsers' own headers stay here: the core sees only this backend.
-  function connect(
-    url: string,
-    onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
+  options: Parameters<JazzCoreOpenContext["connect"]>[1],
+): JazzCore {
+  const open = (
+    path: string,
+    headers: string[][],
+    onEvent: Parameters<JazzCoreTransport["openSocket"]>[2],
     access: BackendAccess,
-  ): CoreSocket {
-    let ws: CoreWebSocket | undefined;
-    const queued: Uint8Array[] = [];
-    let ended = false;
-    let markOpened!: () => void;
-    const opened = new Promise<void>((resolve) => {
-      markOpened = resolve;
-    });
-    const finish = (code: number, reason: string) => {
-      if (ended) return;
-      ended = true;
-      onEvent(null, { kind: "close", code, reason });
-    };
-    credentialHeaders(access)
-      .then((headers) => {
-        if (ended) return;
-        if (target.lifecycle === "hibernate")
-          headers.push(["x-jazz-socket-lifecycle", "hibernate"]);
-        ws = transport.openWebSocket(url, Object.fromEntries(headers));
-        ws.binaryType = "arraybuffer";
-        ws.addEventListener("open", () => {
-          for (const data of queued.splice(0)) ws!.send(data as Uint8Array<ArrayBuffer>);
-          if (!ended) markOpened();
-        });
-        ws.addEventListener("message", (event) => {
-          const data =
-            typeof event.data === "string"
-              ? new TextEncoder().encode(event.data)
-              : new Uint8Array(event.data as ArrayBuffer);
-          onEvent(null, { kind: "message", data });
-        });
-        ws.addEventListener("close", (event) => finish(event.code, event.reason));
-        // A socket that never connects (the core is down or restarting) can
-        // report only the error, and stay CONNECTING: without this, the link
-        // waits on it forever instead of retrying.
-        ws.addEventListener("error", () => {
-          finish(1006, "connection to the core failed");
-          try {
-            ws?.close();
-          } catch {
-            // Already closing.
-          }
-        });
-      })
-      // A failing credential hook, or a socket that can't even be created.
-      .catch((error: unknown) =>
-        finish(1011, error instanceof Error ? error.message : "no backend credential"),
-      );
-    return {
-      send(data) {
-        if (ended) return false;
-        if (ws?.readyState === 1) ws.send(data as Uint8Array<ArrayBuffer>);
-        else queued.push(data);
-        return true;
-      },
-      close() {
-        ended = true;
-        ws?.close();
-      },
-      opened,
-    };
-  }
+  ) => pinnedSocket(connection.openSocket(path, headers, onEvent, access), bundle);
   // This process's own clients (the backend's session) reach the core
   // through an in-process origin, so they present the credential too.
-  const unregister = registerInProcessTransport(core.serverUrl, {
+  const route = routeJazzCoreClient({
     fetch: async (input, init) => {
       const request = new Request(input, init);
       const url = new URL(request.url);
       const headers: string[][] = [];
       request.headers.forEach((value, name) => headers.push([name, value]));
       return coreResponse(
-        await core.handle(
+        await connection.handle(
           request.method,
           url.pathname + url.search,
           headers,
@@ -1706,14 +1023,25 @@ function openRemoteCore(
       );
     },
     WebSocket: inProcessWebSocket((url, onEvent) => {
+      if (options?.openClientSocket) return pinnedSocket(options.openClientSocket(onEvent), bundle);
       const { pathname, search } = new URL(url);
-      return pinnedSocket(
-        connect(`${target.url.replace(/^http/, "ws")}${pathname}${search}`, onEvent, "backend"),
-        bundle,
-      );
+      return open(pathname + search, [], onEvent, "backend");
     }),
   });
-  return core;
+  return {
+    appId: connection.appId,
+    ...route,
+    adminSecret: options?.adminSecret ?? STAND_IN_SECRET,
+    backendSecret: options?.backendSecret ?? STAND_IN_SECRET,
+    handle: (method, path, headers, body, access = "session") =>
+      connection.handle(method, path, headers, body, access),
+    openSocket: (headers, onEvent, access = "session") =>
+      open(`/apps/${encodeURIComponent(connection.appId)}/ws`, headers, onEvent, access),
+    async close() {
+      route.close();
+      await connection.close();
+    },
+  };
 }
 
 /**
@@ -1784,21 +1112,6 @@ function jazzSettings(options: CreateJazzOptions): JazzSettings {
   return { basePath, publicUrls, allowedOrigins };
 }
 
-/** The store this process runs: `vercel()` outside a Vercel deployment runs its `local` store. */
-function runningStore(store: JazzStore): JazzStore {
-  return store.kind === "vercel" && !onVercelDeployment() ? store.local : store;
-}
-
-/** The line a store logs when it opens (a `vercel()` core logs its own). */
-function storeOpenedLine(
-  store: Exclude<JazzStore, { kind: "vercel" | "durableObjects" }>,
-  provider: JazzStore["kind"],
-): string {
-  if (store.kind === "sqlite") return `jazz: store sqlite at ${store.path}`;
-  if (store.kind === "memory") return "jazz: store memory (its data lasts as long as this process)";
-  return `jazz: store ${provider} at ${store.url} (app ${store.appId})`;
-}
-
 /** A Jazz with its store open: what a `createJazz` facade hands each call to. */
 interface OpenedJazz extends Omit<Jazz, "ready" | "db" | "attach"> {
   readonly db: Db;
@@ -1814,31 +1127,18 @@ interface OpenedJazz extends Omit<Jazz, "ready" | "db" | "attach"> {
  * Open `store` and apply the schema, migrations and permissions `options`
  * declare to its core.
  */
-async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise<OpenedJazz> {
-  const store = opening.kind === "durableObjects" ? await durableObjectCore(opening) : opening;
+async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<OpenedJazz> {
   let options = initial;
   let { basePath, publicUrls, allowedOrigins } = jazzSettings(options);
   // The bundle this backend published: every socket to the core carries it,
   // and the core governs this backend's sessions by its permissions alone.
   let pin: string | undefined;
-  const bundle = () => pin;
-  const core =
-    store.kind === "remote"
-      ? openRemoteCore(store.appId, store, bundle)
-      : store.kind === "vercel"
-        ? await openVercelCore({
-            options: store.options,
-            // The function's OIDC token is the core's only credential.
-            openRemote: ({ appId, url, backendCredential }) =>
-              openRemoteCore(appId, { url, backendCredential }, bundle),
-          })
-        : await openInProcessCore(store, bundle);
-  // A vercel() core says which it opened itself.
-  if (store.kind !== "vercel") logStoreOpened(storeOpenedLine(store, opening.kind));
+  const core = await store.open({
+    routeClient: routeJazzCoreClient,
+    connect: (transport, options) => attachCore(transport, () => pin, options),
+  });
   const appId = core.appId;
   const issuer = BACKEND_USER_ISSUER;
-  // An in-memory store's agent tokens last as long as its data: this process.
-  const memoryTokenSecret = newTokenSecret();
 
   /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
   const publish = async (next: CreateJazzOptions) => {
@@ -1880,7 +1180,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     ({ session, client: backend } = await backendSession(options));
   } catch (error) {
     await core.close();
-    throw store.kind === "remote" ? unreachableCore(store.url, error) : error;
+    throw error;
   }
 
   let backendClients = backendClientVerifier(options.backendClients ?? []);
@@ -2089,7 +1389,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
    */
   const signingKey = backendSigningKeys({
     appId: accountAppId(appId),
-    secret: appSecretOf(store, core),
+    secret: core.appSecret,
     fetchShared: async () => {
       const response = await core.handle(
         "GET",
@@ -2880,8 +2180,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
             .then(async (ok) => {
               if (!ok || ended || !socket) return false;
               const core = socket;
-              const toCore = (message: Uint8Array) =>
-                core.sendWithRoom ? core.sendWithRoom(message) : core.send(message);
+              const toCore = (message: Uint8Array) => core.send(message);
               if (!helloSeen) {
                 helloSeen = true;
                 if (asksThinResults(data) && thinLink)
@@ -3723,13 +3022,12 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
   }
 
   /**
-   * Answer `request`. `upgrades`: whether the handler it came through
-   * upgrades sockets on this host, which decides what a plain request for
-   * the socket path is told.
+   * Fetch and Next handlers can return an upgrade response. A Node HTTP
+   * handler receives upgrades separately through attach().
    */
-  async function handle(request: Request, upgrades = upgradesSockets): Promise<Response> {
+  async function handle(request: Request, handler?: "fetch" | "next"): Promise<Response> {
     try {
-      return await route(request, upgrades);
+      return await route(request, handler);
     } catch (error) {
       if (error instanceof AuthenticateExpiresAtError) {
         // The app's own setup is wrong, the same way on every request: tell
@@ -3793,7 +3091,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     return response;
   }
 
-  async function route(request: Request, upgrades: boolean): Promise<Response> {
+  async function route(request: Request, handler?: "fetch" | "next"): Promise<Response> {
     const path = innerPath(request);
     if (path === null) return new Response("Not found", { status: 404 });
     if (request.method !== "GET" && request.method !== "HEAD" && !originAllowed(request)) {
@@ -3828,19 +3126,21 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
       if (id && request.method === "DELETE") return endStream(id, request);
       return new Response(null, { status: 405 });
     }
-    if (path.endsWith("/ws")) {
-      // A plain request for the socket path: the browser client asks this
-      // after a socket failed before it opened. Where this host upgrades
-      // sockets (attach(), or Vercel), that failure was transient (a
-      // restart, a draining instance) and the client should retry the
-      // socket. Only where it can't does the marker send it to the stream
-      // at once; the client also switches after several failed sockets in
-      // a row, when something in between doesn't pass upgrades on. It asks
-      // with a POST, so a page origin the socket was refused for is refused
-      // here too (403, above), and not taken for a proxy's doing.
-      if (upgrades) {
-        return new Response("Upgrade to a WebSocket", { status: 426 });
+    if (SOCKET_PATH.test(path)) {
+      const upgrading =
+        request.method === "GET" && request.headers.get("upgrade")?.toLowerCase() === "websocket";
+      if (upgrading && !originAllowed(request))
+        return new Response("origin not allowed", { status: 403 });
+      const upgrade = handler && (await options.store.getWebSocketUpgrade?.(handler));
+      if (upgrading && upgrade) {
+        return upgrade(request, (socket) => acceptSocket(request, socket), {
+          maxPayload: MAX_STREAM_MESSAGE_BYTES,
+        });
       }
+      // A probe after a failed upgrade retries the socket when this handler
+      // supports it, or when the app takes upgrades through attach/acceptSocket.
+      if (upgradesSockets || upgrade)
+        return new Response("Upgrade to a WebSocket", { status: 426 });
       return useHttpStream();
     }
     if (!PUBLIC_APP_ROUTES.test(path)) return new Response("Not found", { status: 404 });
@@ -3856,57 +3156,10 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
       await core.handle(
         request.method,
         corePath + url.search,
-        store.kind === "remote" || store.kind === "vercel"
-          ? headers.filter(([name]) => REMOTE_FORWARDED_HEADERS.includes(name!.toLowerCase()))
-          : headers,
+        headers.filter(([name]) => REMOTE_FORWARDED_HEADERS.includes(name!.toLowerCase())),
         body,
       ),
     );
-  }
-
-  async function nextHandler(request: Request): Promise<Response> {
-    const path = innerPath(request);
-    // On Vercel this handler upgrades sockets (below), once `ws` is
-    // installed; elsewhere (next dev) only if attach() runs on the same
-    // server. Where it can't, a socket gets the HTTP stream marker, as a
-    // plain request for the socket path does.
-    const onVercel = onVercelHost();
-    const vercelUpgrades = onVercel && (await vercelUpgradesSockets());
-    if (
-      request.method === "GET" &&
-      path?.endsWith("/ws") &&
-      request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-      onVercel
-    ) {
-      if (!originAllowed(request)) return new Response("origin not allowed", { status: 403 });
-      if (!vercelUpgrades) return useHttpStream();
-      // An optional peer: a literal import inside `try`, so bundlers report
-      // a missing one at runtime, not on every route (see importSandboxSdk).
-      let vercelFunctions: {
-        upgradeWebSocket(
-          handler: (ws: WsLikeSocket) => void,
-          options?: { maxPayload?: number },
-        ): Response;
-        getDeadline?(): Date | undefined;
-      };
-      try {
-        vercelFunctions = (await backendNative().importPeer(
-          "@vercel/functions",
-        )) as unknown as typeof vercelFunctions;
-      } catch (error) {
-        throw optionalPeerImportError("Jazz on Vercel", "@vercel/functions", error);
-      }
-      const { upgradeWebSocket } = vercelFunctions;
-      // The socket ends with this invocation, at the route's maxDuration:
-      // close it just before, so the client reconnects without a stall.
-      const deadline = vercelFunctions.getDeadline?.()?.getTime();
-      return upgradeWebSocket(
-        (ws) =>
-          acceptSocket(request, deadline === undefined ? ws : closingBeforeDeadline(ws, deadline)),
-        { maxPayload: MAX_STREAM_MESSAGE_BYTES },
-      );
-    }
-    return handle(request, upgradesSockets || vercelUpgrades);
   }
 
   function nodeRequest(req: IncomingMessage): Request {
@@ -4062,17 +3315,13 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
     tokenSecret: async () => {
       const configured = options.inspector?.tokenSecret;
       if (configured !== undefined) return configured;
-      if (store.kind === "remote") return store.secret ?? null;
-      if (store.kind === "sqlite") return (core as Core).tokenSecret ?? null;
-      if (store.kind === "memory") return memoryTokenSecret;
-      // A Vercel core's only credential is the function's OIDC token: there
-      // is no shared secret to sign with.
-      return null;
+      return core.tokenSecret ?? null;
     },
     remoteAddress: (request) => remoteAddresses.get(request),
     serveUi: createInspectorUi(),
   });
 
+  const nextHandler = (request: Request) => handle(request, "next");
   let closing: Promise<void> | undefined;
   return {
     appId,
@@ -4080,7 +3329,7 @@ async function openJazz(initial: CreateJazzOptions, opening: JazzStore): Promise
       return basePath;
     },
     reload,
-    handle: (request) => handle(request),
+    handle: (request) => handle(request, "fetch"),
     next: () => ({ GET: nextHandler, POST: nextHandler, DELETE: nextHandler }),
     upgrade,
     markAttached,
@@ -4298,10 +3547,9 @@ function boundAppOf(app: BackendSchemaInput) {
 }
 
 function openFacade(options: CreateJazzOptions): Jazz {
-  // Checked at startup, so a missing `ws` is in the logs before the first socket.
-  if (onVercelHost()) void vercelUpgradesSockets();
-  const store = runningStore(options.store);
-  const key = storeKey(store);
+  const store = options.store;
+  store.assertSupportedEnvironment?.();
+  const key = store.key;
   const entries = registry();
   const shared = key === undefined ? undefined : entries.get(key);
   if (shared && !shared.closing) {
@@ -4362,80 +3610,6 @@ function registry(): Map<string, Entry> {
 }
 
 /**
- * The store's identity in this process: one Jazz runs per store, so a hot
- * reload finds the one it opened. A `remote()` store has none: two
- * backends (deployments, tests) may each run their own Jazz on one remote
- * app, with their own permissions. Nor has a `memory()` store, a new,
- * empty database each time. A module that hot reloads keeps such a Jazz
- * across reloads itself (on `globalThis`), or closes it.
- */
-function storeKey(store: JazzStore): string | undefined {
-  if (store.kind === "sqlite") return `sqlite:${resolve(store.path)}`;
-  if (store.kind === "vercel") {
-    const project = store.options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
-    let name: string | undefined;
-    try {
-      name = project ? coreName(project, store.options.namespace, process.env).name : undefined;
-    } catch {
-      // No namespace for this deployment: its open reports that, not createJazz.
-    }
-    // Without a name the core is unknown: its open reports that.
-    return name ? `vercel:${name}` : undefined;
-  }
-  return undefined;
-}
-
-/**
- * What a store's settings are. The functions it holds (a credential hook)
- * are not settings: the open store calls the latest call's. A Sandbox SDK
- * is: another one is another setting.
- */
-function storeSettings(store: JazzStore): string {
-  return JSON.stringify(store, (name, value: unknown) => {
-    if (name === "sdk" && value !== undefined) return `sdk#${identity(value as object)}`;
-    return typeof value === "function" ? "function" : value;
-  });
-}
-
-const identities = new WeakMap<object, number>();
-let lastIdentity = 0;
-function identity(value: object): number {
-  let id = identities.get(value);
-  if (id === undefined) identities.set(value, (id = ++lastIdentity));
-  return id;
-}
-
-/**
- * The entry's store, its function settings (a credential hook) calling
- * through to the latest `createJazz` call's, so a reload applies them.
- */
-function liveStore(entry: Entry): JazzStore {
-  const through = <T extends object>(value: T, current: () => T | undefined): T => {
-    const out = { ...value } as Record<string, unknown>;
-    for (const [name, field] of Object.entries(value)) {
-      if (typeof field !== "function") continue;
-      out[name] = (...args: unknown[]) => {
-        const latest = (current() as Record<string, unknown> | undefined)?.[name];
-        return ((typeof latest === "function" ? latest : field) as (...a: unknown[]) => unknown)(
-          ...args,
-        );
-      };
-    }
-    return out as T;
-  };
-  const store = entry.store;
-  if (store.kind === "vercel") {
-    return {
-      ...store,
-      options: through(store.options, () =>
-        entry.store.kind === "vercel" ? entry.store.options : undefined,
-      ),
-    };
-  }
-  return through(store, () => entry.store);
-}
-
-/**
  * A later `createJazz` for an entry's store. Before the store opens it takes
  * the new settings; once open, settings that would need another core are
  * refused, so a change never silently goes unapplied.
@@ -4447,13 +3621,7 @@ function adoptStore(entry: Entry, store: JazzStore): void {
     entry.failure = undefined;
     return;
   }
-  if (storeSettings(store) !== storeSettings(entry.store)) {
-    throw new Error(
-      `createJazz(): ${entry.key} is already open in this process with other store settings; restart the process to change them`,
-    );
-  }
-  // The same settings: its function settings are the latest call's now.
-  entry.store = store;
+  entry.store.reload?.(store);
 }
 
 function newEntry(
@@ -4492,7 +3660,7 @@ function openEntry(entry: Entry): Promise<OpenedJazz> {
   const options = entry.options;
   const opening: Promise<OpenedJazz> = (async () => {
     await entry.after;
-    return openJazz(options, liveStore(entry));
+    return openJazz(options, entry.store);
   })().then(
     (opened) => {
       entry.failure = undefined;
@@ -4664,20 +3832,6 @@ function byteLength(data: unknown): number {
   if (Array.isArray(data)) return data.reduce((sum: number, part) => sum + byteLength(part), 0);
   const sized = data as { byteLength?: unknown } | null;
   return typeof sized?.byteLength === "number" ? sized.byteLength : 0;
-}
-
-/**
- * A remote core that could not be reached, named, instead of the bare
- * `fetch failed` the request saw. The next use of this Jazz tries again.
- */
-function unreachableCore(url: string, error: unknown): unknown {
-  const cause = (error as { cause?: { code?: unknown; message?: unknown } } | null)?.cause;
-  if (!(error instanceof TypeError) || !cause) return error;
-  const why = typeof cause.code === "string" ? cause.code : String(cause.message ?? error.message);
-  return new Error(
-    `createJazz: could not reach the Jazz core at ${url} (${why}); this Jazz tries again on its next use`,
-    { cause: error },
-  );
 }
 
 /** What `attach()` hands an upgrade to: the `ws` package's server, without one of its own. */
@@ -5150,10 +4304,6 @@ function withPrelude(socket: CoreSocket, prelude: Uint8Array): CoreSocket {
   };
   return {
     send: (data) => socket.send(replace(data)),
-    async sendWithRoom(data) {
-      const sent = replace(data);
-      return socket.sendWithRoom ? socket.sendWithRoom(sent) : socket.send(sent);
-    },
     close: () => socket.close(),
     ...(socket.opened ? { opened: socket.opened } : {}),
   };

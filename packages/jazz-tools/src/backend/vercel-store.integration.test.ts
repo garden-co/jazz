@@ -1,6 +1,7 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { onVercelHost } from "./vercel-host.js";
 import {
   connect as connectTcp,
   createServer as createNetServer,
@@ -13,14 +14,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { testApp } from "../testing/index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
-import { createJazz, vercel, vercelBlob } from "./index.js";
+import { createJazz, memory, vercel, vercelBlob } from "./index.js";
 import { HANDSHAKE_TIMEOUT_MS } from "../runtime/native-runtime/websocket.js";
 import {
   newerVersion,
   perBranch,
   openVercelCore,
   onVercelDeployment,
-  onVercelHost,
   refuseOtherEnvironment,
   startScript,
   workloadOf,
@@ -299,6 +299,26 @@ describe("vercel() store", () => {
     cleanups.push(() => again.close());
     const seen = await again.db.all(app.notes.where({ id: row.id }));
     expect(seen.map((note) => note.text)).toEqual(["on vercel"]);
+  }, 60_000);
+
+  it("refreshes credentials on reuse and refuses changes to the live Sandbox configuration", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const { sdk } = fakeVercel({ ...core, appId });
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const options = { namespace: "test", region: "iad1", sdk, backendCredential: core.credential };
+    const jazz = await createJazz({ app, permissions, store: vercel(options) }).ready();
+    cleanups.push(() => jazz.close());
+
+    const refreshed = vi.fn(core.credential);
+    expect(
+      createJazz({ app, permissions, store: vercel({ ...options, backendCredential: refreshed }) }),
+    ).toBe(jazz);
+    expect(() =>
+      createJazz({ app, permissions, store: vercel({ ...options, region: "fra1" }) }),
+    ).toThrow(/other store settings/);
+    await jazz.createAccountFor("alice");
+    expect(refreshed).toHaveBeenCalled();
   }, 60_000);
 
   it("reaches a core only with the trusted workload's token", async () => {
@@ -1235,6 +1255,22 @@ describe("vercel() store", () => {
     expect(wakes()).toHaveLength(1);
   }, 60_000);
 
+  it("refuses another serverless host even with an in-memory local fallback", () => {
+    vi.stubEnv("VERCEL", "");
+    vi.stubEnv("AWS_LAMBDA_FUNCTION_NAME", "app");
+    try {
+      expect(() =>
+        createJazz({
+          app,
+          permissions,
+          store: vercel({ namespace: legacyNamespace, region: "iad1", local: memory() }),
+        }),
+      ).toThrow(/vercel\(\) requires a Vercel production or preview deployment/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("runs its local store outside a Vercel deployment", async () => {
     const appId = randomUUID();
     const fake = fakeVercel({ appId, url: "http://unused.invalid" });
@@ -1243,7 +1279,6 @@ describe("vercel() store", () => {
     cleanups.push(async () => {
       if (before !== undefined) process.env.VERCEL = before;
     });
-    const { memory } = await import("./index.js");
     const jazz = await createJazz({
       app,
       permissions,

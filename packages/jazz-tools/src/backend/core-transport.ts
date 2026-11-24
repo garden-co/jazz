@@ -1,10 +1,10 @@
 /**
  * How a backend reaches a core over the network: `fetch` for its HTTP routes
- * and a WebSocket for each session. By default the global `fetch` and Node's
- * WebSocket (undici, which takes upgrade headers). In a Cloudflare Worker a
- * core in a Durable Object of the same Worker is reached through its binding
- * instead: `stub.fetch`, and a socket upgraded through `stub.fetch`.
+ * and a WebSocket for each session. Node's WebSocket takes upgrade headers.
+ * Workerd upgrades with fetch, either over the network or through a binding.
  */
+
+import { backendNative } from "./backend-native.js";
 
 /** What `openRemoteCore` uses of a WebSocket. */
 export interface CoreWebSocket {
@@ -27,12 +27,13 @@ export interface CoreTransport {
   openWebSocket(url: string, headers: Record<string, string>): CoreWebSocket;
 }
 
-/** The global `fetch` and Node's WebSocket. */
+/** Network requests and authenticated socket upgrades on the backend host. */
 export function networkTransport(): CoreTransport {
+  // A redirect could forward the core credential to another origin.
+  const fetchCore: StubFetch = (url, init) => fetch(url, { ...init, redirect: "manual" });
+  if (backendNative().host === "workerd") return workerdTransport(fetchCore);
   return {
-    // Every request carries the backend credential, which a redirect would
-    // hand to wherever it points: never follow one (see `refuseRedirect`).
-    fetch: (url, init) => fetch(url, { ...init, redirect: "manual" }),
+    fetch: fetchCore,
     openWebSocket(url, headers) {
       if (!globalThis.WebSocket) {
         throw new Error("remote() needs a global WebSocket (Node 22 or newer)");
@@ -109,12 +110,16 @@ export const BINDING_ORIGIN = "https://jazz-core.internal";
 export function bindingTransport(binding: CoreBinding): CoreTransport {
   const stub =
     "idFromName" in binding ? binding.get(binding.idFromName(CORE_OBJECT_NAME)) : binding;
-  const stubFetch: StubFetch = (input, init) => stub.fetch(input, init);
+  return workerdTransport((input, init) => stub.fetch(input, init));
+}
+
+/** Workerd opens authenticated sockets with a fetch upgrade. */
+function workerdTransport(fetch: StubFetch): CoreTransport {
   return {
-    fetch: (url, init) => stubFetch(url, init),
+    fetch,
     openWebSocket(url, headers) {
       return upgradedSocket(
-        stubFetch(url.replace(/^ws/, "http"), { headers: { ...headers, Upgrade: "websocket" } }),
+        fetch(url.replace(/^ws/, "http"), { headers: { ...headers, Upgrade: "websocket" } }),
       );
     },
   };

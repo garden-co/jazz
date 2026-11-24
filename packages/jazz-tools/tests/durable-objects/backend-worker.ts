@@ -7,6 +7,7 @@ import {
   createJazz,
   durableObjects,
   jazzBackend,
+  remote,
   routeToJazzBackend,
 } from "jazz-tools/backend";
 import { app } from "./backend-app.generated.js";
@@ -18,6 +19,8 @@ interface Env {
   JAZZ_CORE_SECRET: string;
   /** Test switch: the backend presents this secret instead of the core's. */
   TEST_BACKEND_SECRET?: string;
+  TEST_CORE_URL?: string;
+  TEST_REMOTE_APP_ID?: string;
   /** Test switch: `authenticate` lets no one in. */
   TEST_REFUSE_ALL?: string;
 }
@@ -25,13 +28,15 @@ interface Env {
 const permissions = { format: 1, tables: { todos: { read: "true", insert: "true" } } };
 
 export const JazzBackend = jazzBackend((env: Env) => {
+  const secret = env.TEST_BACKEND_SECRET ?? env.JAZZ_CORE_SECRET;
   const jazz = createJazz({
     app,
     permissions,
-    store: durableObjects({
-      binding: env.JAZZ,
-      secret: env.TEST_BACKEND_SECRET ?? env.JAZZ_CORE_SECRET,
-    }),
+    store: env.TEST_CORE_URL
+      ? env.TEST_REMOTE_APP_ID
+        ? remote({ url: env.TEST_CORE_URL, appId: env.TEST_REMOTE_APP_ID, secret })
+        : durableObjects({ url: env.TEST_CORE_URL, secret })
+      : durableObjects({ binding: env.JAZZ, secret }),
     authenticate: (request) => (env.TEST_REFUSE_ALL ? null : acceptDeviceAccounts(request)),
   });
   return {

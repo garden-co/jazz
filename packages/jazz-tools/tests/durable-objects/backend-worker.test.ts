@@ -2,6 +2,8 @@
 // Object of the same Worker as its core, on jazz-wasm (no jazz-napi), in
 // local workerd. Writes and reads through the app's own routes, and its
 // data across a restart.
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,6 +43,46 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz in a Cloudflare Worke
     expect(posted.status, await posted.clone().text()).toBe(200);
     expect(await (await fetch(`${url}/todos`)).json()).toEqual(["first"]);
   });
+
+  it.each(["remote", "durableObjects"])("uses %s to reach a core by URL", async (provider) => {
+    const core = await startDurableObjectCore({
+      script: await bundleWorker(join(__dirname, "real-core-worker.ts")),
+    });
+    cleanups.push(() => core.dispose());
+    const { url } = await worker(undefined, {
+      TEST_CORE_URL: core.url,
+      ...(provider === "remote" && { TEST_REMOTE_APP_ID: await core.appId() }),
+    });
+    const write = await fetch(`${url}/todos`, { method: "POST", body: "across workers" });
+    expect(write.status, await write.clone().text()).toBe(200);
+    expect(await (await fetch(`${url}/todos`)).json()).toEqual(["across workers"]);
+  });
+
+  it.each(["..", "a/b", "a\nb", ""])("refuses an invalid discovered app id %j", async (appId) => {
+    const core = await discoveryServer(() => Response.json({ appId }));
+    const { url } = await worker(undefined, { TEST_CORE_URL: core.url });
+    const response = await fetch(`${url}/app-id`);
+    expect(response.status).toBe(500);
+    expect(await response.text()).toContain(
+      "did not answer as a Jazz Durable Object core (GET /app: 200)",
+    );
+    expect(core.requests).toEqual(["/app"]);
+  });
+
+  it.each([301, 302, 303, 307, 308])(
+    "refuses a %i redirect during app discovery",
+    async (status) => {
+      const target = await discoveryServer(() => Response.json({}));
+      const core = await discoveryServer(() => Response.redirect(target.url, status));
+      const { url } = await worker(undefined, { TEST_CORE_URL: core.url });
+      const response = await fetch(`${url}/app-id`);
+      expect(response.status).toBe(500);
+      expect(await response.text()).toContain(
+        "configure durableObjects() with the core's final URL",
+      );
+      expect(target.requests).toEqual([]);
+    },
+  );
 
   it("keeps the app's data across a restart", async () => {
     const persist = await mkdtemp(join(tmpdir(), "jazz-do-backend-"));
@@ -157,3 +199,22 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz in a Cloudflare Worke
     });
   });
 });
+
+async function discoveryServer(reply: () => Response) {
+  const requests: string[] = [];
+  const server = createServer(async (req, res) => {
+    requests.push(req.url!);
+    const response = reply();
+    res.writeHead(response.status, Object.fromEntries(response.headers));
+    res.end(await response.text());
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  cleanups.push(
+    () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  );
+  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, requests };
+}

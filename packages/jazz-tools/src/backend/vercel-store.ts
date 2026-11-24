@@ -1,3 +1,4 @@
+import type { JazzCore } from "./core-provider.js";
 // The `vercel()` store: the app's core runs in a persistent Vercel Sandbox
 // in the app's own Vercel project, with its data on a Drive. The backend
 // creates the Sandbox on first use, wakes it when a request needs it and lets
@@ -19,11 +20,7 @@ import {
   type VercelBlobStore,
   type VercelS3,
 } from "./blobs.js";
-import {
-  fetchFor,
-  inProcessWebSocketFor,
-  registerInProcessTransport,
-} from "../runtime/in-process-transport.js";
+import { routeJazzCoreClient } from "./core-provider.js";
 import type {
   DeferredConnectWebSocket,
   WebSocketConstructor,
@@ -161,40 +158,12 @@ export interface SandboxHandle {
   stop(): Promise<void>;
 }
 
-/** The shape `createJazz` drives a core through (see `Core` in create-jazz.ts). */
-export interface VercelCore {
-  /** The app id the core runs as, kept on its Drive. */
-  readonly appId: string;
-  readonly serverUrl: string;
-  readonly adminSecret: string;
-  readonly backendSecret: string;
-  /** `access` is what the backend states next to its credential (see `Core`). */
-  handle(
-    method: string,
-    path: string,
-    headers: string[][],
-    body: Uint8Array,
-    access?: "admin" | "backend" | "session",
-  ): Promise<{ status: number; headers: string[][]; body: Uint8Array }>;
-  openSocket(
-    headers: string[][],
-    onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
-    access?: "admin" | "backend" | "session",
-  ): {
-    send(data: Uint8Array): boolean;
-    close(): void;
-    /** Resolves once the session reaches the core (see `CoreSocket.opened`). */
-    readonly opened?: Promise<void>;
-  };
-  close(): Promise<void>;
-}
-
 /** A core reached at `url` with this backend credential: `remote()`'s core. */
 export type OpenRemote = (target: {
   appId: string;
   url: string;
   backendCredential: () => string | Promise<string>;
-}) => VercelCore;
+}) => JazzCore | Promise<JazzCore>;
 
 /** The workload a core trusts: the claims of the function's own OIDC token. */
 export interface TrustedWorkload {
@@ -685,16 +654,6 @@ export function onVercelDeployment(env: Record<string, string | undefined> = pro
   return !!env.VERCEL && (env.VERCEL_ENV === "production" || env.VERCEL_ENV === "preview");
 }
 
-/**
- * Whether this process runs on Vercel's serverless hosts: no lasting disk,
- * sockets only through `upgradeWebSocket`. Only `vercel dev` (VERCEL_ENV
- * development) is a local machine; a VERCEL flag without VERCEL_ENV counts
- * as a host, the safer default for refusing local disk.
- */
-export function onVercelHost(env: Record<string, string | undefined> = process.env): boolean {
-  return !!env.VERCEL && env.VERCEL_ENV !== "development";
-}
-
 /** Vercel's limit on a Sandbox name. */
 export const SANDBOX_NAME_MAX = 128;
 /** Vercel's limit on a Drive name. */
@@ -972,6 +931,7 @@ async function installedVersion(): Promise<string> {
 export interface OpenVercelCoreOptions {
   options: VercelStoreOptions;
   openRemote: OpenRemote;
+  routeClient?: typeof routeJazzCoreClient;
   sdk?: SandboxSdk;
   version?: string;
   env?: Record<string, string | undefined>;
@@ -994,7 +954,7 @@ async function importSandboxSdk(): Promise<SandboxSdk> {
   }
 }
 
-export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
+export async function openVercelCore(params: OpenVercelCoreOptions): Promise<JazzCore> {
   const { options, openRemote } = params;
   refuseVercelAppId(options);
   const env = params.env ?? process.env;
@@ -1337,7 +1297,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   };
 
   let live:
-    | { sbx: SandboxHandle; base: string; appId: string; core: VercelCore; checkedAt: number }
+    | { sbx: SandboxHandle; base: string; appId: string; core: JazzCore; checkedAt: number }
     | undefined;
   let pending: Promise<NonNullable<typeof live>> | undefined;
   let lastActivity = Date.now();
@@ -1418,7 +1378,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           sbx,
           base,
           appId: coreAppId,
-          core: openRemote({ appId: coreAppId, url: base, backendCredential }),
+          core: await openRemote({ appId: coreAppId, url: base, backendCredential }),
           checkedAt: Date.now(),
         };
         if (replaced) void replaced.close().catch(() => {});
@@ -1470,14 +1430,14 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   // an in-process origin, so each of their requests and reconnects wakes it;
   // they go on through the current remote core's own in-process origin, which
   // presents the backend credential.
-  const serverUrl = `http://jazz-vercel-${randomUUID()}.invalid`;
-  const unregister = registerInProcessTransport(serverUrl, {
+  const route = (params.routeClient ?? routeJazzCoreClient)({
     fetch: async (input, init) => {
       const request = new Request(input, init);
       const url = new URL(request.url);
       const send = async (sent: Request) => {
-        const inner = (await ensure()).core.serverUrl;
-        return fetchFor(inner)(new Request(`${inner}${url.pathname}${url.search}`, sent));
+        const inner = (await ensure()).core;
+        const fetchCore = inner.clientTransport?.fetch ?? globalThis.fetch;
+        return fetchCore(new Request(`${inner.serverUrl}${url.pathname}${url.search}`, sent));
       };
       // Kept to send again only when that costs little: a clone tees the
       // body, buffering a streamed upload whole while the first send runs.
@@ -1491,7 +1451,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       void response.body?.cancel().catch(() => {});
       return send(again);
     },
-    WebSocket: wakingWebSocket(async () => (await ensure()).core.serverUrl, {
+    WebSocket: wakingWebSocket(async () => (await ensure()).core, {
       dropped: distrust,
       unreached: connectionUnreached,
       reached: connectionReached,
@@ -1500,7 +1460,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
 
   return {
     appId: first.appId,
-    serverUrl,
+    ...route,
     adminSecret: first.core.adminSecret,
     backendSecret: first.core.backendSecret,
     async handle(method, path, headers, body, access) {
@@ -1514,12 +1474,16 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     },
     openSocket(headers, onEvent, access) {
       sockets++;
-      let inner: ReturnType<VercelCore["openSocket"]> | undefined;
+      let inner: ReturnType<JazzCore["openSocket"]> | undefined;
       let closed = false;
-      const queued: Uint8Array[] = [];
+      let wake!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        wake = resolve;
+      });
       const done = () => {
         if (!closed) sockets--;
         closed = true;
+        wake();
       };
       ensure().then(
         ({ core }) => {
@@ -1552,7 +1516,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
             } as JazzCoreSocketEvent);
             return;
           }
-          for (const data of queued.splice(0)) inner.send(data);
+          wake();
         },
         (error: unknown) => {
           done();
@@ -1568,8 +1532,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           if (closed) return false;
           lastActivity = Date.now();
           if (inner) return inner.send(data);
-          queued.push(data);
-          return true;
+          return ready.then(() => !closed && !!inner && inner.send(data));
         },
         close() {
           done();
@@ -1579,7 +1542,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     },
     async close() {
       clearInterval(keepalive);
-      unregister();
+      route.close();
       await live?.core.close();
     },
   };
@@ -1617,7 +1580,7 @@ function resendable(request: Request, given?: unknown): boolean {
  * only waited for the wake), and `reached` once one opens.
  */
 function wakingWebSocket(
-  resolveOrigin: () => Promise<string>,
+  resolveCore: () => Promise<JazzCore>,
   hooks: { dropped: () => void; unreached: () => void; reached: () => void },
 ): WebSocketConstructor {
   return class WakingSocket implements DeferredConnectWebSocket {
@@ -1639,11 +1602,13 @@ function wakingWebSocket(
     }
 
     private connect(): void {
-      resolveOrigin().then(
-        (origin) => {
+      resolveCore().then(
+        (core) => {
           if (this.readyState >= 2) return;
-          const Socket = inProcessWebSocketFor(origin) ?? globalThis.WebSocket;
-          const socket = new Socket(`${origin.replace(/^http/, "ws")}${this.path}`) as WebSocket;
+          const Socket = core.clientTransport?.WebSocket ?? globalThis.WebSocket;
+          const socket = new Socket(
+            `${core.serverUrl.replace(/^http/, "ws")}${this.path}`,
+          ) as WebSocket;
           socket.binaryType = "arraybuffer";
           this.socket = socket;
           this.tried = true;

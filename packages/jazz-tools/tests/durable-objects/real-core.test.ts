@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createJazz, durableObjects, type Jazz } from "../../src/backend/index.js";
+import { createJazz, remote, type Jazz } from "../../src/backend/index.js";
 import { testApp } from "../../src/testing/index.js";
 import { bundleWorker } from "./bundle.js";
 import { hostBuilt } from "./host.js";
@@ -29,7 +29,7 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz on a Durable Object c
     entry.jazz = createJazz({
       app,
       permissions,
-      store: durableObjects({ url: core.url, secret: core.secret }),
+      store: remote({ url: core.url, appId: await core.appId(), secret: core.secret }),
     });
     await entry.jazz.ready();
     return entry as { core: DurableObjectCore; jazz: Jazz };

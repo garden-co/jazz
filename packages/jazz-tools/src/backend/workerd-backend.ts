@@ -23,8 +23,7 @@
  * with the bindings `JAZZ` (class `JazzCore`), `JAZZ_BACKEND` (class
  * `JazzBackend`) and the secret `JAZZ_CORE_SECRET`.
  */
-import type { WorkerdWebSocket } from "./core-transport.js";
-import type { Jazz, WsLikeSocket } from "./create-jazz.js";
+import type { Jazz } from "./create-jazz.js";
 
 /** What the app's backend object runs: its Jazz, and its own routes. */
 export interface JazzBackendApp {
@@ -86,60 +85,12 @@ export function routeToJazzBackend(
 }
 
 /**
- * Answer a request under `jazz.basePath` inside a Durable Object: sync
- * sockets through a `WebSocketPair`, everything else through `jazz.handle`.
+ * Serve Jazz through its configured provider inside a Durable Object.
  */
 export async function serveJazz(jazz: Jazz, request: Request): Promise<Response> {
-  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return jazz.handle(request);
-  const Pair = (globalThis as { WebSocketPair?: new () => Record<0 | 1, WorkerdWebSocket> })
-    .WebSocketPair;
-  if (!Pair) throw new Error("serveJazz: no WebSocketPair here; it runs in a Cloudflare Worker");
-  const pair = new Pair();
-  const client = pair[0];
-  const server = pair[1];
-  // Binary messages as ArrayBuffers, not workerd's default Blobs.
-  server.binaryType = "arraybuffer";
-  server.accept();
-  jazz.acceptSocket(request, wsLike(server));
-  return new Response(null, { status: 101, webSocket: client } as ResponseInit);
+  return jazz.handle(request);
 }
 
 function underBasePath(pathname: string, basePath: string): boolean {
   return pathname === basePath || pathname.startsWith(`${basePath}/`);
-}
-
-const textEncoder = new TextEncoder();
-
-/**
- * workerd's server socket in the `ws` package's shape, which `acceptSocket`
- * takes. It has no `pause`/`resume`: workerd can't stop reading an accepted
- * socket. A client that ignores flow control still can't grow its session's
- * queue without bound: past `MAX_WAITING_SESSION_BYTES` its session ends.
- */
-function wsLike(ws: WorkerdWebSocket): WsLikeSocket {
-  const socket = {
-    send: (data: Uint8Array) => ws.send(data),
-    close: (code?: number, reason?: string) => {
-      try {
-        ws.close(code, reason);
-      } catch {
-        // Already closed.
-      }
-    },
-    on(event: "message" | "close" | "error", listener: (...args: never[]) => void) {
-      const call = listener as (...args: unknown[]) => void;
-      if (event === "message") {
-        // As the `ws` package hands them over: bytes, text included.
-        ws.addEventListener("message", ({ data }) =>
-          typeof data === "string" ? call(textEncoder.encode(data), false) : call(data, true),
-        );
-      } else if (event === "close") {
-        ws.addEventListener("close", () => call());
-      } else {
-        ws.addEventListener("error", (error) => call(error));
-      }
-      return socket;
-    },
-  };
-  return socket as WsLikeSocket;
 }

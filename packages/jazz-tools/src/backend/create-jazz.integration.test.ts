@@ -339,13 +339,11 @@ describe("createJazz", () => {
     // Record every prelude the backend forwards to the core.
     const forwarded: Array<Record<string, unknown>> = [];
     const realOpenSocket = JazzCore.prototype.openSocket;
-    JazzCore.prototype.openSocket = function (this: unknown, ...args: unknown[]) {
-      const sock = (
-        realOpenSocket as (...a: unknown[]) => { send(data: Uint8Array): boolean }
-      ).apply(this, args);
+    JazzCore.prototype.openSocket = function (...args: Parameters<typeof realOpenSocket>) {
+      const sock = realOpenSocket.apply(this, args);
       let first = true;
-      const realSend = sock.send.bind(sock);
-      sock.send = (data: Uint8Array) => {
+      const realSend = sock.sendWithRoom.bind(sock);
+      sock.sendWithRoom = (data: Uint8Array) => {
         if (first) {
           first = false;
           try {
@@ -357,7 +355,7 @@ describe("createJazz", () => {
         return realSend(data);
       };
       return sock;
-    } as never;
+    };
     cleanups.push(async () => {
       JazzCore.prototype.openSocket = realOpenSocket;
     });
@@ -3531,9 +3529,9 @@ describe("createJazz", () => {
     const previous = process.env.VERCEL;
     process.env.VERCEL = "1";
     try {
-      await expect(
-        createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready(),
-      ).rejects.toThrow(/Use vercel\(\), whose local store runs sqlite\(\) in dev, or remote\(/);
+      expect(() => createJazz({ app, permissions, store: sqlite({ path: dir }) })).toThrow(
+        /Use vercel\(\), whose local store runs sqlite\(\) in dev, or remote\(/,
+      );
     } finally {
       if (previous === undefined) delete process.env.VERCEL;
       else process.env.VERCEL = previous;
