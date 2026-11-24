@@ -42,7 +42,7 @@ use super::super::position::Position;
 use super::super::records::KeyColumns;
 use super::super::records::account::nonce_commitment;
 use super::store::{Rejection, StoreOwner};
-use super::stored::{Binding, Fields, UnrecognisedDocument, ensure_canonical};
+use super::stored::{Binding, Fields, UnrecognisedDocument, ensure_canonical, stored_row};
 
 /// The format of the device document.
 pub const DEVICE_DOCUMENT_FORMAT: &str = "jazz-e2ee-local-devices-v3";
@@ -53,18 +53,6 @@ pub const FLOOR_FORMAT: &str = "jazz-e2ee-floor-v1";
 
 fn decimal(value: u64) -> Value {
     Value::String(value.to_string())
-}
-
-fn parse_decimal(value: &Value) -> ProtocolResult<u64> {
-    let text = value.as_str()?;
-    match text.parse::<u64>() {
-        Ok(number) if number.to_string() == text => Ok(number),
-        _ => invalid("not a canonical decimal"),
-    }
-}
-
-fn version(value: &Value) -> ProtocolResult<u32> {
-    u32::try_from(value.as_number()?).map_err(|_| ProtocolError::InvalidRecord("version range"))
 }
 
 /// The approval nonce of a stored device (§2.2): protected at rest until
@@ -184,7 +172,7 @@ impl StoredDevice {
             sealing: PublicKey {
                 mechanism: MechanismId::new(
                     fields.string("mechanism")?,
-                    version(fields.get("version")?)?,
+                    fields.version("version", "version range")?,
                 ),
                 bytes: fields.bytes("publicKey")?,
             },
@@ -192,7 +180,7 @@ impl StoredDevice {
             signing: PublicKey {
                 mechanism: MechanismId::new(
                     fields.string("signingMechanism")?,
-                    version(fields.get("signingVersion")?)?,
+                    fields.version("signingVersion", "version range")?,
                 ),
                 bytes: fields.bytes("signingPublicKey")?,
             },
@@ -283,36 +271,15 @@ pub fn decode_device_document(bytes: &[u8]) -> Result<Option<StoredDevice>, Unre
     Ok(device)
 }
 
-fn key_columns_value(keys: &KeyColumns) -> Value {
-    Value::object(vec![
-        ("publicKey", Some(Value::bytes(&keys.public_key))),
-        ("mechanism", Some(Value::string(&keys.mechanism))),
-        ("version", Some(Value::Number(keys.version.into()))),
-        (
-            "signingPublicKey",
-            Some(Value::bytes(&keys.signing_public_key)),
-        ),
-        (
-            "signingMechanism",
-            Some(Value::string(&keys.signing_mechanism)),
-        ),
-        (
-            "signingVersion",
-            Some(Value::Number(keys.signing_version.into())),
-        ),
-    ])
-}
-
-fn key_columns_from(value: &Value) -> ProtocolResult<KeyColumns> {
-    let fields = Fields::new(value)?;
-    Ok(KeyColumns {
-        public_key: fields.bytes("publicKey")?,
-        mechanism: fields.string("mechanism")?,
-        version: version(fields.get("version")?)?,
-        signing_public_key: fields.bytes("signingPublicKey")?,
-        signing_mechanism: fields.string("signingMechanism")?,
-        signing_version: version(fields.get("signingVersion")?)?,
-    })
+stored_row! {
+    key_columns_value, key_columns_from for KeyColumns {
+        public_key: "publicKey" => bytes,
+        mechanism: "mechanism" => string,
+        version: "version" => version("version range"),
+        signing_public_key: "signingPublicKey" => bytes,
+        signing_mechanism: "signingMechanism" => string,
+        signing_version: "signingVersion" => version("version range"),
+    }
 }
 
 /// A floor (§2.4, "Floors"; §6.3a) as stored: the account it is of, bound
@@ -365,16 +332,24 @@ impl FloorRecord {
         let value = parse_canonical(bytes)?;
         let fields = Fields::new(&value)?;
         fields.format(FLOOR_FORMAT)?;
+        let decimal_field = |name| {
+            let text = fields.get(name)?.as_str()?;
+            if matches!(text.as_bytes(), [b'+', ..] | [b'0', _, ..]) {
+                return invalid("not a canonical decimal");
+            }
+            text.parse::<u64>()
+                .map_err(|_| ProtocolError::InvalidRecord("not a canonical decimal"))
+        };
         let record = Self {
             binding: Binding::from_value(fields.get("binding")?)?,
             account_id: fields.string("account")?,
             floor: AccountFloor {
-                through: Position(parse_decimal(fields.get("through")?)?),
-                generation: parse_decimal(fields.get("generation")?)?,
+                through: Position(decimal_field("through")?),
+                generation: decimal_field("generation")?,
                 root_id: fields.string("rootId")?,
                 root_keys: key_columns_from(fields.get("rootKeys")?)?,
                 epoch_id: fields.string("epochId")?,
-                epoch_position: Position(parse_decimal(fields.get("epochPosition")?)?),
+                epoch_position: Position(decimal_field("epochPosition")?),
                 active_device: match value.field("activeDevice") {
                     None => None,
                     Some(device) => Some(device.as_str()?.to_owned()),
