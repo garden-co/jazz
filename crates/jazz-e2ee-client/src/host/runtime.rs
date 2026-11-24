@@ -1310,6 +1310,14 @@ fn report_json(report: &Report, table_name: impl Fn(&str) -> Option<String>) -> 
         Report::SkippedRecord { document, reason } => {
             json!({ "type": "skipped-record", "document": document, "reason": reason })
         }
+        Report::ConflictingAccountKey {
+            record_id,
+            signer_id,
+            epoch_id,
+        } => json!({
+            "type": "conflicting-account-key", "recordId": record_id,
+            "signerId": signer_id, "epochId": epoch_id,
+        }),
         Report::InvalidDelivery {
             space: at,
             sender,

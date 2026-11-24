@@ -6,6 +6,8 @@
 
 mod common;
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use common::*;
@@ -14,9 +16,14 @@ use jazz::e2ee::EncryptionSettings;
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz_e2ee::envelope::{self, Mechanism};
+use jazz_e2ee::mechanisms::key_seal;
 use jazz_e2ee::protocol::ProtocolError;
+use jazz_e2ee::protocol::derive::account_sealing_key_pair;
+use jazz_e2ee::protocol::domain::AppDomain;
 use jazz_e2ee::protocol::error::{RefusalCode, UnsupportedCapability};
-use jazz_e2ee_client::{AccountStatus, ClientError, MemoryStore};
+use jazz_e2ee::protocol::signing::sign;
+use jazz_e2ee::registry::Registry;
+use jazz_e2ee_client::{AccountStatus, ClientError, MemoryStore, Report};
 
 /// Contract: alice's first device publishes its request, bootstraps her
 /// account (identity, public root and the first epoch's sealing key, as her
@@ -94,6 +101,105 @@ fn an_app_account_bootstraps_on_its_first_device() {
     let rows = all(&offline, Query::from("notes")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].cell("projectId"), Some(Value::Uuid(space)));
+    assert_eq!(rows[0].cell("body"), Some(text(SECRET)));
+}
+
+/// Alice's device reports a signed sealing key that does not derive from her
+/// account key once, and can still seal and read notes.
+#[test]
+fn a_conflicting_account_key_is_reported_and_ignored_for_sealing() {
+    let settings = EncryptionSettings::default();
+    let alice = account(0xa1);
+    let server = secure_authority_with(&settings, None);
+    let client = open_account(Rc::new(MemoryStore::new()), alice, settings.clone(), None);
+    let (db, _link) = session(&client, &server, alice, &settings, 1, None);
+    assert_eq!(
+        drive(&server, &[&db], client.ensure_account(&db)).unwrap(),
+        AccountStatus::Active
+    );
+
+    let mut conflict = client
+        .with_account(|account| account.public.account_keys[0].row.clone())
+        .unwrap();
+    let id = uuid::Uuid::new_v4();
+    conflict.id = id.to_string();
+    let wrong_key = account_sealing_key_pair(&key_seal::Builtin, &[9; 32])
+        .unwrap()
+        .public
+        .bytes;
+    assert_ne!(wrong_key, conflict.public_key);
+    conflict.public_key = wrong_key;
+    let domain = AppDomain::new(
+        &app_id().as_object_id().uuid().to_string(),
+        Some(ENVIRONMENT),
+    )
+    .unwrap()
+    .account(client.account_id())
+    .unwrap();
+    let registry = Registry::builtin();
+    let device = client.device().unwrap().clone();
+    let signer = registry
+        .signer(device.signing.public.mechanism.as_mechanism())
+        .unwrap();
+    conflict.signature = sign(
+        signer,
+        &device.signing,
+        &conflict.signed_bytes(&domain).unwrap(),
+    )
+    .unwrap();
+    let table = "__e2ee_account_keys";
+    let original = all(&server, Query::from(table)).unwrap().pop().unwrap();
+    let mut cells: BTreeMap<_, _> = original
+        .cells()
+        .filter_map(|(column, value)| Some((column.to_owned(), value?.clone())))
+        .collect();
+    cells.insert("publicKey".to_owned(), Value::Bytes(conflict.public_key));
+    cells.insert("signature".to_owned(), Value::Bytes(conflict.signature));
+    block_on(server.insert(
+        table,
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(jazz::ids::RowUuid(id)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+
+    let reports = Rc::new(RefCell::new(Vec::new()));
+    let events = reports.clone();
+    client.on_report(move |report| {
+        if matches!(report, Report::ConflictingAccountKey { .. }) {
+            events.borrow_mut().push(report.clone());
+        }
+    });
+    for _ in 0..2 {
+        assert_eq!(
+            drive(&server, &[&db], client.ensure_account(&db)).unwrap(),
+            AccountStatus::Active
+        );
+        client.flush_reports();
+    }
+    assert_eq!(
+        &*reports.borrow(),
+        &[Report::ConflictingAccountKey {
+            record_id: conflict.id,
+            signer_id: conflict.signer_id,
+            epoch_id: conflict.epoch_id,
+        }]
+    );
+
+    let space = project(&db, "plans");
+    drive(
+        &server,
+        &[&db],
+        client.write(&db, async || {
+            db.insert("notes", note(space, SECRET), Default::default())
+                .await
+        }),
+    )
+    .unwrap();
+    let rows = all(&db, Query::from("notes")).unwrap();
+    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].cell("body"), Some(text(SECRET)));
 }
 

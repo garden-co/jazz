@@ -83,6 +83,12 @@ pub enum Report {
     /// A record of the private store that failed its load checks and was
     /// skipped (protocol §6.2, §6.3a).
     SkippedRecord { document: String, reason: String },
+    /// A valid sealing key record that did not derive from this account's epoch key.
+    ConflictingAccountKey {
+        record_id: String,
+        signer_id: String,
+        epoch_id: String,
+    },
     /// A delivery to this account that provably failed to open or
     /// authenticate (protocol §3.4): nothing is written; the member stays
     /// `key-pending` until an updater rotates.

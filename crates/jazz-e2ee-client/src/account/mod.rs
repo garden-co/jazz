@@ -536,12 +536,23 @@ impl E2eeClient {
                 }
             }
         }
+        let conflicts = epoch_keys.non_derived_sealing_keys().to_vec();
         *self.account.borrow_mut() = Some(OwnAccount {
             state,
             key,
             epoch_keys,
             public: read.public.clone(),
         });
+        for conflict in conflicts {
+            self.shared.event(
+                format!("conflicting-account-key:{}", conflict.record_id),
+                Report::ConflictingAccountKey {
+                    record_id: conflict.record_id,
+                    signer_id: conflict.signer_id,
+                    epoch_id: conflict.epoch_id,
+                },
+            );
+        }
         Ok(Step::Done(AccountStatus::Active))
     }
 
