@@ -887,6 +887,35 @@ describe("encrypted declarations across sibling versions", () => {
     return project;
   }
 
+  const detail = { detail: "string?" };
+  it.each([
+    { before: detail, after: {}, equality: [], reason: "holds ciphertext" },
+    {
+      before: detail,
+      after: detail,
+      equality: ["detail"],
+      reason: "token column __e2ee_eq_detail stays",
+    },
+    { before: {}, after: detail, equality: [], reason: "held plaintext" },
+  ])(
+    "preserves index-only storage rules for $reason",
+    async ({ before, after, equality, reason }) => {
+      const project = await workspace();
+      const notes = (columns: Record<string, unknown>, equality: string[], indexes: string[]) =>
+        app({
+          notes: {
+            columns: { title: "string", detail: "bytes", __e2ee_eq_detail: "bytes" },
+            encryption: { space: "id", scope: "notes", columns, equality },
+            indexes,
+          },
+        });
+      await project.write(notes(before, equality, []));
+      await generateForDir(project.dir);
+      await project.write(notes(after, [], ["title"]));
+      await project.refused(reason);
+    },
+  );
+
   it("generates and deploys a sibling enum prefix after an index edit", async () => {
     const project = await workspace();
     const server = await startLocalJazzServer();

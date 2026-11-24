@@ -114,17 +114,11 @@ pub(crate) fn check_index_transition(
             entries.unwrap_or(&Entries::new()),
         );
     }
-    let same = |name: &str| Some(name.to_owned());
-    let same_column = |_: &str, name: &str| Some(name.to_owned());
-    check_unlinked(
-        &recorded.encryption,
-        entries,
-        same,
-        same,
-        same_column,
-        same_column,
-        false,
+    encryption::check_index_transition(
+        (&recorded.current_schema, &recorded.encryption),
+        entries.unwrap_or(&Entries::new()),
     )
+    .map_err(transition_error)
 }
 
 /// Check the current version against the bindings' one, which is in the
@@ -306,12 +300,14 @@ fn check_unlinked(
     let Poll::Ready(Ok(result)) = pin!(check).poll(&mut Context::from_waker(Waker::noop())) else {
         unreachable!("the check runs to completion");
     };
-    result.map_err(|reason| {
-        CodegenError::new(format!(
-            "{}: {reason}",
-            jazz::tools::deployment::artifact::APP_FILE
-        ))
-    })
+    result.map_err(transition_error)
+}
+
+fn transition_error(reason: String) -> CodegenError {
+    CodegenError::new(format!(
+        "{}: {reason}",
+        jazz::tools::deployment::artifact::APP_FILE
+    ))
 }
 
 /// Refuse `after` as version `hash`'s declarations when they differ from

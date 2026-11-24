@@ -517,6 +517,71 @@ mod tests {
         generate(dir, langs, true).unwrap();
     }
 
+    fn check_index_storage(
+        old_columns: serde_json::Value,
+        new_columns: serde_json::Value,
+        old_eq: &[&str],
+        new_eq: &[&str],
+        reason: &str,
+    ) {
+        let dir = dir();
+        let langs = [Lang::Rust.into()];
+        let path = dir.join(APP_FILE);
+        let app = |columns, equality: &[&str], indexes: &[&str]| {
+            serde_json::json!({
+                "format": 1,
+                "tables": { "notes": {
+                    "columns": { "title": "string", "detail": "bytes", "__e2ee_eq_detail": "bytes" },
+                    "encryption": { "space": "id", "scope": "notes", "columns": columns, "equality": equality },
+                    "indexes": indexes,
+                } }
+            })
+        };
+        write_app(&path, app(old_columns, old_eq, &[]));
+        generate(&dir, &langs, false).unwrap();
+        let original = std::fs::read(dir.join(Lang::Rust.file())).unwrap();
+        write_app(&path, app(new_columns, new_eq, &["title"]));
+        assert_refused(&dir, &langs, reason, &original);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Alice must keep a ciphertext column declared when adding an index.
+    #[test]
+    fn index_storage_keeps_ciphertext_declared() {
+        check_index_storage(
+            serde_json::json!({"detail": "string?"}),
+            serde_json::json!({}),
+            &[],
+            &[],
+            "holds ciphertext",
+        );
+    }
+
+    /// Alice must keep generating equality tokens while their column remains.
+    #[test]
+    fn index_storage_keeps_equality_tokens() {
+        let columns = serde_json::json!({"detail": "string?"});
+        check_index_storage(
+            columns.clone(),
+            columns,
+            &["detail"],
+            &[],
+            "token column __e2ee_eq_detail stays",
+        );
+    }
+
+    /// Alice cannot reinterpret existing plaintext bytes as encrypted by adding an index.
+    #[test]
+    fn index_storage_preserves_plaintext_bytes() {
+        check_index_storage(
+            serde_json::json!({}),
+            serde_json::json!({"detail": "string?"}),
+            &[],
+            &[],
+            "held plaintext",
+        );
+    }
+
     /// Alice's bindings shipped `[a,b]`. Her index edit declares `[a]` again,
     /// which the deploy reads as a sibling, since no migration leads to it.
     #[test]

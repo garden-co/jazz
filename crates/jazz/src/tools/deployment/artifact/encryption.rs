@@ -581,6 +581,37 @@ pub fn check_mapped_transition(
     old_name: impl Fn(&str, &str) -> Option<String>,
     new_name: impl Fn(&str, &str) -> Option<String>,
 ) -> Result<(), String> {
+    check_mapped_columns(
+        (old_schema, old_entries),
+        new_entries,
+        old_table,
+        new_table,
+        old_name,
+        new_name,
+        false,
+    )
+}
+
+/// An index edit keeps every stored column. Apply the storage checks of an
+/// identity migration, allowing sibling declarations of either enum prefix.
+pub fn check_index_transition(
+    from: (&Schema, &Entries),
+    new_entries: &Entries,
+) -> Result<(), String> {
+    let table = |name: &str| Some(name.to_owned());
+    let column = |_: &str, name: &str| Some(name.to_owned());
+    check_mapped_columns(from, new_entries, table, table, column, column, true)
+}
+
+fn check_mapped_columns(
+    (old_schema, old_entries): (&Schema, &Entries),
+    new_entries: &Entries,
+    old_table: impl Fn(&str) -> Option<String>,
+    new_table: impl Fn(&str) -> Option<String>,
+    old_name: impl Fn(&str, &str) -> Option<String>,
+    new_name: impl Fn(&str, &str) -> Option<String>,
+    siblings: bool,
+) -> Result<(), String> {
     // Every old encrypted column the new version keeps stays encrypted,
     // as long as its stored column remains.
     for (table, old) in old_entries {
@@ -645,7 +676,7 @@ pub fn check_mapped_transition(
                 .and_then(|n| old.and_then(|o| o.columns.get(&n).map(|c| (n, c))));
             match previous {
                 Some((was_name, previous)) => {
-                    check_stored_column_type(&path, previous, declared, false)?;
+                    check_stored_column_type(&path, previous, declared, siblings)?;
                     let tagged_before = old.is_some_and(|o| o.equality.contains(&was_name));
                     if tagged_before
                         && new.equality.contains(name)
