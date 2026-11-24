@@ -8,7 +8,6 @@ import { BandChat } from "./BandChat";
 import { EncryptionNotices } from "./components/EncryptionNotices";
 import { authClient } from "./lib/auth-client";
 import { DeviceStateProvider, failureOf, useDeviceState } from "./lib/device-state";
-import { clearLeaveRecord } from "./lib/leave-record";
 import { clearPendingMarkerIds } from "./lib/mark-read";
 
 /** Signed out: the sign-in form. Signed in: BandChat, synced through `/jazz`. */
@@ -33,6 +32,7 @@ export function App() {
 
 function Dashboard({ name }: { name: string }) {
   const { signOut } = useBandChatLifecycle();
+  const [signOutFailure, setSignOutFailure] = useState<string | null>(null);
   const db = useDb();
   const accountId = useJazzSession().user?.accountId;
   const previousAccountId = useRef(accountId);
@@ -42,7 +42,28 @@ function Dashboard({ name }: { name: string }) {
   }, [accountId]);
   // An ordinary sign-out keeps this browser's keys and device record. It
   // also drops a wish to leave, so a later sign-in is not signed out again.
-  const chat = <BandChat defaultDisplayName={name} onSignOut={signOut} />;
+  async function finishMenuSignOut() {
+    setSignOutFailure(null);
+    try {
+      await signOut();
+    } catch (cause) {
+      setSignOutFailure(failureOf(cause).message);
+    }
+  }
+  const chat = (
+    <>
+      {signOutFailure ? (
+        <Banner
+          status="error"
+          container="section"
+          collapsible={false}
+          title="Could not sign out"
+          description={signOutFailure}
+        />
+      ) : null}
+      <BandChat defaultDisplayName={name} onSignOut={() => void finishMenuSignOut()} />
+    </>
+  );
   if (!accountId) return chat;
   return (
     <DeviceStateProvider encryption={db.encryption} accountId={accountId}>
@@ -61,24 +82,19 @@ function Dashboard({ name }: { name: string }) {
  */
 function SignOutWhenLeft({ children }: { children: React.ReactNode }) {
   const { leaving } = useDeviceState();
-  const { refresh } = useJazzSession();
+  const { signOut } = useBandChatLifecycle();
   const [failure, setFailure] = useState<string | null>(null);
   const started = useRef(false);
 
   async function finish() {
     setFailure(null);
     try {
-      const { error } = await authClient.signOut();
-      if (error) throw new Error(error.message ?? error.statusText);
+      await signOut();
     } catch (cause) {
       // The button tries again; the effect does not loop on it.
       setFailure(failureOf(cause).message);
       return;
     }
-    clearPendingMarkerIds();
-    clearLeaveRecord();
-    await refresh();
-    window.location.assign("/");
   }
 
   useEffect(() => {
