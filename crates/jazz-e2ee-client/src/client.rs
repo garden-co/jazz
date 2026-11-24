@@ -699,6 +699,23 @@ impl E2eeClient {
         f(&self.shared.keys.borrow().held)
     }
 
+    /// Test observation: refused space-root creations this client remembers.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn refused_creations(&self) -> usize {
+        self.shared.creations.borrow().refused.len()
+    }
+
+    /// Test setup: remember a refused space-root creation, as the refusal hook
+    /// does when the host collects it.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn note_refused_creation(&self, root_id: &str, error: jazz::db::Error) {
+        self.shared
+            .creations
+            .borrow_mut()
+            .refused
+            .insert(root_id.to_owned(), error);
+    }
+
     /// Test observation for a host retaining its client through shutdown.
     #[cfg(any(test, feature = "testing"))]
     pub fn has_device_account_identity(&self) -> bool {
@@ -710,6 +727,8 @@ impl E2eeClient {
         self.shared.forget_secrets();
         self.device_account.borrow_mut().take();
         self.account.borrow_mut().take();
+        // Refused creations belong to this run's device and account.
+        self.shared.creations.borrow_mut().refused.clear();
         ClientError::Closed
     }
 

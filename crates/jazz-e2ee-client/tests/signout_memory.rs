@@ -99,6 +99,12 @@ fn assert_shutdown(
         "the save reached the store"
     );
 
+    client.note_refused_creation(
+        "00000000-0000-4000-8000-0000000000aa",
+        jazz::db::Error::new(jazz::db::ErrorCode::WriteRejected, "refused"),
+    );
+    assert_eq!(client.refused_creations(), 1);
+
     let mut shutdown = runtime.call("shutdown".into(), Value::Null);
     assert!(shutdown.as_mut().poll(&mut context).is_pending());
     assert!(client.with_held(|keys| keys.space(&first).is_some()));
@@ -118,6 +124,7 @@ fn assert_shutdown(
             .is_none()
     );
     assert!(!client.has_device_account_identity());
+    assert_eq!(client.refused_creations(), 0);
     assert!(client.with_held(|keys| keys.spaces().is_empty()));
     assert!(matches!(client.device(), Err(ClientError::Closed)));
     assert!(matches!(
