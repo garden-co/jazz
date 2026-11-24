@@ -500,11 +500,12 @@ impl<'a> Writer<'a> {
         // The row.
         let _ = writeln!(out, "/// A row of `{}`.", table.name);
         // Upserts and update advice take only rows that can change.
-        if table.updatable {
-            let _ = writeln!(out, "public struct {row}: {RT}.Row, {RT}.Updatable {{");
+        let updatable = if table.updatable {
+            format!(", {RT}.Updatable")
         } else {
-            let _ = writeln!(out, "public struct {row}: {RT}.Row {{");
-        }
+            String::new()
+        };
+        let _ = writeln!(out, "public struct {row}: {RT}.Row{updatable} {{");
         let _ = writeln!(out, "    public static let table = {table_lit}");
         let _ = writeln!(out, "    public let id: {RT}.ID");
         for f in &fields {

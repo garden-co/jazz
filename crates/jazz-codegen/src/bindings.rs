@@ -1,8 +1,8 @@
-//! Reading committed bindings back: the `source` and compiled schema a
-//! generated module embeds. Bindings are how `jazz validate` knows the
-//! schema the app last generated against, so it can tell an edit of
-//! `tables` that needs a migration from one that doesn't, and how
-//! `migrations create` finds the version to migrate from.
+//! Committed bindings record the source digest, schema history and
+//! encryption declarations an app generated against. Validation uses
+//! this record to distinguish a stale file from an unmigrated schema
+//! edit and to protect declarations that already shipped. Migration
+//! creation uses it to find the version to migrate from.
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
@@ -59,28 +59,37 @@ impl Recorded {
     }
 }
 
-/// An encrypted column is stored as bytes whatever its plaintext type.
-/// Compare declarations for every shared schema hash before regeneration
-/// can overwrite what that version shipped with.
-pub(crate) fn check_recorded_declarations(
-    app: &App,
+/// Check declarations for shared schema hashes and, if the bindings' schema
+/// is present, check its transition to the current version.
+pub(crate) fn check_recorded_version(
+    compiled: &Compiled,
     recorded: &Recorded,
-) -> Result<(), CodegenError> {
-    let versions: Vec<SchemaHash> = app.compiled.schemas.iter().map(|(h, _)| *h).collect();
-    check_declarations_of(&versions, app.compiled.encryption.as_ref(), recorded)
+) -> Result<bool, CodegenError> {
+    check_declarations_of(
+        compiled.schemas.iter().map(|(hash, _)| *hash),
+        compiled.encryption.as_ref(),
+        recorded,
+    )?;
+    let present = compiled
+        .schemas
+        .iter()
+        .any(|(hash, _)| *hash == recorded.current);
+    if present {
+        check_recorded_transition(recorded, compiled)?;
+    }
+    Ok(present)
 }
 
-/// [`check_recorded_declarations`] for `versions` and their declarations
-/// as read from the app file.
+/// Protect declarations even when the app file has not passed migration checks.
 pub(crate) fn check_declarations_of(
-    versions: &[SchemaHash],
+    versions: impl IntoIterator<Item = SchemaHash>,
     declared: Option<&DeclaredEncryption>,
     recorded: &Recorded,
 ) -> Result<(), CodegenError> {
     let empty = Entries::new();
     for version in versions {
         let hash = version.to_string();
-        let before = if *version == recorded.current {
+        let before = if version == recorded.current {
             &recorded.encryption
         } else if let Some(entries) = recorded.history_encryption.get(&hash) {
             entries
@@ -130,15 +139,9 @@ pub(crate) fn check_index_transition(
 /// as a sibling when they don't. Codegen follows the file's migrations
 /// through their nearest common version to find those columns, and checks
 /// nothing when no single path connects the two versions.
-pub(crate) fn check_recorded_transition(
-    recorded: &Recorded,
-    compiled: &Compiled,
-) -> Result<(), CodegenError> {
+fn check_recorded_transition(recorded: &Recorded, compiled: &Compiled) -> Result<(), CodegenError> {
     let (from, to) = (recorded.current, compiled.current);
-    let entries = compiled
-        .encryption
-        .as_ref()
-        .and_then(|declared| declared.entries(&to.to_string()));
+    let entries = compiled.current_entries();
     if from == to || recorded.encryption.is_empty() || entries.is_none() {
         return Ok(());
     }
@@ -172,20 +175,15 @@ pub(crate) fn check_recorded_transition(
         })
         .collect();
     // Each step names a table and column in the next version along the path.
-    let step = |(names, forward): &(MigrationNames, bool), (table, column): (String, String)| {
-        if *forward {
+    let step = |names: &MigrationNames, forward: bool, (table, column): (String, String)| {
+        if forward {
             Some((names.new_table(&table)?, names.new_name(&table, &column)?))
         } else {
             Some((names.old_table(&table)?, names.old_name(&table, &column)?))
         }
     };
-    let back = |(names, forward): &(MigrationNames, bool), (table, column): (String, String)| {
-        if *forward {
-            Some((names.old_table(&table)?, names.old_name(&table, &column)?))
-        } else {
-            Some((names.new_table(&table)?, names.new_name(&table, &column)?))
-        }
-    };
+    let forward = |at, (names, forward): &(MigrationNames, bool)| step(names, *forward, at);
+    let backward = |at, (names, forward): &(MigrationNames, bool)| step(names, !forward, at);
     let table_only = |pair: Option<(String, String)>| pair.map(|(table, _)| table);
     check_unlinked(
         &recorded.encryption,
@@ -195,27 +193,27 @@ pub(crate) fn check_recorded_transition(
                 steps
                     .iter()
                     .rev()
-                    .try_fold((table.to_owned(), String::new()), |at, s| back(s, at)),
+                    .try_fold((table.to_owned(), String::new()), backward),
             )
         },
         |table| {
             table_only(
                 steps
                     .iter()
-                    .try_fold((table.to_owned(), String::new()), |at, s| step(s, at)),
+                    .try_fold((table.to_owned(), String::new()), forward),
             )
         },
         |table, name| {
             steps
                 .iter()
                 .rev()
-                .try_fold((table.to_owned(), name.to_owned()), |at, s| back(s, at))
+                .try_fold((table.to_owned(), name.to_owned()), backward)
                 .map(|(_, name)| name)
         },
         |table, name| {
             steps
                 .iter()
-                .try_fold((table.to_owned(), name.to_owned()), |at, s| step(s, at))
+                .try_fold((table.to_owned(), name.to_owned()), forward)
                 .map(|(_, name)| name)
         },
         path.iter().all(|(_, forward)| *forward),
@@ -700,28 +698,16 @@ pub fn staleness(
         Ok(recorded) => recorded,
         Err(error) => return Ok(Some(Staleness::Unreadable(error.message().to_string()))),
     };
-    check_recorded_declarations(app, &recorded)?;
-    if !app
-        .compiled
-        .schemas
-        .iter()
-        .any(|(h, _)| *h == recorded.current)
-    {
+    if !check_recorded_version(&app.compiled, &recorded)? {
         // A change of single-column indexes changes the schema's hash, not
         // its version or its rows (#5494): regenerating is enough.
         let to = app.compiled.current_schema();
         if differs_only_in_indexes(&recorded.current_schema, to) {
-            let entries = app
-                .compiled
-                .encryption
-                .as_ref()
-                .and_then(|declared| declared.entries(&app.compiled.current.to_string()));
-            check_index_transition(&recorded, to, entries)?;
+            check_index_transition(&recorded, to, app.compiled.current_entries())?;
             return Ok(Some(Staleness::OutOfDate));
         }
         return Ok(Some(Staleness::SchemaChanged));
     }
-    check_recorded_transition(&recorded, &app.compiled)?;
     if recorded.source != app.source || recorded.format != lang.format() {
         return Ok(Some(Staleness::OutOfDate));
     }
