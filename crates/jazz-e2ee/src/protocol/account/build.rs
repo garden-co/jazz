@@ -23,6 +23,7 @@ use super::super::error::{
 };
 use super::super::ids;
 use super::super::json;
+use super::super::key_crypto::{self, Outcome, Z32, provider_check, random_key, read_back, refuse};
 use super::super::records::KeyColumns;
 use super::super::records::account::{
     AccountAction, AccountIdentity, AccountKind, AccountRoot, AccountSealingKey, AccountSuccessor,
@@ -36,34 +37,6 @@ use super::super::signing;
 use super::key::AccountKey;
 use super::ledger::{PrivateAccountLedger, PublicAccountLedger};
 use super::replay::AccountState;
-
-const Z32: [u8; 32] = [0; 32];
-
-fn refuse<T>(code: RefusalCode) -> ProtocolResult<T> {
-    Err(ProtocolError::Refused(code))
-}
-
-/// A self-check that failed: the provider produced something it cannot
-/// read back.
-fn provider_check(ok: bool) -> ProtocolResult<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(ProtocolError::ProviderFailure)
-    }
-}
-
-/// Reading back output this writer just produced: whatever fails there is
-/// the provider's failure, not a property of any input.
-fn read_back<T, E>(result: Result<T, E>) -> ProtocolResult<T> {
-    result.map_err(|_| ProtocolError::ProviderFailure)
-}
-
-fn random_key(rng: &mut dyn RandomSource) -> ProtocolResult<Zeroizing<[u8; 32]>> {
-    let mut key = Zeroizing::new([0u8; 32]);
-    rng.fill(&mut key[..])?;
-    Ok(key)
-}
 
 /// A device's approval nonce `n_R` (§2.5): committed in its request,
 /// revealed in its one approval proof. Cleared on drop and never printed.
@@ -133,18 +106,9 @@ impl LocalDevice {
             &probe,
             rng,
         )?;
-        let opened =
-            read_back(registry.open_sealed(core::slice::from_ref(&self.sealing), &bytes, &sealed))?;
-        provider_check(*opened == *probe)?;
-        let signature = registry
-            .signer(self.signing.public.mechanism.as_mechanism())?
-            .sign(&self.signing, &bytes)?;
-        provider_check(read_back(signing::verify(
-            registry,
-            &self.signing.public,
-            &bytes,
-            &signature,
-        ))?)
+        key_crypto::check_sealed(registry, &self.sealing, &bytes, &sealed, &probe)?;
+        key_crypto::sign(registry, &self.signing, &bytes)?;
+        Ok(())
     }
 
     pub fn keys(&self) -> KeyColumns {
@@ -199,13 +163,7 @@ impl AccountWriter<'_> {
         key: &[u8; 32],
         rng: &mut dyn RandomSource,
     ) -> ProtocolResult<Vec<u8>> {
-        match self
-            .suite
-            .seal_to(core::slice::from_ref(recipient), context, key, rng)
-        {
-            Err(Error::RecipientUnsupported) => refuse(RefusalCode::UnsupportedRecipient),
-            other => Ok(other?),
-        }
+        key_crypto::seal(&self.suite, recipient, context, key, rng)
     }
 
     /// `wrap(K, C, p)` with the configured key wrapper, read back.
@@ -216,25 +174,21 @@ impl AccountWriter<'_> {
         payload: &[u8; 32],
         rng: &mut dyn RandomSource,
     ) -> ProtocolResult<Vec<u8>> {
-        let wrapped = self.suite.key_wrap.wrap(key, context, payload, rng)?;
-        let wrapper = read_back(self.registry.key_wrapper_for(&wrapped))?;
-        let unwrapped = read_back(wrapper.unwrap(key, context, &wrapped))?;
-        provider_check(*unwrapped == *payload)?;
-        Ok(wrapped)
+        key_crypto::wrap(
+            &self.suite,
+            self.registry,
+            key,
+            context,
+            payload,
+            rng,
+            |_| ProtocolError::ProviderFailure,
+        )
     }
 
     /// Signs with `key` (whose mechanism must be registered) and verifies
     /// the signature again.
     fn sign(&self, key: &KeyPair, bytes: &[u8]) -> ProtocolResult<Vec<u8>> {
-        let signer = self.registry.signer(key.public.mechanism.as_mechanism())?;
-        let signature = signing::sign(signer, key, bytes)?;
-        provider_check(read_back(signing::verify(
-            self.registry,
-            &key.public,
-            bytes,
-            &signature,
-        ))?)?;
-        Ok(signature)
+        key_crypto::sign(self.registry, key, bytes)
     }
 
     fn check_device_request(
@@ -407,12 +361,13 @@ pub fn account_root(
         &device.id,
     )?;
     let envelope = writer.seal(&device.sealing.public, &envelope_context, &key, rng)?;
-    let opened = read_back(writer.registry.open_sealed(
-        core::slice::from_ref(&device.sealing),
+    key_crypto::check_sealed(
+        writer.registry,
+        &device.sealing,
         &envelope_context,
         &envelope,
-    ))?;
-    provider_check(*opened == *key)?;
+        &key,
+    )?;
     let marker_context = identity_context(
         &application,
         writer.account_id,
@@ -723,18 +678,10 @@ pub fn verify_possession(
     let application = writer.application()?;
     let coordinates = challenge.coordinates();
     let context = approval_context(&application, writer.account_id, coordinates, "proof")?;
-    let unwrapped = match writer.registry.key_wrapper_for(&proof.proof) {
-        Ok(wrapper) => wrapper
-            .unwrap(secret, &context, &proof.proof)
-            .map_err(Error::after_routing),
-        Err(error) => Err(error),
-    };
-    match unwrapped {
-        Ok(value) if *value == Z32 => {}
-        Ok(_) | Err(Error::InvalidCiphertext) => {
-            return refuse(RefusalCode::InvalidPossessionProof);
-        }
-        Err(error) => return Err(envelope_error(error)),
+    match key_crypto::marker(writer.registry, secret, &context, &proof.proof)? {
+        Outcome::Ok(()) => {}
+        Outcome::Invalid => return refuse(RefusalCode::InvalidPossessionProof),
+        Outcome::Unsupported => return Err(envelope_error(Error::UnsupportedFormat)),
     }
     let bytes = proof_signed_bytes(
         &application,

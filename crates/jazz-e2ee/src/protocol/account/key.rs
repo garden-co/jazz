@@ -28,6 +28,7 @@ use super::super::derive::RecoveryKeys;
 use super::super::domain::AccountDomain;
 use super::super::error::{ProtocolError, ProtocolResult, RecoveryFailure, UnsupportedCapability};
 use super::super::json;
+use super::super::key_crypto::{self, Outcome};
 use super::super::position::{Accepted, Position};
 use super::super::records::account::{
     AccountSuccessor, RecoveryDelivery, approval_context, delivery_marker_context,
@@ -36,8 +37,6 @@ use super::super::records::account::{
 use super::private::{PrivateEvidence, VerifiedApproval};
 use super::replay::{AccountReplay, AccountState};
 use super::sealing::NonDerivedSealingKey;
-
-const Z32: [u8; 32] = [0; 32];
 
 /// What the account key's authentication established.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,23 +171,16 @@ fn unwrap(
     context: &[u8],
     envelope: &[u8],
 ) -> ProtocolResult<Option<Zeroizing<[u8; 32]>>> {
-    let wrapper = match registry.key_wrapper_for(envelope) {
-        Ok(wrapper) => wrapper,
-        Err(Error::InvalidCiphertext) => return Ok(None),
-        Err(Error::UnsupportedFormat) => {
-            return Err(ProtocolError::Unsupported(
-                UnsupportedCapability::AccountKeyEnvelope,
-            ));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    match wrapper
-        .unwrap(key, context, envelope)
-        .map_err(Error::after_routing)
-    {
-        Ok(value) => Ok(Some(value)),
-        Err(Error::InvalidCiphertext) => Ok(None),
-        Err(error) => Err(error.into()),
+    account_wrapper_result(key_crypto::unwrap(registry, key, context, envelope)?)
+}
+
+fn account_wrapper_result<T>(outcome: Outcome<T>) -> ProtocolResult<Option<T>> {
+    match outcome {
+        Outcome::Ok(value) => Ok(Some(value)),
+        Outcome::Invalid => Ok(None),
+        Outcome::Unsupported => Err(ProtocolError::Unsupported(
+            UnsupportedCapability::AccountKeyEnvelope,
+        )),
     }
 }
 
@@ -199,7 +191,7 @@ fn marker(
     context: &[u8],
     envelope: &[u8],
 ) -> ProtocolResult<bool> {
-    Ok(unwrap(registry, key, context, envelope)?.is_some_and(|value| *value == Z32))
+    Ok(account_wrapper_result(key_crypto::marker(registry, key, context, envelope)?)?.is_some())
 }
 
 /// One epoch of the private key chain.

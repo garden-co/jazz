@@ -39,68 +39,30 @@ use super::super::account::{AccountEpochKeys, NonDerivedSealingKey};
 use super::super::derive;
 use super::super::domain::AccountDomain;
 use super::super::error::{ProtocolError, ProtocolResult};
+pub(crate) use super::super::key_crypto::Outcome;
+use super::super::key_crypto::{self, classify};
 use super::super::records::space::{SpaceAddress, SpaceDelivery, SpaceScope};
 use super::chain::SpaceChain;
 use super::ledger::{AccountDirectory, SpaceLedger};
 
-const Z32: [u8; 32] = [0; 32];
-
 /// Keys an authenticated path reaches, with their depths.
 type PathKeys = Vec<(usize, Zeroizing<[u8; 32]>)>;
 
-/// What opening, unwrapping or checking one candidate showed.
-pub(crate) enum Outcome<T> {
-    Ok(T),
-    /// Provably malformed or unauthentic.
-    Invalid,
-    /// An envelope of a mechanism this reader does not route: unsupported,
-    /// never invalid.
-    Unsupported,
-}
-
-/// Maps a reader error: authentication failures are [`Outcome::Invalid`],
-/// an unrouted mechanism [`Outcome::Unsupported`]; anything else (a
-/// provider failure included) fails the operation.
-fn classify<T>(result: crate::Result<T>) -> ProtocolResult<Outcome<T>> {
+/// Space readers skip envelopes that have no matching key.
+fn space_candidate<T>(result: ProtocolResult<Outcome<T>>) -> ProtocolResult<Outcome<T>> {
     match result {
-        Ok(value) => Ok(Outcome::Ok(value)),
-        Err(Error::InvalidCiphertext | Error::NoKeyForMechanism) => Ok(Outcome::Invalid),
-        Err(Error::UnsupportedFormat) => Ok(Outcome::Unsupported),
-        Err(error) => Err(error.into()),
+        Err(ProtocolError::Crypto(Error::NoKeyForMechanism)) => Ok(Outcome::Invalid),
+        other => other,
     }
 }
 
-/// Unwraps `envelope` under `key`.
-pub(crate) fn unwrap(
-    registry: &Registry,
-    key: &[u8; 32],
-    context: &[u8],
-    envelope: &[u8],
-) -> ProtocolResult<Outcome<Zeroizing<[u8; 32]>>> {
-    let wrapper = match classify(registry.key_wrapper_for(envelope))? {
-        Outcome::Ok(wrapper) => wrapper,
-        Outcome::Invalid => return Ok(Outcome::Invalid),
-        Outcome::Unsupported => return Ok(Outcome::Unsupported),
-    };
-    classify(
-        wrapper
-            .unwrap(key, context, envelope)
-            .map_err(Error::after_routing),
-    )
-}
-
-/// Whether the marker is valid for `key`: it unwraps to exactly `Z32`.
 pub(crate) fn marker(
     registry: &Registry,
     key: &[u8; 32],
     context: &[u8],
     envelope: &[u8],
 ) -> ProtocolResult<Outcome<()>> {
-    Ok(match unwrap(registry, key, context, envelope)? {
-        Outcome::Ok(value) if *value == Z32 => Outcome::Ok(()),
-        Outcome::Ok(_) | Outcome::Invalid => Outcome::Invalid,
-        Outcome::Unsupported => Outcome::Unsupported,
-    })
+    space_candidate(key_crypto::marker(registry, key, context, envelope))
 }
 
 /// Opens an envelope sealed to an account's sealing key of the epoch whose
@@ -112,13 +74,17 @@ pub(crate) fn open_account_envelope(
     context: &[u8],
     envelope: &[u8],
 ) -> ProtocolResult<Outcome<Zeroizing<[u8; 32]>>> {
-    let sealer = match classify(registry.key_sealer_for(envelope))? {
+    let sealer = match space_candidate(classify(registry.key_sealer_for(envelope)))? {
         Outcome::Ok(sealer) => sealer,
         Outcome::Invalid => return Ok(Outcome::Invalid),
         Outcome::Unsupported => return Ok(Outcome::Unsupported),
     };
     let pair = derive::account_sealing_key_pair(sealer, epoch_key)?;
-    classify(registry.open_sealed(core::slice::from_ref(&pair), context, envelope))
+    space_candidate(classify(registry.open_sealed(
+        core::slice::from_ref(&pair),
+        context,
+        envelope,
+    )))
 }
 
 /// The marker of the version at `depth` under `key`.
@@ -187,7 +153,12 @@ fn authenticate(
             .row;
         let context = successor.history_context(&chain.application, &chain.scope)?;
         let later = &keys.last().expect("the later key is held").1;
-        let opened = match unwrap(registry, later, &context, &successor.history)? {
+        let opened = match space_candidate(key_crypto::unwrap(
+            registry,
+            later,
+            &context,
+            &successor.history,
+        ))? {
             Outcome::Ok(opened) => opened,
             Outcome::Invalid => return Ok(PathCheck::BrokenHistory(at)),
             Outcome::Unsupported => return Ok(PathCheck::Unsupported),

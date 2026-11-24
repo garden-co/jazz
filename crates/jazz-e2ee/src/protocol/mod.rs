@@ -37,6 +37,7 @@ pub mod domain;
 pub mod error;
 pub mod ids;
 pub mod json;
+mod key_crypto;
 pub mod position;
 pub mod records;
 pub mod signing;
