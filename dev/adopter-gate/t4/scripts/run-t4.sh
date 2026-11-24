@@ -31,10 +31,18 @@ teardown() {
   case "$url" in https://jazz-eval-*.vercel.app) ;; "") ;; *) echo "FAIL teardown: refusing to delete deployment '$url'"; FAIL=1; url=;; esac
   if [ -n "$url" ]; then
     # `vercel rm` returns before the deployment stops serving ("0 of 1 done"), and while it serves, a request (or a
-    # warm instance) resumes the core. Wait until it answers 404 before stopping the core (up to 3 min).
+    # warm instance) resumes the core. Wait until Vercel answers DEPLOYMENT_NOT_FOUND before stopping the core. Edge
+    # propagation took over 3 min in RC 45304195651 (gone within 7), so wait up to 10 min, logging every answer.
     if t4_vercel rm --yes "$url" >> "$T4_WORK/teardown.log" 2>&1; then
-      for i in $(seq 36); do [ "$(t4_curl -s -o /dev/null -w '%{http_code}' "$url/")" = 404 ] && break; sleep 5; done
-      [ "$(t4_curl -s -o /dev/null -w '%{http_code}' "$url/")" = 404 ] && echo "PASS teardown: deployment $url removed" || { echo "FAIL teardown: deployment $url still answers 3 min after removal"; FAIL=1; }
+      answers=; start=$(date +%s); gone_at=
+      for i in $(seq 120); do
+        code=$(t4_curl -s -o /dev/null -D "$T4_WORK/deployment-headers" -w '%{http_code}' "$url/" || echo curl-error)
+        grep -qi '^x-vercel-error: DEPLOYMENT_NOT_FOUND' "$T4_WORK/deployment-headers" 2>/dev/null && [ "$code" = 404 ] && { gone_at=$(( $(date +%s) - start )); break; }
+        case " $answers " in *" $code "*) ;; *) answers="$answers $code"; echo "deployment $url answered $code at +$(( $(date +%s) - start ))s" >> "$T4_WORK/teardown.log";; esac
+        sleep 5
+      done
+      if [ -n "$gone_at" ]; then echo "PASS teardown: deployment $url removed (not found after ${gone_at}s${answers:+; answered$answers before})"
+      else echo "FAIL teardown: deployment $url still answers 10 min after removal (answered:$answers)"; FAIL=1; fi
     else echo "FAIL teardown: deployment $url not removed (see teardown.log)"; FAIL=1; fi
   fi
   if [ -n "$core" ]; then
