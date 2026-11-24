@@ -3326,9 +3326,10 @@ fn a_store_without_held_sets_forgets_closed_points_on_any_access_loss() {
     }
     // As a build that predates the tables left it.
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute("DROP TABLE _jazz_read_holds_points", [])
-        .unwrap();
-    conn.execute("DROP TABLE _jazz_read_holds", []).unwrap();
+    conn.execute_batch(
+        "DROP TABLE _jazz_read_holds_points; DROP TABLE _jazz_read_holds;          DROP TABLE _jazz_read_holds_tables;",
+    )
+    .unwrap();
     drop(conn);
 
     let client = open_durable(&path, alice());
@@ -3485,9 +3486,10 @@ fn read_holds_cost() {
     std::fs::copy(&path, &without).unwrap();
     if stored.is_some() {
         let conn = rusqlite::Connection::open(&without).unwrap();
-        conn.execute("DROP TABLE _jazz_read_holds_points", [])
-            .unwrap();
-        conn.execute("DROP TABLE _jazz_read_holds", []).unwrap();
+        conn.execute_batch(
+            "DROP TABLE _jazz_read_holds_points; DROP TABLE _jazz_read_holds;              DROP TABLE _jazz_read_holds_tables;",
+        )
+        .unwrap();
     }
     let mut report = Vec::new();
     for (label, store) in [("with held sets", &path), ("without held sets", &without)] {
@@ -3525,84 +3527,154 @@ fn read_holds_cost() {
     }
 }
 
-/// `jazz.read-holds.v1` as a store holds it: the two tables as declared,
-/// one header per point matching its watermark row (layout version 1, the
-/// same `through` and read context), and one row per held row, by stored
-/// table and 16-byte id. A one-row change moves the header and adds just
-/// that row.
+/// A durable store's held-set layout, as SQL sees it: its DDL, its newest
+/// point's header and watermark row, and that point's rows by table name.
+struct StoredLayout {
+    ddl: Vec<String>,
+    /// (key, version, through, context, epoch)
+    header: (Vec<u8>, i64, i64, Option<Vec<u8>>, i64),
+    /// The point's watermark row: (through, context, holds_epoch).
+    point: (i64, Option<Vec<u8>>, Option<i64>),
+    /// (table name, id), in order.
+    rows: Vec<(String, Vec<u8>)>,
+}
+
+fn stored_layout(path: &std::path::Path) -> StoredLayout {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let ddl: Vec<String> = conn
+        .prepare("SELECT sql FROM sqlite_master WHERE name LIKE '_jazz_read_holds%' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let header: (Vec<u8>, i64, i64, Option<Vec<u8>>, i64) = conn
+        .query_row(
+            "SELECT key, version, through, context, epoch FROM _jazz_read_holds_points \
+             ORDER BY point DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    let point = conn
+        .query_row(
+            "SELECT through, context, holds_epoch FROM _jazz_watermarks WHERE key = ?1",
+            [&header.0],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    let rows: Vec<(String, Vec<u8>)> = conn
+        .prepare(
+            "SELECT t.name, h.id FROM _jazz_read_holds h \
+             JOIN _jazz_read_holds_points p ON p.point = h.point \
+             JOIN _jazz_read_holds_tables t ON t.tbl = h.tbl \
+             WHERE p.key = ?1 ORDER BY t.name, h.id",
+        )
+        .unwrap()
+        .query_map([&header.0], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    StoredLayout {
+        ddl,
+        header,
+        point,
+        rows,
+    }
+}
+
+/// Room 0's three messages of `seeded(3)` and the membership they rest
+/// on, as stored ids.
+fn room0_held() -> BTreeSet<Vec<u8>> {
+    [id(3, 0), id(3, 2), id(3, 4), id(2, 0)]
+        .iter()
+        .map(|row| row.0.as_bytes().to_vec())
+        .collect()
+}
+
+fn stored_ids(layout: &StoredLayout) -> BTreeSet<Vec<u8>> {
+    layout.rows.iter().map(|(_, id)| id.clone()).collect()
+}
+
+/// Alice's durable replica, linked to `server`, with `query` open and
+/// settled.
+fn durable_with(
+    server: &Db,
+    path: &std::path::Path,
+    query: &Query,
+) -> (Db, jazz::db::Upstream, jazz::db::SubscriptionStream) {
+    let client = open_durable(path, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let prepared = client.prepare_query(query).unwrap();
+    let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(server, &client);
+    (client, upstream, stream)
+}
+
+/// `jazz.read-holds.v1` as a store holds it: the three tables and the
+/// index as declared; one header per point, numbered, matching its
+/// watermark row (layout version 1, the same `through` and read context,
+/// and the epoch the point's `holds_epoch` column carries); one row per
+/// held row, by table number and 16-byte id, with the table names
+/// numbered once. A one-row change moves the header, with a new epoch,
+/// and adds just that row.
 #[test]
 fn held_sets_are_stored_as_jazz_read_holds_v1() {
     let server = seeded(3);
     let dir = StoreDir::new("read-holds-layout");
     let path = dir.store();
-    let client = open_durable(&path, alice());
-    let (client_side, server_side, _) = pipe();
-    let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice()).unwrap();
-    let messages = client.prepare_query(&Query::from("messages")).unwrap();
-    let _messages = block_on(client.subscribe(&messages, ReadOpts::default())).unwrap();
-    pump(&server, &client);
+    let (_client, _upstream, _messages) = durable_with(&server, &path, &Query::from("messages"));
 
-    let stored = |path: &std::path::Path| {
-        let conn = rusqlite::Connection::open(path).unwrap();
-        let ddl: Vec<String> = conn
-            .prepare(
-                "SELECT sql FROM sqlite_master WHERE name LIKE '_jazz_read_holds%' ORDER BY name",
-            )
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        let header: (Vec<u8>, i64, i64, Option<Vec<u8>>) = conn
-            .query_row(
-                "SELECT key, version, through, context FROM _jazz_read_holds_points",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .unwrap();
-        let point: (i64, Option<Vec<u8>>) = conn
-            .query_row(
-                "SELECT through, context FROM _jazz_watermarks WHERE key = ?1",
-                [&header.0],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        let rows: Vec<(String, Vec<u8>)> = conn
-            .prepare("SELECT tbl, id FROM _jazz_read_holds WHERE key = ?1 ORDER BY tbl, id")
-            .unwrap()
-            .query_map([&header.0], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        (ddl, header, point, rows)
-    };
-    let (ddl, header, point, rows) = stored(&path);
+    let layout = stored_layout(&path);
     assert_eq!(
-        ddl,
+        layout.ddl,
         [
-            "CREATE TABLE _jazz_read_holds (key BLOB NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, \
-             PRIMARY KEY (key, tbl, id)) WITHOUT ROWID",
-            "CREATE TABLE _jazz_read_holds_points (key BLOB PRIMARY KEY, version INTEGER NOT NULL, \
-             through INTEGER NOT NULL, context BLOB) WITHOUT ROWID",
+            "CREATE TABLE _jazz_read_holds (point INTEGER NOT NULL, tbl INTEGER NOT NULL, \
+             id BLOB NOT NULL, PRIMARY KEY (point, tbl, id)) WITHOUT ROWID",
+            "CREATE TABLE _jazz_read_holds_points (point INTEGER PRIMARY KEY, key BLOB NOT NULL \
+             UNIQUE, version INTEGER NOT NULL, through INTEGER NOT NULL, context BLOB, \
+             epoch INTEGER NOT NULL)",
             "CREATE INDEX _jazz_read_holds_row ON _jazz_read_holds (tbl, id)",
+            "CREATE TABLE _jazz_read_holds_tables (tbl INTEGER PRIMARY KEY, name TEXT NOT NULL \
+             UNIQUE)",
         ]
     );
-    assert_eq!(header.0.len(), 32, "keyed by the watermark key");
-    assert_eq!(header.1, 1, "layout version 1");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let watermarks: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = '_jazz_watermarks'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(
-        (header.2, header.3.clone()),
-        point,
-        "the header is its point's"
+        watermarks,
+        "CREATE TABLE _jazz_watermarks (key BLOB PRIMARY KEY, through INTEGER NOT NULL, \
+         context BLOB, holds_epoch INTEGER) WITHOUT ROWID",
+        "the epoch column is added to the existing table"
     );
-    // Room 0's three messages and the membership they rest on.
-    let ids: BTreeSet<Vec<u8>> = rows.iter().map(|(_, id)| id.clone()).collect();
-    let expected: BTreeSet<Vec<u8>> = [id(3, 0), id(3, 2), id(3, 4), id(2, 0)]
-        .iter()
-        .map(|row| row.0.as_bytes().to_vec())
-        .collect();
-    assert_eq!(ids, expected, "{rows:?}");
-    assert_eq!(rows.len(), 4);
+    let tables: i64 = conn
+        .query_row("SELECT count(*) FROM _jazz_read_holds_tables", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(tables, 2, "messages and memberships, numbered once");
+    drop(conn);
+    assert_eq!(layout.header.0.len(), 32, "keyed by the watermark key");
+    assert_eq!(layout.header.1, 1, "layout version 1");
+    assert_eq!(
+        layout.point,
+        (
+            layout.header.2,
+            layout.header.3.clone(),
+            Some(layout.header.4)
+        ),
+        "the header is its point's, epoch included"
+    );
+    assert_eq!(stored_ids(&layout), room0_held(), "{:?}", layout.rows);
+    assert_eq!(layout.rows.len(), 4);
 
     // One more message: the header moves with the point, one row is added.
     jazz::db::block_on(server.insert(
@@ -3618,15 +3690,210 @@ fn held_sets_are_stored_as_jazz_read_holds_v1() {
         },
     ))
     .unwrap();
-    pump(&server, &client);
-    let (_, moved, point, after) = stored(&path);
-    assert!(moved.2 > header.2, "the point moved");
-    assert_eq!((moved.2, moved.3), point);
-    assert_eq!(after.len(), 5);
+    pump(&server, &_client);
+    let moved = stored_layout(&path);
+    assert!(moved.header.2 > layout.header.2, "the point moved");
+    assert_ne!(moved.header.4, layout.header.4, "with a new epoch");
+    assert_eq!(
+        moved.point,
+        (moved.header.2, moved.header.3.clone(), Some(moved.header.4))
+    );
+    assert_eq!(moved.rows.len(), 5);
     assert!(
-        after
+        moved
+            .rows
             .iter()
             .any(|(_, row)| *row == id(3, 900).0.as_bytes().to_vec())
+    );
+}
+
+/// A point a build without held sets re-stored is unvouched, even at the
+/// same `through` and context: such a build writes `_jazz_watermarks`
+/// naming only its own columns, which leaves `holds_epoch` empty, and
+/// never touches the held rows, which may no longer be the read's. The
+/// next connection's settle therefore rewrites the set whole, and nothing
+/// of the old rows survives.
+///
+/// ```text
+/// alice: messages ─settle─► point + set (epoch e)
+/// older build: re-store point (holds_epoch NULL); a stray row is left in the set
+/// alice reopens, resumes ─Settled─► set rewritten whole, epoch e' ≠ NULL
+/// ```
+#[test]
+fn a_point_an_older_build_restored_is_rewritten_whole_on_reconnect() {
+    let server = seeded(3);
+    let dir = StoreDir::new("read-holds-older-build");
+    let path = dir.store();
+    {
+        let (client, upstream, _messages) = durable_with(&server, &path, &Query::from("messages"));
+        assert!(client.detach_connection(&upstream));
+    }
+    let before = stored_layout(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        // As an older build re-stores a point it settled again.
+        conn.execute(
+            "INSERT OR REPLACE INTO _jazz_watermarks (key, through, context) \
+             SELECT key, through, context FROM _jazz_watermarks",
+            [],
+        )
+        .unwrap();
+        // A row the read no longer holds, left behind in its set.
+        let point: i64 = conn
+            .query_row("SELECT point FROM _jazz_read_holds_points", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let tbl: i64 = conn
+            .query_row("SELECT min(tbl) FROM _jazz_read_holds_tables", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        conn.execute(
+            "INSERT INTO _jazz_read_holds (point, tbl, id) VALUES (?1, ?2, ?3)",
+            rusqlite::params![point, tbl, id(3, 777).0.as_bytes().to_vec()],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        stored_layout(&path).point.2,
+        None,
+        "the older build left no epoch"
+    );
+
+    let (client, _upstream, _messages) = durable_with(&server, &path, &Query::from("messages"));
+    let after = stored_layout(&path);
+    assert_eq!(
+        stored_ids(&after),
+        room0_held(),
+        "rewritten whole: the stray row is gone"
+    );
+    assert_eq!(
+        after.point,
+        (after.header.2, after.header.3.clone(), Some(after.header.4)),
+        "vouched again"
+    );
+    assert_ne!(after.header.4, before.header.4);
+    drop(client);
+}
+
+/// A closed read's set is cleared on disk by an eviction that names one of
+/// its rows, even though no read in memory holds it: its header goes with
+/// its point. Reopened after a restart, the read is uncovered (it opens
+/// fresh, with no stored set to resume from) and its next settle writes
+/// its set whole.
+///
+/// ```text
+/// alice: room-0 messages ─settle, close─► point + set {m0, m2, m4, membership}
+///        all messages (open) ── membership deleted ─► AccessLost × 3
+/// alice restarts, reopens room-0 messages ─Read (no since)─► fresh, set rewritten whole
+/// ```
+#[test]
+fn an_eviction_while_a_read_is_closed_leaves_it_uncovered_after_a_reload() {
+    let server = seeded(3);
+    let dir = StoreDir::new("read-holds-closed-eviction");
+    let path = dir.store();
+    let room0 = Query::from("messages").filter(eq(col("room"), lit(Value::Uuid(id(1, 0).0))));
+    {
+        let (client, upstream, closed) = durable_with(&server, &path, &room0);
+        let all = client.prepare_query(&Query::from("messages")).unwrap();
+        let _all = block_on(client.subscribe(&all, ReadOpts::default())).unwrap();
+        pump(&server, &client);
+        drop(closed);
+        pump(&server, &client);
+        block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+        pump(&server, &client);
+        assert!(
+            ids(&client, None).is_empty(),
+            "the room's messages are evicted"
+        );
+        assert!(client.detach_connection(&upstream));
+    }
+    // The open read settles again, holding nothing: whatever header is left
+    // is its own, empty. No set on disk names a room-0 row any more.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT count(*) FROM _jazz_read_holds", [], |r| r.get(0))
+        .unwrap();
+    let headers: i64 = conn
+        .query_row("SELECT count(*) FROM _jazz_read_holds_points", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let left: Vec<(Vec<u8>, String, Vec<u8>)> = conn
+        .prepare(
+            "SELECT p.key, t.name, h.id FROM _jazz_read_holds h \
+             JOIN _jazz_read_holds_points p ON p.point = h.point \
+             JOIN _jazz_read_holds_tables t ON t.tbl = h.tbl",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let points: Vec<(Vec<u8>, i64)> = conn
+        .prepare("SELECT key, through FROM _jazz_watermarks")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    drop(conn);
+    // Only the open read's own point is left, with its own set; the closed
+    // read's point and its set are gone.
+    assert_eq!(
+        points.len(),
+        1,
+        "the closed read's point is forgotten: {points:?}"
+    );
+    assert_eq!(headers, 1, "and its header with it");
+    assert!(
+        left.iter().all(|(key, _, _)| *key == points[0].0),
+        "every stored row is the open read's: {left:?}"
+    );
+    let _ = rows;
+
+    // Access back, then the reload.
+    jazz::db::block_on(server.insert(
+        "memberships",
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("member", Value::String(subject())),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(id(2, 1)),
+            identity: jazz::db::WriteIdentity::Attribution(AuthorSubject::SYSTEM),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let client = open_durable(&path, alice());
+    let (client_side, server_side, _, resumes) = watched_pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    let prepared = client.prepare_query(&room0).unwrap();
+    let _reopened = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(*resumes.borrow(), [false], "uncovered: it opens fresh");
+    let layout = stored_layout(&path);
+    let mut expected = room0_held();
+    expected.remove(&id(2, 0).0.as_bytes().to_vec());
+    expected.insert(id(2, 1).0.as_bytes().to_vec());
+    // Written whole, as its holds now are (the server may still list the
+    // deleted membership among them: whatever it lists, the debug check
+    // holds the stored set to it).
+    assert!(
+        stored_ids(&layout).is_superset(&expected),
+        "and writes its set whole: {:?}",
+        layout.rows
+    );
+    assert_eq!(
+        layout.point,
+        (
+            layout.header.2,
+            layout.header.3.clone(),
+            Some(layout.header.4)
+        )
     );
 }
 

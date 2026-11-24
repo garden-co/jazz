@@ -1001,25 +1001,35 @@ resumed read leaves the replica with the same rows as a fresh one
 (`INV-SYNC-25`, `INV-SYNC-11`). A replica that cannot read its watermark opens
 the read fresh.
 
-Beside a live read's watermark the replica stores what that read held as of it,
-under the same key: the read's opening `Holds` plus the changes up to the
-`Settled` that moved the point, never what the store happens to hold. The
-layout is `jazz.read-holds.v1`: one row per held row in `_jazz_read_holds`
-(`key`, stored table, id), indexed by (table, id) so an eviction finds the
-points that count a row, and one header per point in `_jazz_read_holds_points`
-(`key`, layout `version` 1, the point's `through` and read context). The set and
-its header are written with the watermark, in the same tick. A write applies
-only the rows that changed since the last one when the stored header is the one
-this process wrote for the same read, as of an earlier point in the same
-context; otherwise (the first write, a store reopened, a whole `Holds` on a new
-connection, another read sharing the key, a changed context) it rewrites the
-key's rows whole. A point a read cannot vouch for (a one-shot read's, or a live
-read this connection has not told what it holds) is stored without a set. A set
-speaks for its point only while its header matches that point's `through` and
-context: a build without these tables may rewrite or drop points and leave a
-header that no longer matches, which is then ignored, and a key with no header
-has no set whatever rows remain. The tables are created by the first set, so a
-store that never had a live remote read is unchanged.
+Beside a live read's watermark the replica stores what that read held as of it:
+the read's opening `Holds` plus the changes up to the `Settled` that moved the
+point, never what the store happens to hold. The layout is `jazz.read-holds.v1`:
+one header per point in `_jazz_read_holds_points` (a point number, the watermark
+key, layout `version` 1, the point's `through` and read context, and a random
+`epoch` drawn at each write), the stored table names by number in
+`_jazz_read_holds_tables`, and one row per held row in `_jazz_read_holds`
+(point, table number, id), indexed by (table, id) so an eviction finds the
+points that count a row. The first held set also adds a nullable `holds_epoch`
+column to `_jazz_watermarks`; every held-set write stores its epoch there and in
+the header, in the same tick as the watermark.
+
+A set speaks for its point only while its header matches the point's watermark
+row, `through`, context and epoch alike. A build without held sets writes
+`_jazz_watermarks` naming only its own columns, so a point it re-stores has no
+epoch and is unvouched, even at the same `through`; a key with no header has no
+set, whatever rows remain. A point a read cannot vouch for (a one-shot read's,
+or a live read this connection has not told what it holds) is stored without a
+set.
+
+A write applies only the rows that changed since the base it builds on: the set
+this process last wrote, or first loaded, for the same read in the same
+context. Within the write's own tick the header and watermark row are read
+again and must still match that base, epoch included; otherwise the key's rows
+are rewritten whole. A whole `Holds` (a reconnect's first, or a `ReplaceHolds`)
+is diffed against that base, and nothing is written before the read's next
+`Settled`. An eviction clears the header and rows of every point whose stored
+set lists the row, open or closed. The tables and the column are created by the
+first set, so a store that never had a live remote read is unchanged.
 
 A watermark claims the replica holds the result as it settled. Two events make
 that untrue for results the replica cannot name, so the replica forgets every

@@ -2861,6 +2861,9 @@ pub(crate) struct Client {
     /// by watermark key: the bases a diff write may build on. Kept in step
     /// with every write and delete of those tables.
     written_holds: HashMap<[u8; 32], HoldsHeader>,
+    /// The numbers `_jazz_read_holds_tables` gives stored table names, once
+    /// read (`None`: not read yet).
+    holds_tables: Option<HashMap<String, i64>>,
 }
 
 /// A session's commit a relay uploads as its own, for its upload: the
@@ -6837,45 +6840,68 @@ pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld
 const WATERMARKS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_watermarks \
     (key BLOB PRIMARY KEY, through INTEGER NOT NULL, context BLOB) WITHOUT ROWID";
 
-/// `jazz.read-holds.v1`, the rows: per resume point (its
-/// `_jazz_watermarks` key), each row its live read held as of that point,
-/// as a result or as support, by stored table and id. The index finds the
-/// points that count an evicted row. Created by the first held set stored,
-/// with [`READ_HOLDS_POINTS_DDL`], so that opening an existing store without
-/// them leaves the file byte-identical; a store that never had a live
-/// remote read never has them.
+/// `jazz.read-holds.v1`, the headers: one per resume point that has a
+/// held set, numbered (`point`, which the rows are keyed by), under its
+/// `_jazz_watermarks` key, with the point it describes (`through` in read
+/// `context`) and the `epoch` of its last write. A set counts only while
+/// its header matches its watermark row, that row's `holds_epoch`
+/// included: a build that predates these tables re-stores points without
+/// the epoch (`NULL`), so a point it rewrote, even at the same `through`,
+/// is unvouched. A key with no header has no set, whatever rows remain.
+/// Created by the first held set stored, with the tables below and the
+/// `holds_epoch` column, so that opening an existing store without them
+/// leaves the file byte-identical.
+const READ_HOLDS_POINTS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_read_holds_points \
+    (point INTEGER PRIMARY KEY, key BLOB NOT NULL UNIQUE, version INTEGER NOT NULL, \
+     through INTEGER NOT NULL, context BLOB, epoch INTEGER NOT NULL)";
+
+/// `jazz.read-holds.v1`, the stored table names the rows name by number.
+const READ_HOLDS_TABLES_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_read_holds_tables \
+    (tbl INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)";
+
+/// `jazz.read-holds.v1`, the rows: each row a point's live read held as of
+/// it, as a result or as support, by table number and id. The index finds
+/// the points that count an evicted row.
 const READ_HOLDS_DDL: [&str; 2] = [
     "CREATE TABLE IF NOT EXISTS _jazz_read_holds \
-     (key BLOB NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, PRIMARY KEY (key, tbl, id)) \
-     WITHOUT ROWID",
+     (point INTEGER NOT NULL, tbl INTEGER NOT NULL, id BLOB NOT NULL, \
+     PRIMARY KEY (point, tbl, id)) WITHOUT ROWID",
     "CREATE INDEX IF NOT EXISTS _jazz_read_holds_row ON _jazz_read_holds (tbl, id)",
 ];
-
-/// `jazz.read-holds.v1`, the headers: per resume point, which point its
-/// rows in `_jazz_read_holds` describe (`through` in read `context`) and
-/// the layout they are in (`version`). A point's rows count only while its
-/// header matches its `_jazz_watermarks` row: a build that predates the
-/// tables rewrites or drops points without them, which leaves a header
-/// that no longer matches, so its rows are ignored. A key with no header
-/// has no stored set, whatever rows it may still have.
-const READ_HOLDS_POINTS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_read_holds_points \
-    (key BLOB PRIMARY KEY, version INTEGER NOT NULL, through INTEGER NOT NULL, context BLOB) \
-    WITHOUT ROWID";
 
 /// The `version` of a `jazz.read-holds.v1` header. A header of another
 /// version is no header: its read counts as unknown.
 const READ_HOLDS_V1: i64 = 1;
 
-/// Which point a key's stored held set describes, and which live read wrote
-/// it, as this process last wrote it: the base a later write may diff
-/// against. Only a header this process wrote is one: after a reopen,
-/// nothing in memory vouches for what the store holds, so the next write
-/// is whole.
+/// A key's stored held set as this process last wrote it, or first loaded
+/// it: the base a later write may diff against, and which live read owns
+/// it. A diff is written only after the header and watermark row on disk
+/// are read again, in the write's own scope, and still match this, epoch
+/// included; otherwise the write is whole.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HoldsHeader {
     writer: u64,
     through: u64,
     context: Option<[u8; 32]>,
+    epoch: i64,
+}
+
+/// A stored point as `_jazz_watermarks` holds it: `through`, read context
+/// and the epoch of the held set written with it (`None`: none was, or a
+/// build without held sets re-stored it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StoredPoint {
+    through: u64,
+    context: Option<[u8; 32]>,
+    epoch: Option<i64>,
+}
+
+/// Whether a held-set header speaks for the stored point beside it: the
+/// same `through`, context and epoch.
+fn vouches(header: &HoldsHeader, point: &StoredPoint) -> bool {
+    header.through == point.through
+        && header.context == point.context
+        && point.epoch == Some(header.epoch)
 }
 
 /// A live read's net changes to its holds since its held set was last
@@ -7282,13 +7308,15 @@ impl Inner {
     /// not list any of the rows: a live read this connection told what it
     /// holds, whose point settled in this process, by its holds and the
     /// rows they released since that point moved; any other read, open or
-    /// closed, by the held set stored with its point (`_jazz_read_holds`).
-    /// A point with no such set (a one-shot read's, one stored before the
-    /// table existed, or by a build without it) is forgotten, since nothing
-    /// says which rows it held. Reads sharing a watermark key (the same
-    /// query, binding and view: two live reads, or a live and a one-shot
-    /// one) share its stored point, kept only when every one of them keeps
-    /// it.
+    /// closed, by the held set stored with its point, found through the
+    /// rows' index (see [`READ_HOLDS_POINTS_DDL`]). A point with no vouched
+    /// set (a one-shot read's, one stored before the tables existed or
+    /// re-stored by a build without them) is forgotten, since nothing says
+    /// which rows it held. A forgotten point takes its held set with it,
+    /// header and rows, so no later write diffs against it. Reads sharing a
+    /// watermark key (the same query, binding and view: two live reads, or
+    /// a live and a one-shot one) share its stored point, kept only when
+    /// every one of them keeps it.
     ///
     /// `table` is a stored name, as holds, `AccessLost` and evictions name
     /// tables: a table no holds name is one no told read holds a row of.
@@ -7302,9 +7330,20 @@ impl Inner {
         let points = self.stored_watermarks()?;
         let headers = self.holds_headers()?;
         let holding = self.keys_holding(table, rows)?;
+        let stored: HashMap<[u8; 32], StoredPoint> = points
+            .iter()
+            .filter_map(|(key, point)| point.map(|point| (*key, point)))
+            .collect();
         let client = self.client.as_mut().expect("client");
         let unaffected = |key: &[u8; 32], through: u64, context: Option<[u8; 32]>| {
-            headers.get(key) == Some(&(through, context)) && !holding.contains(key)
+            !holding.contains(key)
+                && stored.get(key).is_some_and(|point| {
+                    point.through == through
+                        && point.context == context
+                        && headers
+                            .get(key)
+                            .is_some_and(|header| vouches(header, point))
+                })
         };
         // A stored point is kept only when every read using its key keeps
         // it: reads sharing a key read the same result, and any one of them
@@ -7325,17 +7364,17 @@ impl Inner {
                         && !counts(&live.holds)
                         && !counts(&live.released)
                 });
-                held_here || unaffected(&key, through, read.context)
+                // A set on disk that lists the row is cleared with its
+                // point even when this read's own holds do not list it.
+                (held_here && !holding.contains(&key)) || unaffected(&key, through, read.context)
             });
             *keeps.entry(key).or_insert(true) &= keep;
         }
         // A closed read's point, by the set stored with it.
-        for (key, point) in &points {
-            if let Some((through, context)) = *point {
-                keeps
-                    .entry(*key)
-                    .or_insert_with(|| unaffected(key, through, context));
-            }
+        for (key, point) in &stored {
+            keeps
+                .entry(*key)
+                .or_insert_with(|| unaffected(key, point.through, point.context));
         }
         let kept: HashSet<[u8; 32]> = keeps
             .into_iter()
@@ -7375,6 +7414,9 @@ impl Inner {
             .map_err(storage)?;
             gone.push(*raw);
         }
+        // Sets on disk that list the row lose their header even where their
+        // key had no point left to forget.
+        gone.extend(holding.iter().filter(|key| !kept.contains(*key)).copied());
         for raw in self.malformed_watermarks()? {
             self.exec(
                 "DELETE FROM _jazz_watermarks WHERE key = ?1",
@@ -7382,21 +7424,45 @@ impl Inner {
             )
             .map_err(storage)?;
         }
+        gone.sort_unstable();
+        gone.dedup();
         self.forget_read_holds(&gone)?;
         Ok(())
     }
 
-    /// The stored resume points, by key: where each settled through and in
-    /// which read context (`None` for one this build cannot read, which no
-    /// read resumes from and which is forgotten with the rest).
-    #[allow(clippy::type_complexity)]
-    fn stored_watermarks(&self) -> Result<Vec<([u8; 32], Option<(u64, Option<[u8; 32]>)>)>, Error> {
+    /// Whether `_jazz_watermarks` has the `holds_epoch` column yet.
+    fn watermarks_have_epoch(&self) -> Result<bool, Error> {
+        if !self.has_table("_jazz_watermarks")? {
+            return Ok(false);
+        }
+        self.conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('_jazz_watermarks') \
+                 WHERE name = 'holds_epoch'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .map_err(storage)
+    }
+
+    /// The stored resume points, by key (`None` for one this build cannot
+    /// read, which no read resumes from and which is forgotten with the
+    /// rest).
+    fn stored_watermarks(&self) -> Result<Vec<([u8; 32], Option<StoredPoint>)>, Error> {
         if !self.has_table("_jazz_watermarks")? {
             return Ok(Vec::new());
         }
+        let epoch = if self.watermarks_have_epoch()? {
+            "holds_epoch"
+        } else {
+            "NULL"
+        };
         let mut statement = self
             .conn
-            .prepare("SELECT key, through, context FROM _jazz_watermarks")
+            .prepare(&format!(
+                "SELECT key, through, context, {epoch} FROM _jazz_watermarks"
+            ))
             .map_err(storage)?;
         let rows = statement
             .query_map([], |row| {
@@ -7404,21 +7470,25 @@ impl Inner {
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
                 ))
             })
             .map_err(storage)?;
         let mut points = Vec::new();
         for row in rows {
-            let (key, through, context) = row.map_err(storage)?;
+            let (key, through, context, epoch) = row.map_err(storage)?;
             let Ok(key) = <[u8; 32]>::try_from(key.as_slice()) else {
                 continue;
             };
             let point = match context {
-                None => Some((through as u64, None)),
-                Some(context) => <[u8; 32]>::try_from(context.as_slice())
-                    .ok()
-                    .map(|context| (through as u64, Some(context))),
-            };
+                None => Some(None),
+                Some(context) => <[u8; 32]>::try_from(context.as_slice()).ok().map(Some),
+            }
+            .map(|context| StoredPoint {
+                through: through as u64,
+                context,
+                epoch,
+            });
             points.push((key, point));
         }
         Ok(points)
@@ -7440,109 +7510,96 @@ impl Inner {
         keys.collect::<Result<_, _>>().map_err(storage)
     }
 
-    /// Record that a remote query's result settled through authority seq
-    /// `through`, replacing where it had settled before, with what its live
-    /// read held as of that point (`holds`: the writing read's id and what
-    /// to write; `None` for a read that cannot say: a one-shot read, or a
-    /// live one this connection has not told what it holds). The held set
-    /// and its header are written with the point, in the same tick scope,
-    /// or removed: a point is never left with a set that describes another
-    /// one.
-    /// It is stamped with this connection's read context; before the
-    /// upstream's `Welcome` said which, nothing is stored.
-    fn store_watermark(
-        &mut self,
-        key: &[u8; 32],
-        through: u64,
-        holds: Option<(u64, HoldsWrite)>,
-    ) -> Result<(), Error> {
-        let Some(context) = self.client.as_ref().and_then(|client| client.context) else {
-            return Ok(());
-        };
-        self.exec(WATERMARKS_DDL, []).map_err(storage)?;
-        self.exec(
-            "INSERT OR REPLACE INTO _jazz_watermarks (key, through, context) VALUES (?1, ?2, ?3)",
-            rusqlite::params![
-                key.as_slice(),
-                through as i64,
-                context.map(|context| context.to_vec())
-            ],
-        )
-        .map_err(storage)?;
-        let Some((writer, write)) = holds else {
-            return self.forget_read_holds(&[*key]);
-        };
-        for ddl in READ_HOLDS_DDL {
-            self.exec(ddl, []).map_err(storage)?;
+    /// The stored point under `key`, if any.
+    fn stored_watermark(&self, key: &[u8; 32]) -> Result<Option<StoredPoint>, Error> {
+        if !self.has_table("_jazz_watermarks")? {
+            return Ok(None);
         }
-        self.exec(READ_HOLDS_POINTS_DDL, []).map_err(storage)?;
-        let insert = "INSERT OR IGNORE INTO _jazz_read_holds (key, tbl, id) VALUES (?1, ?2, ?3)";
-        match write {
-            HoldsWrite::Whole(held) => {
-                self.exec(
-                    "DELETE FROM _jazz_read_holds WHERE key = ?1",
-                    rusqlite::params![key.as_slice()],
-                )
-                .map_err(storage)?;
-                for (table, rows) in &held {
-                    for row in rows {
-                        self.exec(
-                            insert,
-                            rusqlite::params![key.as_slice(), table, row.as_slice()],
-                        )
-                        .map_err(storage)?;
-                    }
-                }
-            }
-            HoldsWrite::Diff(delta) => {
-                for (table, row) in &delta.removed {
-                    self.exec(
-                        "DELETE FROM _jazz_read_holds WHERE key = ?1 AND tbl = ?2 AND id = ?3",
-                        rusqlite::params![key.as_slice(), table, row.as_slice()],
-                    )
-                    .map_err(storage)?;
-                }
-                for (table, row) in &delta.added {
-                    self.exec(
-                        insert,
-                        rusqlite::params![key.as_slice(), table, row.as_slice()],
-                    )
-                    .map_err(storage)?;
-                }
-            }
-        }
-        self.exec(
-            "INSERT OR REPLACE INTO _jazz_read_holds_points (key, version, through, context) \
-             VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![
-                key.as_slice(),
-                READ_HOLDS_V1,
-                through as i64,
-                context.map(|context| context.to_vec())
-            ],
-        )
-        .map_err(storage)?;
-        self.client.as_mut().expect("client").written_holds.insert(
-            *key,
-            HoldsHeader {
-                writer,
-                through,
+        let epoch = if self.watermarks_have_epoch()? {
+            "holds_epoch"
+        } else {
+            "NULL"
+        };
+        let found = self
+            .conn
+            .cached_row(
+                &format!("SELECT through, context, {epoch} FROM _jazz_watermarks WHERE key = ?1"),
+                [key.as_slice()],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<Vec<u8>>>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(storage)?;
+        Ok(found.and_then(|(through, context, epoch)| {
+            let context = match context {
+                None => None,
+                Some(context) => Some(<[u8; 32]>::try_from(context.as_slice()).ok()?),
+            };
+            Some(StoredPoint {
+                through: through as u64,
                 context,
-            },
-        );
-        Ok(())
+                epoch,
+            })
+        }))
     }
 
-    /// The stored held-set headers, by key: the point each describes
-    /// (`through`, read context). Headers of another version are left out.
-    #[allow(clippy::type_complexity)]
-    fn holds_headers(&self) -> Result<HashMap<[u8; 32], (u64, Option<[u8; 32]>)>, Error> {
+    /// The held-set header under `key`: its point number and what it says
+    /// (`None`: none, or one of another version).
+    fn holds_header(&self, key: &[u8; 32]) -> Result<Option<(i64, HoldsHeader)>, Error> {
+        if !self.has_table("_jazz_read_holds_points")? {
+            return Ok(None);
+        }
+        let found = self
+            .conn
+            .cached_row(
+                "SELECT point, version, through, context, epoch FROM _jazz_read_holds_points \
+                 WHERE key = ?1",
+                [key.as_slice()],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, Option<Vec<u8>>>(3)?,
+                        r.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(storage)?;
+        Ok(found.and_then(|(point, version, through, context, epoch)| {
+            if version != READ_HOLDS_V1 {
+                return None;
+            }
+            let context = match context {
+                None => None,
+                Some(context) => Some(<[u8; 32]>::try_from(context.as_slice()).ok()?),
+            };
+            Some((
+                point,
+                HoldsHeader {
+                    writer: 0,
+                    through: through as u64,
+                    context,
+                    epoch,
+                },
+            ))
+        }))
+    }
+
+    /// Every stored held-set header, by key (writer unset).
+    fn holds_headers(&self) -> Result<HashMap<[u8; 32], HoldsHeader>, Error> {
         if !self.has_table("_jazz_read_holds_points")? {
             return Ok(HashMap::new());
         }
         let mut statement = self
             .conn
-            .prepare("SELECT key, version, through, context FROM _jazz_read_holds_points")
+            .prepare("SELECT key, version, through, context, epoch FROM _jazz_read_holds_points")
             .map_err(storage)?;
         let rows = statement
             .query_map([], |row| {
@@ -7551,12 +7608,13 @@ impl Inner {
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })
             .map_err(storage)?;
         let mut headers = HashMap::new();
         for row in rows {
-            let (key, version, through, context) = row.map_err(storage)?;
+            let (key, version, through, context, epoch) = row.map_err(storage)?;
             let Ok(key) = <[u8; 32]>::try_from(key.as_slice()) else {
                 continue;
             };
@@ -7568,26 +7626,270 @@ impl Inner {
                 },
             };
             if version == READ_HOLDS_V1 {
-                headers.insert(key, (through as u64, context));
+                headers.insert(
+                    key,
+                    HoldsHeader {
+                        writer: 0,
+                        through: through as u64,
+                        context,
+                        epoch,
+                    },
+                );
             }
         }
         Ok(headers)
     }
 
+    /// The number `_jazz_read_holds_tables` gives stored table `table`,
+    /// given it one if `create` (`None`: it has none).
+    fn holds_table(&mut self, table: &str, create: bool) -> Result<Option<i64>, Error> {
+        if self
+            .client
+            .as_ref()
+            .is_some_and(|client| client.holds_tables.is_none())
+        {
+            let mut tables = HashMap::new();
+            if self.has_table("_jazz_read_holds_tables")? {
+                let mut statement = self
+                    .conn
+                    .prepare("SELECT tbl, name FROM _jazz_read_holds_tables")
+                    .map_err(storage)?;
+                let rows = statement
+                    .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                    .map_err(storage)?;
+                for row in rows {
+                    let (number, name) = row.map_err(storage)?;
+                    tables.insert(name, number);
+                }
+            }
+            self.client.as_mut().expect("client").holds_tables = Some(tables);
+        }
+        let tables = self
+            .client
+            .as_ref()
+            .and_then(|client| client.holds_tables.as_ref())
+            .expect("loaded");
+        if let Some(number) = tables.get(table) {
+            return Ok(Some(*number));
+        }
+        if !create {
+            return Ok(None);
+        }
+        self.exec(READ_HOLDS_TABLES_DDL, []).map_err(storage)?;
+        self.exec(
+            "INSERT INTO _jazz_read_holds_tables (name) VALUES (?1)",
+            rusqlite::params![table],
+        )
+        .map_err(storage)?;
+        let number = self.conn.last_insert_rowid().map_err(storage)?;
+        self.client
+            .as_mut()
+            .and_then(|client| client.holds_tables.as_mut())
+            .expect("loaded")
+            .insert(table.to_owned(), number);
+        Ok(Some(number))
+    }
+
+    /// Record that a remote query's result settled through authority seq
+    /// `through`, replacing where it had settled before, with what its live
+    /// read held as of that point (`holds`: the writing read's id and what
+    /// to write; `None` for a read that cannot say: a one-shot read, or a
+    /// live one this connection has not told what it holds). The held set,
+    /// its header and the point's `holds_epoch` are written together, in
+    /// the same tick scope, or the set is removed: a point is never left
+    /// with a set that describes another one.
+    ///
+    /// A diff is written only onto the base this process wrote or loaded:
+    /// its header and watermark row are read again first, here, and must
+    /// still say what the base does, epoch included. If they do not
+    /// (another connection to the file, a build without held sets, any
+    /// clear), nothing is written and this returns `false`: the caller
+    /// writes the whole set instead.
+    ///
+    /// It is stamped with this connection's read context; before the
+    /// upstream's `Welcome` said which, nothing is stored.
+    fn store_watermark(
+        &mut self,
+        key: &[u8; 32],
+        through: u64,
+        holds: Option<(u64, HoldsWrite)>,
+    ) -> Result<bool, Error> {
+        let Some(context) = self.client.as_ref().and_then(|client| client.context) else {
+            return Ok(true);
+        };
+        let mut point = None;
+        if let Some((_, HoldsWrite::Diff(_))) = &holds {
+            let base = self
+                .client
+                .as_ref()
+                .and_then(|client| client.written_holds.get(key))
+                .copied();
+            let header = self.holds_header(key)?;
+            let stored = self.stored_watermark(key)?;
+            let still = match (base, header, stored) {
+                (Some(base), Some((number, header)), Some(stored)) => {
+                    let same = header.through == base.through
+                        && header.context == base.context
+                        && header.epoch == base.epoch
+                        && vouches(&header, &stored);
+                    same.then_some(number)
+                }
+                _ => None,
+            };
+            match still {
+                Some(number) => point = Some(number),
+                None => return Ok(false),
+            }
+        }
+        self.exec(WATERMARKS_DDL, []).map_err(storage)?;
+        let Some((writer, write)) = holds else {
+            self.exec(
+                "INSERT OR REPLACE INTO _jazz_watermarks (key, through, context) \
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    key.as_slice(),
+                    through as i64,
+                    context.map(|context| context.to_vec())
+                ],
+            )
+            .map_err(storage)?;
+            self.forget_read_holds(&[*key])?;
+            return Ok(true);
+        };
+        if !self.watermarks_have_epoch()? {
+            self.exec(
+                "ALTER TABLE _jazz_watermarks ADD COLUMN holds_epoch INTEGER",
+                [],
+            )
+            .map_err(storage)?;
+        }
+        let epoch = (uuid::Uuid::new_v4().as_u64_pair().0 >> 1) as i64;
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_watermarks (key, through, context, holds_epoch) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                key.as_slice(),
+                through as i64,
+                context.map(|context| context.to_vec()),
+                epoch
+            ],
+        )
+        .map_err(storage)?;
+        self.exec(READ_HOLDS_POINTS_DDL, []).map_err(storage)?;
+        self.exec(READ_HOLDS_TABLES_DDL, []).map_err(storage)?;
+        for ddl in READ_HOLDS_DDL {
+            self.exec(ddl, []).map_err(storage)?;
+        }
+        let point = match point {
+            Some(point) => point,
+            None => match self.holds_header(key)?.map(|(point, _)| point).or(self
+                .conn
+                .cached_row(
+                    "SELECT point FROM _jazz_read_holds_points WHERE key = ?1",
+                    [key.as_slice()],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(storage)?)
+            {
+                Some(point) => point,
+                None => {
+                    self.exec(
+                        "INSERT INTO _jazz_read_holds_points \
+                         (key, version, through, context, epoch) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![
+                            key.as_slice(),
+                            READ_HOLDS_V1,
+                            through as i64,
+                            context.map(|context| context.to_vec()),
+                            epoch
+                        ],
+                    )
+                    .map_err(storage)?;
+                    self.conn.last_insert_rowid().map_err(storage)?
+                }
+            },
+        };
+        let insert = "INSERT OR IGNORE INTO _jazz_read_holds (point, tbl, id) VALUES (?1, ?2, ?3)";
+        match write {
+            HoldsWrite::Whole(held) => {
+                self.exec(
+                    "DELETE FROM _jazz_read_holds WHERE point = ?1",
+                    rusqlite::params![point],
+                )
+                .map_err(storage)?;
+                for (table, rows) in &held {
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    let number = self.holds_table(table, true)?.expect("created");
+                    for row in rows {
+                        self.exec(insert, rusqlite::params![point, number, row.as_slice()])
+                            .map_err(storage)?;
+                    }
+                }
+            }
+            HoldsWrite::Diff(delta) => {
+                for (table, row) in &delta.removed {
+                    if let Some(number) = self.holds_table(table, false)? {
+                        self.exec(
+                            "DELETE FROM _jazz_read_holds WHERE point = ?1 AND tbl = ?2 AND id = ?3",
+                            rusqlite::params![point, number, row.as_slice()],
+                        )
+                        .map_err(storage)?;
+                    }
+                }
+                for (table, row) in &delta.added {
+                    let number = self.holds_table(table, true)?.expect("created");
+                    self.exec(insert, rusqlite::params![point, number, row.as_slice()])
+                        .map_err(storage)?;
+                }
+            }
+        }
+        self.exec(
+            "UPDATE _jazz_read_holds_points SET version = ?2, through = ?3, context = ?4, \
+             epoch = ?5 WHERE point = ?1",
+            rusqlite::params![
+                point,
+                READ_HOLDS_V1,
+                through as i64,
+                context.map(|context| context.to_vec()),
+                epoch
+            ],
+        )
+        .map_err(storage)?;
+        self.client.as_mut().expect("client").written_holds.insert(
+            *key,
+            HoldsHeader {
+                writer,
+                through,
+                context,
+                epoch,
+            },
+        );
+        Ok(true)
+    }
+
     /// The keys whose stored held sets list any of `rows` of stored table
     /// `table`, by the rows' index.
-    fn keys_holding(&self, table: &str, rows: &[[u8; 16]]) -> Result<HashSet<[u8; 32]>, Error> {
+    fn keys_holding(&mut self, table: &str, rows: &[[u8; 16]]) -> Result<HashSet<[u8; 32]>, Error> {
         let mut keys = HashSet::new();
         if rows.is_empty() || !self.has_table("_jazz_read_holds")? {
             return Ok(keys);
         }
+        let Some(number) = self.holds_table(table, false)? else {
+            return Ok(keys);
+        };
         let mut statement = self
             .conn
-            .prepare_cached("SELECT key FROM _jazz_read_holds WHERE tbl = ?1 AND id = ?2")
+            .prepare_cached(
+                "SELECT p.key FROM _jazz_read_holds h JOIN _jazz_read_holds_points p \
+                 ON p.point = h.point WHERE h.tbl = ?1 AND h.id = ?2",
+            )
             .map_err(storage)?;
         for row in rows {
             let found = statement
-                .query_map(rusqlite::params![table, row.as_slice()], |r| {
+                .query_map(rusqlite::params![number, row.as_slice()], |r| {
                     r.get::<_, Vec<u8>>(0)
                 })
                 .map_err(storage)?;
@@ -7601,51 +7903,52 @@ impl Inner {
     }
 
     /// What the live read under `key` held as of its stored point at
-    /// `through` in `context`, if that was stored.
+    /// `through` in `context`, if a vouched set was stored with it: the
+    /// rows and the header they were loaded under.
+    #[allow(clippy::type_complexity)]
     fn stored_holds_for(
         &self,
         key: &[u8; 32],
         through: u64,
         context: Option<[u8; 32]>,
-    ) -> Result<Option<HashMap<String, HashSet<[u8; 16]>>>, Error> {
-        if !self.has_table("_jazz_read_holds_points")? {
+    ) -> Result<Option<(HashMap<String, HashSet<[u8; 16]>>, HoldsHeader)>, Error> {
+        let Some((_, header)) = self.holds_header(key)? else {
+            return Ok(None);
+        };
+        let Some(point) = self.stored_watermark(key)? else {
+            return Ok(None);
+        };
+        if point.through != through || point.context != context || !vouches(&header, &point) {
             return Ok(None);
         }
-        let header = self
-            .conn
-            .cached_row(
-                "SELECT version, through, context FROM _jazz_read_holds_points WHERE key = ?1",
-                [key.as_slice()],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, Option<Vec<u8>>>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(storage)?;
-        let matches = header.is_some_and(|(version, stored, stored_context)| {
-            version == READ_HOLDS_V1
-                && stored as u64 == through
-                && stored_context.as_deref() == context.as_ref().map(|c| c.as_slice())
-        });
-        if !matches {
-            return Ok(None);
+        let rows = self.stored_rows(key)?;
+        // Load-time check (debug test builds): the header the rows were
+        // loaded under still matches its watermark row, epoch included.
+        #[cfg(any(test, all(debug_assertions, feature = "testing")))]
+        {
+            let again = self.stored_watermark(key)?.expect("point");
+            let (_, header_again) = self.holds_header(key)?.expect("header");
+            assert!(
+                vouches(&header_again, &again) && header_again == header,
+                "a loaded held set matches its point"
+            );
         }
-        Ok(Some(self.stored_rows(key)?))
+        Ok(Some((rows, header)))
     }
 
-    /// The rows stored for `key`, by table.
+    /// The rows stored for `key`, by stored table name.
     fn stored_rows(&self, key: &[u8; 32]) -> Result<HashMap<String, HashSet<[u8; 16]>>, Error> {
         let mut held: HashMap<String, HashSet<[u8; 16]>> = HashMap::new();
-        if !self.has_table("_jazz_read_holds")? {
+        if !self.has_table("_jazz_read_holds_points")? {
             return Ok(held);
         }
         let mut statement = self
             .conn
-            .prepare_cached("SELECT tbl, id FROM _jazz_read_holds WHERE key = ?1")
+            .prepare_cached(
+                "SELECT t.name, h.id FROM _jazz_read_holds_points p \
+                 JOIN _jazz_read_holds h ON h.point = p.point \
+                 JOIN _jazz_read_holds_tables t ON t.tbl = h.tbl WHERE p.key = ?1",
+            )
             .map_err(storage)?;
         let rows = statement
             .query_map([key.as_slice()], |r| {
@@ -7674,12 +7977,13 @@ impl Inner {
         }
         for key in keys {
             self.exec(
-                "DELETE FROM _jazz_read_holds_points WHERE key = ?1",
+                "DELETE FROM _jazz_read_holds WHERE point IN \
+                 (SELECT point FROM _jazz_read_holds_points WHERE key = ?1)",
                 rusqlite::params![key.as_slice()],
             )
             .map_err(storage)?;
             self.exec(
-                "DELETE FROM _jazz_read_holds WHERE key = ?1",
+                "DELETE FROM _jazz_read_holds_points WHERE key = ?1",
                 rusqlite::params![key.as_slice()],
             )
             .map_err(storage)?;
@@ -7688,11 +7992,10 @@ impl Inner {
     }
 
     /// Debug test builds (not release ones, which measure): after a tick,
-    /// each held set this process wrote is the
-    /// writing read's holds as of its point (its holds now, with the
-    /// changes since its last write undone). Diff writes that go wrong are
-    /// otherwise silent, and an over-claiming set is a gappy result shown
-    /// as covered.
+    /// each held set this process wrote is the writing read's holds as of
+    /// its point (its holds now, with the changes since its last write
+    /// undone). Diff writes that go wrong are otherwise silent, and an
+    /// over-claiming set is a gappy result shown as covered.
     #[cfg(any(test, all(debug_assertions, feature = "testing")))]
     fn check_stored_holds(&self) -> Result<(), Error> {
         let Some(client) = self.client.as_ref() else {
@@ -9269,6 +9572,7 @@ impl Client {
             forgotten: false,
             stored_points: None,
             written_holds: HashMap::new(),
+            holds_tables: None,
         }
     }
 }
@@ -10106,12 +10410,26 @@ impl Inner {
         // process's, or a read reopened) resumes knowing those rows: its
         // first `Holds` re-checks the ones it no longer holds, as after a
         // reconnect, and an eviction clears it only if they list the row.
+        // The first read in this process to load a key's set holds it as
+        // its base, which its next write may diff against; another read
+        // loading the same key does not replace it, and writes whole.
+        let context = read.context;
         if let (Some(key), Some(through)) = (read.watermark, read.through)
-            && let Ok(Some(stored)) = self.stored_holds_for(&key, through, read.context)
+            && let Ok(Some((stored, header))) = self.stored_holds_for(&key, through, context)
             && let Some(live) = read.live_mut()
         {
             live.holds = stored;
             live.settled_here = true;
+            let client = self.client.as_mut().expect("client");
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                client.written_holds.entry(key)
+            {
+                entry.insert(HoldsHeader {
+                    writer: id,
+                    ..header
+                });
+                live.unstored = Some(HoldsDelta::default());
+            }
         }
         let client = self.client.as_mut().expect("client");
         client.outbox.push(SyncMessage::Read {
@@ -11260,8 +11578,22 @@ impl Db {
                         }
                         // Live checkpoints retain their existing savepoint ordering:
                         // a subsequent membership eviction can invalidate them.
-                        if let Some(watermark) = live_watermark {
-                            inner.store_watermark(&watermark, through, live_holds)?;
+                        if let Some(watermark) = live_watermark
+                            && !inner.store_watermark(&watermark, through, live_holds)?
+                        {
+                            // The base moved on disk: the whole set.
+                            let whole = inner
+                                .client
+                                .as_ref()
+                                .and_then(|client| client.reads.get(&id))
+                                .and_then(ActiveRead::live)
+                                .map(|live| live.holds.clone())
+                                .unwrap_or_default();
+                            inner.store_watermark(
+                                &watermark,
+                                through,
+                                Some((id, HoldsWrite::Whole(whole))),
+                            )?;
                         }
                     }
                     SyncMessage::CheckAllowedResult { id, result } => {
@@ -11558,10 +11890,16 @@ impl Db {
                             } else {
                                 None
                             };
-                            // A whole set leaves no base to diff against.
-                            if before.is_some() {
-                                live.unstored = None;
-                            }
+                            // A whole set is diffed against the base, when
+                            // there is one, once it applied: the changes
+                            // pending since the last write, then the whole
+                            // set against what the read held before it. The
+                            // write waits for the read's `Settled`.
+                            let pending = if before.is_some() {
+                                live.unstored.take()
+                            } else {
+                                None
+                            };
                             for (table, row) in removed {
                                 if let Some(rows) = live.holds.get_mut(&table) {
                                     rows.remove(&row);
@@ -11579,6 +11917,25 @@ impl Db {
                                     delta.add((table.clone(), row));
                                 }
                                 live.holds.entry(table).or_default().insert(row);
+                            }
+                            if let (Some(before), Some(mut delta)) = (&before, pending) {
+                                for (table, rows) in before {
+                                    let now = live.holds.get(table);
+                                    for row in rows {
+                                        if now.is_none_or(|now| !now.contains(row)) {
+                                            delta.remove((table.clone(), *row));
+                                        }
+                                    }
+                                }
+                                for (table, rows) in &live.holds {
+                                    let then = before.get(table);
+                                    for row in rows {
+                                        if then.is_none_or(|then| !then.contains(row)) {
+                                            delta.add((table.clone(), *row));
+                                        }
+                                    }
+                                }
+                                live.unstored = Some(delta);
                             }
                             for (table, rows) in before.into_iter().flatten() {
                                 let now = live.holds.get(&table);
@@ -11626,6 +11983,7 @@ impl Db {
                     // A one-shot read lists its result, not the rows it
                     // rests on: it stores no held set.
                     inner.store_watermark(&watermark, through, None)?;
+
                     let client = inner.client.as_mut().expect("client");
                     client.forgotten = false;
                     client.stored_points = None;
