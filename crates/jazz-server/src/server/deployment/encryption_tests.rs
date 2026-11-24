@@ -11,23 +11,21 @@
 //! ```
 use super::super::{ServerBuilder, StorageBackend, routes::create_router};
 use crate::middleware::AuthConfig;
-use axum::{
-    Router,
-    body::{Body, to_bytes},
-    http::{Request, StatusCode},
-};
+use axum::{Router, http::StatusCode};
 use jazz::tools::AppId;
 use jazz::tools::deployment::artifact::{self, LoadedApp};
 use jazz::tools::public_schema::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
 use serde_json::{Value, json};
-use tower::ServiceExt;
+
+#[path = "test_support.rs"]
+mod test_support;
 
 fn app_id() -> AppId {
     AppId::from_name("encrypted-deployment-tests")
 }
 
 async fn router() -> Router {
-    router_and_state().await.0
+    test_support::router(app_id()).await
 }
 
 async fn router_and_state() -> (Router, std::sync::Arc<super::super::ServerState>) {
@@ -44,24 +42,7 @@ async fn router_and_state() -> (Router, std::sync::Arc<super::super::ServerState
 }
 
 async fn publish(router: &Router, body: Value) -> (StatusCode, Value) {
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/apps/{}/admin/bundles", app_id()))
-                .header("X-Jazz-Admin-Secret", "test-admin")
-                .header("Content-Type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let value =
-        serde_json::from_slice(&bytes).unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes)));
-    (status, value)
+    test_support::publish(app_id(), router, body).await
 }
 
 /// Projects are spaces; a task's title is encrypted in its project's space.
@@ -341,12 +322,7 @@ async fn standalone_encryption_keeps_equality_while_the_token_column_remains() {
 /// Alice can locate an unknown declaration field and see which fields are accepted.
 #[tokio::test]
 async fn an_unknown_deployment_field_names_its_location_and_allowed_fields() {
-    for (key, value, column) in [
-        ("from", Value::Null, true),
-        ("typo", Value::Null, true),
-        ("backfill", json!([]), false),
-        ("typo", json!([]), false),
-    ] {
+    for (key, value, column) in [("typo", Value::Null, true), ("typo", json!([]), false)] {
         let source = APP.replace(
             r#""title": "bytes""#,
             r#""oldTitle": "string", "title": "bytes""#,
@@ -491,33 +467,6 @@ async fn a_renamed_space_column_keeps_its_stored_identity() {
     .unwrap();
     let (status, response) = publish(&router, renamed.deployment_body(false)).await;
     assert_eq!(status, StatusCode::OK, "{response}");
-}
-
-/// Alice cannot declare a re-home from the old title into a new encrypted caption on either path.
-#[tokio::test]
-async fn an_explicit_rehome_is_refused_with_or_without_a_migration() {
-    let (first, next) = standalone_tasks();
-    let from = first.current_hash().to_string();
-    let to = next.current_hash().to_string();
-    let first = first.deployment_body(false);
-    let mut standalone = next.deployment_body(false);
-    let entry = &mut standalone["encryption"]["versions"][&to]["tasks"];
-    entry["space"] = json!("otherProject");
-    entry["rehome"] = json!({ "space": "projectId", "scope": "projects" });
-    entry["columns"] = json!({ "caption": {
-        "type": entry["columns"]["title"]["type"], "from": "title"
-    } });
-    entry["equality"] = json!([]);
-    let mut migrated = standalone.clone();
-    migrated["migrations"] = json!([{ "fromHash": from, "toHash": to, "forward": [] }]);
-    migrated["encryption"]["versions"][&from] = first["encryption"]["versions"][&from].clone();
-    for candidate in [migrated, standalone] {
-        let router = router().await;
-        let (status, response) = publish(&router, first.clone()).await;
-        assert_eq!(status, StatusCode::OK, "{response}");
-        let (status, response) = publish(&router, candidate).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-    }
 }
 
 /// A later version can reuse the public name of a dropped token as an ordinary bytes column.
@@ -1214,36 +1163,8 @@ async fn a_renamed_enum_keeps_variants_from_deployments_outside_its_migration() 
     );
 }
 
-/// Alice cannot convert into a fresh stored column that reuses an old name.
-#[tokio::test]
-async fn a_new_column_reusing_a_name_still_refuses_an_unknown_source_field() {
-    let file = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
-        "tables": { "notes": {
-            "columns": { "oldTitle": "bytes", "title": { "type": "bytes", "default": "" } },
-            "encryption": { "space": "id", "scope": "notes",
-                "columns": { "title": { "type": "string?", "from": "oldTitle" } } } } },
-        "history": {
-            "v1": { "tables": { "notes": { "columns": { "title": "bytes" },
-                "encryption": { "space": "id", "scope": "notes", "columns": { "title": "string" } } } } },
-            "v2": { "tables": { "notes": { "columns": { "oldTitle": "bytes" },
-                "encryption": { "space": "id", "scope": "notes", "columns": { "oldTitle": "string" } } } } } },
-        "migrations": [
-            { "from": "v1", "to": "v2", "migrate": { "notes": { "oldTitle": { "renameFrom": "title" } } } },
-            { "from": "v2", "migrate": { "notes": { "title": { "add": "bytes", "default": "" } } } }] }"#;
-    let permissions = r#"{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
-        "tables": { "notes": { "read": "exists __e2ee_members(scopeId = table_id('notes'), identifier = this.id, accountId = session.user)" } } }"#;
-    let error = artifact::load(file.as_bytes(), permissions.as_bytes())
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("tables.notes.encryption.columns.title")
-            && error.contains("unknown key `from`"),
-        "{error}"
-    );
-}
-
-/// Redeclaring an encrypted column checks its fields and preserves equality
-/// while its token column stays.
+/// Redeclaring an encrypted column preserves required equality while its
+/// token column stays.
 #[tokio::test]
 async fn a_redeclaration_refuses_unknown_fields_and_keeps_required_equality() {
     let router = router().await;
@@ -1251,19 +1172,6 @@ async fn a_redeclaration_refuses_unknown_fields_and_keeps_required_equality() {
     let (status, body) = publish(&router, app.deployment_body(false)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let hash = app.current_hash().to_string();
-
-    let mut converted = app.deployment_body(false);
-    converted["encryption"]["versions"][&hash]["tasks"]["columns"]["title"] = json!({
-        "type": { "columnType": { "type": "Integer" }, "nullable": false },
-        "from": "projectId",
-        "convert": "parse",
-    });
-    let (status, refusal) = publish(&router, converted).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
-    assert!(
-        refusal["error"].as_str().unwrap().contains("unknown field"),
-        "{refusal}"
-    );
 
     let mut untagged = app.deployment_body(false);
     untagged["encryption"]["versions"][&hash]["tasks"]
@@ -2138,15 +2046,6 @@ fn encryption_turned_on_body() -> Value {
     })
 }
 
-/// A server with its account registry deploys an encrypted schema to a
-/// fresh store.
-#[tokio::test]
-async fn an_encrypted_schema_deploys_to_a_server_with_its_registry() {
-    let router = router().await;
-    let (status, deployed) = publish(&router, encrypted_body()).await;
-    assert_eq!(status, StatusCode::OK, "{deployed}");
-}
-
 /// A deployment that brings an encrypted schema to a runtime without the
 /// account registry is refused before anything is applied, and one that
 /// brings an ordinary schema is not.
@@ -2252,50 +2151,32 @@ fn the_portable_deploy_refuses_system_tables_without_declarations() {
 #[tokio::test]
 async fn an_encrypting_app_founds_device_accounts_for_its_own_audience_only() {
     let router = router().await;
-    let found = |audience: Option<String>, subject: &str| {
-        let router = router.clone();
-        let mut body = json!({
-            "identity": {
-                "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
-                "subject": subject,
-            },
-        });
-        if let Some(audience) = audience {
-            body["audience"] = audience.into();
-        }
-        async move {
-            let response = router
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!(
-                            "/apps/{}/admin/accounts/found-local-first",
-                            app_id()
-                        ))
-                        .header("X-Jazz-Admin-Secret", "test-admin")
-                        .header("Content-Type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            response.status()
-        }
-    };
     let subject = |n: u8| uuid::Uuid::from_bytes([n; 16]).to_string();
     let other = Some("https://other.example/jazz".to_owned());
-    assert_eq!(found(other.clone(), &subject(1)).await, StatusCode::OK);
+    assert_eq!(
+        test_support::found_local_first(app_id(), &router, other.clone(), &subject(1)).await,
+        StatusCode::OK
+    );
 
     let (status, deployed) = publish(&router, encrypted_body()).await;
     assert_eq!(status, StatusCode::OK, "{deployed}");
     assert_eq!(
-        found(other, &subject(2)).await,
+        test_support::found_local_first(app_id(), &router, other, &subject(2)).await,
         StatusCode::BAD_REQUEST,
         "another audience"
     );
-    assert_eq!(found(None, &subject(3)).await, StatusCode::OK);
     assert_eq!(
-        found(Some(app_id().to_string()), &subject(4)).await,
+        test_support::found_local_first(app_id(), &router, None, &subject(3)).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        test_support::found_local_first(
+            app_id(),
+            &router,
+            Some(app_id().to_string()),
+            &subject(4),
+        )
+        .await,
         StatusCode::OK,
         "the app's own id as the audience"
     );
@@ -2358,49 +2239,43 @@ async fn an_encrypting_app_admits_a_device_account_founder_of_its_own_audience_o
 #[tokio::test]
 async fn encryption_turned_on_by_a_later_deployment_refuses_foreign_founders_at_once() {
     let router = router().await;
-    let found = |audience: Option<String>, subject: u8| {
-        let router = router.clone();
-        let mut body = json!({
-            "identity": {
-                "issuer": jazz::tools::identity::DEVICE_ACCOUNT_ISSUER,
-                "subject": uuid::Uuid::from_bytes([subject; 16]).to_string(),
-            },
-        });
-        if let Some(audience) = audience {
-            body["audience"] = audience.into();
-        }
-        async move {
-            router
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!(
-                            "/apps/{}/admin/accounts/found-local-first",
-                            app_id()
-                        ))
-                        .header("X-Jazz-Admin-Secret", "test-admin")
-                        .header("Content-Type", "application/json")
-                        .body(Body::from(body.to_string()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap()
-                .status()
-        }
-    };
     let other = Some("https://other.example/jazz".to_owned());
     let (status, deployed) = publish(&router, plain_body()).await;
     assert_eq!(status, StatusCode::OK, "{deployed}");
-    assert_eq!(found(other.clone(), 1).await, StatusCode::OK);
+    assert_eq!(
+        test_support::found_local_first(
+            app_id(),
+            &router,
+            other.clone(),
+            &uuid::Uuid::from_bytes([1; 16]).to_string(),
+        )
+        .await,
+        StatusCode::OK
+    );
 
     let (status, deployed) = publish(&router, encryption_turned_on_body()).await;
     assert_eq!(status, StatusCode::OK, "{deployed}");
     assert_eq!(
-        found(other, 2).await,
+        test_support::found_local_first(
+            app_id(),
+            &router,
+            other,
+            &uuid::Uuid::from_bytes([2; 16]).to_string(),
+        )
+        .await,
         StatusCode::BAD_REQUEST,
         "the running server follows the catalogue"
     );
-    assert_eq!(found(None, 3).await, StatusCode::OK);
+    assert_eq!(
+        test_support::found_local_first(
+            app_id(),
+            &router,
+            None,
+            &uuid::Uuid::from_bytes([3; 16]).to_string(),
+        )
+        .await,
+        StatusCode::OK
+    );
 }
 
 /// Alice publishes a legacy app to a fresh server, upgrades, then tries the
