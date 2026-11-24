@@ -118,6 +118,7 @@ export function keylessEncryption(
     keys: new Keys(reject),
     recovery,
     deviceId: reject,
+    resetAccount: reject,
     ready: reject,
     readable: reject,
     start: refuse,

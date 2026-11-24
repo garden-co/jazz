@@ -54,6 +54,8 @@ export type Schema<S extends SchemaTables = SchemaTables, Claims = AnyClaims> = 
 export interface DefineSchemaOptions<C = unknown> {
   /** The session claims' type: `s.claims<{ join_code: string }>()`. */
   claims?: ClaimsMarker<C>;
+  /** Opt in to account reset for accounts authenticated by the app's own sign-in. */
+  encryption?: ReadableApp["encryption"];
 }
 
 /** `s.claims<T>()`: types `session.claims` as `T`. */
@@ -101,7 +103,6 @@ export function defineSchema<const S extends Record<string, DefinedTable<any, an
   tables: S,
   options: DefineSchemaOptions<C> = {},
 ): Schema<S, unknown extends C ? AnyClaims : TypedClaims<C>> {
-  void options;
   if (!tables || typeof tables !== "object" || Array.isArray(tables))
     throw new Error("s.defineSchema(tables) takes an object of s.table(...) definitions.");
   const meta = new Map<string, TableMeta>();
@@ -115,6 +116,7 @@ export function defineSchema<const S extends Record<string, DefinedTable<any, an
   }
   checkRelations(tables);
   const app = readableApp(tables);
+  if (options.encryption !== undefined) app.encryption = options.encryption;
   // The space tables: what `isMember` accepts, each encryption entry's scope.
   const spaces = new Set<string>();
   for (const table of Object.values(app.tables)) {
@@ -141,7 +143,7 @@ export function defineSchema<const S extends Record<string, DefinedTable<any, an
   }) as unknown as Schema<S, unknown extends C ? AnyClaims : TypedClaims<C>>;
 }
 
-/** The readable `jazz.app.json` parts (`tables`, `transforms`) of a schema, or undefined if it isn't one. */
+/** The readable `jazz.app.json` parts of a schema, or undefined if it isn't one. */
 export function readableSchema(value: unknown): ReadableApp | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   return (value as { [SCHEMA_BRAND]?: { app: ReadableApp } })[SCHEMA_BRAND]?.app;
