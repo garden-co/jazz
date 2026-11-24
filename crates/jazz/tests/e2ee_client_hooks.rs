@@ -186,7 +186,7 @@ enum Opened {
 struct Fake {
     declarations: Option<E2eeDeclarations>,
     held: RefCell<BTreeSet<uuid::Uuid>>,
-    rooted: RefCell<BTreeSet<uuid::Uuid>>,
+    rooted: RefCell<BTreeMap<uuid::Uuid, RowUuid>>,
     /// Seal nothing: a writer that stores whatever it likes.
     hostile: Cell<bool>,
     epoch: Cell<u8>,
@@ -286,6 +286,11 @@ impl E2eeHooks for Fake {
     }
 
     fn companions_dropped(&self, rows: &[(String, RowUuid)]) {
+        self.rooted.borrow_mut().retain(|_, root| {
+            !rows
+                .iter()
+                .any(|(table, row)| table == "space_roots" && row == root)
+        });
         self.dropped.borrow_mut().push(rows.to_vec());
     }
 
@@ -342,10 +347,14 @@ impl E2eeHooks for Fake {
                 id,
                 BTreeMap::from([("name".to_owned(), Value::String(name))]),
             ));
-        } else if self.rooted.borrow_mut().insert(space) {
+        } else if let std::collections::btree_map::Entry::Vacant(root) =
+            self.rooted.borrow_mut().entry(space)
+        {
+            let row = RowUuid(uuid::Uuid::new_v4());
+            root.insert(row);
             write.companion_rows.push((
                 "space_roots".to_owned(),
-                RowUuid(uuid::Uuid::new_v4()),
+                row,
                 BTreeMap::from([("space".to_owned(), Value::Uuid(space))]),
             ));
         }
@@ -1035,17 +1044,26 @@ fn the_hooks_hear_of_companion_rows_that_are_not_stored() {
     block_on(alice.commit_mergeable_handle(id)).unwrap();
     assert_eq!(calls(), 2, "a committed transaction drops nothing");
 
-    // A handle transaction abandoned with a staged root.
+    // A handle transaction abandoned with a staged root. A fresh write to
+    // the same space needs to stage a replacement.
+    let abandoned_space = fresh();
     let id = OpenTransactionId::new();
     block_on(alice.begin_mergeable(id)).unwrap();
     block_on(
         alice
             .tx_ref(id)
-            .insert("notes", note(fresh(), SECRET), Default::default()),
+            .insert("notes", note(abandoned_space, SECRET), Default::default()),
     )
     .unwrap();
     alice.abandon_transaction_handle(id).unwrap();
     assert_eq!(calls(), 3);
+    block_on(alice.insert("notes", note(abandoned_space, SECRET), Default::default())).unwrap();
+    assert!(
+        all(&alice, "space_roots")
+            .iter()
+            .any(|row| row.cell("space") == Some(Value::Uuid(abandoned_space))),
+        "retrying the abandoned space commits its root"
+    );
 
     // A scoped transaction commits explicitly or abandons its writes on drop.
     let tx = block_on(alice.mergeable_tx()).unwrap();
@@ -1060,7 +1078,7 @@ fn the_hooks_hear_of_companion_rows_that_are_not_stored() {
     });
     assert!(rolled_back.is_err());
     assert_eq!(calls(), 4);
-    assert_eq!(all(&alice, "space_roots").len(), 3, "the committed ones");
+    assert_eq!(all(&alice, "space_roots").len(), 4, "the committed ones");
 }
 
 /// Contract: an update or upsert hands the hooks the space of the row it
