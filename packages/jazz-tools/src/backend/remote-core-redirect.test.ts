@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { testApp } from "../testing/index.js";
-import { CoreRedirectError, networkTransport } from "./core-transport.js";
-import { createJazz, durableObjects, remote } from "./index.js";
+import { networkTransport } from "./core-transport.js";
+import { CoreRedirectError, createJazz, durableObjects, remote } from "./index.js";
+// Types only: the Worker entry loads jazz-wasm, which Node tests don't build.
+import type * as workerdEntry from "./workerd.js";
 
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -70,7 +72,7 @@ describe.each(REDIRECTS)("a core answering %i", (status) => {
       () => undefined,
       (error: unknown) => error,
     );
-    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(CoreRedirectError);
     expect(String((error as Error).message)).toContain(`the Jazz core at ${core} redirected to`);
     expect(String((error as Error).message)).toContain(target.url);
     expect(String((error as Error).message)).toContain(
@@ -88,6 +90,7 @@ describe.each(REDIRECTS)("a core answering %i", (status) => {
       store: durableObjects({ url: core, secret: "s".repeat(40) }),
     });
     cleanups.push(() => jazz.close());
+    await expect(jazz.ready()).rejects.toBeInstanceOf(CoreRedirectError);
     await expect(jazz.ready()).rejects.toThrow(
       `the Jazz core at ${core} redirected to ${target.url}/app; Jazz never follows a core's redirects, since they would carry the backend credential along: configure durableObjects() with the core's final URL`,
     );
@@ -125,6 +128,10 @@ describe.each(REDIRECTS)("a core answering %i", (status) => {
     expect(events).toEqual(["error", "close"]);
     expect(target.reached).toEqual([]);
   });
+});
+
+it("both backend entries export CoreRedirectError", () => {
+  expectTypeOf<typeof workerdEntry.CoreRedirectError>().toEqualTypeOf<typeof CoreRedirectError>();
 });
 
 it("CoreRedirectError names the core and where it pointed", () => {
