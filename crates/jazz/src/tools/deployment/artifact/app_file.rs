@@ -14,6 +14,7 @@ use crate::tools::public_schema::{
 
 use super::super::published::{PublishLensOp, PublishMigrationRequest, PublishTableLens};
 use super::json::Json;
+use super::system_tables::FragmentVersion;
 use super::{
     Codegen, CodegenRelation, CodegenTable, ComputedField, FieldType, TransformDecl, TsOnlyColumn,
 };
@@ -40,6 +41,8 @@ fn refuse(path: impl Into<String>, message: impl Into<String>) -> Refusal {
 /// `jazz.app.json`, read.
 #[derive(Debug, Clone)]
 pub struct AppFile {
+    pub current_fragment: FragmentVersion,
+    pub history_fragments: Vec<FragmentVersion>,
     pub current: Schema,
     /// The current tables' `encryption` entries.
     pub current_encryption: Entries,
@@ -65,6 +68,7 @@ pub const TOP_KEYS: &[&str] = &[
     "$generated",
     "tables",
     "history",
+    "systemTablesVersion",
     "migrations",
     "transforms",
     "slices",
@@ -102,7 +106,7 @@ pub const MIGRATION_KEYS: &[&str] = &[
 ];
 pub const TRANSFORM_KEYS: &[&str] = &["stored", "view"];
 pub const COMPUTED_KEYS: &[&str] = &["type", "from"];
-pub const VERSION_KEYS: &[&str] = &["tables"];
+pub const VERSION_KEYS: &[&str] = &["tables", "systemTablesVersion"];
 pub const SETTINGS_KEYS: &[&str] = &["allowAccountReset", "mechanisms"];
 pub const ENCRYPTION_KEYS: &[&str] = &["space", "scope", "columns", "equality"];
 pub const ENCRYPTED_COLUMN_KEYS: &[&str] = &["type", "sealedType", "default"];
@@ -189,6 +193,20 @@ fn identifier(name: &str, path: &str) -> Result<(), Refusal> {
     }
 }
 
+fn read_fragment(version: &Json, prefix: &str) -> Result<FragmentVersion, Refusal> {
+    let Some(value) = version.get("systemTablesVersion") else {
+        return Ok(FragmentVersion::V1);
+    };
+    let path = format!("{prefix}systemTablesVersion");
+    let Json::Number(number) = value else {
+        return Err(refuse(path, "expected a positive integer"));
+    };
+    let number = number
+        .parse::<usize>()
+        .map_err(|_| refuse(&path, "expected a positive integer"))?;
+    FragmentVersion::known(number).map_err(|e| refuse(path, e))
+}
+
 pub fn read(root: &Json) -> Result<AppFile, Refusal> {
     let top = object(root, "(top)")?;
     only_keys(top, TOP_KEYS, "(top)")?;
@@ -238,6 +256,7 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
         }
     }
 
+    let mut history_fragments = Vec::new();
     let mut history = Vec::new();
     let mut history_encryption = Vec::new();
     if let Some(versions) = root.get("history") {
@@ -262,6 +281,7 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
                 .get("tables")
                 .ok_or_else(|| refuse(&path, "no `tables`"))?;
             let (schema, entries) = read_tables(tables, &format!("{path}.tables"), None)?;
+            history_fragments.push(read_fragment(version, &format!("{path}."))?);
             history.push((name.clone(), schema));
             history_encryption.push(entries);
         }
@@ -286,6 +306,8 @@ pub fn read(root: &Json) -> Result<AppFile, Refusal> {
         );
     }
     Ok(AppFile {
+        current_fragment: read_fragment(root, "")?,
+        history_fragments,
         current,
         current_encryption,
         history,
@@ -1166,6 +1188,17 @@ fn read_migration(
             lenses.insert(table.clone(), l);
         }
     }
+    for lens in lenses.values() {
+        if let Some(name) = std::iter::once(lens.table.as_str())
+            .chain(lens.renamed_from.as_deref())
+            .find(|name| super::system_tables::is_system_table(name))
+        {
+            return Err(refuse(
+                path,
+                format!("a migration may not change {name}, one of Jazz's system tables"),
+            ));
+        }
+    }
     Ok((from, to, lenses.into_values().collect()))
 }
 
@@ -1225,10 +1258,8 @@ pub fn write(
     codegen: &Codegen,
     settings: Option<&EncryptionSettings>,
 ) -> Result<Json, String> {
-    let mut top = vec![(
-        "tables".to_string(),
-        write_tables(current.0, Some(codegen), current.1).map_err(|e| format!("tables.{e}"))?,
-    )];
+    let mut top =
+        version_fields(current.0, Some(codegen), current.1).map_err(|e| format!("tables.{e}"))?;
     if !history.is_empty() {
         top.push((
             "history".into(),
@@ -1238,11 +1269,10 @@ pub fn write(
                     .map(|(name, schema, entries)| {
                         Ok((
                             name.clone(),
-                            Json::Object(vec![(
-                                "tables".into(),
-                                write_tables(schema, None, entries)
+                            Json::Object(
+                                version_fields(schema, None, entries)
                                     .map_err(|e| format!("history.{name}.tables.{e}"))?,
-                            )]),
+                            ),
                         ))
                     })
                     .collect::<Result<_, String>>()?,
@@ -1298,10 +1328,28 @@ pub fn write(
     Ok(Json::Object(top))
 }
 
+pub(super) fn version_fields(
+    schema: &Schema,
+    codegen: Option<&Codegen>,
+    entries: &Entries,
+) -> Result<Vec<(String, Json)>, String> {
+    let (tables, version) = write_tables(schema, codegen, entries)?;
+    let mut fields = vec![("tables".into(), tables)];
+    if let Some(version) = version
+        && version != FragmentVersion::V1
+    {
+        fields.push((
+            "systemTablesVersion".into(),
+            Json::Number(version.number().to_string()),
+        ));
+    }
+    Ok(fields)
+}
+
 /// A history version's `tables`: a schema without relations, computed fields
 /// or transforms.
 pub fn write_version_tables(schema: &Schema, entries: &Entries) -> Result<Json, String> {
-    write_tables(schema, None, entries)
+    write_tables(schema, None, entries).map(|(tables, _)| tables)
 }
 
 /// A schema's tables, with their encryption entries. Jazz's system tables
@@ -1313,24 +1361,21 @@ fn write_tables(
     schema: &Schema,
     codegen: Option<&Codegen>,
     entries: &Entries,
-) -> Result<Json, String> {
+) -> Result<(Json, Option<FragmentVersion>), String> {
     let system: Schema = schema
         .iter()
         .filter(|(name, _)| super::system_tables::is_system_table(name.as_str()))
         .map(|(name, table)| (*name, table.clone()))
         .collect();
-    if super::system_tables::check_e2ee_fragment(&system).is_err() {
+    let version = super::system_tables::fragment_version(&system).map_err(|_| {
         let fragment = super::system_tables::e2ee_system_tables_v1();
         let offender = system
             .keys()
             .find(|name| !fragment.contains_key(*name))
             .or_else(|| system.keys().next())
             .expect("a fragment that fails the check holds a table");
-        return Err(format!(
-            "{offender}: {}",
-            reserved_table_name(offender.as_str())
-        ));
-    }
+        format!("{offender}: {}", reserved_table_name(offender.as_str()))
+    })?;
     let mut tables = Vec::new();
     for (name, table) in schema.iter() {
         let name = name.as_str();
@@ -1479,7 +1524,7 @@ fn write_tables(
         }
         tables.push((name.to_string(), Json::Object(fields)));
     }
-    Ok(Json::Object(tables))
+    Ok((Json::Object(tables), version))
 }
 
 fn write_plain(plain: &PlainType) -> Result<Json, String> {

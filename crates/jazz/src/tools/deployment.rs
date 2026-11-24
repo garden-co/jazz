@@ -18,6 +18,7 @@ use crate::tools::public_schema::{
     HistoryRetention, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::tools::schema_lens::{Lens, LensOp, runtime::compile_lens};
+use artifact::system_tables::{FragmentVersion, fragment_version};
 use migration_validation::{validate_lineage_table_partition, validate_migration_lens_between};
 
 type Hash = [u8; 32];
@@ -218,36 +219,76 @@ fn structural(mut schema: Schema) -> Schema {
     schema
 }
 
-/// No lens reshapes a system table: it may not be renamed, nor have a
-/// column added, removed or renamed. Core finds a system table by the name
-/// the admitted versions give it and reads its columns by name across
-/// versions, so a system table is carried between versions unchanged (a
-/// lens may still introduce or remove one whole, as the fragment's own
-/// versions do): a rename, or columns swapped through a temporary name,
-/// would make an older version's uploads read under another layout.
-fn check_system_table_lenses(migrations: &[Lens]) -> Result<(), DeploymentError> {
+/// Only Jazz's fragment upgrade may write a system-table lens. Group by
+/// table because operations on unrelated tables may arrive in either order.
+fn check_system_table_lenses(
+    migrations: &[Lens],
+    schemas: &BTreeMap<Hash, Schema>,
+    versions: &BTreeMap<Hash, Option<FragmentVersion>>,
+) -> Result<(), DeploymentError> {
+    fn touched(op: &LensOp) -> Option<&str> {
+        use artifact::system_tables::is_system_table;
+        let table = match op {
+            LensOp::RenameTable { old_name, .. } if is_system_table(old_name) => old_name,
+            LensOp::RenameTable { new_name, .. } => new_name,
+            LensOp::AddTable { table, .. }
+            | LensOp::RemoveTable { table, .. }
+            | LensOp::AddColumn { table, .. }
+            | LensOp::RemoveColumn { table, .. }
+            | LensOp::RenameColumn { table, .. } => table,
+        };
+        is_system_table(table).then_some(table)
+    }
     for lens in migrations {
-        for op in &lens.forward.ops {
-            let touched: Vec<&String> = match op {
-                LensOp::RenameTable { old_name, new_name } => vec![old_name, new_name],
-                LensOp::AddColumn { table, .. }
-                | LensOp::RemoveColumn { table, .. }
-                | LensOp::RenameColumn { table, .. } => vec![table],
-                LensOp::AddTable { .. } | LensOp::RemoveTable { .. } => Vec::new(),
-            };
-            if let Some(name) = touched
-                .into_iter()
-                .find(|name| artifact::system_tables::is_system_table(name))
-            {
-                return Err(DeploymentError::InvalidMigration {
-                    from: lens.source_hash,
-                    to: lens.target_hash,
-                    reason: format!(
-                        "{name} is one of Jazz's system tables, which a migration may not change: \
-                         it keeps its name and columns in every version"
-                    ),
-                });
-            }
+        let from = lens.source_hash;
+        let to = lens.target_hash;
+        let source = *versions
+            .get(&from.0)
+            .ok_or(DeploymentError::MissingSchema { schema: from })?;
+        let target = *versions
+            .get(&to.0)
+            .ok_or(DeploymentError::MissingSchema { schema: to })?;
+        let invalid = |reason| DeploymentError::InvalidMigration { from, to, reason };
+        // The carry check below diagnoses dropping the entire fragment.
+        if source.is_some()
+            && target.is_none()
+            && lens
+                .forward
+                .ops
+                .iter()
+                .filter(|op| touched(op).is_some())
+                .all(|op| matches!(op, LensOp::RemoveTable { .. }))
+        {
+            continue;
+        }
+        if source > target && target.is_some() {
+            return Err(invalid(
+                "a migration cannot downgrade Jazz's system tables".into(),
+            ));
+        }
+        let mut actual: Vec<_> = lens
+            .forward
+            .ops
+            .iter()
+            .filter_map(|op| touched(op).map(|name| (name, op)))
+            .collect();
+        let steps = artifact::system_tables::upgrade_lenses(source, target);
+        if actual.is_empty() && steps.is_empty() {
+            continue;
+        }
+        actual.sort_by_key(|(name, _)| *name);
+        let expected = published::lower_migration(
+            published::PublishMigrationRequest {
+                from_hash: from.to_string(),
+                to_hash: to.to_string(),
+                forward: steps,
+            },
+            &schemas[&from.0],
+            &schemas[&to.0],
+        )
+        .map_err(invalid)?;
+        if actual.iter().map(|(_, op)| *op).ne(&expected.forward.ops) {
+            return Err(invalid("a migration may not change Jazz's system tables except by their defined upgrade steps".into()));
         }
     }
     Ok(())
@@ -310,24 +351,27 @@ fn check_system_tables_carried<'a>(
 fn check_deployment_keeps_system_tables(
     stored: &DeploymentCatalogue,
     submitted: &[SchemaHash],
-    schemas: &BTreeMap<Hash, Schema>,
+    versions: &BTreeMap<Hash, Option<FragmentVersion>>,
     target: SchemaHash,
 ) -> Result<(), DeploymentError> {
-    let has = |schema: &Schema| {
-        schema
-            .keys()
-            .any(|name| artifact::system_tables::is_system_table(name.as_str()))
-    };
-    if !stored.schemas.iter().any(has) {
-        return Ok(());
-    }
     let stored_hashes: BTreeSet<Hash> = stored
         .schemas
         .iter()
-        .map(|schema| SchemaHash::compute(schema).0)
+        .map(|s| SchemaHash::compute(s).0)
         .collect();
+    let stored_version = stored_hashes.iter().filter_map(|hash| versions[hash]).max();
+    // The target may already exist in the catalogue, including on rollback.
+    if versions[&target.0].is_some() && versions.values().any(|v| v > &versions[&target.0]) {
+        return Err(DeploymentError::InvalidSchema {
+            schema: target,
+            reason: "cannot roll back to an older version of Jazz's system tables".into(),
+        });
+    }
     for hash in submitted {
-        if stored_hashes.contains(&hash.0) || schemas.get(&hash.0).is_none_or(has) {
+        if stored_version.is_none()
+            || stored_hashes.contains(&hash.0)
+            || versions[&hash.0].is_some()
+        {
             continue;
         }
         return Err(DeploymentError::InvalidSchema {
@@ -338,7 +382,7 @@ fn check_deployment_keeps_system_tables(
                 .to_owned(),
         });
     }
-    if !has(&schemas[&target.0]) {
+    if stored_version.is_some() && versions[&target.0].is_none() {
         return Err(DeploymentError::InvalidSchema {
             schema: target,
             reason: "cannot roll back to a version without Jazz's E2EE system tables: \
@@ -413,7 +457,6 @@ fn prepare(
     mut request: DeploymentRequest,
     encryption: Option<&artifact::DeclaredEncryption>,
 ) -> Result<(PreparedDeployment, Vec<String>), DeploymentError> {
-    check_system_table_lenses(&request.migrations)?;
     let mut schemas = BTreeMap::new();
     for schema in &stored.schemas {
         schemas.insert(SchemaHash::compute(schema).0, structural(schema.clone()));
@@ -431,11 +474,28 @@ fn prepare(
             schema: request.target_schema_hash,
         });
     }
+    let versions: BTreeMap<_, _> = schemas
+        .iter()
+        .map(|(hash, schema)| {
+            fragment_version(schema)
+                .map(|v| (*hash, v))
+                .map_err(|reason| DeploymentError::InvalidSchema {
+                    schema: SchemaHash(*hash),
+                    reason,
+                })
+        })
+        .collect::<Result<_, _>>()?;
+    check_system_table_lenses(&request.migrations, &schemas, &versions)?;
     let follows = check_system_tables_carried(
         &schemas,
         stored.migrations.iter().chain(&request.migrations),
     )?;
-    check_deployment_keeps_system_tables(stored, &submitted, &schemas, request.target_schema_hash)?;
+    check_deployment_keeps_system_tables(
+        stored,
+        &submitted,
+        &versions,
+        request.target_schema_hash,
+    )?;
     let warnings = match encryption {
         Some(encryption) => {
             check_encryption(&schemas, &submitted, &mut request, encryption, &follows)?

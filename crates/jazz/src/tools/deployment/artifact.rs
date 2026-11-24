@@ -1044,6 +1044,23 @@ pub fn read_current_schema(json: &[u8]) -> Result<Schema, ArtifactError> {
     Ok(read_app(json)?.current)
 }
 
+/// The edited schema with its recorded fragment, for deciding whether a
+/// migration is needed, and the fragment number to write if one is created.
+pub fn migration_target_schema(
+    json: &[u8],
+    previous: &Schema,
+) -> Result<(Schema, Option<usize>), ArtifactError> {
+    let file = read_app(json)?;
+    if has_system_tables(previous) || !file.current_encryption.is_empty() {
+        Ok((
+            file.current_fragment.add_to(&file.current),
+            Some(system_tables::FragmentVersion::latest().number()),
+        ))
+    } else {
+        Ok((file.current, None))
+    }
+}
+
 /// Every version of `jazz.app.json` by schema hash, the current one last,
 /// and their encryption declarations, read as the file states them: no
 /// migration or lens is checked. What `migrations create` holds the
@@ -1360,19 +1377,21 @@ fn version_schemas(file: &app_file::AppFile) -> (Vec<Schema>, Schema) {
             break;
         }
     }
-    let with_fragment = |schema: &Schema, carries: bool| {
-        if carries {
-            system_tables::with_e2ee_fragment(schema)
-        } else {
-            schema.clone()
-        }
-    };
+    let with_fragment =
+        |schema: &Schema, carries: bool, version: system_tables::FragmentVersion| {
+            if carries {
+                version.add_to(schema)
+            } else {
+                schema.clone()
+            }
+        };
     let history_schemas: Vec<Schema> = file
         .history
         .iter()
-        .map(|(name, schema)| with_fragment(schema, has[name.as_str()]))
+        .zip(&file.history_fragments)
+        .map(|((name, schema), version)| with_fragment(schema, has[name.as_str()], *version))
         .collect();
-    let current_schema = with_fragment(&file.current, has[CURRENT]);
+    let current_schema = with_fragment(&file.current, has[CURRENT], file.current_fragment);
     (history_schemas, current_schema)
 }
 
@@ -1392,11 +1411,11 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
     }
     let mut schemas: Vec<(SchemaHash, Schema)> = Vec::new();
     let mut by_name = BTreeMap::new();
-    for (((name, _), entries), schema) in file
+    for (((name, _), entries), (schema, version)) in file
         .history
         .iter()
         .zip(&file.history_encryption)
-        .zip(&history_schemas)
+        .zip(history_schemas.iter().zip(&file.history_fragments))
     {
         let hash = SchemaHash::compute(schema);
         if !entries.is_empty() {
@@ -1409,36 +1428,41 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
                 "history.{name} is the current schema; a version appears once"
             )));
         }
-        if let Some((other, _)) = by_name.iter().find(|(_, h)| **h == hash) {
+        if let Some((other, _)) = by_name.iter().find(|(_, (h, _))| *h == hash) {
             return Err(ArtifactError::new(format!(
                 "history.{name} repeats history.{other}"
             )));
         }
-        by_name.insert(name.clone(), hash);
+        by_name.insert(
+            name.clone(),
+            (hash, has_system_tables(schema).then_some(*version)),
+        );
         schemas.push((hash, schema.clone()));
     }
+    let current_fragment = has_system_tables(&current_schema).then_some(file.current_fragment);
     schemas.push((current, current_schema));
     let migrations = file
         .migrations
         .iter()
         .map(|(from, to, forward)| {
-            let from_hash = by_name[from].to_string();
-            let to_hash = to.as_ref().map_or(current, |to| by_name[to]).to_string();
+            let (from_hash, source) = by_name[from];
+            let (to_hash, target) = to
+                .as_ref()
+                .map_or((current, current_fragment), |to| by_name[to]);
             let mut forward = forward.clone();
-            let carries = |hash: &str| {
-                schemas
-                    .iter()
-                    .find(|(h, _)| h.to_string() == hash)
-                    .is_some_and(|(_, schema)| has_system_tables(schema))
-            };
-            forward.extend(system_table_lenses(carries(&from_hash), carries(&to_hash)));
-            PublishMigrationRequest {
-                from_hash,
-                to_hash,
-                forward,
+            if source > target {
+                return Err(ArtifactError::new(
+                    "a migration cannot downgrade Jazz's system tables",
+                ));
             }
+            forward.extend(system_tables::upgrade_lenses(source, target));
+            Ok(PublishMigrationRequest {
+                from_hash: from_hash.to_string(),
+                to_hash: to_hash.to_string(),
+                forward,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let schema_of = |hash: &str| {
         let hash = parse_schema_hash(hash).expect("written above");
         &schemas
@@ -1508,7 +1532,7 @@ fn check_history(file: &app_file::AppFile) -> Result<History, ArtifactError> {
             .find(|(later, other)| reached.contains(later) && rows_pass_unchanged(schema, other));
         let name = by_name
             .iter()
-            .find(|(_, h)| *h == hash)
+            .find(|(_, (h, _))| h == hash)
             .map(|(n, _)| n.clone())
             .expect("a history version");
         let Some((later, other)) = bridge else {
@@ -1600,25 +1624,6 @@ fn governing_entries<'a>(
             .collect();
     }
     Ok(None)
-}
-
-/// The table lenses that add Jazz's system tables along a migration into a
-/// version that has them from one that doesn't, or remove them the other
-/// way.
-fn system_table_lenses(from: bool, to: bool) -> Vec<super::published::PublishTableLens> {
-    if from == to {
-        return Vec::new();
-    }
-    system_tables::e2ee_system_tables_v1()
-        .keys()
-        .map(|table| super::published::PublishTableLens {
-            table: table.as_str().to_owned(),
-            added: to,
-            removed: from,
-            renamed_from: None,
-            operations: Vec::new(),
-        })
-        .collect()
 }
 
 /// Whether every row of `from` is a row of `to` as it is: the same tables,
@@ -1926,6 +1931,16 @@ pub fn declared_version_tables(
     entries: &encryption::Entries,
 ) -> Result<Json, ArtifactError> {
     app_file::write_version_tables(schema, entries)
+        .map_err(|error| ArtifactError::unsupported(APP_FILE, error))
+}
+
+/// A complete history entry, retaining the shipped version's system table identity.
+pub fn declared_history_version(
+    schema: &Schema,
+    entries: &encryption::Entries,
+) -> Result<Json, ArtifactError> {
+    app_file::version_fields(schema, None, entries)
+        .map(Json::Object)
         .map_err(|error| ArtifactError::unsupported(APP_FILE, error))
 }
 
