@@ -661,27 +661,26 @@ impl E2eeHooks for Hooks {
                         }
                     },
                     Opened::Missing { epoch_id } => {
+                        let space = db_address(&address);
                         self.shared.report(Report::MissingKey {
                             table: site.table.to_owned(),
-                            space: db_address(&address),
+                            space: space.clone(),
                             epoch_id: epoch_id.clone(),
                         });
                         self.shared.missing(Missing {
                             table: site.table.to_owned(),
                             id: row_uuid,
                             column: name.clone(),
-                            space: db_address(&address),
+                            space: space.clone(),
                             epoch_id: epoch_id.clone(),
                         });
                         outcome
-                            .missing_epochs
-                            .push((db_address(&address), epoch_id));
-                        // Not reported yet: the runtime acquires the epoch
-                        // and settles the report. The read itself says the
-                        // row was left out, pending its key.
+                            .missing_reports
+                            .insert(outcome.unreadable.len(), epoch_id.clone());
                         outcome
                             .unreadable
-                            .push(notice(UnreadableCode::KeyPending, &address));
+                            .push(notice(keys.missing_key_code(&space), &address));
+                        outcome.missing_epochs.push((space, epoch_id));
                         readable = false;
                         None
                     }
@@ -901,6 +900,17 @@ impl E2eeHooks for Hooks {
             epochs: EpochSetId(sha256(&digest)),
             incomplete: incomplete.then(|| db_address(&address)),
         })
+    }
+
+    fn report_incomplete_query(&self, table: &str, space: &jazz::e2ee::SpaceAddress) {
+        let code = self.shared.keys.borrow().incomplete_query_code(space);
+        self.shared.report(Report::Unreadable(Unreadable {
+            table: table.to_owned(),
+            id: None,
+            column: None,
+            code,
+            space: Some(space.clone()),
+        }));
     }
 
     fn seal_stream(&self, target: &StreamTarget<'_>) -> Result<Box<dyn StreamSealer>, SealError> {

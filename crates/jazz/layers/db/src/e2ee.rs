@@ -115,6 +115,9 @@ pub trait E2eeHooks {
     /// token filters, or refuse what cannot be answered without a scan.
     fn plan_query(&self, query: &Query) -> Result<QueryPlan, Error>;
 
+    /// Report that a rewritten query may miss rows of epochs it could not search.
+    fn report_incomplete_query(&self, _table: &str, _space: &SpaceAddress) {}
+
     /// Begin sealing a streamed large value into `target`. Called before
     /// any source byte is read.
     fn seal_stream(&self, target: &StreamTarget<'_>) -> Result<Box<dyn StreamSealer>, SealError>;
@@ -264,6 +267,9 @@ pub struct OpenOutcome {
     /// Epochs a row needs that this device does not hold, reported
     /// provisionally: the runtime acquires them and settles the reports.
     pub missing_epochs: Vec<(SpaceAddress, EpochId)>,
+    /// Epoch of each missing-key entry, keyed by its index in `unreadable`.
+    /// A subscription keeps this for updating its reason after settlement.
+    pub missing_reports: BTreeMap<usize, EpochId>,
 }
 
 impl OpenOutcome {
