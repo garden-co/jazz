@@ -422,13 +422,14 @@ refuse is not refused by the call. It just never syncs.
 ## End-to-end encryption
 
 An app that declares encrypted columns opens with a private store the host supplies: `JazzHandle.open_with_store`
-(UniFFI) or `jazz_open_encrypted` (C ABI) take a callback that answers the store's requests. The config's
+(UniFFI) or `jazz_open_encrypted` (C ABI) take a callback that answers the store's requests. UniFFI
+uses typed methods, with unsigned 64-bit revisions and incarnations and byte buffers. The config's
 `"environment"` names the deployment's environment (default `dev`). Opening such an app any other way is
 refused, naming the option. A device's schema has the plaintext types of its encrypted columns, so rows go
 in and out as ordinary JSON; writes of a space whose key the device does not hold yet wait for it
 (ten seconds at most). The store is called on the client's thread, one request at a time.
 
-A request is JSON text `{ "op": ..., ... }`; bytes are base64 and numbers that may exceed 2^53 are decimal text:
+A C callback request is JSON text `{ "op": ..., ... }`. Bytes are base64. Numbers that may exceed 2^53 use decimal text.
 
 | `op`        | Fields                                                    | Answer (JSON)                        |
 | ----------- | --------------------------------------------------------- | ------------------------------------ |
@@ -443,10 +444,20 @@ A request is JSON text `{ "op": ..., ... }`; bytes are base64 and numbers that m
 An answer is ok with its JSON, or not ok with `conflict` (the document's revision is not `expected`), `wiped`
 (the scope is not of that incarnation) or a message.
 
-The runtime's operations cross as `encryption_call(op, args_json)` (C ABI: `jazz_call` method `encryptionCall`
-with `{ "op", "args" }`), with `encryption_ready(timeout_ms)`, `encryption_state()` and `encryption_reports()`.
-Operations: `deviceId`, `devices`, `challenge`, `answer`, `approvalCode`, `approve`, `remove`, `requestRemoval`,
-`completeRemovals`, `recoveryCreate`, `recoveryRegister`, `recoveryRestore`, `recoveryRetire`, `recoveryList`,
-`keysDeliver`, `keysRotate`. `recoveryRegister` and `recoveryRestore` take a 24-word `phrase` (or a 64-character
-hexadecimal `secret`). A failure is a refusal whose message starts `encryption (<code>):`. A session
-(`jazz_session_open`) takes no store yet.
+Use `encryption_call(op, args_json)` for every operation. In C, pass `"encryptionCall"` to
+`jazz_call` with `{"op", "args"?}`.
+
+| Operations | Purpose |
+| --- | --- |
+| `waitUntilReady`, `state`, `reports` | Wait for account startup, inspect the loop, or drain pending reports as JSON objects. `waitUntilReady` takes an optional non-negative integer `timeoutMs` (default 30,000). |
+| `ready`, `resetAccount` | Verify the account on demand, or reset it when the app enables account reset. |
+| `deviceId`, `devices` | Read this device or list the account's devices. |
+| `challenge`, `answer`, `approvalCode`, `approve` | Approve a device after comparing codes. |
+| `remove`, `requestRemoval`, `completeRemovals` | Remove a device or process removal requests. |
+| `recoveryCreate`, `recoveryRegister`, `recoveryRestore`, `recoveryRetire`, `recoveryList` | Manage recovery. Register and restore accept a 24-word `phrase` or a 64-character hexadecimal `secret`. |
+| `keysDeliver`, `keysRotate`, `keysRecoverRotation` | Deliver keys or rotate a space's key. |
+| `spaceRow` | Resolve the address of a space. Pass its `table` and row `id`, then use the returned `scopeId` and `identifier` in the member row. |
+| `prepareSpace`, `retryWithCurrentKey` | Prepare a space for a write or retry the write with the current key. |
+
+An encryption failure carries a `code` field. Store and database failures have the I/O kind. Other
+encryption failures have the refusal kind. A session (`jazz_session_open`) takes no store yet.

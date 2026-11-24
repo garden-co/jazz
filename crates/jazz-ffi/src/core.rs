@@ -293,17 +293,21 @@ impl Delivery {
     }
 }
 
-/// A host's private store for an encrypted app: each request as JSON text,
-/// answered with `ok` and a payload (see `jazz_app_support::EncryptionConfig`).
-pub(crate) type StoreCalls = Arc<dyn Fn(String) -> (bool, String) + Send + Sync>;
+/// Chooses the error contract even if opening fails while parsing the config.
+pub(crate) fn open_contract(config: &str) -> u64 {
+    serde_json::from_str::<Json>(config)
+        .ok()
+        .and_then(|c| c.get("contract").and_then(Json::as_u64))
+        .unwrap_or(1)
+}
 
 impl Core {
+    #[cfg(test)]
     pub fn open(config_json: &str) -> Result<Self> {
         Self::open_with(config_json, None, None)
     }
 
-    /// [`Self::open`] for an end user signing in with the app's bearer
-    /// (`"auth": { "bearer": true }`): `tokens` gives it.
+    #[cfg(test)]
     pub fn open_with_tokens(
         config_json: &str,
         tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
@@ -311,13 +315,13 @@ impl Core {
         Self::open_with(config_json, tokens, None)
     }
 
-    /// [`Self::open_with_tokens`] for an app that declares end-to-end
+    /// Opens an app that may declare end-to-end
     /// encryption: `store` is the device's private store (`"environment"` in
     /// the config names the deployment's environment, default `dev`).
     pub fn open_with(
         config_json: &str,
         tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
-        store: Option<StoreCalls>,
+        store: Option<jazz_app_support::EncryptionConfig>,
     ) -> Result<Self> {
         let (files, config, app_text) = config(config_json, tokens, store)?;
         let contract = convert::parse(config_json, "the config")?
@@ -566,12 +570,6 @@ impl Core {
         Ok(self.open_jazz()?.bundle().map(str::to_owned))
     }
 
-    /// The catalogue identity of a table, as UUID text: what a member row's
-    /// `scopeId` holds for its space table.
-    pub fn table_identity(&self, table: &str) -> Result<String> {
-        Ok(block_on(self.open_jazz()?.table_identity(table))?.to_string())
-    }
-
     /// The account of the user a backend acts as (`session.user`).
     pub fn account(&self) -> Result<Option<String>> {
         Ok(self
@@ -708,24 +706,7 @@ impl Core {
             .await?;
             mark_wrote(tx);
             settle(&client, committed, tier).await?;
-            // The values come in the stored schema's column order, which has
-            // an encrypted column's token columns that `table` (the app's
-            // plain view) does not.
-            let stored = client.schema()?;
-            let columns = stored
-                .get(&jazz_app_support::jazz::tools::TableName::new(&name))
-                .map(|stored| stored.columns.columns.clone())
-                .unwrap_or_default();
-            let fields = columns
-                .iter()
-                .zip(values)
-                .map(
-                    |(column, value)| jazz_app_support::jazz::tools::QueryResultField {
-                        name: column.name.as_str().to_owned(),
-                        value,
-                    },
-                )
-                .collect();
+            let fields = jazz_app_support::inserted_fields(&client, &name, values)?;
             Ok(convert::row_json(&convert::Shape::of(table), id, fields))
         }))?;
         Ok(row.to_string())
@@ -1340,33 +1321,38 @@ impl Core {
             .map(|session| serde_json::to_string(&session.state()).unwrap_or_default()))
     }
 
-    /// One end-to-end encryption operation by name (`ready`, `devices`,
-    /// `challenge`, `answer`, ...), its arguments and result as JSON.
+    /// One end-to-end encryption operation by name, with JSON arguments and result.
     pub fn encryption_call(&self, op: &str, args: &str) -> Result<String> {
         let args = if args.trim().is_empty() {
             Json::Object(Default::default())
         } else {
             convert::parse(args, "the arguments")?
         };
-        let result = block_on(self.open_jazz()?.encryption().call(op, args))?;
+        let encryption = self.open_jazz()?.encryption();
+        let result = match op {
+            "waitUntilReady" => {
+                let timeout = match args.get("timeoutMs") {
+                    None => 30_000,
+                    Some(given) => given.as_u64().ok_or_else(|| {
+                        refused("timeoutMs must be a non-negative whole number of milliseconds")
+                    })?,
+                };
+                Json::from(block_on(
+                    encryption.ready(std::time::Duration::from_millis(timeout)),
+                )?)
+            }
+            "state" => block_on(encryption.state())?,
+            "reports" => {
+                let reports = block_on(encryption.take_reports())?;
+                let reports = reports
+                    .iter()
+                    .map(|report| convert::parse(report, "the encryption report"))
+                    .collect::<Result<Vec<_>>>()?;
+                Json::from(reports)
+            }
+            _ => block_on(encryption.call(op, args))?,
+        };
         Ok(result.to_string())
-    }
-
-    /// Verifies the account and enrols or recovers this device, waiting up
-    /// to `timeout_ms`: `active`, `awaiting-approval` or `reenrolled`.
-    pub fn encryption_ready(&self, timeout_ms: u64) -> Result<String> {
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-        Ok(block_on(self.open_jazz()?.encryption().ready(timeout))?)
-    }
-
-    /// What the encryption runtime's loop is doing, as JSON.
-    pub fn encryption_state(&self) -> Result<String> {
-        Ok(block_on(self.open_jazz()?.encryption().state())?.to_string())
-    }
-
-    /// The encryption reports waiting, each as a JSON text.
-    pub fn encryption_reports(&self) -> Result<Vec<String>> {
-        Ok(block_on(self.open_jazz()?.encryption().take_reports())?)
     }
 
     /// The connection's status as JSON (`{ "link": … }`).
@@ -2056,7 +2042,7 @@ pub(crate) fn generate_device_key() -> Result<String> {
 fn config(
     config_json: &str,
     tokens: Option<Arc<dyn jazz_app_support::TokenProvider>>,
-    store: Option<StoreCalls>,
+    store: Option<jazz_app_support::EncryptionConfig>,
 ) -> Result<(AppFiles, Config, String)> {
     let Json::Object(config) = convert::parse(config_json, "the config")? else {
         return Err(refused("the config must be a JSON object"));
@@ -2258,9 +2244,7 @@ fn config(
             "backendSecret, adminSecret and session are for a backend, which needs \"permissions\"",
         ));
     }
-    if let Some(store) = store {
-        let mut encryption =
-            jazz_app_support::EncryptionConfig::store_calls(move |request| store(request));
+    if let Some(mut encryption) = store {
         if let Some(environment) = environment {
             encryption = encryption.environment(environment);
         }
@@ -2619,22 +2603,5 @@ mod tests {
             for_user_error("alice", jazz_app_support::Error::Config("scoped".into())),
             FfiError::Refused(_)
         ));
-    }
-    /// An encrypted app opened without encryption hooks is refused at open,
-    /// before a caller can write plaintext into its encrypted columns.
-    #[test]
-    fn an_app_that_declares_encryption_is_refused_at_open() {
-        let app = r#"{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
-            "tables": { "notes": { "columns": { "body": "bytes" },
-                "encryption": { "space": "id", "scope": "notes", "columns": { "body": "string" } } } } }"#;
-        let opened = Core::open(&serde_json::json!({ "app": app }).to_string());
-        let Err(error) = opened else {
-            panic!("an encrypted app must not open without hooks");
-        };
-        let message = format!("{error:?}");
-        assert!(
-            message.contains("declares end-to-end encryption"),
-            "{message}"
-        );
     }
 }

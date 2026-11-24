@@ -20,7 +20,8 @@
  * "noUser" (a session has no user; with "status")
  * and "unsynced" (jazz_close_within, or "close" with a timeoutMs: writes
  * left unsent; with "pending"))
- * (*err is set to NULL on success). Functions block until done. Calls on
+ * (*err is set to NULL on success). Encryption failures also include "code".
+ * Functions block until done. Calls on
  * one handle may come from any threads at once, except the ones that free
  * it, jazz_close, jazz_close_within and jazz_session_close: no call on that
  * handle (or session) may run concurrently with them or follow them.
@@ -261,9 +262,8 @@ typedef int (*JazzStoreCallback)(void *ctx, const char *request, char **payload)
  * ("auth": {"deviceKey": ...}, or {"bearer": true} with a token callback;
  * "environment": the deployment's, default "dev"). store_cb and store_ctx
  * (and the token callback) stay valid, from any thread, until jazz_close
- * returns. The encryption calls go through jazz_call: "encryptionReady"
- * {"timeoutMs"?}, "encryptionCall" {"op", "args"?}, "encryptionState" and
- * "encryptionReports" (see the README). An app that declares encryption
+ * returns. The encryption calls go through jazz_call method
+ * "encryptionCall" with {"op", "args"?} (see the README). An app that declares encryption
  * opened without a store (jazz_open) is refused.
  */
 JazzHandle *jazz_open_encrypted(const char *config_json, JazzTokenCallback token_cb,

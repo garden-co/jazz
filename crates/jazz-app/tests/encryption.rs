@@ -1374,6 +1374,140 @@ async fn a_device_accounts_automatic_registration_refuses_another_identitys_secr
     app.stop().await;
 }
 
+/// Alice's laptop remains active on reopening after its derived root is
+/// retired. Her new phone promptly waits for approval.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_account_starts_after_its_secrets_root_is_retired() {
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let memory = MemoryStore::new();
+    let store = EncryptionConfig::store(move || Rc::new(memory.clone()));
+    let config = app.user(key.clone()).encryption(store);
+    let laptop = Jazz::open(client_files(), config.clone()).await.unwrap();
+    let encryption = laptop.encryption();
+    assert_eq!(
+        encryption.ready(Duration::from_secs(30)).await.unwrap(),
+        "active"
+    );
+
+    // Reverify until the root registered at startup is visible.
+    let roots = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            encryption.call("ready", json!({})).await.unwrap();
+            let roots = encryption.call("recoveryList", json!({})).await.unwrap();
+            if !roots.as_array().unwrap().is_empty() {
+                break roots;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the root was registered");
+    assert_eq!(roots.as_array().unwrap().len(), 1);
+    encryption
+        .call("recoveryRetire", json!({ "rootId": roots[0]["id"] }))
+        .await
+        .unwrap();
+    laptop.shutdown().await.unwrap();
+
+    let reopened = Jazz::open(client_files(), config).await.unwrap();
+    assert_eq!(
+        reopened
+            .encryption()
+            .ready(Duration::from_secs(15))
+            .await
+            .unwrap(),
+        "active"
+    );
+
+    let phone = app.device_of(key).await;
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            phone.encryption().ready(Duration::from_secs(30)),
+        )
+        .await
+        .expect("readiness returns before its deadline")
+        .unwrap(),
+        "awaiting-approval",
+    );
+    phone.shutdown().await.unwrap();
+    reopened.shutdown().await.unwrap();
+    app.stop().await;
+}
+
+/// Alice's phone re-enrols on reopening when a private-store save marks its
+/// recovery nonce spent but the save acknowledgment is lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_continues_after_reopening_with_a_stranded_nonce() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let app = App::start().await;
+    let key = DeviceKey::generate().unwrap();
+    let laptop = app.device_of(key.clone()).await;
+    assert_eq!(
+        laptop
+            .encryption()
+            .ready(Duration::from_secs(30))
+            .await
+            .unwrap(),
+        "active"
+    );
+
+    let memory = MemoryStore::new();
+    let lose_ack = AtomicBool::new(true);
+    let store = EncryptionConfig::store_calls(move |request| {
+        let parsed: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let save =
+            parsed["op"] == "save" && parsed["doc"] == "device" && parsed["expected"].is_string();
+        let (ok, payload) = answer_memory_store(&memory, request);
+        if ok && save && lose_ack.swap(false, Ordering::SeqCst) {
+            return (
+                false,
+                "lost acknowledgement of the recovery nonce save".to_owned(),
+            );
+        }
+        (ok, payload)
+    });
+    let config = app.user(key).encryption(store);
+    let phone = Jazz::open(client_files(), config.clone()).await.unwrap();
+    let error = phone
+        .encryption()
+        .ready(Duration::from_secs(15))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::Encryption { code, message }
+        if code == "store" && message.contains("lost acknowledgement")));
+    let stranded = phone
+        .encryption()
+        .call("deviceId", json!({}))
+        .await
+        .unwrap();
+    phone.shutdown().await.unwrap();
+
+    let reopened = Jazz::open(client_files(), config).await.unwrap();
+    assert_eq!(
+        reopened
+            .encryption()
+            .ready(Duration::from_secs(15))
+            .await
+            .unwrap(),
+        "active"
+    );
+    let recovered = reopened
+        .encryption()
+        .call("deviceId", json!({}))
+        .await
+        .unwrap();
+    assert_ne!(
+        recovered, stranded,
+        "the spent nonce belongs to the old device"
+    );
+    reopened.shutdown().await.unwrap();
+    laptop.shutdown().await.unwrap();
+    app.stop().await;
+}
+
 /// A private store with a hook that can fail or hold selected saves.
 fn store_with_hook(
     hook: impl Fn(&str, Option<u64>) -> futures::future::LocalBoxFuture<'static, Result<(), StoreError>>

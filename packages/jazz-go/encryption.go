@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -233,35 +232,6 @@ func answerStore(store PrivateStore, request string) (bool, string) {
 	return false, "unknown private store operation " + r.Op
 }
 
-// openEncrypted opens an app that declares encryption: store answers the
-// device's private store requests until the handle closes.
-func openEncrypted(config string, tokens TokenProvider, store PrivateStore) (h uintptr, provider, storeID uint64, err error) {
-	if ffi.openEncrypted == nil {
-		return 0, 0, 0, &Error{Kind: KindRefused, Message: "this libjazz_ffi has no end-to-end encryption (an older build)"}
-	}
-	storeID = nextStore.Add(1)
-	stores.Store(storeID, store)
-	var tokenCB, tokenCtx uintptr
-	if tokens != nil {
-		provider = nextProvider.Add(1)
-		providers.Store(provider, tokens)
-		tokenCB, tokenCtx = ffi.tokenCallback, uintptr(provider)
-	}
-	var cerr uintptr
-	h = ffi.openEncrypted(cstr(config), tokenCB, tokenCtx, ffi.storeCallback, uintptr(storeID), &cerr)
-	if err := takeError(cerr); err != nil || h == 0 {
-		stores.Delete(storeID)
-		if provider != 0 {
-			providers.Delete(provider)
-		}
-		if err == nil {
-			err = &Error{Kind: KindRefused, Message: "open failed"}
-		}
-		return 0, 0, 0, err
-	}
-	return h, provider, storeID, nil
-}
-
 // Encryption is the app's end-to-end encryption: this device's account, its
 // other devices, its recovery and its keys. Every call refuses for an app that
 // declares none; a backend holds no keys and refuses too.
@@ -278,12 +248,7 @@ func EncryptionCode(err error) string {
 	if !errors.As(err, &e) {
 		return ""
 	}
-	rest, ok := strings.CutPrefix(e.Message, "encryption (")
-	if !ok {
-		return ""
-	}
-	code, _, _ := strings.Cut(rest, ")")
-	return code
+	return e.Code
 }
 
 // Call runs one of the runtime's operations by name (see the README) with
@@ -296,7 +261,7 @@ func (e *Encryption) Call(ctx context.Context, op string, args, out any) error {
 // to timeout: "active", "awaiting-approval" or "reenrolled".
 func (e *Encryption) Ready(ctx context.Context, timeout time.Duration) (string, error) {
 	var status string
-	err := e.db.call(ctx, "encryptionReady", map[string]any{"timeoutMs": timeout.Milliseconds()}, &status)
+	err := e.Call(ctx, "waitUntilReady", map[string]any{"timeoutMs": timeout.Milliseconds()}, &status)
 	return status, err
 }
 
@@ -310,22 +275,16 @@ type EncryptionState struct {
 // State is what the runtime's loop is doing now.
 func (e *Encryption) State(ctx context.Context) (EncryptionState, error) {
 	var s EncryptionState
-	err := e.db.call(ctx, "encryptionState", map[string]any{}, &s)
+	err := e.Call(ctx, "state", map[string]any{}, &s)
 	return s, err
 }
 
 // Reports are the reports waiting (type "unreadable", "missing-key",
 // "challenged", "ready-failed", ...), each as JSON.
 func (e *Encryption) Reports(ctx context.Context) ([]json.RawMessage, error) {
-	var texts []string
-	if err := e.db.call(ctx, "encryptionReports", map[string]any{}, &texts); err != nil {
-		return nil, err
-	}
-	reports := make([]json.RawMessage, len(texts))
-	for i, text := range texts {
-		reports[i] = json.RawMessage(text)
-	}
-	return reports, nil
+	var reports []json.RawMessage
+	err := e.Call(ctx, "reports", nil, &reports)
+	return reports, err
 }
 
 // DeviceID is this installation's device ID.

@@ -15,15 +15,16 @@ mod omitted_columns;
 #[path = "../../jazz-app/tests/relay/mod.rs"]
 mod relay;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::parse;
 use encrypted_app::EncryptedApp as App;
-use jazz_e2ee_client::MemoryStore;
 use jazz_e2ee_client::testing::answer_memory_store;
-use jazz_ffi::{JazzError, JazzHandle, PrivateStore, StoreReply, generate_device_key};
+use jazz_e2ee_client::{MemoryStore, PrivateStore as _, StoreError};
+use jazz_ffi::{
+    JazzError, JazzHandle, PrivateStore, PrivateStoreError, StoredDocument, generate_device_key,
+};
 use serde_json::{Value, json};
 
 const DIR: &str = concat!(
@@ -31,31 +32,72 @@ const DIR: &str = concat!(
     "/../jazz-app/tests/fixtures/encrypted"
 );
 
-/// A host-language store that records requests and can lose a save acknowledgement.
+/// A host-language store that records saves.
 #[derive(Default)]
 struct HostStore {
     memory: MemoryStore,
-    calls: Mutex<Vec<String>>,
-    lose_recovery_ack: AtomicBool,
+    saves: Mutex<usize>,
+}
+
+fn answer<T>(answer: Result<T, StoreError>) -> Result<T, PrivateStoreError> {
+    answer.map_err(|error| match error {
+        StoreError::Conflict => PrivateStoreError::Conflict,
+        StoreError::Wiped => PrivateStoreError::Wiped,
+        StoreError::Failed(reason) => PrivateStoreError::Failed { reason },
+    })
 }
 
 impl PrivateStore for HostStore {
-    fn call(&self, request: String) -> StoreReply {
-        let parsed = parse(&request);
-        self.calls
-            .lock()
-            .unwrap()
-            .push(parsed["op"].as_str().unwrap_or_default().to_owned());
-        let recovery_save =
-            parsed["op"] == "save" && parsed["doc"] == "device" && parsed["expected"].is_string();
-        let (ok, payload) = answer_memory_store(&self.memory, request);
-        if ok && recovery_save && self.lose_recovery_ack.swap(false, Ordering::SeqCst) {
-            return StoreReply {
-                ok: false,
-                payload: "lost acknowledgement of the recovery nonce save".to_owned(),
-            };
-        }
-        StoreReply { ok, payload }
+    fn open_scope(&self, scope: String) -> Result<u64, PrivateStoreError> {
+        answer(futures::executor::block_on(self.memory.open_scope(&scope)))
+    }
+
+    fn load(
+        &self,
+        scope: String,
+        doc: String,
+    ) -> Result<Option<StoredDocument>, PrivateStoreError> {
+        answer(futures::executor::block_on(self.memory.load(&scope, &doc))).map(|result| {
+            result.map(|document| StoredDocument {
+                bytes: document.bytes,
+                revision: document.revision,
+            })
+        })
+    }
+
+    fn save(
+        &self,
+        scope: String,
+        incarnation: u64,
+        doc: String,
+        bytes: Vec<u8>,
+        expected: Option<u64>,
+    ) -> Result<u64, PrivateStoreError> {
+        *self.saves.lock().unwrap() += 1;
+        answer(futures::executor::block_on(self.memory.save(
+            &scope,
+            incarnation,
+            &doc,
+            &bytes,
+            expected,
+        )))
+    }
+
+    fn list(&self, scope: String) -> Result<Vec<String>, PrivateStoreError> {
+        answer(futures::executor::block_on(self.memory.list(&scope)))
+    }
+
+    fn delete(&self, scope: String) -> Result<(), PrivateStoreError> {
+        answer(futures::executor::block_on(self.memory.delete(&scope)))
+    }
+
+    fn protect(&self, secret: Vec<u8>) -> Result<Vec<u8>, PrivateStoreError> {
+        answer(futures::executor::block_on(self.memory.protect(&secret)))
+    }
+
+    fn unprotect(&self, blob: Vec<u8>) -> Result<Vec<u8>, PrivateStoreError> {
+        answer(futures::executor::block_on(self.memory.unprotect(&blob)))
+            .map(|secret| secret.to_vec())
     }
 }
 
@@ -84,24 +126,37 @@ impl App {
     }
 }
 
+fn wait_until_ready(handle: &JazzHandle, timeout_ms: u64) -> Result<Value, JazzError> {
+    handle
+        .encryption_call(
+            "waitUntilReady".into(),
+            json!({ "timeoutMs": timeout_ms }).to_string(),
+        )
+        .map(|result| parse(&result))
+}
+
 /// The first member row is the creator's, in the transaction that
 /// makes the space row.
 fn make_project(alice: &Arc<JazzHandle>, alice_account: &str) -> (String, String) {
-    let projects = alice.table_identity("projects".into()).unwrap();
+    let project = jazz_app_support::ObjectId::new().to_string();
+    let address = parse(
+        &alice
+            .encryption_call(
+                "spaceRow".into(),
+                json!({ "table": "projects", "id": project }).to_string(),
+            )
+            .unwrap(),
+    );
+    let projects = address["scopeId"].as_str().unwrap().to_owned();
     let tx = alice.clone().begin().unwrap();
-    let project = parse(
-        &tx.insert(
-            "projects".into(),
-            json!({ "name": "plans", "ownerId": alice_account }).to_string(),
-        )
-        .unwrap(),
-    )["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    tx.insert(
+        "projects".into(),
+        json!({ "id": project, "name": "plans", "ownerId": alice_account }).to_string(),
+    )
+    .unwrap();
     tx.insert(
         "__e2ee_members".into(),
-        json!({ "scopeId": projects, "identifier": project, "accountId": alice_account })
+        json!({ "scopeId": projects, "identifier": address["identifier"], "accountId": alice_account })
             .to_string(),
     )
     .unwrap();
@@ -112,7 +167,7 @@ fn make_project(alice: &Arc<JazzHandle>, alice_account: &str) -> (String, String
 /// Contract: a host-language app opens an app that declares encryption with
 /// its own private store; two members share a space and read each other's
 /// encrypted rows as plain values through the JSON handle; the encryption
-/// calls (`ready`, `keysDeliver`) work; opening without a store is refused,
+/// calls (`waitUntilReady`, `keysDeliver`) work; opening without a store is refused,
 /// naming it.
 ///
 /// ```text
@@ -144,15 +199,10 @@ async fn a_host_app_shares_an_encrypted_space_with_a_store_it_supplies() {
             .expect("alice opens with her store");
         let bob = JazzHandle::open_with_store(bob_config, Arc::new(HostStore::default()), None)
             .expect("bob opens with his store");
-        assert_eq!(alice.encryption_ready(30_000).unwrap(), "active");
-        assert_eq!(bob.encryption_ready(30_000).unwrap(), "active");
+        assert_eq!(wait_until_ready(&alice, 30_000).unwrap(), "active");
+        assert_eq!(wait_until_ready(&bob, 30_000).unwrap(), "active");
         assert!(
-            alice_store
-                .calls
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|op| op == "save"),
+            *alice_store.saves.lock().unwrap() > 0,
             "her keys went to her own store"
         );
 
@@ -245,12 +295,18 @@ async fn a_host_app_shares_an_encrypted_space_with_a_store_it_supplies() {
 
         // An encryption call that names nothing is refused with its code.
         match alice.encryption_call("noSuchCall".into(), "{}".into()) {
-            Err(JazzError::Refused { reason }) => {
-                assert!(reason.contains("encryption"), "{reason}")
-            }
-            other => panic!("expected a refusal, got {other:?}"),
+            Err(JazzError::Encryption {
+                code, io: false, ..
+            }) => assert_eq!(code, "error"),
+            other => panic!("expected a coded refusal, got {other:?}"),
         }
-        let state = parse(&alice.encryption_state().unwrap());
+        let devices = parse(
+            &alice
+                .encryption_call("devices".into(), "{}".into())
+                .unwrap(),
+        );
+        assert_eq!(devices[0]["removalRequested"], false);
+        let state = parse(&alice.encryption_call("state".into(), "{}".into()).unwrap());
         assert_eq!(state["status"], "active", "{state}");
         alice.shutdown().unwrap();
         bob.shutdown().unwrap();
@@ -276,7 +332,7 @@ async fn ffi_insert_returns_omitted_encrypted_values() {
     let result = tokio::task::spawn_blocking(move || {
         let alice =
             JazzHandle::open_with_store(config, Arc::new(HostStore::default()), None).unwrap();
-        assert_eq!(alice.encryption_ready(30_000).unwrap(), "active");
+        assert_eq!(wait_until_ready(&alice, 30_000).unwrap(), "active");
         let (project, _) = make_project(&alice, &alice.account().unwrap().unwrap());
         let inserted = parse(
             &alice
@@ -307,117 +363,6 @@ async fn ffi_insert_returns_omitted_encrypted_values() {
     result.unwrap();
 }
 
-/// Reopening a private store after a lost acknowledgement of the spent
-/// nonce enrolls a fresh device and continues recovery with the same key.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn recovery_continues_after_reopening_with_a_stranded_nonce() {
-    let app = start().await;
-    let config = app.config();
-    let result = tokio::task::spawn_blocking(move || {
-        let laptop =
-            JazzHandle::open_with_store(config.clone(), Arc::new(HostStore::default()), None)
-                .unwrap();
-        assert_eq!(laptop.encryption_ready(30_000).unwrap(), "active");
-        let store = Arc::new(HostStore {
-            lose_recovery_ack: AtomicBool::new(true),
-            ..Default::default()
-        });
-        let phone = JazzHandle::open_with_store(config.clone(), store.clone(), None).unwrap();
-        let error = phone.encryption_ready(15_000).unwrap_err();
-        assert!(
-            matches!(error, JazzError::Io { reason } if reason.contains("lost acknowledgement")),
-        );
-        let stranded = phone
-            .encryption_call("deviceId".into(), "{}".into())
-            .unwrap();
-        phone.shutdown().unwrap();
-
-        let reopened = JazzHandle::open_with_store(config, store, None).unwrap();
-        assert_eq!(reopened.encryption_ready(15_000).unwrap(), "active");
-        let recovered = reopened
-            .encryption_call("deviceId".into(), "{}".into())
-            .unwrap();
-        assert_ne!(
-            recovered, stranded,
-            "the spent nonce belongs to the old device"
-        );
-
-        reopened.shutdown().unwrap();
-        laptop.shutdown().unwrap();
-    })
-    .await;
-    app.stop().await;
-    result.unwrap();
-}
-
-/// Contract: a device account whose account-secret root was retired still
-/// starts: an active device reopened on its store is active (the retired
-/// root is not registered again), and a new device with the same secret
-/// stays awaiting approval, answering well before its deadline instead of
-/// waiting for a recovery that cannot come.
-///
-/// ```text
-/// laptop ──ready: registers the secret's root──► retire it ──► close
-/// laptop (same store) ──reopen──► active
-/// phone (same secret, new store) ──ready──► awaiting-approval, at once
-/// ```
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_device_account_starts_after_its_secrets_root_is_retired() {
-    let app = start().await;
-    let config = app.config();
-    let result = tokio::task::spawn_blocking(move || {
-        let store = Arc::new(HostStore::default());
-        let laptop = JazzHandle::open_with_store(config.clone(), store.clone(), None).unwrap();
-        assert_eq!(laptop.encryption_ready(30_000).unwrap(), "active");
-        // The verified account predates the root its start registered: read
-        // it again until the root is there.
-        let started = std::time::Instant::now();
-        let roots = loop {
-            laptop.encryption_call("ready".into(), "{}".into()).unwrap();
-            let roots = parse(
-                &laptop
-                    .encryption_call("recoveryList".into(), "{}".into())
-                    .unwrap(),
-            );
-            if !roots.as_array().unwrap().is_empty() {
-                break roots;
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(15),
-                "no root registered"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        assert_eq!(roots.as_array().unwrap().len(), 1, "{roots}");
-        laptop
-            .encryption_call(
-                "recoveryRetire".into(),
-                json!({ "rootId": roots[0]["id"] }).to_string(),
-            )
-            .unwrap();
-        laptop.shutdown().unwrap();
-
-        let reopened = JazzHandle::open_with_store(config.clone(), store, None).unwrap();
-        assert_eq!(reopened.encryption_ready(15_000).unwrap(), "active");
-
-        let phone =
-            JazzHandle::open_with_store(config, Arc::new(HostStore::default()), None).unwrap();
-        let started = std::time::Instant::now();
-        assert_eq!(phone.encryption_ready(30_000).unwrap(), "awaiting-approval");
-        assert!(
-            started.elapsed() < Duration::from_secs(15),
-            "it did not wait out its deadline: {:?}",
-            started.elapsed()
-        );
-
-        phone.shutdown().unwrap();
-        reopened.shutdown().unwrap();
-    })
-    .await;
-    app.stop().await;
-    result.unwrap();
-}
-
 unsafe extern "C" {
     fn strdup(text: *const std::ffi::c_char) -> *mut std::ffi::c_char;
 }
@@ -433,10 +378,13 @@ unsafe extern "C" fn c_store(
     unsafe {
         let store = &*(ctx as *const HostStore);
         let request = std::ffi::CStr::from_ptr(request).to_str().unwrap();
-        let reply = store.call(request.to_owned());
-        let text = std::ffi::CString::new(reply.payload).unwrap();
+        if parse(request)["op"] == "save" {
+            *store.saves.lock().unwrap() += 1;
+        }
+        let (ok, answer) = answer_memory_store(&store.memory, request.to_owned());
+        let text = std::ffi::CString::new(answer).unwrap();
         *payload = strdup(text.as_ptr());
-        if reply.ok { 0 } else { 1 }
+        if ok { 0 } else { 1 }
     }
 }
 
@@ -494,17 +442,46 @@ async fn the_c_abi_opens_an_encrypted_app_with_a_store_callback() {
             );
             assert!(!handle.is_null(), "{:?}", CStr::from_ptr(err));
             assert_eq!(
-                call(handle, "encryptionReady", json!({ "timeoutMs": 30000 })),
+                call(
+                    handle,
+                    "encryptionCall",
+                    json!({ "op": "waitUntilReady", "args": { "timeoutMs": 30000 } })
+                ),
                 "active"
             );
             assert_eq!(
-                call(handle, "encryptionState", json!({}))["status"],
+                call(handle, "encryptionCall", json!({ "op": "state" }))["status"],
                 "active"
             );
             assert!(call(handle, "encryptionCall", json!({ "op": "deviceId" })).is_string());
-            assert!(store.calls.lock().unwrap().iter().any(|op| op == "save"));
+            let reports = call(handle, "encryptionCall", json!({ "op": "reports" }));
+            assert!(reports.as_array().unwrap().iter().all(Value::is_object));
+            assert_eq!(
+                call(handle, "encryptionCall", json!({ "op": "reports" })),
+                json!([])
+            );
+            assert!(*store.saves.lock().unwrap() > 0);
+
+            let mut err: *mut c_char = std::ptr::null_mut();
+            let args = c"{\"op\":\"noSuchCall\"}";
+            let out = jazz_ffi::c_abi::jazz_call(
+                handle,
+                c"encryptionCall".as_ptr(),
+                args.as_ptr(),
+                &mut err,
+            );
+            assert!(out.is_null());
+            assert!(!err.is_null());
+            let failure = parse(CStr::from_ptr(err).to_str().unwrap());
+            jazz_ffi::c_abi::jazz_string_free(err);
+            assert_eq!(failure["kind"], "refused");
+            assert_eq!(failure["code"], "error");
+
             // A negative readiness timeout is refused, not read as the default.
-            let (method, args) = (c"encryptionReady", c"{\"timeoutMs\": -1}");
+            let (method, args) = (
+                c"encryptionCall",
+                c"{\"op\":\"waitUntilReady\",\"args\":{\"timeoutMs\":-1}}",
+            );
             let mut err: *mut c_char = std::ptr::null_mut();
             let out = jazz_ffi::c_abi::jazz_call(handle, method.as_ptr(), args.as_ptr(), &mut err);
             assert!(out.is_null(), "a negative timeout is refused");

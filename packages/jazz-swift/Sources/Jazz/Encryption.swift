@@ -61,92 +61,48 @@ public struct EncryptionConfig: Sendable {
     }
 }
 
-/// Answers jazz-ffi's store requests (JSON text: `op`, bytes as base64,
-/// numbers that may exceed 2^53 as decimal text) with a `PrivateStore`.
-///
-/// Requests and answers carry key bytes. The `Data` buffers this bridge owns
-/// (the request's UTF-8, the secret it decodes for `protect`, the secret
-/// `unprotect` returns, the answer's JSON) are zeroed once used; a copy the
-/// store keeps is its own (`Data` copies on write). Swift strings (the
-/// request and answer texts, the base64 in them) and Foundation's parsed JSON
-/// cannot be wiped and stay until their memory is reused. jazz-ffi wipes its
-/// own copies.
+/// Adapts the app's store to UniFFI. Hosts wipe secrets they own after use;
+/// lowering and lifting a callback can make temporary UniFFI copies.
 final class StoreBridge: JazzFFI.PrivateStore, @unchecked Sendable {
     let store: any PrivateStore
     init(_ store: any PrivateStore) { self.store = store }
 
-    func call(request: String) -> StoreReply {
-        var data = Data(request.utf8)
-        let parsed = try? JSONSerialization.jsonObject(with: data)
-        wipe(&data)
-        guard let object = parsed as? [String: Any], let op = object["op"] as? String
-        else { return StoreReply(ok: false, payload: "the private store request is not JSON") }
-        func text(_ name: String) throws -> String {
-            guard let value = object[name] as? String else { throw StoreRequestError.missing(name) }
-            return value
-        }
-        func number(_ name: String) throws -> UInt64 {
-            guard let value = UInt64(try text(name)) else { throw StoreRequestError.missing(name) }
-            return value
-        }
-        func bytes(_ name: String) throws -> Data {
-            guard let value = Data(base64Encoded: try text(name)) else { throw StoreRequestError.missing(name) }
-            return value
-        }
-        func json(_ value: Any) -> String {
-            guard var data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed])
-            else { return "null" }
-            defer { wipe(&data) }
-            return String(data: data, encoding: .utf8) ?? "null"
-        }
-        do {
-            let result: String
-            switch op {
-            case "openScope":
-                result = json(String(try store.openScope(try text("scope"))))
-            case "load":
-                if let found = try store.load(scope: try text("scope"), doc: try text("doc")) {
-                    result = json([
-                        "bytes": found.bytes.base64EncodedString(), "revision": String(found.revision),
-                    ])
-                } else {
-                    result = "null"
-                }
-            case "save":
-                var expected: UInt64?
-                if object["expected"] is String { expected = try number("expected") }
-                let revision = try store.save(
-                    scope: try text("scope"), incarnation: try number("incarnation"), doc: try text("doc"),
-                    bytes: try bytes("bytes"), expected: expected)
-                result = json(String(revision))
-            case "list":
-                result = json(try store.list(scope: try text("scope")))
-            case "delete":
-                try store.delete(scope: try text("scope"))
-                result = "null"
-            case "protect":
-                var secret = try bytes("secret")
-                defer { wipe(&secret) }
-                result = json(try store.protect(secret).base64EncodedString())
-            case "unprotect":
-                var secret = try store.unprotect(try bytes("blob"))
-                defer { wipe(&secret) }
-                result = json(secret.base64EncodedString())
-            default:
-                return StoreReply(ok: false, payload: "unknown private store operation \(op)")
+    func openScope(scope: String) throws -> UInt64 { try call { try store.openScope(scope) } }
+
+    func load(scope: String, doc: String) throws -> JazzFFI.StoredDocument? {
+        try call {
+            try store.load(scope: scope, doc: doc).map {
+                JazzFFI.StoredDocument(bytes: $0.bytes, revision: $0.revision)
             }
-            return StoreReply(ok: true, payload: result)
-        } catch PrivateStoreError.conflict {
-            return StoreReply(ok: false, payload: "conflict")
-        } catch PrivateStoreError.wiped {
-            return StoreReply(ok: false, payload: "wiped")
-        } catch {
-            return StoreReply(ok: false, payload: "\(error)")
         }
     }
-}
 
-enum StoreRequestError: Error { case missing(String) }
+    func save(scope: String, incarnation: UInt64, doc: String, bytes: Data, expected: UInt64?) throws -> UInt64 {
+        try call { try store.save(scope: scope, incarnation: incarnation, doc: doc, bytes: bytes, expected: expected) }
+    }
+
+    func list(scope: String) throws -> [String] { try call { try store.list(scope: scope) } }
+    func delete(scope: String) throws { try call { try store.delete(scope: scope) } }
+
+    func protect(secret: Data) throws -> Data {
+        var input = secret.withUnsafeBytes { Data($0) }
+        defer { wipe(&input) }
+        return try call { try store.protect(input) }
+    }
+
+    func unprotect(blob: Data) throws -> Data {
+        var secret = try call { try store.unprotect(blob) }
+        defer { wipe(&secret) }
+        return secret.withUnsafeBytes { Data($0) }
+    }
+
+    private func call<T>(_ block: () throws -> T) throws -> T {
+        do { return try block() }
+        catch PrivateStoreError.conflict { throw JazzFFI.PrivateStoreError.Conflict }
+        catch PrivateStoreError.wiped { throw JazzFFI.PrivateStoreError.Wiped }
+        catch { throw JazzFFI.PrivateStoreError.Failed(reason: "\(error)") }
+    }
+}
 
 /// Zeroes `data`'s bytes in place (a copy shared with someone else is copied
 /// first and left as it was).
@@ -186,14 +142,10 @@ public struct Encryption: Sendable {
     /// The code of an encryption failure (`approval-code-mismatch`,
     /// `no-challenge`, `invalid-checksum`, ...), or `nil` for any other error.
     public static func code(of error: any Error) -> String? {
-        // A `store` or `database` failure arrives as `.io`, the rest as `.refused`.
-        let message: String
         switch error as? JazzError {
-        case .refused(let text), .io(let text): message = text
+        case .refused(_, let code), .io(_, let code): return code
         default: return nil
         }
-        guard message.hasPrefix("encryption (") else { return nil }
-        return message.dropFirst("encryption (".count).prefix { $0 != ")" }.description
     }
 
     /// One of the runtime's operations by name (see the README), with its
@@ -205,8 +157,14 @@ public struct Encryption: Sendable {
     private func call<Result: Decodable>(
         _ op: String, _ args: [String: JSONValue] = [:], as type: Result.Type
     ) async throws -> Result {
+        try await call(op, arguments: JSONValue.object(args), as: type)
+    }
+
+    private func call<Result: Decodable, Arguments: Encodable>(
+        _ op: String, arguments: Arguments, as type: Result.Type
+    ) async throws -> Result {
         try await Client.typed {
-            let json = try Coding.json(JSONValue.object(args))
+            let json = try Coding.json(arguments)
             let text = try await Client.run { try self.client.handle.encryptionCall(op: op, argsJson: json) }
             return try Coding.decode(type, text, self.client.userInfo)
         }
@@ -219,41 +177,28 @@ public struct Encryption: Sendable {
         guard timeout >= 0, timeout * 1000 < Double(UInt64.max) else {
             throw JazzError.refused("the readiness timeout must be a non-negative number of seconds")
         }
-        return try await Client.typed {
-            let status = try await Client.run {
-                try self.client.handle.encryptionReady(timeoutMs: UInt64(timeout * 1000))
-            }
-            return status
-        }
+        return try await call("waitUntilReady", arguments: ["timeoutMs": UInt64(timeout * 1000)], as: String.self)
     }
 
     /// What the runtime's loop is doing now.
     public func state() async throws -> EncryptionState {
-        try await Client.typed {
-            let text = try await Client.run { try self.client.handle.encryptionState() }
-            return try Coding.decode(EncryptionState.self, text, self.client.userInfo)
-        }
+        try await call("state", as: EncryptionState.self)
     }
 
     /// The reports waiting (`type`: `unreadable`, `missing-key`, `challenged`,
     /// `ready-failed`, ...).
     public func reports() async throws -> [JSONValue] {
-        try await Client.typed {
-            let texts = try await Client.run { try self.client.handle.encryptionReports() }
-            return try texts.map { try Coding.decode(JSONValue.self, $0, self.client.userInfo) }
-        }
+        try await call("reports", as: [JSONValue].self)
     }
 
     /// This installation's device ID.
     public func deviceId() async throws -> String {
-        guard case .string(let id) = try await call("deviceId") else { return "" }
-        return id
+        try await call("deviceId", as: String.self)
     }
 
     /// The account's devices.
     public func devices() async throws -> [Device] {
-        let list = try await call("devices")
-        return try Coding.decode([Device].self, try Coding.json(list), client.userInfo)
+        try await call("devices", as: [Device].self)
     }
 
     /// Starts approving a waiting device (on an approved one); `approvalCode`
@@ -265,16 +210,13 @@ public struct Encryption: Sendable {
 
     /// On the new device, once challenged: the code to show.
     public func answer() async throws -> String {
-        guard case .string(let code) = try await call("answer") else { return "" }
-        return code
+        try await call("answer", as: String.self)
     }
 
     /// On the approving device: the code to compare, `nil` until the new
     /// device answered.
     public func approvalCode(deviceId: String) async throws -> String? {
-        guard case .string(let code) = try await call("approvalCode", ["deviceId": .string(deviceId)])
-        else { return nil }
-        return code
+        try await call("approvalCode", ["deviceId": .string(deviceId)], as: String?.self)
     }
 
     /// Approves the device if `code` is the one `approvalCode` gave.
@@ -303,9 +245,8 @@ public struct Encryption: Sendable {
     /// `recoveryRegister` does. Only for an account the app signs in itself (a
     /// device account's recovery is its account key).
     public func recoveryCreate() async throws -> String {
-        guard case .object(let made) = try await call("recoveryCreate"), case .string(let phrase)? = made["phrase"]
-        else { return "" }
-        return phrase
+        struct CreatedRecovery: Decodable { let phrase: String }
+        return try await call("recoveryCreate", as: CreatedRecovery.self).phrase
     }
 
     /// Registers the recovery root `phrase` gives, from a device that is active.
@@ -315,9 +256,7 @@ public struct Encryption: Sendable {
 
     /// Approves this new device with `phrase`: its status.
     public func recoveryRestore(phrase: String) async throws -> String {
-        guard case .string(let status) = try await call("recoveryRestore", ["phrase": .string(phrase)])
-        else { return "" }
-        return status
+        try await call("recoveryRestore", ["phrase": .string(phrase)], as: String?.self) ?? ""
     }
 }
 

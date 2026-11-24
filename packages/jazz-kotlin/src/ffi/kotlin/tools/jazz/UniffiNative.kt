@@ -2,6 +2,8 @@ package tools.jazz
 
 import uniffi.jazz_ffi.JazzHandle
 import uniffi.jazz_ffi.SubscriptionListener
+import uniffi.jazz_ffi.PrivateStoreException as FfiStoreException
+import uniffi.jazz_ffi.StoredDocument as FfiDocument
 import uniffi.jazz_ffi.JazzException as FfiException
 
 /** [Native] over the Kotlin bindings uniffi-bindgen generates for jazz-ffi. */
@@ -20,37 +22,63 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
 
         @JvmStatic
         public fun openWithTokens(configJson: String, tokens: (String) -> String?): Native {
-            val provider = object : uniffi.jazz_ffi.TokenProvider {
-                // A provider that throws (offline, the sign-in server down) is an error the
-                // session retries, not a sign-out: only returning null signs the user out.
+            return UniffiNative(call { JazzHandle.openWithTokens(configJson, tokenProvider(tokens)) })
+        }
+
+        private fun tokenProvider(tokens: (String) -> String?): uniffi.jazz_ffi.TokenProvider =
+            object : uniffi.jazz_ffi.TokenProvider {
                 override fun token(reason: String): String? = try {
                     tokens(reason)
                 } catch (e: Throwable) {
                     throw FfiException.Io(e.message ?: e.toString())
                 }
             }
-            return UniffiNative(call { JazzHandle.openWithTokens(configJson, provider) })
-        }
 
-        /** Opens an app that declares end-to-end encryption: [store] answers its private store requests. */
+        /** Opens an app that declares end-to-end encryption with its private store. */
         @JvmStatic
-        public fun openWithStore(configJson: String, store: (String) -> StoreReply, tokens: ((String) -> String?)?): Native {
+        public fun openWithStore(configJson: String, store: PrivateStore, tokens: ((String) -> String?)?): Native {
             val privateStore = object : uniffi.jazz_ffi.PrivateStore {
-                override fun call(request: String): uniffi.jazz_ffi.StoreReply {
-                    val reply = store(request)
-                    return uniffi.jazz_ffi.StoreReply(reply.ok, reply.payload)
+                override fun openScope(scope: String): ULong = storeCall { store.openScope(scope).toULong() }
+
+                override fun load(scope: String, doc: String): FfiDocument? = storeCall {
+                    store.load(scope, doc)?.let { FfiDocument(it.bytes, it.revision.toULong()) }
                 }
-            }
-            val provider = tokens?.let {
-                object : uniffi.jazz_ffi.TokenProvider {
-                    override fun token(reason: String): String? = try {
-                        it(reason)
-                    } catch (e: Throwable) {
-                        throw FfiException.Io(e.message ?: e.toString())
+
+                override fun save(scope: String, incarnation: ULong, doc: String, bytes: ByteArray, expected: ULong?): ULong =
+                    storeCall { store.save(scope, incarnation.toLong(), doc, bytes, expected?.toLong()).toULong() }
+
+                override fun list(scope: String): List<String> = storeCall { store.list(scope) }
+                override fun delete(scope: String): Unit = storeCall { store.delete(scope) }
+
+                override fun protect(secret: ByteArray): ByteArray = storeCall {
+                    try {
+                        store.protect(secret).copyOf()
+                    } finally {
+                        secret.fill(0)
+                    }
+                }
+
+                override fun unprotect(blob: ByteArray): ByteArray = storeCall {
+                    val secret = store.unprotect(blob)
+                    try {
+                        secret.copyOf()
+                    } finally {
+                        secret.fill(0)
                     }
                 }
             }
+            val provider = tokens?.let(::tokenProvider)
             return UniffiNative(call { JazzHandle.openWithStore(configJson, privateStore, provider) })
+        }
+
+        private inline fun <T> storeCall(block: () -> T): T = try {
+            block()
+        } catch (_: PrivateStoreException.Conflict) {
+            throw FfiStoreException.Conflict()
+        } catch (_: PrivateStoreException.Wiped) {
+            throw FfiStoreException.Wiped()
+        } catch (e: Throwable) {
+            throw FfiStoreException.Failed(e.message ?: e.toString())
         }
 
         @JvmStatic
@@ -62,6 +90,8 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
             throw when (e) {
                 is FfiException.Refused -> JazzException.Refused(e.reason)
                 is FfiException.Io -> JazzException.Io(e.reason)
+                is FfiException.Encryption -> if (e.io) JazzException.Io(e.reason, e.code)
+                    else JazzException.Refused(e.reason, e.code)
                 is FfiException.Closed -> JazzException.Closed()
                 is FfiException.Permission -> JazzException.Permission(e.reason)
                 is FfiException.NotSupported -> JazzException.NotSupported(e.reason)
@@ -115,9 +145,6 @@ public class UniffiNative private constructor(private val handle: JazzHandle) : 
     override fun refresh(): Unit = live { handle.refresh() }
     override fun bundle(): String? = live { handle.bundle() }
     override fun encryptionCall(op: String, argsJson: String): String = live { handle.encryptionCall(op, argsJson) }
-    override fun encryptionReady(timeoutMs: Long): String = live { handle.encryptionReady(timeoutMs.toULong()) }
-    override fun encryptionState(): String = live { handle.encryptionState() }
-    override fun encryptionReports(): List<String> = live { handle.encryptionReports() }
 
     override fun beginUpload(table: String, column: String, kind: String, id: String?, rowJson: String?): NativeUpload {
         val upload = live { handle.beginUpload(table, column, kind, id, rowJson) }

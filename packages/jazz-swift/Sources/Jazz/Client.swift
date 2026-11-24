@@ -4,9 +4,9 @@ import JazzFFI
 /// Why a Jazz call failed.
 public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
     /// Refused: validation, permissions, or not supported yet.
-    case refused(String)
+    case refused(String, encryptionCode: String? = nil)
     /// Storage or network.
-    case io(String)
+    case io(String, encryptionCode: String? = nil)
     /// The client was closed.
     case closed
     /// A row or delta didn't decode into the bindings' types (stale bindings?).
@@ -28,8 +28,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .refused(let message): return "refused: \(message)"
-        case .io(let message): return "io: \(message)"
+        case .refused(let message, _): return "refused: \(message)"
+        case .io(let message, _): return "io: \(message)"
         case .closed: return "closed"
         case .decoding(let message): return "decoding: \(message)"
         case .permissionDenied(let message): return "permission denied: \(message)"
@@ -58,6 +58,8 @@ public enum JazzError: Error, Equatable, Sendable, CustomStringConvertible {
         switch error {
         case .Refused(let message): return JazzError.refused(message)
         case .Io(let message): return JazzError.io(message)
+        case .Encryption(let code, let reason, let io):
+            return io ? JazzError.io(reason, encryptionCode: code) : JazzError.refused(reason, encryptionCode: code)
         case .Closed: return JazzError.closed
         case .Permission(let message): return JazzError.permissionDenied(message)
         case .NotSupported(let message): return JazzError.notSupported(message)

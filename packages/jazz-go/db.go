@@ -217,23 +217,13 @@ func open(ctx context.Context, cfg Config) (*DB, error) {
 	}
 	done := make(chan opened, 1)
 	go func() {
+		var store PrivateStore
 		if cfg.Encryption != nil {
-			var tokens TokenProvider
-			if t, ok := cfg.Auth.(tokenAuth); ok {
-				tokens = t.provider
-			}
-			h, provider, store, err := openEncrypted(string(config), tokens, cfg.Encryption.Store)
-			done <- opened{h, err, provider, store}
-			return
+			store = cfg.Encryption.Store
 		}
-		if t, ok := cfg.Auth.(tokenAuth); ok {
-			h, provider, err := openUser(string(config), t.provider)
-			done <- opened{h: h, err: err, provider: provider}
-			return
-		}
-		var cerr uintptr
-		h := ffi.open(cstr(string(config)), &cerr)
-		done <- opened{h: h, err: takeError(cerr)}
+		auth, _ := cfg.Auth.(tokenAuth)
+		h, provider, storeID, err := openNative(string(config), auth.provider, store)
+		done <- opened{h: h, err: err, provider: provider, store: storeID}
 	}()
 	select {
 	case o := <-done:
@@ -250,6 +240,40 @@ func open(ctx context.Context, cfg Config) (*DB, error) {
 		}()
 		return nil, ctx.Err()
 	}
+}
+
+// openNative registers callbacks before opening and releases them if open fails.
+func openNative(config string, tokens TokenProvider, store PrivateStore) (uintptr, uint64, uint64, error) {
+	if store != nil && ffi.openEncrypted == nil {
+		return 0, 0, 0, &Error{Kind: KindRefused, Message: "this libjazz_ffi has no end-to-end encryption (an older build)"}
+	}
+	var provider, storeID uint64
+	var tokenCB uintptr
+	if tokens != nil {
+		provider = nextProvider.Add(1)
+		providers.Store(provider, tokens)
+		tokenCB = ffi.tokenCallback
+	}
+	var h, cerr uintptr
+	input := cstr(config)
+	switch {
+	case store != nil:
+		storeID = nextStore.Add(1)
+		stores.Store(storeID, store)
+		h = ffi.openEncrypted(input, tokenCB, uintptr(provider), ffi.storeCallback, uintptr(storeID), &cerr)
+	case tokens != nil:
+		h = ffi.openUser(input, tokenCB, uintptr(provider), &cerr)
+	default:
+		h = ffi.open(input, &cerr)
+	}
+	if err := takeError(cerr); err != nil || h == 0 {
+		releaseCallbacks(provider, storeID)
+		if err == nil {
+			err = &Error{Kind: KindRefused, Message: "open failed"}
+		}
+		return 0, 0, 0, err
+	}
+	return h, provider, storeID, nil
 }
 
 // Close closes the app; later calls return ErrClosed.
