@@ -20,7 +20,7 @@ use super::{SpaceKeyState, protocol_address};
 use crate::account::rows::{self, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
-use crate::state::{WatchedRows, row_space};
+use crate::state::{MEMBER_CHANGE_WAIT, WatchedRows, row_space};
 
 /// Live subscriptions to the rows that bring this device its keys: always
 /// its own member rows and the deliveries addressed to it, and, for the
@@ -336,7 +336,6 @@ impl E2eeClient {
             .collect();
         let mut ready = BTreeSet::new();
         let mut done = Vec::new();
-        let wait = self.shared.member_change_wait.get();
         for (row, space, staged) in pending {
             if ready.contains(&space) {
                 done.push(row);
@@ -350,7 +349,7 @@ impl E2eeClient {
             if read.iter().any(|found| found.row_uuid() == row) {
                 ready.insert(space);
                 done.push(row);
-            } else if staged.elapsed() >= wait {
+            } else if self.shared.now().duration_since(staged) >= MEMBER_CHANGE_WAIT {
                 done.push(row);
             }
         }
@@ -384,7 +383,6 @@ impl E2eeClient {
         if pending.is_empty() || !self.shared.keys.borrow().online {
             return Ok(served);
         }
-        let wait = self.shared.member_change_wait.get();
         let mut opts = ReadOpts::for_read_tier(ReadTier::LocalOnly);
         opts.read_view.include_deleted = true;
         let mut done = Vec::new();
@@ -404,7 +402,7 @@ impl E2eeClient {
             if passed {
                 served.extend(space);
                 done.push(row);
-            } else if staged.elapsed() >= wait {
+            } else if self.shared.now().duration_since(staged) >= MEMBER_CHANGE_WAIT {
                 done.push(row);
             }
         }

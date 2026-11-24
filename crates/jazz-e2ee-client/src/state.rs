@@ -698,11 +698,9 @@ pub(crate) struct Shared {
     /// (`NeedsKey`) until the queue is served. A deleted row the local store
     /// does not show after [`MEMBER_CHANGE_WAIT`] is dropped.
     pub(crate) member_removals: RefCell<VecDeque<(RowUuid, web_time::Instant)>>,
-    /// The settle back-off's clock when a test holds it still (`None`: the
+    /// The runtime clock when a test holds it still (`None`: the
     /// real one), so a wait is stepped, not slept.
     pub(crate) held_clock: std::cell::Cell<Option<web_time::Instant>>,
-    /// How long a staged member row is waited for (tests shorten it).
-    pub(crate) member_change_wait: std::cell::Cell<std::time::Duration>,
     /// The collectors of the repair reads in flight, each registered for the
     /// duration of its read (protocol §3.2).
     pub(crate) collectors: RefCell<BTreeMap<uuid::Uuid, Collector>>,
@@ -883,7 +881,6 @@ impl Shared {
         }
     }
 
-    /// The settle back-off's clock.
     pub(crate) fn now(&self) -> web_time::Instant {
         self.held_clock.get().unwrap_or_else(web_time::Instant::now)
     }

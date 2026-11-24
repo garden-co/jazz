@@ -330,7 +330,7 @@ impl E2eeHooks for Hooks {
                     scope_id: scope.to_string(),
                     identifier: id.to_string(),
                 },
-                web_time::Instant::now(),
+                self.shared.now(),
             ));
         }
         // A member row this client deletes, a removal: the space is served
@@ -345,7 +345,7 @@ impl E2eeHooks for Hooks {
             if removals.len() == crate::state::MAX_REPORTS {
                 removals.pop_front();
             }
-            removals.push_back((write.row, web_time::Instant::now()));
+            removals.push_back((write.row, self.shared.now()));
         }
         let Some(plan) = self.plan(write.table) else {
             return Ok(());

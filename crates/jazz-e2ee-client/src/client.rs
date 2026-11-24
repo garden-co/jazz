@@ -251,7 +251,6 @@ impl E2eeClient {
             member_changes: Default::default(),
             member_removals: Default::default(),
             held_clock: Default::default(),
-            member_change_wait: std::cell::Cell::new(crate::state::MEMBER_CHANGE_WAIT),
             collectors: Default::default(),
             next_write: Default::default(),
             member_watch: Default::default(),
@@ -598,20 +597,13 @@ impl E2eeClient {
         self.shared.member_watch.borrow().delivery_mark_checks
     }
 
-    /// Holds the settle back-off's clock still, or moves it on by `by` when
+    /// Holds the runtime clock still, or moves it on by `by` when
     /// already held (tests: a wait is stepped, never slept).
     #[doc(hidden)]
     #[cfg(any(test, feature = "testing"))]
     pub fn advance_settle_clock(&self, by: std::time::Duration) {
         let now = self.shared.now();
         self.shared.held_clock.set(Some(now + by));
-    }
-
-    /// Changes how long tests wait for a staged member row.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "testing"))]
-    pub fn set_member_change_wait(&self, wait: std::time::Duration) {
-        self.shared.member_change_wait.set(wait);
     }
 
     /// This device: its ID and key pairs. [`ClientError::Closed`] once the

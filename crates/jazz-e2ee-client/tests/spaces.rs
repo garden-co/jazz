@@ -3003,6 +3003,7 @@ fn a_member_write_that_never_commits_is_dropped_after_the_wait() {
             .unwrap()
             .unwrap()
             .0;
+        alice.client.advance_settle_clock(std::time::Duration::ZERO);
         let id = jazz::tools::OpenTransactionId::new();
         block_on(alice.db.begin_serializable(id)).unwrap();
         block_on(alice.db.tx_ref(id).insert(
@@ -3023,13 +3024,13 @@ fn a_member_write_that_never_commits_is_dropped_after_the_wait() {
 
         alice
             .client
-            .set_member_change_wait(std::time::Duration::from_secs(3600));
+            .advance_settle_clock(std::time::Duration::from_secs(29));
         alice.sync_spaces(&server, &mut watch).unwrap();
         assert_eq!(alice.client.pending_member_changes(), 1, "still waited for");
 
         alice
             .client
-            .set_member_change_wait(std::time::Duration::ZERO);
+            .advance_settle_clock(std::time::Duration::from_secs(1));
         alice.sync_spaces(&server, &mut watch).unwrap();
         assert_eq!(alice.client.pending_member_changes(), 0, "dropped");
     });
