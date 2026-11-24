@@ -233,35 +233,6 @@ func answerStore(store PrivateStore, request string) (bool, string) {
 	return false, "unknown private store operation " + r.Op
 }
 
-// openEncrypted opens an app that declares encryption: store answers the
-// device's private store requests until the handle closes.
-func openEncrypted(config string, tokens TokenProvider, store PrivateStore) (h uintptr, provider, storeID uint64, err error) {
-	if ffi.openEncrypted == nil {
-		return 0, 0, 0, &Error{Kind: KindRefused, Message: "this libjazz_ffi has no end-to-end encryption (an older build)"}
-	}
-	storeID = nextStore.Add(1)
-	stores.Store(storeID, store)
-	var tokenCB, tokenCtx uintptr
-	if tokens != nil {
-		provider = nextProvider.Add(1)
-		providers.Store(provider, tokens)
-		tokenCB, tokenCtx = ffi.tokenCallback, uintptr(provider)
-	}
-	var cerr uintptr
-	h = ffi.openEncrypted(cstr(config), tokenCB, tokenCtx, ffi.storeCallback, uintptr(storeID), &cerr)
-	if err := takeError(cerr); err != nil || h == 0 {
-		stores.Delete(storeID)
-		if provider != 0 {
-			providers.Delete(provider)
-		}
-		if err == nil {
-			err = &Error{Kind: KindRefused, Message: "open failed"}
-		}
-		return 0, 0, 0, err
-	}
-	return h, provider, storeID, nil
-}
-
 // Encryption is the app's end-to-end encryption: this device's account, its
 // other devices, its recovery and its keys. Every call refuses for an app that
 // declares none; a backend holds no keys and refuses too.
