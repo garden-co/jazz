@@ -28,7 +28,8 @@
     "./dist/worker/**",
     "**/*.css",
     "./dist/backend/node-native.js",
-    "./dist/backend/workerd.js"
+    "./dist/backend/workerd.js",
+    "./dist/cloudflare/index.js"
   ],
   "main": "dist/index.js",
   "browser": {
@@ -70,6 +71,10 @@
     "./durable-object": {
       "types": "./dist/durable-object/index.d.ts",
       "workerd": "./dist/durable-object/index.js"
+    },
+    "./cloudflare": {
+      "types": "./dist/cloudflare/index.d.ts",
+      "workerd": "./dist/cloudflare/index.js"
     },
     "./better-auth-adapter": {
       "types": "./dist/better-auth-adapter/index.d.ts",
