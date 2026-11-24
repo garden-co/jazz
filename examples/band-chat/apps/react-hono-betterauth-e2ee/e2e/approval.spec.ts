@@ -22,13 +22,10 @@ import {
   unique,
   waitingBanner,
   type Device,
-  reportPages,
+  configureBandChatTests,
 } from "./support";
 
-test.describe.configure({ timeout: 300_000 });
-// Playwright reads fixtures from a destructured first argument; this hook needs none.
-// eslint-disable-next-line no-empty-pattern
-test.afterEach(async ({}, testInfo) => reportPages(testInfo));
+configureBandChatTests();
 
 /** Clears everything the browser keeps for the app's origin: storage and cookies. */
 async function clearSiteData(device: Device): Promise<void> {

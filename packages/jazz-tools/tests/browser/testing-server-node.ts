@@ -1,5 +1,5 @@
 import type { VitestPluginContext } from "vitest/node";
-import { storedBytes } from "../stored-bytes.js";
+import { storedBytes } from "../../src/testing/stored-bytes.js";
 import { transportControlBrowserCommands } from "./transport-control-commands.js";
 import {
   startLocalJazzServer,

@@ -1,9 +1,11 @@
-import { mkdtemp, readdir, readFile } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { acceptDeviceAccounts, createJazz, sqlite } from "../backend/index.js";
+import { acceptDeviceAccounts } from "../backend/index.js";
+import {
+  cleanUpTestApp,
+  memoryTestAccountStore as memoryStore,
+  serveEncryptedTestApp,
+  storedBytes,
+} from "../testing/index.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import {
   EncryptionNotDeclaredError,
@@ -56,47 +58,26 @@ const titles = (rows: unknown[]) => rows.map((row) => (row as { title: string })
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
   vi.useRealTimers();
-  while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
+  await cleanUpTestApp(cleanups);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
-async function serve() {
-  const dir = await mkdtemp(`${tmpdir()}/thin-encrypted-`);
-  const jazz = await createJazz({
-    app,
-    permissions,
-    store: sqlite({ path: `${dir}/core.sqlite` }),
-    // The app's own sign-in (`Authorization: Bearer token-<user>`), and device accounts.
-    authenticate: (request: Request) => {
-      const match = /^Bearer token-(\w+)$/.exec(request.headers.get("authorization") ?? "");
-      return match
-        ? { userId: match[1]!, expiresAt: Math.floor(Date.now() / 1000) + 3600 }
-        : acceptDeviceAccounts(request);
+function serve() {
+  return serveEncryptedTestApp(
+    {
+      app,
+      permissions,
+      // The app's own sign-in (`Authorization: Bearer token-<user>`), and device accounts.
+      authenticate: (request: Request) => {
+        const match = /^Bearer token-(\w+)$/.exec(request.headers.get("authorization") ?? "");
+        return match
+          ? { userId: match[1]!, expiresAt: Math.floor(Date.now() / 1000) + 3600 }
+          : acceptDeviceAccounts(request);
+      },
     },
-  }).ready();
-  cleanups.push(() => jazz.close());
-  const server: Server = createServer((req, res) =>
-    jazz.nodeHandler(req, res, () => {
-      res.statusCode = 404;
-      res.end();
-    }),
+    cleanups,
   );
-  await jazz.attach(server);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  cleanups.push(
-    () =>
-      new Promise((resolve) => {
-        server.closeAllConnections();
-        server.close(resolve);
-      }),
-  );
-  return {
-    jazz,
-    server,
-    serverUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/jazz`,
-    storePath: `${dir}/core.sqlite`,
-  };
 }
 type Host = Awaited<ReturnType<typeof serve>>;
 
@@ -115,21 +96,6 @@ function holdNewConnections(host: Host) {
     });
   });
   return { release };
-}
-
-function memoryStore(): AccountStore {
-  let stored: string | null = null;
-  return {
-    read: async () => stored,
-    update: async (transform) => void (stored = transform(stored)),
-  };
-}
-
-async function storedBytes(path: string): Promise<Buffer> {
-  const entries = await readdir(path, { withFileTypes: true }).catch(() => undefined);
-  if (!entries) return readFile(path);
-  const parts = await Promise.all(entries.map((entry) => storedBytes(`${path}/${entry.name}`)));
-  return Buffer.concat(parts);
 }
 
 const loadLocalFirst: LocalFirstLoader = async () => ({ createClient: createLocalFirstDb });

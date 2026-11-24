@@ -1,6 +1,7 @@
-import { cp, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { cp, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { storedBytes as readStoredBytes } from "jazz-tools/testing";
 
 const APP_DIR = resolve(import.meta.dirname, "..");
 
@@ -10,18 +11,8 @@ function serverDataPath(): string {
 }
 
 /** Every byte the server has stored. */
-export async function storedBytes(path = serverDataPath()): Promise<Buffer> {
-  const info = await stat(path).catch(() => undefined);
-  if (!info) return Buffer.alloc(0);
-  if (!info.isDirectory()) {
-    // SQLite keeps recent writes beside the file until a checkpoint.
-    const parts = [await readFile(path)];
-    for (const suffix of ["-wal", "-journal"])
-      parts.push(await readFile(`${path}${suffix}`).catch(() => Buffer.alloc(0)));
-    return Buffer.concat(parts);
-  }
-  const entries = await readdir(path);
-  return Buffer.concat(await Promise.all(entries.map((entry) => storedBytes(join(path, entry)))));
+export function storedBytes(): Promise<Buffer> {
+  return readStoredBytes(serverDataPath());
 }
 
 type Backend = Awaited<ReturnType<typeof openSnapshot>>;
