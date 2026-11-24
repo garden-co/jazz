@@ -686,6 +686,19 @@ impl Held {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static DERIVED_BINDS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How many cells this thread bound from a descriptor its own edit derived
+/// for the write in flight ([`Store::derived`]), trusted as built.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn derived_binds_for_test() -> usize {
+    DERIVED_BINDS.with(Cell::get)
+}
+
 /// Test-visible runtime counters.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeStats {
@@ -8452,6 +8465,8 @@ impl Store {
                 .await?;
         } else if self.derived.borrow().contains(large) {
             // Derived here from a stored tree by an append or splice.
+            #[cfg(any(test, feature = "testing"))]
+            DERIVED_BINDS.with(|binds| binds.set(binds.get() + 1));
             complete = self.client().is_none();
         } else if let Some(possession) = &possession
             && !crate::large::possessed(&self.conn, &self.chunks, large, possession).await?
