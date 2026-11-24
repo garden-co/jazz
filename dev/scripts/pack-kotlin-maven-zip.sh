@@ -11,7 +11,7 @@
 #           holds jazz-kotlin brings its root .module too.
 #
 # Only <version>'s directories go in, without maven-metadata* and _remote.repositories
-# (Gradle reads neither from a local file repository) or .asc files: the tree is signed with
+# (Gradle reads neither from a local file repository) or .asc files (and their checksums): the tree is signed with
 # a throwaway key at build time, and the zip's integrity is its line in SHA256SUMS-languages
 # and its build provenance attestation, like the jar and AAR beside it.
 set -euo pipefail
@@ -38,7 +38,7 @@ for r in "${repos[@]}"; do
   done
 done
 [ "$found" -gt 0 ] || { echo "${repos[*]}: no artifact at $version under tools/jazz" >&2; exit 1; }
-find "$work/tools" -type f \( -name '*.asc' -o -name 'maven-metadata*' -o -name _remote.repositories \) -delete
+find "$work/tools" -type f \( -name '*.asc' -o -name '*.asc.*' -o -name 'maven-metadata*' -o -name _remote.repositories \) -delete
 
 # 1980-01-01, zip's earliest; TZ=UTC since zip stores local time.
 find "$work/tools" -exec touch -h -d '1980-01-01T00:00:00Z' {} +

@@ -37,6 +37,7 @@ function repo({ omit = [], extra = {} } = {}) {
   }, null, 2));
   put(`${base("jazz-kotlin")}.pom`, "<project/>");
   put(`${base("jazz-kotlin")}.module.asc`, "throwaway");
+  put(`${base("jazz-kotlin")}.module.asc.sha256`, "checksum of a throwaway signature");
   put(`tools/jazz/jazz-kotlin/maven-metadata-local.xml`, "<metadata/>");
   if (!omit.includes("root-sources"))
     jar(join(root, `tools/jazz/jazz-kotlin/${V}`), `jazz-kotlin-${V}-sources.jar`, { "commonMain/tools/jazz/Db.kt": "x" });
@@ -66,7 +67,7 @@ test("the KMP repository packs and passes, without signatures or metadata", () =
     const { status, stderr, out } = packAndCheck(root);
     assert.equal(status, 0, stderr);
     const entries = execFileSync("unzip", ["-Z1", out], { encoding: "utf8" });
-    assert.doesNotMatch(entries, /\.asc$|maven-metadata/m);
+    assert.doesNotMatch(entries, /\.asc(\.[a-z0-9]+)?$|maven-metadata/m);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
