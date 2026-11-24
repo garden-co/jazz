@@ -5,9 +5,6 @@
 //! `migrations create` finds the version to migrate from.
 
 use std::collections::{BTreeMap, HashMap};
-use std::convert::Infallible;
-use std::pin::pin;
-use std::task::{Context, Poll, Waker};
 
 use jazz::tools::deployment::artifact::encryption::{
     self, DeclaredEncryption, Entries, MigrationNames,
@@ -308,7 +305,7 @@ fn check_unlinked(
     precedes: bool,
 ) -> Result<(), CodegenError> {
     let empty = Entries::new();
-    let check = encryption::check_unlinked_columns(
+    encryption::check_unlinked_columns(
         recorded,
         entries.unwrap_or(&empty),
         old_table,
@@ -324,13 +321,9 @@ fn check_unlinked(
                 new_name(was, &old.space).is_none_or(|space| space == new.space),
             )
         },
-        async || Ok::<_, Infallible>(precedes),
-    );
-    // Nothing in the check waits: its one callback answers at once.
-    let Poll::Ready(Ok(result)) = pin!(check).poll(&mut Context::from_waker(Waker::noop())) else {
-        unreachable!("the check runs to completion");
-    };
-    result.map_err(transition_error)
+        precedes,
+    )
+    .map_err(transition_error)
 }
 
 fn transition_error(reason: String) -> CodegenError {

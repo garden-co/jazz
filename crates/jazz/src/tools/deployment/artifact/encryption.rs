@@ -733,58 +733,70 @@ pub async fn check_unlinked_transition<E>(
     new_name: impl Fn(&str, &str) -> Option<String>,
     precedes: impl AsyncFnMut() -> Result<bool, E>,
 ) -> Result<Result<(), String>, E> {
-    check_unlinked_columns(
-        old_entries,
-        new_entries,
-        old_table,
-        old_name,
-        |table, was, old, new| {
-            check_stored_space(
-                table,
-                old,
-                new,
-                new_table(&old.scope),
-                new_name(was, &old.space),
-            )
-        },
-        precedes,
-    )
-    .await
-}
-
-/// Compare the declarations whose old names are known. The caller checks
-/// the space using the identities available from the catalogue or the file.
-pub async fn check_unlinked_columns<E>(
-    old_entries: &Entries,
-    new_entries: &Entries,
-    old_table: impl Fn(&str) -> Option<String>,
-    old_name: impl Fn(&str, &str) -> Option<String>,
-    check_space: impl Fn(&str, &str, &EncryptionEntry, &EncryptionEntry) -> Result<(), String>,
-    mut precedes: impl AsyncFnMut() -> Result<bool, E>,
-) -> Result<Result<(), String>, E> {
-    for (table, new) in new_entries {
-        let Some(was) = old_table(table) else {
-            continue;
-        };
-        let Some(old) = old_entries.get(&was) else {
-            continue;
-        };
-        if let Err(refusal) = check_space(table, &was, old, new) {
+    let mut precedes = precedes;
+    for (table, was, old, new) in unlinked_tables(old_entries, new_entries, old_table) {
+        if let Err(refusal) = check_stored_space(
+            table,
+            old,
+            new,
+            new_table(&old.scope),
+            new_name(&was, &old.space),
+        ) {
             return Ok(Err(refusal));
         }
-        for (name, declared) in &new.columns {
-            let Some(previous) = old_name(table, name).and_then(|column| old.columns.get(&column))
-            else {
-                continue;
-            };
-            let path = format!("{table}.{name}");
+        for (name, previous, declared) in unlinked_columns(old, new, |name| old_name(table, name)) {
             let siblings = !previous.plain.same_type(&declared.plain) && !precedes().await?;
-            if let Err(refusal) = check_stored_column_type(&path, previous, declared, siblings) {
+            if let Err(refusal) =
+                check_stored_column_type(&format!("{table}.{name}"), previous, declared, siblings)
+            {
                 return Ok(Err(refusal));
             }
         }
     }
     Ok(Ok(()))
+}
+
+/// Compare the declarations whose old names are known. The caller checks
+/// the space using the identities available from the catalogue or the file.
+pub fn check_unlinked_columns(
+    old_entries: &Entries,
+    new_entries: &Entries,
+    old_table: impl Fn(&str) -> Option<String>,
+    old_name: impl Fn(&str, &str) -> Option<String>,
+    check_space: impl Fn(&str, &str, &EncryptionEntry, &EncryptionEntry) -> Result<(), String>,
+    precedes: bool,
+) -> Result<(), String> {
+    for (table, was, old, new) in unlinked_tables(old_entries, new_entries, old_table) {
+        check_space(table, &was, old, new)?;
+        for (name, previous, declared) in unlinked_columns(old, new, |name| old_name(table, name)) {
+            let siblings = !previous.plain.same_type(&declared.plain) && !precedes;
+            check_stored_column_type(&format!("{table}.{name}"), previous, declared, siblings)?;
+        }
+    }
+    Ok(())
+}
+
+fn unlinked_tables<'a>(
+    old_entries: &'a Entries,
+    new_entries: &'a Entries,
+    old_table: impl Fn(&str) -> Option<String>,
+) -> impl Iterator<Item = (&'a str, String, &'a EncryptionEntry, &'a EncryptionEntry)> {
+    new_entries.iter().filter_map(move |(table, new)| {
+        let was = old_table(table)?;
+        let old = old_entries.get(&was)?;
+        Some((table.as_str(), was, old, new))
+    })
+}
+
+fn unlinked_columns<'a>(
+    old: &'a EncryptionEntry,
+    new: &'a EncryptionEntry,
+    old_name: impl Fn(&str) -> Option<String>,
+) -> impl Iterator<Item = (&'a str, &'a EncryptedColumn, &'a EncryptedColumn)> {
+    new.columns.iter().filter_map(move |(name, declared)| {
+        let previous = old.columns.get(&old_name(name)?)?;
+        Some((name.as_str(), previous, declared))
+    })
 }
 
 /// Check the scope table and space column after mapping their stored identities into the new version.
