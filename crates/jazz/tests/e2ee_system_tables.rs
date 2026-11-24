@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use duplex_transport::duplex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, ReadOpts, RestoreOptions,
+    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, ReadOpts, RestoreOptions, TxReceipt,
     UpdateOptions, WriteIdentity, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -44,6 +44,7 @@ use jazz::tools::{
     CmpOp, ColumnType, OpenTransactionId, PolicyExpr, PolicyValue, Schema, SchemaBuilder,
     SchemaHash, TableName, TablePolicies, TableSchemaBuilder,
 };
+use jazz::tx::DurabilityTier;
 
 const DEVICE_REQUESTS: &str = system_tables::DEVICE_REQUESTS;
 const DEVICE_KEYS: &str = system_tables::DEVICE_KEYS;
@@ -407,7 +408,7 @@ impl World {
     /// Whether the authority holds a live row `row` of `table`.
     fn holds(&self, table: &str, row: RowUuid) -> bool {
         if self.bundle.is_some() {
-            return jazz::db::block_on(self.server.holds_row_for_test(table, row));
+            return block_on(self.server.holds_row_for_test(table, row)).unwrap();
         }
         let prepared = self.server.prepare_query(&Query::from(table)).unwrap();
         block_on(self.server.all(&prepared, ReadOpts::default()))
@@ -435,21 +436,44 @@ impl World {
         }
     }
 
-    /// Commit `writes` as one unit by `who`, staged at the authority as
-    /// `who`'s session.
+    /// Commit `writes` as one unit by `who`, either staged at the authority
+    /// as `who`'s session or uploaded from their replica.
     fn commit(&self, who: AuthorSubject, writes: &[(&str, RowUuid, Cells)]) -> Result<(), String> {
         if !self.uploading.get() {
-            return commit_on(&self.server, WriteIdentity::Session(who), writes);
+            return commit_on(&self.server, WriteIdentity::Session(who), writes).map(drop);
         }
-        // An upload is accepted if the authority ends up holding every row.
         let replica = self.replica(who);
-        commit_on(&replica, WriteIdentity::Database, writes)?;
-        self.pump();
-        if writes.iter().all(|(table, row, _)| self.holds(table, *row)) {
-            Ok(())
-        } else {
-            Err("the authority refused the upload".to_owned())
+        let receipt = commit_on(&replica, WriteIdentity::Database, writes)
+            .expect("the replica commits the rows before upload");
+        let settled = self.settle(&replica, receipt.0);
+        for (table, row, _) in writes {
+            assert_eq!(
+                self.holds(table, *row),
+                settled.is_ok(),
+                "authority row {table}/{row:?} must agree with the upload verdict {settled:?}"
+            );
         }
+        settled
+    }
+
+    /// Tick while the replica waits for the authority's verdict.
+    fn settle(&self, replica: &Db, tx: u64) -> Result<(), String> {
+        let mut wait = std::pin::pin!(replica.wait_for_transaction(tx, DurabilityTier::Global));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..100 {
+            if let std::task::Poll::Ready(result) = wait.as_mut().poll(&mut context) {
+                return result.map(drop).map_err(|error| {
+                    assert!(
+                        error.is_authorization_denied(),
+                        "unexpected upload error: {error}"
+                    );
+                    error.message
+                });
+            }
+            block_on(replica.tick()).unwrap();
+            block_on(self.server.tick()).unwrap();
+        }
+        panic!("the authority did not settle transaction {tx}");
     }
 
     fn address(&self, project: RowUuid) -> Cells {
@@ -605,7 +629,7 @@ fn commit_on(
     db: &Db,
     identity: WriteIdentity,
     writes: &[(&str, RowUuid, Cells)],
-) -> Result<(), String> {
+) -> Result<TxReceipt, String> {
     let id = OpenTransactionId::new();
     block_on(db.begin_mergeable(id)).unwrap();
     let tx = db.tx_ref(id);
@@ -624,9 +648,7 @@ fn commit_on(
             return Err(error.message);
         }
     }
-    block_on(db.commit_mergeable_handle(id))
-        .map(drop)
-        .map_err(|error| error.message)
+    block_on(db.commit_mergeable_handle(id)).map_err(|error| error.message)
 }
 
 fn project(owner: AuthorSubject) -> Cells {
@@ -1596,14 +1618,15 @@ impl World {
         if self.uploading.get() {
             let replica = self.replica(who);
             self.pump();
-            block_on(replica.delete(table, row, DeleteOptions::default()))
-                .map_err(|error| error.message)?;
-            self.pump();
-            return if self.holds(table, row) {
-                Err("the authority refused the delete".to_owned())
-            } else {
-                Ok(())
-            };
+            let written = block_on(replica.delete(table, row, DeleteOptions::default()))
+                .expect("the replica commits the delete before upload");
+            let settled = self.settle(&replica, written.mergeable_tx_id());
+            assert_eq!(
+                self.holds(table, row),
+                settled.is_err(),
+                "authority row {table}/{row:?} must agree with the delete verdict {settled:?}"
+            );
+            return settled;
         }
         let id = OpenTransactionId::new();
         block_on(self.server.begin_mergeable(id)).unwrap();
@@ -2786,9 +2809,7 @@ fn a_later_version_without_declarations_keeps_the_system_rows() {
         before,
         "the system table keeps its stored name"
     );
-    assert!(jazz::db::block_on(
-        world.server.holds_row_for_test(MEMBERS, member)
-    ));
+    assert!(block_on(world.server.holds_row_for_test(MEMBERS, member)).unwrap());
     assert_eq!(world.reads(alice(), MEMBERS), vec![member]);
 }
 

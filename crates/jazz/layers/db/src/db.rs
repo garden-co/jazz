@@ -3296,16 +3296,16 @@ impl Db {
     /// versions name `logical`, wherever the owner's schema stands.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
-    pub async fn holds_row_for_test(&self, logical: &str, row: RowUuid) -> bool {
+    pub async fn holds_row_for_test(&self, logical: &str, row: RowUuid) -> Result<bool, Error> {
         let _operation = self.write_operation().await;
         let inner = self.inner.without_overlay();
         let Some(stored) = inner.names().stored_table_of(logical).map(str::to_owned) else {
-            return false;
+            return Ok(false);
         };
-        matches!(
-            inner.existing(&stored, row, &[]).await,
-            Ok(Some((_, false)))
-        )
+        Ok(matches!(
+            inner.existing(&stored, row, &[]).await?,
+            Some((_, false))
+        ))
     }
 
     /// Diagnostics: stored large-value nodes, and roots referenced by cells.
