@@ -36,6 +36,7 @@ use jazz_e2ee::records::{EqualityValue, RecordKind, read_stored_record};
 use crate::account::rows::{Row, SPACE_ROOTS, unwrap_optional};
 use crate::state::{
     Catalogue, KeyState, Missing, Report, Shared, TablePlan, db_address, not_observed,
+    unchecked_address,
 };
 use crate::values::ColumnCodec;
 
@@ -322,7 +323,7 @@ impl E2eeHooks for Hooks {
             }
             changes.push_back((
                 write.row,
-                jazz::e2ee::SpaceAddress {
+                SpaceAddress {
                     scope_id: scope.to_string(),
                     identifier: id.to_string(),
                 },
@@ -646,7 +647,7 @@ impl E2eeHooks for Hooks {
                             table: site.table.to_owned(),
                             id: row_uuid,
                             column: name.clone(),
-                            space: space.clone(),
+                            space: address.clone(),
                             epoch_id: epoch_id.clone(),
                         });
                         outcome
@@ -654,7 +655,7 @@ impl E2eeHooks for Hooks {
                             .insert(outcome.unreadable.len(), epoch_id.clone());
                         outcome
                             .unreadable
-                            .push(notice(keys.missing_key_code(&space), &address));
+                            .push(notice(keys.missing_key_code(&address), &address));
                         outcome.missing_epochs.push((space, epoch_id));
                         readable = false;
                         None
@@ -693,7 +694,7 @@ impl E2eeHooks for Hooks {
                     && under_refused_key(&keys, &address, stored)
                 {
                     self.shared
-                        .note_repairable(site.table, row_uuid, &db_address(&address), name);
+                        .note_repairable(site.table, row_uuid, &address, name);
                 }
                 if let Some(space) = stale {
                     report(&mut outcome, notice(UnreadableCode::StaleSpace, &space));
@@ -867,7 +868,11 @@ impl E2eeHooks for Hooks {
     }
 
     fn report_incomplete_query(&self, table: &str, space: &jazz::e2ee::SpaceAddress) {
-        let code = self.shared.keys.borrow().incomplete_query_code(space);
+        let code = self
+            .shared
+            .keys
+            .borrow()
+            .incomplete_query_code(&unchecked_address(space));
         self.shared.report(Report::Unreadable(Unreadable {
             table: table.to_owned(),
             id: None,

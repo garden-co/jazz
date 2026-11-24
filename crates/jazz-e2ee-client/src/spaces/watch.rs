@@ -12,15 +12,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{Db, ReadOpts, ReadTier};
-use jazz::e2ee::SpaceAddress;
+use jazz::e2ee::SpaceAddress as DbSpaceAddress;
 use jazz::query::{Operand, Predicate, Query, col, eq, lit};
 use jazz_e2ee::protocol::ProtocolError;
+use jazz_e2ee::protocol::records::space::SpaceAddress;
 
-use super::{SpaceKeyState, protocol_address};
+use super::SpaceKeyState;
 use crate::account::rows::{self, account_id_cell, row_account_id, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
-use crate::state::{MEMBER_CHANGE_WAIT, WatchedRows, row_space};
+use crate::state::{MEMBER_CHANGE_WAIT, WatchedRows, db_address, row_space, unchecked_address};
 
 /// Live subscriptions to the rows that bring this device its keys: always
 /// its own member rows and the deliveries addressed to it, and, for the
@@ -42,16 +43,17 @@ impl SpaceWatch {
     /// `space`: the space joins the watched set (counted). The runtime
     /// cannot see subscriptions open and close, so the binding that
     /// opens them calls this and [`SpaceWatch::release_space`].
-    pub fn use_space(&mut self, space: &SpaceAddress) {
-        *self.uses.entry(space.clone()).or_default() += 1;
+    pub fn use_space(&mut self, space: &DbSpaceAddress) {
+        *self.uses.entry(unchecked_address(space)).or_default() += 1;
     }
 
     /// The last app subscription using `space` closed: it leaves the set.
-    pub fn release_space(&mut self, space: &SpaceAddress) {
-        if let Some(count) = self.uses.get_mut(space) {
+    pub fn release_space(&mut self, space: &DbSpaceAddress) {
+        let space = unchecked_address(space);
+        if let Some(count) = self.uses.get_mut(&space) {
             *count -= 1;
             if *count == 0 {
-                self.uses.remove(space);
+                self.uses.remove(&space);
             }
         }
     }
@@ -64,7 +66,12 @@ impl SpaceWatch {
 /// for `identifier IN (…)` alone. Public only so that a test can ask the
 /// store for the plan of what the runtime really subscribes to.
 #[doc(hidden)]
-pub fn watch_queries(spaces: &[SpaceAddress], versions: &[String]) -> Vec<(&'static str, Query)> {
+pub fn watch_queries(spaces: &[DbSpaceAddress], versions: &[String]) -> Vec<(&'static str, Query)> {
+    let spaces: Vec<_> = spaces.iter().map(unchecked_address).collect();
+    space_queries(&spaces, versions)
+}
+
+fn space_queries(spaces: &[SpaceAddress], versions: &[String]) -> Vec<(&'static str, Query)> {
     if spaces.is_empty() {
         return Vec::new();
     }
@@ -162,8 +169,7 @@ impl E2eeClient {
         let keys = self.shared.keys.borrow();
         spaces
             .iter()
-            .filter_map(|space| protocol_address(space).ok())
-            .filter_map(|address| keys.held.known(&address)?.epochs().last().cloned())
+            .filter_map(|space| keys.held.known(space)?.epochs().last().cloned())
             .collect()
     }
 
@@ -189,7 +195,7 @@ impl E2eeClient {
         let spaces: Vec<SpaceAddress> = covered.iter().cloned().collect();
         let versions: Vec<String> = epochs.iter().cloned().collect();
         let mut streams = Vec::new();
-        for (table, query) in watch_queries(&spaces, &versions) {
+        for (table, query) in space_queries(&spaces, &versions) {
             streams.push((
                 table,
                 WatchedRows::new(
@@ -230,9 +236,9 @@ impl E2eeClient {
             let mut keys = self.shared.keys.borrow_mut();
             members.spaces.retain(|space, _| {
                 let keep = active.contains(space);
-                if !keep && let Ok(address) = protocol_address(space) {
-                    keys.rotation_evaluated.remove(&address);
-                    keys.space_removals.remove(&address);
+                if !keep {
+                    keys.rotation_evaluated.remove(space);
+                    keys.space_removals.remove(space);
                 }
                 keep
             });
@@ -338,11 +344,11 @@ impl E2eeClient {
                 done.push(row);
                 continue;
             }
-            if protocol_address(&space).is_err() {
+            let Ok(address) = SpaceAddress::new(&space.scope_id, &space.identifier) else {
                 done.push(row);
                 continue;
-            }
-            let read = local_members(db, &space).await?;
+            };
+            let read = local_members(db, &address).await?;
             if read.iter().any(|found| found.row_uuid() == row) {
                 ready.insert(space);
                 done.push(row);
@@ -393,7 +399,10 @@ impl E2eeClient {
                 .and_then(row_space);
             let passed = match &space {
                 Some(space) if served.contains(space) => true,
-                Some(space) => self.deliver_pass(db, space).await.is_ok(),
+                Some(space) => match SpaceAddress::new(&space.scope_id, &space.identifier) {
+                    Ok(address) => self.deliver_pass(db, &address).await.is_ok(),
+                    Err(_) => false,
+                },
                 None => false,
             };
             if passed {
@@ -421,7 +430,7 @@ impl E2eeClient {
         &self,
         db: &Db,
         watch: &mut SpaceWatch,
-    ) -> Result<Vec<(SpaceAddress, Result<SpaceKeyState, ClientError>)>, ClientError> {
+    ) -> Result<Vec<(DbSpaceAddress, Result<SpaceKeyState, ClientError>)>, ClientError> {
         self.ensure_open()?;
         let mut interest = self.shared.published.borrow().pending_spaces();
         interest.extend(watch.uses.keys().cloned());
@@ -448,9 +457,18 @@ impl E2eeClient {
         served.extend(members_changed.intersection(&interest).cloned());
         let mut results = Vec::new();
         for space in served {
-            // `acquire` refuses an address that is not a pair of UUIDs: that
-            // space is reported with its error, the others go on.
-            let mut state = self.acquire(db, &space).await;
+            // Interest may include malformed coordinates registered by a
+            // caller. Report that space's error and continue with the rest.
+            let validated = self.ensure_open().and_then(|()| {
+                SpaceAddress::new(&space.scope_id, &space.identifier).map_err(ClientError::from)
+            });
+            let mut state = match validated {
+                Ok(address) => self
+                    .acquire_full(db, &address)
+                    .await
+                    .map(|acquired| acquired.state),
+                Err(error) => Err(error),
+            };
             // A subscriber waiting for its key still watches the members' roots.
             // The shared membership subscription supplies these rows locally.
             let needs_pass = matches!(state, Ok(SpaceKeyState::Held | SpaceKeyState::NoRoot));
@@ -489,7 +507,7 @@ impl E2eeClient {
             {
                 state = Err(error);
             }
-            results.push((space, state));
+            results.push((db_address(&space), state));
         }
         // What was acquired may have moved a space's current version.
         self.refresh_shared(db, watch, &interest).await?;

@@ -24,6 +24,8 @@ use jazz_e2ee::protocol::content::store::{
 use jazz_e2ee::protocol::derive;
 use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 use jazz_e2ee::protocol::domain::AppDomain;
+#[cfg(any(test, feature = "testing"))]
+use jazz_e2ee::protocol::records::space::SpaceAddress;
 use jazz_e2ee::registry::Registry;
 
 use crate::account::OwnAccount;
@@ -541,10 +543,7 @@ impl E2eeClient {
     /// an authority ledger. Record the check made by their fixture setup.
     #[doc(hidden)]
     #[cfg(any(test, feature = "testing"))]
-    pub fn record_fixture_rotation_check(
-        &self,
-        address: &jazz_e2ee::protocol::records::space::SpaceAddress,
-    ) {
+    pub fn record_fixture_rotation_check(&self, address: &SpaceAddress) {
         self.shared.note_write(address);
         self.shared
             .keys
@@ -562,12 +561,13 @@ impl E2eeClient {
         &self,
         space: &jazz::e2ee::SpaceAddress,
     ) -> Vec<(&'static str, String)> {
+        let space = crate::state::unchecked_address(space);
         let watch = self.shared.member_watch.borrow();
         watch
             .by_account
             .iter()
             .filter(|((table, account), spaces)| {
-                spaces.contains(space)
+                spaces.contains(&space)
                     && watch
                         .streams
                         .get(table)
