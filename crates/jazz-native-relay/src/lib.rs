@@ -3435,8 +3435,6 @@ mod tests {
     use super::*;
 
     mod encrypted_app;
-    #[cfg(feature = "e2ee-client")]
-    mod encrypted_device;
     mod host;
 
     /// jazz#3595: a bearer travels in plaintext only to this machine (an

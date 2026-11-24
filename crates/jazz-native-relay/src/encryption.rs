@@ -4,7 +4,7 @@
 //! The relay's own durable database holds no keys: it opens with keyless
 //! hooks built from the app's declarations, so it stores and relays what the
 //! devices write and never opens an encrypted cell. A UI peer that is a
-//! device attaches with the runtime ([`EncryptedDevice`]): its in-memory
+//! device opens a leased foreground with the runtime: its in-memory
 //! database opens with the runtime's hooks over a private store the app
 //! supplies, and the relay runs the runtime's loop between its drives.
 //! A UI peer attached without one is keyless like the relay.
@@ -19,8 +19,7 @@ use jazz_e2ee_client::host::runtime as host;
 use crate::JazzNativeRelayStatus as Status;
 use crate::account_session::AccountSessionOwner;
 
-/// The app's encryption declarations, which a relay opens its store with
-/// ([`crate::NativeRelay::spawn_encrypted`]).
+/// The app's encryption declarations used to open the relay store.
 pub type Declarations = E2eeDeclarations;
 
 /// Immutable declarations admitted with the account and the delivered schema.
@@ -98,23 +97,6 @@ impl ForegroundEncryption {
     }
 }
 
-/// A device UI peer: what its runtime is built from. The store is made on
-/// the relay's owner thread, where its requests are answered on the spot
-/// (see [`JsStore::served_by`]).
-pub struct EncryptedDevice {
-    /// The app's `jazz.app.json`.
-    pub app_file: Vec<u8>,
-    /// The deployment's environment (part of every cell's domain).
-    pub environment: String,
-    /// The app, as the declarations name it.
-    pub app_id: String,
-    /// The device account's secret as 64 hexadecimal characters, for an
-    /// account the device holds itself; `None` for one the app signs in.
-    pub device_account_secret: Option<String>,
-    /// Makes the device's private store, on the owner thread.
-    pub store: Box<dyn FnOnce() -> Rc<JsStore> + Send>,
-}
-
 /// A device's runtime, built and waiting for its database.
 pub(crate) struct Built {
     pub built: host::NativeBuilt,
@@ -141,31 +123,4 @@ fn account_secret(hex: &str) -> Result<jazz_e2ee_client::host::RecoverySecret, S
             .map_err(|_| "a recovery secret is hexadecimal".to_owned())?;
     }
     Ok(jazz_e2ee_client::host::RecoverySecret::from_bytes(*bytes))
-}
-
-/// The runtime for `account`, built over the device's store.
-pub(crate) fn build(
-    device: EncryptedDevice,
-    account: String,
-    declarations: &Declarations,
-) -> Result<Built, String> {
-    let device_account_secret = device
-        .device_account_secret
-        .as_deref()
-        .map(account_secret)
-        .transpose()?;
-    let store = (device.store)();
-    let built = jazz::db::block_on(host::build_native(
-        host::NativeOptions {
-            app_file: device.app_file,
-            from_bindings: false,
-            device_account_secret,
-            app_id: device.app_id,
-            environment: device.environment,
-        },
-        account,
-        Rc::clone(&store),
-        Some(declarations),
-    ))?;
-    Ok(Built { built, store })
 }

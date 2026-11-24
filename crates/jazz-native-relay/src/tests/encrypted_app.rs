@@ -1,6 +1,5 @@
-//! A relay serves a client's app on its persistent store, and a client has
-//! no encryption hooks yet: a relay refuses to open an app whose schema
-//! holds Jazz's system tables, before it creates the store.
+//! Opening a relay without encryption declarations refuses a schema with
+//! encryption system tables and accepts an ordinary schema.
 use super::*;
 use jazz::db::Migrations;
 use jazz::ids::AuthorSubject;

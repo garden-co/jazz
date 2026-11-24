@@ -3,11 +3,15 @@ use crate::ForegroundDbCommandRequest as Request;
 use crate::ForegroundDbCommandResponse as Response;
 use crate::JazzNativeRelayStatus as Status;
 use jazz::db::block_on;
+use jazz::tools::deployment::artifact::AppDefinition;
 use jazz_e2ee_client::MemoryStore;
-use jazz_e2ee_client::host::bridge::serve;
+use jazz_e2ee_client::host::bridge::{Handler, serve};
 use serde_json::json;
 use std::rc::Rc;
+use std::thread;
+use std::time::{Duration, Instant};
 
+const APP_ID: &str = "07070707-0707-4707-8707-070707070707";
 const ALICE_ACCOUNT_ID: &str = "08080808-0808-4808-8808-080808080808";
 
 /// Alice opens an encrypted app through the account-owned C ABI used by RN.
@@ -20,34 +24,8 @@ const ALICE_ACCOUNT_ID: &str = "08080808-0808-4808-8808-080808080808";
 fn a_leased_foreground_opens_with_the_apps_async_private_store() {
     let root = tempfile::tempdir().unwrap();
     let root_bytes = root.path().to_str().unwrap().as_bytes();
-    let app = jazz::tools::deployment::artifact::load_app(include_bytes!(
-        "../../../jazz-codegen/tests/apps/encrypted/jazz.app.json"
-    ))
-    .unwrap();
-    let mut schema = serde_json::to_value(app.current_schema()).unwrap();
-    let bindings = json!({
-        "schema": {
-            "current": app.current_hash(),
-            "schemas": [{ "hash": app.current_hash(), "schema": schema }],
-            "migrations": [],
-            "encryption": app.encryption(),
-        },
-        "relations": {},
-    });
-    schema["encryptionBindings"] = json!(bindings.to_string());
-    let schema = serde_json::to_vec(&schema).unwrap();
-    let app_id = "07070707-0707-4707-8707-070707070707";
-    let request = serde_json::to_vec(&json!({
-        "registry": format!("https://edge.example/apps/{app_id}/accounts"),
-        "app_id": app_id,
-        "env": "test",
-        "account_id": ALICE_ACCOUNT_ID,
-        "issuer": "https://issuer.example",
-        "subject": "alice",
-        "bearer": "alice-session",
-        "server_url": null,
-    }))
-    .unwrap();
+    let (app, schema) = encrypted_schema();
+    let request = alice_request();
     let store = serve(Rc::new(MemoryStore::new()));
 
     unsafe {
@@ -66,35 +44,7 @@ fn a_leased_foreground_opens_with_the_apps_async_private_store() {
             }),
             Response::OperationError { .. },
         ));
-        let mut answered = 0;
-        let mut opened = false;
-        for _ in 0..32 {
-            let Response::StoreRequests { requests } = execute(Request::TakeStoreRequests) else {
-                panic!("the foreground must expose store requests while attaching");
-            };
-            for request in requests {
-                let value: serde_json::Value = serde_json::from_str(&request).unwrap();
-                let id = value["id"].as_str().unwrap().to_owned();
-                let (ok, payload) = block_on(store(request));
-                assert_eq!(
-                    execute(Request::ReplyStore { id, ok, payload }),
-                    Response::StoreReply { accepted: true }
-                );
-                answered += 1;
-            }
-            match execute(Request::EncryptionOpen) {
-                Response::EncryptionOpen { ready: true } => {
-                    opened = true;
-                    break;
-                }
-                Response::EncryptionOpen { ready: false } => {}
-                error => panic!("cannot attach device: {error:?}"),
-            }
-        }
-        assert!(
-            opened && answered > 0,
-            "the native runtime used Alice's store"
-        );
+        finish_store_open(&execute, &store);
         assert_eq!(execute(Request::NativeSessionMetadata), before);
         let Response::EncryptionResult { json } = execute(Request::EncryptionCall {
             op: "spaces".to_owned(),
@@ -109,12 +59,7 @@ fn a_leased_foreground_opens_with_the_apps_async_private_store() {
                 .unwrap()
                 .is_empty()
         );
-        let relay = {
-            let host = (*host).lock().unwrap();
-            host.relays[&host.foregrounds[&foreground].relay]
-                .relay
-                .clone()
-        };
+        let relay = foreground_relay(&*lease, foreground);
         let sibling_lease = jazz_native_relay_host_retain(host, 2);
         let mut sibling_request: serde_json::Value = serde_json::from_slice(&request).unwrap();
         sibling_request["subject"] = json!("bob");
@@ -167,6 +112,165 @@ fn a_leased_foreground_opens_with_the_apps_async_private_store() {
     }
 }
 
+/// Alice's relay admits her encrypted foreground. A peer attached to the
+/// same relay without a device runtime receives the keyless write refusal.
+#[test]
+fn a_keyless_peer_refuses_an_encrypted_write() {
+    use jazz::records::{OwnedRecord, RecordDescriptor, ValueType};
+
+    let root = tempfile::tempdir().unwrap();
+    let (_, schema) = encrypted_schema();
+    unsafe {
+        let host = jazz_native_relay_host_new();
+        let lease = jazz_native_relay_host_retain(host, 1);
+        let foreground = open_account_foreground(
+            &*lease,
+            root.path().to_str().unwrap().as_bytes(),
+            &alice_request(),
+            &schema,
+        );
+        let relay = foreground_relay(&*lease, foreground);
+        let author = AuthorSubject::authenticated("https://issuer.example", "alice")
+            .unwrap()
+            .with_account(jazz::account_registry::AccountId(
+                ALICE_ACCOUNT_ID.parse().unwrap(),
+            ));
+        let peer = relay
+            .attach_client(fresh_client_identity(author).unwrap(), BTreeMap::new())
+            .unwrap();
+        let Response::TransactionOpened { transaction } = peer
+            .execute(Request::BeginTransaction {
+                kind: ForegroundTransactionKind::Mergeable,
+            })
+            .unwrap()
+        else {
+            panic!("the keyless peer could not open a transaction")
+        };
+        let descriptor =
+            RecordDescriptor::new([("name", ValueType::String), ("ownerId", ValueType::Uuid)]);
+        let raw = descriptor
+            .create(&[
+                Value::String("plans".into()),
+                Value::Uuid(ALICE_ACCOUNT_ID.parse().unwrap()),
+            ])
+            .unwrap();
+        let response = peer
+            .execute(Request::Insert {
+                transaction,
+                table: "projects".to_owned(),
+                row_id: None,
+                cells: jazz::binding_codec::encode_named_cells(&OwnedRecord::new(raw, descriptor))
+                    .unwrap(),
+            })
+            .unwrap();
+        let response = match response {
+            Response::Inserted { .. } => peer
+                .execute(Request::CommitTransaction { transaction })
+                .unwrap(),
+            other => other,
+        };
+        assert!(
+            matches!(&response, Response::CodedOperationError { reason, .. }
+            if reason.contains("holds no encryption keys") && reason.contains("projects.name")),
+            "expected the keyless write refusal, got {response:?}"
+        );
+        peer.close().unwrap();
+        jazz_native_relay_host_lease_free(lease);
+        jazz_native_relay_host_free(host);
+    }
+}
+
+/// Alice's laptop founds her account, but the authority refuses its recovery root.
+/// Her fresh phone has the account secret, but each readiness deadline must
+/// report awaiting approval once the phone has verified that the root is absent.
+#[test]
+fn a_leased_phone_preserves_missing_recovery_evidence_at_its_deadline() {
+    use jazz::tools::identity::{
+        DEVICE_ACCOUNT_ISSUER, derive_user_id, mint_jazz_self_signed_token,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let root_bytes = root.path().to_str().unwrap().as_bytes();
+    let (app, schema) = encrypted_schema();
+    let seed = [0x42; 32];
+    let subject = derive_user_id(&seed).to_string();
+    let account = jazz::account_registry::device_account_id(APP_ID.parse().unwrap(), &subject);
+    let author = AuthorSubject::reserved(DEVICE_ACCOUNT_ISSUER, &subject)
+        .unwrap()
+        .with_account(account);
+    let request = json!({
+        "registry": format!("https://edge.example/apps/{APP_ID}/accounts"),
+        "app_id": APP_ID, "env": "test", "account_id": account.0.to_string(),
+        "issuer": DEVICE_ACCOUNT_ISSUER, "subject": subject,
+        "jwt": mint_jazz_self_signed_token(&seed, DEVICE_ACCOUNT_ISSUER, APP_ID, 3600).unwrap(),
+        "device_account_secret": "42".repeat(32), "server_url": null,
+    });
+    unsafe {
+        let host = jazz_native_relay_host_new();
+        let lease = jazz_native_relay_host_retain(host, 1);
+        let open = |request: &serde_json::Value| {
+            open_account_foreground(
+                &*lease,
+                root_bytes,
+                &serde_json::to_vec(request).unwrap(),
+                &schema,
+            )
+        };
+        let laptop = open(&request);
+        let relay = foreground_relay(&*lease, laptop);
+        let pump = connect_authority(&relay, &app, author, false);
+        let ready = |foreground, store: &Handler, timeout| {
+            let execute = |cmd| leased_execute(&*lease, foreground, cmd).unwrap();
+            settle(&execute, execute(start_ready(timeout)), || {
+                pump();
+                answer_store(&execute, store);
+            })
+        };
+        let open_store = |foreground| {
+            let store = serve(Rc::new(MemoryStore::new()));
+            finish_store_open(
+                &|cmd| leased_execute(&*lease, foreground, cmd).unwrap(),
+                &store,
+            );
+            store
+        };
+        let refused = ready(laptop, &open_store(laptop), 10_000);
+        assert!(
+            matches!(&refused, Response::OperationError { reason }
+            if reason.contains("authorization_denied") && reason.contains("__e2ee_recovery_roots")),
+            "the authority must refuse the founder's recovery registration: {refused:?}"
+        );
+        let phone = open(&request);
+        let store = open_store(phone);
+        let awaiting = Response::EncryptionResult {
+            json: json!("awaiting-approval").to_string(),
+        };
+        let first_pass = Instant::now() + Duration::from_secs(60);
+        loop {
+            match ready(phone, &store, 2000) {
+                Response::OperationError { reason }
+                    if reason.starts_with("timeout:") && Instant::now() < first_pass =>
+                {
+                    continue;
+                }
+                result => {
+                    assert_eq!(result, awaiting);
+                    break;
+                }
+            }
+        }
+        for _ in 0..4 {
+            let started = Instant::now();
+            assert_eq!(ready(phone, &store, 1500), awaiting);
+            assert!(
+                started.elapsed() >= Duration::from_millis(1500),
+                "the phone must wait for recovery until its deadline"
+            );
+        }
+        jazz_native_relay_host_lease_free(lease);
+        jazz_native_relay_host_free(host);
+    }
+}
+
 /// Alice's device account opens its first encrypted foreground: the native
 /// host hands her account secret to that foreground's runtime, which wipes
 /// it once its recovery at start is done, and keeps no copy of its own for
@@ -183,34 +287,8 @@ fn a_leased_foreground_opens_with_the_apps_async_private_store() {
 fn the_host_keeps_no_account_secret_once_a_foreground_attached() {
     let root = tempfile::tempdir().unwrap();
     let root_bytes = root.path().to_str().unwrap().as_bytes();
-    let app = jazz::tools::deployment::artifact::load_app(include_bytes!(
-        "../../../jazz-codegen/tests/apps/encrypted/jazz.app.json"
-    ))
-    .unwrap();
-    let mut schema = serde_json::to_value(app.current_schema()).unwrap();
-    let bindings = json!({
-        "schema": {
-            "current": app.current_hash(),
-            "schemas": [{ "hash": app.current_hash(), "schema": schema }],
-            "migrations": [],
-            "encryption": app.encryption(),
-        },
-        "relations": {},
-    });
-    schema["encryptionBindings"] = json!(bindings.to_string());
-    let schema = serde_json::to_vec(&schema).unwrap();
-    let app_id = "07070707-0707-4707-8707-070707070707";
-    let request = serde_json::to_vec(&json!({
-        "registry": format!("https://edge.example/apps/{app_id}/accounts"),
-        "app_id": app_id,
-        "env": "test",
-        "account_id": ALICE_ACCOUNT_ID,
-        "issuer": "https://issuer.example",
-        "subject": "alice",
-        "bearer": "alice-session",
-        "server_url": null,
-    }))
-    .unwrap();
+    let (_, schema) = encrypted_schema();
+    let request = alice_request();
 
     unsafe {
         let host = jazz_native_relay_host_new();
@@ -240,6 +318,130 @@ fn the_host_keeps_no_account_secret_once_a_foreground_attached() {
         );
         jazz_native_relay_host_lease_free(lease);
         jazz_native_relay_host_free(host);
+    }
+}
+
+fn encrypted_schema() -> (AppDefinition, Vec<u8>) {
+    let app = jazz::tools::deployment::artifact::load_app(include_bytes!(
+        "../../../jazz-codegen/tests/apps/encrypted/jazz.app.json"
+    ))
+    .unwrap();
+    let mut schema = serde_json::to_value(app.current_schema()).unwrap();
+    let bindings = json!({
+        "schema": {
+            "current": app.current_hash(),
+            "schemas": [{ "hash": app.current_hash(), "schema": schema }],
+            "migrations": [],
+            "encryption": app.encryption(),
+        },
+        "relations": {},
+    });
+    schema["encryptionBindings"] = json!(bindings.to_string());
+    let schema = serde_json::to_vec(&schema).unwrap();
+    (app, schema)
+}
+
+fn alice_request() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "registry": format!("https://edge.example/apps/{APP_ID}/accounts"),
+        "app_id": APP_ID,
+        "env": "test",
+        "account_id": ALICE_ACCOUNT_ID,
+        "issuer": "https://issuer.example",
+        "subject": "alice",
+        "bearer": "alice-session",
+        "server_url": null,
+    }))
+    .unwrap()
+}
+
+fn foreground_relay(lease: &JazzNativeRelayHostLease, foreground: u64) -> NativeRelay {
+    let host = lease.lock_foreground(foreground).unwrap();
+    host.relays[&host.foregrounds[&foreground].relay]
+        .relay
+        .clone()
+}
+
+fn answer_store(execute: &impl Fn(Request) -> Response, store: &Handler) -> usize {
+    let Response::StoreRequests { requests } = execute(Request::TakeStoreRequests) else {
+        panic!("the foreground must expose store requests");
+    };
+    let count = requests.len();
+    for request in requests {
+        let value: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let id = value["id"].as_str().unwrap().to_owned();
+        let (ok, payload) = block_on(store(request));
+        assert_eq!(
+            execute(Request::ReplyStore { id, ok, payload }),
+            Response::StoreReply { accepted: true }
+        );
+    }
+    count
+}
+
+fn finish_store_open(execute: &impl Fn(Request) -> Response, store: &Handler) {
+    let mut answered = 0;
+    for _ in 0..32 {
+        answered += answer_store(execute, store);
+        match execute(Request::EncryptionOpen) {
+            Response::EncryptionOpen { ready: true } => {
+                assert!(answered > 0, "the runtime used the device's private store");
+                return;
+            }
+            Response::EncryptionOpen { ready: false } => {}
+            error => panic!("cannot attach device: {error:?}"),
+        }
+    }
+    panic!("the encrypted foreground did not open");
+}
+
+fn connect_authority(
+    relay: &NativeRelay,
+    app: &AppDefinition,
+    author: AuthorSubject,
+    allow_registration: bool,
+) -> impl Fn() {
+    use jazz::binding_host::Binding;
+    use jazz::db::{Db, DbConfig};
+    use jazz::tools::deployment::artifact::system_tables;
+
+    let mut schema = app.current_schema().clone();
+    let declarations = app.encryption();
+    let current = app.current_hash().to_string();
+    let tables = declarations.entries(&current).unwrap();
+    for (table, policies) in
+        system_tables::derive_e2ee_policies(&schema, tables, &declarations.settings).unwrap()
+    {
+        schema.get_mut(&table).unwrap().policies = policies;
+    }
+    if !allow_registration {
+        use jazz::tools::public_schema::{OperationPolicy, PolicyExpr, TableName};
+        schema
+            .get_mut(&TableName::new(system_tables::RECOVERY_ROOTS))
+            .unwrap()
+            .policies
+            .insert = OperationPolicy::with_check(PolicyExpr::False);
+    }
+    let root = DbIdentity {
+        node: NodeUuid::from_bytes([0x42; 16]),
+        author: AuthorSubject::SYSTEM,
+    };
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        JazzSchema::new(&schema).unwrap(),
+        root,
+    )))
+    .unwrap();
+    jazz::db::block_on(db.set_authority()).unwrap();
+    let server = block_on(Binding::new(db, root, true));
+    let link = block_on(server.accept_subscriber(author, Default::default())).unwrap();
+    let wire = relay.wire().unwrap();
+    relay.set_remote_link_hint(RemoteLinkHint::Live).unwrap();
+    move || {
+        link.receive(wire.take_outbound_encoded().unwrap());
+        block_on(server.tick()).unwrap();
+        for frame in link.take_outbound() {
+            wire.push_inbound_encoded(&frame).unwrap();
+        }
     }
 }
 
@@ -418,6 +620,24 @@ fn readiness_while_sibling_holds_the_host(
     new
 }
 
+fn settle(
+    execute: &impl Fn(Request) -> Response,
+    mut response: Response,
+    pump: impl Fn(),
+) -> Response {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while let Response::Pending { operation } = response {
+        assert!(
+            Instant::now() < deadline,
+            "the foreground operation did not finish"
+        );
+        pump();
+        thread::sleep(Duration::from_millis(2));
+        response = execute(Request::Poll { operation });
+    }
+    response
+}
+
 /// After Alice changes her account by registering a recovery root, her next
 /// ready cannot succeed on the previous verification while authority frames
 /// are held. Once frames flow, the current account is active again.
@@ -427,74 +647,26 @@ fn readiness_reads_the_authority_again(
     app: &jazz::tools::deployment::artifact::AppDefinition,
     store: &jazz_e2ee_client::host::bridge::Handler,
 ) {
-    use jazz::binding_host::Binding;
-    use jazz::db::{Db, DbConfig};
-    use jazz::tools::deployment::artifact::system_tables;
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    let mut schema = app.current_schema().clone();
-    let declarations = app.encryption();
-    let current = app.current_hash().to_string();
-    let tables = declarations.entries(&current).unwrap();
-    for (table, policies) in
-        system_tables::derive_e2ee_policies(&schema, tables, &declarations.settings).unwrap()
-    {
-        schema.get_mut(&table).unwrap().policies = policies;
-    }
-    let root = DbIdentity {
-        node: NodeUuid::from_bytes([0x42; 16]),
-        author: AuthorSubject::SYSTEM,
-    };
-    let db = block_on(Db::open_history_complete(DbConfig::new(
-        JazzSchema::new(&schema).unwrap(),
-        root,
-    )))
-    .unwrap();
-    jazz::db::block_on(db.set_authority()).unwrap();
-    let server = block_on(Binding::new(db, root, true));
     let author = AuthorSubject::authenticated("https://issuer.example", "alice")
         .unwrap()
         .with_account(jazz::account_registry::AccountId(
             ALICE_ACCOUNT_ID.parse().unwrap(),
         ));
-    let link = block_on(server.accept_subscriber(author, Default::default())).unwrap();
-    let wire = relay.wire().unwrap();
-    relay.set_remote_link_hint(RemoteLinkHint::Live).unwrap();
-    let pump = || {
-        link.receive(wire.take_outbound_encoded().unwrap());
-        block_on(server.tick()).unwrap();
-        for frame in link.take_outbound() {
-            wire.push_inbound_encoded(&frame).unwrap();
-        }
-        let Response::StoreRequests { requests } = execute(Request::TakeStoreRequests) else {
-            panic!("store requests unavailable");
-        };
-        for request in requests {
-            let value: serde_json::Value = serde_json::from_str(&request).unwrap();
-            let id = value["id"].as_str().unwrap().to_owned();
-            let (ok, payload) = block_on(store(request));
-            assert_eq!(
-                execute(Request::ReplyStore { id, ok, payload }),
-                Response::StoreReply { accepted: true }
-            );
-        }
-    };
+    let pump = connect_authority(relay, app, author, true);
     let call = |op: &str, args: serde_json::Value, carry: bool| {
-        let mut response = execute(Request::EncryptionCall {
-            op: op.to_owned(),
-            args_json: args.to_string(),
-        });
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while let Response::Pending { operation } = response {
-            assert!(Instant::now() < deadline, "{op} did not finish");
-            if carry {
-                pump();
-            }
-            thread::sleep(Duration::from_millis(2));
-            response = execute(Request::Poll { operation });
-        }
-        response
+        settle(
+            &execute,
+            execute(Request::EncryptionCall {
+                op: op.to_owned(),
+                args_json: args.to_string(),
+            }),
+            || {
+                if carry {
+                    pump();
+                    answer_store(&execute, store);
+                }
+            },
+        )
     };
     let active = Response::EncryptionResult {
         json: "\"active\"".to_owned(),
