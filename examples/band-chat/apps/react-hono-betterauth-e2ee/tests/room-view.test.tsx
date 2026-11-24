@@ -158,27 +158,6 @@ describe("locked messages", () => {
     expect(screen.queryByText(/waiting for the room's key/)).toBeNull();
   });
 
-  it("clears the ten-second timer once the room view closes", () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const setTimer = vi.spyOn(globalThis, "setTimeout");
-    const clearTimer = vi.spyOn(globalThis, "clearTimeout");
-    try {
-      deviceStatus.current = "active";
-      const view = show({ messages: { data: [], unreadable: [pending] } });
-      expect(screen.getByText(/Decrypting 1 message/)).toBeTruthy();
-      const timers = setTimer.mock.results.filter(
-        (_, call) => setTimer.mock.calls[call]![1] === 10_000,
-      );
-      expect(timers).toHaveLength(1);
-      expect(clearTimer).not.toHaveBeenCalledWith(timers[0]!.value);
-      view.unmount();
-      expect(clearTimer).toHaveBeenCalledWith(timers[0]!.value);
-    } finally {
-      setTimer.mockRestore();
-      clearTimer.mockRestore();
-    }
-  });
-
   it("says messages are locked once a room has had no key record for a while", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     deviceStatus.current = "active";

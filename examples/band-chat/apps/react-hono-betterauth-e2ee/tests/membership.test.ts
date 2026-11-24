@@ -18,23 +18,65 @@ async function memberRowsOf(
   return host.jazz.db.all(app.__e2ee_members.where(filter));
 }
 
+async function admit(
+  alice: Awaited<ReturnType<typeof device>>,
+  bob: Awaited<ReturnType<typeof device>>,
+  roomId: string,
+) {
+  const request = await bob.db
+    .insert(app.joinRequests, { roomId, requester: bob.account, profileId: bob.profile.id })
+    .wait({ tier: "global" });
+  return admitMember({
+    db: alice.db,
+    roomId,
+    memberAuthor: bob.account,
+    memberProfileId: bob.profile.id,
+    requestIds: [request.id],
+  });
+}
+
+async function interleave(
+  db: Db,
+  afterReadOf: string,
+  effect: () => Promise<void>,
+  run: (transaction: ReturnType<typeof vi.spyOn>) => Promise<void>,
+) {
+  const transaction = db.serializableTransaction.bind(db);
+  const transactionSpy = vi.spyOn(db, "serializableTransaction");
+  let completed = false;
+  transactionSpy.mockImplementation((callback) =>
+    transaction(async (tx) => {
+      const all = tx.all.bind(tx);
+      tx.all = (async (...args: Parameters<Db["all"]>) => {
+        const rows = await all(...args);
+        if (!completed && args[0]._table === afterReadOf) {
+          completed = true;
+          await effect();
+        }
+        return rows;
+      }) as typeof tx.all;
+      const result = await callback(tx);
+      if (!completed) {
+        completed = true;
+        await effect();
+      }
+      return result;
+    }),
+  );
+  try {
+    await run(transactionSpy);
+  } finally {
+    transactionSpy.mockRestore();
+  }
+}
+
 describe("membership writes", () => {
   it("admits with both rows in one transaction, removes both and renews the key", async () => {
     const host = await serve();
     const alice = await device(host);
     const bob = await device(host);
     const roomId = await createRoom(alice, "Rehearsal");
-    const request = await bob.db
-      .insert(app.joinRequests, { roomId, requester: bob.account, profileId: bob.profile.id })
-      .wait({ tier: "global" });
-
-    await admitMember({
-      db: alice.db,
-      roomId,
-      memberAuthor: bob.account,
-      memberProfileId: bob.profile.id,
-      requestIds: [request.id],
-    });
+    await admit(alice, bob, roomId);
     expect((await alice.db.encryption.keys.deliver()).failed).toBe(0);
     expect((await memberRowsOf(host, alice, roomId)).map((row) => row.accountId).sort()).toEqual(
       [alice.account, bob.account].sort(),
@@ -61,58 +103,25 @@ describe("membership writes", () => {
     const alice = await device(host);
     const bob = await device(host);
     const roomId = await createRoom(alice, "Rehearsal");
-    const admit = async () => {
-      const request = await bob.db
-        .insert(app.joinRequests, { roomId, requester: bob.account, profileId: bob.profile.id })
-        .wait({ tier: "global" });
-      return admitMember({
-        db: alice.db,
-        roomId,
-        memberAuthor: bob.account,
-        memberProfileId: bob.profile.id,
-        requestIds: [request.id],
-      });
-    };
-    await admit();
+    await admit(alice, bob, roomId);
 
     // Run a second real transaction after the removal has taken its snapshot,
     // before the server sees its commit. The authority decides the conflict.
-    const transaction = alice.db.serializableTransaction.bind(alice.db);
-    let admittedAgain = false;
-    const removal = vi.spyOn(alice.db, "serializableTransaction");
-    removal.mockImplementation((run) =>
-      transaction(async (tx) => {
-        const all = tx.all.bind(tx);
-        tx.all = (async (...args: Parameters<Db["all"]>) => {
-          const rows = await all(...args);
-          if (!admittedAgain && args[0]._table === "roomMembers") {
-            admittedAgain = true;
-            await admit();
-          }
-          return rows;
-        }) as typeof tx.all;
-        // If reads are moved outside the transaction, they have already run.
-        const result = await run(tx);
-        if (!admittedAgain) {
-          admittedAgain = true;
-          await admit();
-        }
-        return result;
-      }),
+    await interleave(
+      alice.db,
+      "roomMembers",
+      () => admit(alice, bob, roomId),
+      async (removal) => {
+        expect(await removeMember({ db: alice.db, roomId, accountId: bob.account })).toBe(2);
+        expect(removal).toHaveBeenCalledTimes(2);
+        expect((await memberRowsOf(host, alice, roomId)).map((row) => row.accountId)).toEqual([
+          alice.account,
+        ]);
+        expect(
+          await host.jazz.db.all(app.roomMembers.where({ roomId, memberAuthor: bob.account })),
+        ).toEqual([]);
+      },
     );
-
-    try {
-      expect(await removeMember({ db: alice.db, roomId, accountId: bob.account })).toBe(2);
-      expect(removal).toHaveBeenCalledTimes(2);
-      expect((await memberRowsOf(host, alice, roomId)).map((row) => row.accountId)).toEqual([
-        alice.account,
-      ]);
-      expect(
-        await host.jazz.db.all(app.roomMembers.where({ roomId, memberAuthor: bob.account })),
-      ).toEqual([]);
-    } finally {
-      removal.mockRestore();
-    }
   }, 90_000);
 
   it("retries when a concurrent admission changes only Jazz's member rows", async () => {
@@ -124,34 +133,14 @@ describe("membership writes", () => {
     const addMember = () => alice.db.insert(app.__e2ee_members, row).wait({ tier: "global" });
     await addMember();
 
-    const transaction = alice.db.serializableTransaction.bind(alice.db);
-    let addedAgain = false;
-    const removal = vi.spyOn(alice.db, "serializableTransaction");
-    removal.mockImplementation((run) =>
-      transaction(async (tx) => {
-        const all = tx.all.bind(tx);
-        tx.all = (async (...args: Parameters<Db["all"]>) => {
-          const rows = await all(...args);
-          // Both reads have returned. Only the member read should conflict.
-          if (!addedAgain && args[0]._table === "roomMembers") {
-            addedAgain = true;
-            await addMember();
-          }
-          return rows;
-        }) as typeof tx.all;
-        return run(tx);
-      }),
-    );
-
-    try {
+    // Both reads have returned. Only the member read should conflict.
+    await interleave(alice.db, "roomMembers", addMember, async (removal) => {
       expect(await removeMember({ db: alice.db, roomId, accountId: bob.account })).toBe(2);
       expect(removal).toHaveBeenCalledTimes(2);
       expect((await memberRowsOf(host, alice, roomId)).map((member) => member.accountId)).toEqual([
         alice.account,
       ]);
-    } finally {
-      removal.mockRestore();
-    }
+    });
   }, 90_000);
 
   it("lets a member leave, taking the member row, profile membership and markers with them", async () => {
@@ -159,16 +148,7 @@ describe("membership writes", () => {
     const alice = await device(host);
     const bob = await device(host);
     const roomId = await createRoom(alice, "Rehearsal");
-    const request = await bob.db
-      .insert(app.joinRequests, { roomId, requester: bob.account, profileId: bob.profile.id })
-      .wait({ tier: "global" });
-    await admitMember({
-      db: alice.db,
-      roomId,
-      memberAuthor: bob.account,
-      memberProfileId: bob.profile.id,
-      requestIds: [request.id],
-    });
+    await admit(alice, bob, roomId);
     await alice.db
       .insert(app.messages, { roomId, senderId: alice.profile.id, text: "set list" })
       .wait({ tier: "global" });
