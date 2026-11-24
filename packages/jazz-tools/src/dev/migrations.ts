@@ -854,13 +854,67 @@ function withEntries(
   return out;
 }
 
+/** Keep the original sealed enum type beside the declaration made by schema.ts. */
+function pinEncryptedEnums(
+  entries: EncryptionEntries,
+  previous: EncryptionEntries,
+  sameVersion: boolean,
+): void {
+  type EnumType = { enum?: string[]; optional?: boolean };
+  type EncryptedColumn = EnumType & {
+    type?: EnumType;
+    sealedType?: EnumType;
+    default?: ReadableJson;
+  };
+  type Entry = { columns: Record<string, EncryptedColumn | string> };
+  const appends = (before: EnumType, after: EnumType) => {
+    const variants = after.enum;
+    return (
+      Array.isArray(before.enum) &&
+      Array.isArray(variants) &&
+      (before.optional ?? false) === (after.optional ?? false) &&
+      before.enum.length < variants.length &&
+      before.enum.every((variant, index) => variant === variants[index])
+    );
+  };
+
+  for (const [table, entry] of Object.entries(entries)) {
+    if (!Object.hasOwn(previous, table)) continue;
+    const before = (previous[table] as unknown as Entry | undefined)?.columns;
+    if (!before) continue;
+    const current = entry as unknown as Entry;
+    const columns = { ...current.columns };
+    for (const [name, column] of Object.entries(current.columns)) {
+      const old = Object.hasOwn(before, name) ? before[name] : undefined;
+      if (!old || typeof old !== "object" || typeof column !== "object") continue;
+      const oldType = old.type ?? old;
+      const { default: defaultValue, ...declared } = column;
+      const currentType = declared.type ?? declared;
+      if (sameVersion && appends(oldType, currentType)) {
+        throw new Error(
+          `${table}.${name}: adding variants to an encrypted enum leaves the schema version unchanged. ` +
+            "Make a schema change that creates a new version, such as adding an index, " +
+            "and run jazz-tools migrations create again.",
+        );
+      }
+      const sealed = old.sealedType ?? oldType;
+      if (column.sealedType || !appends(sealed, currentType)) continue;
+      columns[name] = {
+        type: currentType,
+        sealedType: { enum: sealed.enum, ...(sealed.optional ? { optional: true } : {}) },
+        ...(defaultValue !== undefined ? { default: defaultValue } : {}),
+      };
+    }
+    entries[table] = { ...current, columns } as ReadableJson;
+  }
+}
+
 async function checkSnapshotEncryption(
-  migrationsDir: string,
   previous: SnapshotEntry,
+  previousEntries: EncryptionEntries,
   currentTables: Record<string, ReadableTable>,
   currentEntries: EncryptionEntries,
 ): Promise<void> {
-  const previousEntries = await snapshotEntries(migrationsDir, previous);
   if (Object.keys(previousEntries).length === 0 && Object.keys(currentEntries).length === 0) return;
   const { tables } = await snapshotToVersion(previous.schema);
   const previousTables = withEntries(tables, previousEntries, shortSchemaHash(previous.hash));
@@ -873,6 +927,8 @@ async function checkSnapshotEncryption(
 }
 
 export interface MigrationHistory {
+  /** Current readable tables with the pins kept in their snapshot. */
+  tables: Record<string, ReadableTable>;
   /** Earlier versions, oldest first, by short hash: `jazz.app.json`'s `history`. */
   history: Record<string, ReadableVersion>;
   /** `jazz.app.json`'s `migrations`, in file order. */
@@ -901,15 +957,15 @@ export async function loadMigrationHistory(options: {
   // The current version's snapshot must declare what schema.ts declares:
   // the hash doesn't cover a plaintext type.
   const currentSnapshot = snapshots.filter((snapshot) => snapshot.hash === current.hash).at(-1);
-  if (currentSnapshot)
-    await checkSnapshotEncryption(
-      options.migrationsDir,
-      currentSnapshot,
-      options.currentTables,
-      currentEntries,
-    );
+  let tables = options.currentTables;
+  if (currentSnapshot) {
+    const previousEntries = await snapshotEntries(options.migrationsDir, currentSnapshot);
+    pinEncryptedEnums(currentEntries, previousEntries, true);
+    tables = withEntries(tables, currentEntries, currentShort);
+    await checkSnapshotEncryption(currentSnapshot, previousEntries, tables, currentEntries);
+  }
   const files = await loadMigrationFiles(options.migrationsDir, options.loadModule);
-  if (files.length === 0) return { history: {}, migrations: [], current: current.hash };
+  if (files.length === 0) return { tables, history: {}, migrations: [], current: current.hash };
 
   const versions = new Map<string, Record<string, ReadableTable>>();
   versions.set(
@@ -1009,7 +1065,7 @@ export async function loadMigrationHistory(options: {
       ...(entry.migration.steps as Omit<ReadableMigration, "from" | "to">),
     });
   }
-  return { history, migrations, current: current.hash };
+  return { tables, history, migrations, current: current.hash };
 }
 
 // ============================================================================
@@ -1119,7 +1175,14 @@ export async function createMigration(options: {
   if (!baseline) {
     return { changed: true, initial: true, toHash: current.hash, snapshot: await writeSnapshot() };
   }
-  await checkSnapshotEncryption(migrationsDir, baseline, options.currentTables, currentEntries);
+  const previousEntries = await snapshotEntries(migrationsDir, baseline);
+  pinEncryptedEnums(currentEntries, previousEntries, baseline.hash === current.hash);
+  await checkSnapshotEncryption(
+    baseline,
+    previousEntries,
+    withEntries(options.currentTables, currentEntries, toShort),
+    currentEntries,
+  );
   if (baseline.hash === current.hash) return { changed: false };
   if (!(await requiresMigration(baseline.schema, current.schema))) {
     return {

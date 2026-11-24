@@ -159,13 +159,14 @@ export async function loadTsApp(
   const migrationsDir = join(dir, MIGRATIONS_DIR);
   if (existsSync(migrationsDir)) {
     const tooling = await migrationsTooling();
-    const { history, migrations } = await tooling.loadMigrationHistory({
+    const { tables, history, migrations } = await tooling.loadMigrationHistory({
       migrationsDir,
       currentTables: readable.tables as Parameters<
         Awaited<ReturnType<typeof migrationsTooling>>["loadMigrationHistory"]
       >[0]["currentTables"],
       loadModule,
     });
+    app.tables = tables;
     if (Object.keys(history).length > 0) app.history = history;
     if (migrations.length > 0) app.migrations = migrations;
   }

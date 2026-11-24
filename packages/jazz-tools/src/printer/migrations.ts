@@ -50,7 +50,13 @@ export async function printMigrations(
   const unsupported: Unsupported[] = [];
   const versions = app.history ?? {};
   const migrations = app.migrations ?? [];
-  if (Object.keys(versions).length === 0 && migrations.length === 0) return { files, unsupported };
+  const hasSealedType = Object.values(app.tables).some((table) =>
+    Object.values(table.encryption?.columns ?? {}).some(
+      (column) => typeof column === "object" && column.sealedType !== undefined,
+    ),
+  );
+  if (!hasSealedType && Object.keys(versions).length === 0 && migrations.length === 0)
+    return { files, unsupported };
 
   let time = (options.start ?? new Date()).getTime();
   const nextStamp = () => {

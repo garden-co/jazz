@@ -32,6 +32,13 @@ export const VARIANTS = Object.freeze([
     env: Object.freeze({}),
   }),
   Object.freeze({
+    name: "band-chat-hono-encrypted",
+    dir: "examples/band-chat/apps/react-hono-betterauth-e2ee",
+    environment: "Vite React SPA, Jazz in a Hono server, Better Auth, end-to-end encryption",
+    publicPrefix: "VITE_",
+    env: Object.freeze({}),
+  }),
+  Object.freeze({
     name: "jamazon",
     dir: "examples/jamazon/apps/nextjs-betterauth",
     environment: "Next.js hybrid: guest cart, then Better Auth",

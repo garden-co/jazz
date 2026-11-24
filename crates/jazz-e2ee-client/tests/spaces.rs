@@ -3150,6 +3150,62 @@ fn a_space_over_the_member_limit_is_reported_once() {
     });
 }
 
+/// Alice delivers keys for two spaces to Bob. Only the space Alice watches
+/// keeps the delivery pass's rotation evaluation for her next write.
+///
+/// ```text
+/// alice watches one space ──delivers both keys──► bob
+/// next-write retry: watched space is evaluated, unwatched space needs a read
+/// ```
+#[test]
+fn a_delivery_only_caches_rotation_evaluation_for_watched_spaces() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let store = MemoryStore::new();
+        let (watched, unwatched) = {
+            let alice = device(&server, account(0xa1), store.clone(), 1);
+            alice.activate(&server);
+            let watched = new_project(&server, &alice, "watched");
+            let unwatched = new_project(&server, &alice, "unwatched");
+            for space in [watched, unwatched] {
+                write_note(&server, &alice, space, SECRET).unwrap();
+            }
+            pump(&server, &alice.db);
+            drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
+            (watched, unwatched)
+        };
+
+        // Reopening clears the recent-write watches of both spaces.
+        let alice = device(&server, account(0xa1), store, 2);
+        alice.activate(&server);
+        let bob = device(&server, account(0xb0), MemoryStore::new(), 3);
+        bob.activate(&server);
+        let watched_address = space_address(&alice, watched);
+        let unwatched_address = space_address(&alice, unwatched);
+        let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
+        watch.use_space(&watched_address);
+        alice.sync_spaces(&server, &mut watch).unwrap();
+
+        for space in [watched, unwatched] {
+            add_member(&server, &alice, space, &bob.id());
+            pump(&server, &alice.db);
+            assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+        }
+        assert!(
+            !alice
+                .client
+                .retry_with_current_key(&watched_address, "write timed out")
+                .unwrap()
+        );
+        assert!(
+            alice
+                .client
+                .retry_with_current_key(&unwatched_address, "write timed out")
+                .unwrap()
+        );
+    });
+}
+
 /// Contract: a space in use is watched, and a change of its members runs
 /// the pass for it: after another writer adds a member, alice's next
 /// `sync_spaces` delivers to him without any call of the pass; a space no subscription uses is not

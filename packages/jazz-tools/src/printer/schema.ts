@@ -104,7 +104,7 @@ export function printTable(table: TableJson, options: TablesPrintOptions): strin
 
 /** What an encryption entry holds that `s.table` and `.encrypted()` can print. */
 const PRINTED_ENTRY_KEYS = new Set(["space", "scope", "columns", "equality"]);
-/** Plaintext declaration fields represented by the column builder. */
+/** Fields represented by the column builder or kept in its snapshot sidecar. */
 const PRINTED_COLUMN_KEYS = new Set([
   "type",
   "enum",
@@ -112,6 +112,7 @@ const PRINTED_COLUMN_KEYS = new Set([
   "array",
   "optional",
   "default",
+  "sealedType",
   "$comment",
 ]);
 
@@ -136,10 +137,7 @@ function refuseUnprintedEncryption(
       options.unsupported.push({
         path: `${at}.columns.${name}.${field}`,
         text: JSON.stringify((column as Record<string, unknown>)[field]),
-        reason:
-          field === "sealedType"
-            ? "Printing an encrypted column's field sealedType is not supported yet"
-            : `Unknown encrypted column field ${field}. Expected a type declaration, sealedType or default.`,
+        reason: `Unknown encrypted column field ${field}. Expected a type declaration, sealedType or default.`,
       });
     }
   }

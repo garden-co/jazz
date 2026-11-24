@@ -1,7 +1,10 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as prettier from "prettier";
 import { describe, expect, it } from "vitest";
+import { generateApp } from "../dev/project.js";
 import { readablePermissions } from "../permissions/dsl.js";
 import * as s from "../schema-builders.js";
 import { readableSchema } from "../schema-dsl/define-schema.js";
@@ -10,6 +13,7 @@ import {
   schema as encryptedSchema,
 } from "./__fixtures__/encrypted-permissions.js";
 import type { AppJson, PermissionsJson } from "./app-json.js";
+import { printTs } from "./cli.js";
 import { parseExpr } from "./expr.js";
 import { formatTs, layout, printPermissions, printSchemaTs } from "./index.js";
 import { printMigrations } from "./migrations.js";
@@ -394,12 +398,12 @@ describe("the schema printer", () => {
     expect(schema).toContain('.history("latest")');
   });
 
-  it("reports sealedType, app-wide settings and unknown encryption fields", () => {
+  it("reports app-wide settings and unknown encryption fields", () => {
     const rooms = { columns: { name: "bytes", nameText: "string?" } };
     const encryption = {
       space: "id",
       scope: "rooms",
-      columns: { name: { type: "string", sealedType: "string", from: "nameText" } },
+      columns: { name: { type: "string", from: "nameText" } },
       backfill: ["name"],
     };
     const out = printSchemaTs(
@@ -416,11 +420,6 @@ describe("the schema printer", () => {
         reason: "Unknown encryption key backfill. Expected space, scope, columns or equality.",
       },
       {
-        path: "tables.rooms.encryption.columns.name.sealedType",
-        text: '"string"',
-        reason: "Printing an encrypted column's field sealedType is not supported yet",
-      },
-      {
         path: "tables.rooms.encryption.columns.name.from",
         text: '"nameText"',
         reason:
@@ -432,6 +431,48 @@ describe("the schema printer", () => {
         reason: "Printing this app-wide encryption setting is not supported yet",
       },
     ]);
+  });
+
+  it("prints a pinned encrypted enum without history and generates the same pin", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-print-enum-"));
+    const path = join(dir, "jazz.app.json");
+    const status = { type: { enum: ["draft", "sent"] }, sealedType: { enum: ["draft"] } };
+    try {
+      await writeFile(
+        path,
+        JSON.stringify(
+          app({
+            rooms: {
+              columns: { status: "bytes" },
+              encryption: { space: "id", scope: "rooms", columns: { status } },
+            },
+          }),
+        ),
+      );
+      await writeFile(
+        join(dir, "jazz.permissions.json"),
+        JSON.stringify({
+          format: 1,
+          tables: {
+            rooms: {
+              read: "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.id, accountId = session.user)",
+            },
+          },
+        }),
+      );
+      const files = await printTs({ dir });
+      expect(files).toContain("schema.ts");
+      const sidecar = files.find((name) => name.endsWith(".encryption.json"));
+      expect(sidecar).toBeDefined();
+      expect(read(join(dir, sidecar!)).tables.rooms.columns.status).toEqual(status);
+      expect(readFileSync(join(dir, "schema.ts"), "utf8")).toContain(
+        's.enum("draft", "sent").encrypted()',
+      );
+      await generateApp({ cwd: dir, force: true });
+      expect(read(path).tables.rooms.encryption.columns.status).toEqual(status);
+    } finally {
+      await rm(dir, { force: true, recursive: true });
+    }
   });
 
   it("prints a migration stub per migration and a snapshot per version", async () => {
