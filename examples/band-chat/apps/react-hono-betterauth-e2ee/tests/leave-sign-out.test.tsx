@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { within, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { DevicesPanel } from "../src/components/DevicesPanel";
 import { clearLeaveRecord, readLeaveRecord, writeLeaveRecord } from "../src/lib/leave-record";
+import { clearPendingMarkerIds } from "../src/lib/mark-read";
 import { encryptionError, fakeEncryption } from "./fake-encryption";
 
 const ACCOUNT = "account-alice";
@@ -56,7 +57,13 @@ beforeEach(() => {
   mocks.authSignOut.mockClear();
   mocks.jazzRefresh.mockClear();
   mocks.lifecycleSignOut.mockClear();
-  mocks.lifecycleSignOut.mockImplementation(async () => clearLeaveRecord());
+  mocks.lifecycleSignOut.mockImplementation(async () => {
+    const { error } = (await mocks.authSignOut()) as { error: { message?: string } | null };
+    if (error) throw new Error(error.message);
+    clearPendingMarkerIds();
+    clearLeaveRecord();
+    await mocks.jazzRefresh();
+  });
 });
 
 afterEach(() => cleanup());
@@ -192,10 +199,23 @@ describe("finishing leaving this browser", () => {
     mocks.fake = fakeEncryption({ deviceId: "device-this" });
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
-    expect(readLeaveRecord()).toBeNull();
+    await waitFor(() => expect(readLeaveRecord()).toBeNull());
     expect(mocks.lifecycleSignOut).toHaveBeenCalledTimes(1);
     expect(mocks.fake.handle.devices.requestRemoval).not.toHaveBeenCalled();
     expect(mocks.fake.handle.devices.remove).not.toHaveBeenCalled();
+  });
+
+  it("reports a menu sign-out failure and keeps the leave record", async () => {
+    writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-this" });
+    mocks.fake = fakeEncryption({ deviceId: "device-this" });
+    mocks.authSignOut.mockResolvedValueOnce({ data: null, error: { message: "network down" } });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+
+    expect(await screen.findByText("Could not sign out")).not.toBeNull();
+    expect(screen.getByText("network down")).not.toBeNull();
+    expect(readLeaveRecord()).toEqual({ accountId: ACCOUNT, deviceId: "device-this" });
   });
 
   it("says so, with a retry, when the sign-out itself fails", async () => {

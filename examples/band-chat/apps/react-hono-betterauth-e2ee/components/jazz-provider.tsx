@@ -22,9 +22,10 @@ export function useBandChatLifecycle(): AuthActions {
   return {
     async signOut() {
       // Signs out of Better Auth, then Jazz follows the backend's answer.
-      clearLeaveRecord();
-      await authClient.signOut();
+      const { error } = await authClient.signOut();
+      if (error) throw new Error(error.message ?? error.statusText);
       clearPendingMarkerIds();
+      clearLeaveRecord();
       await refresh();
       window.location.assign("/");
     },
