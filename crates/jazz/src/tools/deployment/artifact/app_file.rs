@@ -726,20 +726,6 @@ fn read_entry(value: &Json, path: &str) -> Result<EncryptionEntry, Refusal> {
     })
 }
 
-/// Whether every enum value in `value` is one of its column type's
-/// variants.
-fn in_variants(column_type: &ColumnType, value: &Value) -> bool {
-    match (column_type, value) {
-        (_, Value::Null) => true,
-        (ColumnType::Enum { variants }, Value::Text(variant)) => variants.contains(variant),
-        (ColumnType::Enum { .. }, _) => false,
-        (ColumnType::Array { element }, Value::Array(items)) => {
-            items.iter().all(|item| in_variants(element, item))
-        }
-        _ => true,
-    }
-}
-
 /// Check only type objects. A JSON schema inside a type is application data.
 fn encrypted_type_keys(spec: &Json, path: &str, allowed: &[&str]) -> Result<(), Refusal> {
     let Some(fields) = spec.as_object() else {
@@ -789,14 +775,6 @@ fn read_plain(spec: &Json, path: &str, with_default: bool) -> Result<PlainType, 
     } else {
         None
     };
-    if let Some(default) = &default
-        && !in_variants(&column.column_type, default)
-    {
-        return Err(refuse(
-            format!("{path}.default"),
-            "an enum default must be one of the enum's variants",
-        ));
-    }
     plain_type(&column, spec, path)?;
     if spec.get("transform").is_some() {
         return Err(refuse(
@@ -828,14 +806,7 @@ fn read_encrypted_column(spec: &Json, path: &str) -> Result<EncryptedColumn, Ref
     let mut plain = read_plain(ty, &format!("{path}.type"), false)?;
     if let Some(default) = spec.get("default") {
         let at = format!("{path}.default");
-        let value = read_value(default, &plain.column_type, &at)?;
-        if !in_variants(&plain.column_type, &value) {
-            return Err(refuse(
-                at,
-                "an enum default must be one of the enum's variants",
-            ));
-        }
-        plain.default = Some(value);
+        plain.default = Some(read_value(default, &plain.column_type, &at)?);
     }
     Ok(EncryptedColumn {
         plain,

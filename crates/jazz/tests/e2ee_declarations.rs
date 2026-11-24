@@ -915,7 +915,7 @@ fn an_encrypted_enum_default_must_be_a_variant() {
     };
     load_app(with_default("done").as_bytes()).unwrap_or_else(|e| panic!("{e}"));
     let error = refusal(load_app(with_default("lost").as_bytes()));
-    assert!(error.contains("one of the enum's variants"), "{error}");
+    assert!(error.contains("the declared default is not a value of its type"), "{error}");
 }
 
 /// The app-file reader refuses a source on either an existing or a fresh encrypted column.
