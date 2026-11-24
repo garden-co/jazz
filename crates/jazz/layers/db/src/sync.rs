@@ -18175,6 +18175,14 @@ impl Store {
 ///
 /// The namespace is the one `_jazz_meta` holds, as the store keeps it in
 /// memory ([`Store::known_namespace`]): compiling cannot await a read.
+/// The memory follows the file because this store's connection is the
+/// file's only writer (see [`FollowMemo`]): every write of the namespace
+/// goes through [`Store::persist_namespace`], and every read through
+/// [`Store::stored_namespace`], both of which keep it, and a rolled-back
+/// savepoint forgets one it wrote. The names a policy's identities also
+/// need ([`Store::names_confirmed`]) are kept in memory on the same terms,
+/// so a second writer of the file would be unseen by both alike; no lock
+/// refuses one, and none is assumed here.
 impl crate::compile::IdentitySource for Store {
     fn identity_namespace(&self, schema: &Schema) -> Result<Option<[u8; 16]>, Error> {
         let Some(namespace) = self.known_namespace.get() else {
