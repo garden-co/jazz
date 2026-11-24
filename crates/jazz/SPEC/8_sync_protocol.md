@@ -280,6 +280,18 @@ admission. `crates/jazz/fixtures/websocket_prelude_v1.json` pins the writer
 strings and the server's parse. Axum caps inbound WebSocket frames and
 messages at 2 MiB, the prelude included.
 
+An app backend never relays a client's prelude as sent. It decides through
+`jazz::tools::backend_admission` (Node, Workers and the native endpoint alike)
+and builds the core's prelude: the client's `peer_identity` and
+`requested_link`, an `auth` of the backend secret and at most one identity,
+the backend's `bundle`, and `local_first_audience` when the backend checked a
+device account's proof against one of its endpoints. No other client field is
+copied. A client's credentials are those of its `auth` object, or the top
+level of a prelude without one; beside an `auth` object, top-level copies are
+not read. A user's `backend_session` carries `authenticatedAt`, when the
+backend started `authenticate` for it (Unix milliseconds).
+`crates/jazz/fixtures/backend_admission_v1.json` pins the decisions.
+
 ### 8.2 Upstream: commits
 
 A committed transaction travels as one `Commit { id, kind, ops, … }`, `id`

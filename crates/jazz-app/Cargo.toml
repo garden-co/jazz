@@ -14,7 +14,13 @@ include = ["src/**", "build.rs", "README.md"]
 # Unstable, not part of a release yet: the app's Jazz endpoint (`endpoint`),
 # a native main server for an app's users. Run main backends with TS
 # `createJazz`.
-unstable-endpoint = ["dep:hmac", "dep:sha2", "dep:tokio-tungstenite"]
+unstable-endpoint = [
+  "dep:hmac",
+  "dep:sha2",
+  "dep:tokio-tungstenite",
+  "jazz/backend-admission",
+  "serde_json/raw_value",
+]
 # `Endpoint::router`: the endpoint as an Axum router.
 axum = ["unstable-endpoint", "dep:axum"]
 # A stand-in for an app's Jazz endpoint, for testing bindings' end users:

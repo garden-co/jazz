@@ -8,6 +8,7 @@ const nativeBinding = require("./index.cjs");
 
 export default nativeBinding;
 export const {
+  admitPrelude,
   captureTextAnchor,
   captureTextRange,
   checkClientMigrations,
@@ -44,6 +45,7 @@ export const {
   verifyGenerated,
   verifyLocalFirstIdentityProof,
   nativeArtifactFingerprint,
+  pinPreludeBundle,
   resolveTextAnchor,
   resolveTextRange,
   schemaHash,

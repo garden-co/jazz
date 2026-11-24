@@ -2015,3 +2015,113 @@ async fn a_refused_sign_in_names_its_reason_to_a_client_that_reads_one() {
     );
     app.stop().await;
 }
+
+/// A revoke that races alice's sign-in refuses her session: the endpoint
+/// states when her `authenticate` started, not when the core admitted her.
+///
+/// ```text
+/// alice ──socket──► endpoint ──authenticate starts─┐
+/// backend ──revoke-sessions──► core                │ (mark is newer)
+/// core ◄──authenticatedAt: started──── endpoint ◄──┘ ──✗── refused
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revoke_that_races_a_sign_in_refuses_the_session() {
+    use jazz_app_support::jazz::wire::{
+        WireFrame, WireHello, WirePeerRole, decode_frame, decode_websocket_frame_batch,
+        encode_frame, encode_websocket_frame_batch,
+    };
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+    let mut app = App::start().await;
+    let account = app.endpoint.create_account_for("alice").await.unwrap();
+    // `authenticate` runs twice for the socket: for its admission, and for
+    // this file's host, which logs who was admitted. Hold both until the
+    // revoke is done, whichever is which.
+    let entered = Arc::new(tokio::sync::Semaphore::new(0));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let held = {
+        let (entered, release) = (entered.clone(), release.clone());
+        move |request: Request| {
+            let (entered, release) = (entered.clone(), release.clone());
+            async move {
+                let answer = authenticate(request).await;
+                entered.add_permits(1);
+                let _ = release.acquire().await;
+                answer
+            }
+        }
+    };
+    app.endpoint = Endpoint::new(&app.backend, held).unwrap();
+    app.host.abort();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    app.url = format!("http://{}/jazz", listener.local_addr().unwrap());
+    app.host = tokio::spawn(host(listener, app.endpoint.clone(), app.admitted.clone()));
+
+    let ws = app.url.replacen("http", "ws", 1) + &format!("/apps/{}/ws", app.app_id);
+    let mut request = ws.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", "Bearer token-alice".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let account = account.0.to_string();
+    let peer = serde_json::to_string(&(account.as_str(), "jazz:backend", "alice")).unwrap();
+    let prelude = json!({
+        "peer_identity": peer,
+        "auth": { "backend_session": { "user_id": "alice" } },
+    });
+    socket
+        .send(Message::Text(prelude.to_string().into()))
+        .await
+        .unwrap();
+    let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, 0));
+    let hello = encode_websocket_frame_batch(&[encode_frame(&hello).unwrap()]).unwrap();
+    socket.send(Message::Binary(hello.into())).await.unwrap();
+
+    let both = tokio::time::timeout(Duration::from_secs(10), entered.acquire_many(2)).await;
+    both.expect("authenticate ran for both").unwrap().forget();
+    // The mark refuses only what is strictly older.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let revoked_before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let revoked = reqwest::Client::new()
+        .post(format!(
+            "{}/apps/{}/admin/accounts/revoke-sessions",
+            app.server.base_url(),
+            app.app_id
+        ))
+        .header("X-Jazz-Admin-Secret", app.server.admin_secret())
+        .json(&json!({
+            "identity": { "issuer": "jazz:backend", "subject": "alice" },
+            "revokedBefore": revoked_before,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status().as_u16(), 200);
+    release.close();
+
+    let refusal = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(Ok(message)) = socket.next().await {
+            let Message::Binary(message) = message else {
+                continue;
+            };
+            for frame in decode_websocket_frame_batch(&message).unwrap() {
+                if let Ok(WireFrame::Error(error)) = decode_frame(&frame) {
+                    return Some(error.message);
+                }
+            }
+        }
+        None
+    })
+    .await
+    .expect("the core refuses the raced session");
+    assert!(
+        refusal
+            .as_deref()
+            .is_some_and(|message| message.contains("revoked")),
+        "{refusal:?}"
+    );
+    app.stop().await;
+}

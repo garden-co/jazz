@@ -462,6 +462,12 @@ export declare class Write {
   close(): boolean
 }
 
+/**
+ * `createJazz`'s admission of a client's socket prelude
+ * (`jazz::tools::backend_admission`): `facts` and the answered step are JSON.
+ */
+export declare function admitPrelude(prelude: Uint8Array, facts: string): string
+
 /** The anchor at `position` (UTF-16 code units) of `text`. */
 export declare function captureTextAnchor(text: string, version: number | undefined | null, position: number, side: JsonValue): JsonValue
 
@@ -693,6 +699,12 @@ export declare function mintLocalFirstToken(seedB64: string, audience: string, t
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
 export declare function nativeArtifactFingerprint(): string
+
+/**
+ * `prelude` pinned to the backend's published `bundle`; null when it is
+ * not a JSON object.
+ */
+export declare function pinPreludeBundle(prelude: Uint8Array, bundle?: string | undefined | null): Uint8Array | null
 
 /** Where `anchor` lands in `text`: `{ position, confidence, ambiguous }`. */
 export declare function resolveTextAnchor(anchor: JsonValue, text: string, version?: number | undefined | null): JsonValue

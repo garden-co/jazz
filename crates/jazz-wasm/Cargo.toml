@@ -56,7 +56,7 @@ durable-object = ["dep:jazz-server", "dep:bytes"]
 # What a backend's `createJazz` needs on this WASM build (`src/backend.rs`:
 # `serveThinTransaction`, `WasmThinRouter`, ...), for the workerd backend
 # (`backend/pkg`). Off by default, so browsers never download it.
-backend = []
+backend = ["jazz/backend-admission"]
 # Test-only checks for the workerd smoke test (`tests/durable-objects`); never in releases.
 durable-object-tests = ["durable-object"]
 # Browser store probes (IndexedDB vs in memory); never in release builds.

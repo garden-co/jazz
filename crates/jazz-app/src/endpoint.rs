@@ -42,6 +42,9 @@ use base64::Engine as _;
 use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _};
 use jazz::account_registry::AccountId;
 use jazz::tools::Session;
+use jazz::tools::backend_admission::{
+    self, Account, Authenticated, BackendClient, Facts, Lookup, Refusal, Step, Who,
+};
 use jazz::wire::{
     WireError, WireErrorCode, WireErrorReason, WireFrame, WireRetry, encode_websocket_frame_batch,
 };
@@ -1357,142 +1360,103 @@ impl Endpoint {
         closed
     }
 
-    /// `admitPrelude`: a device account's own proof, or the session of the
-    /// user `authenticate` names, rewritten to the backend's word and pinned
-    /// to its bundle.
+    /// Who this socket is and the prelude its core gets, by the rules every
+    /// backend shares ([`backend_admission`]): this answers their lookups.
     ///
-    /// What reaches the core is built here, never copied from the client:
-    /// `peer_identity` and `requested_link` from the prelude, the pinned
-    /// `bundle`, and an `auth` holding the backend secret and exactly one
-    /// identity (the device's token, or the vouched session). Credentials
-    /// are read from `auth` only: one stated beside it that differs (TS
-    /// clients repeat theirs there), a secret, or a request only a backend
-    /// makes (`bootstrap_catalogue`, `local_first_audience`) refuses the
-    /// socket. Every other field is dropped.
+    /// Not supported on this host, and so refused: backend clients
+    /// (`backendClients`; their stand-in secret names no one here), proofs
+    /// for an endpoint URL, and renewing a session in place.
     async fn admit(&self, request: &Request, prelude: &[u8]) -> Result<Admission> {
         if prelude.len() > MAX_PRELUDE_BYTES {
             return Ok(Admission::Unverified);
         }
-        let Ok(Value::Object(parsed)) = serde_json::from_slice::<Value>(prelude) else {
-            return Ok(Admission::Missing);
-        };
-        let Some(Value::Object(auth)) = parsed.get("auth") else {
-            return Ok(Admission::Missing);
-        };
-        let mut forwarded = Map::new();
-        for (key, value) in &parsed {
-            match key.as_str() {
-                // The core checks it against the session it admits.
-                "peer_identity" | "requested_link" if value.is_string() => {
-                    forwarded.insert(key.clone(), value.clone());
-                }
-                "peer_identity" | "requested_link" => return Ok(Admission::Unverified),
-                // A TS client repeats its credentials beside `auth`: they
-                // must be the same (or null), and only `auth`'s are read.
-                "jwt_token" | "backend_secret" | "admin_secret" | "backend_session"
-                    if !value.is_null() && auth.get(key) != Some(value) =>
-                {
-                    return Ok(Admission::Unverified);
-                }
-                // Requests only a backend makes.
-                "bootstrap_catalogue" if value != &json!(false) => {
-                    return Ok(Admission::Unverified);
-                }
-                "local_first_audience" if !value.is_null() => return Ok(Admission::Unverified),
-                // Anything else (the client's `bundle`, `sub`, the renewal
-                // field) never reaches the core.
-                _ => {}
-            }
-        }
-        let stated = |key: &str| auth.get(key).is_some_and(|value| !value.is_null());
-        if stated("backend_secret") || stated("admin_secret") {
-            return Ok(Admission::Unverified);
-        }
-        let secret = Value::String(self.inner.core.backend_secret.clone());
         let now = Instant::now();
-        if stated("jwt_token") {
-            if stated("backend_session") {
-                return Ok(Admission::Unverified);
+        let mut facts = Facts {
+            backend_secret: self.inner.core.backend_secret.clone(),
+            app_id: self.inner.core.app_id.to_string(),
+            now_ms: unix_now_ms(),
+            endpoints: Vec::new(),
+            client: None,
+            device_accepted: None,
+            user: None,
+            account: None,
+        };
+        let mut user: Option<AuthUser> = None;
+        let mut session: Option<Session> = None;
+        let admitted = loop {
+            match backend_admission::admit(prelude, &facts).map_err(not_admitted)? {
+                Step::Admitted(admitted) => break admitted,
+                Step::Refused(Refusal::Missing) => return Ok(Admission::Missing),
+                Step::Refused(Refusal::Unverified | Refusal::UnverifiedDeviceProof { .. }) => {
+                    return Ok(Admission::Unverified);
+                }
+                Step::Lookup(Lookup::BackendClient) => facts.client = Some(BackendClient::None),
+                Step::Lookup(Lookup::DeviceAccount { .. }) => {
+                    facts.device_accepted = Some(self.accepts_device_account(request).await?);
+                }
+                Step::Lookup(Lookup::User) => {
+                    let authenticated_at_ms = unix_now_ms();
+                    user = self.authenticate(request).await?;
+                    facts.user = Some(Authenticated {
+                        user_id: user.as_ref().map(|user| user.user_id.clone()),
+                        authenticated_at_ms,
+                    });
+                }
+                Step::Lookup(Lookup::Account) => {
+                    let named = user
+                        .as_ref()
+                        .ok_or_else(|| not_admitted("an account was asked for before a user"))?;
+                    session = match self.session_for(named).await {
+                        Ok(session) => Some(session),
+                        Err(Error::NoAccount(_)) => None,
+                        Err(error) => return Err(error),
+                    };
+                    facts.account = Some(Account {
+                        id: session
+                            .as_ref()
+                            .and_then(|session| session.account_id)
+                            .map(|account| account.0.to_string()),
+                        issuer: BACKEND_ISSUER.to_owned(),
+                        claims: serde_json::value::to_raw_value(&named.claims)
+                            .map_err(not_admitted)?,
+                    });
+                }
             }
-            let Some(token) = auth.get("jwt_token").and_then(Value::as_str) else {
-                return Ok(Admission::Unverified);
-            };
-            let claims = token_claims(token);
-            let local_first = claims
-                .as_ref()
-                .is_some_and(|claims| claims.get("iss") == Some(&json!(DEVICE_ACCOUNT_ISSUER)));
-            // The core verifies the token itself; the backend only checks
-            // it is for this app. Proofs for an endpoint URL are not
-            // supported yet.
-            let app = self.inner.core.app_id.to_string();
-            let for_this_app = claims
-                .as_ref()
-                .and_then(|claims| claims.get("aud"))
-                .is_some_and(|aud| match aud {
-                    Value::String(aud) => *aud == app,
-                    Value::Array(auds) => auds.iter().any(|aud| aud.as_str() == Some(&app)),
-                    _ => false,
-                });
-            if !local_first || !for_this_app || !self.accepts_device_account(request).await? {
-                return Ok(Admission::Unverified);
+        };
+        let forwarded: Value = serde_json::from_str(&admitted.prelude).map_err(not_admitted)?;
+        let (who, auth, until) = match (admitted.who, user, session, &facts.user) {
+            (Who::User, Some(user), Some(session), Some(asked)) => {
+                let Some(until) = reauthenticate_at(now, user.expires_at, self.inner.session_ttl)
+                else {
+                    return Ok(Admission::Expired);
+                };
+                let auth = thin::SessionAuth::User {
+                    session,
+                    authenticated_at_ms: asked.authenticated_at_ms,
+                };
+                (Admitted::User(user.user_id), auth, until)
             }
-            forwarded.insert(
-                "auth".into(),
-                json!({ "jwt_token": token, "backend_secret": secret }),
-            );
-            return Ok(Admission::Admitted {
-                prelude: self.pinned(forwarded),
-                who: Admitted::DeviceAccount,
-                auth: thin::SessionAuth::DeviceAccount(token.to_owned()),
-                until: now + self.inner.session_ttl,
-            });
-        }
-        let Some(Value::Object(stated_session)) = auth.get("backend_session") else {
-            return Ok(Admission::Missing);
+            (Who::DeviceAccount, ..) => {
+                let token = forwarded["auth"]["jwt_token"]
+                    .as_str()
+                    .ok_or_else(|| not_admitted("a device account was admitted without a proof"))?;
+                (
+                    Admitted::DeviceAccount,
+                    thin::SessionAuth::DeviceAccount(token.to_owned()),
+                    now + self.inner.session_ttl,
+                )
+            }
+            _ => return Err(not_admitted("admitted as no one this endpoint looked up")),
         };
-        let Some(user) = self.authenticate(request).await? else {
-            return Ok(Admission::Missing);
-        };
-        if stated_session.get("user_id").and_then(Value::as_str) != Some(user.user_id.as_str()) {
-            return Ok(Admission::Missing);
-        }
-        // A client states a user's session only once its sign-in gave them
-        // an account: this never makes one.
-        let session = match self.session_for(&user).await {
-            Ok(session) => session,
-            Err(Error::NoAccount(_)) => return Ok(Admission::Missing),
-            Err(error) => return Err(error),
-        };
-        let Some(until) = reauthenticate_at(now, user.expires_at, self.inner.session_ttl) else {
-            return Ok(Admission::Expired);
-        };
-        let auth = thin::SessionAuth::User(session.clone());
-        // As TS `sessionFor` states it to the core.
-        let session = json!({
-            "account_id": session.account_id.map(|account| account.0.to_string()),
-            "issuer": session.issuer,
-            "user_id": session.user_id,
-            "claims": session.claims,
-            "authMode": "external",
-        });
-        forwarded.insert(
-            "auth".into(),
-            json!({ "backend_secret": secret, "backend_session": session }),
-        );
+        let prelude =
+            backend_admission::pin_bundle(admitted.prelude.as_bytes(), Some(&self.inner.bundle))
+                .ok_or_else(|| not_admitted("the prelude could not be pinned"))?;
         Ok(Admission::Admitted {
-            prelude: self.pinned(forwarded),
-            who: Admitted::User(user.user_id),
+            prelude,
+            who,
             auth,
             until,
         })
-    }
-
-    /// `pinnedSocket`: the prelude with the bundle this backend published.
-    /// The core honours the pin only on the backend's word, so whatever
-    /// bundle the client stated is replaced.
-    fn pinned(&self, mut prelude: Map<String, Value>) -> Vec<u8> {
-        prelude.insert("bundle".into(), Value::String(self.inner.bundle.clone()));
-        serde_json::to_vec(&prelude).unwrap_or_default()
     }
 
     /// The prelude the core would get for this socket, if admitted: for
@@ -1603,13 +1567,15 @@ fn unix_now() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-/// A JWT's claims, unverified: the core verifies it.
-fn token_claims(token: &str) -> Option<Map<String, Value>> {
-    let payload = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.trim_end_matches('='))
-        .ok()?;
-    serde_json::from_slice(&bytes).ok()
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
+}
+
+/// A fault of this backend's admission, never the client's refusal.
+fn not_admitted(error: impl std::fmt::Display) -> Error {
+    Error::Config(format!("cannot admit the socket: {error}"))
 }
 
 /// When a session admitted `now`, good until `expires_at` (Unix seconds)

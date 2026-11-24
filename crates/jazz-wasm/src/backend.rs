@@ -2,8 +2,8 @@
 //! build instead of `jazz-napi` (a Cloudflare Worker, where native addons
 //! cannot load): a database serving thin sessions' transactions, the router
 //! splitting a thin connection between the core and the backend, admitting
-//! a device account's session, waiting on a trusted session's writes, and
-//! loading the app the backend publishes. Each mirrors the `jazz-napi`
+//! a device account's session, admitting a client's socket prelude, waiting
+//! on a trusted session's writes, and loading the app the backend publishes. Each mirrors the `jazz-napi`
 //! export of the same name; where napi answers a value or a pending read,
 //! these answer a `Promise`.
 
@@ -345,6 +345,21 @@ impl WasmThinRouter {
         }
         Ok(steps)
     }
+}
+
+/// `createJazz`'s admission of a client's socket prelude
+/// (`jazz::tools::backend_admission`): `facts` and the answered step are
+/// JSON, as napi's `admitPrelude`.
+#[wasm_bindgen(js_name = admitPrelude)]
+pub fn admit_prelude(prelude: &[u8], facts: &str) -> Result<String, JsValue> {
+    jazz::tools::backend_admission::admit_json(prelude, facts).map_err(error)
+}
+
+/// `prelude` pinned to the backend's published `bundle`, as napi's
+/// `pinPreludeBundle`; undefined when it is not a JSON object.
+#[wasm_bindgen(js_name = pinPreludeBundle)]
+pub fn pin_prelude_bundle(prelude: &[u8], bundle: Option<String>) -> Option<Vec<u8>> {
+    jazz::tools::backend_admission::pin_bundle(prelude, bundle.as_deref())
 }
 
 /// Read and check a backend's `jazz.permissions.json` (`permissions`)

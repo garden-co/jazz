@@ -5,5 +5,7 @@
 declare module "jazz-wasm/backend" {
   export * from "jazz-wasm";
   export const WasmThinRouter: unknown;
+  export function admitPrelude(prelude: Uint8Array, facts: string): string;
+  export function pinPreludeBundle(prelude: Uint8Array, bundle?: string): Uint8Array | undefined;
   export function loadBackendApp(schema: string, permissions: string): unknown;
 }

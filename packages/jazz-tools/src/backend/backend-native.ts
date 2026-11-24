@@ -19,6 +19,10 @@ export interface BackendNative {
   readonly ThinRouter: typeof Napi.NapiThinRouter;
   /** An in-process core (`sqlite()`, `memory()`): Node only. */
   readonly JazzCore?: typeof Napi.JazzCore;
+  /** Admits a client's socket prelude (`jazz::tools::backend_admission`). */
+  readonly admitPrelude: typeof Napi.admitPrelude;
+  /** Stamps the backend's published bundle into a prelude. */
+  readonly pinPreludeBundle: typeof Napi.pinPreludeBundle;
   readonly captureTextAnchor: typeof Napi.captureTextAnchor;
   readonly captureTextRange: typeof Napi.captureTextRange;
   readonly resolveTextAnchor: typeof Napi.resolveTextAnchor;
@@ -51,6 +55,8 @@ export function napiBackendNative(
     Db: napi.NapiDb,
     ThinRouter: napi.NapiThinRouter,
     JazzCore: napi.JazzCore,
+    admitPrelude: napi.admitPrelude,
+    pinPreludeBundle: napi.pinPreludeBundle,
     captureTextAnchor: napi.captureTextAnchor,
     captureTextRange: napi.captureTextRange,
     resolveTextAnchor: napi.resolveTextAnchor,

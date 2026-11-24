@@ -1358,6 +1358,70 @@ describe("createJazz", () => {
       .wait({ tier: "global" });
   }, 60_000);
 
+  // The revoke is on another instance, so only the `authenticatedAt` the
+  // admission states can refuse the session: without it the core would date
+  // the session from when it admitted it, after the revoke.
+  it("refuses a sign-in that a revokeUser on another instance raced", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    let entered!: () => void;
+    let release!: () => void;
+    const asked = new Promise<void>((resolve) => (entered = resolve));
+    const answered = new Promise<void>((resolve) => (release = resolve));
+    const instance = async () => {
+      const jazz = await createJazz({
+        app,
+        permissions,
+        store: remote({ url: core.url, appId, secret: core.adminSecret }),
+        authenticate: async (request) => {
+          const userId = request.headers.get("x-test-user");
+          if (!userId) return null;
+          // The socket's sign-in holds its answer; the account sign-in doesn't.
+          if (new URL(request.url).pathname.endsWith("/ws")) {
+            entered();
+            await answered;
+          }
+          return { userId, expiresAt: inAnHour() };
+        },
+      }).ready();
+      cleanups.push(() => jazz.close());
+      return jazz;
+    };
+    const [socketHost, signOutHandler] = await Promise.all([instance(), instance()]);
+    const origin = await serve(socketHost, { sockets: true });
+    const signedIn = await fetch(`${origin}/jazz/apps/${appId}/accounts/backend-sign-in`, {
+      method: "POST",
+      headers: { "x-test-user": "alice" },
+    });
+    const { account } = (await signedIn.json()) as { account: string };
+    const socket = new NodeWebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
+      headers: { "x-test-user": "alice" },
+    } as never);
+    socket.binaryType = "arraybuffer";
+    socket.addEventListener("open", () => {
+      const session = { issuer: "jazz:backend", user_id: "alice" };
+      socket.send(
+        JSON.stringify({
+          peer_identity: canonicalAuthorSubject("jazz:backend", "alice", account),
+          auth: { backend_session: session },
+        }),
+      );
+      socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
+    });
+    let received = "";
+    socket.addEventListener("message", (event) => {
+      received += new TextDecoder().decode(new Uint8Array(event.data as ArrayBuffer));
+    });
+    await asked;
+    // The mark refuses only what is strictly older.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(await signOutHandler.revokeUser("alice")).toBe(0);
+    release();
+    await expect.poll(() => received, { timeout: 10_000 }).toContain("session revoked");
+    socket.close();
+  }, 30_000);
+
   it("never takes row data for the core's revocation", async () => {
     // Everyone reads every todo, so Bob's text reaches Alice's session.
     const shared = {
