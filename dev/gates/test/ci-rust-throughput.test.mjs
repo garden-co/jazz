@@ -432,14 +432,24 @@ const assertEntryCacheTrustBoundary = (source) => {
     "steps",
     "timeout-minutes",
   ]);
-  assert.match(fullSuiteStatus.if, /^always\(\) && needs\.test-rust\.result == 'success' && \(/);
+  // full-suite reads the suite results directly (test-rust's own success per
+  // event), so the merge group's tail skips one job hop.
+  assert.match(fullSuiteStatus.if, /^always\(\) && \(\n/);
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'workflow_dispatch' && needs\.untrusted\.result == 'success' && needs\.trusted\.result == 'skipped' \|\|\n/,
+  );
+  assert.match(fullSuiteStatus.if, /github\.event_name == 'push' && needs\.trusted\.result == 'success' \|\|\n/);
   assert.match(
     fullSuiteStatus.if,
     /github\.event_name == 'pull_request' && needs\.trusted\.result == 'success' && github\.base_ref == 'release'\n/,
   );
   assert.doesNotMatch(fullSuiteStatus.if, /head_ref/);
-  assert.doesNotMatch(fullSuiteStatus.if, /needs\.untrusted/);
-  assert.deepEqual(fullSuiteStatus.needs, ["trusted", "test-rust"]);
+  // An untrusted suite result counts for dispatches only: a pull request's
+  // untrusted (fast-scope) run must never post full-suite.
+  assert.equal([...fullSuiteStatus.if.matchAll(/needs\.untrusted/g)].length, 1);
+  assert.match(fullSuiteStatus.if, /github\.event_name == 'workflow_dispatch' && needs\.untrusted\./);
+  assert.deepEqual(fullSuiteStatus.needs, ["untrusted", "trusted"]);
   assert.deepEqual(fullSuiteStatus.permissions, { contents: "read", statuses: "write" });
   assert.equal(fullSuiteStatus.steps.length, 2);
   assert.equal(
