@@ -61,12 +61,11 @@ function wait<T>(request: IDBRequest<T>): Promise<T> {
 function finished(transaction: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
     transaction.onabort = () => reject(transaction.error ?? new Error("transaction aborted"));
   });
 }
 
-/** A random incarnation: 52 bits, never 0, so it fits a JavaScript number as well as a `u64`. */
+/** A random incarnation: 48 bits, with 0 mapped to 1, so it fits a JavaScript number as well as a `u64`. */
 function newIncarnation(crypto: Crypto): bigint {
   const bytes = crypto.getRandomValues(new Uint8Array(6));
   let value = 0n;
@@ -130,13 +129,17 @@ export function browserPrivateStore(options: BrowserPrivateStoreOptions = {}): P
         "decrypt",
       ]);
       const transaction = db.transaction(KEYS, "readwrite");
+      // Add only: where there are no locks, the tab that lost the race
+      // uses the key that won.
+      const added = transaction.objectStore(KEYS).add(made, WRAP_KEY);
       try {
-        // Add only: where there are no locks, the tab that lost the race
-        // uses the key that won.
-        await wait(transaction.objectStore(KEYS).add(made, WRAP_KEY));
+        await Promise.all([wait(added), finished(transaction)]);
         return made;
-      } catch {
-        return (await read()) as CryptoKey;
+      } catch (error) {
+        if (added.error?.name !== "ConstraintError") throw error;
+        const winner = (await read()) as CryptoKey | undefined;
+        if (!winner) throw error;
+        return winner;
       }
     }).catch((error) => {
       wrapKey = undefined;
@@ -197,21 +200,9 @@ export function browserPrivateStore(options: BrowserPrivateStoreOptions = {}): P
         } satisfies DocRow);
         return revision;
       })();
-      const result = await verdict.catch((error) => {
-        transaction.abort();
-        throw error;
-      });
-      if (result === "wiped") {
-        transaction.abort();
-        await settled.catch(() => {});
-        throw new PrivateStoreWipedError();
-      }
-      if (result === "conflict") {
-        transaction.abort();
-        await settled.catch(() => {});
-        throw new PrivateStoreConflictError();
-      }
-      await settled;
+      const [result] = await Promise.all([verdict, settled]);
+      if (result === "wiped") throw new PrivateStoreWipedError();
+      if (result === "conflict") throw new PrivateStoreConflictError();
       return result;
     },
 

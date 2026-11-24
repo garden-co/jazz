@@ -9,6 +9,7 @@
  */
 import type { WasmSchema } from "../drivers/types.js";
 import { PersistedWriteRejectedError } from "../runtime/client.js";
+import { bytesToHex } from "../runtime/hex.js";
 import type { Db } from "../runtime/db.js";
 import { boundApp, TypedTableQueryBuilder } from "../typed-app.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
@@ -144,7 +145,7 @@ export interface EncryptionOptions {
 /** @internal Takes ownership of the decoded secret passed to the native host. */
 export function takeSecretHex(bytes: Uint8Array): string {
   try {
-    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    return bytesToHex(bytes);
   } finally {
     bytes.fill(0);
   }
@@ -160,6 +161,13 @@ function failure(error: unknown, operation?: string): EncryptionError {
   const [, code, detail] = match;
   // For a protocol refusal, the runtime gives its reason in the code.
   return new EncryptionError(code!, detail === "E2EE operation refused" ? message : detail!);
+}
+
+function verificationTimeout(state: { error?: string | null; stage?: string }): EncryptionError {
+  return failure(
+    state.error ??
+      `database: the account was not verified in time (waiting: ${state.stage ?? "unknown"})`,
+  );
 }
 
 /** The handle an app uses; see the docs. */
@@ -203,12 +211,37 @@ export class Encryption {
    * own loop, which tries again with a growing wait while the server cannot
    * be reached or has not yet accepted what this device published; this
    * waits for it, up to `timeoutMs` (default 30 seconds), then fails.
-   * Later calls verify again at once.
+   * Concurrent calls share verification and recovery, each with its own
+   * timeout. Later calls verify again at once.
    */
   async ready(options: { timeoutMs?: number } = {}): Promise<AccountStatus> {
     const timeoutMs = options.timeoutMs ?? 30_000;
     if (this.options.nativeReadiness) return this.call("ready", { timeoutMs });
-    return this.verify(Date.now() + timeoutMs);
+    const deadline = Number.isNaN(timeoutMs) ? Infinity : Date.now() + timeoutMs;
+    this.verificationDeadline = Math.max(this.verificationDeadline, deadline);
+    const attempt = (this.verifying ??= this.verifyOnce().finally(() => {
+      this.verifying = undefined;
+      this.verificationDeadline = 0;
+    }));
+    if (deadline === Infinity) return attempt;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const expired = new Promise<void>((resolve) => {
+        // Longer delays overflow a single platform timer.
+        const schedule = () => {
+          const left = deadline - Date.now();
+          const maxDelay = 2_147_483_647;
+          timer = setTimeout(left > maxDelay ? schedule : resolve, Math.min(left, maxDelay));
+          (timer as { unref?: () => void }).unref?.();
+        };
+        schedule();
+      }).then(() => {
+        throw verificationTimeout(JSON.parse(this.native.encryptionState()));
+      });
+      return await Promise.race([attempt, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -240,7 +273,7 @@ export class Encryption {
   }
 
   /** The loop's verification, once it has one (see {@link ready}). */
-  private async verified(deadline: number): Promise<AccountStatus> {
+  private async verified(): Promise<AccountStatus> {
     for (;;) {
       const state = JSON.parse(this.native.encryptionState()) as {
         status: AccountStatus | null;
@@ -248,14 +281,7 @@ export class Encryption {
         stage?: string;
       };
       if (state.status !== null) return state.status;
-      if (Date.now() >= deadline) {
-        throw failure(
-          new Error(
-            state.error ??
-              `database: the account was not verified in time (waiting: ${state.stage ?? "unknown"})`,
-          ),
-        );
-      }
+      if (Date.now() >= this.verificationDeadline) throw verificationTimeout(state);
       await new Promise((resolve) => {
         const timer = setTimeout(resolve, 100);
         (timer as { unref?: () => void }).unref?.();
@@ -263,21 +289,15 @@ export class Encryption {
     }
   }
 
+  // A recovery spends the approval nonce once. Keep polling for the longest
+  // waiter, while each caller can stop waiting for the shared attempt sooner.
   private verifying: Promise<AccountStatus> | undefined;
+  private verificationDeadline = 0;
 
-  /** One verification at a time: a second caller shares the one in flight (a recovery spends the device's approval nonce once). */
-  private verify(deadline: number): Promise<AccountStatus> {
-    return (this.verifying ??= this.verifyOnce(deadline).finally(() => {
-      this.verifying = undefined;
-    }));
-  }
-
-  private async verifyOnce(deadline: number): Promise<AccountStatus> {
+  private async verifyOnce(): Promise<AccountStatus> {
     const known = JSON.parse(this.native.encryptionState()) as { status: AccountStatus | null };
     let status =
-      known.status === null
-        ? await this.verified(deadline)
-        : await this.call<AccountStatus>("ready", {});
+      known.status === null ? await this.verified() : await this.call<AccountStatus>("ready", {});
     const secret = await this.options.accountSecret?.();
     if (secret !== undefined) {
       const hex = takeSecretHex(parseSecret(secret));

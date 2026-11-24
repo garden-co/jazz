@@ -61,11 +61,15 @@ async function serverAt(
 }
 
 /** A page load: a session with a device account and the app's encryption. */
-async function load(server: { url: string; appId: string }, dbName: string) {
+async function load(
+  server: { url: string; appId: string },
+  dbName: string,
+  { clearOnSignOut = false } = {},
+) {
   const session = await createJazzClient({
     scope: server.appId,
     serverUrl: server.url,
-
+    clearOnSignOut,
     driver: { type: "persistent", dbName },
     fetch: jazzAppFetch,
     initial: "device",
@@ -152,7 +156,7 @@ function step<T>(name: string, work: Promise<T>, ms = 15_000): Promise<T> {
 it("encrypts in a real browser: a device's keys in the browser's own store, a tab behind the shared worker, rows sealed on the server, readable by the device, the same device after a reload", async () => {
   const server = await serverAt("encryption-browser", { onDisk: true });
   const dbName = uniqueDbName("encryption-browser-db");
-  const first = await step("load", load(server, dbName), 40_000);
+  const first = await step("load", load(server, dbName, { clearOnSignOut: true }), 40_000);
   const db = first.getSnapshot().client!.db;
   const ready = await step("ready", db.encryption.ready({ timeoutMs: 40_000 }), 45_000);
   expect(ready).toBe("active");
@@ -204,8 +208,11 @@ it("encrypts in a real browser: a device's keys in the browser's own store, a ta
   const names = await indexedDB.databases();
   expect(names.map((entry) => entry.name)).toContain("jazz-private-store");
 
+  // Even a shared device keeps its keys on an ordinary close.
   await first.close();
-  const reloaded = await step("reload", load(server, dbName), 40_000);
+  const keys = encryptionStoreScope(server.appId, "dev", account);
+  expect(await browserPrivateStore().list(keys)).toContain("device");
+  const reloaded = await step("reload", load(server, dbName, { clearOnSignOut: true }), 40_000);
   const again = reloaded.getSnapshot().client!.db;
   expect(await step("ready again", again.encryption.ready({ timeoutMs: 150_000 }), 160_000)).toBe(
     "active",

@@ -1,5 +1,5 @@
-import { IDBFactory } from "fake-indexeddb";
-import { describe, expect, it } from "vitest";
+import { IDBFactory, IDBObjectStore } from "fake-indexeddb";
+import { describe, expect, it, vi } from "vitest";
 import { browserPrivateStore } from "./browser-store.js";
 import { PrivateStoreConflictError, PrivateStoreWipedError } from "./private-store.js";
 
@@ -32,6 +32,43 @@ function tabs(count = 2, locks: ReturnType<typeof lockManager> | null = lockMana
 }
 
 describe("the browser private store", () => {
+  it.each([
+    [0, 1n],
+    [255, (1n << 48n) - 1n],
+  ] as const)(
+    "draws a 48-bit incarnation, mapping zero to one (byte %i)",
+    async (byte, expected) => {
+      using draw = vi.spyOn(crypto, "getRandomValues").mockImplementation((bytes) => {
+        expect(bytes).toBeInstanceOf(Uint8Array);
+        expect(bytes?.byteLength).toBe(6);
+        (bytes as Uint8Array).fill(byte);
+        return bytes;
+      });
+      const [store] = tabs(1);
+      expect(await store!.openScope("device")).toBe(expected);
+      expect(draw).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("observes the save transaction's abort when the scope read fails", async () => {
+    const [store] = tabs(1);
+    const incarnation = await store!.openScope("device");
+    const get = IDBObjectStore.prototype.get;
+    using read = vi.spyOn(IDBObjectStore.prototype, "get").mockImplementationOnce(function (
+      this: IDBObjectStore,
+      key,
+    ) {
+      const request = get.call(this, key);
+      queueMicrotask(() => this.transaction.abort());
+      return request;
+    });
+    await expect(store!.save("device", incarnation, "doc", bytes(1), null)).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    expect(read).toHaveBeenCalledOnce();
+    await expect(store!.save("device", incarnation, "doc", bytes(2), null)).resolves.toBe(1n);
+  });
+
   it("saves with compare-and-swap and loads what it saved", async () => {
     const [store] = tabs(1);
     const incarnation = await store!.openScope("device");
@@ -148,6 +185,38 @@ describe("the browser private store", () => {
     expect(await two!.unprotect(a)).toEqual(bytes(1, 2, 3));
     expect(await one!.unprotect(b)).toEqual(bytes(4, 5, 6));
     expect(locks.held.filter((name) => name.endsWith(":wrap-key"))).not.toHaveLength(0);
+  });
+
+  it("discards a wrapping key when its add succeeds but the transaction aborts", async () => {
+    const [writer, reopened] = tabs(2, null);
+    const add = IDBObjectStore.prototype.add;
+    using insert = vi.spyOn(IDBObjectStore.prototype, "add").mockImplementationOnce(function (
+      this: IDBObjectStore,
+      ...args
+    ) {
+      const request = add.apply(this, args);
+      request.addEventListener("success", () => this.transaction.abort());
+      return request;
+    });
+    using reads = vi.spyOn(IDBObjectStore.prototype, "get");
+    using encrypt = vi.spyOn(crypto.subtle, "encrypt");
+    await expect(writer!.protect(bytes(1))).rejects.toThrow(/abort/i);
+    expect(encrypt).not.toHaveBeenCalled();
+    expect(reads).toHaveBeenCalledTimes(1);
+    const sealed = await writer!.protect(bytes(2));
+    expect(insert).toHaveBeenCalledTimes(2);
+    expect(await reopened!.unprotect(sealed)).toEqual(bytes(2));
+  });
+
+  it("propagates a key insertion failure other than a competing insertion", async () => {
+    const [store] = tabs(1, null);
+    const failure = new DOMException("quota exhausted", "QuotaExceededError");
+    using insert = vi.spyOn(IDBObjectStore.prototype, "add").mockImplementationOnce(() => {
+      throw failure;
+    });
+    await expect(store!.protect(bytes(1))).rejects.toBe(failure);
+    await expect(store!.protect(bytes(2))).resolves.toBeInstanceOf(Uint8Array);
+    expect(insert).toHaveBeenCalledTimes(2);
   });
 
   it("without Web Locks the tab that loses the key race uses the winner's key", async () => {
