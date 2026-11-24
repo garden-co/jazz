@@ -25,6 +25,7 @@ import { RoomView } from "../src/components/RoomView";
 import { UnsentMessagesProvider } from "../src/components/UnsentNotices";
 import { downloadBytes } from "../src/lib/attachments";
 import { ProfileDirectoryProvider } from "../src/lib/profiles";
+import { clearPendingMarkerIds } from "../src/lib/mark-read";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -82,6 +83,7 @@ const markerWrites = () => db.insert.mock.calls.length + db.update.mock.calls.le
 
 beforeEach(() => {
   resetWorld();
+  clearPendingMarkerIds();
   deviceStatus.current = null;
 });
 afterEach(() => {

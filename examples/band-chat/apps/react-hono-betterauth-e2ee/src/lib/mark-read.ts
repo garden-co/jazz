@@ -48,6 +48,10 @@ export function markerToWrite({
 const pendingMarkerIds = new Map<string, string>();
 const pendingKey = (roomId: string, author: string) => JSON.stringify([roomId, author]);
 
+export function clearPendingMarkerIds() {
+  pendingMarkerIds.clear();
+}
+
 /**
  * Moves this reader's private marker to the newest message's time (or now)
  * while the room is open and the page is visible. A refused write is not
