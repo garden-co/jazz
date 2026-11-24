@@ -1,5 +1,7 @@
 # jazz-rn-android
 
+## 2.0.0-beta.2
+
 ## 2.0.0-beta.1
 
 ## 2.0.0-beta.0
