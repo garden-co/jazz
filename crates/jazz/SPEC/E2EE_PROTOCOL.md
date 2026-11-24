@@ -1525,10 +1525,10 @@ the 32 secret bytes, created and read with user verification required
 - **Retiring a derived root.** Because the derivation is fixed, a retired
   derived root can never be registered again from the same secret in the
   same generation.
-  - **External accounts:** retiring is how a leaked or lost recovery secret is
-    replaced. The SDK generates a new recovery secret, registers its root,
-    offers a new passkey backup, and then retires the old root in one account
-    rotation; the old passkey becomes useless for E2EE.
+  - **External accounts:** to replace a leaked or lost recovery secret, the
+    app creates a new secret, registers it and gives the user a new backup.
+    The app calls retirement separately. Retirement rotates the account and
+    retires the old root. See the [runtime's recovery operations](../../jazz-e2ee-client/src/host/runtime.rs#L759-L798).
   - **Device accounts:** the account secret is the account, and it cannot
     be rotated without becoming a different account. Retiring its derived root
     therefore only turns off recovery by account secret for this account (the
@@ -1640,10 +1640,10 @@ is one of two kinds:
   canonical root of its generation, whose `deviceId` must be the signer; for
   an account successor (§2.8), the accepted successor whose `epochId` is the
   record's, whose `signerId` must be the signer. The signer is authorised by
-  the creation itself, not by membership of the new epoch: the root's device
-  is admitted by the root, and a successor's signer was active before the
-  successor (§2.4 step 3) even when it is the device the successor removes,
-  which is then absent from the new membership. A record at that position
+  the creation itself: the root admits its device, and a successor's signer
+  was active before the successor (§2.4 step 3). The
+  [successor replay check](../../jazz-e2ee/src/protocol/account/replay.rs#L581-L593)
+  rejects a signer that tries to remove itself (§2.8). A record at that position
   naming any other signer, whether a device active in the predecessor epoch,
   a device the new membership admits, or a device of no standing, is not
   valid, and no later approval makes it valid.
@@ -1673,8 +1673,7 @@ this client does not support is skipped and reported
 (`unsupported-account-key`); it never fails the account's replay.
 
 Required behavioural tests, each a separate case: a record co-published by
-a bootstrap, by a reset and by a rotation is valid; a record co-published by
-a rotation whose signer removes itself is valid; a record at a creation's
+a bootstrap, by a reset and by a rotation is valid; a record at a creation's
 position signed by another device (one active in the predecessor epoch, one
 admitted by the new membership, and one with no standing) is not; a later
 publication by an active device is valid, and one by a device that was not
@@ -2441,7 +2440,11 @@ reported against the space column as `invalid-ciphertext`. Any other error fails
 deduplicated per account by `(table, id, column, code)` in a bounded
 least-recently-used set of 10,000 entries; a listener registered later first
 receives the reports still in that set. A console warning names table, row and
-column, never content. The reports belong to the client runtime and its listeners: a read's result, one-shot or a subscription's, carries none, and the database core does not pass them on.
+column, never content. One-shot and subscription results carry metadata for
+the rows that read omitted. In TypeScript, `unreadableRows(result)` returns
+their table, row ID, column and reason code. The runtime's report listeners
+also receive reports, including for rows that were returned. See the
+[read and subscription test](../../../packages/jazz-tools/src/encryption/node-e2e.test.ts#L779-L840).
 
 Unreadable rows are dropped after `limit` and `offset` have been applied, so a
 page may contain fewer rows than its limit. This is accepted behaviour: the
@@ -2962,10 +2965,13 @@ Properties:
   account successors, recovery roots, account sealing keys, private
   approvals and device proofs, space roots and successors) are signed by
   their author device and replayed in accepted order; forged or reordered
-  records are skipped, contradictions fail closed. The other records are
-  not signed: `app` account roots (trusted on first use, below), account
-  identities, challenges and every envelope record (device, recovery,
-  successor and space deliveries) are authenticated
+  records are skipped, contradictions fail closed. The approving device
+  also signs its challenge. The requesting device verifies the signature
+  before answering, as specified in [§2.5](#25-device-approval-by-challenge-and-response)
+  and exercised by the [challenge verification test](../../jazz-e2ee/tests/protocol_account.rs#L2289).
+  The unsigned records are `app` account roots (trusted on first use, below),
+  account identities and every envelope record (device, recovery, successor
+  and space deliveries). They are authenticated
   by Jazz authorship (`$createdBy`) and by the markers and chains their keys
   must verify against. A delivered key is used only after
   it authenticates against its version's marker and the signed chain (§3.3).
@@ -3025,11 +3031,13 @@ Limits:
   written offline before the removal and synced after it, makes the account
   a member again, and it receives later versions. Removal UIs should check
   the member list after syncing.
-- **A device that had the recovery secret may keep it.** Removing a device
-  does not retire a recovery root, and a device already active that runs
-  restore writes nothing. For an externally authenticated account, to revoke
-  the recovery secret, retire its recovery root and register a new secret
-  (§2.8, §2.9). For a device account the recovery secret is the account
+- **A device that had the recovery secret may keep it.** The removal
+  rotation retires every recovery root the removed device registered or used
+  to recover. For an externally authenticated account, if the device may
+  have copied a different recovery secret, retire that root separately and
+  register a new secret (§2.8, §2.9). See the
+  [device-removal test](../../jazz-e2ee/tests/protocol_account.rs#L1379-L1454).
+  For a device account the recovery secret is the account
   secret, which is the account (§2.9, §2.11): removing a device does not lock
   out a holder, because the device re-enrols and restores from the secret at
   its next start (§2.4) and receives later keys; retiring the root does not

@@ -404,8 +404,10 @@ Leaving wipes the keys, not the browser's local copy of the plain data.
   Such a member shows as unknown until they have a profile row. They can leave.
 - **Removing a lost device signs out the person's other browsers.** They keep their keys and device
   records, and sign in again.
-- **Keys stay in the browser after sign-out.** Use "Leave this browser" or "Remove lost device" to
-  remove them.
+- **Keys stay in the browser after sign-out.** Use "Leave this browser" while you can still use it
+  to erase its keys. "Remove lost device" revokes the device remotely. Copies of keys on an offline
+  browser can remain there. See the
+  [lost-device removal flow](https://github.com/garden-co/jazz/blob/94cd8e1e45/examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#L270-L291).
 - **Leaving needs another device online.** A sole device cannot leave, and a completed leave adds
   one entry that cannot be removed.
 - **Removing a member cannot take back what they read.** A message can be sealed under the old key

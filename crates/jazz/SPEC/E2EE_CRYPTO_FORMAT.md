@@ -148,11 +148,9 @@ wrapped key bytes `20`–`3f`): `wrapDerived` is
 `4a453245011b6a617a7a2e777261702e786368616368613230706f6c793133303500000001014a45324301000000016100000001700000000173000000016900000001740000000172000000016300000001650000000164`
 and the envelope is
 `4a453245011b6a617a7a2e777261702e786368616368613230706f6c79313330350000000101000102030405060708090a0b0c0d0e0f10111213141516175f4e9275e4e56d266c7621949e0aae0329cbef65778ca9d4498c602e7e280296eed23822869f2300f7907e08149f0669`.
-The `jazz-e2ee` vector tests assert all three. These three values are the
-crate's own output after the mechanism rename: `fixtures/e2ee-vectors.c` has
-been updated to the new ID but not yet rerun, so they are not independently
-generated until the generator is compiled against libsodium and reproduces
-them.
+The [Rust wrap vector test](../../jazz-e2ee/tests/vectors.rs#L141-L152)
+checks the fixture. The [independent C generator](fixtures/e2ee-vectors.c),
+built against libsodium 1.0.22, reproduces all three values.
 
 ## Built-in key sealing (HPKE), version 1
 
