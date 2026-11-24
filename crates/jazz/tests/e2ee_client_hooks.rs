@@ -186,7 +186,7 @@ enum Opened {
 struct Fake {
     declarations: Option<E2eeDeclarations>,
     held: RefCell<BTreeSet<uuid::Uuid>>,
-    rooted: RefCell<BTreeSet<uuid::Uuid>>,
+    rooted: RefCell<BTreeMap<uuid::Uuid, RowUuid>>,
     /// Seal nothing: a writer that stores whatever it likes.
     hostile: Cell<bool>,
     epoch: Cell<u8>,
@@ -286,6 +286,11 @@ impl E2eeHooks for Fake {
     }
 
     fn companions_dropped(&self, rows: &[(String, RowUuid)]) {
+        self.rooted.borrow_mut().retain(|_, root| {
+            !rows
+                .iter()
+                .any(|(table, row)| table == "space_roots" && row == root)
+        });
         self.dropped.borrow_mut().push(rows.to_vec());
     }
 
@@ -342,10 +347,14 @@ impl E2eeHooks for Fake {
                 id,
                 BTreeMap::from([("name".to_owned(), Value::String(name))]),
             ));
-        } else if self.rooted.borrow_mut().insert(space) {
+        } else if let std::collections::btree_map::Entry::Vacant(root) =
+            self.rooted.borrow_mut().entry(space)
+        {
+            let row = RowUuid(uuid::Uuid::new_v4());
+            root.insert(row);
             write.companion_rows.push((
                 "space_roots".to_owned(),
-                RowUuid(uuid::Uuid::new_v4()),
+                row,
                 BTreeMap::from([("space".to_owned(), Value::Uuid(space))]),
             ));
         }
@@ -628,12 +637,16 @@ struct Recorded {
     out: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     wire: Rc<RefCell<Vec<u8>>>,
+    reads: Option<Rc<RefCell<Vec<Query>>>>,
 }
 
 impl Transport for Recorded {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         for frame in encode_frames(message.clone())? {
             self.wire.borrow_mut().extend(frame);
+        }
+        if let (Some(reads), SyncMessage::Read { query, .. }) = (&self.reads, &message) {
+            reads.borrow_mut().push((**query).clone());
         }
         self.out.borrow_mut().push_back(message);
         Ok(())
@@ -646,7 +659,7 @@ impl Transport for Recorded {
 
 /// `client` connected to `server` as SYSTEM; every frame either sends.
 fn link(client: &Db, server: &Db) -> (jazz::db::Upstream, Rc<RefCell<Vec<u8>>>) {
-    link_as(client, server, AuthorSubject::SYSTEM)
+    link_as(client, server, AuthorSubject::SYSTEM, None)
 }
 
 /// `client` connected to `server`, which serves it as `author`.
@@ -654,6 +667,7 @@ fn link_as(
     client: &Db,
     server: &Db,
     author: AuthorSubject,
+    reads: Option<Rc<RefCell<Vec<Query>>>>,
 ) -> (jazz::db::Upstream, Rc<RefCell<Vec<u8>>>) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
@@ -662,12 +676,14 @@ fn link_as(
         out: up.clone(),
         inbound: down.clone(),
         wire: wire.clone(),
+        reads,
     })));
     jazz::db::block_on(server.accept_subscriber(
         Box::new(Recorded {
             out: down,
             inbound: up,
             wire: wire.clone(),
+            reads: None,
         }),
         author,
     ))
@@ -749,7 +765,8 @@ fn plaintext_reaches_neither_storage_nor_the_wire() {
     let alice = client_at(&hooks, &path);
     let server = block_on(Db::open(DbConfig::new(schema(), identity(0)))).unwrap();
     jazz::db::block_on(server.set_authority()).unwrap();
-    let (_link, wire) = link(&alice, &server);
+    let reads = Rc::new(RefCell::new(Vec::new()));
+    let (_link, wire) = link_as(&alice, &server, AuthorSubject::SYSTEM, Some(reads.clone()));
     let space = uuid::Uuid::new_v4();
     hooks.hold(space);
 
@@ -828,8 +845,18 @@ fn plaintext_reaches_neither_storage_nor_the_wire() {
         assert!(matches!(*token, Value::Bytes(_)));
     }
     assert_eq!(all(&server, "space_roots").len(), 1);
+    let token_filter = Predicate::In(
+        Operand::Column("__e2ee_eq_body".to_owned()),
+        vec![lit(Value::Bytes(token(&format!("{SECRET}-handle"))))],
+    );
+    assert!(
+        reads
+            .borrow()
+            .iter()
+            .any(|query| query.table == "notes" && query.filters.contains(&token_filter)),
+        "alice sent a read with the equality token predicate"
+    );
     let wire = wire.borrow();
-    assert!(contains(&wire, b"__e2ee_eq_body"), "the query went up");
     assert!(!contains(&wire, SECRET.as_bytes()), "plaintext on the wire");
     drop(alice);
     assert!(
@@ -1017,17 +1044,26 @@ fn the_hooks_hear_of_companion_rows_that_are_not_stored() {
     block_on(alice.commit_mergeable_handle(id)).unwrap();
     assert_eq!(calls(), 2, "a committed transaction drops nothing");
 
-    // A handle transaction abandoned with a staged root.
+    // A handle transaction abandoned with a staged root. A fresh write to
+    // the same space needs to stage a replacement.
+    let abandoned_space = fresh();
     let id = OpenTransactionId::new();
     block_on(alice.begin_mergeable(id)).unwrap();
     block_on(
         alice
             .tx_ref(id)
-            .insert("notes", note(fresh(), SECRET), Default::default()),
+            .insert("notes", note(abandoned_space, SECRET), Default::default()),
     )
     .unwrap();
     alice.abandon_transaction_handle(id).unwrap();
     assert_eq!(calls(), 3);
+    block_on(alice.insert("notes", note(abandoned_space, SECRET), Default::default())).unwrap();
+    assert!(
+        all(&alice, "space_roots")
+            .iter()
+            .any(|row| row.cell("space") == Some(Value::Uuid(abandoned_space))),
+        "retrying the abandoned space commits its root"
+    );
 
     // A scoped transaction commits explicitly or abandons its writes on drop.
     let tx = block_on(alice.mergeable_tx()).unwrap();
@@ -1042,7 +1078,7 @@ fn the_hooks_hear_of_companion_rows_that_are_not_stored() {
     });
     assert!(rolled_back.is_err());
     assert_eq!(calls(), 4);
-    assert_eq!(all(&alice, "space_roots").len(), 3, "the committed ones");
+    assert_eq!(all(&alice, "space_roots").len(), 4, "the committed ones");
 }
 
 /// Contract: an update or upsert hands the hooks the space of the row it
@@ -1466,12 +1502,14 @@ fn a_creating_upserts_large_sealed_default_travels_as_chunks() {
         out: up.clone(),
         inbound: down.clone(),
         wire: wire.clone(),
+        reads: None,
     })));
     jazz::db::block_on(server.accept_subscriber(
         Box::new(Recorded {
             out: down,
             inbound: up.clone(),
             wire,
+            reads: None,
         }),
         AuthorSubject::SYSTEM,
     ))
@@ -1769,10 +1807,9 @@ fn transaction_fates_survive_a_restart() {
     let hooks = Fake::new();
     let server = authority();
     let author = AuthorSubject::for_test_bytes([0xa1; 16]);
-    let (accepted, refused, kept) = {
+    let accepted = {
         let alice = client_as(&hooks, &path, author);
-        alice.track_upstream_rejections();
-        let _link = link_as(&alice, &server, author);
+        let _link = link_as(&alice, &server, author, None);
         let accepted = block_on(alice.insert(
             "space_roots",
             root(uuid::Uuid::new_v4()),
@@ -1781,20 +1818,35 @@ fn transaction_fates_survive_a_restart() {
         .unwrap()
         .mergeable_tx_id();
         assert!(matches!(
-            jazz::db::block_on(alice.transaction_fate(accepted)).unwrap(),
+            block_on(alice.transaction_fate(accepted)).unwrap(),
             TransactionFate::Pending
         ));
-        pump(&server, &alice);
+        accepted
+    };
+    let (refused, kept) = {
+        let alice = client_as(&hooks, &path, author);
+        assert!(matches!(
+            block_on(alice.transaction_fate(accepted)).unwrap(),
+            TransactionFate::Pending
+        ));
+        alice.track_upstream_rejections();
+        let _link = link_as(&alice, &server, author, None);
+        drive(
+            &server,
+            &alice,
+            alice.wait_for_transaction(accepted, jazz::tx::DurabilityTier::Global),
+        )
+        .unwrap();
         let refused =
             block_on(alice.insert("closed", root(uuid::Uuid::new_v4()), Default::default()))
                 .unwrap()
                 .mergeable_tx_id();
         pump(&server, &alice);
-        let kept = match jazz::db::block_on(alice.transaction_fate(refused)).unwrap() {
+        let kept = match block_on(alice.transaction_fate(refused)).unwrap() {
             TransactionFate::Refused(Some(error)) => error,
             other => panic!("expected a kept refusal, got {other:?}"),
         };
-        (accepted, refused, kept)
+        (refused, kept)
     };
     let alice = client_as(&hooks, &path, author);
     let server_position = all(&server, "space_roots")[0].seq().seq;
