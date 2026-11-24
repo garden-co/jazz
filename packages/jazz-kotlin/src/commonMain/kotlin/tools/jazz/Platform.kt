@@ -36,3 +36,6 @@ internal inline fun <T> AtomicReference<T>.updateAtomic(transform: (T) -> T) {
         if (compareAndSet(old, transform(old))) return
     }
 }
+
+/** [cause] as this throwable's cause, where the platform allows setting it after construction (the JVM's initCause). */
+internal expect fun Throwable.initCauseCompat(cause: Throwable)

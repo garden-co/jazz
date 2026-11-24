@@ -1,0 +1,9 @@
+# jazz-ffi's C ABI (crates/jazz-ffi/include/jazz_ffi.h, the one jazz-go uses),
+# for the experimental iOS targets (-PjazzIos=true). build.gradle.kts adds the
+# include path and the target's libjazz_ffi.a, which the klib then carries.
+headers = jazz_ffi.h
+package = tools.jazz.cabi
+# What libjazz_ffi.a needs on Apple platforms (as jazz-swift's Package.swift
+# declares). Here rather than in Gradle, so an app linking the klib gets them.
+linkerOpts.ios = -framework CoreFoundation -framework Security -framework SystemConfiguration -liconv -lresolv
+linkerOpts.osx = -framework CoreFoundation -framework Security -framework SystemConfiguration -liconv -lresolv
