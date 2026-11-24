@@ -518,6 +518,47 @@ fn a_device_reopen_preserves_a_crypto_provider_failure() {
     ));
 }
 
+/// Alice's stored device passes its local check until her signature provider
+/// fails verification. Reopening returns that provider error to Alice.
+#[test]
+fn a_device_reopen_preserves_a_signature_provider_failure() {
+    use mechanisms::{FLAKY_SIGN, FlakySigner};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let fails = Arc::new(AtomicBool::new(false));
+    let mut registry = Registry::builtin();
+    registry
+        .register_signer(Arc::new(FlakySigner {
+            fails: fails.clone(),
+            record_marker: b"jazz.e2ee.local-device-check.v1",
+        }))
+        .unwrap();
+    let store = Rc::new(MemoryStore::new());
+    let signing = serde_json::json!({ "id": FLAKY_SIGN.id, "version": FLAKY_SIGN.version });
+    let mut declarations = declarations();
+    declarations.settings.mechanisms = Some(serde_json::json!({
+        "selected": { "signature": signing }, "allowed": { "signature": [signing] }
+    }));
+    let open = || {
+        block_on(E2eeClient::open(ClientConfig {
+            store: store.clone(),
+            declarations: declarations.clone(),
+            account_id: ALICE.into(),
+            registry: registry.clone(),
+            random: Box::new(OsRandom),
+            device_account: None,
+        }))
+    };
+    drop(open().unwrap());
+    drop(open().unwrap());
+    fails.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        open(),
+        Err(ClientError::Protocol(ProtocolError::ProviderFailure))
+    ));
+}
+
 /// Alice sees the store's original failure when opening her private scope.
 #[test]
 fn a_scope_open_failure_retains_the_store_error() {

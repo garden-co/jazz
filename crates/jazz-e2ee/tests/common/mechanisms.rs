@@ -196,13 +196,11 @@ impl KeyWrapper for FlakyWrapper {
 }
 
 /// The built-in signatures under [`FLAKY_SIGN`]. With `fails` set,
-/// verifying a space record (bytes that bind the space policy) is a
-/// provider failure; account records still verify.
+/// verifying a record containing the selected marker is a provider failure.
 pub struct FlakySigner {
     pub fails: Arc<AtomicBool>,
+    pub record_marker: &'static [u8],
 }
-
-const SPACE_POLICY: &[u8] = b"jazz.e2ee.space.v1";
 
 impl MechanismImpl for FlakySigner {
     fn mechanism(&self) -> Mechanism<'static> {
@@ -239,8 +237,8 @@ impl Signer for FlakySigner {
     fn verify(&self, public: &PublicKey, record: &[u8], signature: &[u8]) -> Result<bool> {
         if self.fails.load(Ordering::SeqCst)
             && record
-                .windows(SPACE_POLICY.len())
-                .any(|window| window == SPACE_POLICY)
+                .windows(self.record_marker.len())
+                .any(|window| window == self.record_marker)
         {
             return Err(Error::CryptoFailure);
         }
@@ -265,6 +263,7 @@ pub fn flaky_registry() -> (Registry, Arc<AtomicBool>, Arc<AtomicBool>) {
     registry
         .register_signer(Arc::new(FlakySigner {
             fails: sign_fails.clone(),
+            record_marker: b"jazz.e2ee.space.v1",
         }))
         .unwrap();
     (registry, wrap_fails, sign_fails)

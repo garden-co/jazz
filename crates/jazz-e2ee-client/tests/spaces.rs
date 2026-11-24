@@ -5,6 +5,9 @@
 //! settled into the reports of §4.3.
 
 mod common;
+#[allow(dead_code)]
+#[path = "../../jazz-e2ee/tests/common/mechanisms.rs"]
+mod mechanisms;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -4682,6 +4685,112 @@ fn a_watched_rootless_space_reports_a_members_reset() {
                 generation: 1
             }));
         }
+        assert_eq!(count(&server, SPACES), 0);
+    });
+}
+
+/// When Alice's provider cannot verify Bob's device approval, delivery in
+/// their rootless space returns the provider error. A retry after the provider
+/// recovers completes with no deliveries because the space has no key.
+///
+/// ```text
+/// bob ──approves──► second device
+/// alice ──deliver──► provider failure ──retry──► zero deliveries
+/// ```
+#[test]
+fn a_rootless_delivery_pass_preserves_a_members_replay_failure() {
+    use jazz_e2ee::OsRandom;
+    use jazz_e2ee::registry::Registry;
+    use jazz_e2ee_client::ClientConfig;
+    use mechanisms::{FLAKY_SIGN, FlakySigner};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    within(|| {
+        let signing = serde_json::json!({ "id": FLAKY_SIGN.id, "version": FLAKY_SIGN.version });
+        let settings = EncryptionSettings {
+            mechanisms: Some(serde_json::json!({
+                "selected": { "signature": signing }, "allowed": { "signature": [signing] }
+            })),
+            ..Default::default()
+        };
+        let server = secure_authority_with(&settings, None);
+        let make_device = |who, node, fails| {
+            let mut registry = Registry::builtin();
+            registry
+                .register_signer(Arc::new(FlakySigner {
+                    fails,
+                    record_marker: b"jazz.e2ee.public-device-approval.v1",
+                }))
+                .unwrap();
+            let client = block_on(E2eeClient::open(ClientConfig {
+                store: Rc::new(MemoryStore::new()),
+                declarations: declarations_with(settings.clone()),
+                account_id: account_id(who),
+                registry,
+                random: Box::new(OsRandom),
+                device_account: None,
+            }))
+            .unwrap();
+            let (db, link) = session(&client, &server, who, &settings, node, None);
+            Device {
+                who,
+                client,
+                db,
+                _link: Some(link),
+                live: Default::default(),
+            }
+        };
+        let alice_fails = Arc::new(AtomicBool::new(false));
+        let alice = make_device(account(0xa1), 1, alice_fails.clone());
+        let bob_fails = Arc::new(AtomicBool::new(false));
+        let bob = make_device(account(0xb0), 2, bob_fails.clone());
+        let second = make_device(bob.who, 3, bob_fails);
+        alice.activate(&server);
+        bob.activate(&server);
+
+        let bob_dbs = [&bob.db, &second.db];
+        assert_eq!(
+            drive(&server, &bob_dbs, second.client.ensure_account(&second.db)).unwrap(),
+            AccountStatus::AwaitingApproval
+        );
+        let pending = drive(
+            &server,
+            &bob_dbs,
+            bob.client
+                .challenge_device(&bob.db, &second.client.device().unwrap().id),
+        )
+        .unwrap();
+        let code = drive(
+            &server,
+            &bob_dbs,
+            second.client.answer_challenge(&second.db),
+        )
+        .unwrap();
+        drive(
+            &server,
+            &bob_dbs,
+            bob.client.approve_device(&bob.db, &pending, &code),
+        )
+        .unwrap();
+
+        let space = new_project(&server, &alice, "plans");
+        add_member(&server, &alice, space, &bob.id());
+        let address = space_address(&alice, space);
+        let deliver = || {
+            drive(
+                &server,
+                &[&alice.db],
+                alice.client.deliver_space(&alice.db, &address),
+            )
+        };
+        alice_fails.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            deliver(),
+            Err(ClientError::Protocol(ProtocolError::ProviderFailure))
+        ));
+        alice_fails.store(false, Ordering::SeqCst);
+        assert_eq!(deliver().unwrap(), 0);
         assert_eq!(count(&server, SPACES), 0);
     });
 }

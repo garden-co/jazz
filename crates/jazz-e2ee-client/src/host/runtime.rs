@@ -1401,6 +1401,10 @@ fn report_json(report: &Report, table_name: impl Fn(&str) -> Option<String>) -> 
 pub type JsonFuture = Pin<Box<dyn Future<Output = Result<Value, String>>>>;
 
 #[cfg(test)]
+#[path = "../../../jazz/layers/types/tests/support/zeroized_allocation.rs"]
+mod zeroized_allocation;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1425,6 +1429,25 @@ mod tests {
         assert!(secret(&"ab".repeat(32)).is_ok());
         assert!(secret("ab").is_err());
         assert!(secret(&"zz".repeat(32)).is_err());
+    }
+
+    /// Alice's owned mnemonic is wiped before its buffer is freed on success
+    /// or parse failure. The argument boundary is tested directly so the
+    /// assertion can identify the exact allocation handed to the parser.
+    #[test]
+    fn an_owned_recovery_phrase_is_wiped_on_success_and_failure() {
+        use super::zeroized_allocation::assert_zeroized;
+
+        let phrase = super::super::phrase::from_secret(&[5; 32]);
+        let parse = |phrase| {
+            let mut args = Value::Object(serde_json::Map::from_iter([(
+                "phrase".to_owned(),
+                Value::String(phrase),
+            )]));
+            take_recovery_phrase(&mut args).unwrap()
+        };
+        assert!(assert_zeroized(phrase.as_str().to_owned(), parse).is_ok());
+        assert!(assert_zeroized("one word".to_owned(), parse).is_err());
     }
 
     /// Alice's mnemonic is consumed before either recovery call can wait
