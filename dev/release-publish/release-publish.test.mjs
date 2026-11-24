@@ -266,3 +266,19 @@ test("the jar and AAR installs declare exactly the dependencies of the Kotlin bu
     "## Upgrading from beta.0 to beta.1",
   );
 });
+
+test("the Maven bundle takes jazz-kotlin-jvm only when the tree has it (Kotlin Multiplatform)", async () => {
+  const { treeArtifacts } = await import("./maven-central.mjs");
+  const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const tree = mkdtempSync(join(tmpdir(), "tree-"));
+  try {
+    assert.deepEqual(treeArtifacts(tree, "1"), ["jazz-kotlin", "jazz-kotlin-android"]);
+    mkdirSync(join(tree, "jazz-kotlin-jvm", "1"), { recursive: true });
+    assert.deepEqual(treeArtifacts(tree, "1"), ["jazz-kotlin", "jazz-kotlin-jvm", "jazz-kotlin-android"]);
+    assert.equal(requiredFiles("jazz-kotlin-jvm", "1")[0], "jazz-kotlin-jvm-1.jar");
+  } finally {
+    rmSync(tree, { recursive: true, force: true });
+  }
+});

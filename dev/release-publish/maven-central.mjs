@@ -5,7 +5,8 @@
 // throwaway key). Nothing is built here.
 //
 //   maven-central.mjs bundle <tools/jazz tree> <version> <out.zip>
-//       Copies <artifact>/<version>/ of jazz-kotlin and jazz-kotlin-android,
+//       Copies <artifact>/<version>/ of jazz-kotlin and jazz-kotlin-android
+//       (and jazz-kotlin-jvm, once jazz-kotlin is Kotlin Multiplatform),
 //       drops the throwaway signatures, signs every file with the key in
 //       MAVEN_SIGNING_KEY (passphrase MAVEN_SIGNING_KEY_PASSWORD), adds the
 //       .md5 and .sha1 Central requires, checks the set, and zips it in the
@@ -43,9 +44,18 @@ const PORTAL = "https://central.sonatype.com/api/v1/publisher";
 const GROUP = "tools/jazz";
 const NAMESPACE = "tools.jazz";
 export const ARTIFACTS = { "jazz-kotlin": "jar", "jazz-kotlin-android": "aar" };
+// Kotlin Multiplatform adds the JVM variant (the root jazz-kotlin is then metadata).
+const KMP_JVM = "jazz-kotlin-jvm";
+
+/** The artifacts a tools/jazz tree publishes at `version`: KMP's jazz-kotlin-jvm when present. */
+export function treeArtifacts(tree, version) {
+  const names = Object.keys(ARTIFACTS);
+  if (existsSync(join(resolve(tree), KMP_JVM, version))) names.splice(1, 0, KMP_JVM);
+  return names;
+}
 
 export function requiredFiles(artifact, version) {
-  const main = ARTIFACTS[artifact];
+  const main = ARTIFACTS[artifact] ?? "jar";
   return [
     `${artifact}-${version}.${main}`,
     `${artifact}-${version}-sources.jar`,
@@ -91,7 +101,7 @@ function bundle(tree, version, out) {
       ],
       { input: key, stdio: ["pipe", "inherit", "inherit"] },
     );
-    for (const artifact of Object.keys(ARTIFACTS)) {
+    for (const artifact of treeArtifacts(tree, version)) {
       const from = join(resolve(tree), artifact, version);
       const to = join(work, GROUP, artifact, version);
       if (!existsSync(from)) throw new Error(`${from} doesn't exist`);
