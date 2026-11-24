@@ -680,6 +680,8 @@ pub(crate) struct Creations {
     /// Roots staged in this run whose transaction may not have committed
     /// yet: a root absent from the store is not yet known to be lost.
     pub(crate) staged: BTreeSet<String>,
+    /// Refusals collected by the host before the unpublished key was settled.
+    pub(crate) refused: BTreeMap<String, jazz::db::Error>,
     /// Staged roots the database dropped (their write or transaction
     /// failed): the next write abandons them before anything seals under
     /// their keys.

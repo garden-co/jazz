@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use jazz::db::{CurrentRow, Error, ErrorCode};
+use jazz::db::{CurrentRow, Error, ErrorCode, WireOp, WireWrite};
 use jazz::e2ee::{
     E2eeDeclarations, E2eeHooks, E2eeRefusal, EpochSetId, OpenOutcome, QueryPlan, ReadSite,
     Residual, ResidualPred, SealError, StreamSealer, StreamTarget, Unreadable, UnreadableCode,
@@ -514,6 +514,25 @@ impl E2eeHooks for Hooks {
             let id = row.0.to_string();
             if table == SPACE_ROOTS && creations.staged.remove(&id) {
                 creations.dropped.insert(id);
+            }
+        }
+    }
+
+    fn transaction_refused(&self, ops: &[WireOp], error: &Error) {
+        let keys = self.shared.keys.borrow();
+        let mut creations = self.shared.creations.borrow_mut();
+        for op in ops {
+            if let WireWrite::Insert { table, row, .. } = &op.write
+                && table == SPACE_ROOTS
+            {
+                let id = uuid::Uuid::from_bytes(*row).to_string();
+                if keys
+                    .held
+                    .space(&id)
+                    .is_some_and(crate::spaces::has_unpublished)
+                {
+                    creations.refused.insert(id, error.clone());
+                }
             }
         }
     }

@@ -112,6 +112,7 @@ impl E2eeClient {
                     .retain(|_, prepared| prepared.id != root_id);
             }
             self.keep(settled).await?;
+            self.shared.creations.borrow_mut().refused.remove(&root_id);
         }
         Ok(undecided)
     }
@@ -206,9 +207,6 @@ impl E2eeClient {
         uuid_cell(root_id).ok_or(ProtocolError::InvalidRecord(
             "a creation's root ID is not a UUID",
         ))?;
-        let id_bytes = *uuid::Uuid::parse_str(root_id)
-            .map_err(|_| ProtocolError::InvalidRecord("a creation's root ID is not a UUID"))?
-            .as_bytes();
         let query = by_id(rows::SPACE_ROOTS, root_id)?;
         let read = match db.provisional_read(&db.prepare_query(&query)?).await {
             Ok(read) => read,
@@ -223,13 +221,18 @@ impl E2eeClient {
             Some((_, Provisional::Own(tx))) => match db.transaction_fate(*tx).await? {
                 TransactionFate::Accepted(_) => CreationFate::Accepted,
                 TransactionFate::Refused(error) => {
-                    self.note_refusal(address, error.as_ref());
+                    // The host may have collected the refusal since the provisional read.
+                    let creations = self.shared.creations.borrow();
+                    self.note_refusal(
+                        address,
+                        error.as_ref().or_else(|| creations.refused.get(root_id)),
+                    );
                     CreationFate::NotAccepted
                 }
                 _ => CreationFate::Undecided,
             },
             None => {
-                if let Some(error) = self.refused_root(db, id_bytes).await? {
+                if let Some(error) = self.refused_root(db, root_id).await? {
                     self.note_refusal(address, Some(&error));
                     return Ok(CreationFate::NotAccepted);
                 }
@@ -244,14 +247,19 @@ impl E2eeClient {
         })
     }
 
-    /// Whether the store keeps a refused commit that inserted the root
-    /// `id`: a root refused after the run staged it is gone from the
-    /// store's rows, and this is what is left of it.
+    /// The refusal of the commit that inserted this root, whether its
+    /// payload is still in the retry store or the host has collected it.
     async fn refused_root(
         &self,
         db: &Db,
-        id: [u8; 16],
+        root_id: &str,
     ) -> Result<Option<jazz::db::Error>, ClientError> {
+        let collected = || self.shared.creations.borrow().refused.get(root_id).cloned();
+        if let Some(error) = collected() {
+            return Ok(Some(error));
+        }
+        let id = uuid::Uuid::parse_str(root_id)
+            .map_err(|_| ProtocolError::InvalidRecord("a creation's root ID is not a UUID"))?;
         Ok(db
             .rejected_transactions()
             .await?
@@ -261,11 +269,13 @@ impl E2eeClient {
                     matches!(
                         &op.write,
                         WireWrite::Insert { table, row, .. }
-                            if table == rows::SPACE_ROOTS && *row == id
+                            if table == rows::SPACE_ROOTS && row == id.as_bytes()
                     )
                 })
             })
-            .map(|rejected| rejected.error))
+            .map(|rejected| rejected.error)
+            // The host may have collected it while the store read was waiting.
+            .or_else(collected))
     }
 
     /// Settles the creations this device's store holds from an earlier run
