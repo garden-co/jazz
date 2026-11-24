@@ -627,53 +627,36 @@ mod tests {
                 via_column: "h".into(),
                 max_depth: None,
             },
+            PolicyExpr::InheritsFrom {
+                operation: Operation::Select,
+                table_column: "scopeId".into(),
+                id_column: "identifier".into(),
+                tables: vec!["projects".into()],
+            },
+            PolicyExpr::InheritsFrom {
+                operation: Operation::Update,
+                table_column: "scopeId".into(),
+                id_column: "identifier".into(),
+                tables: vec!["boards".into(), "projects".into()],
+            },
+            PolicyExpr::InsertedByThisTransaction,
+            PolicyExpr::Cmp {
+                column: "scopeId".into(),
+                op: CmpOp::Eq,
+                value: PolicyValue::TableIdentity {
+                    table: "projects".into(),
+                },
+            },
             PolicyExpr::And(vec![PolicyExpr::False, PolicyExpr::Or(vec![])]),
         ])
     }
 
-    /// The address-policy variants' serde JSON, as stored in a permissions
-    /// bundle (`jazz-bundle-v1`, additive): named, with their fields, and
-    /// read back exactly. The bundle's canonical form and digest are pinned
-    /// with `canonical_json` (`crates/jazz/tests/address_policy_encoding.rs`).
     #[test]
-    fn address_policy_json_is_pinned() {
-        for (expr, json) in [
-            (
-                PolicyExpr::InheritsFrom {
-                    operation: Operation::Select,
-                    table_column: "scopeId".into(),
-                    id_column: "identifier".into(),
-                    tables: vec!["projects".into()],
-                },
-                r#"{"type":"InheritsFrom","operation":"Select","table_column":"scopeId","id_column":"identifier","tables":["projects"]}"#,
-            ),
-            (
-                PolicyExpr::InheritsFrom {
-                    operation: Operation::Update,
-                    table_column: "scopeId".into(),
-                    id_column: "identifier".into(),
-                    tables: vec!["boards".into(), "projects".into()],
-                },
-                r#"{"type":"InheritsFrom","operation":"Update","table_column":"scopeId","id_column":"identifier","tables":["boards","projects"]}"#,
-            ),
-            (
-                PolicyExpr::InsertedByThisTransaction,
-                r#"{"type":"InsertedByThisTransaction"}"#,
-            ),
-            (
-                PolicyExpr::Cmp {
-                    column: "scopeId".into(),
-                    op: CmpOp::Eq,
-                    value: PolicyValue::TableIdentity {
-                        table: "projects".into(),
-                    },
-                },
-                r#"{"type":"Cmp","column":"scopeId","op":"Eq","value":{"type":"TableIdentity","table":"projects"}}"#,
-            ),
-        ] {
-            assert_eq!(serde_json::to_string(&expr).unwrap(), json);
-            assert_eq!(serde_json::from_str::<PolicyExpr>(json).unwrap(), expr);
-        }
+    fn policy_expr_json_is_pinned() {
+        let expr = every_policy_variant();
+        let json = r#"{"type":"Or","exprs":[{"type":"Cmp","column":"a","op":"Le","value":{"type":"Literal","value":{"type":"Integer","value":3}}},{"type":"SessionCmp","path":["claims","team"],"op":"Ne","value":{"type":"Text","value":"x"}},{"type":"IsNull","column":"b"},{"type":"SessionIsNull","path":["claims","team"]},{"type":"IsNotNull","column":"c"},{"type":"SessionIsNotNull","path":["claims","team"]},{"type":"Contains","column":"d","value":{"type":"SessionRef","path":["claims","team"]}},{"type":"SessionContains","path":["claims","team"],"value":{"type":"BigInt","value":"-9"}},{"type":"In","column":"e","session_path":["claims","team"]},{"type":"InList","column":"f","values":[{"type":"Literal","value":{"type":"Boolean","value":true}},{"type":"SessionRef","path":["claims","team"]}]},{"type":"SessionInList","path":["claims","team"],"values":[{"type":"Null"},{"type":"Double","value":1.5}]},{"type":"Exists","table":"t","condition":{"type":"Not","expr":{"type":"True"}}},{"type":"ExistsRel","rel":{"TableScan":{"table":"shares"}}},{"type":"Inherits","operation":"Select","via_column":"g","max_depth":2},{"type":"InheritsReferencing","operation":"Update","source_table":"s","via_column":"h","max_depth":null},{"type":"InheritsFrom","operation":"Select","table_column":"scopeId","id_column":"identifier","tables":["projects"]},{"type":"InheritsFrom","operation":"Update","table_column":"scopeId","id_column":"identifier","tables":["boards","projects"]},{"type":"InsertedByThisTransaction"},{"type":"Cmp","column":"scopeId","op":"Eq","value":{"type":"TableIdentity","table":"projects"}},{"type":"And","exprs":[{"type":"False"},{"type":"Or","exprs":[]}]}]}"#;
+        assert_eq!(serde_json::to_string(&expr).unwrap(), json);
+        assert_eq!(serde_json::from_str::<PolicyExpr>(json).unwrap(), expr);
         for (input, error) in [
             (
                 r#"{"type":"InheritsFrom","operation":"Select","table_column":"scopeId","id_column":"identifier"}"#,
@@ -689,14 +672,6 @@ mod tests {
                 .to_string();
             assert!(actual.starts_with(error), "{input}: {actual}");
         }
-    }
-
-    #[test]
-    fn policy_expr_json_is_pinned() {
-        let expr = every_policy_variant();
-        let json = r#"{"type":"Or","exprs":[{"type":"Cmp","column":"a","op":"Le","value":{"type":"Literal","value":{"type":"Integer","value":3}}},{"type":"SessionCmp","path":["claims","team"],"op":"Ne","value":{"type":"Text","value":"x"}},{"type":"IsNull","column":"b"},{"type":"SessionIsNull","path":["claims","team"]},{"type":"IsNotNull","column":"c"},{"type":"SessionIsNotNull","path":["claims","team"]},{"type":"Contains","column":"d","value":{"type":"SessionRef","path":["claims","team"]}},{"type":"SessionContains","path":["claims","team"],"value":{"type":"BigInt","value":"-9"}},{"type":"In","column":"e","session_path":["claims","team"]},{"type":"InList","column":"f","values":[{"type":"Literal","value":{"type":"Boolean","value":true}},{"type":"SessionRef","path":["claims","team"]}]},{"type":"SessionInList","path":["claims","team"],"values":[{"type":"Null"},{"type":"Double","value":1.5}]},{"type":"Exists","table":"t","condition":{"type":"Not","expr":{"type":"True"}}},{"type":"ExistsRel","rel":{"TableScan":{"table":"shares"}}},{"type":"Inherits","operation":"Select","via_column":"g","max_depth":2},{"type":"InheritsReferencing","operation":"Update","source_table":"s","via_column":"h","max_depth":null},{"type":"And","exprs":[{"type":"False"},{"type":"Or","exprs":[]}]}]}"#;
-        assert_eq!(serde_json::to_string(&expr).unwrap(), json);
-        assert_eq!(serde_json::from_str::<PolicyExpr>(json).unwrap(), expr);
         let session_ref = |path: &str| PolicyExpr::Cmp {
             column: "a".into(),
             op: CmpOp::Eq,
