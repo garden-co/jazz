@@ -66,38 +66,32 @@ pub fn encode(mechanism: Mechanism<'_>, payload: &[u8]) -> Result<Vec<u8>> {
 /// [`Error::UnsupportedFormat`]. The payload is not authenticated here.
 pub fn decode<'b>(mechanism: Mechanism<'_>, envelope: &'b [u8]) -> Result<&'b [u8]> {
     mechanism.validate()?;
-    let (id, version, payload) = parse(envelope)?;
-    if id != mechanism.id.as_bytes() || version != mechanism.version {
+    let (actual, payload) = parse(envelope)?;
+    if actual != mechanism {
         return Err(Error::UnsupportedFormat);
     }
     Ok(payload)
 }
 
-/// Splits any well-formed envelope into its ID bytes, version and payload.
+/// Splits any well-formed envelope into its mechanism and payload.
 /// A header that is malformed, including an ID outside `[a-z0-9.-]` or
 /// version 0, is [`Error::InvalidCiphertext`].
-pub(crate) fn parse(envelope: &[u8]) -> Result<(&[u8], u32, &[u8])> {
+pub(crate) fn parse(envelope: &[u8]) -> Result<(Mechanism<'_>, &[u8])> {
     if envelope.len() < 11 || envelope[..4] != MAGIC || envelope[4] != FORMAT {
         return Err(Error::InvalidCiphertext);
     }
     let id_len = usize::from(envelope[5]);
-    if !(1..=MAX_ID_LEN).contains(&id_len) || envelope.len() < 10 + id_len {
+    if envelope.len() < 10 + id_len {
         return Err(Error::InvalidCiphertext);
     }
-    let id = &envelope[6..6 + id_len];
+    let id =
+        core::str::from_utf8(&envelope[6..6 + id_len]).map_err(|_| Error::InvalidCiphertext)?;
     let version = u32::from_be_bytes(
         envelope[6 + id_len..10 + id_len]
             .try_into()
             .expect("four version bytes"),
     );
-    // A header whose ID or version no mechanism can have is malformed, not
-    // another mechanism's.
-    let valid = id
-        .iter()
-        .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
-        && version != 0;
-    if !valid {
-        return Err(Error::InvalidCiphertext);
-    }
-    Ok((id, version, &envelope[10 + id_len..]))
+    let mechanism = Mechanism::new(id, version);
+    mechanism.validate().map_err(|_| Error::InvalidCiphertext)?;
+    Ok((mechanism, &envelope[10 + id_len..]))
 }

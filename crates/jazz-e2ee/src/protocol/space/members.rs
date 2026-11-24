@@ -32,8 +32,8 @@ use super::super::records::account::AccountAction;
 use super::super::records::space::{
     SpaceAddress, SpaceDelivery, SpaceMember, SpaceRoot, SpaceSuccessor,
 };
-use super::chain::SpaceChain;
-use super::ledger::{AccountDirectory, Recipient, SpaceLedger};
+use super::chain::{SpaceChain, SpaceVersion};
+use super::ledger::{AccountDirectory, Recipient, SpaceLedger, collect_member_accounts};
 
 /// A member, or an account an envelope names, whose public account history
 /// needs a capability this client lacks (§3.4, §7): skipped, and reported
@@ -113,6 +113,34 @@ pub struct VersionEnvelope {
     pub position: Position,
 }
 
+impl VersionEnvelope {
+    fn from_version(version: &SpaceVersion, root: &SpaceRoot) -> Self {
+        let (account, epoch) = version.writer(root);
+        Self {
+            account_id: account.to_owned(),
+            account_epoch_id: epoch.to_owned(),
+            source: if version.successor.is_some() {
+                EnvelopeSource::Successor
+            } else {
+                EnvelopeSource::Root
+            },
+            record_id: version.record_id(root).to_owned(),
+            position: version.position,
+        }
+    }
+
+    fn from_delivery(delivery: &Accepted<SpaceDelivery>) -> Self {
+        let row = &delivery.row;
+        Self {
+            account_id: row.recipient_account_id.clone(),
+            account_epoch_id: row.recipient_account_epoch_id.clone(),
+            source: EnvelopeSource::Delivery,
+            record_id: row.id.clone(),
+            position: delivery.position,
+        }
+    }
+}
+
 /// The envelopes of the version at `depth`: the `accountEnvelope` of its
 /// own record, then the deliveries of it, by position then ID. With
 /// `after_root`, deliveries at or before the root's position are left out,
@@ -148,30 +176,14 @@ fn version_envelopes(
     let version = chain
         .version(depth)
         .ok_or(ProtocolError::InvalidRecord("depth beyond the chain"))?;
-    let (writer, writer_epoch) = version.writer(&chain.root.row);
-    let (source, record_id) = match &version.successor {
-        None => (EnvelopeSource::Root, chain.root.row.id.clone()),
-        Some(successor) => (EnvelopeSource::Successor, successor.row.id.clone()),
-    };
-    let mut found = vec![VersionEnvelope {
-        account_id: writer.to_owned(),
-        account_epoch_id: writer_epoch.to_owned(),
-        source,
-        record_id,
-        position: version.position,
-    }];
-    for delivery in ledger.deliveries_of(&version.epoch_id) {
-        if after_root && delivery.position <= chain.root.position {
-            continue;
-        }
-        found.push(VersionEnvelope {
-            account_id: delivery.row.recipient_account_id.clone(),
-            account_epoch_id: delivery.row.recipient_account_epoch_id.clone(),
-            source: EnvelopeSource::Delivery,
-            record_id: delivery.row.id.clone(),
-            position: delivery.position,
-        });
-    }
+    let mut found = vec![VersionEnvelope::from_version(version, &chain.root.row)];
+    found.extend(
+        ledger
+            .deliveries_of(&version.epoch_id)
+            .into_iter()
+            .filter(|delivery| !after_root || delivery.position > chain.root.position)
+            .map(VersionEnvelope::from_delivery),
+    );
     Ok(found)
 }
 
@@ -423,24 +435,13 @@ impl CurrentVersion {
     /// ```
     pub fn from_chain(chain: &ReplayedSpaceChain) -> ProtocolResult<Self> {
         let version = chain.current()?;
-        let (account, epoch) = version.writer(&chain.root.row);
-        let (source, id) = match &version.successor {
-            Some(s) => (EnvelopeSource::Successor, &s.row.id),
-            None => (EnvelopeSource::Root, &chain.root.row.id),
-        };
         Ok(Self {
             address: chain.address().clone(),
             epoch: version.epoch_id.clone(),
             through: chain.through(),
             root: chain.root.clone(),
             successor: version.successor.clone(),
-            writer: VersionEnvelope {
-                account_id: account.to_owned(),
-                account_epoch_id: epoch.to_owned(),
-                source,
-                record_id: id.clone(),
-                position: version.position,
-            },
+            writer: VersionEnvelope::from_version(version, &chain.root.row),
         })
     }
 
@@ -502,34 +503,21 @@ impl CurrentVersion {
         }
         check_read(members, through)?;
         check_read(deliveries, through)?;
-        let mut membership = BTreeSet::new();
-        for member in members {
-            if member.row.scope_id != address.scope_id
-                || member.row.identifier != address.identifier
-            {
-                return Err(ProtocolError::InconsistentEvidence);
-            }
-            membership.insert(member.row.account_id.clone());
+        if members.iter().any(|member| {
+            member.row.scope_id != address.scope_id || member.row.identifier != address.identifier
+        }) || deliveries.iter().any(|delivery| {
+            let row = &delivery.row;
+            row.scope_id != address.scope_id
+                || row.identifier != address.identifier
+                || row.key_epoch_id != self.epoch
+        }) {
+            return Err(ProtocolError::InconsistentEvidence);
         }
+        let membership = collect_member_accounts(members.iter());
         let mut found = vec![self.writer.clone()];
         let mut ordered = deliveries.iter().collect::<Vec<_>>();
         super::by_position_then_id(&mut ordered);
-        for delivery in ordered {
-            let row = &delivery.row;
-            if row.scope_id != address.scope_id
-                || row.identifier != address.identifier
-                || row.key_epoch_id != self.epoch
-            {
-                return Err(ProtocolError::InconsistentEvidence);
-            }
-            found.push(VersionEnvelope {
-                account_id: row.recipient_account_id.clone(),
-                account_epoch_id: row.recipient_account_epoch_id.clone(),
-                source: EnvelopeSource::Delivery,
-                record_id: row.id.clone(),
-                position: delivery.position,
-            });
-        }
+        found.extend(ordered.into_iter().map(VersionEnvelope::from_delivery));
         mark_envelopes(&self.epoch, &membership, found, accounts)
     }
 }

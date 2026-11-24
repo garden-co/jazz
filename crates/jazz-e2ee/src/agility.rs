@@ -19,7 +19,9 @@ use core::fmt;
 use zeroize::Zeroizing;
 
 use crate::envelope::{self, Mechanism};
-use crate::error::{Error, Result};
+#[cfg(doc)]
+use crate::error::Error;
+use crate::error::Result;
 use crate::random::RandomSource;
 
 /// An owned mechanism ID and version, as carried in configuration and keys.
@@ -87,15 +89,9 @@ impl PublicKey {
 
     /// Reads the advertised form of a key of any mechanism.
     pub fn decode(encoded: &[u8]) -> Result<Self> {
-        let (id, version, payload) = envelope::parse(encoded)?;
-        let id = core::str::from_utf8(id).map_err(|_| Error::InvalidCiphertext)?;
-        let mechanism = MechanismId::new(id, version);
-        mechanism
-            .as_mechanism()
-            .validate()
-            .map_err(|_| Error::InvalidCiphertext)?;
+        let (mechanism, payload) = envelope::parse(encoded)?;
         Ok(Self {
-            mechanism,
+            mechanism: mechanism.into(),
             bytes: payload.to_vec(),
         })
     }

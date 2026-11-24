@@ -156,8 +156,8 @@ impl HeldSpace {
             return Err(ProtocolError::InvalidRecord("empty creation transaction"));
         }
         let application = domain.account(&root.creator_account_id)?;
-        let context = root.marker_context(&application)?;
-        match marker(registry, &records.key, &context, &root.verification)? {
+        let scope = root.scope()?;
+        match marker(registry, &records.key, &application, &scope, root, None)? {
             Outcome::Ok(()) => {}
             Outcome::Invalid | Outcome::Unsupported => {
                 return Err(ProtocolError::InvalidRecord("key fails its root's marker"));
@@ -165,7 +165,7 @@ impl HeldSpace {
         }
         Ok(Self {
             application,
-            scope: root.scope()?,
+            scope,
             root: root.clone(),
             successors: Vec::new(),
             keys: BTreeMap::from([(
@@ -230,6 +230,11 @@ impl HeldSpace {
     }
 
     /// The held depths, ascending, with their marks.
+    /// Whether the space holds no key entries, including refused keys.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
     pub fn held(&self) -> impl Iterator<Item = (usize, &KeyMark)> {
         self.keys.iter().map(|(depth, entry)| (*depth, &entry.mark))
     }
@@ -240,6 +245,12 @@ impl HeldSpace {
 
     pub(crate) fn key_at(&self, depth: usize) -> Option<&[u8; 32]> {
         self.keys.get(&depth).map(|entry| &*entry.key)
+    }
+
+    pub(super) fn keep_entry(&mut self, depth: usize, entry: HeldEntry) {
+        if self.mark(depth) != Some(&KeyMark::Refused) {
+            self.keys.insert(depth, entry);
+        }
     }
 
     /// Keeps `other`, a later holding of the same root: the longer lineage
@@ -262,12 +273,7 @@ impl HeldSpace {
             self.successors = other.successors;
         }
         for (depth, entry) in other.keys {
-            match self.keys.get(&depth) {
-                Some(held) if held.mark == KeyMark::Refused => {}
-                _ => {
-                    self.keys.insert(depth, entry);
-                }
-            }
+            self.keep_entry(depth, entry);
         }
         Ok(())
     }

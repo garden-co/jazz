@@ -56,6 +56,14 @@ enum ReadKind {
     },
 }
 
+pub(super) fn collect_member_accounts<'a>(
+    members: impl Iterator<Item = &'a Accepted<SpaceMember>>,
+) -> BTreeSet<String> {
+    members
+        .map(|member| member.row.account_id.clone())
+        .collect()
+}
+
 impl SpaceLedger {
     fn empty(address: SpaceAddress, through: Position, kind: ReadKind) -> Self {
         Self {
@@ -160,14 +168,10 @@ impl SpaceLedger {
     /// member rows (§1.3). One row makes the account a member; the row ID
     /// carries no meaning.
     pub fn member_accounts(&self) -> BTreeSet<String> {
-        self.members
-            .iter()
-            .filter(|member| {
-                self.names(&member.row.scope_id, &member.row.identifier)
-                    && ids::is_id(&member.row.account_id, IdForm::Any)
-            })
-            .map(|member| member.row.account_id.clone())
-            .collect()
+        collect_member_accounts(self.members.iter().filter(|member| {
+            self.names(&member.row.scope_id, &member.row.identifier)
+                && ids::is_id(&member.row.account_id, IdForm::Any)
+        }))
     }
 
     /// Whether `account_id` has a member row for the space.

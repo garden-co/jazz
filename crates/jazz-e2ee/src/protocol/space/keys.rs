@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 
 use zeroize::Zeroizing;
 
-use crate::envelope::{self, Mechanism};
+use crate::envelope;
 use crate::error::Error;
 use crate::registry::Registry;
 
@@ -41,7 +41,9 @@ use super::super::domain::AccountDomain;
 use super::super::error::{ProtocolError, ProtocolResult};
 pub(crate) use super::super::key_crypto::Outcome;
 use super::super::key_crypto::{self, classify};
-use super::super::records::space::{SpaceAddress, SpaceDelivery, SpaceScope};
+use super::super::records::space::{
+    SpaceAddress, SpaceDelivery, SpaceRoot, SpaceScope, SpaceSuccessor,
+};
 use super::chain::SpaceChain;
 use super::ledger::{AccountDirectory, SpaceLedger};
 
@@ -54,15 +56,6 @@ fn space_candidate<T>(result: ProtocolResult<Outcome<T>>) -> ProtocolResult<Outc
         Err(ProtocolError::Crypto(Error::NoKeyForMechanism)) => Ok(Outcome::Invalid),
         other => other,
     }
-}
-
-pub(crate) fn marker(
-    registry: &Registry,
-    key: &[u8; 32],
-    context: &[u8],
-    envelope: &[u8],
-) -> ProtocolResult<Outcome<()>> {
-    space_candidate(key_crypto::marker(registry, key, context, envelope))
 }
 
 /// Opens an envelope sealed to an account's sealing key of the epoch whose
@@ -97,19 +90,33 @@ fn version_marker(
     let version = chain
         .version(depth)
         .ok_or(ProtocolError::InvalidRecord("depth beyond the chain"))?;
-    let (context, envelope) = match &version.successor {
-        None => (
-            chain.root.row.marker_context(&chain.application)?,
-            &chain.root.row.verification,
-        ),
+    marker(
+        registry,
+        key,
+        &chain.application,
+        &chain.scope,
+        &chain.root.row,
+        version.successor.as_ref().map(|successor| &successor.row),
+    )
+}
+
+/// Checks the marker of the root or the successor that introduced this key.
+pub(crate) fn marker(
+    registry: &Registry,
+    key: &[u8; 32],
+    application: &AccountDomain,
+    scope: &SpaceScope,
+    root: &SpaceRoot,
+    successor: Option<&SpaceSuccessor>,
+) -> ProtocolResult<Outcome<()>> {
+    let (context, envelope) = match successor {
+        None => (root.marker_context(application)?, &root.verification),
         Some(successor) => (
-            successor
-                .row
-                .marker_context(&chain.application, &chain.scope)?,
-            &successor.row.verification,
+            successor.marker_context(application, scope)?,
+            &successor.verification,
         ),
     };
-    marker(registry, key, &context, envelope)
+    space_candidate(key_crypto::marker(registry, key, &context, envelope))
 }
 
 /// What authenticating one key against the chain showed.
@@ -511,23 +518,7 @@ pub fn acquire(
         if writer == account_id
             && let Some(epoch_key) = own.get(writer_epoch)
         {
-            let (record_id, context, envelope) = match &version.successor {
-                None => (
-                    &chain.root.row.id,
-                    chain
-                        .root
-                        .row
-                        .account_envelope_context(&chain.application)?,
-                    &chain.root.row.account_envelope,
-                ),
-                Some(successor) => (
-                    &successor.row.id,
-                    successor
-                        .row
-                        .account_envelope_context(&chain.application, &chain.scope)?,
-                    &successor.row.account_envelope,
-                ),
-            };
+            let (context, envelope) = version.account_envelope(chain)?;
             match try_candidate(chain, registry, depth, epoch_key, &context, envelope)? {
                 PathCheck::Ok(found) => {
                     keys.insert(found);
@@ -535,7 +526,9 @@ pub fn acquire(
                 }
                 PathCheck::Unopened | PathCheck::Invalid => {}
                 PathCheck::BrokenHistory(at) => broken(at),
-                PathCheck::Unsupported => unsupported.push(record_id.clone()),
+                PathCheck::Unsupported => {
+                    unsupported.push(version.record_id(&chain.root.row).to_owned())
+                }
             }
         }
         for delivery in ledger.deliveries_of(&version.epoch_id) {
@@ -615,9 +608,7 @@ fn sealed_to_non_derived<'k>(
     non_derived: &'k [NonDerivedSealingKey],
     row: &SpaceDelivery,
 ) -> Option<&'k NonDerivedSealingKey> {
-    let (id, version, _) = envelope::parse(&row.envelope).ok()?;
-    let id = core::str::from_utf8(id).ok()?;
-    let mechanism = Mechanism::new(id, version);
+    let (mechanism, _) = envelope::parse(&row.envelope).ok()?;
     non_derived
         .iter()
         .find(|record| record.is_selected_for(&row.recipient_account_epoch_id, mechanism))
