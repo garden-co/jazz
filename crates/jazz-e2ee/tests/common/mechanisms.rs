@@ -200,6 +200,7 @@ impl KeyWrapper for FlakyWrapper {
 /// provider failure; account records still verify.
 pub struct FlakySigner {
     pub fails: Arc<AtomicBool>,
+    pub space_records_only: bool,
 }
 
 const SPACE_POLICY: &[u8] = b"jazz.e2ee.space.v1";
@@ -238,9 +239,10 @@ impl Signer for FlakySigner {
 
     fn verify(&self, public: &PublicKey, record: &[u8], signature: &[u8]) -> Result<bool> {
         if self.fails.load(Ordering::SeqCst)
-            && record
-                .windows(SPACE_POLICY.len())
-                .any(|window| window == SPACE_POLICY)
+            && (!self.space_records_only
+                || record
+                    .windows(SPACE_POLICY.len())
+                    .any(|window| window == SPACE_POLICY))
         {
             return Err(Error::CryptoFailure);
         }
@@ -254,6 +256,20 @@ impl Signer for FlakySigner {
 /// A registry with the built-ins, the flaky key wrapper and the flaky
 /// signer, and the flags that make each fail.
 pub fn flaky_registry() -> (Registry, Arc<AtomicBool>, Arc<AtomicBool>) {
+    flaky_registry_with_space_signer()
+}
+
+pub fn flaky_registry_with_all_record_signer() -> (Registry, Arc<AtomicBool>, Arc<AtomicBool>) {
+    flaky_registry_with_scope(false)
+}
+
+fn flaky_registry_with_space_signer() -> (Registry, Arc<AtomicBool>, Arc<AtomicBool>) {
+    flaky_registry_with_scope(true)
+}
+
+fn flaky_registry_with_scope(
+    space_records_only: bool,
+) -> (Registry, Arc<AtomicBool>, Arc<AtomicBool>) {
     let mut registry = Registry::builtin();
     let wrap_fails = Arc::new(AtomicBool::new(false));
     let sign_fails = Arc::new(AtomicBool::new(false));
@@ -265,6 +281,7 @@ pub fn flaky_registry() -> (Registry, Arc<AtomicBool>, Arc<AtomicBool>) {
     registry
         .register_signer(Arc::new(FlakySigner {
             fails: sign_fails.clone(),
+            space_records_only,
         }))
         .unwrap();
     (registry, wrap_fails, sign_fails)
