@@ -108,11 +108,7 @@ fn forged(server: &Db, space: uuid::Uuid, title: &str) -> RowUuid {
 /// ```
 #[test]
 fn a_subscription_names_the_rows_it_left_out_and_keeps_the_list_current() {
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (server, _client, db, _link, space) = client_in_space();
     let a = sealed(&db, space, "a");
     pump(&server, &db);
     let b = forged(&server, space, "b");
@@ -182,11 +178,7 @@ fn a_subscription_names_the_rows_it_left_out_and_keeps_the_list_current() {
 /// ```
 #[test]
 fn a_page_counts_the_rows_it_left_out_and_names_them() {
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (server, _client, db, _link, space) = client_in_space();
     let a = sealed(&db, space, "a");
     sealed(&db, space, "c");
     pump(&server, &db);

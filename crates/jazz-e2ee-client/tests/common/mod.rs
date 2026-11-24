@@ -237,6 +237,16 @@ pub fn authority() -> Db {
     server
 }
 
+/// An online client holding the key of a new `plans` space.
+pub fn client_in_space() -> (Db, E2eeClient, Db, Upstream, uuid::Uuid) {
+    let server = authority();
+    let client = open_client(Rc::new(MemoryStore::new()));
+    let (db, link, _) = online(&client, &server, None);
+    let space = project(&db, "plans");
+    hold_new_space(&client, &db, space);
+    (server, client, db, link, space)
+}
+
 /// A client database with the runtime's hooks, in memory or at `path`.
 pub fn client_db(client: &E2eeClient, path: Option<&Path>) -> Db {
     let config = DbConfig::new(schema(), identity(1)).with_e2ee(client.hooks());
@@ -693,6 +703,16 @@ pub fn open_account(
         device_account,
     }))
     .unwrap()
+}
+
+/// Copies a SQLite database and any active sidecars to a test snapshot.
+pub fn copy_database(from: &std::path::Path, to: &std::path::Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let source = std::path::PathBuf::from(format!("{}{suffix}", from.display()));
+        if source.exists() {
+            std::fs::copy(&source, format!("{}{suffix}", to.display())).unwrap();
+        }
+    }
 }
 
 /// `who`'s database with the runtime's hooks, linked to `server` as

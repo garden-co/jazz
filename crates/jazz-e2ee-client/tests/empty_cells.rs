@@ -5,14 +5,12 @@
 
 mod common;
 
-use std::rc::Rc;
-
 use common::*;
 use jazz::db::block_on;
 use jazz::e2ee::UnreadableCode;
 use jazz::query::Query;
 use jazz::records::Value;
-use jazz_e2ee_client::{MemoryStore, Report};
+use jazz_e2ee_client::Report;
 
 /// Contract: a row whose required encrypted column (no declared default)
 /// holds the empty value is not returned and is reported `empty-cell` for
@@ -24,11 +22,7 @@ use jazz_e2ee_client::{MemoryStore, Report};
 /// ```
 #[test]
 fn an_empty_cell_of_a_required_column_without_a_default_withholds_its_row() {
-    let server = authority();
-    let client = open_client(Rc::new(MemoryStore::new()));
-    let (db, _link, _) = online(&client, &server, None);
-    let space = project(&db, "plans");
-    hold_new_space(&client, &db, space);
+    let (server, client, db, _link, space) = client_in_space();
 
     let mut stored_empty = note(space, "ignored");
     for column in ["body", "note", "attachment", "rank"] {

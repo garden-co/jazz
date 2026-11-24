@@ -296,16 +296,6 @@ fn a_root_lena_s_identity_did_not_sign_is_root_not_mine() {
     assert!(client.with_account(|_| ()).is_none());
 }
 
-/// Every file of the SQLite database at `path`.
-fn copy_database(from: &std::path::Path, to: &std::path::Path) {
-    for suffix in ["", "-wal", "-shm"] {
-        let source = std::path::PathBuf::from(format!("{}{suffix}", from.display()));
-        if source.exists() {
-            std::fs::copy(&source, format!("{}{suffix}", to.display())).unwrap();
-        }
-    }
-}
-
 /// Contract: once alice's device has verified her account at a later cut,
 /// a server restored from an older copy cannot make it accept the older
 /// state: verifying against it is `stale-state`, the floor stays, and the
