@@ -44,7 +44,7 @@ pub fn min_cell_record_len() -> usize {
 }
 
 /// A logical value as an equality index encodes it, owned, for values the
-/// caller decodes from plaintext ([`PlaintextValues`]). Cleared on drop and
+/// caller decodes from plaintext. Cleared on drop and
 /// never printed.
 #[derive(Clone, PartialEq)]
 pub enum EqualityValueBuf {
