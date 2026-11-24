@@ -30,6 +30,8 @@
 
 use std::collections::BTreeMap;
 
+use jazz_model::model::public_api::types::EQUALITY_PREFIX;
+
 use crate::db::Shape;
 use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode, Reason};
@@ -488,7 +490,7 @@ pub(crate) fn refuse_stored_defaults(
         for column in &table.columns {
             let name = column.name.as_str();
             let token = name
-                .strip_prefix("__e2ee_eq_")
+                .strip_prefix(EQUALITY_PREFIX)
                 .is_some_and(|source| entry.equality.iter().any(|c| c == source));
             if (entry.columns.contains_key(name) || token)
                 && column

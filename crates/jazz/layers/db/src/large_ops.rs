@@ -1244,8 +1244,7 @@ impl Db {
         }
         whole_only(&self.inner, table, column)?;
         #[cfg(feature = "e2ee-client")]
-        self.inner
-            .check_rowless_stream(&self.operation_schema(), table, cells, None)?;
+        self.inner.check_rowless_stream(table, cells, None)?;
         self.begin_upload(table, cells, column)
     }
 
@@ -1596,7 +1595,7 @@ impl Db {
             *cells = std::mem::take(&mut sealed.cells);
         } else {
             self.inner
-                .check_rowless_stream(&active_schema, table, cells, Some(mutation))?;
+                .check_rowless_stream(table, cells, Some(mutation))?;
         }
         #[cfg(not(feature = "e2ee-client"))]
         let _ = (mutation, row, target);

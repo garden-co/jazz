@@ -9,6 +9,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use jazz_model::model::public_api::types::{EQUALITY_PREFIX, equality_column};
+
 use serde::{Deserialize, Serialize};
 
 use crate::catalogue::Permissions;
@@ -67,15 +69,6 @@ fn column<'a>(schema: &'a Schema, table: &str, column: &str) -> Option<&'a Colum
         .columns
         .iter()
         .find(|c| c.name_str() == column)
-}
-
-/// The prefix of a table's equality columns, which hold an encrypted
-/// column's equality tokens.
-pub const EQUALITY_PREFIX: &str = "__e2ee_eq_";
-
-/// The name of a table's equality column for `column`.
-pub fn equality_column(column: &str) -> String {
-    format!("{EQUALITY_PREFIX}{column}")
 }
 
 /// Whether `name` is an equality token column declared for this table.
