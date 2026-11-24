@@ -618,7 +618,7 @@ jobs:
 
       - name: Build the relay staticlib
         run: |
-          cargo rustc --manifest-path crates/jazz-native-relay/Cargo.toml --features e2ee-client --target "$TARGET" --crate-type staticlib --profile release-mobile
+          cargo rustc --manifest-path crates/jazz-native-relay/Cargo.toml --target "$TARGET" --crate-type staticlib --profile release-mobile
           mkdir -p "slice/$TARGET"
           cp "target/$TARGET/release-mobile/libjazz_native_relay.a" "slice/$TARGET/"
           sccache --show-stats
@@ -710,7 +710,7 @@ jobs:
         run: |
           export IPHONEOS_DEPLOYMENT_TARGET="$(sed -nE 's/^[[:space:]]*export IPHONEOS_DEPLOYMENT_TARGET=([0-9]+\.[0-9]+)$/\1/p' crates/jazz-rn/scripts/build-relay-artifacts.sh)"
           [[ -n "$IPHONEOS_DEPLOYMENT_TARGET" ]] || { echo "::error::no IPHONEOS_DEPLOYMENT_TARGET in build-relay-artifacts.sh"; exit 1; }
-          cargo rustc --manifest-path crates/jazz-native-relay/Cargo.toml --features e2ee-client --target "$TARGET" --crate-type staticlib --profile release-mobile
+          cargo rustc --manifest-path crates/jazz-native-relay/Cargo.toml --target "$TARGET" --crate-type staticlib --profile release-mobile
           mkdir -p "slice/$TARGET"
           cp "target/$TARGET/release-mobile/libjazz_native_relay.a" "slice/$TARGET/"
 

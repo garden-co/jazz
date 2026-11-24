@@ -424,7 +424,6 @@ fn incompatible_open_creates_no_relay_or_sqlite_store() {
             node: NodeUuid::from_bytes([0xa1; 16]),
             author: AuthorSubject::for_test_bytes([0xa2; 16]),
         },
-        #[cfg(feature = "e2ee-client")]
         declarations: None,
     };
     assert!(matches!(
