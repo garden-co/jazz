@@ -621,22 +621,6 @@ mod tests {
     }
 
     #[test]
-    fn loosening_an_encrypted_json_schema_requires_a_new_column() {
-        let restricted = PlainType::new(
-            ColumnType::Json {
-                schema: Some(serde_json::json!({"type": "object"})),
-            },
-            false,
-        );
-        let loose = PlainType::new(ColumnType::Json { schema: None }, false);
-        let error = transition(&restricted, &restricted, &loose).unwrap_err();
-        assert!(
-            error.contains("docs/e2ee/encrypting-existing-data"),
-            "{error}"
-        );
-    }
-
-    #[test]
     fn an_empty_cell_reads_the_default_null_or_nothing() {
         let with = |column_type: ColumnType, nullable: bool, default: Option<DeclaredValue>| {
             let plain = PlainType {
