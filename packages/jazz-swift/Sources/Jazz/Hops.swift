@@ -201,8 +201,8 @@ extension Client {
     public func all<Q: ReadQuery>(_ query: Q, tier: ReadTier? = nil) async throws -> [Q.Row] {
         try await Self.typed {
             let json = try Coding.json(JSONValue.object(try query.object()))
-            let rows = try await Self.run {
-                if let tier { try self.handle.allAt(queryJson: json, tier: tier.rawValue) } else { try self.handle.all(queryJson: json) }
+            let rows = try await self.controlled { handle in
+                if let tier { try handle.allAt(queryJson: json, tier: tier.rawValue) } else { try handle.all(queryJson: json) }
             }
             return try Coding.decode([Q.Row].self, rows, userInfo)
         }
@@ -212,7 +212,7 @@ extension Client {
     public func all<R>(_ history: History<R>, tier: ReadTier = .remote) async throws -> [Version<R>] {
         try await Self.typed {
             let json = try history.json()
-            let rows = try await Self.run { try self.handle.allAt(queryJson: json, tier: tier.rawValue) }
+            let rows = try await self.controlled { handle in try handle.allAt(queryJson: json, tier: tier.rawValue) }
             let decoded = try Coding.decode([R].self, rows, userInfo)
             let meta = try Coding.decode([HistoryMeta].self, rows)
             return zip(decoded, meta).map {
@@ -246,8 +246,8 @@ extension Client {
     ) async throws -> R where S.Element == Data {
         try await Self.typed {
             let rowJSON = try row.map { try Coding.json($0, userInfo) }
-            let upload = try await Self.run {
-                try self.handle.beginUpload(table: R.table, column: column, kind: kind, id: id, rowJson: rowJSON)
+            let upload = try await self.controlled { handle in
+                try handle.beginUpload(table: R.table, column: column, kind: kind, id: id, rowJson: rowJSON)
             }
             do {
                 for try await chunk in bytes {

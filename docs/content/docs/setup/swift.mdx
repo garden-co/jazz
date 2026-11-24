@@ -203,7 +203,8 @@ view's rows current, and `$tasks` is its `JazzQuery`, for `isLoading` and `error
 
 Every call throws a `JazzError` (catch it with `catch let error as JazzError`). The cases are
 `refused` (validation, permissions or not supported yet), `io`, `closed`, `decoding`,
-`cancelled` (the calling task was cancelled), `permissionDenied` (your backend's permissions
+`cancelled` (the calling task was cancelled), `stillQueued` (cancelled after the write was saved
+locally: it may still reach the server, so don't retry it), `permissionDenied` (your backend's permissions
 refused it, seen when waiting for the `global` tier), `notSupported`, `conflict` (a serializable
 transaction lost to another write: retry it), and for a `JazzSession`'s clients `replaced` and
 `noUser`.
@@ -224,6 +225,12 @@ the server accepts it only if nothing it read changed meanwhile, else it throws
 `JazzError.conflict`. Reads take a
 `tier:` (`.local`, `.localFirst`, `.remote`), and so do writes (`.local`, `.global`);
 `jazz.waitForSync(.global)` waits until everything written so far has reached the server.
+
+Cancelling the calling task ends a wait on the server at once, as in TypeScript: `waitForSync`, a
+`.global` write or commit, and a `.remote` read throw `JazzError.cancelled`, or
+`JazzError.stillQueued` for a write already saved locally, which stays queued (a later refusal
+reaches `jazz.mutationErrors`). A task cancelled before a call starts does nothing, and a transaction
+cancelled before its commit rolls back; once the commit has begun, it stands.
 
 ## Mergeable text and permission advice
 
