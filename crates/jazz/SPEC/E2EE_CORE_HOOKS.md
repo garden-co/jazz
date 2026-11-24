@@ -75,7 +75,7 @@ A call the hooks refuse for want of a key (`NeedsKey`, `SpacePending`, here and 
   - For updates and upserts, core supplies `stored_space`, the space cell of the current row, which is plaintext; core already loads that row for updates and upserts.
   - `companion_rows` lets the hook stage internal rows (a space root) into the write's own transaction; core inserts them in the same transaction, as the same session (R2), before the write. This is how creation stays atomic with the write without a separate transaction kind.
 
-- **No key (`NeedsKey`).** Core has not applied anything, so the caller awaits `runtime.acquire(space)` (key acquisition, a missing root and a pending rotation, as `db.encryption.acquire`, spec §5.6) and re-issues the same call. In an open transaction only that staging call is retried; the callback is never replayed (spec §5.6).
+- **No key (`NeedsKey`).** Core has not applied anything, so the caller awaits `runtime.acquire(space)` (key acquisition, a missing root and a pending rotation, as `db.encryption.acquire`, spec §5.6) and re-issues the same call. In an open core transaction, the retry applies only to that staging call (spec §5.6).
 - **Space creation (spec §3.2, §5.4).** The client never evaluates write policies (exists: a replica runs no write-policy check, `Inner::checked` at db.rs:8140 returns `None` on a client; the only client-side answer is the asynchronous `JazzClient::permission_advice`, `crates/jazz/src/tools/client.rs:1701`, which asks the authority and is `Unknown` offline). Creation is therefore optimistic and needs no advice:
   - an encrypted write to a space with no known valid root and no prepared root returns `NeedsKey`; the runtime prepares the root (online it first reads the address's roots; it generates `K₀`, builds and signs the root, and persists `K₀` as an `unpublished` held key) and the caller retries;
   - on the retry the hook stages the prepared root as a companion row of the write, and seals the write under `K₀`;
@@ -135,7 +135,7 @@ A call the hooks refuse for want of a key (`NeedsKey`, `SpacePending`, here and 
   - `residual` is applied after H3 decrypts: compare the authenticated plaintext, then window.
   - `epochs` is folded into the query's shape hash, so a new held epoch makes a new prepared query. The runtime re-prepares live subscriptions when its epoch set changes (retry budget of 3, spec §4.5).
   - **Cold queries.** Online, an encrypted predicate on a space for which no epoch is held returns `NeedsKey` instead of an empty `IN`; the binding acquires within the read budget and plans again (spec §4.5).
-  - **Incomplete results.** When the known lineage has unheld epochs, the plan sets `incomplete`, and the runtime reports the space once with the protocol's code for its state: `key-pending` for a member, `key-unavailable` otherwise (spec §4.5), exactly as for H3.
+  - **Incomplete results.** When the known lineage has unheld epochs, the plan sets `incomplete`, and execution reports the space as unreadable with no row ID or column. It uses the protocol's code for that state, such as `key-pending` for a member or `key-unavailable` otherwise (spec §4.5). The runtime deduplicates the report until the missing keys arrive. See the [equality query test](../../jazz-e2ee-client/tests/settled_reasons.rs#L140).
 
 - **Refusals (never a scan).**
   - Ordering by an encrypted column.

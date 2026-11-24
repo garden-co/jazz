@@ -916,9 +916,8 @@ pub fn load_client(json: &[u8]) -> Result<crate::db::Migrations, ArtifactError> 
 /// [`load_client`], with the current schema: what a client that has no
 /// other copy of the schema opens with.
 ///
-/// A client has no encryption hooks yet, so it refuses an app whose current
-/// version declares encryption ([`load_client_encrypted`] reads one for a
-/// client that installs them).
+/// This loader refuses apps whose current version declares encryption.
+/// Clients that install encryption hooks use [`load_client_encrypted`].
 pub fn load_client_current(json: &[u8]) -> Result<(Schema, crate::db::Migrations), ArtifactError> {
     let app_file = read_app(json)?;
     let history = check_history(&app_file)?;

@@ -112,7 +112,16 @@ member waiting on another member's delivery) before it fails with the reason `ke
 A row this device cannot decrypt (it holds no key for it, or the key is still on its way) is never read
 as empty: the read leaves it out and says so. `unreadableRows(result)` returns the rows a read left out,
 each with its `table`, `id`, the `column` that could not be opened and a `code` (`key-pending`,
-`key-unavailable`, `invalid-ciphertext`, ...); it is empty when the result is complete.
+`key-unavailable`, `invalid-ciphertext`, ...). When key acquisition settles, Jazz updates provisional missing-key reasons
+to reflect the space’s state, such as `space-pending` when a member’s space has no valid
+root yet. A live result can update that reason even if its visible rows stay the same.
+See the [settled read reasons test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/settled_reasons.rs#L57-L139).
+
+An empty `unreadableRows(result)` list means the query left out no candidate rows at decryption.
+An online equality filter can still miss matches when Jazz knows about key versions it does not
+hold. Jazz reports the affected query as `type: "unreadable"` with `table` and `space`,
+`id` and `column` set to `null`, and a code such as `key-pending`. It reports that condition
+once while the keys are missing. See the [incomplete equality query test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/settled_reasons.rs#L140).
 
 ```ts
 import { unreadableRows } from "jazz-tools/backend";

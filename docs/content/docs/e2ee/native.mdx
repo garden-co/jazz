@@ -78,6 +78,12 @@ Turn on the `e2ee-client` feature of `jazz-app-support`.
 
 `JazzSession::open` returns `Error::EncryptedSessionUnsupported` for encrypted apps, even when
 starting signed out. Use `Jazz::open` with `Config::encryption` and your private store as shown above.
+See the [session refusal test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-app/src/jazz_session.rs#L1076-L1087).
+
+Deleting the native client’s local database (`deleteClientStorage` in React Native,
+`Jazz::delete_client_storage` in Rust) closes the client and leaves the separate private store
+intact. Reopening with the same account and private store can decrypt data again after syncing.
+See the [native storage deletion test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-app/tests/encryption.rs#L411-L428).
 
 **Swift**
 

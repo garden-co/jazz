@@ -83,10 +83,12 @@ Retry the whole transaction on a serialization conflict.
 If the space has no key yet, nothing has been sealed. For an active member, `rotate` succeeds and
 writes nothing. If the space already has a key, a member whose device is waiting for delivery gets
 `rotation-needs-key`. Retry once the device has the current key. The same code can also mean the
-device cannot confirm the space's key state. If the device sees that its account has no membership,
+device cannot confirm the space's key state. For example, a missing root with a locally held key
+or a skipped root row yields the same refusal. If the device sees that its account has no membership,
 it gets `not-a-member`. A device waiting for approval gets `no-account`, even in a space with no key yet.
 If the server hides the key root and the device has no evidence of it, `rotate` returns `0` for an
-active member, just as it does for a space that has never had a key.
+active member, just as it does for a space that has never had a key. See the
+[rotation tests](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/spaces.rs#L2239-L2353).
 
 If no online member holds the current key or the key history is broken, ask a person to confirm before calling `db.encryption.keys.recoverRotation(space)` from a device that holds an earlier key.
 
@@ -117,4 +119,9 @@ db.encryption.onReport((report) => {
 ```
 
 On Node, the database from `createJazz` can add, list and remove members through `db.encryption.members`.
+When Jazz verifies its own account and finds a signed sealing-key record that does not derive
+from the account key, it ignores the record. `onReport` emits `conflicting-account-key` once per
+record, with `recordId`, the signing device’s `signerId` and `epochId`. See the
+[conflicting account key test](https://github.com/garden-co/jazz/blob/5a4121130c/crates/jazz-e2ee-client/tests/accounts.rs#L110).
+
 The backend holds no encryption keys. Use a device client to rotate keys or manage devices and recovery.
