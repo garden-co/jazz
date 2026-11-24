@@ -1548,6 +1548,68 @@ fn watched_rows_acquire_and_withdraw_reports() {
     });
 }
 
+/// Bob reads an encrypted note whose stored project has no root and sees
+/// a space-pending report. His watch withdraws it when Alice creates the root.
+///
+/// ```text
+/// bob ──read note in rootless project──► space-pending
+/// alice ──write note + root──► server ──watch──► bob withdraws report
+/// ```
+#[test]
+fn watching_a_new_space_withdraws_the_space_pending_report() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let (alice, bob, space) = two_members(&server);
+        let original = new_project(&server, &alice, "original");
+        let note = write_note(&server, &alice, original, SECRET)
+            .unwrap()
+            .row_uuid();
+        pump(&server, &alice.db);
+
+        // Move the stored row without resealing so Bob sees ciphertext
+        // in a project whose root has not been created yet.
+        let patch = BTreeMap::from([("projectId".to_owned(), Value::Uuid(space))]);
+        block_on(server.update("notes", note, patch, Default::default())).unwrap();
+        pump(&server, &bob.db);
+
+        let events = reports_of(&bob);
+        assert!(read_notes(&server, &bob, space).unwrap().is_empty());
+        let address = space_address(&bob, space);
+        let reports = events.borrow();
+        assert!(
+            reports.iter().any(|report| matches!(
+                report,
+                Report::Unreadable(unreadable)
+                    if unreadable.code == UnreadableCode::SpacePending
+                        && unreadable.id.is_none()
+                        && unreadable.space.as_ref() == Some(&address)
+            )),
+            "{reports:?}"
+        );
+        drop(reports);
+
+        let mut watch = block_on(bob.client.watch_spaces(&bob.db)).unwrap();
+        bob.sync_spaces(&server, &mut watch).unwrap();
+        write_note(&server, &alice, space, SECRET).unwrap();
+        pump(&server, &alice.db);
+        pump(&server, &bob.db);
+        let results = bob.sync_spaces(&server, &mut watch).unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|(_, state)| matches!(state, Ok(SpaceKeyState::KeyPending))),
+            "{results:?}"
+        );
+        assert!(events.borrow().iter().any(|report| matches!(
+            report,
+            Report::Withdrawn {
+                code: UnreadableCode::SpacePending,
+                ..
+            }
+        )));
+    });
+}
+
 /// Contract: a creation the authority refused as a whole (root and note
 /// together: neither exists on the server) is found refused after the
 /// device restarts, from its own store: the key is `refused` and never
