@@ -98,7 +98,7 @@ impl E2eeClient {
             ..Default::default()
         };
         for account in &deps.members {
-            if let Ok(Some(state)) = directory.current(account)
+            if let Some(state) = directory.current(account)?
                 && state.generation > 0
             {
                 self.shared.event(
