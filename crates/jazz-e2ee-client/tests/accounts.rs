@@ -762,11 +762,12 @@ fn a_reset_on_a_rolled_back_server_is_stale_state() {
 struct AllDeviceAccounts;
 
 impl jazz::db::AccountRegistryView for AllDeviceAccounts {
-    fn founded_by_device_account(
-        &self,
+    fn founded_by_device_account<'a>(
+        &'a self,
+        _store: &'a jazz::storage::Storage,
         _account: jazz::account_registry::AccountId,
-    ) -> Result<Option<bool>, String> {
-        Ok(Some(true))
+    ) -> futures::future::LocalBoxFuture<'a, Result<Option<bool>, String>> {
+        Box::pin(async { Ok(Some(true)) })
     }
 }
 

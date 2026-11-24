@@ -8,6 +8,7 @@
 //! that is durable before the command answers. Opening reads nothing, and a
 //! second owner of the same file cannot decide from stale state.
 
+use futures::future::LocalBoxFuture;
 use jazz::account_registry::{
     AccountCommand, AccountCommandResult, AccountId, Assignment, Principal,
 };
@@ -134,10 +135,8 @@ fn unix_now_ms() -> u64 {
 /// it (E2EE protocol R5, R6). Core reads it on the store's own connection,
 /// inside the write's transaction: a second connection to a shared
 /// in-memory database, which has no write-ahead log, is locked out while
-/// the store's connection holds a write. The reader kept beside it serves
-/// callers that hold no connection.
+/// the store's connection holds a write.
 pub(crate) struct RegistryFounders {
-    reader: jazz::host::HostReader,
     app: Uuid,
 }
 
@@ -184,8 +183,8 @@ async fn external_identities_of(
 }
 
 impl RegistryFounders {
-    pub(crate) fn new(reader: jazz::host::HostReader, app: Uuid) -> Self {
-        Self { reader, app }
+    pub(crate) fn new(app: Uuid) -> Self {
+        Self { app }
     }
 
     /// An account was founded by a device-account identity when one of its
@@ -211,23 +210,13 @@ impl RegistryFounders {
     }
 }
 
-// The registry's reads run on native SQLite, whose futures are ready at
-// once: the synchronous view waits on them where it is called.
 impl jazz::db::AccountRegistryView for RegistryFounders {
-    fn founded_by_device_account(&self, account: AccountId) -> Result<Option<bool>, String> {
-        self.founded(
-            account,
-            self.reader
-                .sql(|conn| jazz::db::block_on(identities_of(conn, account))),
-        )
-    }
-
-    fn founded_by_device_account_on(
-        &self,
-        store: &jazz::storage::Storage,
+    fn founded_by_device_account<'a>(
+        &'a self,
+        store: &'a jazz::storage::Storage,
         account: AccountId,
-    ) -> Result<Option<bool>, String> {
-        self.founded(account, jazz::db::block_on(identities_of(store, account)))
+    ) -> LocalBoxFuture<'a, Result<Option<bool>, String>> {
+        Box::pin(async move { self.founded(account, identities_of(store, account).await) })
     }
 
     /// An account whose identities are all device-account identities and
@@ -237,33 +226,23 @@ impl jazz::db::AccountRegistryView for RegistryFounders {
     /// the documented one (E2EE protocol R5, R6), and the founding routes
     /// refuse to create them. An account with an external identity is not
     /// told apart from one the app founded, so it reads as the app's.
-    fn founded_for_another_audience(&self, account: AccountId) -> Result<bool, String> {
-        let Some(founded) = self.founded_by_device_account(account)? else {
-            return Ok(false);
-        };
-        if founded {
-            return Ok(false);
-        }
-        self.reader
-            .sql(|conn| jazz::db::block_on(external_identities_of(conn, account)))
-            .map(|external| external == 0)
-            .map_err(|error| error.to_string())
-    }
-
-    fn founded_for_another_audience_on(
-        &self,
-        store: &jazz::storage::Storage,
+    fn founded_for_another_audience<'a>(
+        &'a self,
+        store: &'a jazz::storage::Storage,
         account: AccountId,
-    ) -> Result<bool, String> {
-        let Some(founded) = self.founded_by_device_account_on(store, account)? else {
-            return Ok(false);
-        };
-        if founded {
-            return Ok(false);
-        }
-        jazz::db::block_on(external_identities_of(store, account))
-            .map(|external| external == 0)
-            .map_err(|error| error.to_string())
+    ) -> LocalBoxFuture<'a, Result<bool, String>> {
+        Box::pin(async move {
+            let Some(founded) = self.founded_by_device_account(store, account).await? else {
+                return Ok(false);
+            };
+            if founded {
+                return Ok(false);
+            }
+            external_identities_of(store, account)
+                .await
+                .map(|external| external == 0)
+                .map_err(|error| error.to_string())
+        })
     }
 }
 
@@ -272,6 +251,14 @@ mod tests {
     use super::*;
     use crate::portable::accounts::{REVOCATION_MARK_RETENTION_MS, storage_error};
     use jazz::account_registry::AccountError;
+    use jazz::db::AccountRegistryView;
+    use jazz::storage::{Backend, Cell, Cursor, SqlResult, Storage, TransactionBody, Value};
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::Poll;
 
     fn principal(subject: &str) -> Principal {
         Principal {
@@ -332,12 +319,138 @@ mod tests {
         assert_eq!(first.login(&principal("bob")).unwrap(), bob.assignment);
     }
 
-    // Core's account-record checks read who founded an account through
-    // the registry's own read connection (E2EE protocol R5, R6). Internal:
-    // the view has no public reader of its own to observe it through.
+    // Read the same small SQLite fixture through the host SQL interface, where
+    // starting a query and advancing its cursor can both suspend.
+    struct SuspendingRegistrySql {
+        conn: Mutex<rusqlite::Connection>,
+        caller_resumed: Arc<AtomicBool>,
+    }
+
+    struct RegistryRows {
+        columns: Vec<String>,
+        rows: VecDeque<Vec<Value>>,
+        current: Option<Vec<Value>>,
+        caller_resumed: Arc<AtomicBool>,
+    }
+
+    async fn yield_to_caller(caller_resumed: &AtomicBool) {
+        // Require the caller to drive the next poll. A nested blocking
+        // executor reaches the assertion instead of hanging the test.
+        let mut yielded = false;
+        std::future::poll_fn(|cx| {
+            if yielded {
+                assert!(
+                    caller_resumed.load(Ordering::Relaxed),
+                    "the registry lookup must yield to its caller while waiting for SQL"
+                );
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                caller_resumed.store(false, Ordering::Relaxed);
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl Cursor for RegistryRows {
+        async fn next(&mut self) -> SqlResult<Option<&[Value]>> {
+            yield_to_caller(&self.caller_resumed).await;
+            self.current = self.rows.pop_front();
+            Ok(self.current.as_deref())
+        }
+
+        fn columns(&self) -> &[String] {
+            &self.columns
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl Backend for SuspendingRegistrySql {
+        async fn query(&self, sql: &str, params: &[Value]) -> SqlResult<Box<dyn Cursor + '_>> {
+            yield_to_caller(&self.caller_resumed).await;
+            let conn = self.conn.lock().unwrap();
+            let mut statement = conn.prepare_cached(sql)?;
+            let columns: Vec<_> = statement
+                .column_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let params = params.iter().map(jazz::storage::ToSql::as_cell);
+            let mut rows = statement.query(rusqlite::params_from_iter(params))?;
+            let mut result = VecDeque::new();
+            while let Some(row) = rows.next()? {
+                let cells = (0..columns.len())
+                    .map(|index| row.get_ref(index).map(|cell| Value::from(Cell::from(cell))))
+                    .collect::<Result<_, _>>()?;
+                result.push_back(cells);
+            }
+            Ok(Box::new(RegistryRows {
+                columns,
+                rows: result,
+                current: None,
+                caller_resumed: Arc::clone(&self.caller_resumed),
+            }))
+        }
+
+        async fn execute(&self, _: &str, _: &[Value]) -> SqlResult<usize> {
+            unreachable!()
+        }
+
+        async fn execute_script(&self, _: &str) -> SqlResult<()> {
+            unreachable!()
+        }
+
+        async fn transaction(&self, _: TransactionBody<'_>) -> SqlResult<()> {
+            unreachable!()
+        }
+
+        async fn last_insert_rowid(&self) -> SqlResult<i64> {
+            unreachable!()
+        }
+
+        async fn total_changes(&self) -> SqlResult<u64> {
+            unreachable!()
+        }
+
+        fn max_parameters(&self) -> usize {
+            2
+        }
+    }
+
+    fn check_registry_on_both_backends(dir: &Path, check: impl AsyncFn(&Storage)) {
+        let path = dir.join(crate::server::identity::STORE_FILE);
+        let open = || {
+            rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap()
+        };
+        let native = Storage::native(open());
+        let caller_resumed = Arc::new(AtomicBool::new(false));
+        let suspending = Storage::from_backend(SuspendingRegistrySql {
+            conn: Mutex::new(open()),
+            caller_resumed: Arc::clone(&caller_resumed),
+        });
+        futures::executor::block_on(async {
+            check(&native).await;
+            let mut check = std::pin::pin!(check(&suspending));
+            std::future::poll_fn(|cx| {
+                let result = check.as_mut().poll(cx);
+                if result.is_pending() {
+                    caller_resumed.store(true, Ordering::Relaxed);
+                }
+                result
+            })
+            .await;
+            assert!(caller_resumed.load(Ordering::Relaxed));
+        });
+    }
+
+    /// Core checks who founded Alice's and Bob's accounts through this view.
+    /// A view-level test is needed to observe it yielding during SQL reads.
     #[test]
     fn the_founders_view_tells_device_account_founded_accounts() {
-        use jazz::db::AccountRegistryView;
         let dir = tempfile::tempdir().unwrap();
         let storage = crate::runtime::StorageConfig::data_dir(dir.path());
         let store = crate::runtime::AppStore::open(&storage).unwrap();
@@ -361,32 +474,26 @@ mod tests {
         else {
             panic!("an assignment");
         };
-        let view = RegistryFounders::new(
-            jazz::host::HostReader::open(
-                &dir.path().join(crate::server::identity::STORE_FILE),
-                None,
-            )
-            .unwrap(),
-            app,
-        );
-        assert_eq!(
-            view.founded_by_device_account(founded.account),
-            Ok(Some(true))
-        );
-        assert_eq!(view.founded_by_device_account(external), Ok(Some(false)));
-        assert_eq!(
-            view.founded_by_device_account(AccountId(Uuid::from_bytes([3; 16]))),
-            Ok(None)
-        );
+        let view = RegistryFounders::new(app);
+        check_registry_on_both_backends(dir.path(), async |conn| {
+            for (account, expected) in [
+                (founded.account, Some(true)),
+                (external, Some(false)),
+                (AccountId(Uuid::from_bytes([3; 16])), None),
+            ] {
+                assert_eq!(
+                    view.founded_by_device_account(conn, account).await,
+                    Ok(expected)
+                );
+            }
+        });
     }
 
-    /// An account whose identities are all device-account identities and
-    /// none of which derives its id in the app's namespace was founded for
-    /// another audience; the app's own founders, external accounts and unknown
-    /// accounts are not.
+    /// Core distinguishes a device account founded for another audience from
+    /// accounts founded for this app, external accounts and unknown accounts.
+    /// A view-level test is needed to observe it yielding during SQL reads.
     #[test]
     fn an_account_founded_for_another_audience_is_told_apart() {
-        use jazz::db::AccountRegistryView;
         let dir = tempfile::tempdir().unwrap();
         let app = Uuid::from_bytes([7; 16]);
         let store =
@@ -420,21 +527,20 @@ mod tests {
             .unwrap()
             .assignment
             .account;
-        let view = RegistryFounders::new(
-            jazz::host::HostReader::open(
-                &dir.path().join(crate::server::identity::STORE_FILE),
-                None,
-            )
-            .unwrap(),
-            app,
-        );
-        assert_eq!(view.founded_for_another_audience(own), Ok(false));
-        assert_eq!(view.founded_for_another_audience(other), Ok(true));
-        assert_eq!(view.founded_for_another_audience(external), Ok(false));
-        assert_eq!(
-            view.founded_for_another_audience(AccountId(Uuid::from_bytes([3; 16]))),
-            Ok(false)
-        );
+        let view = RegistryFounders::new(app);
+        check_registry_on_both_backends(dir.path(), async |conn| {
+            for (account, expected) in [
+                (own, false),
+                (other, true),
+                (external, false),
+                (AccountId(Uuid::from_bytes([3; 16])), false),
+            ] {
+                assert_eq!(
+                    view.founded_for_another_audience(conn, account).await,
+                    Ok(expected)
+                );
+            }
+        });
     }
 
     #[test]

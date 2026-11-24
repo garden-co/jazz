@@ -925,7 +925,7 @@ impl StoreLoop {
                     self.wake.clone(),
                     runtime.any_stored_catalogue,
                     self.app.lock().ok().and_then(|app| app.clone()),
-                    self.source.reader().ok(),
+                    self.source.reader().is_ok(),
                     initial,
                 )
             }))
