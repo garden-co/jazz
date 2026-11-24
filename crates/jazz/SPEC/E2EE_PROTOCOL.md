@@ -2069,9 +2069,10 @@ found none receives the version with no other write to a space table.
 ### 3.5 Rotation and removal
 
 **Rotation** is by an updater (R16) whose device is active and holds the
-current version (it acquires it first, §3.3). If an active member confirms
-the space has no root, ordinary rotation succeeds with zero deliveries and
-writes nothing. Otherwise a device that cannot confirm the key state or
+current version (it acquires it first, §3.3). If the server shows no root and
+the device has no evidence of one, ordinary rotation by an active member
+succeeds with zero deliveries and writes nothing, whether the root is absent
+or hidden by the server. Otherwise a device that cannot confirm the key state or
 acquire the current key gets `rotation-needs-key`, as does a recovery
 rotation by a device that holds no version. A device awaiting approval gets
 `no-account`. An account observed to have no member row gets `not-a-member`.

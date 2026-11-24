@@ -2245,6 +2245,97 @@ fn explicit_rotation_of_a_space_without_a_key_writes_nothing() {
     });
 }
 
+/// Alice refuses to rotate when the server hides a root whose key she holds;
+/// Bob sees no evidence of the root and gets the same zero as a keyless space.
+///
+/// ```text
+/// alice ──write──► server creates root
+/// server (copy before the write) ──no root──► alice: rotation-needs-key
+///                               └──no root──► bob: zero deliveries
+/// ```
+#[test]
+fn explicit_rotation_of_a_hidden_root_depends_on_held_key_evidence() {
+    within(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("server.sqlite");
+        let old = dir.path().join("old.sqlite");
+        let settings = EncryptionSettings::default();
+        let alice_store = MemoryStore::new();
+        let bob_store = MemoryStore::new();
+        let space = {
+            let server = secure_authority_with(&settings, Some(&live));
+            let alice = device(&server, account(0xa1), alice_store.clone(), 1);
+            alice.activate(&server);
+            let bob = device(&server, account(0xb0), bob_store.clone(), 2);
+            bob.activate(&server);
+            let space = new_project(&server, &alice, "plans");
+            add_member(&server, &alice, space, &bob.id());
+            for suffix in ["", "-wal", "-shm"] {
+                let source = format!("{}{suffix}", live.display());
+                if std::path::Path::new(&source).exists() {
+                    std::fs::copy(&source, format!("{}{suffix}", old.display())).unwrap();
+                }
+            }
+            write_note(&server, &alice, space, SECRET).unwrap();
+            pump(&server, &alice.db);
+            drive(&server, &[&alice.db], alice.client.reconcile(&alice.db)).unwrap();
+            assert_eq!(count(&server, SPACES), 1);
+            assert_eq!(marks(&alice, space), [KeyMark::Published]);
+            space
+        };
+
+        let hiding = secure_authority_with(&settings, Some(&old));
+        assert_eq!(count(&hiding, SPACES), 0);
+        let alice = device(&hiding, account(0xa1), alice_store, 3);
+        alice.activate(&hiding);
+        let address = space_address(&alice, space);
+        let error = drive(
+            &hiding,
+            &[&alice.db],
+            alice.client.rotate(&alice.db, &address),
+        )
+        .expect_err("Alice holds the key of the hidden root");
+        let ClientError::Protocol(ProtocolError::Refused(code)) = error else {
+            panic!("unexpected rotation error: {error}");
+        };
+        assert_eq!(code.code(), "rotation-needs-key");
+
+        let bob = device(&hiding, account(0xb0), bob_store, 4);
+        bob.activate(&hiding);
+        assert!(marks(&bob, space).is_empty());
+        assert_eq!(
+            drive(&hiding, &[&bob.db], bob.client.rotate(&bob.db, &address)).unwrap(),
+            0
+        );
+        assert_eq!(count(&hiding, "__e2ee_space_successors"), 0);
+    });
+}
+
+/// Alice refuses to rotate when the server shows a root row she cannot decode.
+#[test]
+fn explicit_rotation_refuses_when_a_root_row_is_skipped() {
+    within(|| {
+        let server = secure_authority_with(&EncryptionSettings::default(), None);
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 1);
+        alice.activate(&server);
+        let space = new_project(&server, &alice, "plans");
+        undecodable_root(&server, &alice, space, -1);
+        assert!(marks(&alice, space).is_empty());
+        let address = space_address(&alice, space);
+        let error = drive(
+            &server,
+            &[&alice.db],
+            alice.client.rotate(&alice.db, &address),
+        )
+        .expect_err("the skipped row could be the root");
+        let ClientError::Protocol(ProtocolError::Refused(code)) = error else {
+            panic!("unexpected rotation error: {error}");
+        };
+        assert_eq!(code.code(), "rotation-needs-key");
+        assert_eq!(count(&server, "__e2ee_space_successors"), 0);
+    });
+}
+
 /// Bob is a member, but Alice has yet to deliver the project's key to him.
 #[test]
 fn explicit_rotation_tells_a_member_to_wait_for_the_key() {
