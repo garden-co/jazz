@@ -1272,7 +1272,10 @@ export class NativeRuntimeAdapter implements Runtime {
   encryptionHandle(): Encryption | undefined {
     const state = this.ownerRuntime.encryptionState;
     if (!state) return undefined;
-    state.handle ??= state.createHandle(state.native);
+    if (!state.handle) {
+      state.handle = state.createHandle(state.native);
+      if (this.ownerRuntime.closed) state.handle.stop();
+    }
     return state.handle;
   }
 
@@ -2153,6 +2156,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
     this.advancePhase("closing");
+    this.encryptionState?.handle?.stop();
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
@@ -2196,6 +2200,7 @@ export class NativeRuntimeAdapter implements Runtime {
   discard(): void {
     if (this.phase !== "open") return;
     this.advancePhase("closed");
+    this.encryptionState?.handle?.stop();
     // Do not explicitly free the WASM wrapper here. A forced IndexedDB close
     // can reject a storage Promise while a WASM future is still unwinding;
     // freeing its receiver in that window is unsafe. Sever all runtime work
@@ -2222,7 +2227,6 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const write of this.writes.values()) {
       write.close?.();
     }
-    this.encryptionState?.handle?.stop();
     this.encryptionState?.serving.stop({ cancelPending: true });
     this.subscriptions.clear();
     this.pendingTxs.clear();

@@ -182,6 +182,10 @@ export class Encryption {
   private readonly pendingReports: EncryptionReport[] = [];
   private readonly activeReports = new Map<string, EncryptionReport>();
   private timer: ReturnType<typeof setInterval> | undefined;
+  private closed = false;
+  private readonly assertOpen = () => {
+    if (this.closed) throw new EncryptionError("closed", "The encryption handle is closed");
+  };
 
   constructor(
     private readonly native: EncryptionNative,
@@ -189,15 +193,19 @@ export class Encryption {
   ) {
     const call = <T>(op: string, args: Record<string, unknown> = {}) => this.call<T>(op, args);
     this.devices = new Devices(call);
-    this.recovery = new Recovery(call, options);
+    this.recovery = new Recovery(call, options, this.assertOpen);
     this.keys = new Keys(call);
     this.members = new Members((space) => call("spaceRow", { ...space }));
   }
 
   private async call<T>(op: string, args: Record<string, unknown>): Promise<T> {
+    this.assertOpen();
     try {
-      return JSON.parse(await this.native.encryptionCall(op, args)) as T;
+      const response = await this.native.encryptionCall(op, args);
+      this.assertOpen();
+      return JSON.parse(response) as T;
     } catch (error) {
+      this.assertOpen();
       throw failure(error, op);
     }
   }
@@ -230,6 +238,7 @@ export class Encryption {
    * timeout. Later calls verify again at once.
    */
   async ready(options: { timeoutMs?: number } = {}): Promise<AccountStatus> {
+    this.assertOpen();
     const timeoutMs = options.timeoutMs ?? 30_000;
     if (this.options.nativeReadiness) return this.call("ready", { timeoutMs });
     const deadline = Number.isNaN(timeoutMs) ? Infinity : Date.now() + timeoutMs;
@@ -251,6 +260,7 @@ export class Encryption {
         };
         schedule();
       }).then(() => {
+        this.assertOpen();
         throw verificationTimeout(JSON.parse(this.native.encryptionState()));
       });
       return await Promise.race([attempt, expired]);
@@ -278,6 +288,7 @@ export class Encryption {
    */
   async readable(): Promise<void> {
     for (;;) {
+      this.assertOpen();
       const state = JSON.parse(this.native.encryptionState()) as { readable?: boolean };
       if (state.readable) return;
       await new Promise((resolve) => {
@@ -290,6 +301,7 @@ export class Encryption {
   /** The loop's verification, once it has one (see {@link ready}). */
   private async verified(): Promise<AccountStatus> {
     for (;;) {
+      this.assertOpen();
       const state = JSON.parse(this.native.encryptionState()) as {
         status: AccountStatus | null;
         error: string | null;
@@ -314,6 +326,7 @@ export class Encryption {
     let status =
       known.status === null ? await this.verified() : await this.call<AccountStatus>("ready", {});
     const secret = await this.options.accountSecret?.();
+    this.assertOpen();
     if (secret !== undefined) {
       // `automatic`: a retired root of the account secret is not an error
       // here, so the device still starts.
@@ -342,7 +355,7 @@ export class Encryption {
    * is reported (`ready-failed`). Called for you when the database opens.
    */
   start(): void {
-    if (this.runner) return;
+    if (this.runner || this.closed) return;
     const runner = { stopped: false };
     this.runner = runner;
     void (async () => {
@@ -366,8 +379,9 @@ export class Encryption {
     })();
   }
 
-  /** Stops the background verification and the delivery of reports. */
+  /** Closes this handle and stops background verification and report delivery. */
   stop(): void {
+    this.closed = true;
     if (this.runner) this.runner.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
@@ -398,6 +412,7 @@ export class Encryption {
 
   /** Listens to reports; returns the function that stops it. */
   onReport(listener: (report: EncryptionReport) => void): () => void {
+    this.assertOpen();
     if (!this.listeners.has(listener) && this.activeReports.size > 0) {
       queueMicrotask(() => {
         for (const report of this.activeReports.values()) {
@@ -419,9 +434,8 @@ export class Encryption {
   }
 
   /**
-   * The reports of rows left out because they could not be read, as they
-   * happen. The read that left a row out also says so itself: see
-   * {@link unreadableRows}.
+   * Reports of type `unreadable`, including those for a space and notices
+   * about rows returned. For rows omitted from a read, see {@link unreadableRows}.
    */
   onUnreadable(listener: (report: EncryptionReport) => void): () => void {
     return this.onReport((report) => {
@@ -507,6 +521,7 @@ export class Recovery {
   constructor(
     private readonly call: Call,
     private readonly options: EncryptionOptions,
+    private readonly assertOpen: () => void = () => {},
   ) {}
 
   private async phraseSecret(phrase: string): Promise<string> {
@@ -606,6 +621,7 @@ export class Recovery {
   }
 
   private refuseForDeviceAccount() {
+    this.assertOpen();
     if (this.options.accountSecret || this.options.deviceAccount) {
       throw new EncryptionError(
         "device-account",

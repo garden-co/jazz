@@ -154,7 +154,7 @@ describe("encryption on the browser-style client, end to end", () => {
     const keyScope = encryptionStoreScope(scope, "dev", session.getSnapshot().account!.id);
     const keys = browserPrivateStore();
     expect(await keys.list(keyScope)).not.toEqual([]);
-    await session.signOut();
+    await session.logout();
     expect(await keys.list(keyScope)).toEqual([]);
   });
 

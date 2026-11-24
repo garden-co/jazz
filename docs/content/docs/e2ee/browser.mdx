@@ -93,9 +93,10 @@ which only the local-first client has:
 - **Async calls wait like any other operation**: `ready()`, `deviceId()`, `devices.*`, `recovery.*`,
   `keys.*`, `resetAccount()`, `members.row`, `members.where` and `members.remove` wait up to 30 seconds for the local-first client, start loading it if it
   has not started, then run on the real handle. The 30 seconds cover the load and the new client
-  verifying the account. While the `Db` is thin, `ready({ timeoutMs })` waits for the shorter of
-  your `timeoutMs` and those 30 seconds, then rejects with reason `"timeout"`. They reject with the same `EncryptionNeedsLocalFirstError` as
-  above (reason `"no-loader"` without a loader). `await db.encryption.ready()` is the way to wait for
+  verifying the account. With `ready({ timeoutMs })`, loading and verification share your timeout.
+  The wait for local-first has a 30-second cap. If that wait times out, `ready()` rejects with
+  `EncryptionNeedsLocalFirstError` and reason `"timeout"`. Without a loader, the reason is
+  `"no-loader"`. `await db.encryption.ready()` is the way to wait for
   the keys: on a thin `Db` it waits for the upgrade first, then for the device's keys to be ready.
 - **A handle you took while thin keeps working** after the upgrade; you do not need to read
   `db.encryption` again. After a sign-out its calls reject with `DbReplacedError`, and a call still
@@ -132,9 +133,8 @@ keys from the private store (yours, if you passed `store`) together with its loc
 tab of the app holds that account open, and a sign-out the page did not see (on your server, or a tab
 that closed) is wiped on the next page load. The device can no longer read the account's encrypted
 rows: when the user signs in again it is a new device, approved by another device or recovered (see
-[Devices and recovery](/docs/e2ee/devices-and-recovery)). Wiping takes the persistent storage (the
-default). With `driver: { type: "memory" }`, sign-out releases the in-memory client and skips
-the private-store wipe. See the [persistent-driver check](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/src/session/create-jazz-session.ts#L318) and the
+[Devices and recovery](/docs/e2ee/devices-and-recovery)). With `driver: { type: "memory" }`, sign-out
+closes the in-memory replica and still wipes the saved keys. See the
 [two-tab sign-out test](https://github.com/garden-co/jazz/blob/5a4121130c/packages/jazz-tools/tests/browser/encryption.server.test.ts#L710).
 
 ## Tabs

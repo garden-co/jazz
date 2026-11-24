@@ -51,6 +51,7 @@ import {
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 import { relayWorkerLink } from "../default-runtime-source.js";
 import { CONNECTED } from "../sync-status.js";
+import { Encryption } from "../../encryption/index.js";
 import { memoryPrivateStore, servePrivateStore } from "../../encryption/private-store.js";
 
 type NativeDbForTest = ReturnType<
@@ -8801,13 +8802,16 @@ it("closes an encrypted database when its private store never answers", async ()
     takeStoreRequests: () => requests.splice(0),
     replyStore: vi.fn(() => true),
     encryptionSetOnline: vi.fn(),
+    encryptionSpaces: () => "{}",
   };
   const load = vi.fn(() => new Promise<never>(() => {}));
   const serving = servePrivateStore(native, { ...memoryPrivateStore(), load });
   const stop = vi.spyOn(serving, "stop");
-  runtime.attachEncryption(native as never, serving, () => ({}) as never);
+  runtime.attachEncryption(native as never, serving, (adapter) => new Encryption(adapter));
+  const retained = runtime.encryptionHandle()!;
   try {
     const closing = runtime.close();
+    await expect(retained.deviceId()).rejects.toMatchObject({ code: "closed" });
     await vi.advanceTimersByTimeAsync(10);
     expect(load).toHaveBeenCalledWith("device", "keys");
     expect(close).not.toHaveBeenCalled();
