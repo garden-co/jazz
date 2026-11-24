@@ -937,6 +937,26 @@ export class WriteWaitTimeoutError extends Error {
   }
 }
 
+/**
+ * A streaming write timed out after publication started. Publication may
+ * still complete. Await {@link settled} and check its outcome before retrying.
+ */
+export class StreamingPublicationTimeoutError extends Error {
+  readonly name = "TimeoutError";
+
+  constructor(
+    table: string,
+    /** The ID of the row being published. */
+    readonly rowId: string,
+    /** Resolves with the publication receipt or rejects with the publication error. */
+    readonly settled: Promise<StreamingInsertResult>,
+  ) {
+    super(
+      `Streaming publication of ${table} row ${rowId} timed out and may still complete. Await error.settled before retrying.`,
+    );
+  }
+}
+
 /** Options for waiting on a write. */
 export interface WriteWaitOptions {
   tier: DurabilityTier;
