@@ -1231,10 +1231,12 @@ function foregroundOperationError(response: {
   reason: string;
   code?: string;
   reasonName?: string;
+  space?: { scopeId: string; identifier: string };
 }): Error {
   const error = new Error(response.reason);
   if (response.code !== undefined) Object.assign(error, { code: response.code });
   if (response.reasonName !== undefined) Object.assign(error, { reason: response.reasonName });
+  if (response.space !== undefined) Object.assign(error, { space: response.space });
   return error;
 }
 

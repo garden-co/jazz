@@ -744,41 +744,24 @@ fn json_or_null(value: Option<JsonValue>) -> serde_json::Value {
 
 // ---- errors --------------------------------------------------------------------------
 
-/// Prefix of the private `cause` that carries a core error code, and after
-/// [`CORE_ERROR_REASON_SEPARATOR`] its reason name, from where the core error
-/// is converted to the exported method that throws it or the promise it
-/// rejects. It never reaches JavaScript: [`BindingError`] strips it.
+/// Carries the core code through napi-rs until the exported method throws it.
 const CORE_ERROR_CODE_CARRIER: &str = "\u{0}jazz-core-error-code:";
-const CORE_ERROR_REASON_SEPARATOR: char = '\u{0}';
 
-/// Convert a core error into a `napi::Error` with its unchanged `Display`
-/// text, recording its stable [`jazz::db::ErrorCode::as_str`] code and
-/// `Reason::as_str` name. They ride inside the `napi::Error` until an
-/// exported method returns it as a [`BindingError`], which throws the code as
-/// the JavaScript `error.code`, or a promise rejects with it, which also sets
-/// `error.reason` (see [`js_error_value`]).
 fn napi_core_error(error: &CoreError) -> napi::Error {
     let mut napi_error = napi::Error::from_reason(error.to_string());
-    let mut carrier = format!("{CORE_ERROR_CODE_CARRIER}{}", error.code.as_str());
-    if let Some(reason) = error.reason {
-        carrier.push(CORE_ERROR_REASON_SEPARATOR);
-        carrier.push_str(reason.as_str());
-    }
-    napi_error.set_cause(napi::Error::from_reason(carrier));
+    napi_error.set_cause(napi::Error::from_reason(format!(
+        "{CORE_ERROR_CODE_CARRIER}{}",
+        error.code.as_str()
+    )));
     napi_error
 }
 
-/// The core code and reason name `error` carries, if it is a core error.
-fn carried_core(error: &napi::Error) -> Option<(&str, Option<&str>)> {
-    let carried = error
+fn carried_code(error: &napi::Error) -> Option<&str> {
+    error
         .cause
         .as_ref()?
         .reason
-        .strip_prefix(CORE_ERROR_CODE_CARRIER)?;
-    Some(match carried.split_once(CORE_ERROR_REASON_SEPARATOR) {
-        Some((code, reason)) => (code, Some(reason)),
-        None => (carried, None),
-    })
+        .strip_prefix(CORE_ERROR_CODE_CARRIER)
 }
 
 /// The error a shared-layer failure throws: an engine error keeps its stable
@@ -788,6 +771,19 @@ fn host_error(error: HostError) -> napi::Error {
         HostError::Engine(error) => napi_core_error(&error),
         HostError::Argument(message) => napi::Error::from_reason(message),
     }
+}
+
+/// napi-rs normally constructs a synchronous exception from just its code and
+/// message. Throw the completed JS object when a write needs its space field.
+fn sync_host_error(env: &Env, error: HostError) -> napi::Error {
+    if matches!(&error, HostError::Engine(core) if core.space.is_some()) {
+        let value = js_error_value(env.raw(), error);
+        if unsafe { sys::napi_throw(env.raw(), value) } == sys::Status::napi_ok {
+            return napi::Error::from_status(napi::Status::PendingException);
+        }
+        return napi::Error::from_reason("could not throw the encryption refusal");
+    }
+    host_error(error)
 }
 
 fn not_supported(what: &str) -> napi::Error {
@@ -815,7 +811,7 @@ impl From<napi::Error> for BindingError {
     fn from(mut error: napi::Error) -> Self {
         // A thrown error carries only the code: napi-rs creates it from a
         // code and a message, with no way to add properties.
-        let carried = carried_core(&error).map(|(code, _)| code.to_owned());
+        let carried = carried_code(&error).map(str::to_owned);
         let (code, cause) = match carried {
             Some(code) => (code, None),
             None => (error.status.as_ref().to_owned(), error.cause.take()),
@@ -896,7 +892,7 @@ fn host_promise(env: &Env, future: HostFuture<()>) -> napi::Result<PromiseRaw<'s
                 }
             }
             Err(error) => {
-                let rejection = js_error_value(env, &host_error(error));
+                let rejection = js_error_value(env, error);
                 unsafe { sys::napi_reject_deferred(env, deferred, rejection) };
             }
         },
@@ -906,9 +902,16 @@ fn host_promise(env: &Env, future: HostFuture<()>) -> napi::Result<PromiseRaw<'s
 
 /// A JavaScript `Error` with `error`'s message, code and, for a core error
 /// that has one, its reason name as `error.reason` (see [`BindingError`]).
-fn js_error_value(env: sys::napi_env, error: &napi::Error) -> sys::napi_value {
-    let carried = carried_core(error);
-    let code = carried.map_or_else(|| error.status.as_ref(), |(code, _)| code);
+fn js_error_value(env: sys::napi_env, error: HostError) -> sys::napi_value {
+    let (code, reason, space, detail) = match &error {
+        HostError::Engine(core) => (
+            core.code.as_str(),
+            core.reason,
+            core.space.as_ref(),
+            core.to_string(),
+        ),
+        HostError::Argument(message) => ("GenericFailure", None, None, message.clone()),
+    };
     let string = |text: &str| {
         let mut value = std::ptr::null_mut();
         unsafe {
@@ -916,16 +919,38 @@ fn js_error_value(env: sys::napi_env, error: &napi::Error) -> sys::napi_value {
         };
         value
     };
-    let message = string(&error.reason);
+    let message = string(&detail);
     let mut js_error = std::ptr::null_mut();
     // `napi_create_error` sets the JavaScript `error.code` from its code.
     let status = unsafe { sys::napi_create_error(env, string(code), message, &mut js_error) };
     if status != sys::Status::napi_ok {
         return message;
     }
-    if let Some((_, Some(reason))) = carried {
+    if let Some(reason) = reason {
         // Setting a data property on a fresh error object cannot fail.
-        unsafe { sys::napi_set_named_property(env, js_error, c"reason".as_ptr(), string(reason)) };
+        unsafe {
+            sys::napi_set_named_property(env, js_error, c"reason".as_ptr(), string(reason.as_str()))
+        };
+    }
+    if let Some(space) = space {
+        let mut address = std::ptr::null_mut();
+        unsafe {
+            if sys::napi_create_object(env, &mut address) == sys::Status::napi_ok {
+                sys::napi_set_named_property(
+                    env,
+                    address,
+                    c"scopeId".as_ptr(),
+                    string(&space.scope_id),
+                );
+                sys::napi_set_named_property(
+                    env,
+                    address,
+                    c"identifier".as_ptr(),
+                    string(&space.identifier),
+                );
+                sys::napi_set_named_property(env, js_error, c"space".as_ptr(), address);
+            }
+        }
     }
     js_error
 }
@@ -1159,7 +1184,7 @@ impl Inner {
     /// A write's receipt. A rejected write is reported to the
     /// mutation-error callback unless a wait claims it first.
     fn write(&self, env: &Env, write: HostResult<binding_host::Write>) -> napi::Result<Write> {
-        let write = write.map_err(host_error)?;
+        let write = write.map_err(|error| sync_host_error(env, error))?;
         settle_promises();
         let claimed = Rc::new(Cell::new(false));
         if let Some(error) = &write.rejected {
@@ -1293,18 +1318,18 @@ impl PendingNativeRead {
         }
     }
 
-    fn poll_once(&self) -> napi::Result<Option<Uint8Array>> {
+    fn poll_once(&self) -> HostResult<Option<Uint8Array>> {
         if let Some(bytes) = self.done.borrow_mut().take() {
             return Ok(Some(bytes.into()));
         }
         let Some(mut future) = self.future.borrow_mut().take() else {
-            return Err(napi::Error::from_reason(
-                "native pending read is already complete",
+            return Err(HostError::Argument(
+                "native pending read is already complete".to_owned(),
             ));
         };
         let mut context = Context::from_waker(Waker::noop());
         match future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => result.map(|bytes| Some(bytes.into())).map_err(host_error),
+            Poll::Ready(result) => result.map(|bytes| Some(bytes.into())),
             Poll::Pending => {
                 *self.future.borrow_mut() = Some(future);
                 Ok(None)
@@ -1316,8 +1341,8 @@ impl PendingNativeRead {
 #[napi]
 impl PendingNativeRead {
     #[napi]
-    pub fn poll(&self) -> js::Result<Option<Uint8Array>> {
-        Ok(self.poll_once()?)
+    pub fn poll(&self, env: &Env) -> js::Result<Option<Uint8Array>> {
+        Ok(self.poll_once().map_err(|err| sync_host_error(env, err))?)
     }
 
     #[napi]
@@ -1337,7 +1362,7 @@ impl PendingNativeRead {
 
 fn read_or_pending(future: ReadFuture) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
     let pending = PendingNativeRead::new(future);
-    Ok(match pending.poll_once()? {
+    Ok(match pending.poll_once().map_err(host_error)? {
         Some(bytes) => Either::A(bytes),
         None => Either::B(pending),
     })
@@ -1347,6 +1372,7 @@ fn read_or_pending(future: ReadFuture) -> js::Result<Either<Uint8Array, PendingN
 /// read is answered as a [`PendingNativeRead`] even when done at once, so the
 /// rows reach JS with it.
 fn reporting_read_or_pending(
+    env: &Env,
     future: HostFuture<(Vec<u8>, Vec<jazz::db::UnreadableRow>)>,
 ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
     let unreadable = Rc::<RefCell<Option<String>>>::default();
@@ -1355,7 +1381,10 @@ fn reporting_read_or_pending(
         unreadable,
         ..PendingNativeRead::new(future)
     };
-    match pending.poll_once()? {
+    match pending
+        .poll_once()
+        .map_err(|err| sync_host_error(env, err))?
+    {
         Some(bytes) if pending.unreadable.borrow().is_none() => Ok(Either::A(bytes)),
         Some(bytes) => {
             *pending.done.borrow_mut() = Some(bytes.to_vec());
@@ -1789,8 +1818,8 @@ pub struct SubscriptionBatchError {
 
 impl From<napi::Error> for SubscriptionBatchError {
     fn from(error: napi::Error) -> Self {
-        let code = carried_core(&error)
-            .map(|(code, _)| code.to_owned())
+        let code = carried_code(&error)
+            .map(str::to_owned)
             .unwrap_or_else(|| error.status.as_ref().to_owned());
         Self {
             message: error.reason,
@@ -2277,6 +2306,7 @@ impl NapiDb {
     #[napi(js_name = "insertInTransaction")]
     pub fn insert_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         cells: Uint8Array,
@@ -2290,7 +2320,7 @@ impl NapiDb {
                 &cells,
                 &insert_options(options),
             )
-            .map_err(host_error)?;
+            .map_err(|error| sync_host_error(env, error))?;
         Ok(row.to_bytes().to_vec().into())
     }
 
@@ -2313,6 +2343,7 @@ impl NapiDb {
     #[napi(js_name = "updateInTransaction")]
     pub fn update_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         row_id: Uint8Array,
@@ -2328,14 +2359,16 @@ impl NapiDb {
                 &patch,
                 &update_options(options),
             )
-            .map_err(host_error)?)
+            .map_err(|error| sync_host_error(env, error))?)
     }
 
     /// Binding-only entrypoint for typed partial-value updates staged inside
     /// an open transaction. The transaction's bound identity authors them.
     #[napi(js_name = "updateLargeValuesInTransaction")]
+    #[allow(clippy::too_many_arguments)] // The JS binding has six arguments plus the NAPI environment.
     pub fn update_large_values_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         row_id: Uint8Array,
@@ -2354,7 +2387,7 @@ impl NapiDb {
                 mutations,
                 updated_at_ms,
             )
-            .map_err(host_error)?)
+            .map_err(|error| sync_host_error(env, error))?)
     }
 
     /// Binding-only entrypoint for typed partial-value updates. The public
@@ -2397,6 +2430,7 @@ impl NapiDb {
     #[napi(js_name = "upsertInTransaction")]
     pub fn upsert_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         row_id: Uint8Array,
@@ -2407,7 +2441,7 @@ impl NapiDb {
         Ok(self
             .binding()?
             .upsert_in_transaction(&open_transaction_id, &table, &row_id, &cells, &options)
-            .map_err(host_error)?)
+            .map_err(|error| sync_host_error(env, error))?)
     }
 
     #[napi(js_name = "delete")]
@@ -2428,6 +2462,7 @@ impl NapiDb {
     #[napi(js_name = "deleteInTransaction")]
     pub fn delete_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         row_id: Uint8Array,
@@ -2441,7 +2476,7 @@ impl NapiDb {
                 &row_id,
                 &delete_options(options),
             )
-            .map_err(host_error)?)
+            .map_err(|error| sync_host_error(env, error))?)
     }
 
     #[napi(js_name = "restore")]
@@ -2464,6 +2499,7 @@ impl NapiDb {
     #[napi(js_name = "restoreInTransaction")]
     pub fn restore_in_transaction(
         &self,
+        env: &Env,
         open_transaction_id: String,
         table: String,
         row_id: Uint8Array,
@@ -2479,13 +2515,14 @@ impl NapiDb {
                 cells.as_deref(),
                 &restore_options(options),
             )
-            .map_err(host_error)?)
+            .map_err(|error| sync_host_error(env, error))?)
     }
 
     #[napi(js_name = "beginStreamingMutation")]
     #[allow(clippy::too_many_arguments)]
     pub fn begin_streaming_mutation(
         &self,
+        env: &Env,
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
@@ -2516,7 +2553,7 @@ impl NapiDb {
                 base,
                 transaction.as_deref(),
             )
-            .map_err(host_error)?;
+            .map_err(|error| sync_host_error(env, error))?;
         Ok(StreamingMutation { inner, mutation })
     }
 
@@ -2884,6 +2921,7 @@ impl NapiDb {
     #[napi]
     pub fn all(
         &self,
+        env: &Env,
         query: Uint8Array,
         #[napi(
             ts_arg_type = "{ tier?: string; include_deleted?: boolean; sync?: boolean } | undefined | null"
@@ -2902,8 +2940,8 @@ impl NapiDb {
                 author.as_deref(),
                 claims,
             )
-            .map_err(host_error)?;
-        reporting_read_or_pending(read)
+            .map_err(|err| sync_host_error(env, err))?;
+        reporting_read_or_pending(env, read)
     }
 
     /// Bind receipt-correlation claims to this client's own admitted identity.
@@ -2948,11 +2986,16 @@ impl NapiDb {
     /// deleted or not. Write authorization remains at the mutation boundary;
     /// this is not a query.
     #[napi(js_name = "localCurrentRow")]
-    pub fn local_current_row(&self, table: String, row_id: Uint8Array) -> js::Result<Uint8Array> {
+    pub fn local_current_row(
+        &self,
+        env: &Env,
+        table: String,
+        row_id: Uint8Array,
+    ) -> js::Result<Uint8Array> {
         Ok(self
             .binding()?
             .local_current_row(&table, &row_id)
-            .map_err(host_error)?
+            .map_err(|err| sync_host_error(env, err))?
             .into())
     }
 

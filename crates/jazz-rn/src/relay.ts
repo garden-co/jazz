@@ -248,6 +248,7 @@ export type NativeForegroundResponse =
       code?: string;
       /** The stable core `Reason` name when the core error has one. */
       reasonName?: string;
+      space?: { scopeId: string; identifier: string };
     }
   | { type: "cancelled"; cancelled: boolean }
   | { type: "transactionOpened"; transaction: number }
@@ -804,6 +805,14 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
     };
   if (tag === 22 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1))
     return { type: "streamingMutationAborted", aborted: bytes[1] === 1 };
+  if (tag === 39) {
+    const [code, a] = decodeForegroundPrefixedString(bytes, 1, "error code");
+    const [reasonName, b] = decodeForegroundPrefixedString(bytes, a, "error reason name");
+    const [reason, c] = decodeForegroundPrefixedString(bytes, b, "operation error");
+    const [scopeId, d] = decodeForegroundPrefixedString(bytes, c, "space scope");
+    const identifier = decodeForegroundString(bytes.subarray(d), "space identifier");
+    return { type: "operationError", code, reasonName, reason, space: { scopeId, identifier } };
+  }
   if (tag === 25) {
     // CodedOperationError: postcard code string, optional reason name, then
     // the reason string.
