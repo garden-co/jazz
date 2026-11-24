@@ -424,6 +424,8 @@ fn incompatible_open_creates_no_relay_or_sqlite_store() {
             node: NodeUuid::from_bytes([0xa1; 16]),
             author: AuthorSubject::for_test_bytes([0xa2; 16]),
         },
+        #[cfg(feature = "e2ee-client")]
+        declarations: None,
     };
     assert!(matches!(
         registry.open_admitted(config),
@@ -1196,21 +1198,12 @@ fn a_relay_refuses_a_client_of_another_identity() {
         node: NodeUuid::from_bytes([byte; 16]),
         author: AuthorSubject::for_test_bytes([0x5a; 16]),
     };
-    let relay = NativeRelay::spawn(RelayOpenConfig {
-        supported_abi: NativeRelayAbiRange {
-            minimum: NATIVE_RELAY_ABI_V1,
-            maximum: NATIVE_RELAY_ABI_V1,
-        },
-        scope: RelayScope {
-            app_namespace: "app".to_owned(),
-            storage_namespace: "default".to_owned(),
-            auth_scope: Some("alice".to_owned()),
-        },
-        sqlite_path: directory.path().join("alice.sqlite"),
-        schema: schema(),
-        migrations: Default::default(),
-        identity: identity(0x01),
-    })
+    let relay = NativeRelay::spawn(super::relay_config(
+        schema(),
+        directory.path().join("alice.sqlite"),
+        Default::default(),
+        identity(0x01),
+    ))
     .unwrap();
     let other = DbIdentity {
         author: AuthorSubject::for_test_bytes([0x5b; 16]),
@@ -1493,21 +1486,12 @@ fn a_store_opened_without_migrations_is_rebuilt_when_nothing_is_pending() {
         author,
     };
     let open = |migrations: Migrations| {
-        NativeRelay::spawn(RelayOpenConfig {
-            supported_abi: NativeRelayAbiRange {
-                minimum: NATIVE_RELAY_ABI_V1,
-                maximum: NATIVE_RELAY_ABI_V1,
-            },
-            scope: RelayScope {
-                app_namespace: "app".to_owned(),
-                storage_namespace: "default".to_owned(),
-                auth_scope: Some("alice".to_owned()),
-            },
-            sqlite_path: directory.path().join("alice.sqlite"),
-            schema: head.clone(),
+        NativeRelay::spawn(super::relay_config(
+            head.clone(),
+            directory.path().join("alice.sqlite"),
             migrations,
-            identity: identity(0x01),
-        })
+            identity(0x01),
+        ))
         .unwrap()
     };
     // As alpha.60 did: the head schema alone.
@@ -1596,21 +1580,12 @@ fn a_store_opened_without_migrations_with_unsynced_writes_is_left_for_the_app() 
         author,
     };
     let open = |migrations: Migrations| {
-        NativeRelay::spawn(RelayOpenConfig {
-            supported_abi: NativeRelayAbiRange {
-                minimum: NATIVE_RELAY_ABI_V1,
-                maximum: NATIVE_RELAY_ABI_V1,
-            },
-            scope: RelayScope {
-                app_namespace: "app".to_owned(),
-                storage_namespace: "default".to_owned(),
-                auth_scope: Some("alice".to_owned()),
-            },
-            sqlite_path: directory.path().join("alice.sqlite"),
-            schema: head.clone(),
+        NativeRelay::spawn(super::relay_config(
+            head.clone(),
+            directory.path().join("alice.sqlite"),
             migrations,
-            identity: identity(0x01),
-        })
+            identity(0x01),
+        ))
         .unwrap()
     };
     {
@@ -1750,21 +1725,12 @@ fn a_store_is_rebuilt_once_per_schema_version() {
     // Without the app's migrations, as a bundle that disagrees with the
     // server would open it: every store it makes is refused.
     let open = || {
-        NativeRelay::spawn(RelayOpenConfig {
-            supported_abi: NativeRelayAbiRange {
-                minimum: NATIVE_RELAY_ABI_V1,
-                maximum: NATIVE_RELAY_ABI_V1,
-            },
-            scope: RelayScope {
-                app_namespace: "app".to_owned(),
-                storage_namespace: "default".to_owned(),
-                auth_scope: Some("alice".to_owned()),
-            },
-            sqlite_path: directory.path().join("alice.sqlite"),
-            schema: head.clone(),
-            migrations: Migrations::default(),
-            identity: identity(0x01),
-        })
+        NativeRelay::spawn(super::relay_config(
+            head.clone(),
+            directory.path().join("alice.sqlite"),
+            Migrations::default(),
+            identity(0x01),
+        ))
         .unwrap()
     };
     // Carry the upstream until it stops changing; returns how many

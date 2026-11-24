@@ -7,24 +7,15 @@ use jazz::tools::deployment::artifact::system_tables::with_e2ee_fragment;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 fn config(schema: jazz::schema::JazzSchema, path: PathBuf) -> RelayOpenConfig {
-    RelayOpenConfig {
-        supported_abi: NativeRelayAbiRange {
-            minimum: NATIVE_RELAY_ABI_V1,
-            maximum: NATIVE_RELAY_ABI_V1,
-        },
-        scope: RelayScope {
-            app_namespace: "app".to_owned(),
-            storage_namespace: "default".to_owned(),
-            auth_scope: Some("alice".to_owned()),
-        },
-        sqlite_path: path,
+    super::relay_config(
         schema,
-        migrations: Migrations::default(),
-        identity: DbIdentity {
+        path,
+        Migrations::default(),
+        DbIdentity {
             node: NodeUuid::from_bytes([0x01; 16]),
             author: AuthorSubject::for_test_bytes([0x02; 16]),
         },
-    }
+    )
 }
 
 /// ```text

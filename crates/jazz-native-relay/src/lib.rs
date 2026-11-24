@@ -1797,9 +1797,11 @@ impl NativeRelayHost {
     ) -> Result<NativeRelay, JazzNativeRelayStatus> {
         #[cfg(feature = "e2ee-client")]
         if let Some(encryption) = self.admitted_scopes[&capability].encryption.as_ref() {
+            let mut config = config;
+            config.declarations = Some(encryption.declarations.clone());
             return self
                 .registry
-                .open_admitted_with(config, Some(encryption.declarations.clone()))
+                .open_admitted_with(config)
                 .map_err(relay_status);
         }
         self.registry.open_admitted(config).map_err(relay_status)
@@ -2168,7 +2170,8 @@ impl NativeRelayHost {
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let schema =
             JazzSchema::new(&public_schema).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        let config = RelayOpenConfig {
+        #[allow(unused_mut)]
+        let mut config = RelayOpenConfig {
             supported_abi: NativeRelayAbiRange {
                 minimum: NATIVE_RELAY_ABI_V1,
                 maximum: NATIVE_RELAY_ABI_V1,
@@ -2178,7 +2181,13 @@ impl NativeRelayHost {
             schema,
             migrations,
             identity: request.identity,
+            #[cfg(feature = "e2ee-client")]
+            declarations: None,
         };
+        #[cfg(feature = "e2ee-client")]
+        {
+            config.declarations = encryption.as_ref().map(|app| app.declarations.clone());
+        }
         // A scope is immutable once trusted code has admitted it. Reject a
         // conflicting second configuration before JavaScript can receive a
         // capability, even if no relay alias has been opened yet.
@@ -3433,6 +3442,32 @@ pub fn ensure_native_relay_abi_compatible(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jazz::db::Migrations;
+
+    fn relay_config(
+        schema: JazzSchema,
+        sqlite_path: PathBuf,
+        migrations: Migrations,
+        identity: DbIdentity,
+    ) -> RelayOpenConfig {
+        RelayOpenConfig {
+            supported_abi: NativeRelayAbiRange {
+                minimum: NATIVE_RELAY_ABI_V1,
+                maximum: NATIVE_RELAY_ABI_V1,
+            },
+            scope: RelayScope {
+                app_namespace: "app".to_owned(),
+                storage_namespace: "default".to_owned(),
+                auth_scope: Some("alice".to_owned()),
+            },
+            sqlite_path,
+            schema,
+            migrations,
+            identity,
+            #[cfg(feature = "e2ee-client")]
+            declarations: None,
+        }
+    }
 
     mod encrypted_app;
     mod host;

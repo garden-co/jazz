@@ -157,6 +157,8 @@ pub struct RelayOpenConfig {
     /// ships them: the store keeps each column where the authority does.
     pub migrations: Migrations,
     pub identity: DbIdentity,
+    #[cfg(feature = "e2ee-client")]
+    pub(crate) declarations: Option<Declarations>,
 }
 
 impl RelayOpenConfig {
@@ -303,8 +305,6 @@ use crate::encryption::Declarations;
 /// With the `e2ee-client` feature off there are no declarations to open a
 /// relay with.
 #[cfg(not(feature = "e2ee-client"))]
-type Declarations = std::convert::Infallible;
-#[cfg(not(feature = "e2ee-client"))]
 type BuiltDevice = std::convert::Infallible;
 #[cfg(feature = "e2ee-client")]
 use crate::encryption::{Built as BuiltDevice, ForegroundEncryption};
@@ -332,6 +332,7 @@ struct RelayInner {
     schema_version: jazz::ids::SchemaVersionId,
     migrations: MigrationsKey,
     identity: DbIdentity,
+    #[cfg(feature = "e2ee-client")]
     declarations: Option<Declarations>,
 }
 
@@ -378,15 +379,10 @@ impl Drop for OwnerAlive {
 impl NativeRelay {
     /// Open the scope's SQLite store on a new owner thread.
     pub fn spawn(config: RelayOpenConfig) -> Result<Self, RelayError> {
-        Self::spawn_with(config, None)
+        Self::spawn_with(config)
     }
 
-    fn spawn_with(
-        config: RelayOpenConfig,
-        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_variables))] declarations: Option<
-            Declarations,
-        >,
-    ) -> Result<Self, RelayError> {
+    fn spawn_with(config: RelayOpenConfig) -> Result<Self, RelayError> {
         // Before the thread exists and before SQLite is touched.
         config.validate()?;
         let sqlite_path = config.sqlite_path.clone();
@@ -394,9 +390,7 @@ impl NativeRelay {
         let migrations = config.migrations_key();
         let identity = config.identity;
         #[cfg(feature = "e2ee-client")]
-        let worker_declarations = declarations.clone();
-        #[cfg(not(feature = "e2ee-client"))]
-        let worker_declarations = declarations;
+        let declarations = config.declarations.clone();
         let alive = Arc::new(AtomicBool::new(true));
         let (commands, receiver) =
             mpsc::sync_channel::<RelayCommand>(NATIVE_RELAY_OWNER_COMMAND_MAX);
@@ -406,7 +400,7 @@ impl NativeRelay {
             .name("jazz-native-relay".to_owned())
             .spawn(move || {
                 let _alive = OwnerAlive(owner_alive);
-                let mut worker = match RelayWorker::open(config, worker_declarations) {
+                let mut worker = match RelayWorker::open(config) {
                     Ok(worker) => {
                         let _ = started_tx.send(Ok(()));
                         worker
@@ -431,6 +425,7 @@ impl NativeRelay {
                 schema_version,
                 migrations,
                 identity,
+                #[cfg(feature = "e2ee-client")]
                 declarations,
             }),
         })
@@ -1256,14 +1251,9 @@ impl RelayWorker {
         config
     }
 
-    fn open(
-        config: RelayOpenConfig,
-        #[cfg_attr(not(feature = "e2ee-client"), allow(unused_variables))] declarations: Option<
-            Declarations,
-        >,
-    ) -> Result<Self, RelayError> {
+    fn open(config: RelayOpenConfig) -> Result<Self, RelayError> {
         #[cfg(feature = "e2ee-client")]
-        let keyless = declarations.map(crate::encryption::keyless);
+        let keyless = config.declarations.clone().map(crate::encryption::keyless);
         ensure_sqlite_store(&config.sqlite_path)?;
         if let Some(parent) = config.sqlite_path.parent() {
             std::fs::create_dir_all(parent)
@@ -1930,48 +1920,24 @@ fn foreground_encryption_call(
     args_json: &str,
 ) -> Result<ForegroundDbCommandResponse, HostError> {
     let encryption = foreground_encryption(client)?;
-    let args: serde_json::Value =
-        serde_json::from_str(args_json).map_err(|error| HostError::Argument(error.to_string()))?;
     let result = |value: serde_json::Value| ForegroundDbCommandResponse::EncryptionResult {
         json: value.to_string(),
     };
-    let string = |name: &str| {
-        args.get(name)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| HostError::Argument(format!("missing encryption argument {name}")))
-    };
-    let flag = |name: &str| {
-        args.get(name)
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| HostError::Argument(format!("missing encryption argument {name}")))
-    };
-    let value = match op.as_str() {
-        "state" => encryption.state(),
-        "spaces" => encryption.spaces.clone(),
-        "useSpace" => {
-            encryption.use_space(flag("open")?, string("table")?, string("id")?);
-            serde_json::Value::Null
-        }
-        "setOnline" => {
-            encryption.set_online(flag("online")?);
-            serde_json::Value::Null
-        }
-        "ready" => return Err("readiness must start at the foreground host".into()),
-        _ => {
-            return client.pending_or_ready(
-                Box::pin(async move {
-                    let value = encryption
-                        .call(op, args)
-                        .await
-                        .map_err(HostError::Argument)?;
-                    Ok(result(value))
-                }),
-                None,
-            );
-        }
-    };
-    Ok(result(value))
+    if op == "ready" {
+        return Err("readiness must start at the foreground host".into());
+    }
+    let args =
+        serde_json::from_str(args_json).map_err(|error| HostError::Argument(error.to_string()))?;
+    client.pending_or_ready(
+        Box::pin(async move {
+            let value = encryption
+                .call(op, args)
+                .await
+                .map_err(HostError::Argument)?;
+            Ok(result(value))
+        }),
+        None,
+    )
 }
 
 /// A `MutationErrorEvent` for transaction `tx` rejected with `error` (by
@@ -2702,13 +2668,12 @@ pub struct NativeRelayRegistry {
 
 impl NativeRelayRegistry {
     pub fn open_admitted(&self, config: RelayOpenConfig) -> Result<NativeRelay, RelayError> {
-        self.open_admitted_with(config, None)
+        self.open_admitted_with(config)
     }
 
     pub(crate) fn open_admitted_with(
         &self,
         config: RelayOpenConfig,
-        declarations: Option<Declarations>,
     ) -> Result<NativeRelay, RelayError> {
         config.validate()?;
         let mut relays = self
@@ -2720,7 +2685,16 @@ impl NativeRelayRegistry {
                 || existing.inner.schema_version != config.schema.version_id()
                 || existing.inner.migrations != config.migrations_key()
                 || existing.inner.identity != config.identity
-                || existing.inner.declarations != declarations
+                || {
+                    #[cfg(feature = "e2ee-client")]
+                    {
+                        existing.inner.declarations != config.declarations
+                    }
+                    #[cfg(not(feature = "e2ee-client"))]
+                    {
+                        false
+                    }
+                }
             {
                 return Err(RelayError::ScopeConfigurationMismatch);
             }
@@ -2739,7 +2713,7 @@ impl NativeRelayRegistry {
         {
             return Err(RelayError::StorageAlreadyOwned);
         }
-        let relay = NativeRelay::spawn_with(config.clone(), declarations)?;
+        let relay = NativeRelay::spawn_with(config.clone())?;
         relays.insert(config.scope, relay.clone());
         Ok(relay)
     }
