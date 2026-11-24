@@ -16,9 +16,11 @@
  *
  * Select R2 with `blobs: (env) => r2(env.JAZZ_BLOBS!)` to move large
  * values to the bucket under `jazz/<app id>/` or `JAZZ_BLOBS_PREFIX`.
- * Only workerd
- * loads this module (the `workerd` export condition).
+ * Select an existing external store with `blobs: () => s3({ bucket, region })`
+ * or `blobs: () => vercelBlob()`. Configure credentials on this Worker.
+ * Only workerd loads this module (the `workerd` export condition).
  *
  * @experimental
  */
 export { createJazzCore, r2, routeJazzRequest, type JazzCoreEnv } from "jazz-wasm/durable-object";
+export { s3, vercelBlob } from "../backend/blobs.js";

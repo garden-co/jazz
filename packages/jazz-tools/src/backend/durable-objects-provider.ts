@@ -59,7 +59,7 @@ const DURABLE_OBJECT_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
  * which this backend asks it for when the store opens.
  *
  * Large values' bytes go where the core's Worker puts them, so there is no
- * `blobs` option here: select an R2 binding or inline SQLite when calling `createJazzCore()`.
+ * `blobs` option here: select SQLite, R2, S3 or Vercel Blob on the core Worker with `createJazzCore()`.
  *
  * The core admits only this backend, which holds the secret; browsers keep
  * talking to your backend. A Durable Object core doesn't run thin-client

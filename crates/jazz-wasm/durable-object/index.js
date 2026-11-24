@@ -3,7 +3,12 @@
 // initialised here from its statically imported module (Wrangler bundles
 // it as CompiledWasm). A Worker exports `JazzCore` as its Durable Object
 // class and `routeJazzRequest` as its fetch (see `host.js`).
-import { initSync, DurableObjectCore, __jazzReinstantiate } from "./pkg/jazz_wasm_do.js";
+import {
+  initSync,
+  DurableObjectCore,
+  signS3Request,
+  __jazzReinstantiate,
+} from "./pkg/jazz_wasm_do.js";
 import wasm from "./pkg/jazz_wasm_do_bg.wasm";
 import { jazzCoreClass, routeJazzRequest } from "./host.js";
 
@@ -28,7 +33,7 @@ export function createJazzCore(options) {
     );
   }
   return jazzCoreClass(
-    { DurableObjectCore, reinstantiate: () => __jazzReinstantiate(wasm) },
+    { DurableObjectCore, signS3Request, reinstantiate: () => __jazzReinstantiate(wasm) },
     options.blobs,
   );
 }

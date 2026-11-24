@@ -1,30 +1,6 @@
 // Where a core keeps the bytes of large values once they settle.
-
-/** An S3-compatible bucket for large-value bytes; see {@link s3}. */
-export interface S3BlobStore {
-  readonly kind: "s3";
-  /** Use these keys instead of the host's AWS credential chain or Sandbox workload role. */
-  readonly credentials?: {
-    readonly accessKeyId: string;
-    readonly secretAccessKey: string;
-    readonly sessionToken?: string;
-  };
-  /** Defaults to `S3_BUCKET_NAME`. */
-  readonly bucket?: string;
-  /** Defaults to `AWS_REGION`; `auto` for R2. */
-  readonly region?: string;
-  /** An S3-compatible endpoint other than AWS, e.g. R2's. */
-  readonly endpoint?: string;
-  /**
-   * Prepended to every object name. Defaults to `jazz/<store id>/`,
-   * one per store, so stores sharing a bucket (a preview core per branch)
-   * never share objects. A prefix is claimed by the first store that uses
-   * it, and any other store is refused there. A `vercel()` core also claims
-   * the whole bucket for its environment, so production and previews each
-   * need a bucket of their own.
-   */
-  readonly prefix?: string;
-}
+import type { S3BlobStore, VercelBlobStore } from "jazz-wasm/durable-object/blob-stores.js";
+export type { S3BlobStore, VercelBlobStore } from "jazz-wasm/durable-object/blob-stores.js";
 
 /**
  * Where a store keeps the bytes of large values once they settle. Rows and
@@ -75,11 +51,8 @@ export function files(options: { dir?: string } = {}): Extract<BlobStore, { kind
  * `AWS_ROLE_ARN`, and the core assumes that role with the function's own
  * OIDC token), MinIO, or Cloudflare R2 through R2's S3 API (an `endpoint`
  * of `https://<account id>.r2.cloudflarestorage.com`, `region: "auto"` and an
- * R2 API token's keys). `s3()` is for cores that run as a native server
- * (`sqlite()` on a host of your own, `vercel()`); a core on a Cloudflare
- * Durable Object (`durableObjects()`) reaches R2 through its Worker's
- * `JAZZ_BLOBS` R2 binding instead, set in that Worker's Wrangler config, not
- * here. Elsewhere the core finds
+ * R2 API token's keys). On a Durable Object, configure the core Worker with
+ * this helper or use a direct R2 binding via `r2(bucket)`. Native SQLite finds
  * credentials as the AWS SDKs do: `AWS_ACCESS_KEY_ID` and
  * `AWS_SECRET_ACCESS_KEY`, then `AWS_ROLE_ARN` with
  * `AWS_WEB_IDENTITY_TOKEN_FILE`, then the role ECS, Fargate, EKS Pod
@@ -96,23 +69,6 @@ export function files(options: { dir?: string } = {}): Extract<BlobStore, { kind
 export function s3(options: Omit<S3BlobStore, "kind"> = {}): S3BlobStore {
   const set = Object.entries(options).filter(([, value]) => value !== undefined);
   return { kind: "s3", ...Object.fromEntries(set) };
-}
-
-/** A Vercel Blob store for large-value bytes; see {@link vercelBlob}. */
-export interface VercelBlobStore {
-  readonly kind: "vercel-blob";
-  /** Use this token instead of ambient credentials or Sandbox workload OIDC. */
-  readonly credentials?: { readonly readWriteToken: string };
-  /** Defaults to `BLOB_STORE_ID`, set when a Blob store is connected to the project. */
-  readonly storeId?: string;
-  /**
-   * Prepended to every blob's pathname. Defaults to `jazz/<store id>/`,
-   * one per core, so the preview cores of different branches sharing a Blob
-   * store never share blobs. A prefix is claimed by the first core that uses
-   * it. The Blob store itself serves one environment: production and
-   * previews each need their own.
-   */
-  readonly prefix?: string;
 }
 
 /**

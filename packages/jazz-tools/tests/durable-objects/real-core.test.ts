@@ -58,6 +58,36 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz on a Durable Object c
     await stop();
   });
 
+  it.each(["s3", "vercel-blob"])(
+    "claims a prefix through the packaged %s destination",
+    async (kind) => {
+      let marker: string | undefined;
+      const core = await startDurableObjectCore({
+        script,
+        bindings: {
+          TEST_BLOBS: kind,
+          AWS_ACCESS_KEY_ID: "test-id",
+          AWS_SECRET_ACCESS_KEY: "test-secret",
+          BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_Test_example",
+        },
+        outboundService: async (request) => {
+          if (request.method === "PUT") {
+            marker = await request.text();
+            return new Response();
+          }
+          return marker === undefined ? new Response(null, { status: 404 }) : new Response(marker);
+        },
+      });
+      try {
+        const ready = await fetch(core.url + "/ready");
+        expect(ready.status, await ready.text()).toBe(200);
+        expect(marker?.trim()).toBe(await core.appId());
+      } finally {
+        await core.dispose();
+      }
+    },
+  );
+
   it("publishes, writes and reads through the backend", async () => {
     const { jazz } = await start();
     await jazz.db.insert(app.notes, { title: "first" }).wait({ tier: "global" });

@@ -83,6 +83,35 @@ once (Dashboard → R2 Object Storage), which asks for a payment method even wit
 - **Failures:** a value stays in SQLite until its upload has succeeded, and failed uploads are
   retried with backoff (logged to the Worker's logs), so an unreachable bucket never loses data.
 
+### Large values in S3 or Vercel Blob
+
+Select an existing bucket or private Blob store in the **core Worker**. Every
+backend connecting to that core uses the same destination. For S3, set
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` as Worker secrets, plus
+`AWS_SESSION_TOKEN` for temporary credentials. For Vercel Blob, set
+`BLOB_READ_WRITE_TOKEN`.
+
+```ts title="worker.ts"
+import { createJazzCore, routeJazzRequest, s3 } from "jazz-tools/durable-object";
+
+export const JazzCore = createJazzCore({
+  blobs: () => s3({ bucket: "app-chunks", region: "us-east-1" }),
+});
+export default { fetch: routeJazzRequest };
+```
+
+Set `endpoint` for an S3-compatible service. For private Vercel Blob, import
+`vercelBlob` from the same entry and use `blobs: () => vercelBlob()`. The core
+can read the store ID from a read-write token or from `storeId`.
+
+For custom secret bindings, return `s3({ bucket, region, credentials: {
+accessKeyId, secretAccessKey, sessionToken } })` or `vercelBlob({ credentials:
+{ readWriteToken } })` from the callback, using values from its `env` argument.
+Both destinations default to the app's own prefix. Give each core a unique
+explicit `prefix` if you override it. Vercel Blob does not document atomic
+first creation when two cores claim the same custom prefix simultaneously. As with R2, the core claims the prefix,
+keeps chunks in SQLite until their uploads succeed, and checks their hashes on read.
+
 ## Run your backend in the Worker too
 
 <Callout type="warn" title="Experimental">

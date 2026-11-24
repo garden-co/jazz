@@ -4,7 +4,7 @@
 import { readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Miniflare } from "miniflare";
+import { Miniflare, type WorkerOptions } from "miniflare";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -30,6 +30,7 @@ export async function startDurableObjectCore(
     backend?: boolean;
     /** More bindings for the Worker (test switches). */
     bindings?: Record<string, string>;
+    outboundService?: WorkerOptions["outboundService"];
   } = {},
 ): Promise<DurableObjectCore> {
   const script = options.script ?? join(here, "mock-core.mjs");
@@ -47,6 +48,7 @@ export async function startDurableObjectCore(
     },
     compatibilityFlags: ["nodejs_compat"],
     ...(options.persist ? { durableObjectsPersist: options.persist } : {}),
+    outboundService: options.outboundService,
     bindings: { ...options.bindings, JAZZ_CORE_SECRET: secret },
     host: "127.0.0.1",
     port: 0,

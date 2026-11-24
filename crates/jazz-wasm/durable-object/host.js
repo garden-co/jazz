@@ -22,9 +22,8 @@
 // JAZZ_BLOBS_PREFIX (where in it, default `jazz/<app id>/`).
 //
 // Large values: with inline storage their bytes stay in the object's SQL,
-// which grows with every one. With R2 selected, each settled large-value node moves
-// to the bucket under the prefix, named by its SHA-256 (which every put
-// carries, so R2 refuses a corrupted body), and is deleted from there once
+// which grows with every one. With external storage, each settled large-value node moves
+// under the claimed prefix, named by its SHA-256, and is deleted once
 // reclaimed. The engine hands out one batch of that work at a time; this
 // host runs it against the bucket and hands the outcome back, and a failed
 // op is retried in a later batch, with backoff. Bytes leave the SQL only
@@ -51,6 +50,8 @@
 //   instance with a fresh one; the next request opens a fresh core on it,
 //   over the same storage.
 import { DurableObject } from "cloudflare:workers";
+
+import { blobStore } from "./blob-stores.js";
 
 const decoder = new TextDecoder();
 
@@ -87,7 +88,7 @@ async function each(items, limit, run) {
 }
 
 /**
- * A store's large values in an R2 bucket (the `JAZZ_BLOBS` binding), under
+ * A store's externally stored large values, under
  * its own prefix, which it claims for its app id before its first op.
  */
 export class LargeValueBucket {
@@ -104,7 +105,7 @@ export class LargeValueBucket {
     this.claiming = null;
   }
 
-  /** `env.JAZZ_BLOBS_PREFIX`, ending in `/`, else `jazz/<app id>/`. */
+  /** The configured prefix, ending in `/`, else `jazz/<app id>/`. */
   static prefix(configured, appId) {
     if (configured === undefined || configured === "") return `jazz/${appId}/`;
     return configured.endsWith("/") ? configured : `${configured}/`;
@@ -112,8 +113,7 @@ export class LargeValueBucket {
 
   /**
    * Check that this store owns the prefix, claiming it if no store does: a
-   * put of `.jazz-owner` only if it is absent (R2's `onlyIf`), which answers
-   * `null` when another put got there first. Resolves to `null` once owned,
+   * create of `.jazz-owner` with overwrites disabled, then a read of its owner. Resolves to `null` once owned,
    * or to why the store is refused (for good: another store owns it, or
    * the bucket or prefix is not the one this store claimed, where its
    * values are). A failure to reach the bucket rejects and is tried again
@@ -130,19 +130,22 @@ export class LargeValueBucket {
   async claimNow() {
     const key = this.prefix + OWNER_OBJECT;
     const refused = (owner) =>
-      `JAZZ_BLOBS: ${this.prefix} in this bucket belongs to app ${owner}, not this one (${this.appId}); ` +
-      "give each store its own bucket or JAZZ_BLOBS_PREFIX";
+      `Large values: ${this.prefix} in this bucket belongs to app ${owner}, not this one (${this.appId}); ` +
+      "give each store its own bucket or prefix";
     // Once a store claimed a prefix, its moved values are there: another
     // prefix, or a bucket without its owner object (another bucket bound),
     // would split them, so it is refused until the binding is set back.
     const recorded = this.claimed.get();
     if (recorded !== null && recorded !== this.prefix) {
       return (
-        `JAZZ_BLOBS: this store's large values are under ${recorded}, but JAZZ_BLOBS_PREFIX now names ${this.prefix}; ` +
+        `Large values: this store's large values are under ${recorded}, but ${this.bucket.prefixOption ?? "prefix"} now names ${this.prefix}; ` +
         "set it back (moving a store's large values to another prefix isn't supported yet)"
       );
     }
-    const owner = async () => (await (await this.bucket.get(key))?.text())?.trim();
+    const owner = async () => {
+      const bytes = await this.bucket.get(key, 1024);
+      return bytes === null ? undefined : decoder.decode(bytes).trim();
+    };
     const found = await owner();
     if (found !== undefined) {
       if (found !== this.appId) return refused(found);
@@ -151,21 +154,20 @@ export class LargeValueBucket {
     }
     if (recorded !== null) {
       return (
-        `JAZZ_BLOBS: ${key} is missing from the bound bucket, though this store claimed ${recorded} there: ` +
+        `Large values: ${key} is missing from the bound bucket, though this store claimed ${recorded} there: ` +
         "the binding names another bucket (bind the store's own again), or the owner object was deleted"
       );
     }
-    const put = await this.bucket.put(key, `${this.appId}\n`, {
-      onlyIf: { etagDoesNotMatch: "*" },
-    });
-    if (put !== null) {
-      this.claimed.set(this.prefix);
-      return null;
+    // Read back even when creation races or its response is lost. Blob's
+    // no-overwrite upload can report a conflict with several HTTP statuses.
+    let createError;
+    try {
+      await this.bucket.createOwner(key, new TextEncoder().encode(this.appId + "\n"));
+    } catch (error) {
+      createError = error;
     }
-    // Another store claimed it first.
     const winner = await owner();
-    if (winner === undefined)
-      throw new Error("JAZZ_BLOBS: the owner object vanished while claiming");
+    if (winner === undefined) throw createError ?? new Error("missing owner after claim");
     if (winner !== this.appId) return refused(winner);
     this.claimed.set(this.prefix);
     return null;
@@ -183,7 +185,7 @@ export class LargeValueBucket {
     try {
       refusal = await this.claim();
     } catch (error) {
-      refusal = `JAZZ_BLOBS: claim ${this.prefix}: ${reason(error)}`;
+      refusal = `Large values: claim ${this.prefix}: ${reason(error)}`;
     }
     if (refusal !== null) {
       return {
@@ -193,18 +195,16 @@ export class LargeValueBucket {
       };
     }
     const [fetched, put, deleted] = await Promise.all([
-      each(fetches, BUCKET_CONCURRENCY, async (key) => {
-        const object = await this.bucket.get(this.prefix + key);
-        return object === null ? null : new Uint8Array(await object.arrayBuffer());
-      }),
+      // MAX_ENCODED_NODE_BYTES from jazz-types (256 KiB leaf + 16 KiB framing).
+      each(fetches, BUCKET_CONCURRENCY, (key) => this.bucket.get(this.prefix + key, 272 * 1024)),
       each(
         puts.map((key, index) => ({ key, index })),
         BUCKET_CONCURRENCY,
         async ({ key, index }) => {
           const bytes = bytesOf(index);
           if (bytes === undefined) throw new Error("the core that handed this put out is gone");
-          // A node's name is its bytes' SHA-256: R2 refuses a body that differs.
-          await this.bucket.put(this.prefix + key, bytes, { sha256: key });
+          // The transport receives the expected SHA-256 with the bytes.
+          await this.bucket.put(this.prefix + key, bytes, key);
         },
       ),
       this.deleteAll(deletes),
@@ -215,8 +215,11 @@ export class LargeValueBucket {
   /** One bulk delete (a batch holds at most 256): every key's result is its call's. */
   async deleteAll(keys) {
     if (keys.length === 0) return [];
+    const names = keys.map((key) => this.prefix + key);
+    if (!this.bucket.deleteMany)
+      return each(names, BUCKET_CONCURRENCY, (name) => this.bucket.remove(name));
     try {
-      await this.bucket.delete(keys.map((key) => this.prefix + key));
+      await this.bucket.deleteMany(names);
       return keys.map(() => undefined);
     } catch (error) {
       const why = reason(error) || "failed";
@@ -312,16 +315,14 @@ export function jazzCoreClass(wasm, blobs) {
       super(ctx, env);
       this.env = env;
       const destination = typeof blobs === "function" ? blobs(env) : blobs;
-      if (destination !== "sqlite" && !(destination?.kind === "r2" && destination.bucket)) {
-        throw new Error('createJazzCore(): select "sqlite" or r2(bucket)');
-      }
-      this.blobBucket = destination === "sqlite" ? undefined : destination.bucket;
+      this.blobBucket = blobStore(destination, env, wasm.signS3Request);
+      this.blobPrefix = destination?.kind === "r2" ? env.JAZZ_BLOBS_PREFIX : destination?.prefix;
       this.core = null;
       this.sockets = new Map();
       this.flushTimer = undefined;
       this.alarmSet = false;
       this.handlers = new WeakMap();
-      // Large values in the R2 bucket, if bound (see the top of this file).
+      // Initialise the transport claim once the persisted app id is known.
       this.bucket = null;
       this.chunkIo = { out: false, failures: 0, retryAt: 0, logged: false };
       this.chunkFetches = { out: false, failures: 0, retryAt: 0, logged: false };
@@ -363,7 +364,7 @@ export function jazzCoreClass(wasm, blobs) {
           const appId = this.core.appId();
           this.bucket = new LargeValueBucket(
             this.blobBucket,
-            LargeValueBucket.prefix(this.env.JAZZ_BLOBS_PREFIX, appId),
+            LargeValueBucket.prefix(this.blobPrefix, appId),
             appId,
             claimedPrefix(this.ctx.storage.sql),
           );
@@ -551,7 +552,7 @@ export function jazzCoreClass(wasm, blobs) {
           try {
             refusal = await this.bucket.claim();
           } catch (error) {
-            const why = `JAZZ_BLOBS: claim ${this.bucket.prefix}: ${reason(error)}`;
+            const why = `Large values: claim ${this.bucket.prefix}: ${reason(error)}`;
             return failure(503, "large_value_bucket_unavailable", why);
           }
           if (refusal !== null) return failure(503, "large_value_bucket_refused", refusal);

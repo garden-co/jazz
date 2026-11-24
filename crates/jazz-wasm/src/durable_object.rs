@@ -15,6 +15,39 @@ use jazz::storage::{self, Backend, Cursor, SqlError, SqlResult, Storage, Value};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
+/// Sign the headers the Worker sends with its S3 fetch, using the native core's signer.
+#[wasm_bindgen(js_name = signS3Request)]
+pub fn sign_s3_request(
+    method: &str,
+    path: &str,
+    headers: JsValue,
+    payload_hash: &str,
+    keys: JsValue,
+    region: &str,
+) -> Result<String, JsValue> {
+    let mut headers: Vec<(String, String)> = serde_wasm_bindgen::from_value(headers)
+        .map_err(|_| JsValue::from_str("invalid S3 request headers"))?;
+    let mut dates = headers.iter().filter(|(name, _)| name == "x-amz-date");
+    let valid_date = dates
+        .next()
+        .and_then(|(_, value)| value.get(..8))
+        .is_some_and(|date| date.bytes().all(|b| b.is_ascii_digit()));
+    if !valid_date || dates.next().is_some() {
+        return Err(JsValue::from_str("invalid S3 request date"));
+    }
+    let keys = serde_wasm_bindgen::from_value(keys)
+        .map_err(|_| JsValue::from_str("invalid S3 credentials"))?;
+    Ok(jazz_server::s3_signing::sign(
+        method,
+        path,
+        "",
+        &mut headers,
+        payload_hash,
+        &keys,
+        region,
+    ))
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[derive(Clone)]
