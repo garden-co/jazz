@@ -172,6 +172,15 @@ pub fn create(
         // A stub without TODOs must load: what the diff decided passes
         // every lens check a deployment runs.
         artifact::load_app(out.as_bytes()).map_err(CodegenError::from_artifact)?;
+    } else {
+        let (versions, declared) =
+            artifact::read_declared_versions(app_json).map_err(CodegenError::from_artifact)?;
+        let empty = encryption::Entries::new();
+        let after = versions
+            .last()
+            .and_then(|version| declared.entries(&version.to_string()))
+            .unwrap_or(&empty);
+        check_encryption_diff(&source_tables, &target_tables, &recorded.encryption, after)?;
     }
     Ok(Created {
         app: out,
@@ -852,7 +861,7 @@ pub fn check_encryption_migration(from_json: &[u8], to_json: &[u8]) -> Result<()
             .cloned()
     };
     let before = entries(&from).unwrap_or_default();
-    let mut after = entries(&to).unwrap_or_default();
+    let after = entries(&to).unwrap_or_default();
     let (old, new) = (from.current_schema(), to.current_schema());
     let refusal = |reason| CodegenError::new(format!("{}: {reason}", artifact::APP_FILE));
     if from.current_hash() == to.current_hash() {
@@ -862,11 +871,24 @@ pub fn check_encryption_migration(from_json: &[u8], to_json: &[u8]) -> Result<()
         return encryption::check_index_transition((old, &before), &after).map_err(refusal);
     }
 
+    check_encryption_diff(old, new, &before, &after)
+}
+
+fn check_encryption_diff(
+    old: &Schema,
+    new: &Schema,
+    before: &encryption::Entries,
+    after: &encryption::Entries,
+) -> Result<(), CodegenError> {
+    if before.is_empty() && after.is_empty() {
+        return Ok(());
+    }
+    let refusal = |reason| CodegenError::new(format!("{}: {reason}", artifact::APP_FILE));
     let diff = diff_steps(old, new)?;
-    // The author decides these identities in the stub. The loader checks
-    // those columns once the author chooses a rename or an add/drop.
+    // First check the changes whose column identities the stub already knows.
+    let mut definite = after.clone();
     for table in &diff.migrate {
-        if let Some(entry) = after.get_mut(&table.table) {
+        if let Some(entry) = definite.get_mut(&table.table) {
             for step in &table.steps {
                 if let ColumnStep::MaybeRenamed { column, .. } = step {
                     entry.columns.remove(column);
@@ -905,44 +927,109 @@ pub fn check_encryption_migration(from_json: &[u8], to_json: &[u8]) -> Result<()
                 .any(|candidate| candidate.name_str() == column)
         })
     };
-    encryption::check_mapped_columns(
-        (old, &before),
-        &after,
-        old_table,
-        new_table,
-        |table, name| {
-            old_table(table)
-                .filter(|table| has_column(old, table, name))
-                .map(|_| name.to_owned())
-        },
-        |table, name| {
-            let next = new_table(table)?;
-            if has_column(new, &next, name) {
-                return Some(name.to_owned());
+    let check = |before: &encryption::Entries,
+                 after: &encryption::Entries,
+                 rename_table: &str,
+                 renames: &[(&str, &str)]| {
+        encryption::check_mapped_columns(
+            (old, before),
+            after,
+            old_table,
+            new_table,
+            |table, name| {
+                if table == rename_table
+                    && let Some((from, _)) = renames.iter().find(|(_, to)| *to == name)
+                {
+                    return Some((*from).to_owned());
+                }
+                old_table(table)
+                    .filter(|table| has_column(old, table, name))
+                    .map(|_| name.to_owned())
+            },
+            |table, name| {
+                let next = new_table(table)?;
+                if next == rename_table
+                    && let Some((_, to)) = renames.iter().find(|(from, _)| *from == name)
+                {
+                    return Some((*to).to_owned());
+                }
+                if has_column(new, &next, name) {
+                    return Some(name.to_owned());
+                }
+                // A possible rename may preserve the declared space column.
+                let new_space = &after.get(&next)?.space;
+                if before.get(table)?.space != name {
+                    return None;
+                }
+                diff.migrate
+                    .iter()
+                    .find(|t| t.table == next)?
+                    .steps
+                    .iter()
+                    .find_map(|step| match step {
+                        ColumnStep::MaybeRenamed { column, candidates }
+                            if column == new_space
+                                && candidates.iter().any(|candidate| candidate == name) =>
+                        {
+                            Some(column.clone())
+                        }
+                        _ => None,
+                    })
+            },
+            false,
+        )
+    };
+    check(before, &definite, "", &[]).map_err(refusal)?;
+
+    // For each possible encrypted rename, try that column as an addition
+    // and then with each candidate identity. The author can choose any
+    // viable interpretation when filling in the stub.
+    for table in &diff.migrate {
+        let name = &table.table;
+        let Some(entry) = after.get(name) else {
+            continue;
+        };
+        let earlier = before.get(name);
+        let old_entries =
+            encryption::Entries::from_iter(earlier.map(|entry| (name.clone(), entry.clone())));
+        let mut new_entries = encryption::Entries::new();
+        for step in &table.steps {
+            let ColumnStep::MaybeRenamed { column, candidates } = step else {
+                continue;
+            };
+            let Some(declaration) = entry.columns.get(column) else {
+                continue;
+            };
+            let mut trial = definite[name].clone();
+            trial.columns.insert(column.clone(), declaration.clone());
+            let tagged = entry.equality.contains(column);
+            if tagged {
+                trial.equality.push(column.clone());
             }
-            // A possible rename may preserve the declared space column.
-            let new_space = &after.get(&next)?.space;
-            if before.get(table)?.space != name {
-                return None;
+            new_entries.insert(name.clone(), trial);
+            let Err(add_error) = check(&old_entries, &new_entries, name, &[]) else {
+                continue;
+            };
+            if !candidates.iter().any(|candidate| {
+                let mut renames = vec![(candidate.as_str(), column.as_str())];
+                let old_tag = encryption::equality_column(candidate);
+                let new_tag = encryption::equality_column(column);
+                if tagged
+                    && earlier.is_some_and(|entry| entry.equality.contains(candidate))
+                    && table.steps.iter().any(|step| {
+                        matches!(step, ColumnStep::MaybeRenamed { column, candidates }
+                            if *column == new_tag && candidates.contains(&old_tag))
+                    })
+                {
+                    renames.push((&old_tag, &new_tag));
+                }
+                check(&old_entries, &new_entries, name, &renames).is_ok()
+            }) {
+                return Err(refusal(add_error));
             }
-            diff.migrate
-                .iter()
-                .find(|t| t.table == next)?
-                .steps
-                .iter()
-                .find_map(|step| match step {
-                    ColumnStep::MaybeRenamed { column, candidates }
-                        if column == new_space
-                            && candidates.iter().any(|candidate| candidate == name) =>
-                    {
-                        Some(column.clone())
-                    }
-                    _ => None,
-                })
-        },
-        false,
-    )
-    .map_err(refusal)
+        }
+    }
+    Ok(())
 }
 
 /// The fields of the migration from `from` to `to`, after `name` and
