@@ -284,10 +284,12 @@ impl World {
     /// device.
     pub fn approve_device(&mut self, account: &str) -> LocalDevice {
         self.with_account(account, |entry, rng| {
-            let device = entry.env.device(rng);
+            let mut device = entry.env.device(rng);
             entry.ledger.request(&device, rng);
             let approver = entry.device.clone();
-            entry.ledger.approve(&entry.env, &approver, &device, rng);
+            entry
+                .ledger
+                .approve(&entry.env, &approver, &mut device, rng);
             device
         })
     }

@@ -1,6 +1,5 @@
-import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
 import type { VitestPluginContext } from "vitest/node";
+import { storedBytes } from "../stored-bytes.js";
 import { transportControlBrowserCommands } from "./transport-control-commands.js";
 import {
   startLocalJazzServer,
@@ -124,12 +123,7 @@ export async function jazzServerStoreHolds(
   const dataDir = started.server.dataDir;
   if (!started.onDisk || !dataDir)
     throw new Error("This core keeps its store in memory: start it with onDisk");
-  const files = async (path: string): Promise<Buffer> => {
-    const entries = await readdir(path, { withFileTypes: true }).catch(() => undefined);
-    if (!entries) return readFile(path).catch(() => Buffer.alloc(0));
-    return Buffer.concat(await Promise.all(entries.map((entry) => files(join(path, entry.name)))));
-  };
-  const stored = await files(dataDir);
+  const stored = await storedBytes(dataDir);
   return needles.map((needle) => stored.includes(Buffer.from(needle, "utf8")));
 }
 

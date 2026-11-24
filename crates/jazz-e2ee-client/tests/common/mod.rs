@@ -705,6 +705,18 @@ pub fn session(
     node: u8,
     path: Option<&Path>,
 ) -> (Db, Upstream) {
+    let (db, upstream, _) = recorded_session(client, server, who, settings, node, path);
+    (db, upstream)
+}
+
+pub fn recorded_session(
+    client: &E2eeClient,
+    server: &Db,
+    who: AuthorSubject,
+    settings: &EncryptionSettings,
+    node: u8,
+    path: Option<&Path>,
+) -> (Db, Upstream, Rc<RefCell<Vec<u8>>>) {
     let config = DbConfig::new(
         secure_schema_with(settings),
         DbIdentity {
@@ -717,29 +729,13 @@ pub fn session(
         Some(path) => block_on(Db::open_at(config, path, FileOptions::default())).unwrap(),
         None => block_on(Db::open(config)).unwrap(),
     };
-    let up = Rc::new(RefCell::new(VecDeque::new()));
-    let down = Rc::new(RefCell::new(VecDeque::new()));
-    let wire = Rc::new(RefCell::new(Vec::new()));
-    let link = block_on(db.connect_upstream(Box::new(Recorded {
-        out: up.clone(),
-        inbound: down.clone(),
-        wire: wire.clone(),
-    })));
-    jazz::db::block_on(server.accept_subscriber(
-        Box::new(Recorded {
-            out: down,
-            inbound: up,
-            wire,
-        }),
-        who,
-    ))
-    .unwrap();
+    let (link, wire) = link_as(&db, server, who);
     pump(server, &db);
     assert!(
         jazz::db::block_on(client.prepare(&db)).unwrap(),
         "identities after one sync"
     );
-    (db, link)
+    (db, link, wire)
 }
 
 /// Runs `future` while the clients and `server` exchange what it waits

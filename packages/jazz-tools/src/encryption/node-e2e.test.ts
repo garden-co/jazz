@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { NapiDb } from "jazz-napi";
 import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
 import permissions from "../../tests/fixtures/encrypted/jazz.permissions.json";
+import { storedBytes } from "../../tests/stored-bytes.js";
 import { startTestJazz, testApp } from "../testing/index.js";
 import {
   acceptDeviceAccounts,
@@ -96,14 +97,6 @@ function memoryStore(): AccountStore {
     read: async () => stored,
     update: async (transform) => void (stored = transform(stored)),
   };
-}
-
-/** Every byte under `path` (a file, or a directory of them). */
-async function storedBytes(path: string): Promise<Buffer> {
-  const entries = await readdir(path, { withFileTypes: true }).catch(() => undefined);
-  if (!entries) return readFile(path);
-  const parts = await Promise.all(entries.map((entry) => storedBytes(`${path}/${entry.name}`)));
-  return Buffer.concat(parts);
 }
 
 type Server_ = Awaited<ReturnType<typeof serve>>;

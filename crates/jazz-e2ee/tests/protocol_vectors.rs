@@ -785,8 +785,9 @@ fn signed_bytes() {
         epoch_id: E1.into(),
         kind: AccountKind::DeviceAccount,
         device_account_public_key: Some(vec![0x33; 32]),
-        device_account_signature: Some(vec![]),
+        device_account_signature: Some(vec![1]),
     };
+    account_root.validate().unwrap();
     cases.push((
         "device account root",
         account_root.signed_bytes(&da, &keys()).unwrap(),
@@ -1496,7 +1497,11 @@ fn hand_computed_signed_bytes() {
         recovery_signature: None,
     };
     let column = format!("approval-signature:{D1}");
-    let expected = context([
+    let mut signing_env = b"JE2E\x01\x10jazz.sodium.sign\x00\x00\x00\x01".to_vec();
+    signing_env.extend_from_slice(&[0x22; 32]);
+    let mut sealing_env = b"JE2E\x01\x15jazz.wrap.hpke-x25519\x00\x00\x00\x01".to_vec();
+    sealing_env.extend_from_slice(&[0x11; 32]);
+    let mut expected = context([
         &app,
         "jazz.e2ee.public-device-approval.v1",
         "account",
@@ -1507,18 +1512,11 @@ fn hand_computed_signed_bytes() {
         E1,
         D2,
     ]);
-    assert_eq!(to_hex(&expected), PUBLIC_APPROVAL_HEX);
     // The approval signs its device's keys after the context (§2.5).
-    assert_eq!(
-        approval.signed_bytes(&da, &keys()).unwrap(),
-        append(
-            expected,
-            &[
-                &env("jazz.sodium.sign", &[0x22; 32]),
-                &env("jazz.wrap.hpke-x25519", &[0x11; 32]),
-            ],
-        )
-    );
+    expected.extend(field(&signing_env));
+    expected.extend(field(&sealing_env));
+    assert_eq!(to_hex(&expected), PUBLIC_APPROVAL_HEX);
+    assert_eq!(approval.signed_bytes(&da, &keys()).unwrap(), expected);
 
     let root = RecoveryRoot {
         id: R2.into(),
@@ -1529,10 +1527,6 @@ fn hand_computed_signed_bytes() {
         signature: vec![],
     };
     let column = format!("[\"root\",\"{D1}\"]");
-    let mut signing_env = b"JE2E\x01\x10jazz.sodium.sign\x00\x00\x00\x01".to_vec();
-    signing_env.extend_from_slice(&[0x22; 32]);
-    let mut sealing_env = b"JE2E\x01\x15jazz.wrap.hpke-x25519\x00\x00\x00\x01".to_vec();
-    sealing_env.extend_from_slice(&[0x11; 32]);
     let mut expected = field(&context([
         &app,
         "jazz.e2ee.recovery.v1",
@@ -1599,7 +1593,7 @@ fn hand_computed_signed_bytes() {
     assert_eq!(delivery.seal_context(&da, &scope).unwrap(), expected);
 }
 
-const PUBLIC_APPROVAL_HEX: &str = "4a45324301000000565b2230663865336134632d316432622d346335642d386536662d376138623963306431653266222c2270726f64222c2261313163653030302d303030302d353030302d383030302d303030303030303061313163225d000000236a617a7a2e653265652e7075626c69632d6465766963652d617070726f76616c2e7631000000076163636f756e740000002461313163653030302d303030302d353030302d383030302d3030303030303030613131630000001e5f5f653265655f7075626c69635f6465766963655f617070726f76616c730000002461316131613161312d613161312d346131612d396131612d61316131613161316131613100000037617070726f76616c2d7369676e61747572653a31313131313131312d313131312d343131312d383131312d3131313131313131313131310000002465316531653165312d653165312d346531652d386531652d6531653165316531653165310000002432323232323232322d323232322d343232322d383232322d323232323232323232323232";
+const PUBLIC_APPROVAL_HEX: &str = "4a45324301000000565b2230663865336134632d316432622d346335642d386536662d376138623963306431653266222c2270726f64222c2261313163653030302d303030302d353030302d383030302d303030303030303061313163225d000000236a617a7a2e653265652e7075626c69632d6465766963652d617070726f76616c2e7631000000076163636f756e740000002461313163653030302d303030302d353030302d383030302d3030303030303030613131630000001e5f5f653265655f7075626c69635f6465766963655f617070726f76616c730000002461316131613161312d613161312d346131612d396131612d61316131613161316131613100000037617070726f76616c2d7369676e61747572653a31313131313131312d313131312d343131312d383131312d3131313131313131313131310000002465316531653165312d653165312d346531652d386531652d6531653165316531653165310000002432323232323232322d323232322d343232322d383232322d3232323232323232323232320000003a4a45324501106a617a7a2e736f6469756d2e7369676e0000000122222222222222222222222222222222222222222222222222222222222222220000003f4a45324501156a617a7a2e777261702e68706b652d783235353139000000011111111111111111111111111111111111111111111111111111111111111111";
 
 /// Contexts and signed bytes come from a record's coordinates before its
 /// outputs exist: a delivery's sealing context needs no envelope, a

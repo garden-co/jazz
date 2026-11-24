@@ -149,12 +149,12 @@ fn signer_failure_stops_replay() {
     let env = &flaky.env;
     let mut rng = TestRandom(31);
     let laptop = env.device(&mut rng);
-    let phone = env.device(&mut rng);
+    let mut phone = env.device(&mut rng);
     let mut ledger = Ledger::new(ALICE);
     ledger.request(&laptop, &mut rng);
     ledger.root(env, &laptop, 0, &mut rng);
     ledger.request(&phone, &mut rng);
-    ledger.approve(env, &laptop, &phone, &mut rng);
+    ledger.approve(env, &laptop, &mut phone, &mut rng);
     assert!(ledger.state(env).is_active(&phone.id));
 
     flaky.signer_fails.store(true, Ordering::SeqCst);
