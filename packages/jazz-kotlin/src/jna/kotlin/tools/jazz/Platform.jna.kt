@@ -5,7 +5,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.ChannelResult
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.channels.trySendBlocking
-import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.runBlocking
 
 // The platform seam's actuals for the JVM and Android (compiled into both
@@ -57,16 +56,3 @@ internal actual fun <E> SendChannel<E>.trySendBlockingCompat(element: E): Channe
 internal actual fun startThread(name: String, block: () -> Unit) {
     Thread(block, name).apply { isDaemon = false }.start()
 }
-
-/** This stream's bytes as a [kotlinx.coroutines.flow.Flow] of chunks of [size], read on [kotlinx.coroutines.Dispatchers.IO]; closes it at the end. */
-public fun java.io.InputStream.chunks(size: Int = 256 * 1024): kotlinx.coroutines.flow.Flow<ByteArray> =
-    kotlinx.coroutines.flow.flow {
-        use { input ->
-            val buffer = ByteArray(size)
-            while (true) {
-                val n = input.read(buffer)
-                if (n < 0) break
-                if (n > 0) emit(buffer.copyOf(n))
-            }
-        }
-    }.flowOn(kotlinx.coroutines.Dispatchers.IO)

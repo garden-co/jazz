@@ -1,5 +1,12 @@
+// One JVM class, SerializersKt, with InputStream.chunks (src/jna): the class
+// beta.1's callers (Java, and anything compiled against it) link against.
+@file:JvmName("SerializersKt")
+@file:JvmMultifileClass
+
 package tools.jazz
 
+import kotlin.jvm.JvmMultifileClass
+import kotlin.jvm.JvmName
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.nullable
 import kotlinx.serialization.descriptors.PrimitiveKind

@@ -390,9 +390,9 @@ publishing {
     }
 }
 
-// The local repository is the whole library or nothing: never a JVM-only one
-// because the Android SDK was missing.
-tasks.matching { it.name == "publishAllPublicationsToJazzLocalRepository" }.configureEach {
+// Every publication (the local repository, Maven Central, ~/.m2) is the whole
+// library or nothing: never a JVM-only set because the Android SDK was missing.
+tasks.matching { it.name.startsWith("publish") }.configureEach {
     doFirst {
         check(withAndroid || findProperty("jazzAndroid") == "skip") {
             "the Android target needs an Android SDK (ANDROID_HOME); -PjazzAndroid=skip publishes without it"
