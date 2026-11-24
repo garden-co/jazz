@@ -87,7 +87,7 @@ pub struct SealingKeys {
     root_id: String,
     epoch_id: String,
     valid: Vec<Accepted<AccountSealingKey>>,
-    unsupported: Vec<UnsupportedSealingKey>,
+    pub(super) unsupported: Vec<UnsupportedSealingKey>,
 }
 
 impl SealingKeys {

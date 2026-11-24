@@ -90,7 +90,7 @@ pub struct E2eeClient {
     /// scope was wiped elsewhere fails, and closes the runtime. Re-enrolment
     /// moves it to a new incarnation.
     incarnation: Cell<u64>,
-    pub(crate) device_account: Option<DeviceAccountIdentity>,
+    pub(crate) device_account: RefCell<Option<DeviceAccountIdentity>>,
     /// The account as this device last verified it.
     pub(crate) account: RefCell<Option<OwnAccount>>,
     /// Whether this run reconciled the creations it found stored.
@@ -146,10 +146,15 @@ fn check_device(
     let mut probe = [0u8; 32];
     random.fill(&mut probe)?;
     let sealed = sealer.seal(&device.sealing.public, &bytes, &probe, random)?;
-    let opened = registry.open_sealed(std::slice::from_ref(&device.sealing), &bytes, &sealed);
+    let opened = match registry.open_sealed(std::slice::from_ref(&device.sealing), &bytes, &sealed)
+    {
+        Ok(key) => *key == probe,
+        Err(jazz_e2ee::Error::InvalidCiphertext) => false,
+        Err(error) => return Err(error.into()),
+    };
     let signature = signer.sign(&device.signing, &bytes)?;
-    let verified = registry.verify(&device.signing.public, &bytes, &signature);
-    if opened.ok().as_deref().map(|key| &key[..]) != Some(&probe[..]) || verified != Ok(true) {
+    let verified = registry.verify(&device.signing.public, &bytes, &signature)?;
+    if !opened || !verified {
         return Err(ClientError::Protocol(ProtocolError::InvalidRecord(
             "the stored device does not pass its local check",
         )));
@@ -250,7 +255,7 @@ impl E2eeClient {
             store,
             scope,
             incarnation: Cell::new(incarnation),
-            device_account,
+            device_account: device_account.into(),
             account: RefCell::new(None),
             reconciled: Cell::new(false),
             documents: Mutex::new(Documents::default()),
@@ -688,9 +693,16 @@ impl E2eeClient {
         f(&self.shared.keys.borrow().held)
     }
 
+    /// Test observation for a host retaining its client through shutdown.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn has_device_account_identity(&self) -> bool {
+        self.device_account.borrow().is_some()
+    }
+
     /// Closes the client and drops the device, account and held space keys.
     pub(crate) fn close(&self) -> ClientError {
         self.shared.forget_secrets();
+        self.device_account.borrow_mut().take();
         self.account.borrow_mut().take();
         ClientError::Closed
     }
@@ -942,7 +954,7 @@ impl E2eeClient {
     /// failed deletion is returned: the wipe is unfinished, and the runtime
     /// stays closed.
     pub async fn wipe(&self) -> Result<(), ClientError> {
-        self.shared.forget_secrets();
+        self.close();
         let mut documents = self.documents.lock().await;
         *documents = Documents::default();
         self.store.delete(&self.scope).await?;

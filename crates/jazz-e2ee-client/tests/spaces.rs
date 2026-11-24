@@ -4636,6 +4636,146 @@ fn resets(events: &Rc<RefCell<Vec<Report>>>) -> Vec<(String, u64)> {
         .collect()
 }
 
+/// Bob resets after Alice starts watching their space. Until its first
+/// encrypted write there is no space root, but Alice still hears the reset once.
+#[test]
+fn a_watched_rootless_space_reports_a_members_reset() {
+    within(|| {
+        let settings = reset_settings();
+        let server = secure_authority_with(&settings, None);
+        let alice = device_with(&server, account(0xa1), MemoryStore::new(), 1, &settings);
+        let bob = device_with(&server, account(0xb0), MemoryStore::new(), 2, &settings);
+        alice.activate(&server);
+        bob.activate(&server);
+        let space = new_project(&server, &alice, "plans");
+        add_member(&server, &alice, space, &bob.id());
+        let address = space_address(&alice, space);
+        let other = new_project(&server, &alice, "notes");
+        add_member(&server, &alice, other, &bob.id());
+        let other_address = space_address(&alice, other);
+        let events = reports_of(&alice);
+        let mut watch = block_on(alice.client.watch_spaces(&alice.db)).unwrap();
+        watch.use_space(&address);
+        watch.use_space(&other_address);
+        let mut sync = || {
+            pump(&server, &alice.db);
+            drive(
+                &server,
+                &[&alice.db],
+                alice.client.sync_spaces(&alice.db, &mut watch),
+            )
+            .unwrap();
+        };
+        sync();
+        sync();
+        assert!(resets(&events).is_empty());
+        let bob2 = device_with(&server, bob.who, MemoryStore::new(), 3, &settings);
+        reset_account_on(&server, &bob2);
+        sync();
+        sync();
+        let events = events.borrow();
+        assert_eq!(events.len(), 2);
+        for space in [address, other_address] {
+            assert!(events.contains(&Report::AccountReset {
+                account: bob.id(),
+                space,
+                generation: 1
+            }));
+        }
+        assert_eq!(count(&server, SPACES), 0);
+    });
+}
+
+/// Alice delivers to Bob's signed sealing record. Bob's first space read
+/// finds the record conflicts with his epoch key. Later space and account
+/// reads report neither a duplicate nor a faulty delivery by Alice.
+#[test]
+fn a_space_read_reports_the_conflicting_sealing_record_once() {
+    use jazz_e2ee::mechanisms::key_seal;
+    use jazz_e2ee::protocol::derive::account_sealing_key_pair;
+    use jazz_e2ee::protocol::domain::AppDomain;
+    use jazz_e2ee::protocol::signing::sign;
+    use jazz_e2ee::registry::Registry;
+
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.sqlite");
+        let who = account(0xb0);
+        let client = open_account(Rc::new(MemoryStore::new()), who, settings.clone(), None);
+        {
+            let server = secure_authority_with(&settings, Some(&path));
+            let (db, _link) = session(&client, &server, who, &settings, 1, None);
+            drive(&server, &[&db], client.ensure_account(&db)).unwrap();
+        }
+        let mut record = client
+            .with_account(|a| a.public.account_keys[0].row.clone())
+            .unwrap();
+        let domain = AppDomain::new(
+            &app_id().as_object_id().uuid().to_string(),
+            Some(ENVIRONMENT),
+        )
+        .unwrap()
+        .account(client.account_id())
+        .unwrap();
+        let signing_device = client.device().unwrap().clone();
+        let registry = Registry::builtin();
+        let signer = registry
+            .signer(signing_device.signing.public.mechanism.as_mechanism())
+            .unwrap();
+        record.public_key = account_sealing_key_pair(&key_seal::Builtin, &[9; 32])
+            .unwrap()
+            .public
+            .bytes;
+        record.signature = sign(
+            signer,
+            &signing_device.signing,
+            &record.signed_bytes(&domain).unwrap(),
+        )
+        .unwrap();
+        // Model a co-published, correctly signed record with the wrong public key.
+        tamper(
+            &path,
+            "__e2ee_account_keys",
+            "publicKey",
+            &record.public_key,
+        );
+        tamper(&path, "__e2ee_account_keys", "signature", &record.signature);
+        let server = secure_authority_with(&settings, Some(&path));
+        let (db, link) = session(&client, &server, who, &settings, 2, None);
+        let bob = Device {
+            who,
+            client,
+            db,
+            _link: Some(link),
+            live: Default::default(),
+        };
+        let alice = device(&server, account(0xa1), MemoryStore::new(), 3);
+        alice.activate(&server);
+        let space = new_project(&server, &alice, "plans");
+        add_member(&server, &alice, space, &bob.id());
+        write_note(&server, &alice, space, SECRET).unwrap();
+        pump(&server, &alice.db);
+        assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+        let events = reports_of(&bob);
+        let expected = [Report::ConflictingAccountKey {
+            record_id: record.id,
+            signer_id: record.signer_id,
+            epoch_id: record.epoch_id,
+        }];
+        let address = space_address(&bob, space);
+        for _ in 0..2 {
+            assert_eq!(
+                drive(&server, &[&bob.db], bob.client.acquire(&bob.db, &address)).unwrap(),
+                SpaceKeyState::KeyPending
+            );
+            assert_eq!(&*events.borrow(), &expected);
+        }
+        bob.activate(&server);
+        assert_eq!(&*events.borrow(), &expected);
+    });
+}
+
 /// Contract: a reset account reads again after re-delivery, and the other
 /// members see `account-reset`, once: bob's account is reset on a second
 /// device (his first is lost); alice, a holder, finds him lacking the

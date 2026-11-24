@@ -23,7 +23,7 @@ use jazz_e2ee::protocol::domain::AppDomain;
 use jazz_e2ee::protocol::error::{RefusalCode, UnsupportedCapability};
 use jazz_e2ee::protocol::signing::sign;
 use jazz_e2ee::registry::Registry;
-use jazz_e2ee_client::{AccountStatus, ClientError, MemoryStore, Report};
+use jazz_e2ee_client::{AccountStatus, ClientError, MemoryStore, PrivateStore, Report};
 
 /// Contract: alice's first device publishes its request, bootstraps her
 /// account (identity, public root and the first epoch's sealing key, as her
@@ -123,12 +123,9 @@ fn a_conflicting_account_key_is_reported_and_ignored_for_sealing() {
         .unwrap();
     let id = uuid::Uuid::new_v4();
     conflict.id = id.to_string();
-    let wrong_key = account_sealing_key_pair(&key_seal::Builtin, &[9; 32])
-        .unwrap()
-        .public
-        .bytes;
-    assert_ne!(wrong_key, conflict.public_key);
-    conflict.public_key = wrong_key;
+    let wrong_pair = account_sealing_key_pair(&key_seal::Builtin, &[9; 32]).unwrap();
+    assert_ne!(wrong_pair.public.bytes, conflict.public_key);
+    conflict.public_key = wrong_pair.public.bytes.clone();
     let domain = AppDomain::new(
         &app_id().as_object_id().uuid().to_string(),
         Some(ENVIRONMENT),
@@ -189,6 +186,18 @@ fn a_conflicting_account_key_is_reported_and_ignored_for_sealing() {
     );
 
     let space = project(&db, "plans");
+    pump(&server, &db);
+    let scope = block_on(db.table_identity("projects")).unwrap().unwrap().0;
+    let member = BTreeMap::from([
+        ("scopeId".into(), Value::Uuid(scope)),
+        ("identifier".into(), Value::Uuid(space)),
+        (
+            "accountId".into(),
+            Value::Uuid(uuid::Uuid::parse_str(client.account_id()).unwrap()),
+        ),
+    ]);
+    block_on(db.insert("__e2ee_members", member, Default::default())).unwrap();
+    pump(&server, &db);
     drive(
         &server,
         &[&db],
@@ -201,6 +210,114 @@ fn a_conflicting_account_key_is_reported_and_ignored_for_sealing() {
     let rows = all(&db, Query::from("notes")).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].cell("body"), Some(text(SECRET)));
+    pump(&server, &db);
+    let root = client.with_held(|keys| keys.roots_of(&address(&db, space))[0].root().clone());
+    let context = root.account_envelope_context(&domain).unwrap();
+    let row = all(&server, Query::from("__e2ee_spaces"))
+        .unwrap()
+        .pop()
+        .unwrap();
+    let Some(Value::Bytes(envelope)) = row.cell("accountEnvelope") else {
+        panic!("missing account envelope")
+    };
+    let derived = client
+        .with_account(|a| account_sealing_key_pair(&key_seal::Builtin, a.key.key()).unwrap())
+        .unwrap();
+    assert!(
+        registry
+            .open_sealed(&[derived], &context, &envelope)
+            .is_ok()
+    );
+    assert_eq!(
+        registry
+            .open_sealed(&[wrong_pair], &context, &envelope)
+            .unwrap_err(),
+        jazz_e2ee::Error::InvalidCiphertext
+    );
+}
+
+/// Alice reopens an app account with a sealing record signed under a
+/// version her client cannot verify. She stays active and hears about
+/// the skipped record once across repeated account checks.
+#[test]
+fn an_unsupported_sealing_key_is_reported_without_failing_account_replay() {
+    let settings = EncryptionSettings::default();
+    let alice = account(0xa1);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("server.sqlite");
+    let store = Rc::new(MemoryStore::new());
+    let client = open_account(store.clone(), alice, settings.clone(), None);
+    // This reader starts with the same device, before its first verified floor.
+    let first_read = MemoryStore::new();
+    let scope = store.scopes().pop().unwrap();
+    first_read.overwrite(
+        &scope,
+        "device",
+        block_on(store.load(&scope, "device"))
+            .unwrap()
+            .unwrap()
+            .bytes,
+    );
+    let record = {
+        let server = secure_authority_with(&settings, Some(&path));
+        let (db, _link) = session(&client, &server, alice, &settings, 1, None);
+        drive(&server, &[&db], client.ensure_account(&db)).unwrap();
+        client
+            .with_account(|a| a.public.account_keys[0].row.clone())
+            .unwrap()
+    };
+    for table in ["__e2ee_device_keys", "__e2ee_device_requests"] {
+        tamper(&path, table, "signingVersion", 2i64);
+    }
+    let client = open_account(Rc::new(first_read), alice, settings.clone(), None);
+    let reports = Rc::new(RefCell::new(Vec::new()));
+    let events = reports.clone();
+    client.on_report(move |report| events.borrow_mut().push(report.clone()));
+    let server = secure_authority_with(&settings, Some(&path));
+    let (db, _link) = session(&client, &server, alice, &settings, 2, None);
+    for _ in 0..2 {
+        assert_eq!(
+            drive(&server, &[&db], client.ensure_account(&db)).unwrap(),
+            AccountStatus::Active
+        );
+    }
+    assert_eq!(
+        &*reports.borrow(),
+        &[Report::UnsupportedAccountKey {
+            record_id: record.id,
+            signer_id: record.signer_id,
+            capability: UnsupportedCapability::SigningVersion,
+        }]
+    );
+}
+
+/// Wiping Alice's verified device drops its account and historical epoch
+/// keys even while the application retains the client.
+#[test]
+fn a_wiped_client_drops_its_verified_account_keys() {
+    let settings = EncryptionSettings::default();
+    let (alice, identity) = device_account(0xa1);
+    let server = secure_authority_with(&settings, None);
+    let client = open_account(
+        Rc::new(MemoryStore::new()),
+        alice,
+        settings.clone(),
+        Some(identity),
+    );
+    let (db, _link) = session(&client, &server, alice, &settings, 1, None);
+    drive(&server, &[&db], client.ensure_account(&db)).unwrap();
+    assert_eq!(
+        client.with_account(|a| a.epoch_keys.epoch_ids().count()),
+        Some(1)
+    );
+    assert!(client.has_device_account_identity());
+    block_on(client.wipe()).unwrap();
+    assert!(!client.has_device_account_identity());
+    assert!(
+        client
+            .with_account(|a| a.epoch_keys.epoch_ids().count())
+            .is_none()
+    );
 }
 
 /// Contract: lena's device-account account is bootstrapped with a root her
@@ -589,6 +706,133 @@ fn two_first_devices_found_the_account_once() {
     );
     assert_eq!(count(&server, "__e2ee_account_roots"), 1);
     assert_eq!(count(&server, "__e2ee_device_requests"), 2);
+}
+
+/// Two of Alice's waiting devices reset concurrently. Each accepted reset
+/// advances a distinct generation even when both started at generation zero.
+#[test]
+fn racing_resets_publish_at_most_one_root_per_generation() {
+    let settings = EncryptionSettings {
+        allow_account_reset: true,
+        ..Default::default()
+    };
+    let alice = account(0xa1);
+    let server = secure_authority_with(&settings, None);
+    let devices = [1, 2, 3].map(|node| {
+        let client = open_account(Rc::new(MemoryStore::new()), alice, settings.clone(), None);
+        let (db, link) = session(&client, &server, alice, &settings, node, None);
+        let status = drive(&server, &[&db], client.ensure_account(&db)).unwrap();
+        assert_eq!(
+            status,
+            if node == 1 {
+                AccountStatus::Active
+            } else {
+                AccountStatus::AwaitingApproval
+            }
+        );
+        (client, db, link)
+    });
+    let [_, (one, db1, _), (two, db2, _)] = &devices;
+    let (a, b) = drive(
+        &server,
+        &[db1, db2],
+        futures::future::join(one.reset_account(db1), two.reset_account(db2)),
+    );
+    assert!(
+        matches!(a, Ok(AccountStatus::Active)) || matches!(b, Ok(AccountStatus::Active)),
+        "{a:?}, {b:?}"
+    );
+    let mut generations: Vec<_> = all(&server, Query::from("__e2ee_account_roots"))
+        .unwrap()
+        .into_iter()
+        .map(|row| match row.cell("generation") {
+            Some(Value::I64(g)) => g,
+            other => panic!("unexpected generation {other:?}"),
+        })
+        .collect();
+    generations.sort();
+    assert!(
+        generations == [0, 1] || generations == [0, 1, 2],
+        "{generations:?}"
+    );
+}
+
+/// Alice loses the reset acknowledgement after the authority commits.
+/// Her live call settles when the device reconnects.
+///
+/// waiting device → submit reset → authority commits → link lost before receipt
+#[test]
+fn a_committed_reset_survives_a_lost_acknowledgement() {
+    lose_reset_acknowledgement(false);
+}
+
+/// After process loss, Alice's retained device replays the committed
+/// reset at the authority and obtains its account key for generation one.
+#[test]
+fn a_restarted_device_recovers_a_reset_whose_acknowledgement_was_lost() {
+    lose_reset_acknowledgement(true);
+}
+
+fn lose_reset_acknowledgement(restart: bool) {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let settings = EncryptionSettings {
+        allow_account_reset: true,
+        ..Default::default()
+    };
+    let alice = account(0xa1);
+    let server = secure_authority_with(&settings, None);
+    let founder = open_account(Rc::new(MemoryStore::new()), alice, settings.clone(), None);
+    let (first, _link) = session(&founder, &server, alice, &settings, 1, None);
+    drive(&server, &[&first], founder.ensure_account(&first)).unwrap();
+
+    let store = Rc::new(MemoryStore::new());
+    let client = open_account(store.clone(), alice, settings.clone(), None);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("device.sqlite");
+    let (db, link) = session(&client, &server, alice, &settings, 2, Some(&path));
+    assert_eq!(
+        drive(&server, &[&db], client.ensure_account(&db)).unwrap(),
+        AccountStatus::AwaitingApproval
+    );
+
+    let mut reset = Box::pin(client.reset_account(&db));
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..2000 {
+        assert!(reset.as_mut().poll(&mut cx).is_pending());
+        block_on(db.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        if count(&server, "__e2ee_account_roots") == 2 {
+            break;
+        }
+    }
+    assert_eq!(count(&server, "__e2ee_account_roots"), 2);
+    assert!(
+        db.pending_upload_count() > 0,
+        "the device has not received the reset fate"
+    );
+    assert!(db.detach_connection(&link));
+    if restart {
+        drop(reset);
+        drop(db);
+        drop(client);
+        let client = open_account(store, alice, settings.clone(), None);
+        let (db, _link) = session(&client, &server, alice, &settings, 2, Some(&path));
+        assert_eq!(
+            drive(&server, &[&db], client.ensure_account(&db)).unwrap(),
+            AccountStatus::Active
+        );
+        assert_eq!(client.with_account(|a| a.state.generation), Some(1));
+    } else {
+        let (_link, _) = link_as(&db, &server, alice);
+        assert_eq!(
+            drive(&server, &[&db], reset).unwrap(),
+            AccountStatus::Active
+        );
+        assert_eq!(client.with_account(|a| a.state.generation), Some(1));
+    }
+    assert_eq!(count(&server, "__e2ee_account_roots"), 2);
 }
 
 /// Inserts, as the authority itself, a root for `who`'s account of `kind`

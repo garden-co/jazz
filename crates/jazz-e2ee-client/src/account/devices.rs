@@ -696,7 +696,8 @@ impl E2eeClient {
         db: &Db,
         secret: &RecoverySecret,
     ) -> Result<AccountStatus, ClientError> {
-        if self.device_account.is_none() {
+        self.ensure_open()?;
+        if self.device_account.borrow().is_none() {
             return Err(ClientError::Unsupported(
                 "start_device_account is for a device account: this runtime was opened \
                  without its identity"
@@ -720,7 +721,7 @@ impl E2eeClient {
         &self,
         secret: &RecoverySecret,
     ) -> Result<(), ClientError> {
-        if let Some(identity) = &self.device_account
+        if let Some(identity) = self.device_account.borrow().as_ref()
             && DeviceAccountIdentity::from_secret(secret)?.public_key() != identity.public_key()
         {
             return Err(ProtocolError::Recovery(RecoveryFailure::RootMismatch).into());
