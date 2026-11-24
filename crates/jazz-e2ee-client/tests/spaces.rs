@@ -4715,6 +4715,36 @@ fn an_unsupported_member_does_not_block_delivery_to_another_member() {
     });
 }
 
+/// Alice skips Carol's account because its root has no device keys and still
+/// delivers the space key to Bob, who can then read Alice's note.
+#[test]
+fn a_member_missing_root_device_keys_does_not_block_delivery_to_another_member() {
+    within(|| {
+        let settings = EncryptionSettings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.sqlite");
+        let carol = account(0xc0);
+        {
+            let server = secure_authority_with(&settings, Some(&path));
+            device(&server, carol, MemoryStore::new(), 3).activate(&server);
+        }
+        let deleted = rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute("DELETE FROM __e2ee_device_keys", [])
+            .unwrap();
+        assert!(deleted > 0);
+
+        let server = secure_authority_with(&settings, Some(&path));
+        let (alice, bob, space) = shared_space(&server);
+        add_member(&server, &alice, space, &account_id(carol));
+        assert_eq!(deliver(&server, &alice, &[&bob], space), 1);
+        pump(&server, &bob.db);
+        let rows = read_notes(&server, &bob, space).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cell("body"), Some(text(SECRET)));
+    });
+}
+
 /// When Alice's provider cannot verify Bob's device approval, delivery in
 /// their rootless space returns the provider error. A retry after the provider
 /// recovers completes with no deliveries because the space has no key.
