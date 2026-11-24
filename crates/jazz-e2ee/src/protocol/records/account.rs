@@ -4,16 +4,42 @@
 
 use crate::agility::{MechanismId, PublicKey};
 use crate::context::CryptoContext;
+use crate::envelope::Mechanism;
 
 use super::super::domain::AccountDomain;
 
 use super::super::error::ProtocolResult;
 use super::super::ids::IdForm;
 use super::super::json;
+use super::super::position::RowId;
 use super::{
     KeyColumns, append_framed, context, ensure, ensure_account, ensure_bytes, ensure_id,
     ensure_mechanism, env, frame, row_id,
 };
+
+#[allow(clippy::too_many_arguments)]
+fn account_context(
+    application: &AccountDomain,
+    policy: &str,
+    identifier: &str,
+    table: &str,
+    row: &str,
+    column: &str,
+    epoch: &str,
+    recipient: &str,
+) -> ProtocolResult<Vec<u8>> {
+    context(CryptoContext {
+        application: application.as_str(),
+        policy,
+        scope: SCOPE,
+        identifier,
+        table,
+        row,
+        column,
+        epoch,
+        recipient,
+    })
+}
 
 /// The only ledger version this client supports; any other is an
 /// unsupported capability.
@@ -151,10 +177,9 @@ super::string_enum!(
     AccountAction { RemoveDevice => "remove-device", RetireRecoveryRoot => "retire-recovery-root" }
 );
 
-/// `__e2ee_public_account_successors`: the key-free signed rotation. Its
-/// `revision` lists public approval IDs.
+/// The columns signed by both successor records.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublicAccountSuccessor {
+pub struct AccountSuccessorColumns {
     pub id: String,
     pub account_id: String,
     pub predecessor: String,
@@ -167,6 +192,13 @@ pub struct PublicAccountSuccessor {
     /// `remove-device` successor also retires (possibly none, `[]`).
     pub retired_recovery_root_ids: Vec<u8>,
     pub membership: Vec<u8>,
+}
+
+/// `__e2ee_public_account_successors`: the key-free signed rotation. Its
+/// `revision` lists public approval IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicAccountSuccessor {
+    pub columns: AccountSuccessorColumns,
     pub revision: Vec<u8>,
     pub signature: Vec<u8>,
 }
@@ -175,18 +207,7 @@ pub struct PublicAccountSuccessor {
 /// deliveries. Its `revision` lists private approval IDs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountSuccessor {
-    pub id: String,
-    pub account_id: String,
-    pub predecessor: String,
-    pub epoch_id: String,
-    pub signer_id: String,
-    pub action: AccountAction,
-    pub removed_device_id: Option<String>,
-    /// An ID list (§0) of recovery root IDs: the one root a
-    /// `retire-recovery-root` successor retires, or every root a
-    /// `remove-device` successor also retires (possibly none, `[]`).
-    pub retired_recovery_root_ids: Vec<u8>,
-    pub membership: Vec<u8>,
+    pub columns: AccountSuccessorColumns,
     pub revision: Vec<u8>,
     pub verification: Vec<u8>,
     pub history: Vec<u8>,
@@ -252,12 +273,22 @@ row_id!(
     DeviceApproval,
     DeviceDelivery,
     PublicDeviceApproval,
-    PublicAccountSuccessor,
-    AccountSuccessor,
     RecoveryRoot,
     RecoveryDelivery,
     AccountSealingKey,
 );
+
+impl RowId for PublicAccountSuccessor {
+    fn row_id(&self) -> &str {
+        &self.columns.id
+    }
+}
+
+impl RowId for AccountSuccessor {
+    fn row_id(&self) -> &str {
+        &self.columns.id
+    }
+}
 
 impl DeviceRequest {
     pub fn validate(&self) -> ProtocolResult<()> {
@@ -359,17 +390,16 @@ impl AccountRoot {
             super::super::error::ProtocolError::InvalidRecord("an app account root is not signed"),
         )?;
         device_keys.validate()?;
-        let prefix = context(CryptoContext {
-            application: application.as_str(),
-            policy: DEVICE_ACCOUNT_ROOT_POLICY,
-            scope: SCOPE,
-            identifier: &self.account_id,
-            table: "__e2ee_account_roots",
-            row: &self.id,
-            column: "device-account-signature",
-            epoch: &self.epoch_id,
-            recipient: &self.device_id,
-        })?;
+        let prefix = account_context(
+            application,
+            DEVICE_ACCOUNT_ROOT_POLICY,
+            &self.account_id,
+            "__e2ee_account_roots",
+            &self.id,
+            "device-account-signature",
+            &self.epoch_id,
+            &self.device_id,
+        )?;
         append_framed(
             prefix,
             &[
@@ -513,17 +543,16 @@ impl PublicDeviceApproval {
                 format!("approval-signature:{}", self.signer_id),
             ),
         };
-        let prefix = context(CryptoContext {
-            application: application.as_str(),
+        let prefix = account_context(
+            application,
             policy,
-            scope: SCOPE,
-            identifier: &self.account_id,
-            table: "__e2ee_public_device_approvals",
-            row: &self.id,
-            column: &column,
-            epoch: &self.epoch_id,
-            recipient: &self.device_id,
-        })?;
+            &self.account_id,
+            "__e2ee_public_device_approvals",
+            &self.id,
+            &column,
+            &self.epoch_id,
+            &self.device_id,
+        )?;
         append_framed(
             prefix,
             &[
@@ -559,42 +588,13 @@ fn successor_target(
     }
 }
 
-/// Checks the columns both successor tables share and returns the target
-/// and the decoded membership.
-#[allow(clippy::too_many_arguments)]
-fn successor_header(
-    id: &str,
-    account_id: &str,
-    predecessor: &str,
-    epoch_id: &str,
-    signer_id: &str,
-    action: AccountAction,
-    removed_device_id: &Option<String>,
-    retired_recovery_root_ids: &[u8],
-    membership: &[u8],
-) -> ProtocolResult<(String, Vec<String>)> {
-    ensure_account(account_id, "invalid account ID")?;
-    for value in [id, predecessor, epoch_id, signer_id] {
-        ensure_id(value, IdForm::Random, "invalid successor ID")?;
-    }
-    ensure(predecessor != epoch_id, "successor repeats its predecessor")?;
-    let (target, _) = successor_target(action, removed_device_id, retired_recovery_root_ids)?;
-    let members = json::decode_id_list(membership)?;
-    ensure(
-        action != AccountAction::RemoveDevice || !members.contains(&target),
-        "removed device remains a member",
-    )?;
-    Ok((target, members))
-}
-
-impl PublicAccountSuccessor {
+impl AccountSuccessorColumns {
     /// The target ID; malformed columns are invalid.
     pub fn target_id(&self) -> ProtocolResult<String> {
         Ok(self.targets()?.0)
     }
 
-    /// The target ID and, for a removal, the recovery roots it also
-    /// retires.
+    /// The target ID and, for a removal, the recovery roots it also retires.
     pub fn targets(&self) -> ProtocolResult<(String, Vec<String>)> {
         successor_target(
             self.action,
@@ -603,6 +603,27 @@ impl PublicAccountSuccessor {
         )
     }
 
+    fn validate(&self) -> ProtocolResult<Vec<String>> {
+        ensure_account(&self.account_id, "invalid account ID")?;
+        let ids = [&self.id, &self.predecessor, &self.epoch_id, &self.signer_id];
+        for id in ids {
+            ensure_id(id, IdForm::Random, "invalid successor ID")?;
+        }
+        ensure(
+            self.predecessor != self.epoch_id,
+            "successor repeats its predecessor",
+        )?;
+        let target = self.target_id()?;
+        let members = json::decode_id_list(&self.membership)?;
+        ensure(
+            self.action != AccountAction::RemoveDevice || !members.contains(&target),
+            "removed device remains a member",
+        )?;
+        Ok(members)
+    }
+}
+
+impl PublicAccountSuccessor {
     /// A complete received successor; returns the decoded membership.
     pub fn validate(&self) -> ProtocolResult<Vec<String>> {
         let members = self.check_unsigned()?;
@@ -611,17 +632,7 @@ impl PublicAccountSuccessor {
     }
 
     fn check_unsigned(&self) -> ProtocolResult<Vec<String>> {
-        let (_, members) = successor_header(
-            &self.id,
-            &self.account_id,
-            &self.predecessor,
-            &self.epoch_id,
-            &self.signer_id,
-            self.action,
-            &self.removed_device_id,
-            &self.retired_recovery_root_ids,
-            &self.membership,
-        )?;
+        let members = self.columns.validate()?;
         json::decode_revision(&self.revision)?;
         Ok(members)
     }
@@ -634,26 +645,25 @@ impl PublicAccountSuccessor {
     /// the `retiredRecoveryRootIds` column's canonical bytes.
     pub fn signed_bytes(&self, application: &AccountDomain) -> ProtocolResult<Vec<u8>> {
         self.check_unsigned()?;
-        let (target, _) = self.targets()?;
-        let prefix = context(CryptoContext {
-            application: application.as_str(),
-            policy: PUBLIC_SUCCESSOR_POLICY,
-            scope: SCOPE,
-            identifier: &self.account_id,
-            table: "__e2ee_public_account_successors",
-            row: &self.id,
-            column: "signature",
-            epoch: &self.epoch_id,
-            recipient: &self.signer_id,
-        })?;
+        let target = self.columns.target_id()?;
+        let prefix = account_context(
+            application,
+            PUBLIC_SUCCESSOR_POLICY,
+            &self.columns.account_id,
+            "__e2ee_public_account_successors",
+            &self.columns.id,
+            "signature",
+            &self.columns.epoch_id,
+            &self.columns.signer_id,
+        )?;
         append_framed(
             prefix,
             &[
-                self.predecessor.as_bytes(),
-                self.action.as_str().as_bytes(),
+                self.columns.predecessor.as_bytes(),
+                self.columns.action.as_str().as_bytes(),
                 target.as_bytes(),
-                &self.retired_recovery_root_ids,
-                &self.membership,
+                &self.columns.retired_recovery_root_ids,
+                &self.columns.membership,
                 &self.revision,
             ],
         )
@@ -661,20 +671,6 @@ impl PublicAccountSuccessor {
 }
 
 impl AccountSuccessor {
-    pub fn target_id(&self) -> ProtocolResult<String> {
-        Ok(self.targets()?.0)
-    }
-
-    /// The target ID and, for a removal, the recovery roots it also
-    /// retires.
-    pub fn targets(&self) -> ProtocolResult<(String, Vec<String>)> {
-        successor_target(
-            self.action,
-            &self.removed_device_id,
-            &self.retired_recovery_root_ids,
-        )
-    }
-
     /// The private `revision` is an ID list of private approval (challenge)
     /// IDs, and `deliveries` names exactly the members. Returns the decoded
     /// membership.
@@ -685,17 +681,7 @@ impl AccountSuccessor {
     }
 
     fn check_unsigned(&self) -> ProtocolResult<Vec<String>> {
-        let (_, members) = successor_header(
-            &self.id,
-            &self.account_id,
-            &self.predecessor,
-            &self.epoch_id,
-            &self.signer_id,
-            self.action,
-            &self.removed_device_id,
-            &self.retired_recovery_root_ids,
-            &self.membership,
-        )?;
+        let members = self.columns.validate()?;
         json::decode_id_list(&self.revision)?;
         let deliveries = json::decode_delivery_map(&self.deliveries)?;
         ensure(
@@ -716,23 +702,23 @@ impl AccountSuccessor {
     /// revision, verification, history, deliveries]`.
     pub fn signed_bytes(&self, application: &AccountDomain) -> ProtocolResult<Vec<u8>> {
         self.check_unsigned()?;
-        let (target, _) = self.targets()?;
+        let target = self.columns.target_id()?;
         let prefix = successor_context(
             application,
-            &self.account_id,
-            &self.id,
-            &self.epoch_id,
+            &self.columns.account_id,
+            &self.columns.id,
+            &self.columns.epoch_id,
             "signature",
-            &self.signer_id,
+            &self.columns.signer_id,
         )?;
         append_framed(
             prefix,
             &[
-                self.predecessor.as_bytes(),
-                self.action.as_str().as_bytes(),
+                self.columns.predecessor.as_bytes(),
+                self.columns.action.as_str().as_bytes(),
                 target.as_bytes(),
-                &self.retired_recovery_root_ids,
-                &self.membership,
+                &self.columns.retired_recovery_root_ids,
+                &self.columns.membership,
                 &self.revision,
                 &self.verification,
                 &self.history,
@@ -744,15 +730,7 @@ impl AccountSuccessor {
     /// Whether `public` is this successor's public row: same ID, account,
     /// predecessor, epoch, signer, action, target and membership (§2.4).
     pub fn matches_public(&self, public: &PublicAccountSuccessor) -> bool {
-        self.id == public.id
-            && self.account_id == public.account_id
-            && self.predecessor == public.predecessor
-            && self.epoch_id == public.epoch_id
-            && self.signer_id == public.signer_id
-            && self.action == public.action
-            && self.removed_device_id == public.removed_device_id
-            && self.retired_recovery_root_ids == public.retired_recovery_root_ids
-            && self.membership == public.membership
+        self.columns == public.columns
     }
 }
 
@@ -784,17 +762,16 @@ impl RecoveryRoot {
     pub fn signed_bytes(&self, application: &AccountDomain) -> ProtocolResult<Vec<u8>> {
         self.check_unsigned()?;
         let column = json::strings(&["root", &self.signer_id]);
-        let prefix = context(CryptoContext {
-            application: application.as_str(),
-            policy: RECOVERY_POLICY,
-            scope: SCOPE,
-            identifier: &self.account_id,
-            table: "__e2ee_recovery_roots",
-            row: &self.id,
-            column: &column,
-            epoch: &self.epoch_id,
-            recipient: "",
-        })?;
+        let prefix = account_context(
+            application,
+            RECOVERY_POLICY,
+            &self.account_id,
+            "__e2ee_recovery_roots",
+            &self.id,
+            &column,
+            &self.epoch_id,
+            "",
+        )?;
         frame(&[
             &prefix,
             &self.keys.signing_envelope()?,
@@ -823,17 +800,16 @@ impl DeviceRemovalRequest {
     /// recipient: deviceId}`, signed by the device itself (§2.8).
     pub fn signed_bytes(&self, application: &AccountDomain) -> ProtocolResult<Vec<u8>> {
         self.check_unsigned()?;
-        context(CryptoContext {
-            application: application.as_str(),
-            policy: REMOVAL_REQUEST_POLICY,
-            scope: SCOPE,
-            identifier: &self.account_id,
-            table: "__e2ee_device_removal_requests",
-            row: &self.id,
-            column: "signature",
-            epoch: &self.epoch_id,
-            recipient: &self.device_id,
-        })
+        account_context(
+            application,
+            REMOVAL_REQUEST_POLICY,
+            &self.account_id,
+            "__e2ee_device_removal_requests",
+            &self.id,
+            "signature",
+            &self.epoch_id,
+            &self.device_id,
+        )
     }
 }
 
@@ -851,6 +827,10 @@ impl RecoveryDelivery {
 }
 
 impl AccountSealingKey {
+    pub fn mechanism(&self) -> Mechanism<'_> {
+        Mechanism::new(&self.mechanism, self.version)
+    }
+
     /// The published public key with its mechanism.
     pub fn public(&self) -> PublicKey {
         PublicKey {
@@ -885,17 +865,16 @@ impl AccountSealingKey {
     /// publicKey)]` (§2.12).
     pub fn signed_bytes(&self, application: &AccountDomain) -> ProtocolResult<Vec<u8>> {
         self.check_unsigned()?;
-        let prefix = context(CryptoContext {
-            application: application.as_str(),
-            policy: ACCOUNT_KEY_POLICY,
-            scope: SCOPE,
-            identifier: &self.account_id,
-            table: "__e2ee_account_keys",
-            row: &self.id,
-            column: &self.signer_id,
-            epoch: &self.epoch_id,
-            recipient: "",
-        })?;
+        let prefix = account_context(
+            application,
+            ACCOUNT_KEY_POLICY,
+            &self.account_id,
+            "__e2ee_account_keys",
+            &self.id,
+            &self.signer_id,
+            &self.epoch_id,
+            "",
+        )?;
         append_framed(
             prefix,
             &[&env(&self.mechanism, self.version, &self.public_key)?],
@@ -916,17 +895,16 @@ pub fn identity_context(
     column: &str,
     recipient: &str,
 ) -> ProtocolResult<Vec<u8>> {
-    context(CryptoContext {
-        application: application.as_str(),
-        policy: IDENTITY_POLICY,
-        scope: SCOPE,
-        identifier: account_id,
-        table: "__e2ee_account_identities",
-        row: identity_id,
+    account_context(
+        application,
+        IDENTITY_POLICY,
+        account_id,
+        "__e2ee_account_identities",
+        identity_id,
         column,
-        epoch: epoch_id,
+        epoch_id,
         recipient,
-    })
+    )
 }
 
 /// The coordinates a challenge binds.
@@ -947,17 +925,16 @@ pub fn approval_context(
     challenge: ChallengeCoordinates<'_>,
     column: &str,
 ) -> ProtocolResult<Vec<u8>> {
-    context(CryptoContext {
-        application: application.as_str(),
-        policy: APPROVAL_POLICY,
-        scope: SCOPE,
-        identifier: account_id,
-        table: "__e2ee_device_challenges",
-        row: challenge.id,
+    account_context(
+        application,
+        APPROVAL_POLICY,
+        account_id,
+        "__e2ee_device_challenges",
+        challenge.id,
         column,
-        epoch: challenge.epoch_id,
-        recipient: challenge.device_id,
-    })
+        challenge.epoch_id,
+        challenge.device_id,
+    )
 }
 
 /// The challenge signature's bytes (§2.5): `P("challenge-signature:" ‖
@@ -1080,17 +1057,16 @@ pub fn successor_context(
     column: &str,
     recipient: &str,
 ) -> ProtocolResult<Vec<u8>> {
-    context(CryptoContext {
-        application: application.as_str(),
-        policy: SUCCESSOR_POLICY,
-        scope: SCOPE,
-        identifier: account_id,
-        table: "__e2ee_account_successors",
-        row: successor_id,
+    account_context(
+        application,
+        SUCCESSOR_POLICY,
+        account_id,
+        "__e2ee_account_successors",
+        successor_id,
         column,
-        epoch: new_epoch_id,
+        new_epoch_id,
         recipient,
-    })
+    )
 }
 
 /// `R` of §2.9: `ctx{application: D, policy: "jazz.e2ee.recovery.v1",
@@ -1102,15 +1078,14 @@ pub fn recovery_delivery_context(
     account_id: &str,
     delivery: &RecoveryDelivery,
 ) -> ProtocolResult<Vec<u8>> {
-    context(CryptoContext {
-        application: application.as_str(),
-        policy: RECOVERY_POLICY,
-        scope: SCOPE,
-        identifier: account_id,
-        table: "__e2ee_recovery_deliveries",
-        row: &delivery.id,
-        column: "envelope",
-        epoch: &delivery.epoch_id,
-        recipient: &delivery.root_id,
-    })
+    account_context(
+        application,
+        RECOVERY_POLICY,
+        account_id,
+        "__e2ee_recovery_deliveries",
+        &delivery.id,
+        "envelope",
+        &delivery.epoch_id,
+        &delivery.root_id,
+    )
 }

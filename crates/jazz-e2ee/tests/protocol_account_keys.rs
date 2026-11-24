@@ -187,7 +187,7 @@ fn record_at_a_rotation_signed_by_another_device_is_not_valid() {
         RotationTarget::RemoveDevice(phone.id.clone()),
         &mut rng,
     );
-    let epoch = rotation.public.epoch_id.clone();
+    let epoch = rotation.public.columns.epoch_id.clone();
     let public_key = derived(&rotation.key);
     let mut forged = Vec::new();
     for signer in [&phone, &tablet, &stranger] {
@@ -274,7 +274,7 @@ fn later_publication_by_a_device_that_was_not_active_is_not_valid() {
         RotationTarget::RemoveDevice(phone.id.clone()),
         &mut rng,
     );
-    let epoch = rotation.public.epoch_id.clone();
+    let epoch = rotation.public.columns.epoch_id.clone();
     let mut forged = Vec::new();
     for signer in [&phone, &stranger] {
         let record = crafted(&env, signer, &epoch, derived(&rotation.key), &mut rng);
@@ -315,7 +315,7 @@ fn later_publication_for_an_epoch_no_longer_current_is_not_valid() {
     let early = crafted(
         &env,
         &laptop,
-        &rotation.public.epoch_id,
+        &rotation.public.columns.epoch_id,
         derived(&rotation.key),
         &mut rng,
     );
@@ -326,7 +326,10 @@ fn later_publication_for_an_epoch_no_longer_current_is_not_valid() {
         .push(Accepted::new(at, early.clone()));
     let at = ledger.next();
     ledger.accept_rotation(at, &rotation);
-    assert_eq!(ledger.state(&env).epoch_id(), rotation.public.epoch_id);
+    assert_eq!(
+        ledger.state(&env).epoch_id(),
+        rotation.public.columns.epoch_id
+    );
 
     // A record of the root epoch, after the rotation superseded it.
     let stale = crafted(&env, &laptop, &root_epoch, derived(&root_key), &mut rng);
@@ -438,7 +441,7 @@ fn epoch_keys_reach_every_epoch_of_the_generation() {
             RotationTarget::RemoveDevice(phone.id.clone()),
             &mut rng,
         );
-        expected.push((rotation.public.epoch_id.clone(), *rotation.key));
+        expected.push((rotation.public.columns.epoch_id.clone(), *rotation.key));
     }
     let keys = epoch_keys(&env, &ledger, &laptop);
     assert_eq!(
@@ -491,7 +494,7 @@ fn a_record_that_does_not_derive_is_reported_until_its_signer_is_removed() {
         &mut rng,
     )
     .unwrap();
-    let epoch = rotation.public.epoch_id.clone();
+    let epoch = rotation.public.columns.epoch_id.clone();
     rotation.account_key = crafted(&env, &phone, &epoch, derived(&[9; 32]), &mut rng);
     let at = ledger.next();
     ledger.accept_rotation(at, &rotation);

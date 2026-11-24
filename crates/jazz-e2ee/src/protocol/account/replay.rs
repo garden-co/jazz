@@ -520,10 +520,10 @@ impl<'a> AccountReplay<'a> {
     ) -> ProtocolResult<Option<ValidSuccessor>> {
         let successor = &candidate.row;
         let position = candidate.position;
-        if successor.account_id != run.account_id
-            || successor.predecessor != epoch.epoch_id
+        if successor.columns.account_id != run.account_id
+            || successor.columns.predecessor != epoch.epoch_id
             || position <= epoch.position
-            || used_epochs.contains(&successor.epoch_id)
+            || used_epochs.contains(&successor.columns.epoch_id)
         {
             return Ok(None);
         }
@@ -538,17 +538,17 @@ impl<'a> AccountReplay<'a> {
         if revision.as_deref() != Ok(successor.revision.as_slice()) {
             return Ok(None);
         }
-        if !members.active.contains(&successor.signer_id) {
+        if !members.active.contains(&successor.columns.signer_id) {
             return Ok(None);
         }
-        let Ok((target, also_retired)) = successor.targets() else {
+        let Ok((target, also_retired)) = successor.columns.targets() else {
             return Ok(None);
         };
         let mut expected = members.active.clone();
-        match successor.action {
+        match successor.columns.action {
             AccountAction::RemoveDevice => {
                 // A device never removes itself: it generated the new key.
-                if target == successor.signer_id || !expected.remove(&target) {
+                if target == successor.columns.signer_id || !expected.remove(&target) {
                     return Ok(None);
                 }
                 // In an app account, removing a device retires every still
@@ -577,7 +577,7 @@ impl<'a> AccountReplay<'a> {
                 }
             }
         }
-        if !run.verify_device(&successor.signer_id, &bytes, &successor.signature)? {
+        if !run.verify_device(&successor.columns.signer_id, &bytes, &successor.signature)? {
             return Ok(None);
         }
         if membership.len() != expected.len()
@@ -602,7 +602,7 @@ impl<'a> AccountReplay<'a> {
         let Some(root) = roots.last().cloned() else {
             return Ok(None);
         };
-        let keys = device_keys(view)?;
+        let keys = collect_keys(view.keys.iter())?;
         if !keys.contains_key(&root.row.device_id) {
             return Err(ProtocolError::Intrinsic(
                 IntrinsicContradiction::MissingRootKey,
@@ -678,7 +678,7 @@ impl<'a> AccountReplay<'a> {
                 members,
             } = valid.pop().expect("one valid successor");
             approvals.extend(accepted);
-            match candidate.row.action {
+            match candidate.row.columns.action {
                 AccountAction::RemoveDevice => {
                     run.removed.insert(target);
                     for root in also_retired {
@@ -689,9 +689,9 @@ impl<'a> AccountReplay<'a> {
                     run.retired.insert(target, position);
                 }
             }
-            used_epochs.insert(candidate.row.epoch_id.clone());
+            used_epochs.insert(candidate.row.columns.epoch_id.clone());
             epochs.push(AccountEpoch {
-                epoch_id: candidate.row.epoch_id.clone(),
+                epoch_id: candidate.row.columns.epoch_id.clone(),
                 position,
                 successor: Some(candidate),
                 members,
@@ -839,6 +839,29 @@ struct Run<'r, 'a> {
     retired: BTreeMap<String, Position>,
 }
 
+/// An app device holds the roots it registered and those it recovered with.
+pub(super) fn roots_held_by<'a>(
+    kind: AccountKind,
+    device: &'a str,
+    roots: &'a [Accepted<RecoveryRoot>],
+    approvals: impl Iterator<Item = &'a Accepted<PublicDeviceApproval>>,
+    before: Option<Position>,
+) -> impl Iterator<Item = &'a Accepted<RecoveryRoot>> {
+    let (roots, recovered) = if kind == AccountKind::App {
+        let recovered = approvals
+            .filter(|approval| approval.row.device_id == device)
+            .filter_map(|approval| approval.row.recovery_root_id.as_deref())
+            .collect::<BTreeSet<_>>();
+        (roots, recovered)
+    } else {
+        (&[][..], BTreeSet::new())
+    };
+    roots.iter().filter(move |root| {
+        (root.row.signer_id == device && before.is_none_or(|cut| root.position < cut))
+            || recovered.contains(root.row.id.as_str())
+    })
+}
+
 impl Run<'_, '_> {
     /// The recovery roots a removal of `device` at `position` must retire
     /// with it (§2.8): in an app account, every valid root of this
@@ -854,22 +877,14 @@ impl Run<'_, '_> {
         current: &[Accepted<PublicDeviceApproval>],
     ) -> ProtocolResult<BTreeSet<String>> {
         let mut held = BTreeSet::new();
-        if self.kind != AccountKind::App {
-            return Ok(held);
-        }
-        let recovered: BTreeSet<&str> = earlier
-            .iter()
-            .chain(current)
-            .filter(|approval| approval.row.device_id == device)
-            .filter_map(|approval| approval.row.recovery_root_id.as_deref())
-            .collect();
-        for root in &self.view.recovery_roots {
-            let id = root.row.id.as_str();
-            let registered = root.row.signer_id == device && root.position < position;
-            if (registered || recovered.contains(id))
-                && !self.retired.contains_key(id)
-                && self.recovery_valid(root)?
-            {
+        for root in roots_held_by(
+            self.kind,
+            device,
+            &self.view.recovery_roots,
+            earlier.iter().chain(current),
+            Some(position),
+        ) {
+            if !self.retired.contains_key(&root.row.id) && self.recovery_valid(root)? {
                 held.insert(root.row.id.clone());
             }
         }
@@ -1007,10 +1022,6 @@ fn root_device_keys(
 
 /// The account's device keys by device ID. Two rows of one device with
 /// different keys are a contradiction.
-fn device_keys(view: &PublicAccountLedger) -> ProtocolResult<BTreeMap<String, KeyColumns>> {
-    collect_keys(view.keys.iter())
-}
-
 pub(super) fn collect_keys<'a>(
     rows: impl Iterator<Item = &'a Accepted<DeviceKeysRow>>,
 ) -> ProtocolResult<BTreeMap<String, KeyColumns>> {

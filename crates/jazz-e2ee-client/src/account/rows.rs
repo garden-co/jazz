@@ -14,8 +14,8 @@ use jazz::records::Value;
 use jazz_e2ee::protocol::records::KeyColumns;
 use jazz_e2ee::protocol::records::account::{
     AccountAction, AccountIdentity, AccountKind, AccountRoot, AccountSealingKey, AccountSuccessor,
-    DeviceApproval, DeviceChallenge, DeviceDelivery, DeviceKeysRow, DeviceProof,
-    DeviceRemovalRequest, DeviceRequest, PublicAccountSuccessor, PublicDeviceApproval,
+    AccountSuccessorColumns, DeviceApproval, DeviceChallenge, DeviceDelivery, DeviceKeysRow,
+    DeviceProof, DeviceRemovalRequest, DeviceRequest, PublicAccountSuccessor, PublicDeviceApproval,
     RecoveryDelivery, RecoveryRoot,
 };
 use jazz_e2ee::protocol::records::space::{SpaceDelivery, SpaceMember, SpaceRoot, SpaceSuccessor};
@@ -414,36 +414,65 @@ row! {
     }
 }
 
-row! {
+macro_rules! successor_row {
+    ($record:ident => $table:ident { $($field:ident : $column:literal),* $(,)? }) => {
+        impl Row for $record {
+            const TABLE: &'static str = $table;
+
+            fn id(&self) -> &str {
+                &self.columns.id
+            }
+
+            fn cells(&self) -> Option<Cells> {
+                let columns = &self.columns;
+                Write::new()
+                    .id("accountId", &columns.account_id)
+                    .id("predecessor", &columns.predecessor)
+                    .id("epochId", &columns.epoch_id)
+                    .id("signerId", &columns.signer_id)
+                    .text("action", columns.action.as_str())
+                    .maybe_id("removedDeviceId", columns.removed_device_id.as_deref())
+                    .bytes("retiredRecoveryRootIds", &columns.retired_recovery_root_ids)
+                    .bytes("membership", &columns.membership)
+                    $(.bytes($column, &self.$field))*
+                    .done()
+            }
+
+            fn decode(row: &CurrentRow) -> Option<Self> {
+                let r = Read(row);
+                Some(Self {
+                    columns: AccountSuccessorColumns {
+                        id: r.row_id(),
+                        account_id: r.id("accountId")?,
+                        predecessor: r.id("predecessor")?,
+                        epoch_id: r.id("epochId")?,
+                        signer_id: r.id("signerId")?,
+                        action: AccountAction::parse(&r.text("action")?).ok()?,
+                        removed_device_id: r.maybe_id("removedDeviceId")?,
+                        retired_recovery_root_ids: r.bytes("retiredRecoveryRootIds")?,
+                        membership: r.bytes("membership")?,
+                    },
+                    $($field: r.bytes($column)?),*
+                })
+            }
+        }
+    };
+}
+
+successor_row! {
     PublicAccountSuccessor => PUBLIC_ACCOUNT_SUCCESSORS {
-        account_id: id "accountId",
-        predecessor: id "predecessor",
-        epoch_id: id "epochId",
-        signer_id: id "signerId",
-        action: action "action",
-        removed_device_id: maybe_id "removedDeviceId",
-        retired_recovery_root_ids: bytes "retiredRecoveryRootIds",
-        membership: bytes "membership",
-        revision: bytes "revision",
-        signature: bytes "signature",
+        revision: "revision",
+        signature: "signature",
     }
 }
 
-row! {
+successor_row! {
     AccountSuccessor => ACCOUNT_SUCCESSORS {
-        account_id: id "accountId",
-        predecessor: id "predecessor",
-        epoch_id: id "epochId",
-        signer_id: id "signerId",
-        action: action "action",
-        removed_device_id: maybe_id "removedDeviceId",
-        retired_recovery_root_ids: bytes "retiredRecoveryRootIds",
-        membership: bytes "membership",
-        revision: bytes "revision",
-        verification: bytes "verification",
-        history: bytes "history",
-        deliveries: bytes "deliveries",
-        signature: bytes "signature",
+        revision: "revision",
+        verification: "verification",
+        history: "history",
+        deliveries: "deliveries",
+        signature: "signature",
     }
 }
 
@@ -750,15 +779,17 @@ mod tests {
             round_trip(
                 &db,
                 PublicAccountSuccessor {
-                    id: id(row),
-                    account_id: id(83),
-                    predecessor: id(84),
-                    epoch_id: id(85),
-                    signer_id: id(86),
-                    action,
-                    removed_device_id: removed.clone(),
-                    retired_recovery_root_ids: bytes(87),
-                    membership: bytes(88),
+                    columns: AccountSuccessorColumns {
+                        id: id(row),
+                        account_id: id(83),
+                        predecessor: id(84),
+                        epoch_id: id(85),
+                        signer_id: id(86),
+                        action,
+                        removed_device_id: removed.clone(),
+                        retired_recovery_root_ids: bytes(87),
+                        membership: bytes(88),
+                    },
                     revision: bytes(89),
                     signature: bytes(90),
                 },
@@ -766,15 +797,17 @@ mod tests {
             round_trip(
                 &db,
                 AccountSuccessor {
-                    id: id(row + 100),
-                    account_id: id(91),
-                    predecessor: id(92),
-                    epoch_id: id(93),
-                    signer_id: id(94),
-                    action,
-                    removed_device_id: removed,
-                    retired_recovery_root_ids: bytes(95),
-                    membership: bytes(96),
+                    columns: AccountSuccessorColumns {
+                        id: id(row + 100),
+                        account_id: id(91),
+                        predecessor: id(92),
+                        epoch_id: id(93),
+                        signer_id: id(94),
+                        action,
+                        removed_device_id: removed,
+                        retired_recovery_root_ids: bytes(95),
+                        membership: bytes(96),
+                    },
                     revision: bytes(97),
                     verification: bytes(98),
                     history: bytes(99),

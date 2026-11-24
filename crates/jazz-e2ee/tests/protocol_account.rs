@@ -8,6 +8,7 @@ use common::TestRandom;
 use common::mechanisms::{OTHER_SEAL, UNROUTED_SEAL, custom_registry, relabelled};
 use common::protocol::{ALICE, Env, Ledger};
 use jazz_e2ee::agility::MechanismId;
+use jazz_e2ee::agility::Signer as _;
 use jazz_e2ee::mechanisms::key_seal;
 use jazz_e2ee::mechanisms::signature;
 use jazz_e2ee::protocol::account::build::{self, LocalDevice, ResetPolicy, RotationTarget};
@@ -277,7 +278,7 @@ fn removal_rotates_and_excludes_the_device() {
     );
 
     let state = ledger.state(&env);
-    assert_eq!(state.epoch_id(), rotation.public.epoch_id);
+    assert_eq!(state.epoch_id(), rotation.public.columns.epoch_id);
     assert_eq!(state.current_epoch().position, at);
     assert!(state.is_removed(&phone.id));
     assert!(!state.is_active(&phone.id));
@@ -472,7 +473,10 @@ fn recovery_restores_a_new_device() {
         RotationTarget::RemoveDevice(replacement.id.clone()),
         &mut rng,
     );
-    assert_eq!(removal.public.targets().unwrap().1, vec![root.id.clone()]);
+    assert_eq!(
+        removal.public.columns.targets().unwrap().1,
+        vec![root.id.clone()]
+    );
     assert!(removal.recovery_deliveries.is_empty());
     let state = ledger.state(&env);
     assert!(state.is_removed(&replacement.id));
@@ -481,9 +485,9 @@ fn recovery_restores_a_new_device() {
 
     // A removal that leaves the root active is not accepted.
     let mut keeps_root = removal.public.clone();
-    keeps_root.retired_recovery_root_ids = b"[]".to_vec();
+    keeps_root.columns.retired_recovery_root_ids = b"[]".to_vec();
     let bytes = keeps_root.signed_bytes(&env.application()).unwrap();
-    keeps_root.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    keeps_root.signature = signature::Builtin.sign(&laptop.signing, &bytes).unwrap();
     let mut view = before_removal;
     view.through = at;
     view.successors.push(Accepted::new(at, keeps_root));
@@ -653,8 +657,8 @@ fn retired_recovery_root_no_longer_approves() {
         .signed_bytes(&env.application(), &replacement.keys())
         .unwrap();
     let signer = env.registry.signer(signature::MECHANISM).unwrap();
-    current.signature = signing::sign(signer, &replacement.signing, &bytes).unwrap();
-    current.recovery_signature = Some(signing::sign(signer, &recovery.signing, &bytes).unwrap());
+    current.signature = signer.sign(&replacement.signing, &bytes).unwrap();
+    current.recovery_signature = Some(signer.sign(&recovery.signing, &bytes).unwrap());
     let at = ledger.next();
     ledger
         .public
@@ -1330,7 +1334,7 @@ fn private_evidence_is_bound_to_its_state() {
     let row = &mut public.approvals[0].row;
     row.id = ids::random_v4(&mut rng).unwrap();
     let bytes = row.signed_bytes(&env.application(), &phone.keys()).unwrap();
-    row.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    row.signature = signature::Builtin.sign(&laptop.signing, &bytes).unwrap();
     let replay =
         jazz_e2ee::protocol::account::AccountReplay::new(&public, &env.domain, &env.registry)
             .unwrap();
@@ -1414,7 +1418,7 @@ fn removing_a_registering_device_retires_its_roots() {
     );
     let mut both = vec![first.root_id.clone(), second.root_id.clone()];
     both.sort();
-    assert_eq!(removal.public.targets().unwrap().1, both);
+    assert_eq!(removal.public.columns.targets().unwrap().1, both);
     assert!(removal.recovery_deliveries.is_empty());
     let state = ledger.state(&env);
     assert!(state.is_removed(&phone.id));
@@ -1422,10 +1426,10 @@ fn removing_a_registering_device_retires_its_roots() {
 
     // Naming only one of them is not accepted.
     let mut partial = removal.public.clone();
-    partial.retired_recovery_root_ids =
+    partial.columns.retired_recovery_root_ids =
         jazz_e2ee::protocol::json::encode_root_id_list([&second.root_id]).unwrap();
     let bytes = partial.signed_bytes(&env.application()).unwrap();
-    partial.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    partial.signature = signature::Builtin.sign(&laptop.signing, &bytes).unwrap();
     let mut view = before;
     view.through = at;
     view.successors.push(Accepted::new(at, partial));
@@ -1450,7 +1454,7 @@ fn removing_a_registering_device_retires_its_roots() {
         &mut rng,
     );
     assert_eq!(
-        removal.public.targets().unwrap().1,
+        removal.public.columns.targets().unwrap().1,
         vec![first.root_id.clone()]
     );
     assert!(ledger2.state(&env).recovery_roots.is_empty());
@@ -1492,7 +1496,7 @@ fn removal_retires_every_root_a_device_recovered_with() {
         &mut rng,
     );
     assert_eq!(
-        removal.public.targets().unwrap().1,
+        removal.public.columns.targets().unwrap().1,
         vec![second.root_id.clone()]
     );
     let state = ledger.state(&env);
@@ -1595,7 +1599,7 @@ fn every_epoch_publishes_its_sealing_key() {
         &mut rng,
     );
     let state = ledger.state(&env);
-    assert_eq!(state.epoch_id(), rotation.public.epoch_id);
+    assert_eq!(state.epoch_id(), rotation.public.columns.epoch_id);
     assert!(state.is_removed(&phone.id));
     assert_sealing_key(
         &env,
@@ -1603,7 +1607,7 @@ fn every_epoch_publishes_its_sealing_key() {
         1,
         rotation_at,
         &laptop,
-        &rotation.public.epoch_id,
+        &rotation.public.columns.epoch_id,
         &rotation.key,
     );
 
@@ -1715,9 +1719,9 @@ fn re_sign(
     successor: &mut jazz_e2ee::protocol::records::account::PublicAccountSuccessor,
     device: &LocalDevice,
 ) {
-    successor.signer_id = device.id.clone();
+    successor.columns.signer_id = device.id.clone();
     let bytes = successor.signed_bytes(&env.application()).unwrap();
-    successor.signature = signing::sign(&signature::Builtin, &device.signing, &bytes).unwrap();
+    successor.signature = signature::Builtin.sign(&device.signing, &bytes).unwrap();
 }
 
 /// Accepts `successor` alone at the next position and replays.
@@ -1775,17 +1779,18 @@ fn a_successor_with_other_membership_or_revision_is_rejected() {
     let epoch = ledger.state(&env).epoch_id().to_owned();
 
     let mut wider = successor.clone();
-    let mut members = jazz_e2ee::protocol::json::decode_id_list(&wider.membership).unwrap();
+    let mut members = jazz_e2ee::protocol::json::decode_id_list(&wider.columns.membership).unwrap();
     members.push(phone.id.clone());
     members.sort();
-    wider.membership = jazz_e2ee::protocol::json::encode_id_list(&members).unwrap();
+    wider.columns.membership = jazz_e2ee::protocol::json::encode_id_list(&members).unwrap();
     re_sign(&env, &mut wider, &laptop);
     let state = with_successor(&env, &ledger, wider);
     assert!(state.is_active(&tablet.id));
     assert_eq!(state.epoch_id(), epoch);
 
     let mut narrower = successor.clone();
-    narrower.membership = jazz_e2ee::protocol::json::encode_id_list(Vec::<String>::new()).unwrap();
+    narrower.columns.membership =
+        jazz_e2ee::protocol::json::encode_id_list(Vec::<String>::new()).unwrap();
     re_sign(&env, &mut narrower, &laptop);
     assert_eq!(with_successor(&env, &ledger, narrower).epoch_id(), epoch);
 
@@ -2027,12 +2032,12 @@ fn only_a_valid_removal_request_is_pending() {
     let mut by_laptop = valid.clone();
     by_laptop.id = ids::random_v4(&mut rng).unwrap();
     let bytes = by_laptop.signed_bytes(&env.application()).unwrap();
-    by_laptop.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    by_laptop.signature = signature::Builtin.sign(&laptop.signing, &bytes).unwrap();
     let mut other_epoch = valid.clone();
     other_epoch.id = ids::random_v4(&mut rng).unwrap();
     other_epoch.epoch_id = ids::random_v4(&mut rng).unwrap();
     let bytes = other_epoch.signed_bytes(&env.application()).unwrap();
-    other_epoch.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
+    other_epoch.signature = signature::Builtin.sign(&phone.signing, &bytes).unwrap();
     for invalid in [tampered, by_laptop, other_epoch] {
         let mut with = ledger.clone();
         accept_request(&mut with, invalid.clone());
@@ -2248,7 +2253,7 @@ fn approval_codes_match_and_neither_nonce_can_be_changed() {
         &by_stranger.nonce,
     )
     .unwrap();
-    by_stranger.signature = signing::sign(&signature::Builtin, &stranger.signing, &bytes).unwrap();
+    by_stranger.signature = signature::Builtin.sign(&stranger.signing, &bytes).unwrap();
     for (name, bad) in [
         ("altered nonce", other_nonce),
         ("altered signature", tampered),
@@ -2278,7 +2283,7 @@ fn approval_codes_match_and_neither_nonce_can_be_changed() {
         &swapped.nonce,
     )
     .unwrap();
-    swapped.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
+    swapped.signature = signature::Builtin.sign(&phone.signing, &bytes).unwrap();
     assert_eq!(
         build::verify_possession(
             &writer,
@@ -2332,7 +2337,7 @@ fn private_verification_requires_the_signed_challenge_and_the_nonce() {
         &challenge.nonce,
     )
     .unwrap();
-    challenge.signature = signing::sign(&signature::Builtin, &tablet.signing, &bytes).unwrap();
+    challenge.signature = signature::Builtin.sign(&tablet.signing, &bytes).unwrap();
     assert_eq!(count(&resigned), 1, "only the tablet's approval verifies");
 
     let mut tampered = ledger.clone();
@@ -2367,7 +2372,7 @@ fn private_verification_requires_the_signed_challenge_and_the_nonce() {
         &proof.nonce,
     )
     .unwrap();
-    proof.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
+    proof.signature = signature::Builtin.sign(&phone.signing, &bytes).unwrap();
     assert_eq!(count(&renonced), 1);
 }
 
@@ -2438,7 +2443,7 @@ fn approve_refuses_a_request_other_than_the_challenged_one() {
         &reproof.nonce,
     )
     .unwrap();
-    reproof.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
+    reproof.signature = signature::Builtin.sign(&phone.signing, &bytes).unwrap();
     assert_eq!(
         build::approve(
             &writer, &state, &laptop, &challenge, &reproof, &swapped, &key, &mut rng
@@ -2500,7 +2505,7 @@ fn a_successor_retiring_another_accounts_recovery_root_is_rejected() {
     .unwrap()
     .public;
     let mut foreign = legitimate.clone();
-    foreign.retired_recovery_root_ids =
+    foreign.columns.retired_recovery_root_ids =
         jazz_e2ee::protocol::json::encode_root_id_list([bobs.root_id.as_str()]).unwrap();
     re_sign(&env, &mut foreign, &laptop);
 
