@@ -323,6 +323,19 @@ test("CI-equivalent partitions cannot silently substitute their Rust or TypeScri
   );
 });
 
+test("Rust partition runs the NAPI and wasm encryption tests", () => {
+  const rust = planFor({ partition: "rust-workspace" });
+  const napi = rust.find(({ label }) => label === "jazz-napi encryption tests");
+  assert.ok(napi);
+  assert.equal(napi.executable, "bash");
+  assert.match(napi.args.join(" "), /unset RUSTC_WRAPPER;.*cargo test -p jazz-napi --lib --features rn-test-bridge/);
+
+  const wasm = rust.find(({ label }) => label === "jazz-wasm encryption tests");
+  assert.ok(wasm);
+  assert.equal(wasm.executable, "bash");
+  assert.match(wasm.args.join(" "), /unset RUSTC_WRAPPER;.*wasm-pack test --node crates\/jazz-wasm/);
+});
+
 test("the shared TypeScript runner rejects inherited suite overrides under the CI guard", () => {
   const result = spawnSync("bash", ["dev/gates/run-ts-tests.sh"], {
     cwd: root,
