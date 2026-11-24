@@ -237,7 +237,8 @@ kotlin {
             kotlin.srcDir("src/jna/kotlin")
             if (withFfi) {
                 kotlin.srcDir("src/ffi/kotlin")
-                kotlin.srcDir(uniffiBindings ?: uniffiOut)
+                // builtBy: every reader (compile, the sources jars) runs generateUniffi first.
+                kotlin.srcDir(uniffiBindings ?: files(uniffiOut).builtBy(generateUniffi))
             }
             dependencies { implementation("net.java.dev.jna:jna:5.17.0") }
         }
@@ -252,7 +253,9 @@ kotlin {
             androidMain {
                 kotlin.srcDir("src/jna/kotlin")
                 kotlin.srcDir("src/ffi/kotlin")
-                kotlin.srcDir(androidUniffiBindings ?: androidUniffiOut)
+                // builtBy: AGP's androidReleaseSourcesJar isn't a Gradle Jar the hook
+                // below reaches; the source dir itself carries the task.
+                kotlin.srcDir(androidUniffiBindings ?: files(androidUniffiOut).builtBy(generateUniffiAndroid))
                 // JNA's Android build: the same classes plus libjnidispatch.so per ABI.
                 dependencies { implementation("net.java.dev.jna:jna:5.17.0@aar") }
             }
