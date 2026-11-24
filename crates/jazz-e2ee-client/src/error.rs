@@ -27,6 +27,14 @@ pub enum ClientError {
     /// The database refused a call the runtime made.
     #[error(transparent)]
     Database(#[from] jazz::db::Error),
+    /// An account reset whose generated records could not be published.
+    #[error("account reset publication failed: {source}")]
+    AccountResetPublication {
+        record_ids: Box<[String; 3]>,
+        refused: bool,
+        #[source]
+        source: Box<ClientError>,
+    },
     /// This device already answered a challenge (its approval nonce is
     /// spent), or the server shows a proof of its own that it did not make
     /// in this run: it answers no other challenge (protocol §2.5). It

@@ -625,13 +625,28 @@ impl Encryption {
             Value::String(text) => Some(Zeroizing::new(std::mem::take(text))),
             _ => None,
         });
+        let phrase = match op.as_str() {
+            "recoveryRegister" | "recoveryRestore" => take_recovery_phrase(&mut args),
+            _ => None,
+        };
         Box::pin(async move {
-            this.run(&op, &args, secret.as_ref().map(|text| text.as_str()))
-                .await
+            this.run(
+                &op,
+                &args,
+                phrase,
+                secret.as_ref().map(|text| text.as_str()),
+            )
+            .await
         })
     }
 
-    async fn run(&self, op: &str, args: &Value, secret: Option<&str>) -> Result<Value, String> {
+    async fn run(
+        &self,
+        op: &str,
+        args: &Value,
+        phrase: Option<Result<RecoverySecret, String>>,
+        secret: Option<&str>,
+    ) -> Result<Value, String> {
         if op == "shutdown" {
             // The loop can be holding the store lock while waiting for its
             // save to settle. Keep driving it until the client is closed.
@@ -759,7 +774,7 @@ impl Encryption {
             // (`recovery-root-mismatch`) and nothing is written. Otherwise a
             // retired root is refused (`recovery-root-mismatch`).
             "recoveryRegister" => {
-                let secret = recovery_secret(args, secret)?;
+                let secret = recovery_secret(args, phrase, secret)?;
                 if args.get("automatic").and_then(Value::as_bool) == Some(true) {
                     match client.refuse_foreign_device_secret(&secret) {
                         Ok(()) => client.register_recovery_at_start(db, &secret).await,
@@ -775,7 +790,7 @@ impl Encryption {
             // as native readiness runs it. `null`: nothing to recover from
             // (yet), so the device stays awaiting approval.
             "recoveryRestore" => {
-                let secret = recovery_secret(args, secret)?;
+                let secret = recovery_secret(args, phrase, secret)?;
                 let restored = if args.get("automatic").and_then(Value::as_bool) == Some(true) {
                     match client.recover_device_when_available(db, &secret).await {
                         Err(ClientError::ApprovalAnswered) => {
@@ -1205,6 +1220,30 @@ fn status_name(status: AccountStatus) -> &'static str {
 
 /// A runtime error as JS sees it: a stable code, then the message.
 fn describe(error: ClientError) -> String {
+    if let ClientError::AccountResetPublication {
+        record_ids,
+        refused,
+        source,
+    } = &error
+    {
+        let code = match source.as_ref() {
+            ClientError::Database(error) => error
+                .reason
+                .map_or(error.code.as_str(), |reason| reason.as_str()),
+            ClientError::Protocol(error) => error.code().unwrap_or("protocol"),
+            _ => "error",
+        };
+        return format!(
+            "publication: {}",
+            json!({
+                "stage": "account-reset",
+                "outcome": if *refused { "refused" } else { "unknown" },
+                "code": code,
+                "recordIds": record_ids.as_ref(),
+                "message": source.to_string(),
+            }),
+        );
+    }
     let code = match &error {
         ClientError::ApprovalAnswered => "approval-answered",
         ClientError::NoChallenge => "no-challenge",
@@ -1222,13 +1261,29 @@ fn describe(error: ClientError) -> String {
     format!("{code}: {error}")
 }
 
-/// Read a recovery phrase, a formatted device account secret for automatic
-/// recovery, or a hexadecimal backup secret for explicit recovery.
-fn recovery_secret(args: &Value, text: Option<&str>) -> Result<RecoverySecret, String> {
-    if let Some(phrase) = args.get("phrase").and_then(Value::as_str) {
-        return super::phrase::to_secret(phrase)
+/// Move the JSON string's allocation into a zeroizing buffer and parse it
+/// before creating the future, so only the parsed secret can wait in the gate.
+fn take_recovery_phrase(args: &mut Value) -> Option<Result<RecoverySecret, String>> {
+    let Value::String(text) = args.get_mut("phrase")? else {
+        return None;
+    };
+    let phrase = Zeroizing::new(std::mem::take(text));
+    Some(
+        super::phrase::to_secret(&phrase)
             .map(|bytes| RecoverySecret::from_bytes(*bytes))
-            .map_err(|error| format!("{}: the recovery phrase is not valid", error.code()));
+            .map_err(|error| format!("{}: the recovery phrase is not valid", error.code())),
+    )
+}
+
+/// Use the supplied phrase, a formatted device account secret for automatic
+/// recovery, or a hexadecimal backup secret for explicit recovery.
+fn recovery_secret(
+    args: &Value,
+    phrase: Option<Result<RecoverySecret, String>>,
+    text: Option<&str>,
+) -> Result<RecoverySecret, String> {
+    if let Some(phrase) = phrase {
+        return phrase;
     }
     let text = text.ok_or("`phrase` is missing")?;
     if args.get("automatic").and_then(Value::as_bool) == Some(true) {
@@ -1359,6 +1414,34 @@ mod tests {
         assert!(secret(&"ab".repeat(32)).is_ok());
         assert!(secret("ab").is_err());
         assert!(secret(&"zz".repeat(32)).is_err());
+    }
+
+    /// Alice's mnemonic is consumed before either recovery call can wait
+    /// or be cancelled. Test the argument boundary directly because callers
+    /// cannot inspect the call's owned JSON after handing it over.
+    #[test]
+    fn recovery_phrase_is_removed_before_success_error_or_cancellation() {
+        let bytes = [5; 32];
+        let phrase = super::super::phrase::from_secret(&bytes);
+        let mut args = json!({ "phrase": phrase.as_str() });
+        let parsed = take_recovery_phrase(&mut args).unwrap().unwrap();
+        assert_eq!(parsed.format(), RecoverySecret::from_bytes(bytes).format());
+        assert_eq!(args["phrase"], "");
+
+        let mut args = json!({ "phrase": "one word" });
+        let parsed = take_recovery_phrase(&mut args).unwrap();
+        assert!(matches!(parsed, Err(error) if error.starts_with("invalid-length: ")));
+        assert_eq!(args["phrase"], "");
+
+        let runtime = native_runtime_with_catalogue(true);
+        let busy = run(runtime.gate.enter());
+        let mut context = Context::from_waker(Waker::noop());
+        for op in ["recoveryRegister", "recoveryRestore"] {
+            let mut call = runtime.call(op.to_owned(), json!({ "phrase": phrase.as_str() }));
+            assert!(call.as_mut().poll(&mut context).is_pending());
+            drop(call);
+        }
+        drop(busy);
     }
 
     /// Contract: an encrypted app is installed from its own declarations: an

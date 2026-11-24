@@ -393,6 +393,86 @@ fn a_refused_reset_keeps_the_verified_account() {
     );
 }
 
+/// Alice's waiting device reports which reset records the authority refused.
+/// The app can reconcile the original identity, root and sealing key IDs.
+#[test]
+fn a_failed_reset_reports_the_publication_and_original_record_ids() {
+    use jazz_e2ee_client::host::{
+        bridge::JsStore,
+        runtime::{Built, Encryption},
+    };
+    use serde_json::{Value as Json, json};
+
+    let server = secure_authority_with(&EncryptionSettings::default(), None);
+    let settings = EncryptionSettings {
+        allow_account_reset: true,
+        ..Default::default()
+    };
+    let alice = account(0xad);
+    let first = open_account(Rc::new(MemoryStore::new()), alice, settings.clone(), None);
+    let (first_db, _first_link) = session(&first, &server, alice, &settings, 1, None);
+    assert_eq!(
+        drive(&server, &[&first_db], first.ensure_account(&first_db)).unwrap(),
+        AccountStatus::Active
+    );
+
+    let second = Rc::new(open_account(
+        Rc::new(MemoryStore::new()),
+        alice,
+        settings.clone(),
+        None,
+    ));
+    let (second_db, _second_link, wire) =
+        recorded_session(&second, &server, alice, &settings, 2, None);
+    let second_db = Rc::new(second_db);
+    assert_eq!(
+        drive(&server, &[&second_db], second.ensure_account(&second_db)).unwrap(),
+        AccountStatus::AwaitingApproval
+    );
+    let runtime = Encryption::new(
+        Built {
+            spaces: json!({}),
+            client: second,
+            reports: Rc::default(),
+        },
+        Rc::new(JsStore::default()),
+        Rc::clone(&second_db),
+    );
+    wire.borrow_mut().clear();
+    let error = drive(
+        &server,
+        &[&second_db],
+        runtime.call("resetAccount".into(), json!({})),
+    )
+    .unwrap_err();
+    let details: Json =
+        serde_json::from_str(error.strip_prefix("publication: ").expect(&error)).unwrap();
+    assert_eq!(details["stage"], "account-reset");
+    assert_eq!(details["outcome"], "refused");
+    assert_eq!(details["code"], "authorization_denied");
+
+    let ids: std::collections::BTreeSet<_> = details["recordIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| uuid::Uuid::parse_str(id.as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(ids.len(), 3);
+    for id in ids {
+        assert!(
+            contains(&wire.borrow(), id.as_bytes()),
+            "record {id} was sent"
+        );
+    }
+    for table in [
+        "__e2ee_account_identities",
+        "__e2ee_account_roots",
+        "__e2ee_account_keys",
+    ] {
+        assert_eq!(count(&server, table), 1, "nothing published to {table}");
+    }
+}
+
 /// Contract: after alice's second device resets her account, a reset
 /// attempt on the first device discovers that it is no longer active and
 /// immediately clears its last verified account.
