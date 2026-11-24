@@ -1,6 +1,7 @@
 import { Banner, Button, HStack, VStack } from "@astryxdesign/core";
-import { useDeviceState } from "../lib/device-state";
+import { isWaitingForApproval, useDeviceState } from "../lib/device-state";
 import { ApprovalCode } from "./DevicesPanel";
+import { KeyCheckFailedBanner, WaitingForApprovalBanner } from "./DeviceBanners";
 
 /**
  * What needs the user's attention about this browser's keys, shown above
@@ -23,22 +24,9 @@ export function EncryptionNotices({ signOutFailure }: { signOutFailure?: React.R
         />
       ) : null}
       {signOutFailure}
-      {readyFailed ? (
-        <Banner
-          status="error"
-          container="section"
-          collapsible={false}
-          title="This browser could not check its keys"
-          description={readyFailed.message}
-          endContent={<Button label="Check again" onClick={() => void retryReady()} />}
-        />
-      ) : null}
-      {leaving !== "unfinished" && (status === "awaiting-approval" || status === "reenrolled") ? (
-        <Banner
-          status="warning"
-          container="section"
-          collapsible={false}
-          title="This browser is waiting for approval"
+      {readyFailed ? <KeyCheckFailedBanner failure={readyFailed} retry={retryReady} /> : null}
+      {leaving !== "unfinished" && isWaitingForApproval(status) ? (
+        <WaitingForApprovalBanner
           description={
             <VStack gap={2}>
               <ApprovalCode approval={approval} />
@@ -47,7 +35,7 @@ export function EncryptionNotices({ signOutFailure }: { signOutFailure?: React.R
               </span>
             </VStack>
           }
-          endContent={
+          action={
             <HStack>
               <Button label="Show approval code" onClick={() => void answerChallenge()} />
             </HStack>

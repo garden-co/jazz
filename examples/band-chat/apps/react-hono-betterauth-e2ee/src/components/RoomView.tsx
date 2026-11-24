@@ -24,7 +24,7 @@ import {
   VStack,
 } from "@astryxdesign/core";
 import { app, type Reaction } from "../../jazz.generated";
-import { useDeviceStateIfAny } from "../lib/device-state";
+import { failureOf, isWaitingForApproval, useDeviceStateIfAny } from "../lib/device-state";
 import { useMarkRead } from "../lib/mark-read";
 import { removeMember, renewRoomKey, useRoomMembers } from "../lib/membership";
 import { ProfileAvatar, useDirectory } from "../lib/profiles";
@@ -123,11 +123,11 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   function retryRotation() {
     setRotationFailure(undefined);
     renewRoomKey(db, roomId).catch((error: unknown) =>
-      setRotationFailure(error instanceof Error ? error.message : String(error)),
+      setRotationFailure(failureOf(error).message),
     );
   }
   const reportFailure = (action: string) => (cause: unknown) =>
-    setActionError(`${action}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    setActionError(`${action}: ${failureOf(cause).message}`);
 
   const decryptedIds = useMemo(
     () => (newestFirst ? new Set(newestFirst.map((message) => message.id)) : undefined),
@@ -455,7 +455,7 @@ const KEY_ARRIVING_MS = 10_000;
  */
 function useKeyOnItsWay(unreadable: readonly { code: string }[]): "arriving" | "slow" | null {
   const status = useDeviceStateIfAny()?.status;
-  const waitingForApproval = status === "awaiting-approval" || status === "reenrolled";
+  const waitingForApproval = isWaitingForApproval(status ?? null);
   const onItsWay =
     !waitingForApproval &&
     unreadable.length > 0 &&

@@ -16,6 +16,10 @@ export type EncryptionHandle = ReturnType<typeof useDb>["encryption"];
 export type AccountStatus = Awaited<ReturnType<EncryptionHandle["ready"]>>;
 export type DeviceInfo = Awaited<ReturnType<EncryptionHandle["devices"]["list"]>>[number];
 
+export function isWaitingForApproval(status: AccountStatus | null): boolean {
+  return status === "awaiting-approval" || status === "reenrolled";
+}
+
 export interface Failure {
   code: string;
   message: string;

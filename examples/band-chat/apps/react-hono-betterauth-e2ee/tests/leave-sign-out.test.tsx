@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { within, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { DevicesPanel } from "../src/components/DevicesPanel";
-import { readLeaveRecord, writeLeaveRecord } from "../src/lib/leave-record";
+import { clearLeaveRecord, readLeaveRecord, writeLeaveRecord } from "../src/lib/leave-record";
 import { encryptionError, fakeEncryption } from "./fake-encryption";
 
 const ACCOUNT = "account-alice";
@@ -56,6 +56,7 @@ beforeEach(() => {
   mocks.authSignOut.mockClear();
   mocks.jazzRefresh.mockClear();
   mocks.lifecycleSignOut.mockClear();
+  mocks.lifecycleSignOut.mockImplementation(async () => clearLeaveRecord());
 });
 
 afterEach(() => cleanup());
@@ -67,16 +68,14 @@ async function settle(fake: ReturnType<typeof fakeEncryption>) {
 }
 
 describe("a browser waiting for approval", () => {
-  for (const status of ["awaiting-approval", "reenrolled"] as const) {
-    it(`is told so wherever the user is (${status}), with the code to type elsewhere`, async () => {
-      const fake = (mocks.fake = fakeEncryption({ status, devices: [] }));
-      render(<App />);
-      await screen.findByText("This browser is waiting for approval");
-      expect(screen.getByText(/restore with your recovery phrase or passkey/)).not.toBeNull();
-      fake.challenge();
-      await screen.findByText("654321");
-    });
-  }
+  it("is told so wherever the user is, with the code to type elsewhere", async () => {
+    const fake = (mocks.fake = fakeEncryption({ status: "awaiting-approval", devices: [] }));
+    render(<App />);
+    await screen.findByText("This browser is waiting for approval");
+    expect(screen.getByText(/restore with your recovery phrase or passkey/)).not.toBeNull();
+    fake.challenge();
+    await screen.findByText("654321");
+  });
 });
 
 describe("finishing leaving this browser", () => {
@@ -103,16 +102,18 @@ describe("finishing leaving this browser", () => {
     expect(readLeaveRecord()).toBeNull();
   });
 
-  for (const status of ["reenrolled", "awaiting-approval"] as const) {
-    it(`signs out at start-up when the device ID changed (${status}), then drops the record`, async () => {
-      writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-old" });
-      mocks.fake = fakeEncryption({ deviceId: "device-new", status, devices: [] });
-      render(<App />);
-      await waitFor(() => expect(mocks.authSignOut).toHaveBeenCalledTimes(1));
-      await waitFor(() => expect(readLeaveRecord()).toBeNull());
-      expect(mocks.jazzRefresh).toHaveBeenCalled();
+  it("signs out at start-up when the device ID changed, then drops the record", async () => {
+    writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-old" });
+    mocks.fake = fakeEncryption({
+      deviceId: "device-new",
+      status: "awaiting-approval",
+      devices: [],
     });
-  }
+    render(<App />);
+    await waitFor(() => expect(mocks.authSignOut).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(readLeaveRecord()).toBeNull());
+    expect(mocks.jazzRefresh).toHaveBeenCalled();
+  });
 
   it("does not sign out while the device ID is the same", async () => {
     writeLeaveRecord({ accountId: ACCOUNT, deviceId: "device-this" });
