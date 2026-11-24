@@ -363,6 +363,14 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    command("jazz-napi encryption tests", "bash", [
+      "-lc",
+      "unset RUSTC_WRAPPER; exec cargo test -p jazz-napi --lib --features rn-test-bridge",
+    ]),
+    command("jazz-wasm encryption tests", "bash", [
+      "-lc",
+      "unset RUSTC_WRAPPER; exec wasm-pack test --node crates/jazz-wasm",
+    ]),
     // jazz-core's integration tests again with the client's encryption hooks
     // compiled in: the hook tests exist only then, and every other test must
     // pass with the call sites built. A run of its own, so the workspace run
