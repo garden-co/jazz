@@ -1,135 +1,29 @@
-import { mkdtemp } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { acceptDeviceAccounts, createJazz, sqlite } from "../backend/index.js";
-import type { AccountStore } from "../accounts/persistence.js";
 import { Encryption, memoryPrivateStore } from "../encryption/index.js";
-import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import type { Db } from "../runtime/db.js";
 import { EncryptionNeedsLocalFirstError } from "../runtime/encryption-needs-local-first.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
-import { testApp } from "../testing/index.js";
+import { cleanUpTestApp, memoryTestAccountStore as memoryStore } from "../testing/index.js";
 import { openBrowserSessionCore, type BrowserJazzSession } from "./create-jazz-session.js";
+import {
+  gatedLoader,
+  serveThinTestApp,
+  thinHandleApp as app,
+  thinHandlePermissions as permissions,
+} from "../../tests/fixtures/thin-session.js";
 
 // Calls on a db.encryption handle taken while thin: what starts the load, what a listener receives, and how a call ends at a failed or a stalled load.
 
-const app = testApp({
-  format: 1,
-  tables: {
-    projects: { columns: { name: "string", ownerId: "uuid" } },
-    tasks: {
-      columns: { projectId: "uuid", title: "bytes", __e2ee_eq_title: "bytes", note: "string?" },
-      relations: { project: { rel: "projects", column: "projectId" } },
-      encryption: {
-        space: "projectId",
-        scope: "projects",
-        columns: { title: "string" },
-        equality: ["title"],
-      },
-    },
-    // Plain; a comment's insert is allowed only once its task is on the server.
-    comments: {
-      columns: { taskId: "uuid", text: "string" },
-      relations: { task: { rel: "tasks", column: "taskId" } },
-    },
-    notes: { columns: { text: "string" } },
-    // Plain; a reply's insert is allowed only once its note is on the server.
-    replies: {
-      columns: { noteId: "uuid", text: "string" },
-      relations: { note: { rel: "notes", column: "noteId" } },
-    },
-  },
-});
-const members =
-  "exists __e2ee_members(scopeId = table_id('projects'), identifier = this.id, accountId = session.user)";
-const permissions = {
-  $schema: "https://jazz.tools/schemas/jazz.permissions.v1.json",
-  tables: {
-    projects: {
-      read: members,
-      insert: "$createdBy.account = session.user",
-      update: "ownerId = session.user",
-    },
-    // Anyone reads a task's row, so an account outside its space sees its
-    // plain columns and holds no key for its encrypted one.
-    tasks: { read: "true", insert: "allowedTo.read(project)" },
-    comments: { read: "true", insert: "allowedTo.read(task)" },
-    notes: { read: "true", insert: "true" },
-    replies: { read: "true", insert: "allowedTo.read(note)" },
-  },
-} as never;
-
 const cleanups: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
-  while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
+  await cleanUpTestApp(cleanups);
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
-async function serve() {
-  const dir = await mkdtemp(`${tmpdir()}/thin-encrypted-`);
-  const jazz = await createJazz({
-    app: app as never,
-    permissions,
-    store: sqlite({ path: `${dir}/core.sqlite` }),
-    // The app's own sign-in (`Authorization: Bearer token-<user>`), and device accounts.
-    authenticate: (request: Request) => {
-      const match = /^Bearer token-(\w+)$/.exec(request.headers.get("authorization") ?? "");
-      return match
-        ? { userId: match[1]!, expiresAt: Math.floor(Date.now() / 1000) + 3600 }
-        : acceptDeviceAccounts(request);
-    },
-  }).ready();
-  cleanups.push(() => jazz.close());
-  const server: Server = createServer((req, res) =>
-    jazz.nodeHandler(req, res, () => {
-      res.statusCode = 404;
-      res.end();
-    }),
-  );
-  await jazz.attach(server);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  cleanups.push(
-    () =>
-      new Promise((resolve) => {
-        server.closeAllConnections();
-        server.close(resolve);
-      }),
-  );
-  return {
-    jazz,
-    serverUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/jazz`,
-    storePath: `${dir}/core.sqlite`,
-  };
-}
+const serve = () => serveThinTestApp(app, permissions, cleanups);
 type Host = Awaited<ReturnType<typeof serve>>;
-
-function memoryStore(): AccountStore {
-  let stored: string | null = null;
-  return {
-    read: async () => stored,
-    update: async (transform) => void (stored = transform(stored)),
-  };
-}
-
-/** A loader that loads only once `release()` is called, counting its calls. */
-function gatedLoader() {
-  let release!: () => void;
-  const released = new Promise<void>((resolve) => (release = resolve));
-  const gate = {
-    calls: 0,
-    release: () => release(),
-    loader: (async () => {
-      gate.calls++;
-      await released;
-      return { createClient: createLocalFirstDb };
-    }) as LocalFirstLoader,
-  };
-  return gate;
-}
 
 /** The page is still loading: the background upgrade waits for a load event that doesn't come. */
 function pageStillLoading() {
