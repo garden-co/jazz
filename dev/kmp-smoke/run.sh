@@ -38,7 +38,13 @@
 
 set -euo pipefail
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+# One line per check for a gate to count: PASS <check>, or FAIL <check>: <why> (then exit 1).
+# Checks: zip-layout, jvm-resolve, jvm-roundtrip, android-resolve, android-assemble,
+# android-natives-app-debug, android-natives-app-release, android-r8-keep; with
+# KMP_SMOKE_SKIP_ANDROID=1, NOT_COVERED android in place of the Android ones.
+check=setup
+fail() { echo "FAIL $check: $*"; echo "FAIL: $*" >&2; exit 1; }
+pass() { echo "PASS $1"; }
 step() { echo; echo "== $*"; }
 
 [ $# -eq 2 ] || { echo "usage: $0 <jazz-kotlin-maven-VERSION.zip> <version>" >&2; exit 2; }
@@ -66,6 +72,7 @@ org.gradle.workers.max=2"
 export GRADLE_USER_HOME="${KMP_SMOKE_GRADLE_HOME:-$work/gradle-home}"
 rm -rf "$GRADLE_USER_HOME/caches/modules-2/files-2.1/tools.jazz" "$GRADLE_USER_HOME/caches/modules-2/metadata-"*/descriptors/tools.jazz
 
+check=zip-layout
 step "unzip $(basename "$zip")"
 # As the docs do: unzipped into jazz-maven/ beside the build, tools/jazz/ at its top.
 mkdir "$work/unzipped"
@@ -90,6 +97,7 @@ jazz_repository="    exclusiveContent {
     mavenCentral()"
 
 # ---------------------------------------------------------------- JVM
+pass zip-layout
 step "JVM project"
 jvm="$work/jvm-app"
 mkdir -p "$jvm/src/main/kotlin/smoke"
@@ -175,6 +183,7 @@ fun main(args: Array<String>) = runBlocking {
 }
 EOF
 
+check=jvm-resolve
 (cd "$jvm" && gradle "${gradle_flags[@]}" -q jazzVariant) | tee "$work/jvm-variant.txt" || fail "JVM: Gradle failed resolving tools.jazz:jazz-kotlin:$version (above)"
 grep -q "^COMPONENT tools.jazz:jazz-kotlin:$version " "$work/jvm-variant.txt" || fail "JVM: tools.jazz:jazz-kotlin:$version not in the runtime classpath"
 grep -q "^COMPONENT tools.jazz:jazz-kotlin-jvm:$version " "$work/jvm-variant.txt" || fail "JVM: jazz-kotlin didn't resolve to jazz-kotlin-jvm through its module metadata"
@@ -183,19 +192,24 @@ grep -q "^COMPONENT tools.jazz:jazz-kotlin-android" "$work/jvm-variant.txt" && f
 grep -q "^FILE jna-.*\.jar$" "$work/jvm-variant.txt" || fail "JVM: JNA's jar isn't on the runtime classpath"
 grep -q "^FILE jna-.*\.aar$" "$work/jvm-variant.txt" && fail "JVM: JNA's Android AAR is on the JVM classpath"
 echo "JVM: jazz-kotlin -> jazz-kotlin-jvm ok"
+pass jvm-resolve
 
+check=jvm-roundtrip
 (cd "$jvm" && gradle "${gradle_flags[@]}" -q run --args="$work/jvm-data") | tee "$work/jvm-run.txt" || fail "JVM: the app failed"
 grep -q "^JVM SMOKE OK$" "$work/jvm-run.txt" || fail "JVM: the app didn't write and read back"
+pass jvm-roundtrip
 
 # ---------------------------------------------------------------- Android
 if [ "${KMP_SMOKE_SKIP_ANDROID:-}" = 1 ]; then
   echo
+  echo "NOT_COVERED android (KMP_SMOKE_SKIP_ANDROID=1)"
   echo "SKIPPED: Android (KMP_SMOKE_SKIP_ANDROID=1). The KMP package is NOT checked on Android."
   echo "KMP SMOKE: JVM PASS, ANDROID SKIPPED"
   exit 0
 fi
 
 step "Android project"
+check=android-sdk
 sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 [ -n "$sdk" ] && [ -d "$sdk" ] || fail "Android: set ANDROID_HOME to an Android SDK (or KMP_SMOKE_SKIP_ANDROID=1)"
 [ -d "$sdk/platforms/android-36" ] || fail "Android: the SDK lacks platforms;android-36"
@@ -321,15 +335,21 @@ class SmokeActivity : Activity() {
 }
 EOF
 
+check=android-resolve
 (cd "$and" && gradle "${gradle_flags[@]}" -q :app:jazzVariant) | tee "$work/android-variant.txt" || fail "Android: Gradle failed resolving tools.jazz:jazz-kotlin:$version (above)"
 grep -q "^COMPONENT tools.jazz:jazz-kotlin-android:$version " "$work/android-variant.txt" || fail "Android: jazz-kotlin didn't resolve to jazz-kotlin-android through its module metadata"
 grep -q "^COMPONENT tools.jazz:jazz-kotlin-jvm" "$work/android-variant.txt" && fail "Android: the JVM variant leaked into the Android classpath"
 echo "Android: jazz-kotlin -> jazz-kotlin-android ok"
+pass android-resolve
+check=android-assemble
 
 (cd "$and" && gradle "${gradle_flags[@]}" :app:assembleDebug :app:assembleRelease) > "$work/android-build.txt" 2>&1 \
   || { tail -60 "$work/android-build.txt"; fail "Android: assembleDebug/assembleRelease failed (log: $work/android-build.txt)"; }
+pass android-assemble
+check=android-natives
 
 for apk in "$and/app/build/outputs/apk/debug/app-debug.apk" "$and/app/build/outputs/apk/release/app-release.apk"; do
+  check="android-natives-$(basename "$apk" .apk)"
   [ -f "$apk" ] || fail "Android: no $(basename "$apk")"
   listing="$(unzip -l "$apk")"
   for abi in arm64-v8a x86_64; do
@@ -337,13 +357,17 @@ for apk in "$and/app/build/outputs/apk/debug/app-debug.apk" "$and/app/build/outp
     grep -q "lib/$abi/libjnidispatch.so" <<<"$listing" || fail "Android: $(basename "$apk") lacks JNA's lib/$abi/libjnidispatch.so"
   done
   echo "Android: $(basename "$apk") ok ($(du -h "$apk" | cut -f1))"
+  pass "$check"
 done
 
 # R8 must have kept what JNA reaches by reflection: the UniFFI bindings and JNA's own classes.
+check=android-r8-keep
 mapping="$and/app/build/outputs/mapping/release/mapping.txt"
 [ -f "$mapping" ] || fail "Android: R8 wrote no mapping.txt"
 grep -q "^uniffi.jazz_ffi\.[A-Za-z_]* -> uniffi.jazz_ffi\." "$mapping" || fail "Android: R8 renamed or dropped uniffi.jazz_ffi (the consumer rules don't keep it)"
 grep -q "^com.sun.jna.Native -> com.sun.jna.Native:" "$mapping" || fail "Android: R8 renamed com.sun.jna.Native"
 
+echo
+pass android-r8-keep
 echo
 echo "KMP SMOKE: JVM PASS, ANDROID PASS (assembled debug and R8 release; not run on a device)"
