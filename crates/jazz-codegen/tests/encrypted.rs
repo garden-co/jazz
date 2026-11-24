@@ -23,9 +23,30 @@ fn app_json() -> Vec<u8> {
 fn a_client_from_bindings_reads_the_same_declarations() {
     let app_id = jazz::tools::AppId::from_name("encrypted-app");
     let bound = jazz_codegen::compile_app(&app_json()).unwrap();
-    let from_bindings = artifact::bound_declarations(bound.as_bytes(), app_id, "test")
+    let (current, from_bindings) =
+        artifact::bound_declarations(bound.as_bytes(), app_id, "test", true).unwrap();
+    assert_eq!(
+        current,
+        artifact::load_app(&app_json()).unwrap().current_hash()
+    );
+    let from_bindings = from_bindings.expect("declared");
+    // Relay admission must verify the schema bytes before trusting this hash.
+    let mut forged: serde_json::Value = serde_json::from_str(&bound).unwrap();
+    let schema = forged["schema"]["schemas"]
+        .as_array_mut()
         .unwrap()
-        .expect("declared");
+        .iter_mut()
+        .find(|entry| entry["hash"] == current.to_string())
+        .unwrap();
+    let tables = schema["schema"]["tables"].as_object_mut().unwrap();
+    tables.insert("invented".into(), tables.values().next().unwrap().clone());
+    let forged = serde_json::to_vec(&forged).unwrap();
+    assert!(
+        artifact::bound_declarations(&forged, app_id, "test", true)
+            .unwrap_err()
+            .to_string()
+            .contains("does not match its hash")
+    );
     let (_, _, from_files) = artifact::load_client_encrypted(&app_json(), app_id, "test").unwrap();
     assert_eq!(from_bindings, from_files.expect("declared"));
 
@@ -33,8 +54,9 @@ fn a_client_from_bindings_reads_the_same_declarations() {
         "tables": { "notes": { "columns": { "title": "string" } } } }"#;
     let bound = jazz_codegen::compile_app(plain).unwrap();
     assert!(
-        artifact::bound_declarations(bound.as_bytes(), app_id, "test")
+        artifact::bound_declarations(bound.as_bytes(), app_id, "test", false)
             .unwrap()
+            .1
             .is_none()
     );
 }

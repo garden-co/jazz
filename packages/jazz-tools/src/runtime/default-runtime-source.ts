@@ -174,7 +174,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   /** The end-to-end encryption runtime built for this tab's account, for an app that declares encryption. */
   private encryption:
     | {
-        runtime: unknown;
+        runtime: import("../encryption/private-store.js").StoreTarget;
         store: import("../encryption/private-store.js").PrivateStore;
         accountSecret?: () => string | undefined;
         app: import("../schema-source.js").SchemaSourceInput;

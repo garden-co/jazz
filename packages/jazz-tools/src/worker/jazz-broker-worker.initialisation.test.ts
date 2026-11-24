@@ -1422,8 +1422,7 @@ describe("broker worker context initialization", () => {
       "{}",
       "worker-initialization-test",
       "dev",
-      "token",
-      "author",
+      proof("worker-initialization-test"),
     ]);
 
     const mismatch = {

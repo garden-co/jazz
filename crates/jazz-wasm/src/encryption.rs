@@ -7,78 +7,39 @@
 //! make progress (a noop waker), as in the Node binding, so the store's
 //! requests are taken and answered by the same JavaScript that serves Node's.
 
-use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
 
-use jazz_e2ee_client::host::bridge::JsStore;
-use jazz_e2ee_client::host::runtime::{self, Built, Encryption, JsonFuture, Options};
+use jazz_e2ee_client::host::runtime::{Encryption, JsonFuture, RuntimeBuilder};
 use wasm_bindgen::prelude::*;
 
 use super::{WasmDb, WasmDbInner};
-use jazz::binding_host::{self, Binding, OpenAs};
-use jazz::db::block_on;
-
-/// A promise waiting on a runtime call, settled with the JSON text of its
-/// result or an error.
-struct PendingJson {
-    future: JsonFuture,
-    resolve: js_sys::Function,
-    reject: js_sys::Function,
-}
+use jazz::binding_host::OpenAs;
 
 thread_local! {
-    static PENDING: RefCell<Vec<PendingJson>> = const { RefCell::new(Vec::new()) };
-}
-
-impl PendingJson {
-    /// Whether the call finished (and its promise was settled).
-    fn poll(&mut self) -> bool {
-        let mut context = Context::from_waker(Waker::noop());
-        let result = match self.future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => result,
-            Poll::Pending => return false,
-        };
-        match result {
-            Ok(value) => {
-                let _ = self
-                    .resolve
-                    .call1(&JsValue::NULL, &JsValue::from_str(&value.to_string()));
-            }
-            Err(message) => {
-                let _ = self
-                    .reject
-                    .call1(&JsValue::NULL, &js_sys::Error::new(&message));
-            }
-        }
-        true
-    }
+    static PENDING: jazz_e2ee_client::host::PromiseQueue = Default::default();
 }
 
 fn json_promise(future: JsonFuture) -> js_sys::Promise {
     let mut settle = None;
     let promise = js_sys::Promise::new(&mut |resolve, reject| settle = Some((resolve, reject)));
     let (resolve, reject) = settle.expect("a promise runs its executor at once");
-    let mut pending = PendingJson {
-        future,
-        resolve,
-        reject,
-    };
-    if !pending.poll() {
-        PENDING.with(|pending_calls| pending_calls.borrow_mut().push(pending));
-    }
+    PENDING.with(|queue| {
+        queue.submit(async move {
+            match future.await {
+                Ok(value) => {
+                    let _ = resolve.call1(&JsValue::NULL, &JsValue::from_str(&value.to_string()));
+                }
+                Err(message) => {
+                    let _ = reject.call1(&JsValue::NULL, &js_sys::Error::new(&message));
+                }
+            }
+        })
+    });
     promise
 }
 
-/// Poll every call that waits: the answer it needs may have arrived.
 fn settle_promises() {
-    let mut pending = PENDING.with(|calls| std::mem::take(&mut *calls.borrow_mut()));
-    pending.retain_mut(|call| !call.poll());
-    PENDING.with(|calls| {
-        let mut calls = calls.borrow_mut();
-        pending.append(&mut calls);
-        *calls = pending;
-    });
+    PENDING.with(|queue| queue.settle());
 }
 
 /// The runtime of an app, built over the private store the page supplies,
@@ -86,12 +47,7 @@ fn settle_promises() {
 /// with `takeStoreRequests` and answered with `replyStore`.
 #[wasm_bindgen(js_name = EncryptionRuntime)]
 pub struct WasmEncryptionRuntime {
-    store: Rc<JsStore>,
-    options: Rc<RefCell<Option<Options>>>,
-    building: Rc<Cell<bool>>,
-    account_id: String,
-    app_id: String,
-    built: Rc<RefCell<Option<Built>>>,
+    builder: RuntimeBuilder,
 }
 
 #[wasm_bindgen(js_class = EncryptionRuntime)]
@@ -109,57 +65,32 @@ impl WasmEncryptionRuntime {
         account_id: String,
         device_account_secret: Option<String>,
     ) -> Result<WasmEncryptionRuntime, JsValue> {
-        let device_account_secret = device_account_secret
-            .map(jazz::identity::DeviceAccountSecret::parse_owned)
-            .transpose()
-            .map_err(super::to_js_error)?;
-        Ok(WasmEncryptionRuntime {
-            store: Rc::default(),
-            options: Rc::new(RefCell::new(Some(Options {
-                app_file: bindings.into_bytes(),
-                from_bindings: true,
-                device_account_secret,
-                app_id: app_id.clone(),
+        Ok(Self {
+            builder: RuntimeBuilder::from_bindings(
+                bindings,
+                app_id,
                 environment,
-            }))),
-            building: Rc::default(),
-            account_id,
-            app_id,
-            built: Rc::default(),
+                account_id,
+                device_account_secret,
+            )
+            .map_err(super::to_js_error)?,
         })
     }
 
     /// Builds the runtime: settles when its device is loaded or made, which
     /// takes the store (answer its requests while waiting).
     pub fn ready(&self) -> js_sys::Promise {
-        let build = {
-            let options = self.options.borrow();
-            let Some(options) = options.as_ref().filter(|_| !self.building.get()) else {
-                return js_sys::Promise::reject(&JsValue::from_str("the runtime is already built"));
-            };
-            runtime::build(options, self.account_id.clone(), Rc::clone(&self.store))
-        };
-        let options = Rc::downgrade(&self.options);
-        let building = Rc::clone(&self.building);
-        let slot = Rc::clone(&self.built);
-        json_promise(Box::pin(async move {
-            building.set(true);
-            let result = build.await;
-            building.set(false);
-            let built = result?;
-            if let Some(options) = options.upgrade() {
-                options.borrow_mut().take();
-            }
-            *slot.borrow_mut() = Some(built);
-            Ok(serde_json::Value::Null)
-        }))
+        match self.builder.build_future() {
+            Some(future) => json_promise(future),
+            None => js_sys::Promise::reject(&JsValue::from_str("the runtime is already built")),
+        }
     }
 
     /// The store requests queued since the last call, each a JSON text.
     #[wasm_bindgen(js_name = takeStoreRequests)]
     pub fn take_store_requests(&self) -> Vec<String> {
-        let requests = self.store.take_requests();
-        settle_promises();
+        let requests = self.builder.take_requests();
+        self.builder.drive(settle_promises);
         requests
     }
 
@@ -167,10 +98,8 @@ impl WasmEncryptionRuntime {
     /// outstanding (the answer is dropped).
     #[wasm_bindgen(js_name = replyStore)]
     pub fn reply_store(&self, id: String, ok: bool, payload: String) -> bool {
-        let accepted = id
-            .parse()
-            .is_ok_and(|id| self.store.reply(id, ok, &payload));
-        settle_promises();
+        let accepted = self.builder.reply(&id, ok, &payload);
+        self.builder.drive(settle_promises);
         accepted
     }
 }
@@ -182,27 +111,46 @@ pub(crate) fn keyless_declarations(
     app_id: &str,
     environment: &str,
 ) -> Result<jazz::e2ee::E2eeDeclarations, JsValue> {
-    let app = jazz::tools::AppId::from_string(app_id)
-        .unwrap_or_else(|_| jazz::tools::AppId::from_name(app_id));
-    jazz::tools::deployment::artifact::bound_declarations(bindings.as_bytes(), app, environment)
-        .map_err(|failure| error(failure.to_string()))?
-        .ok_or_else(|| error("the app's bindings declare no encryption"))
+    jazz_e2ee_client::host::runtime::keyless_declarations(bindings, app_id, environment)
+        .map_err(error)
 }
 
 fn error(message: impl AsRef<str>) -> JsValue {
     js_sys::Error::new(message.as_ref()).into()
 }
 
-fn proof_of(proof: &JsValue) -> Result<(Option<String>, Option<String>), JsValue> {
-    if proof.is_undefined() || proof.is_null() {
-        return Ok((None, None));
+pub(crate) struct SessionProof {
+    token: Option<String>,
+    author: Option<String>,
+    #[cfg(all(target_arch = "wasm32", feature = "backend"))]
+    app_id: Option<String>,
+}
+
+impl SessionProof {
+    pub(crate) fn read(proof: &JsValue) -> Self {
+        let field = |name: &str| {
+            js_sys::Reflect::get(proof, &JsValue::from_str(name))
+                .ok()
+                .and_then(|value| value.as_string())
+        };
+        Self {
+            token: field("token"),
+            author: field("claimedAuthor"),
+            #[cfg(all(target_arch = "wasm32", feature = "backend"))]
+            app_id: field("appId"),
+        }
     }
-    let field = |name: &str| {
-        js_sys::Reflect::get(proof, &JsValue::from_str(name))
-            .ok()
-            .and_then(|value| value.as_string())
-    };
-    Ok((field("token"), field("claimedAuthor")))
+
+    pub(crate) fn for_app<'a>(&'a self, app_id: &'a str) -> OpenAs<'a> {
+        match (&self.token, &self.author) {
+            (Some(token), Some(claimed_author)) => OpenAs::SelfSigned {
+                token,
+                app_id,
+                claimed_author,
+            },
+            _ => OpenAs::Untrusted,
+        }
+    }
 }
 
 impl WasmDb {
@@ -215,18 +163,10 @@ impl WasmDb {
         environment: &str,
         how: OpenAs<'_>,
     ) -> Result<Self, JsValue> {
-        super::initialize_wasm_tracing();
-        let (config, identity, trusted) = Self::prepare_open(schema, config, how)?;
-        let hooks = jazz_e2ee_client::KeylessHooks::hooks(keyless_declarations(
-            bindings,
-            app_id,
-            environment,
-        )?);
-        let db = block_on(binding_host::open_memory(config.with_e2ee(hooks)))
-            .map_err(super::to_js_error)?;
-        Ok(Self::runtime_owner(block_on(Binding::new(
-            db, identity, trusted,
-        ))))
+        Self::open_memory_with(schema, config, how, |config, _| {
+            let declarations = keyless_declarations(bindings, app_id, environment)?;
+            Ok(config.with_e2ee(jazz_e2ee_client::KeylessHooks::hooks(declarations)))
+        })
     }
 
     /// The encryption runtime of this database, or why there is none.
@@ -273,22 +213,18 @@ impl WasmDb {
         environment: &str,
         proof: JsValue,
     ) -> Result<WasmDb, JsValue> {
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Proof {
-            token: String,
-            app_id: String,
-            claimed_author: String,
-        }
-        let proof: Option<Proof> =
-            serde_wasm_bindgen::from_value(proof).map_err(super::to_js_error)?;
-        let how = match &proof {
-            Some(proof) => OpenAs::SelfSigned {
-                token: &proof.token,
-                app_id: &proof.app_id,
-                claimed_author: &proof.claimed_author,
-            },
-            None => OpenAs::Untrusted,
+        let session = SessionProof::read(&proof);
+        let how = if proof.is_null() || proof.is_undefined() {
+            OpenAs::Untrusted
+        } else {
+            let app_id = session
+                .app_id
+                .as_deref()
+                .ok_or_else(|| error("missing proof appId"))?;
+            if session.token.is_none() || session.author.is_none() {
+                return Err(error("missing session proof field"));
+            }
+            session.for_app(app_id)
         };
         Self::open_keyless_as(schema, config, bindings, app_id, environment, how)
     }
@@ -303,83 +239,26 @@ impl WasmDb {
         runtime: &WasmEncryptionRuntime,
         proof: JsValue,
     ) -> Result<WasmDb, JsValue> {
-        super::initialize_wasm_tracing();
-        let (token, author) = proof_of(&proof)?;
-        let how = match (&token, &author) {
-            (Some(token), Some(author)) => OpenAs::SelfSigned {
-                token,
-                app_id: &runtime.app_id,
-                claimed_author: author,
-            },
-            _ => OpenAs::Untrusted,
-        };
-        let (db_config, identity, trusted) = Self::prepare_open(&schema, &config, how)?;
-        let hooks = {
-            let slot = runtime.built.borrow();
-            let built = slot
-                .as_ref()
-                .ok_or_else(|| error("the encryption runtime is not ready"))?;
-            if identity
-                .author
-                .account_id()
-                .map(|account| account.0.to_string())
-                != Some(runtime.account_id.clone())
-            {
-                return Err(error(
-                    "the encryption runtime is for another account than this session's",
-                ));
-            }
-            built.client.hooks()
-        };
-        let db_config = db_config.with_e2ee(hooks);
-        let db = block_on(binding_host::open_memory(db_config)).map_err(super::to_js_error)?;
-        let owner = Self::runtime_owner(block_on(Binding::new(db, identity, trusted)));
+        let proof = SessionProof::read(&proof);
+        let owner = Self::open_memory_with(
+            &schema,
+            &config,
+            proof.for_app(&runtime.builder.app_id),
+            |config, identity| Ok(config.with_e2ee(runtime.builder.hooks(identity).map_err(error)?)),
+        )?;
         let inner: WasmDbInner = owner.open_inner()?;
-        let built = runtime
-            .built
-            .borrow_mut()
-            .take()
-            .expect("runtime checked before open");
         let host = Rc::downgrade(&inner.host);
-        runtime.store.set_wake(Box::new(move || {
-            let Some(host) = host.upgrade() else { return };
-            let scheduler = host.tick_scheduler.borrow().clone();
-            if let Some(scheduler) = scheduler {
-                let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
-            }
-        }));
-        *inner.host.encryption.borrow_mut() = Some(Encryption::new(
-            built,
-            Rc::clone(&runtime.store),
+        *inner.host.encryption.borrow_mut() = Some(runtime.builder.attach(
             Rc::clone(&inner.binding.db),
+            Box::new(move || {
+                let Some(host) = host.upgrade() else { return };
+                let scheduler = host.tick_scheduler.borrow().clone();
+                if let Some(scheduler) = scheduler {
+                    let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
+                }
+            }),
         ));
         Ok(owner)
-    }
-
-    /// The private-store requests queued since the last call, each a JSON text.
-    #[wasm_bindgen(js_name = takeStoreRequests)]
-    pub fn take_store_requests(&self) -> Result<Vec<String>, JsValue> {
-        let encryption = self.encryption()?;
-        let requests = encryption.bridge_store().take_requests();
-        // The host polls here, so a request the store never answers times out.
-        encryption.drive();
-        settle_promises();
-        encryption.wake_if_owed();
-        Ok(requests)
-    }
-
-    /// The store's answer to a request; `false` when no such request is
-    /// outstanding (the answer is dropped).
-    #[wasm_bindgen(js_name = replyStore)]
-    pub fn reply_store(&self, id: String, ok: bool, payload: String) -> Result<bool, JsValue> {
-        let encryption = self.encryption()?;
-        let accepted = id
-            .parse()
-            .is_ok_and(|id| encryption.bridge_store().reply(id, ok, &payload));
-        encryption.drive();
-        settle_promises();
-        encryption.wake_if_owed();
-        Ok(accepted)
     }
 
     /// Run one end-to-end encryption operation: its name and arguments,
@@ -388,13 +267,7 @@ impl WasmDb {
     pub fn encryption_call(&self, op: String, args: JsValue) -> Result<js_sys::Promise, JsValue> {
         let encryption = self.encryption()?;
         let args = super::json_or_null(args)?;
-        let future = encryption.call(op, args);
-        let driver = Rc::clone(&encryption);
-        let promise = json_promise(Box::pin(async move {
-            let result = future.await;
-            driver.drive();
-            result
-        }));
+        let promise = json_promise(encryption.call_driven(op, args));
         encryption.drive();
         settle_promises();
         encryption.wake_if_owed();
@@ -447,6 +320,36 @@ mod tests {
     use wasm_bindgen_futures::JsFuture;
     use wasm_bindgen_test::wasm_bindgen_test;
 
+    fn bindings(app: &jazz::tools::deployment::artifact::AppDefinition) -> String {
+        serde_json::json!({
+            "schema": {"current": app.current_hash(), "schemas": [{"hash": app.current_hash(), "schema": app.current_schema()}],
+                "migrations": [], "encryption": app.encryption()},
+            "relations": {}
+        }).to_string()
+    }
+
+    async fn finish_build(runtime: &WasmEncryptionRuntime) {
+        let store =
+            jazz_e2ee_client::host::bridge::serve(Rc::new(jazz_e2ee_client::MemoryStore::new()));
+        let ready = JsFuture::from(runtime.ready());
+        loop {
+            let requests = runtime.take_store_requests();
+            if requests.is_empty() {
+                break;
+            }
+            for request in requests {
+                let request_id = serde_json::from_str::<serde_json::Value>(&request).unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                let (ok, payload) = store(request).await;
+                assert!(ok, "{payload}");
+                assert!(runtime.reply_store(request_id, ok, payload));
+            }
+        }
+        ready.await.expect("readiness should succeed");
+    }
+
     /// Alice's malformed device secret is refused at browser runtime construction,
     /// before her application declarations or private store are read.
     #[wasm_bindgen_test]
@@ -473,22 +376,18 @@ mod tests {
         let schema = serde_json::to_vec(definition.current_schema()).unwrap();
         let alice = AuthorSubject::for_test_bytes([1; 16]);
         let bob = AuthorSubject::for_test_bytes([2; 16]);
-        let runtime = WasmEncryptionRuntime {
-            store: Rc::default(),
-            options: Rc::new(RefCell::new(Some(Options {
-                app_file: app.to_vec(),
-                from_bindings: false,
-                app_id: "test".into(),
-                environment: "test".into(),
-                device_account_secret: Some(jazz::identity::DeviceAccountSecret::from_bytes(
-                    [1; 32],
-                )),
-            }))),
-            building: Rc::default(),
-            account_id: alice.account_id().unwrap().0.to_string(),
-            app_id: "test".into(),
-            built: Rc::default(),
-        };
+        let runtime = WasmEncryptionRuntime::from_bindings(
+            bindings(&definition),
+            "test".into(),
+            "test".into(),
+            alice.account_id().unwrap().0.to_string(),
+            Some(
+                jazz::identity::DeviceAccountSecret::from_bytes([1; 32])
+                    .format()
+                    .to_string(),
+            ),
+        )
+        .unwrap();
         let id = |request: &str| {
             serde_json::from_str::<serde_json::Value>(request).unwrap()["id"]
                 .as_str()
@@ -509,33 +408,8 @@ mod tests {
             .as_string()
             .unwrap()
             .contains("store unavailable"));
-        assert!(
-            runtime.options.borrow().as_ref().is_some_and(|options| {
-                options
-                    .device_account_secret
-                    .as_ref()
-                    .map(|secret| secret.as_bytes())
-                    == Some(&[1; 32])
-            }),
-            "failed readiness preserves the recovery secret for a retry"
-        );
+        finish_build(&runtime).await;
 
-        let store =
-            jazz_e2ee_client::host::bridge::serve(Rc::new(jazz_e2ee_client::MemoryStore::new()));
-        let retry = JsFuture::from(runtime.ready());
-        loop {
-            let requests = runtime.take_store_requests();
-            if requests.is_empty() {
-                break;
-            }
-            for request in requests {
-                let request_id = id(&request);
-                let (ok, payload) = store(request).await;
-                assert!(ok, "{payload}");
-                assert!(runtime.reply_store(request_id, ok, payload));
-            }
-        }
-        retry.await.expect("readiness can be retried");
         assert!(
             JsFuture::from(runtime.ready()).await.is_err(),
             "build completed"
@@ -596,28 +470,15 @@ mod tests {
         })
         .unwrap();
         for close in [true, false] {
-            let store = Rc::new(JsStore::served_by(jazz_e2ee_client::host::bridge::serve(
-                Rc::new(jazz_e2ee_client::MemoryStore::new()),
-            )));
-            let account_id = author.account_id().unwrap().0.to_string();
-            let options = Options {
-                app_file: app.to_vec(),
-                from_bindings: false,
-                app_id: "test".into(),
-                environment: "test".into(),
-                device_account_secret: None,
-            };
-            let built = runtime::build(&options, account_id.clone(), store.clone())
-                .await
-                .unwrap();
-            let bridge = WasmEncryptionRuntime {
-                store,
-                options: Rc::default(),
-                building: Rc::default(),
-                account_id,
-                app_id: "test".into(),
-                built: Rc::new(RefCell::new(Some(built))),
-            };
+            let bridge = WasmEncryptionRuntime::from_bindings(
+                bindings(&definition),
+                "test".into(),
+                "test".into(),
+                author.account_id().unwrap().0.to_string(),
+                None,
+            )
+            .unwrap();
+            finish_build(&bridge).await;
             let owner = WasmDb::open_memory_encrypted(
                 schema.clone(),
                 config.clone(),

@@ -1026,7 +1026,14 @@ pub fn bound_declarations(
     bound: &[u8],
     app_id: crate::tools::AppId,
     environment: &str,
-) -> Result<Option<crate::tools::public_schema::E2eeDeclarations>, ArtifactError> {
+    verify_current_hash: bool,
+) -> Result<
+    (
+        SchemaHash,
+        Option<crate::tools::public_schema::E2eeDeclarations>,
+    ),
+    ArtifactError,
+> {
     let refuse = |message: String| {
         ArtifactError::new(format!(
             "the bindings' compiled app: {message}; regenerate them with `npx jazz-tools generate`"
@@ -1039,21 +1046,29 @@ pub fn bound_declarations(
         .schema
         .schemas
         .into_iter()
-        .find(|entry| parse_schema_hash(&entry.hash).is_ok_and(|hash| hash == current))
+        .find(|entry| {
+            if verify_current_hash {
+                entry.hash == bound.schema.current
+            } else {
+                parse_schema_hash(&entry.hash).is_ok_and(|hash| hash == current)
+            }
+        })
         .map(|entry| structural(entry.schema))
         .ok_or_else(|| refuse(format!("no schema {current}, the current one")))?;
+    if verify_current_hash && SchemaHash::compute(&schema).to_string() != bound.schema.current {
+        return Err(refuse(
+            "the current schema does not match its hash".to_owned(),
+        ));
+    }
     let encryption = bound.schema.encryption.unwrap_or_default();
     let own = encryption.entries(&current.to_string());
     for (table, entry) in own.into_iter().flatten() {
         encryption::check_version_entry(table, entry, &schema, true)
             .map_err(|(at, message)| refuse(format!("tables.{table}.encryption{at}: {message}")))?;
     }
-    Ok(client_declarations(
-        &schema,
-        own,
-        &encryption.settings,
-        app_id,
-        environment,
+    Ok((
+        current,
+        client_declarations(&schema, own, &encryption.settings, app_id, environment),
     ))
 }
 

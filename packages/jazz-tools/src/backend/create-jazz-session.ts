@@ -193,7 +193,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
     private readonly account: AccountHandle,
     /** The encryption runtime built for this account, for an app that declares encryption. */
     private readonly encryption?: {
-      runtime: unknown;
+      runtime: import("../encryption/private-store.js").StoreTarget;
       store: import("../encryption/private-store.js").PrivateStore;
     },
   ) {

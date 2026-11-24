@@ -1,6 +1,7 @@
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { queryObjects } from "node:v8";
+import { compiledBindings } from "../encryption/build.js";
 import { EncryptionRuntime, NapiDb } from "jazz-napi";
 import { describe, expect, it } from "vitest";
 import {
@@ -56,8 +57,8 @@ function counting(store: PrivateStore) {
 }
 
 async function openEncrypted(store: PrivateStore, label: string, path?: string) {
-  const runtime = new EncryptionRuntime(
-    new TextEncoder().encode(JSON.stringify(encryptedFile)),
+  const runtime = EncryptionRuntime.fromBindings(
+    compiledBindings(encrypted),
     "napi-encryption-test",
     "test",
     testAccountId(label),
@@ -72,7 +73,7 @@ async function openEncrypted(store: PrivateStore, label: string, path?: string) 
   const db = path
     ? NapiDb.openPersistentEncrypted(path, schema, config(label), runtime)
     : NapiDb.openMemoryEncrypted(schema, config(label), runtime);
-  const serving = servePrivateStore(db, store);
+  const serving = servePrivateStore(runtime, store);
   return {
     db,
     encryption: new Encryption(db),
@@ -160,11 +161,9 @@ describe("encryption on the Node binding", () => {
     }
   });
 
-  it("fails to build for an app file that declares no encryption, and a store that fails fails the build", async () => {
-    const undeclared = new EncryptionRuntime(
-      new TextEncoder().encode(
-        JSON.stringify({ format: 1, tables: { notes: { columns: { text: "string" } } } }),
-      ),
+  it("fails to build for bindings that declare no encryption, and a store that fails fails the build", async () => {
+    const undeclared = EncryptionRuntime.fromBindings(
+      compiledBindings(plain),
       "napi-encryption-test",
       "test",
       testAccountId("undeclared"),
@@ -174,8 +173,8 @@ describe("encryption on the Node binding", () => {
     broken.openScope = async () => {
       throw new Error("the disk is gone");
     };
-    const runtime = new EncryptionRuntime(
-      new TextEncoder().encode(JSON.stringify(encryptedFile)),
+    const runtime = EncryptionRuntime.fromBindings(
+      compiledBindings(encrypted),
       "napi-encryption-test",
       "test",
       testAccountId("broken"),
@@ -189,8 +188,8 @@ describe("encryption on the Node binding", () => {
   });
 
   it("refuses a runtime built for another account than the session's", async () => {
-    const runtime = new EncryptionRuntime(
-      new TextEncoder().encode(JSON.stringify(encryptedFile)),
+    const runtime = EncryptionRuntime.fromBindings(
+      compiledBindings(encrypted),
       "napi-encryption-test",
       "test",
       testAccountId("someone-else"),
