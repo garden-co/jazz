@@ -34,6 +34,80 @@ pub(crate) trait Row: Sized {
     fn cells(&self) -> Option<Cells>;
     /// The record a stored row holds, or `None` when its cells are not one.
     fn decode(row: &CurrentRow) -> Option<Self>;
+    #[cfg(test)]
+    fn sample(seed: &mut u8, optionals: bool) -> Self;
+}
+
+#[cfg(test)]
+fn sample_id(seed: &mut u8) -> String {
+    let value = *seed;
+    *seed = seed.wrapping_add(1);
+    uuid::Uuid::from_bytes([value; 16]).to_string()
+}
+
+#[cfg(test)]
+fn sample_bytes(seed: &mut u8) -> Vec<u8> {
+    let value = *seed;
+    *seed = seed.wrapping_add(1);
+    vec![value, value.wrapping_add(1), value.wrapping_add(2)]
+}
+
+#[cfg(test)]
+fn sample_keys(seed: &mut u8) -> KeyColumns {
+    let public_key = sample_bytes(seed);
+    let signing_public_key = sample_bytes(seed);
+    let value = *seed;
+    *seed = seed.wrapping_add(1);
+    KeyColumns {
+        public_key,
+        mechanism: format!("sealing-{value}"),
+        version: u32::from(value) + 1000,
+        signing_public_key,
+        signing_mechanism: format!("signing-{value}"),
+        signing_version: u32::from(value) + 2000,
+    }
+}
+
+#[cfg(test)]
+macro_rules! sample_column {
+    ($seed:ident, $optionals:ident, id) => {
+        sample_id($seed)
+    };
+    ($seed:ident, $optionals:ident, bytes) => {
+        sample_bytes($seed)
+    };
+    ($seed:ident, $optionals:ident, keys) => {
+        sample_keys($seed)
+    };
+    ($seed:ident, $optionals:ident, text) => {{
+        let value = *$seed;
+        *$seed = $seed.wrapping_add(1);
+        format!("value-{value}")
+    }};
+    ($seed:ident, $optionals:ident, number) => {{
+        let value = *$seed;
+        *$seed = $seed.wrapping_add(1);
+        u64::from(value)
+    }};
+    ($seed:ident, $optionals:ident, version) => {{
+        let value = *$seed;
+        *$seed = $seed.wrapping_add(1);
+        u32::from(value) + 100
+    }};
+    ($seed:ident, $optionals:ident, maybe_id) => {{
+        if $optionals {
+            Some(sample_id($seed))
+        } else {
+            None
+        }
+    }};
+    ($seed:ident, $optionals:ident, maybe_bytes) => {{
+        if $optionals {
+            Some(sample_bytes($seed))
+        } else {
+            None
+        }
+    }};
 }
 
 /// A UUID cell from its text form; `None` when it is not a UUID.
@@ -297,6 +371,14 @@ macro_rules! row {
                     $($field: read_column!(r, $kind $(, $column)?)),*
                 })
             }
+            #[cfg(test)]
+            fn sample(seed: &mut u8, optionals: bool) -> Self {
+                let _ = optionals;
+                Self {
+                    id: sample_id(seed),
+                    $($field: sample_column!(seed, optionals, $kind)),*
+                }
+            }
         }
     };
 }
@@ -378,6 +460,36 @@ impl Row for AccountRoot {
             device_account_public_key,
             device_account_signature,
         })
+    }
+    #[cfg(test)]
+    fn sample(seed: &mut u8, optionals: bool) -> Self {
+        let ledger_version = 100 + u32::from(*seed);
+        *seed = seed.wrapping_add(1);
+        let generation = u64::from(*seed);
+        *seed = seed.wrapping_add(1);
+        let account_id = sample_id(seed);
+        let device_id = sample_id(seed);
+        let epoch_id = sample_id(seed);
+        let (kind, device_account_public_key, device_account_signature) = if optionals {
+            (
+                AccountKind::DeviceAccount,
+                Some(sample_bytes(seed)),
+                Some(sample_bytes(seed)),
+            )
+        } else {
+            (AccountKind::App, None, None)
+        };
+        Self {
+            id: sample_id(seed),
+            ledger_version,
+            generation,
+            account_id,
+            device_id,
+            epoch_id,
+            kind,
+            device_account_public_key,
+            device_account_signature,
+        }
     }
 }
 
@@ -470,6 +582,23 @@ macro_rules! successor_row {
                     },
                     $($field: r.bytes($column)?),*
                 })
+            }
+            #[cfg(test)]
+            fn sample(seed: &mut u8, optionals: bool) -> Self {
+                let id = sample_id(seed);
+                let account_id = sample_id(seed);
+                let predecessor = sample_id(seed);
+                let epoch_id = sample_id(seed);
+                let signer_id = sample_id(seed);
+                let removed_device_id = optionals.then(|| sample_id(seed));
+                let retired_recovery_root_ids = sample_bytes(seed);
+                let membership = sample_bytes(seed);
+                let columns = AccountSuccessorColumns {
+                    id, account_id, predecessor, epoch_id, signer_id,
+                    action: if optionals { AccountAction::RemoveDevice } else { AccountAction::RetireRecoveryRoot },
+                    removed_device_id, retired_recovery_root_ids, membership,
+                };
+                Self { columns, $($field: sample_bytes(seed)),* }
             }
         }
     };
@@ -616,27 +745,6 @@ mod tests {
         db
     }
 
-    /// A distinct UUID for each `n`.
-    fn id(n: u8) -> String {
-        uuid::Uuid::from_bytes([n; 16]).to_string()
-    }
-
-    /// Distinct bytes for each `n`.
-    fn bytes(n: u8) -> Vec<u8> {
-        vec![n, n.wrapping_add(1), n.wrapping_add(2)]
-    }
-
-    fn keys(n: u8) -> KeyColumns {
-        KeyColumns {
-            public_key: bytes(n),
-            mechanism: format!("sealing-{n}"),
-            version: u32::from(n) + 1000,
-            signing_public_key: bytes(n + 1),
-            signing_mechanism: format!("signing-{n}"),
-            signing_version: u32::from(n) + 2000,
-        }
-    }
-
     /// Writes `record` as its table's cells under its row ID, reads the row
     /// back and decodes it: the result is `record`.
     ///
@@ -674,269 +782,37 @@ mod tests {
         });
     }
 
-    /// Every table's record, with every column set to a value no other
-    /// column of the record holds, and each optional column both present
-    /// and absent, survives being stored and read back.
+    /// Samples generated by each table mapping round-trip with optional
+    /// columns both present and absent.
     #[test]
-    fn every_account_table_round_trips() {
+    fn every_table_round_trips() {
         let db = database();
-        round_trip(
-            &db,
-            DeviceRequest {
-                id: id(1),
-                keys: keys(2),
-                nonce_commitment: bytes(4),
-            },
-        );
-        round_trip(
-            &db,
-            DeviceKeysRow {
-                id: id(5),
-                device_id: id(6),
-                keys: keys(7),
-            },
-        );
-        round_trip(
-            &db,
-            AccountIdentity {
-                id: id(10),
-                ledger_version: 11,
-                generation: 12,
-                device_id: id(13),
-                epoch_id: id(14),
-                envelope: bytes(15),
-                verification: bytes(16),
-            },
-        );
-        for (row, kind, key, signature) in [
-            (
-                20,
-                AccountKind::DeviceAccount,
-                Some(bytes(21)),
-                Some(bytes(22)),
-            ),
-            (23, AccountKind::App, None, None),
-        ] {
-            round_trip(
-                &db,
-                AccountRoot {
-                    id: id(row),
-                    ledger_version: 24,
-                    generation: 25,
-                    account_id: id(26),
-                    device_id: id(27),
-                    epoch_id: id(28),
-                    kind,
-                    device_account_public_key: key,
-                    device_account_signature: signature,
-                },
-            );
+        macro_rules! sample {
+            ($record:ty) => {
+                let mut seed = 1;
+                for optionals in [false, true] {
+                    round_trip(&db, <$record as Row>::sample(&mut seed, optionals));
+                }
+            };
         }
-        round_trip(
-            &db,
-            DeviceChallenge {
-                id: id(30),
-                device_id: id(31),
-                epoch_id: id(32),
-                envelope: bytes(33),
-                nonce: bytes(34),
-                signer_id: id(35),
-                signature: bytes(36),
-            },
-        );
-        round_trip(
-            &db,
-            DeviceProof {
-                id: id(40),
-                challenge_id: id(41),
-                proof: bytes(42),
-                nonce: bytes(43),
-                signature: bytes(44),
-            },
-        );
-        round_trip(
-            &db,
-            DeviceApproval {
-                id: id(50),
-                challenge_id: id(51),
-                signer_id: id(52),
-                verification: bytes(53),
-                signature: bytes(54),
-            },
-        );
-        round_trip(
-            &db,
-            DeviceDelivery {
-                id: id(60),
-                challenge_id: id(61),
-                envelope: bytes(62),
-                verification: bytes(63),
-            },
-        );
-        for (row, root, signature) in [(70, Some(id(71)), Some(bytes(72))), (73, None, None)] {
-            round_trip(
-                &db,
-                PublicDeviceApproval {
-                    id: id(row),
-                    account_id: id(74),
-                    epoch_id: id(75),
-                    device_id: id(76),
-                    signer_id: id(77),
-                    signature: bytes(78),
-                    recovery_root_id: root,
-                    recovery_signature: signature,
-                },
-            );
-        }
-        for (row, action, removed) in [
-            (80, AccountAction::RemoveDevice, Some(id(81))),
-            (82, AccountAction::RetireRecoveryRoot, None),
-        ] {
-            round_trip(
-                &db,
-                PublicAccountSuccessor {
-                    columns: AccountSuccessorColumns {
-                        id: id(row),
-                        account_id: id(83),
-                        predecessor: id(84),
-                        epoch_id: id(85),
-                        signer_id: id(86),
-                        action,
-                        removed_device_id: removed.clone(),
-                        retired_recovery_root_ids: bytes(87),
-                        membership: bytes(88),
-                    },
-                    revision: bytes(89),
-                    signature: bytes(90),
-                },
-            );
-            round_trip(
-                &db,
-                AccountSuccessor {
-                    columns: AccountSuccessorColumns {
-                        id: id(row + 100),
-                        account_id: id(91),
-                        predecessor: id(92),
-                        epoch_id: id(93),
-                        signer_id: id(94),
-                        action,
-                        removed_device_id: removed,
-                        retired_recovery_root_ids: bytes(95),
-                        membership: bytes(96),
-                    },
-                    revision: bytes(97),
-                    verification: bytes(98),
-                    history: bytes(99),
-                    deliveries: bytes(100),
-                    signature: bytes(101),
-                },
-            );
-        }
-        round_trip(
-            &db,
-            RecoveryRoot {
-                id: id(110),
-                account_id: id(111),
-                signer_id: id(112),
-                epoch_id: id(113),
-                keys: keys(114),
-                signature: bytes(116),
-            },
-        );
-        round_trip(
-            &db,
-            RecoveryDelivery {
-                id: id(120),
-                root_id: id(121),
-                epoch_id: id(122),
-                envelope: bytes(123),
-            },
-        );
-        round_trip(
-            &db,
-            AccountSealingKey {
-                id: id(130),
-                account_id: id(131),
-                epoch_id: id(132),
-                signer_id: id(133),
-                mechanism: "sealing-134".to_owned(),
-                version: 135,
-                public_key: bytes(136),
-                signature: bytes(137),
-            },
-        );
-        round_trip(
-            &db,
-            DeviceRemovalRequest {
-                id: id(140),
-                account_id: id(141),
-                epoch_id: id(142),
-                device_id: id(143),
-                signature: bytes(144),
-            },
-        );
-    }
-
-    /// The space tables' records, as above.
-    #[test]
-    fn every_space_table_round_trips() {
-        let db = database();
-        round_trip(
-            &db,
-            SpaceMember {
-                id: id(150),
-                scope_id: id(151),
-                identifier: id(152),
-                account_id: id(153),
-            },
-        );
-        round_trip(
-            &db,
-            SpaceRoot {
-                id: id(160),
-                scope_id: id(161),
-                identifier: id(162),
-                creator_account_id: id(163),
-                device_id: id(164),
-                account_epoch_id: id(165),
-                epoch_id: id(166),
-                mechanism: "wrap-167".to_owned(),
-                version: 168,
-                verification: bytes(169),
-                account_envelope: bytes(170),
-                signature: bytes(171),
-            },
-        );
-        round_trip(
-            &db,
-            SpaceSuccessor {
-                id: id(180),
-                scope_id: id(181),
-                identifier: id(182),
-                predecessor: id(183),
-                history_epoch_id: id(184),
-                epoch_id: id(185),
-                author_account_id: id(186),
-                author_device_id: id(187),
-                author_epoch_id: id(188),
-                verification: bytes(189),
-                history: bytes(190),
-                account_envelope: bytes(191),
-                signature: bytes(192),
-            },
-        );
-        round_trip(
-            &db,
-            SpaceDelivery {
-                id: id(200),
-                scope_id: id(201),
-                identifier: id(202),
-                key_epoch_id: id(203),
-                sender_account_id: id(204),
-                recipient_account_id: id(205),
-                recipient_account_epoch_id: id(206),
-                envelope: bytes(207),
-            },
-        );
+        sample!(DeviceRequest);
+        sample!(DeviceKeysRow);
+        sample!(AccountIdentity);
+        sample!(AccountRoot);
+        sample!(DeviceChallenge);
+        sample!(DeviceProof);
+        sample!(DeviceApproval);
+        sample!(DeviceDelivery);
+        sample!(PublicDeviceApproval);
+        sample!(PublicAccountSuccessor);
+        sample!(AccountSuccessor);
+        sample!(RecoveryRoot);
+        sample!(RecoveryDelivery);
+        sample!(AccountSealingKey);
+        sample!(DeviceRemovalRequest);
+        sample!(SpaceMember);
+        sample!(SpaceRoot);
+        sample!(SpaceSuccessor);
+        sample!(SpaceDelivery);
     }
 }
