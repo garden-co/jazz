@@ -4835,7 +4835,6 @@ impl Store {
                 // refuses one in a read policy, directly or inherited (Jazz
                 // derives it for write policies only), so no read policy
                 // reaches one.
-                PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => {}
                 _ => {}
             }
         }
@@ -4936,8 +4935,6 @@ impl Store {
                 PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
                     parts.iter().for_each(|part| hops(part, out))
                 }
-                // Not a hop through a reference column (see `clauses`).
-                PolicyExpr::InheritsFrom { .. } => {}
                 _ => {}
             }
         }
@@ -7750,6 +7747,27 @@ impl Store {
             .await.map_err(storage)?;
         }
         Ok(())
+    }
+
+    /// The kept error for one refused commit.
+    #[cfg(feature = "e2ee-client")]
+    pub(crate) async fn rejected_error(&self, tx: u64) -> Result<Option<Error>, Error> {
+        if !self.has_rejected_store().await? {
+            return Ok(None);
+        }
+        let error = self
+            .conn
+            .cached_row(
+                "SELECT error FROM _jazz_rejected WHERE tx = ?1",
+                [tx as i64],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .await
+            .optional()
+            .map_err(storage)?;
+        error
+            .map(|error| decode_stored(&error).map(from_wire_error))
+            .transpose()
     }
 
     /// The refused commits in the retry store, oldest first.

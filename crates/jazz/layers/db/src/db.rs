@@ -270,7 +270,6 @@ fn row_local_policy(policy: &PolicyExpr) -> bool {
         | PolicyExpr::False => true,
         // False outside a write check, so it reads nothing here.
         PolicyExpr::InsertedByThisTransaction => true,
-        PolicyExpr::InheritsFrom { .. } => false,
         _ => false,
     }
 }
@@ -1847,21 +1846,11 @@ impl Db {
         file: crate::host::StoreFile,
         change: crate::catalogue::CatalogueChange,
     ) -> Result<Self, Error> {
-        Self::open_file_with_catalogue_keeping(config, file, change, &[]).await
+        Self::open_file_with_catalogue_checked(config, file, change, &[], async |_| Ok(())).await
     }
 
-    /// Initialize and publish the first catalogue together with its host-table values.
-    pub async fn open_file_with_catalogue_keeping(
-        config: DbConfig,
-        file: crate::host::StoreFile,
-        change: crate::catalogue::CatalogueChange,
-        kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
-    ) -> Result<Self, Error> {
-        Self::open_file_with_catalogue_checked(config, file, change, kept, async |_| Ok(())).await
-    }
-
-    /// As [`Self::open_file_with_catalogue_keeping`], checking the newly
-    /// admitted catalogue before committing any part of initialization.
+    /// Initialize and publish the first catalogue together with its host-table
+    /// values, checking the admitted catalogue before committing.
     pub async fn open_file_with_catalogue_checked(
         config: DbConfig,
         file: crate::host::StoreFile,
@@ -4178,30 +4167,37 @@ impl Db {
     }
 
     async fn write_prepared(&self, mut op: PreparedWrite, who: Who) -> Result<WriteHandle, Error> {
+        self.commit_prepared(op.op.row(), async |inner, seq, origin| {
+            let handle = inner.apply_authored(&mut op, who, seq, origin).await?;
+            Ok((handle, [op]))
+        })
+        .await
+    }
+
+    async fn commit_prepared<Ops: AsRef<[PreparedWrite]>>(
+        &self,
+        row: Option<RowUuid>,
+        apply: impl AsyncFnOnce(
+            &Store,
+            u64,
+            Option<([u8; 16], u64)>,
+        ) -> Result<(WriteHandle, Ops), Error>,
+    ) -> Result<WriteHandle, Error> {
         self.inner.without_overlay().require_mutation_admission()?;
-        if let Some(row) = op.op.row() {
+        if let Some(row) = row {
             self.inner.refuse_held(&[*row.0.as_bytes()])?;
         }
         self.with_upload(async || {
             let (prior, mark) = {
                 let inner = self.inner.without_overlay();
-                let mark = inner.changed.borrow().len();
-                (inner.seq.get(), mark)
+                (inner.seq.get(), inner.changed.borrow().len())
             };
-            let (notify, handle) = self
-                .write_unnotified(async |inner, seq, origin| {
-                    inner.apply_authored(&mut op, who, seq, origin).await
-                })
-                .await?;
-            // A standalone write that changed nothing made no commit: its
-            // handle names the row's current version, which may be the
-            // newest commit's own seq, so recording it would upload a
-            // second commit under that commit's transaction id.
-            // The upload record joins the write's SQLite transaction: if it
-            // fails, `with_upload` rolls both back, and nobody has been told.
+            let (notify, handle, ops) = self.write_unnotified(apply).await?;
+            // A no-op handle names an existing version, so only record an
+            // upload for a new commit. Its upload joins the transaction.
             if notify
                 && let Err(error) = self
-                    .record_upload(&[op], handle.tx, sync::Kind::Mergeable, None)
+                    .record_upload(ops.as_ref(), handle.tx, sync::Kind::Mergeable, None)
                     .await
             {
                 let inner = self.inner.without_overlay();
@@ -4217,82 +4213,40 @@ impl Db {
         .await
     }
 
-    /// One write sealed by the encryption hooks first ([`Db::write_prepared`]
-    /// otherwise): the internal rows the hooks stage with it commit, and
-    /// upload, before it, in the same transaction.
+    /// Seal a write and commit its internal companion rows before it, in
+    /// the same transaction.
     #[cfg(feature = "e2ee-client")]
     async fn write_sealed(
         &self,
-        op: StagedOp,
+        mut op: StagedOp,
         who: Who,
         streamed: Option<large_ops::StreamedSeal<'_>>,
     ) -> Result<WriteHandle, Error> {
-        self.inner.without_overlay().require_mutation_admission()?;
-        if let Some(row) = op.row() {
-            self.inner.refuse_held(&[*row.0.as_bytes()])?;
-        }
         let schema = self.operation_schema();
-        let companions: RefCell<Vec<(String, RowUuid)>> = RefCell::default();
+        let mut companions = Vec::new();
         let written = self
-            .with_upload(async || {
-                let (prior, mark) = {
-                    let inner = self.inner.without_overlay();
-                    let mark = inner.changed.borrow().len();
-                    (inner.seq.get(), mark)
-                };
-                let mut ops = Vec::new();
-                let (notify, handle) = self
-                    .write_unnotified(async |inner, seq, origin| {
-                        let mut op = op;
-                        let staged = inner.seal_op(&schema, &mut op, streamed).await?;
-                        *companions.borrow_mut() = staged
-                            .iter()
-                            .filter_map(|companion| match companion {
-                                StagedOp::Insert(table, _, opts) => {
-                                    opts.row_id.map(|row| (table.clone(), row))
-                                }
-                                _ => None,
-                            })
-                            .collect();
-                        // What the caller derived for the write (a streamed
-                        // value's descriptor, an edit's tree and the nodes
-                        // it built) is the write's, not its companions',
-                        // whose applies clear what they derive.
-                        let given = (inner.derived.take(), inner.pending_nodes.take());
-                        for companion in staged {
-                            let mut companion = inner.prepare_write(schema.clone(), companion)?;
-                            inner
-                                .apply_authored(&mut companion, who, seq, origin)
-                                .await?;
-                            ops.push(companion);
-                        }
-                        inner.derived.borrow_mut().extend(given.0);
-                        inner.pending_nodes.borrow_mut().extend(given.1);
-                        let mut op = inner.prepare_write(schema.clone(), op)?;
-                        let applied = inner.apply_authored(&mut op, who, seq, origin).await;
-                        ops.push(op);
-                        applied
-                    })
-                    .await?;
-                // As in `write_prepared`: a write that changed nothing made
-                // no commit, and the upload record joins its transaction.
-                if notify
-                    && let Err(error) = self
-                        .record_upload(&ops, handle.tx, sync::Kind::Mergeable, None)
-                        .await
-                {
-                    let inner = self.inner.without_overlay();
-                    inner.seq.set(prior);
-                    inner.changed.borrow_mut().truncate(mark);
-                    return Err(error);
+            .commit_prepared(op.row(), async |inner, seq, origin| {
+                let staged = inner.seal_op(&schema, &mut op, streamed).await?;
+                companions = e2ee_write::companion_names(&staged);
+                let mut ops = Vec::with_capacity(staged.len() + 1);
+                // Each apply clears its derived values and nodes. Save the
+                // caller's edits while applying the companions.
+                let given = (inner.derived.take(), inner.pending_nodes.take());
+                for companion in staged {
+                    let mut companion = inner.prepare_write(schema.clone(), companion)?;
+                    inner
+                        .apply_authored(&mut companion, who, seq, origin)
+                        .await?;
+                    ops.push(companion);
                 }
-                if notify {
-                    self.notify().await;
-                }
-                Ok(handle)
+                inner.derived.borrow_mut().extend(given.0);
+                inner.pending_nodes.borrow_mut().extend(given.1);
+                let mut op = inner.prepare_write(schema, op)?;
+                let handle = inner.apply_authored(&mut op, who, seq, origin).await?;
+                ops.push(op);
+                Ok((handle, ops))
             })
             .await;
-        let companions = companions.into_inner();
         if written.is_err()
             && !companions.is_empty()
             && let Some(hooks) = &self.inner.e2ee
@@ -4318,10 +4272,14 @@ impl Db {
 
     /// Run one write atomically. Returns whether it committed a change;
     /// the caller notifies subscribers once its upload record is in.
-    async fn write_unnotified(
+    async fn write_unnotified<Ops>(
         &self,
-        apply: impl AsyncFnOnce(&Store, u64, Option<([u8; 16], u64)>) -> Result<WriteHandle, Error>,
-    ) -> Result<(bool, WriteHandle), Error> {
+        apply: impl AsyncFnOnce(
+            &Store,
+            u64,
+            Option<([u8; 16], u64)>,
+        ) -> Result<(WriteHandle, Ops), Error>,
+    ) -> Result<(bool, WriteHandle, Ops), Error> {
         let standalone = {
             let inner = self.inner.without_overlay();
             let seq = inner.fresh_seq();
@@ -4346,7 +4304,7 @@ impl Db {
             };
             let applied = conn
                 .db_scope("w", async || {
-                    let handle = apply(inner, seq, origin).await?;
+                    let (handle, ops) = apply(inner, seq, origin).await?;
                     // The authority records the fate of a commit made under a
                     // client's id in the commit itself.
                     {
@@ -4369,12 +4327,12 @@ impl Db {
                             };
                             inner.note_origin_entry(node, tx, prunable).await?;
                         }
-                        Ok((wrote, handle))
+                        Ok((wrote, handle, ops))
                     }
                 })
                 .await;
             match applied {
-                Ok((wrote, handle)) => {
+                Ok((wrote, handle, ops)) => {
                     if !wrote {
                         restore(inner);
                     } else if let Some(origin) = &self.origin {
@@ -4385,7 +4343,7 @@ impl Db {
                     if wrote {
                         inner.seq.set(inner.seq.get().max(seq));
                     }
-                    (wrote, handle)
+                    (wrote, handle, ops)
                 }
                 Err(error) => {
                     inner.changed.borrow_mut().truncate(mark);
@@ -4430,28 +4388,15 @@ impl Db {
         &self,
         change: crate::catalogue::CatalogueChange,
     ) -> Result<(), Error> {
-        self.apply_catalogue_keeping(change, &[]).await
-    }
-
-    /// [`Self::apply_catalogue`] that also keeps `kept` (host table, key,
-    /// value) in the same transaction: each is written unless its key holds
-    /// a value already, and a key that holds a different value fails the
-    /// whole change (code `Schema`), leaving the file and this database as
-    /// they were. The transaction is the one this call owns and ends before
-    /// it returns.
-    pub async fn apply_catalogue_keeping(
-        &self,
-        change: crate::catalogue::CatalogueChange,
-        kept: &[(crate::host::HostTable, Vec<u8>, Vec<u8>)],
-    ) -> Result<(), Error> {
-        self.apply_catalogue_checked(change, kept, async |_| Ok(()))
+        self.apply_catalogue_checked(change, &[], async |_| Ok(()))
             .await
     }
 
-    /// As [`Self::apply_catalogue_keeping`], running a host's check after
-    /// admission assigns stored names and before the transaction keeps its
-    /// new host values. A failed check rolls the whole change back. The
-    /// check runs inside this call's operation, on a handle of its own.
+    /// Apply a catalogue change and run a host's check after admission
+    /// assigns stored names. Then keep the new host values in the same
+    /// transaction. A failed check or conflicting host value rolls the whole
+    /// change back. The check runs inside this call's operation, on a handle
+    /// of its own.
     pub async fn apply_catalogue_checked(
         &self,
         change: crate::catalogue::CatalogueChange,
@@ -4582,15 +4527,6 @@ impl Db {
     ) -> Result<HashSet<jazz_model::model::public_schema::SchemaHash>, Error> {
         let _operation = self.write_operation().await;
         crate::catalogue::descendants(&self.inner.without_overlay().conn, hash).await
-    }
-
-    /// The admitted table and column names used for storage by a published
-    /// schema hash, including hashes that share a runtime schema version.
-    pub async fn catalogue_stored_names(
-        &self,
-        hash: &jazz_model::model::public_schema::SchemaHash,
-    ) -> Result<crate::values::StoredNames, Error> {
-        Ok(self.catalogue_schema_and_stored_names(hash).await?.1)
     }
 
     /// A published schema and the identities of its tables and columns,
@@ -5308,8 +5244,6 @@ fn policy_reads_other_rows(policy: &PolicyExpr) -> bool {
         | PolicyExpr::InheritsFrom { .. } => true,
         PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(policy_reads_other_rows),
         PolicyExpr::Not(inner) => policy_reads_other_rows(inner),
-        // Its value depends on the unit's inserts, not on rows read.
-        PolicyExpr::InsertedByThisTransaction => false,
         _ => false,
     }
 }
@@ -8029,20 +7963,7 @@ impl Store {
         key: &[u8],
         seq: u64,
     ) -> Result<bool, Error> {
-        let before = self.own_pos(seq.saturating_sub(1));
-        let cut = Cut {
-            unsettled: false,
-            seq: before,
-            own: self.own_rank(seq.saturating_sub(1)),
-            extra: Vec::new(),
-            overlay: None,
-            inserted: Arc::default(),
-        };
-        Ok(matches!(
-            self.existing_at(&table.stored, row, key, Some(&cut))
-                .await?,
-            Some((_, false))
-        ))
+        Ok(self.deleted_before(table, row, key, seq).await? == Some(false))
     }
 
     /// Whether the row had any version, live or deleted, in the state a
@@ -8054,10 +7975,21 @@ impl Store {
         key: &[u8],
         seq: u64,
     ) -> Result<bool, Error> {
+        Ok(self.deleted_before(table, row, key, seq).await?.is_some())
+    }
+
+    async fn deleted_before(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+    ) -> Result<Option<bool>, Error> {
+        let before = seq.saturating_sub(1);
         let cut = Cut {
             unsettled: false,
-            seq: self.own_pos(seq.saturating_sub(1)),
-            own: self.own_rank(seq.saturating_sub(1)),
+            seq: self.own_pos(before),
+            own: self.own_rank(before),
             extra: Vec::new(),
             overlay: None,
             inserted: Arc::default(),
@@ -8065,7 +7997,7 @@ impl Store {
         Ok(self
             .existing_at(&table.stored, row, key, Some(&cut))
             .await?
-            .is_some())
+            .map(|(_, deleted)| deleted))
     }
 
     /// A USING or read-for-write check of the row a write acts on
@@ -10384,8 +10316,6 @@ fn policy_is_monotone(
         // (a member row removed, the row itself updated): keep the full
         // post-state pass.
         PolicyExpr::InheritsFrom { .. } => false,
-        // Holds for the unit's fresh inserts, a set no added row shrinks.
-        PolicyExpr::InsertedByThisTransaction => true,
         _ => true,
     }
 }
@@ -11569,6 +11499,12 @@ impl Batch {
             pending_nodes: self.edits.pending_nodes.len(),
         }
     }
+
+    fn restore_prefix(&mut self, prefix: BatchPrefix) {
+        self.ops.truncate(prefix.ops);
+        self.edits.derived.truncate(prefix.derived);
+        self.edits.pending_nodes.truncate(prefix.pending_nodes);
+    }
 }
 
 enum BatchKind {
@@ -11663,6 +11599,45 @@ fn child_versions(node: &ResultNode, out: &mut Vec<ReadVersion>) {
     }
 }
 
+impl Table {
+    fn stored_branch_selector(&self, branch: BranchSelector) -> BranchSelector {
+        BranchSelector {
+            values: branch
+                .values
+                .into_iter()
+                .map(|(name, value)| (self.stored_name(&name).to_owned(), value))
+                .collect(),
+        }
+    }
+
+    fn stored_exact_write_target(&self, target: ExactWriteTarget) -> ExactWriteTarget {
+        match target {
+            ExactWriteTarget::Root => ExactWriteTarget::Root,
+            ExactWriteTarget::Branch(branch) => {
+                ExactWriteTarget::Branch(self.stored_branch_selector(branch))
+            }
+        }
+    }
+
+    fn stored_write_target(&self, target: WriteTarget) -> WriteTarget {
+        match target {
+            WriteTarget::Root => WriteTarget::Root,
+            WriteTarget::BranchView { head, base } => WriteTarget::BranchView {
+                head: self.stored_branch_selector(head),
+                base: base.map(|base| match base {
+                    BranchViewBase::Current(branch) => {
+                        BranchViewBase::Current(self.stored_branch_selector(branch))
+                    }
+                    BranchViewBase::Snapshot { branch, snapshot } => BranchViewBase::Snapshot {
+                        branch: self.stored_branch_selector(branch),
+                        snapshot,
+                    },
+                }),
+            },
+        }
+    }
+}
+
 impl StagedOp {
     fn by_stored_names(self, table: &Table) -> Self {
         let cells = |values: BTreeMap<String, Value>| {
@@ -11671,55 +11646,36 @@ impl StagedOp {
                 .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
                 .collect()
         };
-        let selector = |branch: BranchSelector| BranchSelector {
-            values: branch
-                .values
-                .into_iter()
-                .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
-                .collect(),
-        };
-        let exact = |target| match target {
-            ExactWriteTarget::Root => ExactWriteTarget::Root,
-            ExactWriteTarget::Branch(branch) => ExactWriteTarget::Branch(selector(branch)),
-        };
-        let target = |target| match target {
-            WriteTarget::Root => WriteTarget::Root,
-            WriteTarget::BranchView { head, base } => WriteTarget::BranchView {
-                head: selector(head),
-                base: base.map(|base| match base {
-                    BranchViewBase::Current(branch) => BranchViewBase::Current(selector(branch)),
-                    BranchViewBase::Snapshot { branch, snapshot } => BranchViewBase::Snapshot {
-                        branch: selector(branch),
-                        snapshot,
-                    },
-                }),
-            },
-        };
         let name = table.stored.clone();
         match self {
             Self::Insert(_, values, mut options) => {
-                options.target = exact(options.target);
+                options.target = table.stored_exact_write_target(options.target);
                 Self::Insert(name, cells(values), options)
             }
             Self::Update(_, row, values, mut options) => {
-                options.target = target(options.target);
+                options.target = table.stored_write_target(options.target);
                 Self::Update(name, row, cells(values), options)
             }
             Self::Upsert(_, row, values, created, mut options) => {
-                options.target = target(options.target);
+                options.target = table.stored_write_target(options.target);
                 // A local upsert's created cells (the ones the encryption
                 // hooks sealed for a created row) are named as its cells.
                 Self::Upsert(name, row, cells(values), cells(created), options)
             }
             Self::Delete(_, row, mut options) => {
-                options.target = target(options.target);
+                options.target = table.stored_write_target(options.target);
                 Self::Delete(name, row, options)
             }
             Self::Restore(_, row, values, mut options) => {
-                options.target = exact(options.target);
+                options.target = table.stored_exact_write_target(options.target);
                 Self::Restore(name, row, values.map(cells), options)
             }
-            Self::Move(_, from, to, row) => Self::Move(name, selector(from), selector(to), row),
+            Self::Move(_, from, to, row) => Self::Move(
+                name,
+                table.stored_branch_selector(from),
+                table.stored_branch_selector(to),
+                row,
+            ),
         }
     }
 }
@@ -13094,7 +13050,7 @@ impl Db {
                 inner.chunk_large_cells(&mut op).await
             })
             .await?;
-        let marks = {
+        let prefix = {
             let inner = self.inner.as_ref();
             inner.require_mutation_admission()?;
             edits.derived.extend(chunked.derived);
@@ -13103,17 +13059,16 @@ impl Db {
             let batch = batches
                 .get_mut(&id)
                 .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
-            let marks = (batch.edits.derived.len(), batch.edits.pending_nodes.len());
+            let prefix = batch.prefix();
             batch.edits.derived.extend(edits.derived);
             batch.edits.pending_nodes.extend(edits.pending_nodes);
-            marks
+            prefix
         };
         let staged = self.stage_op(id, op).await;
         if staged.is_err()
             && let Some(batch) = self.inner.batches.borrow_mut().get_mut(&id)
         {
-            batch.edits.derived.truncate(marks.0);
-            batch.edits.pending_nodes.truncate(marks.1);
+            batch.restore_prefix(prefix);
         }
         staged
     }

@@ -44,6 +44,15 @@ pub struct EncryptionSettings {
     pub mechanisms: Option<serde_json::Value>,
 }
 
+/// The prefix of a table's equality columns, which hold an encrypted
+/// column's equality tokens.
+pub const EQUALITY_PREFIX: &str = "__e2ee_eq_";
+
+/// The name of a table's equality column for `column`.
+pub fn equality_column(column: &str) -> String {
+    format!("{EQUALITY_PREFIX}{column}")
+}
+
 /// A table's `encryption` entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -58,6 +67,13 @@ pub struct EncryptionEntry {
     /// The encrypted columns that carry equality tokens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub equality: Vec<String>,
+}
+
+impl EncryptionEntry {
+    /// Whether each row is its own space.
+    pub fn is_own_space(&self) -> bool {
+        self.space == "id"
+    }
 }
 
 /// One encrypted column and the type its stored cells were sealed under.
