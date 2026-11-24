@@ -1115,13 +1115,8 @@ impl E2eeClient {
             || keys.needs_evaluation(&address)
             || !self.shared.member_removals.borrow().is_empty();
         if !pending
-            || crate::hooks::write_key(
-                &keys,
-                &self.shared.creations.borrow().dropped,
-                &address,
-                keys.creation_refused.contains(&address),
-            )
-            .is_err()
+            || crate::hooks::write_key(&keys, &self.shared.creations.borrow().dropped, &address)
+                .is_err()
         {
             return Ok(false);
         }
@@ -1274,13 +1269,8 @@ impl E2eeClient {
             // below: told to try again now, it would fail the same way.
             let holds_current = {
                 let keys = self.shared.keys.borrow();
-                crate::hooks::write_key(
-                    &keys,
-                    &self.shared.creations.borrow().dropped,
-                    &address,
-                    keys.creation_refused.contains(&address),
-                )
-                .is_ok()
+                crate::hooks::write_key(&keys, &self.shared.creations.borrow().dropped, &address)
+                    .is_ok()
             };
             if holds_current {
                 return Ok(true);

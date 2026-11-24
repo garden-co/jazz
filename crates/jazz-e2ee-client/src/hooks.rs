@@ -231,10 +231,12 @@ pub(crate) fn write_key<'k>(
     keys: &'k KeyState,
     dropped: &BTreeSet<String>,
     address: &SpaceAddress,
-    refused_here: bool,
 ) -> Result<WriteKey<'k>, SealError> {
     let space = || db_address(address);
-    match keys.held.write_key(address, refused_here) {
+    match keys
+        .held
+        .write_key(address, keys.creation_refused.contains(address))
+    {
         WriteChoice::Key(key)
             if matches!(key.mark(), KeyMark::Unpublished { .. })
                 && dropped.contains(key.root_id()) =>
@@ -372,9 +374,8 @@ impl E2eeHooks for Hooks {
                 if write.cells.contains_key(name) || write.streamed_column == Some(name) {
                     continue;
                 }
-                let filled = match &codec.default {
-                    Some(default) => Some(default.clone()),
-                    None if codec.nullable => Some(Value::Nullable(None)),
+                let filled = match &codec.empty {
+                    Some(empty) => Some(empty.clone()),
                     None if write.streamed_column.is_some() => {
                         return Err(refused(&format!(
                             "a streamed row requires encrypted column `{}.{name}`",
@@ -410,12 +411,7 @@ impl E2eeHooks for Hooks {
             self.check_rotation(&address)?;
         }
         let keys = self.shared.keys.borrow();
-        let key = write_key(
-            &keys,
-            &self.shared.creations.borrow().dropped,
-            &address,
-            keys.creation_refused.contains(&address),
-        )?;
+        let key = write_key(&keys, &self.shared.creations.borrow().dropped, &address)?;
         let catalogue = keys
             .catalogue
             .as_ref()
@@ -502,12 +498,7 @@ impl E2eeHooks for Hooks {
             .ok_or_else(|| SealError::Refused(rejected("an encrypted write names its space")))?;
         let address = Self::address(&keys, self.plan(table).expect("sealed table"), &id)
             .map_err(SealError::Refused)?;
-        let key = write_key(
-            &keys,
-            &self.shared.creations.borrow().dropped,
-            &address,
-            keys.creation_refused.contains(&address),
-        )?;
+        let key = write_key(&keys, &self.shared.creations.borrow().dropped, &address)?;
         if key.root_id() != root {
             return Err(SealError::Refused(rejected(
                 "the space root changed during the upload",
@@ -921,12 +912,7 @@ impl E2eeHooks for Hooks {
             .map_err(SealError::Refused)?;
         self.check_rotation(&address)?;
         let keys = self.shared.keys.borrow();
-        let key = write_key(
-            &keys,
-            &self.shared.creations.borrow().dropped,
-            &address,
-            keys.creation_refused.contains(&address),
-        )?;
+        let key = write_key(&keys, &self.shared.creations.borrow().dropped, &address)?;
         let catalogue = keys
             .catalogue
             .as_ref()

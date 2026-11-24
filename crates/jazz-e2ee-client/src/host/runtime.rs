@@ -667,9 +667,9 @@ impl Encryption {
             Verification::Complete => Some(Ok(status_name(
                 self.status.get().expect("the account was verified"),
             ))),
-            Verification::Failed(error) => Some(Err(describe_native(error))),
+            Verification::Failed(error) => Some(Err(describe(error.clone()))),
             Verification::AwaitingRecovery if expired => Some(Ok("awaiting-approval")),
-            Verification::Retry(error) if expired => Some(Err(describe_native(error))),
+            Verification::Retry(error) if expired => Some(Err(describe(error.clone()))),
             _ if expired => Some(Err(self.readiness_timeout())),
             _ => None,
         }
@@ -749,12 +749,12 @@ impl Encryption {
                     Verification::Pending
                     | Verification::AwaitingRecovery
                     | Verification::Retry(_) => Ok(false),
-                    Verification::Failed(error) => Err(describe_native(error)),
+                    Verification::Failed(error) => Err(describe(error.clone())),
                     Verification::Complete => Err(describe(ClientError::NoAccount)),
                 },
                 None => Err(describe(ClientError::NoAccount)),
             },
-            outcome => outcome.map_err(|error| describe_native(&error)),
+            outcome => outcome.map_err(describe),
         }
     }
 
@@ -800,7 +800,7 @@ impl Encryption {
     }
 
     fn record_native_failure(&self, native: &NativeReadiness, error: ClientError) {
-        let text = describe_native(&error);
+        let text = describe(error.clone());
         let (code, message) = text.split_once(": ").expect("a host error has a code");
         self.reports
             .borrow_mut()
@@ -1175,7 +1175,7 @@ async fn main_loop(this: Rc<Encryption>) {
             Err(error) => {
                 if let Some(native) = &this.native {
                     if !native_may_retry(&error) {
-                        *this.last_error.borrow_mut() = Some(describe_native(&error));
+                        *this.last_error.borrow_mut() = Some(describe(error.clone()));
                         this.record_native_failure(native, error);
                         return;
                     }
@@ -1308,7 +1308,7 @@ async fn main_loop(this: Rc<Encryption>) {
                         retry_at = None;
                     }
                     *this.last_error.borrow_mut() = Some(if this.native.is_some() {
-                        describe_native(&error)
+                        describe(error.clone())
                     } else {
                         describe(error)
                     });
@@ -1444,16 +1444,7 @@ fn may_pass_later(error: &ClientError) -> bool {
 fn native_may_retry(error: &ClientError) -> bool {
     matches!(error, ClientError::Database(error) if
         matches!(error.code, ErrorCode::Backpressure | ErrorCode::NotObserved)
-            || crate::account::conflict(error))
-}
-
-fn describe_native(error: &ClientError) -> String {
-    if let ClientError::Protocol(error) = error
-        && let Some(code) = error.code()
-    {
-        return format!("{code}: {error}");
-    }
-    describe(error.clone())
+            || error.is_conflict())
 }
 
 /// Pending once, so the host polls the loop again after its next tick.
@@ -1969,7 +1960,7 @@ mod tests {
         assert_eq!(runtime.foreground_ready_outcome(first, false), None);
 
         runtime.stop();
-        let closed = describe_native(&ClientError::Closed);
+        let closed = describe(ClientError::Closed);
         assert_eq!(
             runtime.foreground_ready_outcome(first, false),
             Some(Err(closed.clone()))

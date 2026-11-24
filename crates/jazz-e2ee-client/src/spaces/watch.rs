@@ -395,18 +395,7 @@ impl E2eeClient {
             let space = read
                 .iter()
                 .find(|found| found.row_uuid() == row)
-                .and_then(
-                    |found| match (found.cell("scopeId"), found.cell("identifier")) {
-                        (
-                            Some(jazz::records::Value::Uuid(scope)),
-                            Some(jazz::records::Value::Uuid(id)),
-                        ) => Some(SpaceAddress {
-                            scope_id: scope.to_string(),
-                            identifier: id.to_string(),
-                        }),
-                        _ => None,
-                    },
-                );
+                .and_then(row_space);
             let passed = match &space {
                 Some(space) if served.contains(space) => true,
                 Some(space) => self.deliver_pass(db, space).await.is_ok(),

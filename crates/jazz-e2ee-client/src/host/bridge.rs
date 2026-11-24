@@ -153,9 +153,7 @@ impl JsStore {
         });
         wipe(&mut args);
         let _abandon = Abandon(self, id);
-        if let Some(wake) = self.wake.borrow().as_ref() {
-            wake();
-        }
+        self.request_wake();
         let deadline = Instant::now() + self.timeout.get().unwrap_or(ANSWER_TIMEOUT);
         std::future::poll_fn(|_| match self.replies.borrow_mut().remove(&id) {
             Some(result) => Poll::Ready(result),

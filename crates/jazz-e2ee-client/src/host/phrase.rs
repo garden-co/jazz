@@ -10,7 +10,7 @@
 //! so it never grows and leaves a copy behind.
 
 use jazz_e2ee::Zeroizing;
-use sha2::{Digest, Sha256};
+use jazz_e2ee::primitives::hash::sha256;
 
 /// The 2048 words, in order.
 const LIST: &str = include_str!("english.txt");
@@ -50,7 +50,7 @@ pub fn from_secret(secret: &[u8; 32]) -> Zeroizing<String> {
     let words = words();
     let mut bits = Zeroizing::new([0u8; 33]);
     bits[..32].copy_from_slice(secret);
-    bits[32] = Sha256::digest(secret)[0];
+    bits[32] = sha256(secret)[0];
     let mut phrase = Zeroizing::new(String::with_capacity(MAX_PHRASE));
     for word in 0..24 {
         let mut index = 0usize;
@@ -89,7 +89,7 @@ pub fn to_secret(phrase: &str) -> Result<Zeroizing<[u8; 32]>, PhraseError> {
     }
     let mut secret = Zeroizing::new([0u8; 32]);
     secret.copy_from_slice(&bits[..32]);
-    if Sha256::digest(*secret)[0] != bits[32] {
+    if sha256(&*secret)[0] != bits[32] {
         return Err(PhraseError::InvalidChecksum);
     }
     Ok(secret)
@@ -119,7 +119,7 @@ mod tests {
     /// every platform that shares it.
     #[test]
     fn the_word_list_is_the_published_one() {
-        let digest: String = Sha256::digest(LIST.as_bytes())
+        let digest: String = sha256(LIST.as_bytes())
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
