@@ -55,7 +55,8 @@ export async function bundleBrokerWorker(outputDir = canonicalOutputDir, entryPo
   const outfile = resolve(outputDir, "jazz-broker-worker.js");
   const wasmOutfile = resolve(outputDir, "jazz_wasm_bg.wasm");
   try {
-    await build({
+    const bundle = await build({
+      write: false,
       entryPoints: [entryPoint],
       outfile: stagedWorker,
       // Correctness consumers pin both wasm-bindgen glue and the binary.  A
@@ -75,8 +76,10 @@ export async function bundleBrokerWorker(outputDir = canonicalOutputDir, entryPo
     // asset. Refuse to publish a worker whose embedded wasm-bindgen glue cannot
     // instantiate the binary it is built alongside: the browser otherwise reports
     // an opaque missing-import error only after the SharedWorker has started.
-    const wasmBytes = await readFile(wasmSource);
-    await assertWasmGlueInstantiates(wasmBytes, await readFile(stagedWorker, "utf8"));
+    await copyFile(wasmSource, stagedWasm);
+    const wasmModule = await WebAssembly.compile(await readFile(stagedWasm));
+    const workerSource = bundle.outputFiles[0].text;
+    await assertWasmGlueInstantiates(wasmModule, workerSource);
 
     // Bundlers that start the worker from its URL (Next.js/Turbopack copies
     // it into `media/` byte for byte) ship exactly this file, so it has to be
@@ -84,13 +87,13 @@ export async function bundleBrokerWorker(outputDir = canonicalOutputDir, entryPo
     // Minified after the check above, which evaluates wasm-bindgen's glue by
     // its generated names. No code splitting: the bundlers that copy the file
     // would not emit its chunks.
-    const minified = await transform(await readFile(stagedWorker, "utf8"), {
+    const minified = await transform(workerSource, {
       format: "esm",
       target: "es2022",
       legalComments: "none",
       minify: true,
     });
-    assertWasmGlueAbi(wasmBytes, minified.code);
+    assertWasmGlueAbi(wasmModule, minified.code);
     await writeFile(stagedWorker, minified.code);
 
     // The worker bundles wasm-bindgen's JS glue. Its default initializer resolves
@@ -98,7 +101,6 @@ export async function bundleBrokerWorker(outputDir = canonicalOutputDir, entryPo
     // worker bundle. Keep the binary beside the shipped worker so every consumer
     // bundler sees one complete, package-owned worker artifact; applications do
     // not need to copy Jazz assets into their own public directory.
-    await copyFile(wasmSource, stagedWasm);
     await rename(stagedWorker, outfile);
     await rename(stagedWasm, wasmOutfile);
 

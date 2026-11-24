@@ -110,8 +110,12 @@ test("the shards' lanes together run exactly the unsharded suites", () => {
   };
 
   // Node: every workspace package's `test` except jazz-tools, through the same
-  // Turbo selection, plus jazz-tools' `test`, which is its two halves.
-  take((command) => command === `${allNode} --filter=!jazz-tools`, "the other packages' tests");
+  // package selection, plus jazz-tools' `test`, which is its two halves.
+  assert.match(allNode, / test$/);
+  take(
+    (command) => command === allNode.replace(/ test$/, " --filter=!jazz-tools test"),
+    "the other packages' tests",
+  );
   assert.deepEqual(chain(jazzTools.test), ["pnpm test:without-node", "pnpm test:node"]);
   take(
     (command) => command === "pnpm --filter jazz-tools run test:without-node",
