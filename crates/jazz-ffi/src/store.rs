@@ -46,7 +46,7 @@ pub trait PrivateStore: Send + Sync {
     ) -> Result<u64, PrivateStoreError>;
     fn list(&self, scope: String) -> Result<Vec<String>, PrivateStoreError>;
     fn delete(&self, scope: String) -> Result<(), PrivateStoreError>;
-    fn protect(&self, secret: Vec<u8>) -> Result<Vec<u8>, PrivateStoreError>;
+    fn protect(&self, secret: Zeroizing<Vec<u8>>) -> Result<Vec<u8>, PrivateStoreError>;
     fn unprotect(&self, blob: Vec<u8>) -> Result<Vec<u8>, PrivateStoreError>;
 }
 
@@ -137,8 +137,13 @@ impl NativeStore for CallbackStore {
     }
 
     fn protect<'a>(&'a self, secret: &'a [u8]) -> Answer<'a, Vec<u8>> {
-        // UniFFI owns this copy once lowered. Hosts wipe the secret they receive.
-        Box::pin(ready(self.0.protect(secret.to_vec()).map_err(Into::into)))
+        // Our copy is wiped when lowering drops it; UniFFI's serialized
+        // buffer is its own. Hosts wipe the secret they receive.
+        Box::pin(ready(
+            self.0
+                .protect(Zeroizing::new(secret.to_vec()))
+                .map_err(Into::into),
+        ))
     }
 
     fn unprotect<'a>(&'a self, blob: &'a [u8]) -> Answer<'a, Zeroizing<Vec<u8>>> {

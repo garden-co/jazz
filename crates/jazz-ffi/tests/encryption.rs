@@ -91,7 +91,7 @@ impl PrivateStore for HostStore {
         answer(futures::executor::block_on(self.memory.delete(&scope)))
     }
 
-    fn protect(&self, secret: Vec<u8>) -> Result<Vec<u8>, PrivateStoreError> {
+    fn protect(&self, secret: zeroize::Zeroizing<Vec<u8>>) -> Result<Vec<u8>, PrivateStoreError> {
         answer(futures::executor::block_on(self.memory.protect(&secret)))
     }
 
