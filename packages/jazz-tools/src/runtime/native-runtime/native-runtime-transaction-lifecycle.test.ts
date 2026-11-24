@@ -1,4 +1,4 @@
-import { expect, it, vi } from "vitest";
+import { expect, expectTypeOf, it, vi } from "vitest";
 import {
   PostcardWriter,
   createRecord,
@@ -12,9 +12,11 @@ import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { parseSnapshotRef, UnsupportedSnapshotError } from "../snapshot-ref.js";
 import {
   createOpenTransactionId,
+  StreamingPublicationTimeoutError,
   type TxId,
   type MutationErrorEvent,
   type OpenTransactionId,
+  type StreamingInsertResult,
 } from "../client.js";
 
 function beginTestBatch(runtime: NativeRuntimeAdapter, userId?: string): OpenTransactionId {
@@ -377,7 +379,7 @@ it.each(["standalone", "transaction"])(
       await vi.advanceTimersByTimeAsync(24_999);
       await expect(first).resolves.toBeDefined();
 
-      const refused = vi.fn();
+      const refused = vi.fn<(error: unknown) => void>();
       const id = "00000000-0000-7000-8000-000000000002";
       const second = write(id).catch(refused);
       await vi.advanceTimersByTimeAsync(24_999);
@@ -392,16 +394,33 @@ it.each(["standalone", "transaction"])(
           settled: expect.any(Promise),
         }),
       );
-      const { settled } = refused.mock.calls[0]![0];
-      const queued = write().catch(refused);
+      const error = refused.mock.calls[0]![0];
+      expect(error).toBeInstanceOf(StreamingPublicationTimeoutError);
+      if (!(error instanceof StreamingPublicationTimeoutError)) throw error;
+      expectTypeOf(error.rowId).toEqualTypeOf<string>();
+      expectTypeOf(error.settled).toEqualTypeOf<Promise<StreamingInsertResult>>();
+
+      const queuedId = "00000000-0000-7000-8000-000000000003";
+      const queued = write(queuedId).catch(refused);
       await vi.advanceTimersByTimeAsync(25_000);
       expect(refused).toHaveBeenCalledTimes(2);
-      expect(refused.mock.calls[1]![0].message).toContain("before publication started");
+      expect(refused.mock.calls[1]![0]).toMatchObject({
+        name: "TimeoutError",
+        message: "Streaming write timed out before publication started",
+      });
+      expect(refused.mock.calls[1]![0]).not.toBeInstanceOf(StreamingPublicationTimeoutError);
       release();
-      await expect(settled).resolves.toMatchObject({ id, kind: tx ? "staged" : "committed" });
+      await expect(error.settled).resolves.toMatchObject({ id, kind: tx ? "staged" : "committed" });
       await Promise.all([second, queued]);
+
+      const retry = write(queuedId);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expect(retry).resolves.toMatchObject({
+        id: queuedId,
+        kind: tx ? "staged" : "committed",
+      });
       await runtime.close();
-      expect(finish).toHaveBeenCalledTimes(2);
+      expect(finish).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
     }

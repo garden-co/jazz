@@ -1,4 +1,4 @@
-import { createOpenTransactionId } from "../client.js";
+import { createOpenTransactionId, StreamingPublicationTimeoutError } from "../client.js";
 import type { ClientMigrations } from "../client-migrations.js";
 import type { Encryption, EncryptionNative } from "../../encryption/index.js";
 import { servePrivateStore, type PrivateStore } from "../../encryption/private-store.js";
@@ -2414,12 +2414,12 @@ export class NativeRuntimeAdapter implements Runtime {
       let timer: ReturnType<typeof setTimeout>;
       const deadline = new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          const message = finishStarted
-            ? `Streaming publication of ${table} row ${id} timed out and may still complete. Await error.settled before retrying.`
-            : "Streaming write timed out before publication started";
-          const error = new Error(message);
+          if (finishStarted) {
+            reject(new StreamingPublicationTimeoutError(table, id, publication));
+            return;
+          }
+          const error = new Error("Streaming write timed out before publication started");
           error.name = "TimeoutError";
-          if (finishStarted) Object.assign(error, { rowId: id, settled: publication });
           reject(error);
         }, KEY_WAIT_MS);
       });
