@@ -45,8 +45,8 @@ import {
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
 import { randomNodeUuidBytes } from "./runtime-entropy.js";
-import { buildBrowserEncryption } from "../encryption/browser-host.js";
-import { compiledBindings } from "../encryption/build.js";
+import { buildEncryption, compiledBindings } from "../encryption/build.js";
+import { browserPrivateStore } from "../encryption/browser-store.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { declaredEntries, declaresEncryption } from "../encryption/plain-schema.js";
 import { Encryption } from "../encryption/index.js";
@@ -187,29 +187,28 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       if (!config.accountId) {
         throw new Error("End-to-end encryption needs an account: sign in before opening the app");
       }
-      const host = (this.module as unknown as { EncryptionRuntime?: never }).EncryptionRuntime;
       if (!declaresEncryption(config.encryption.app)) return;
+      const host = this.module.EncryptionRuntime;
       if (!host) {
         throw new Error(
           "The WASM runtime does not support encrypted apps; rebuild the matching Jazz WASM artifact",
         );
       }
       const secret = config.encryption.accountSecret?.();
-      const built = await buildBrowserEncryption({
+      const built = await buildEncryption({
         host,
-        config: config.encryption,
+        app: config.encryption.app,
         appId: clientScope(config),
         environment: config.env ?? "dev",
         accountId: config.accountId,
         deviceAccountSecret: secret,
+        store: config.encryption.store ?? browserPrivateStore(),
       });
-      if (built) {
-        this.encryption = {
-          ...built,
-          accountSecret: config.encryption.accountSecret,
-          app: config.encryption.app,
-        };
-      }
+      this.encryption = {
+        ...built,
+        accountSecret: config.encryption.accountSecret,
+        app: config.encryption.app,
+      };
     }
   }
 
