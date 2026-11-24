@@ -188,14 +188,21 @@ jobs:
   # run covered carries no `full-suite` status, so a ruleset requiring it blocks
   # that merge. A new push to a covered PR moves its head off the covered SHA
   # and so voids coverage.
+  #
+  # It reads the suite invocations directly rather than waiting for test-rust,
+  # one job hop (~12 s) earlier on every merge group. Each clause is exactly
+  # test-rust's success for that event: pushes and release PRs run only the
+  # trusted suite (untrusted is skipped for them), and a dispatch runs only the
+  # untrusted one. An untrusted result counts for dispatches alone, as before
+  # through test-rust; a pull request's untrusted run never posts full-suite.
   report-full-suite:
     if: >-
-      always() && needs.test-rust.result == 'success' && (
-        github.event_name == 'workflow_dispatch' ||
+      always() && (
+        github.event_name == 'workflow_dispatch' && needs.untrusted.result == 'success' && needs.trusted.result == 'skipped' ||
         github.event_name == 'push' && needs.trusted.result == 'success' ||
         github.event_name == 'pull_request' && needs.trusted.result == 'success' && github.base_ref == 'release'
       )
-    needs: [trusted, test-rust]
+    needs: [untrusted, trusted]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
