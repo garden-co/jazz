@@ -991,7 +991,8 @@ pub struct KeylessProof {
 #[napi]
 pub struct EncryptionRuntime {
     store: Rc<js_store::JsStore>,
-    options: RefCell<Option<encryption::Options>>,
+    options: Rc<RefCell<Option<encryption::Options>>>,
+    building: Rc<Cell<bool>>,
     account_id: String,
     app_id: String,
     built: Rc<RefCell<Option<encryption::Built>>>,
@@ -1054,17 +1055,43 @@ impl EncryptionRuntime {
     ) -> Self {
         Self {
             store: Rc::default(),
-            options: RefCell::new(Some(encryption::Options {
+            options: Rc::new(RefCell::new(Some(encryption::Options {
                 app_file,
                 from_bindings,
                 device_account_secret,
                 app_id: app_id.clone(),
                 environment,
-            })),
+            }))),
+            building: Rc::default(),
             account_id,
             app_id,
             built: Rc::default(),
         }
+    }
+
+    fn build_future(&self) -> Option<encryption::JsonFuture> {
+        if self.building.get() {
+            return None;
+        }
+        let build = encryption::build(
+            self.options.borrow().as_ref()?,
+            self.account_id.clone(),
+            Rc::clone(&self.store),
+        );
+        let options = Rc::downgrade(&self.options);
+        let building = Rc::clone(&self.building);
+        let slot = Rc::clone(&self.built);
+        Some(Box::pin(async move {
+            building.set(true);
+            let result = build.await;
+            building.set(false);
+            let built = result?;
+            if let Some(options) = options.upgrade() {
+                options.borrow_mut().take();
+            }
+            *slot.borrow_mut() = Some(built);
+            Ok(serde_json::Value::Null)
+        }))
     }
 }
 
@@ -1074,18 +1101,9 @@ impl EncryptionRuntime {
     /// takes the app's store (answer its requests while waiting).
     #[napi(ts_return_type = "Promise<string>")]
     pub fn ready(&self, env: &Env) -> js::Result<PromiseRaw<'static, String>> {
-        let options = self
-            .options
-            .borrow_mut()
-            .take()
+        let future = self
+            .build_future()
             .ok_or_else(|| napi::Error::from_reason("the runtime is already built"))?;
-        let (account, store) = (self.account_id.clone(), Rc::clone(&self.store));
-        let slot = Rc::clone(&self.built);
-        let future: encryption::JsonFuture = Box::pin(async move {
-            let built = encryption::build(options, account, store).await?;
-            *slot.borrow_mut() = Some(built);
-            Ok(serde_json::Value::Null)
-        });
         Ok(json_promise(env, future)?)
     }
 
@@ -2183,10 +2201,10 @@ impl NapiDb {
             db_config = db_config.with_e2ee(Rc::clone(hooks));
         }
         if let Some(Hooks::Client(encrypted)) = encrypted {
-            let built =
-                encrypted.built.borrow_mut().take().ok_or_else(|| {
-                    napi::Error::from_reason("the encryption runtime is not ready")
-                })?;
+            let slot = encrypted.built.borrow();
+            let built = slot
+                .as_ref()
+                .ok_or_else(|| napi::Error::from_reason("the encryption runtime is not ready"))?;
             if identity
                 .author
                 .account_id()
@@ -2198,7 +2216,7 @@ impl NapiDb {
                 ));
             }
             db_config = db_config.with_e2ee(built.client.hooks());
-            runtime = Some((built, Rc::clone(&encrypted.store)));
+            runtime = Some(encrypted);
         }
         let db = match data_path {
             None => block_on(binding_host::open_memory(db_config)),
@@ -2211,7 +2229,13 @@ impl NapiDb {
         .map_err(|error| napi_core_error(&error))?;
         let binding = block_on(Binding::new(db, identity, trusted));
         let owner = Self::runtime_owner(binding);
-        if let Some((built, store)) = runtime {
+        if let Some(runtime) = runtime {
+            let built = runtime
+                .built
+                .borrow_mut()
+                .take()
+                .expect("runtime checked before open");
+            let store = Rc::clone(&runtime.store);
             let inner = owner.inner.borrow();
             let inner = inner.as_ref().expect("just opened");
             let host = Rc::downgrade(&inner.host);
@@ -3949,6 +3973,106 @@ mod native_root_tests {
         ] {
             assert!(names_foreign_store(name), "{name} should be refused");
         }
+    }
+}
+
+#[cfg(all(test, feature = "rn-test-bridge"))]
+mod encryption_tests {
+    use super::*;
+    use jazz::binding_host::{OpenConfig, OpenIdentity};
+    use jazz::ids::{AuthorSubject, NodeUuid};
+
+    /// Alice can retry readiness after her private store refuses a request,
+    /// and Bob's refused open leaves the built runtime available to Alice.
+    /// Rust drives the same build future as `ready` because its JS promise
+    /// requires a Node environment.
+    #[test]
+    fn encryption_startup_can_retry_after_store_failure_and_account_mismatch() {
+        let app =
+            include_bytes!("../../../packages/jazz-tools/tests/fixtures/encrypted/jazz.app.json");
+        let definition = jazz::tools::deployment::artifact::load_app(app).unwrap();
+        let schema = serde_json::to_vec(definition.current_schema()).unwrap();
+        let alice = AuthorSubject::for_test_bytes([1; 16]);
+        let bob = AuthorSubject::for_test_bytes([2; 16]);
+        let runtime = EncryptionRuntime::from_source(
+            app.to_vec(),
+            false,
+            "test".into(),
+            "test".into(),
+            alice.account_id().unwrap().0.to_string(),
+            Some("01".repeat(32)),
+        );
+        let mut context = Context::from_waker(Waker::noop());
+        let mut failed = runtime.build_future().unwrap();
+        assert!(failed.as_mut().poll(&mut context).is_pending());
+        assert!(runtime.build_future().is_none(), "build in progress");
+        let id = |request: &str| {
+            serde_json::from_str::<JsonValue>(request).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let requests = runtime.take_store_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(runtime.reply_store(id(&requests[0]), false, "store unavailable".into()));
+        let Poll::Ready(Err(failure)) = failed.as_mut().poll(&mut context) else {
+            panic!("readiness should report the failed store request");
+        };
+        assert!(failure.contains("store unavailable"), "{failure}");
+        assert!(
+            runtime.options.borrow().as_ref().is_some_and(|options| {
+                options.device_account_secret.as_deref() == Some("01".repeat(32).as_str())
+            }),
+            "failed readiness preserves the recovery secret for a retry"
+        );
+
+        let store = js_store::serve(Rc::new(jazz_e2ee_client::MemoryStore::new()));
+        let mut retry = runtime.build_future().expect("readiness can be retried");
+        loop {
+            if let Poll::Ready(result) = retry.as_mut().poll(&mut context) {
+                result.expect("the recovered store builds the runtime");
+                break;
+            }
+            let requests = runtime.take_store_requests();
+            assert!(!requests.is_empty());
+            for request in requests {
+                let request_id = id(&request);
+                let (ok, payload) = block_on(store(request));
+                assert!(ok, "{payload}");
+                assert!(runtime.reply_store(request_id, ok, payload));
+            }
+        }
+        assert!(runtime.build_future().is_none(), "build completed");
+
+        let open = |author| {
+            let config = postcard::to_allocvec(&OpenConfig {
+                identity: OpenIdentity {
+                    node: NodeUuid::from_bytes([3; 16]),
+                    author,
+                },
+                row_id_seed: None,
+                history_complete: false,
+                initial_sync_flush_every: None,
+                migrations: None,
+                system_node: None,
+            })
+            .unwrap();
+            NapiDb::open_as(
+                &schema,
+                &config,
+                None,
+                OpenAs::Untrusted,
+                Some(Hooks::Client(&runtime)),
+            )
+        };
+        let failure = open(bob).err().expect("Bob cannot open Alice's runtime");
+        assert!(failure.reason.contains("for another account"), "{failure}");
+        let owner = open(alice).expect("Alice can still open her runtime");
+        assert!(owner.encryption().is_ok());
+        let failure = open(alice)
+            .err()
+            .expect("the runtime is attached only once");
+        assert!(failure.reason.contains("not ready"), "{failure}");
     }
 }
 

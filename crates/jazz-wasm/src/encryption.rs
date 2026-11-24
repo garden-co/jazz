@@ -7,7 +7,7 @@
 //! make progress (a noop waker), as in the Node binding, so the store's
 //! requests are taken and answered by the same JavaScript that serves Node's.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
@@ -87,7 +87,8 @@ fn settle_promises() {
 #[wasm_bindgen(js_name = EncryptionRuntime)]
 pub struct WasmEncryptionRuntime {
     store: Rc<JsStore>,
-    options: RefCell<Option<Options>>,
+    options: Rc<RefCell<Option<Options>>>,
+    building: Rc<Cell<bool>>,
     account_id: String,
     app_id: String,
     built: Rc<RefCell<Option<Built>>>,
@@ -110,13 +111,14 @@ impl WasmEncryptionRuntime {
     ) -> WasmEncryptionRuntime {
         WasmEncryptionRuntime {
             store: Rc::default(),
-            options: RefCell::new(Some(Options {
+            options: Rc::new(RefCell::new(Some(Options {
                 app_file: bindings.into_bytes(),
                 from_bindings: true,
                 device_account_secret,
                 app_id: app_id.clone(),
                 environment,
-            })),
+            }))),
+            building: Rc::default(),
             account_id,
             app_id,
             built: Rc::default(),
@@ -126,13 +128,24 @@ impl WasmEncryptionRuntime {
     /// Builds the runtime: settles when its device is loaded or made, which
     /// takes the store (answer its requests while waiting).
     pub fn ready(&self) -> js_sys::Promise {
-        let Some(options) = self.options.borrow_mut().take() else {
-            return js_sys::Promise::reject(&JsValue::from_str("the runtime is already built"));
+        let build = {
+            let options = self.options.borrow();
+            let Some(options) = options.as_ref().filter(|_| !self.building.get()) else {
+                return js_sys::Promise::reject(&JsValue::from_str("the runtime is already built"));
+            };
+            runtime::build(options, self.account_id.clone(), Rc::clone(&self.store))
         };
-        let (account, store) = (self.account_id.clone(), Rc::clone(&self.store));
+        let options = Rc::downgrade(&self.options);
+        let building = Rc::clone(&self.building);
         let slot = Rc::clone(&self.built);
         json_promise(Box::pin(async move {
-            let built = runtime::build(options, account, store).await?;
+            building.set(true);
+            let result = build.await;
+            building.set(false);
+            let built = result?;
+            if let Some(options) = options.upgrade() {
+                options.borrow_mut().take();
+            }
             *slot.borrow_mut() = Some(built);
             Ok(serde_json::Value::Null)
         }))
@@ -297,25 +310,32 @@ impl WasmDb {
             _ => OpenAs::Untrusted,
         };
         let (db_config, identity, trusted) = Self::prepare_open(&schema, &config, how)?;
+        let hooks = {
+            let slot = runtime.built.borrow();
+            let built = slot
+                .as_ref()
+                .ok_or_else(|| error("the encryption runtime is not ready"))?;
+            if identity
+                .author
+                .account_id()
+                .map(|account| account.0.to_string())
+                != Some(runtime.account_id.clone())
+            {
+                return Err(error(
+                    "the encryption runtime is for another account than this session's",
+                ));
+            }
+            built.client.hooks()
+        };
+        let db_config = db_config.with_e2ee(hooks);
+        let db = block_on(binding_host::open_memory(db_config)).map_err(super::to_js_error)?;
+        let owner = Self::runtime_owner(block_on(Binding::new(db, identity, trusted)));
+        let inner: WasmDbInner = owner.open_inner()?;
         let built = runtime
             .built
             .borrow_mut()
             .take()
-            .ok_or_else(|| error("the encryption runtime is not ready"))?;
-        if identity
-            .author
-            .account_id()
-            .map(|account| account.0.to_string())
-            != Some(runtime.account_id.clone())
-        {
-            return Err(error(
-                "the encryption runtime is for another account than this session's",
-            ));
-        }
-        let db_config = db_config.with_e2ee(built.client.hooks());
-        let db = block_on(binding_host::open_memory(db_config)).map_err(super::to_js_error)?;
-        let owner = Self::runtime_owner(block_on(Binding::new(db, identity, trusted)));
-        let inner: WasmDbInner = owner.open_inner()?;
+            .expect("runtime checked before open");
         let host = Rc::downgrade(&inner.host);
         runtime.store.set_wake(Box::new(move || {
             let Some(host) = host.upgrade() else { return };
@@ -423,6 +443,110 @@ mod tests {
     use wasm_bindgen_futures::JsFuture;
     use wasm_bindgen_test::wasm_bindgen_test;
 
+    /// Alice can retry readiness after her private store refuses a request,
+    /// and Bob's refused open leaves the built runtime available to Alice.
+    #[wasm_bindgen_test]
+    async fn encryption_startup_can_retry_after_store_failure_and_account_mismatch() {
+        let app =
+            include_bytes!("../../../packages/jazz-tools/tests/fixtures/encrypted/jazz.app.json");
+        let definition = jazz::tools::deployment::artifact::load_app(app).unwrap();
+        let schema = serde_json::to_vec(definition.current_schema()).unwrap();
+        let alice = AuthorSubject::for_test_bytes([1; 16]);
+        let bob = AuthorSubject::for_test_bytes([2; 16]);
+        let runtime = WasmEncryptionRuntime {
+            store: Rc::default(),
+            options: Rc::new(RefCell::new(Some(Options {
+                app_file: app.to_vec(),
+                from_bindings: false,
+                app_id: "test".into(),
+                environment: "test".into(),
+                device_account_secret: Some("01".repeat(32)),
+            }))),
+            building: Rc::default(),
+            account_id: alice.account_id().unwrap().0.to_string(),
+            app_id: "test".into(),
+            built: Rc::default(),
+        };
+        let id = |request: &str| {
+            serde_json::from_str::<serde_json::Value>(request).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let failed = JsFuture::from(runtime.ready());
+        assert!(
+            JsFuture::from(runtime.ready()).await.is_err(),
+            "build in progress"
+        );
+        let requests = runtime.take_store_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(runtime.reply_store(id(&requests[0]), false, "store unavailable".into()));
+        let failure = js_sys::Error::from(failed.await.unwrap_err());
+        assert!(failure
+            .message()
+            .as_string()
+            .unwrap()
+            .contains("store unavailable"));
+        assert!(
+            runtime.options.borrow().as_ref().is_some_and(|options| {
+                options.device_account_secret.as_deref() == Some("01".repeat(32).as_str())
+            }),
+            "failed readiness preserves the recovery secret for a retry"
+        );
+
+        let store =
+            jazz_e2ee_client::host::bridge::serve(Rc::new(jazz_e2ee_client::MemoryStore::new()));
+        let retry = JsFuture::from(runtime.ready());
+        loop {
+            let requests = runtime.take_store_requests();
+            if requests.is_empty() {
+                break;
+            }
+            for request in requests {
+                let request_id = id(&request);
+                let (ok, payload) = store(request).await;
+                assert!(ok, "{payload}");
+                assert!(runtime.reply_store(request_id, ok, payload));
+            }
+        }
+        retry.await.expect("readiness can be retried");
+        assert!(
+            JsFuture::from(runtime.ready()).await.is_err(),
+            "build completed"
+        );
+
+        let open = |author| {
+            let config = postcard::to_allocvec(&OpenConfig {
+                identity: OpenIdentity {
+                    node: NodeUuid::from_bytes([3; 16]),
+                    author,
+                },
+                row_id_seed: None,
+                history_complete: false,
+                initial_sync_flush_every: None,
+                migrations: None,
+                system_node: None,
+            })
+            .unwrap();
+            WasmDb::open_memory_encrypted(schema.clone(), config, &runtime, JsValue::UNDEFINED)
+        };
+        let failure =
+            js_sys::Error::from(open(bob).err().expect("Bob cannot open Alice's runtime"));
+        assert!(failure
+            .message()
+            .as_string()
+            .unwrap()
+            .contains("for another account"));
+        let owner = open(alice).expect("Alice can still open her runtime");
+        assert!(owner.encryption().is_ok());
+        let failure = js_sys::Error::from(
+            open(alice)
+                .err()
+                .expect("the runtime is attached only once"),
+        );
+        assert!(failure.message().as_string().unwrap().contains("not ready"));
+    }
+
     /// Alice's schema view can close independently. Closing or dropping the
     /// owning database frees the runtime, database and host, even if JS keeps
     /// the store bridge. Weak references observe the native lifetimes.
@@ -457,12 +581,13 @@ mod tests {
                 environment: "test".into(),
                 device_account_secret: None,
             };
-            let built = runtime::build(options, account_id.clone(), store.clone())
+            let built = runtime::build(&options, account_id.clone(), store.clone())
                 .await
                 .unwrap();
             let bridge = WasmEncryptionRuntime {
                 store,
-                options: RefCell::new(None),
+                options: Rc::default(),
+                building: Rc::default(),
                 account_id,
                 app_id: "test".into(),
                 built: Rc::new(RefCell::new(Some(built))),
