@@ -1,6 +1,6 @@
-//! Readiness receipts for open, lease-owned foregrounds. Waiting for the
-//! relay's lifecycle lock could make a sibling store's open or close spend
-//! this foreground's readiness deadline.
+//! A leased foreground must submit and poll readiness while the relay owner
+//! is busy or a sibling open or close holds the lifecycle lock. Keeping the
+//! receipts here lets each caller observe its own deadline in either case.
 
 use super::{
     ForegroundDbCommandRequest as Request, ForegroundDbCommandResponse as Response,
