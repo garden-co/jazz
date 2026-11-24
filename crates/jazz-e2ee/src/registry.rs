@@ -54,17 +54,17 @@ fn custom<T: MechanismImpl + ?Sized>(list: &mut Vec<Arc<T>>, item: Arc<T>) -> Re
 fn find<'r, T: MechanismImpl + ?Sized>(
     list: &'r [Arc<T>],
     mechanism: Mechanism<'_>,
-) -> Option<&'r T> {
-    list.iter()
-        .find(|item| item.mechanism() == mechanism)
-        .map(|item| &**item)
+) -> Option<&'r Arc<T>> {
+    list.iter().find(|item| item.mechanism() == mechanism)
 }
 
 fn configured<'r, T: MechanismImpl + ?Sized>(
     list: &'r [Arc<T>],
     id: &MechanismId,
 ) -> Result<&'r T> {
-    find(list, id.as_mechanism()).ok_or(Error::UnknownMechanism)
+    find(list, id.as_mechanism())
+        .map(|item| &**item)
+        .ok_or(Error::UnknownMechanism)
 }
 
 /// The registered mechanisms of `list` that `allowed` names; naming an
@@ -76,8 +76,7 @@ fn allowed<T: MechanismImpl + ?Sized>(
     allowed
         .iter()
         .map(|id| {
-            list.iter()
-                .find(|item| item.mechanism() == id.as_mechanism())
+            find(list, id.as_mechanism())
                 .cloned()
                 .ok_or(Error::UnknownMechanism)
         })
@@ -88,7 +87,9 @@ fn allowed<T: MechanismImpl + ?Sized>(
 fn routed<'r, T: MechanismImpl + ?Sized>(list: &'r [Arc<T>], envelope: &[u8]) -> Result<&'r T> {
     let (id, version, _) = envelope::parse(envelope)?;
     let id = core::str::from_utf8(id).map_err(|_| Error::InvalidCiphertext)?;
-    find(list, Mechanism::new(id, version)).ok_or(Error::UnsupportedFormat)
+    find(list, Mechanism::new(id, version))
+        .map(|item| &**item)
+        .ok_or(Error::UnsupportedFormat)
 }
 
 macro_rules! role {
@@ -109,7 +110,9 @@ macro_rules! role {
 
         #[doc = concat!("The registered ", $what, " for `mechanism`.")]
         pub fn $get(&self, mechanism: Mechanism<'_>) -> Result<&dyn $trait> {
-            find(&self.$field, mechanism).ok_or(Error::UnknownMechanism)
+            find(&self.$field, mechanism)
+                .map(|item| &**item)
+                .ok_or(Error::UnknownMechanism)
         }
 
         #[doc = concat!("The registered ", $what, " named by `envelope`'s header.")]

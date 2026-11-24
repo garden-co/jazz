@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use jazz_e2ee::{Error, RandomSource, Result};
+#[allow(unused_imports)]
+pub use jazz_e2ee::conformance::FixedRandom;
+use jazz_e2ee::{RandomSource, Result};
 
 pub fn hex(value: &str) -> Vec<u8> {
     assert!(value.len().is_multiple_of(2), "odd hex length");
@@ -16,20 +18,6 @@ pub fn to_hex(bytes: &[u8]) -> String {
 
 pub fn array<const N: usize>(value: &str) -> [u8; N] {
     hex(value).try_into().expect("vector length")
-}
-
-/// Yields the given bytes in order, then fails.
-pub struct FixedRandom(pub Vec<u8>);
-
-impl RandomSource for FixedRandom {
-    fn fill(&mut self, dest: &mut [u8]) -> Result<()> {
-        if self.0.len() < dest.len() {
-            return Err(Error::RandomUnavailable);
-        }
-        dest.copy_from_slice(&self.0[..dest.len()]);
-        self.0.drain(..dest.len());
-        Ok(())
-    }
 }
 
 /// A fast deterministic generator (xorshift64*) for test inputs only.
