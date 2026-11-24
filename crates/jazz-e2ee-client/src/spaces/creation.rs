@@ -15,15 +15,14 @@
 
 use jazz::db::{Db, ErrorCode, Reason, WireWrite};
 use jazz::e2ee::{Provisional, TransactionFate};
-use jazz::query::{Query, col, eq, lit};
 use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::content::{CreationFate, HeldSpace};
 use jazz_e2ee::protocol::records::space::SpaceAddress;
 use jazz_e2ee::protocol::space::AccountDirectory;
-use jazz_e2ee::protocol::space::build::{Author, SpaceWriter, space_root};
+use jazz_e2ee::protocol::space::build::{Author, space_root};
 
-use super::{has_live_key, has_unpublished};
+use super::{by_id, has_live_key, has_unpublished};
 use crate::account::rows::{self, uuid_cell};
 use crate::client::{E2eeClient, SharedRandom};
 use crate::error::ClientError;
@@ -46,12 +45,8 @@ impl E2eeClient {
             )?;
             let device = self.shared.device()?.clone();
             let author = Author::new(&directory, &self.shared.account_id, &account.key, &device)?;
-            let writer = SpaceWriter {
-                suite: self.shared.registry.select(&self.shared.selected)?,
-                registry: &self.shared.registry,
-                domain: &self.shared.domain,
-                account_id: &self.shared.account_id,
-            };
+            let suite = self.shared.registry.select(&self.shared.selected)?;
+            let writer = self.space_writer(suite);
             space_root(
                 &writer,
                 address,
@@ -148,16 +143,7 @@ impl E2eeClient {
     /// Settles the creations of this run that the authority has since
     /// accepted or refused.
     pub(crate) async fn settle_pending(&self, db: &Db) -> Result<(), ClientError> {
-        let addresses: Vec<SpaceAddress> = self
-            .shared
-            .keys
-            .borrow()
-            .held
-            .spaces()
-            .iter()
-            .filter(|space| has_unpublished(space))
-            .map(|space| space.address().clone())
-            .collect();
+        let addresses = self.unpublished_addresses();
         for address in addresses {
             self.settle_creations(db, &address, None).await?;
         }
@@ -177,8 +163,7 @@ impl E2eeClient {
         if !self.shared.keys.borrow().online {
             return Ok(CreationFate::Undecided);
         }
-        let id = uuid_cell(root_id).ok_or(ProtocolError::InconsistentEvidence)?;
-        let query = Query::from(rows::SPACE_ROOTS).filter(eq(col("id"), lit(id)));
+        let query = by_id(rows::SPACE_ROOTS, root_id)?;
         let skipped = std::cell::Cell::new(0);
         let tx = OpenTransactionId::new();
         db.begin_serializable(tx).await?;
@@ -218,13 +203,13 @@ impl E2eeClient {
             creations.staged.contains(root_id)
                 || creations.prepared.values().any(|root| root.id == root_id)
         };
-        let id = uuid_cell(root_id).ok_or(ProtocolError::InvalidRecord(
+        uuid_cell(root_id).ok_or(ProtocolError::InvalidRecord(
             "a creation's root ID is not a UUID",
         ))?;
         let id_bytes = *uuid::Uuid::parse_str(root_id)
             .map_err(|_| ProtocolError::InvalidRecord("a creation's root ID is not a UUID"))?
             .as_bytes();
-        let query = Query::from(rows::SPACE_ROOTS).filter(eq(col("id"), lit(id)));
+        let query = by_id(rows::SPACE_ROOTS, root_id)?;
         let read = match db.provisional_read(&db.prepare_query(&query)?).await {
             Ok(read) => read,
             // A store that has never had an upstream knows nothing yet.
@@ -290,16 +275,7 @@ impl E2eeClient {
     /// automatic path, and may be called again.
     pub async fn reconcile(&self, db: &Db) -> Result<(), ClientError> {
         self.ensure_open()?;
-        let addresses: Vec<SpaceAddress> = self
-            .shared
-            .keys
-            .borrow()
-            .held
-            .spaces()
-            .iter()
-            .filter(|space| has_unpublished(space))
-            .map(|space| space.address().clone())
-            .collect();
+        let addresses = self.unpublished_addresses();
         let online = self.shared.keys.borrow().online;
         for address in addresses {
             if online {

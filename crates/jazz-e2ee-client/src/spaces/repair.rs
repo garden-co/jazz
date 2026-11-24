@@ -137,7 +137,11 @@ impl E2eeClient {
             let mut progressed = false;
             for (table, rows) in found {
                 for batch in rows.chunks(REPAIR_BATCH) {
-                    match self.repair_batch(db, space, &table, batch).await {
+                    match crate::account::serializable(db, ATTEMPTS, async |tx| {
+                        self.repair_step(db, tx, space, &table, batch).await
+                    })
+                    .await
+                    {
                         Ok(count) => {
                             written += count;
                             progressed |= count > 0;
@@ -230,22 +234,6 @@ impl E2eeClient {
             }
         }
         Ok(found)
-    }
-
-    /// One repair transaction: reads `rows` of `table` (the rows are in its
-    /// read set), and rewrites the cells that still name the losing epoch.
-    /// A conflict reads again. How many rows it rewrote.
-    async fn repair_batch(
-        &self,
-        db: &Db,
-        space: &SpaceAddress,
-        table: &str,
-        rows: &[RowUuid],
-    ) -> Result<usize, ClientError> {
-        crate::account::serializable(db, ATTEMPTS, async |tx| {
-            self.repair_step(db, tx, space, table, rows).await
-        })
-        .await
     }
 
     async fn repair_step(

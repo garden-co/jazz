@@ -14,10 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use jazz::db::{Db, ReadOpts, ReadTier};
 use jazz::e2ee::SpaceAddress as DbSpaceAddress;
 use jazz::query::{Operand, Predicate, Query, col, eq, lit};
-use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::records::space::SpaceAddress;
 
-use super::SpaceKeyState;
+use super::{SpaceKeyState, space_query};
 use crate::account::rows::{self, account_id_cell, row_account_id, uuid_cell};
 use crate::client::E2eeClient;
 use crate::error::ClientError;
@@ -149,10 +148,7 @@ async fn local_members(
     db: &Db,
     space: &SpaceAddress,
 ) -> Result<Vec<jazz::db::CurrentRow>, ClientError> {
-    let id = |value: &str| uuid_cell(value).ok_or(ProtocolError::InconsistentEvidence);
-    let query = Query::from(rows::SPACE_MEMBERS)
-        .filter(eq(col("scopeId"), lit(id(&space.scope_id)?)))
-        .filter(eq(col("identifier"), lit(id(&space.identifier)?)));
+    let query = space_query(rows::SPACE_MEMBERS, space)?;
     Ok(db
         .all(
             &db.prepare_query(&query)?,

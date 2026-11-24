@@ -19,8 +19,7 @@ use jazz::tools::OpenTransactionId;
 use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::error::RefusalCode;
 use jazz_e2ee::protocol::records::space::SpaceAddress;
-use jazz_e2ee::protocol::space::AccountDirectory;
-use jazz_e2ee::protocol::space::build::{Author, SpaceWriter, deliver, recover_rotation, rotate};
+use jazz_e2ee::protocol::space::build::{Author, deliver, recover_rotation, rotate};
 use jazz_e2ee::protocol::space::members::{
     DELIVERY_BATCH, lacking_held, rotation_mark, rotation_recipients,
 };
@@ -41,7 +40,7 @@ const MAX_BATCHES: usize = 100;
 
 /// Which rotation to make.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Rotation {
+pub(super) enum Rotation {
     Ordinary,
     Recovery,
 }
@@ -70,12 +69,22 @@ impl E2eeClient {
                 },
             );
         }
-        let Replayed {
-            chain,
-            member,
-            acquisition,
-            ..
-        } = self.replay_space(&mut read).await?;
+        let (
+            Replayed {
+                chain,
+                member,
+                acquisition,
+                ..
+            },
+            directory,
+        ) = self
+            .replay_space(
+                &mut read.chain,
+                &mut read.acquisition,
+                &read.ledger,
+                &read.accounts,
+            )
+            .await?;
         // Only a member delivers (R17). What it delivers is what it holds of
         // this chain, which can be a skipped version without the current one
         // (protocol §3.4).
@@ -85,12 +94,6 @@ impl E2eeClient {
             }
             return Ok(0);
         }
-        let directory = AccountDirectory::new(
-            &read.accounts,
-            &self.shared.domain,
-            &self.shared.registry,
-            read.ledger.through,
-        )?;
         // A member whose current generation is above 0 was reset
         // (protocol §2.11): told once per space, account and generation.
         let mut deps = crate::state::WatchedMembers {
@@ -161,12 +164,7 @@ impl E2eeClient {
         }
         let lacking = lacking_held(&chain, &read.ledger, &directory, &acquisition.keys)?;
         let suite = self.shared.registry.select(&self.shared.selected)?;
-        let writer = SpaceWriter {
-            suite,
-            registry: &self.shared.registry,
-            domain: &self.shared.domain,
-            account_id: &self.shared.account_id,
-        };
+        let writer = self.space_writer(suite);
         let mut written = 0;
         'members: for member in &lacking.lacking {
             if member.account_id == self.shared.account_id {
@@ -248,15 +246,7 @@ impl E2eeClient {
         &self,
         db: &Db,
     ) -> Result<Vec<(DbSpaceAddress, Result<usize, ClientError>)>, ClientError> {
-        let held: BTreeSet<SpaceAddress> = self
-            .shared
-            .keys
-            .borrow()
-            .held
-            .spaces()
-            .iter()
-            .map(|space| space.address().clone())
-            .collect();
+        let held: BTreeSet<SpaceAddress> = self.held_addresses().into_iter().collect();
         let mut results = Vec::new();
         for space in held {
             let mut outcome = self.deliver_pass(db, &space).await;
@@ -280,15 +270,7 @@ impl E2eeClient {
     /// under a version the removed device holds cannot be undone. A later
     /// pass that succeeds clears a mark the space does not need.
     pub(crate) async fn mark_after_device_removal(&self, db: &Db) {
-        let held: Vec<_> = self
-            .shared
-            .keys
-            .borrow()
-            .held
-            .spaces()
-            .iter()
-            .map(|space| space.address().clone())
-            .collect();
+        let held = self.held_addresses();
         for address in held {
             if self.deliver_pass(db, &address).await.is_err() {
                 let mut keys = self.shared.keys.borrow_mut();
@@ -323,17 +305,7 @@ impl E2eeClient {
     /// written, or zero if the space has no key yet. Needs the authority.
     pub async fn rotate(&self, db: &Db, space: &DbSpaceAddress) -> Result<usize, ClientError> {
         self.ensure_open()?;
-        self.rotate_before(db, &protocol_address(space)?, None)
-            .await
-    }
-
-    pub(super) async fn rotate_before(
-        &self,
-        db: &Db,
-        space: &SpaceAddress,
-        deadline: Option<web_time::Instant>,
-    ) -> Result<usize, ClientError> {
-        self.rotate_with(db, space, Rotation::Ordinary, deadline)
+        self.rotate_with(db, &protocol_address(space)?, Rotation::Ordinary, None)
             .await
     }
 
@@ -351,7 +323,7 @@ impl E2eeClient {
             .await
     }
 
-    async fn rotate_with(
+    pub(super) async fn rotate_with(
         &self,
         db: &Db,
         space: &SpaceAddress,
@@ -399,7 +371,10 @@ impl E2eeClient {
         }
         let mut written = first;
         for batch in rest.chunks(DELIVERY_BATCH) {
-            written += self.deliver_batch(db, space, batch).await?;
+            written += crate::account::serializable(db, ATTEMPTS, async |tx| {
+                self.batch_step(db, tx, space, batch).await
+            })
+            .await?;
         }
         Ok(written)
     }
@@ -418,12 +393,22 @@ impl E2eeClient {
         let mut read = self
             .read_space_of(db, tx, address, SpaceReadPurpose::Rotate)
             .await?;
-        let Replayed {
-            chain,
-            member,
-            acquisition,
-            ..
-        } = self.replay_space(&mut read).await?;
+        let (
+            Replayed {
+                chain,
+                member,
+                acquisition,
+                ..
+            },
+            directory,
+        ) = self
+            .replay_space(
+                &mut read.chain,
+                &mut read.acquisition,
+                &read.ledger,
+                &read.accounts,
+            )
+            .await?;
         if !member {
             return Err(ProtocolError::Refused(RefusalCode::NotAMember).into());
         }
@@ -440,12 +425,6 @@ impl E2eeClient {
         let (Some(chain), Some(acquisition)) = (chain, acquisition) else {
             return Err(ProtocolError::Refused(RefusalCode::RotationNeedsKey).into());
         };
-        let directory = AccountDirectory::new(
-            &read.accounts,
-            &self.shared.domain,
-            &self.shared.registry,
-            read.ledger.through,
-        )?;
         let suite = self.shared.registry.select(&self.shared.selected)?;
         let recipients = rotation_recipients(
             &chain,
@@ -455,12 +434,7 @@ impl E2eeClient {
             suite.key_seal.mechanism(),
             &mut SharedRandom(&self.shared.random),
         )?;
-        let writer = SpaceWriter {
-            suite,
-            registry: &self.shared.registry,
-            domain: &self.shared.domain,
-            account_id: &self.shared.account_id,
-        };
+        let writer = self.space_writer(suite);
         let records = {
             let account = self.account.borrow();
             let account = account.as_ref().ok_or(ClientError::NoAccount)?;
@@ -493,18 +467,6 @@ impl E2eeClient {
     /// One batch of deliveries of the current version to `accounts`, each
     /// whether or not a delivery to it exists (protocol §3.5), read and
     /// committed in a transaction of its own that re-reads on a conflict.
-    async fn deliver_batch(
-        &self,
-        db: &Db,
-        address: &SpaceAddress,
-        accounts: &[String],
-    ) -> Result<usize, ClientError> {
-        crate::account::serializable(db, ATTEMPTS, async |tx| {
-            self.batch_step(db, tx, address, accounts).await
-        })
-        .await
-    }
-
     async fn batch_step(
         &self,
         db: &Db,
@@ -515,25 +477,24 @@ impl E2eeClient {
         let mut read = self
             .read_space_of(db, tx, address, SpaceReadPurpose::Rotate)
             .await?;
-        let Replayed {
-            chain, acquisition, ..
-        } = self.replay_space(&mut read).await?;
+        let (
+            Replayed {
+                chain, acquisition, ..
+            },
+            directory,
+        ) = self
+            .replay_space(
+                &mut read.chain,
+                &mut read.acquisition,
+                &read.ledger,
+                &read.accounts,
+            )
+            .await?;
         let (Some(chain), Some(acquisition)) = (chain, acquisition) else {
             return Ok(0);
         };
-        let directory = AccountDirectory::new(
-            &read.accounts,
-            &self.shared.domain,
-            &self.shared.registry,
-            read.ledger.through,
-        )?;
         let suite = self.shared.registry.select(&self.shared.selected)?;
-        let writer = SpaceWriter {
-            suite,
-            registry: &self.shared.registry,
-            domain: &self.shared.domain,
-            account_id: &self.shared.account_id,
-        };
+        let writer = self.space_writer(suite);
         let current = chain.current()?.epoch_id.clone();
         let Some(version) = acquisition.keys.version(&current) else {
             return Ok(0);
