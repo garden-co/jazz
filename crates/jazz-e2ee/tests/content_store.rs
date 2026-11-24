@@ -368,6 +368,50 @@ fn marks(space: &HeldSpace) -> Vec<(usize, KeyMark)> {
         .collect()
 }
 
+/// Alice's stored keys at the root and two rotated depths authenticate the
+/// same bytes as the original held-key encoding. This goes through the
+/// protocol store because the client does not expose those bytes.
+#[test]
+fn a_rotated_document_preserves_the_authenticated_bytes() {
+    let (mut world, _, _) = alice_holding(41);
+    world.rotate(ALICE);
+    let space = acquire_held(&world, ALICE, ROW);
+    let owner = owner(&world, ALICE);
+    let document = owner
+        .seal_document(&space, &[], 3, &mut TestRandom(5))
+        .unwrap();
+
+    assert_eq!(document.keys.len(), 3);
+    let mut rng = TestRandom(5);
+    for (depth, record) in document.keys.iter().enumerate() {
+        let single = owner.seal_key(&space, depth, &mut rng).unwrap();
+        assert_eq!(record.body_bytes().unwrap(), single.body_bytes().unwrap());
+        assert_eq!(
+            record.signed_bytes().unwrap(),
+            single.signed_bytes().unwrap()
+        );
+    }
+    assert_eq!(
+        hex(&sha256(&document.encode().unwrap())),
+        "29dce4b41030f6ca7f58a8c1f4813259e3bad3962b0c06fde03227faf5b88c86"
+    );
+
+    let mut decoded = DecodedDocument::from(document);
+    decoded.keys.remove(1);
+    let loaded = owner.load(&decoded).unwrap();
+    assert!(loaded.rejected.is_empty());
+    let sparse = loaded.space.unwrap();
+    let document = owner
+        .seal_document(&sparse, &[], 3, &mut TestRandom(5))
+        .unwrap();
+    let [root, newest] = document.keys.as_slice() else {
+        panic!("Alice only holds the root and newest keys");
+    };
+    let mut rng = TestRandom(5);
+    assert_eq!(root, &owner.seal_key(&sparse, 0, &mut rng).unwrap());
+    assert_eq!(newest, &owner.seal_key(&sparse, 2, &mut rng).unwrap());
+}
+
 #[test]
 fn a_held_space_survives_the_store() {
     let (world, space, lost) = alice_holding(1);

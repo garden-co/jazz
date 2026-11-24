@@ -31,6 +31,7 @@ use super::super::error::{ProtocolError, ProtocolResult};
 use super::super::space::keys::{Outcome, marker};
 use super::super::{key_crypto, signing};
 use super::held::{HeldEntry, HeldSpace, KeyMark};
+use super::stored::prefix_hashes;
 pub use super::stored::{
     Binding, DecodedDocument, HeldDocument, HeldKeyRecord, LineageRecord, UnrecognisedDocument,
     decode_document, device_hash, prefix_hash,
@@ -172,6 +173,18 @@ impl StoreOwner<'_> {
             .keys
             .get(&depth)
             .ok_or(ProtocolError::InvalidRecord("no key held at that depth"))?;
+        let prefix = prefix_hash(&space.root, &space.successors[..depth])?;
+        self.seal_key_with_prefix(space, depth, entry, prefix, rng)
+    }
+
+    fn seal_key_with_prefix(
+        &self,
+        space: &HeldSpace,
+        depth: usize,
+        entry: &HeldEntry,
+        prefix: String,
+        rng: &mut dyn RandomSource,
+    ) -> ProtocolResult<HeldKeyRecord> {
         let (unpublished, refused) = match &entry.mark {
             KeyMark::Published => (None, false),
             KeyMark::Unpublished { transaction } => (Some(transaction.clone()), false),
@@ -185,7 +198,7 @@ impl StoreOwner<'_> {
                 .expect("a held depth is in the lineage")
                 .to_owned(),
             depth: depth as u64,
-            prefix: prefix_hash(&space.root, &space.successors[..depth])?,
+            prefix,
             unpublished,
             refused,
             envelope: Vec::new(),
@@ -237,17 +250,12 @@ impl StoreOwner<'_> {
         // Carried records first: a reader that opens both lets this
         // device's own record of an epoch replace one carried, unless the
         // carried one is `refused`.
-        let keys = carried
-            .iter()
-            .cloned()
-            .map(Ok)
-            .chain(
-                space
-                    .keys
-                    .keys()
-                    .map(|depth| self.seal_key(space, *depth, rng)),
-            )
-            .collect::<ProtocolResult<_>>()?;
+        let prefixes = prefix_hashes(&space.root, &space.successors, space.keys.keys().copied())?;
+        let mut keys = Vec::with_capacity(carried.len() + space.keys.len());
+        keys.extend_from_slice(carried);
+        for ((&depth, entry), prefix) in space.keys.iter().zip(prefixes) {
+            keys.push(self.seal_key_with_prefix(space, depth, entry, prefix, rng)?);
+        }
         Ok(HeldDocument {
             revision,
             lineage,

@@ -459,6 +459,56 @@ fn epoch_keys_reach_every_epoch_of_the_generation() {
     assert!(!rendered.contains(&format!("{:?}", root_key)));
 }
 
+/// After Alice removes her phone, one acquisition retains the authenticated
+/// root and current keys and the sealing-key report for that evidence.
+/// The protocol API exposes the epoch keys and report together.
+#[test]
+fn acquisition_returns_the_authenticated_epoch_keys() {
+    let (env, mut ledger, laptop, mut rng) = bootstrapped(29);
+    let root_key = *ledger.acquire(&env, &laptop).unwrap().key();
+    let root = &ledger.public.roots[0];
+    let root_epoch = root.row.epoch_id.clone();
+    let root_at = root.position;
+    let mut phone = env.device(&mut rng);
+    ledger.request(&phone, &mut rng);
+    ledger.approve(&env, &laptop, &mut phone, &mut rng);
+    let (_, rotation) = ledger.rotate(
+        &env,
+        &laptop,
+        RotationTarget::RemoveDevice(phone.id.clone()),
+        &mut rng,
+    );
+    let wrong = crafted(&env, &laptop, &root_epoch, derived(&[9; 32]), &mut rng);
+    let wrong_id = wrong.id.clone();
+    ledger
+        .public
+        .account_keys
+        .push(Accepted::new(root_at, wrong));
+
+    let replay = ledger.replay(&env);
+    let state = replay.current().unwrap().unwrap();
+    let private = verify_private(&replay, &state, &ledger.private).unwrap();
+    let evidence = AccountKeyEvidence::new(&replay, &state, &private).unwrap();
+    let (key, keys) = evidence
+        .acquire_with_epoch_keys(&laptop.id, std::slice::from_ref(&laptop.sealing))
+        .unwrap();
+
+    assert_eq!(
+        keys.epoch_ids().collect::<Vec<_>>(),
+        [root_epoch.as_str(), key.epoch_id()]
+    );
+    assert_eq!(keys.get(&root_epoch), Some(&root_key));
+    assert_eq!(keys.get(key.epoch_id()), Some(&*rotation.key));
+    let [conflict] = keys.non_derived_sealing_keys() else {
+        panic!("Alice's original epoch has one non-derived sealing key");
+    };
+    assert_eq!(conflict.record_id, wrong_id);
+    assert_eq!(
+        key.authenticated().non_derived_sealing_keys,
+        std::slice::from_ref(conflict)
+    );
+}
+
 /// A device of the account rotates it and co-publishes the new epoch's
 /// record with a key that does not derive from the new epoch key. The
 /// record is valid (the rotation's author signed it), so it is the record

@@ -404,6 +404,15 @@ impl AccountKeyEvidence<'_> {
         key: &[u8; 32],
         delivery_approval: Option<&str>,
     ) -> ProtocolResult<AuthenticatedAccountKey> {
+        self.authenticate_with_epoch_keys(key, delivery_approval)
+            .map(|(authenticated, _)| authenticated)
+    }
+
+    fn authenticate_with_epoch_keys(
+        &self,
+        key: &[u8; 32],
+        delivery_approval: Option<&str>,
+    ) -> ProtocolResult<(AuthenticatedAccountKey, AccountEpochKeys)> {
         let chain = self.chain()?;
         let current = chain.last().expect("a state has its root epoch");
         self.confirm(current, key)?;
@@ -446,12 +455,13 @@ impl AccountKeyEvidence<'_> {
         }
         reached.reverse();
         let keys = self.epoch_keys_of(reached)?;
-        Ok(AuthenticatedAccountKey {
+        let authenticated = AuthenticatedAccountKey {
             epoch_id: current.epoch_id.to_owned(),
             approval_ids,
-            non_derived_sealing_keys: keys.non_derived,
+            non_derived_sealing_keys: keys.non_derived.clone(),
             public_approval_ids: self.state.current_approval_ids(),
-        })
+        };
+        Ok((authenticated, keys))
     }
 
     /// Every account epoch key of the current generation, reached from the
@@ -525,7 +535,7 @@ impl AccountKeyEvidence<'_> {
         envelope: &[u8],
         delivery_approval: Option<&str>,
         unsupported_delivery: &mut bool,
-    ) -> ProtocolResult<Option<AccountKey>> {
+    ) -> ProtocolResult<Option<(AccountKey, AccountEpochKeys)>> {
         let key = match self.registry().open_sealed(keys, context, envelope) {
             Ok(key) => key,
             Err(Error::InvalidCiphertext | Error::NoKeyForMechanism) => return Ok(None),
@@ -535,11 +545,14 @@ impl AccountKeyEvidence<'_> {
             }
             Err(error) => return Err(error.into()),
         };
-        match self.authenticate(&key, delivery_approval) {
-            Ok(authenticated) => Ok(Some(AccountKey {
-                key: key.into(),
-                authenticated,
-            })),
+        match self.authenticate_with_epoch_keys(&key, delivery_approval) {
+            Ok((authenticated, epoch_keys)) => Ok(Some((
+                AccountKey {
+                    key: key.into(),
+                    authenticated,
+                },
+                epoch_keys,
+            ))),
             Err(ProtocolError::AccountKeyUnavailable) => Ok(None),
             Err(error) => Err(error),
         }
@@ -550,6 +563,17 @@ impl AccountKeyEvidence<'_> {
     /// device at the root epoch), then each verified approval delivery to it
     /// for the current epoch.
     pub fn acquire(&self, device_id: &str, keys: &[KeyPair]) -> ProtocolResult<AccountKey> {
+        self.acquire_with_epoch_keys(device_id, keys)
+            .map(|(key, _)| key)
+    }
+
+    /// Acquires the current key and returns the epoch keys and sealing-key
+    /// reports reached during the same authentication.
+    pub fn acquire_with_epoch_keys(
+        &self,
+        device_id: &str,
+        keys: &[KeyPair],
+    ) -> ProtocolResult<(AccountKey, AccountEpochKeys)> {
         let chain = self.chain()?;
         let current = chain.last().expect("a state has its root epoch");
         let application = self.application();
@@ -666,7 +690,7 @@ impl AccountKeyEvidence<'_> {
         for delivery in candidates {
             let context =
                 recovery_delivery_context(self.application(), self.account_id(), &delivery.row)?;
-            if let Some(key) = self.try_candidate(
+            if let Some((key, _)) = self.try_candidate(
                 keys,
                 &context,
                 &delivery.row.envelope,

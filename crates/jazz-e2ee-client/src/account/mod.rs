@@ -578,8 +578,8 @@ impl E2eeClient {
         }
         let evidence = verify_private(&replay, &state, &read.private)?;
         let keys = AccountKeyEvidence::new(&replay, &state, &evidence)?;
-        let key = keys.acquire(&device.id, std::slice::from_ref(&device.sealing))?;
-        let epoch_keys = keys.epoch_keys(&key)?;
+        let (key, epoch_keys) =
+            keys.acquire_with_epoch_keys(&device.id, std::slice::from_ref(&device.sealing))?;
         self.advance_floor(&self.shared.account_id, &floor).await?;
         {
             // A new account epoch (a device removed, wherever that was

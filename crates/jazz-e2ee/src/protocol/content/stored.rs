@@ -19,6 +19,8 @@
 //! a document is decoded record by record, so such a record is skipped on
 //! its own.
 
+use sha2::{Digest, Sha256};
+
 use crate::agility::{MechanismId, PublicKey};
 use crate::primitives::hash::sha256;
 
@@ -197,6 +199,41 @@ pub fn prefix_hash(root: &SpaceRoot, successors: &[SpaceSuccessor]) -> ProtocolR
         ]),
     )?;
     Ok(hex(&sha256(&bytes)))
+}
+
+/// Hashes the requested depths in ascending order, encoding each row once.
+pub(super) fn prefix_hashes(
+    root: &SpaceRoot,
+    successors: &[SpaceSuccessor],
+    depths: impl ExactSizeIterator<Item = usize>,
+) -> ProtocolResult<Vec<String>> {
+    let mut prefixes = Vec::with_capacity(depths.len());
+    if depths.len() == 0 {
+        return Ok(prefixes);
+    }
+
+    // B(format, [root, [successors]]), with the closing brackets added
+    // only to the copy we finalize at each held depth.
+    let mut hash = Sha256::new();
+    hash.update(b"[");
+    hash.update(Value::string(PREFIX_FORMAT).encode()?);
+    hash.update(b",[");
+    hash.update(root_value(root).encode()?);
+    hash.update(b",[");
+    let mut hashed_depth = 0;
+    for depth in depths {
+        for successor in &successors[hashed_depth..depth] {
+            if hashed_depth > 0 {
+                hash.update(b",");
+            }
+            hash.update(successor_value(successor).encode()?);
+            hashed_depth += 1;
+        }
+        let mut prefix = hash.clone();
+        prefix.update(b"]]]");
+        prefixes.push(hex(&prefix.finalize()));
+    }
+    Ok(prefixes)
 }
 
 /// What a record is bound to: `{ application: Dₐ(self), device: deviceId,
