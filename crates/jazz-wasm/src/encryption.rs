@@ -146,11 +146,7 @@ pub(crate) fn keyless_declarations(
     app_id: &str,
     environment: &str,
 ) -> Result<jazz::e2ee::E2eeDeclarations, JsValue> {
-    let app = jazz::tools::AppId::from_string(app_id)
-        .unwrap_or_else(|_| jazz::tools::AppId::from_name(app_id));
-    jazz::tools::deployment::artifact::bound_declarations(bindings.as_bytes(), app, environment)
-        .map_err(|failure| error(failure.to_string()))?
-        .ok_or_else(|| error("the app's bindings declare no encryption"))
+    runtime::keyless_declarations(bindings, app_id, environment).map_err(error)
 }
 
 fn error(message: impl AsRef<str>) -> JsValue {

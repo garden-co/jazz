@@ -35,33 +35,16 @@ impl ForegroundEncryption {
         schema: &serde_json::Value,
         owner: &AccountSessionOwner,
     ) -> Result<Self, Status> {
-        use jazz::tools::deployment::artifact::{bound_declarations, schema_hash};
-        let invalid = |_| Status::LifecycleFailure;
-        let bound: serde_json::Value = serde_json::from_str(bindings).map_err(invalid)?;
-        let current = bound["schema"]["current"]
-            .as_str()
-            .ok_or(Status::LifecycleFailure)?;
-        let shipped = bound["schema"]["schemas"]
-            .as_array()
-            .and_then(|entries| {
-                entries
-                    .iter()
-                    .find(|entry| entry["hash"].as_str() == Some(current))
-            })
-            .ok_or(Status::LifecycleFailure)?;
-        let stored_schema = |value| {
-            let bytes = serde_json::to_vec(value).map_err(|_| Status::LifecycleFailure)?;
-            schema_hash(&bytes).map_err(|_| Status::LifecycleFailure)
-        };
-        let schema = stored_schema(schema)?;
-        if schema != stored_schema(&shipped["schema"])? || schema.to_string() != current {
+        let (current, declarations) =
+            host::bound_declarations(bindings.as_bytes(), &owner.app_id, &owner.environment, true)
+                .map_err(|_| Status::LifecycleFailure)?;
+        let bytes = serde_json::to_vec(schema).map_err(|_| Status::LifecycleFailure)?;
+        let delivered = jazz::tools::deployment::artifact::schema_hash(&bytes)
+            .map_err(|_| Status::LifecycleFailure)?;
+        if delivered != current {
             return Err(Status::LifecycleFailure);
         }
-        let app_id = jazz::tools::AppId::from_string(&owner.app_id)
-            .unwrap_or_else(|_| jazz::tools::AppId::from_name(&owner.app_id));
-        let declarations = bound_declarations(bindings.as_bytes(), app_id, &owner.environment)
-            .map_err(|_| Status::LifecycleFailure)?
-            .ok_or(Status::LifecycleFailure)?;
+        let declarations = declarations.ok_or(Status::LifecycleFailure)?;
         Ok(Self {
             declarations,
             bindings: Arc::from(bindings.as_bytes()),

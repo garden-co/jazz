@@ -232,20 +232,52 @@ pub async fn build_native(
     Ok(NativeBuilt { built, recovery })
 }
 
+/// Bind the compiled app to its deployment. Relay admission also verifies the
+/// shipped schema against its hash before comparing it to the delivered one.
+pub fn bound_declarations(
+    bindings: &[u8],
+    app_id: &str,
+    environment: &str,
+    verify_current_hash: bool,
+) -> Result<
+    (
+        jazz::tools::public_schema::SchemaHash,
+        Option<E2eeDeclarations>,
+    ),
+    String,
+> {
+    jazz::tools::deployment::artifact::bound_declarations(
+        bindings,
+        jazz::tools::AppId::from_text(app_id),
+        environment,
+        verify_current_hash,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn keyless_declarations(
+    bindings: &str,
+    app_id: &str,
+    environment: &str,
+) -> Result<E2eeDeclarations, String> {
+    bound_declarations(bindings.as_bytes(), app_id, environment, false)?
+        .1
+        .ok_or_else(|| "the app's bindings declare no encryption".to_owned())
+}
+
 fn declarations(options: &Options) -> Result<E2eeDeclarations, String> {
-    let app_id = jazz::tools::AppId::from_string(&options.app_id)
-        .unwrap_or_else(|_| jazz::tools::AppId::from_name(&options.app_id));
     let declarations = if options.from_bindings {
-        jazz::tools::deployment::artifact::bound_declarations(
+        bound_declarations(
             &options.app_file,
-            app_id,
+            &options.app_id,
             &options.environment,
-        )
-        .map_err(|error| error.to_string())?
+            false,
+        )?
+        .1
     } else {
         jazz::tools::deployment::artifact::load_client_encrypted(
             &options.app_file,
-            app_id,
+            jazz::tools::AppId::from_text(&options.app_id),
             &options.environment,
         )
         .map_err(|error| error.to_string())?

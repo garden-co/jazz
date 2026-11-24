@@ -2072,15 +2072,8 @@ impl NapiDb {
         app_id: &str,
         environment: &str,
     ) -> napi::Result<Rc<dyn jazz::e2ee::E2eeHooks>> {
-        let app = jazz::tools::AppId::from_string(app_id)
-            .unwrap_or_else(|_| jazz::tools::AppId::from_name(app_id));
-        let declarations = jazz::tools::deployment::artifact::bound_declarations(
-            bindings.as_bytes(),
-            app,
-            environment,
-        )
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?
-        .ok_or_else(|| napi::Error::from_reason("the app's bindings declare no encryption"))?;
+        let declarations = encryption::keyless_declarations(bindings, app_id, environment)
+            .map_err(napi::Error::from_reason)?;
         Ok(jazz_e2ee_client::KeylessHooks::hooks(declarations))
     }
 
@@ -3596,8 +3589,7 @@ impl JazzServer {
             .transpose()
             .map_err(host_error)?;
 
-        let app_id =
-            AppId::from_string(&opts.app_id).unwrap_or_else(|_| AppId::from_name(&opts.app_id));
+        let app_id = AppId::from_text(&opts.app_id);
 
         // A trusted workload replaces the shared secrets.
         let trusted_workload = opts.trusted_workload.take().map(|workload| {
