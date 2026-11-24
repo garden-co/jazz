@@ -23,10 +23,16 @@ Manager, libsecret).
 
 ## A store to start from
 
-Keep the files in a directory and the key that protects them in your key store:
+Keep the files in a directory and the key that protects them in your key store. Give each directory
+one owner. Use a single store instance for that directory, including across processes. Its queue
+serialises the revision check and replacement within that instance.
+
+A scope is active while its incarnation marker exists. Deletion removes that marker atomically
+before cleaning up the documents. If cleanup is interrupted, reads ignore the orphaned documents
+and opening the scope discards them before publishing a new marker. See the [private store contract](https://github.com/garden-co/jazz/blob/94cd8e1e45/packages/jazz-tools/src/encryption/private-store.ts#L22-L56).
 
 ```ts
-import { mkdir, readFile, rename, rm, writeFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import {
   PrivateStoreConflictError,
@@ -36,12 +42,24 @@ import {
 
 /** `machineKey` is 32 bytes from your operating system's key store. */
 export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
-  const at = (scope: string, doc?: string) =>
-    [dir, encodeURIComponent(scope), ...(doc ? [encodeURIComponent(doc)] : [])].join("/");
+  const at = (scope: string) => {
+    if (!scope || scope === "." || scope === "..") throw new Error("Invalid scope name");
+    return `${dir}/${encodeURIComponent(scope)}`;
+  };
+  const docPath = (scope: string, doc: string) => `${at(scope)}/${encodeURIComponent(doc)}`;
+  const marker = (scope: string) => `${at(scope)}/.incarnation`;
   const isMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
+  const incarnationOf = async (scope: string) => {
+    try {
+      return BigInt(await readFile(marker(scope), "utf8"));
+    } catch (error) {
+      if (isMissing(error)) return null;
+      throw error;
+    }
+  };
   const read = async (scope: string, doc: string) => {
     try {
-      const text = await readFile(at(scope, doc), "utf8");
+      const text = await readFile(docPath(scope, doc), "utf8");
       const { revision, bytes } = JSON.parse(text);
       return { revision: BigInt(revision), bytes: new Uint8Array(Buffer.from(bytes, "base64")) };
     } catch (error) {
@@ -54,32 +72,24 @@ export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
   // One operation at a time: a save checks and replaces atomically.
   const serial = <T>(work: () => Promise<T>) => (queue = queue.then(work, work)) as Promise<T>;
   return {
-    load: (scope, doc) => read(scope, doc),
-    async openScope(scope) {
-      return serial(async () => {
-        const marker = `${at(scope)}/.incarnation`;
-        try {
-          return BigInt(await readFile(marker, "utf8"));
-        } catch (error) {
-          // Only a missing marker means a new incarnation; any other error (an I/O error, a
-          // garbled marker) is thrown, never taken for a wipe.
-          if (!isMissing(error)) throw error;
-          // Only this process's user may list or read the device's keys.
-          await mkdir(at(scope), { recursive: true, mode: 0o700 });
-          const incarnation = BigInt(Date.now()) * 1000n + BigInt(randomBytes(2).readUInt16BE());
-          await writeFile(marker, incarnation.toString(), { mode: 0o600 });
-          return incarnation;
-        }
-      });
-    },
+    load: (scope, doc) =>
+      serial(async () => ((await incarnationOf(scope)) === null ? null : read(scope, doc))),
+    openScope: (scope) =>
+      serial(async () => {
+        const current = await incarnationOf(scope);
+        if (current !== null) return current;
+
+        await rm(at(scope), { recursive: true, force: true });
+        await mkdir(at(scope), { recursive: true, mode: 0o700 });
+        const incarnation = randomBytes(8).readBigUInt64BE() || 1n;
+        const pending = `${marker(scope)}.tmp`;
+        await writeFile(pending, incarnation.toString(), { mode: 0o600 });
+        await rename(pending, marker(scope));
+        return incarnation;
+      }),
     save: (scope, incarnation, doc, bytes, expected) =>
       serial(async () => {
-        // A missing marker means wiped; any other read error is thrown as it is.
-        const marker = await readFile(`${at(scope)}/.incarnation`, "utf8").catch((error) => {
-          if (isMissing(error)) return null;
-          throw error;
-        });
-        if (marker === null || BigInt(marker) !== incarnation) throw new PrivateStoreWipedError();
+        if ((await incarnationOf(scope)) !== incarnation) throw new PrivateStoreWipedError();
         const current = await read(scope, doc);
         if ((current?.revision ?? null) !== expected) throw new PrivateStoreConflictError();
         const revision = (current?.revision ?? 0n) + 1n;
@@ -87,22 +97,26 @@ export function directoryStore(dir: string, machineKey: Buffer): PrivateStore {
           revision: revision.toString(),
           bytes: Buffer.from(bytes).toString("base64"),
         });
-        // Written beside, then renamed over: a crash never leaves half a document.
-        await writeFile(`${at(scope, doc)}.tmp`, body, { mode: 0o600 });
-        await rename(`${at(scope, doc)}.tmp`, at(scope, doc));
+        const path = docPath(scope, doc);
+        const pending = `${at(scope)}/.document.tmp`;
+        await writeFile(pending, body, { mode: 0o600 });
+        await rename(pending, path);
         return revision;
       }),
-    list: async (scope) =>
-      (
-        await readdir(at(scope)).catch((error) => {
-          // No directory means nothing saved; any other error is thrown.
-          if (isMissing(error)) return [];
-          throw error;
-        })
-      )
-        .filter((name) => !name.startsWith(".") && !name.endsWith(".tmp"))
-        .map(decodeURIComponent),
-    delete: (scope) => serial(() => rm(at(scope), { recursive: true, force: true })),
+    list: (scope) =>
+      serial(async () => {
+        if ((await incarnationOf(scope)) === null) return [];
+        return (await readdir(at(scope)))
+          .filter((name) => !name.startsWith(".") && !name.endsWith(".tmp"))
+          .map(decodeURIComponent);
+      }),
+    delete: (scope) =>
+      serial(async () => {
+        await unlink(marker(scope)).catch((error) => {
+          if (!isMissing(error)) throw error;
+        });
+        await rm(at(scope), { recursive: true, force: true });
+      }),
     async protect(secret) {
       const iv = randomBytes(12);
       const cipher = createCipheriv("aes-256-gcm", machineKey, iv);

@@ -1,5 +1,12 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { BrowserPasskeyBackup } from "../local-first-auth/passkey.js";
+import { resolveAccountRuntimeConfig } from "../accounts/context.js";
+import { makeFakeAccount } from "../react-core/test-utils.js";
+import {
+  beginNativeAccountSession,
+  resolveNativeSession,
+} from "../react-native/account-session.js";
+import { app } from "../../tests/fixtures/encrypted/jazz.generated.js";
 import { formatSecret } from "../local-first-auth/secret.js";
 import { Encryption, type EncryptionNative } from "./index.js";
 
@@ -89,4 +96,29 @@ it("clears the decoded secret when the passkey challenge cannot be generated", a
   expect(parsed.last).toEqual(new Uint8Array(32));
   expect(create).not.toHaveBeenCalled();
   expect(failure).toMatchObject({ code: "create-failed" });
+});
+
+it("clears the decoded account secret before passing its hex to the React Native host", async () => {
+  const config = await resolveAccountRuntimeConfig({ scope: "app-1", account: makeFakeAccount() });
+  config.encryption = { app, accountSecret: () => formatSecret(new Uint8Array(32).fill(7)) };
+  const beginAccountSession = vi.fn((request: string) => {
+    expect(JSON.parse(request).device_account_secret).toBe("07".repeat(32));
+    expect(parsed.last).toEqual(new Uint8Array(32));
+    return new Uint8Array(32);
+  });
+  beginNativeAccountSession(
+    {
+      abiVersion: 1,
+      beginAccountSession,
+      attachAccountSchema: vi.fn(),
+      releaseAccountSession: vi.fn(),
+      refreshAccountSession: vi.fn(),
+      openAttached: vi.fn(),
+    },
+    config,
+    resolveNativeSession(config),
+    undefined,
+    true,
+  );
+  expect(beginAccountSession).toHaveBeenCalledOnce();
 });

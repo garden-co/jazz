@@ -96,10 +96,14 @@ Before reusing a space key, Jazz checks whether it needs rotation. If account ve
 check fails, `onReport` receives `rotation-check-failed` with the space and the original reason.
 Jazz marks the space for rotation. The app receives the original failure even if rotation succeeds.
 
-That automatic rotation happens just before a write. If it fails, for example because the writer may
-not update the space's row, the write still goes ahead under the current key, which the removed member
-may hold. The runtime then sends `onReport` a `rotation-failed` report with the space and the
-`reason`, and the next write tries again:
+Automatic rotation happens just before a write. If rotation fails, the write can still go ahead
+under the current key, which the removed member may hold. The runtime sends `onReport` a
+`rotation-failed` report with the space and the `reason`.
+
+The next write can retry after a transient failure. After a permission denial, this client stops
+trying to rotate that space automatically for the rest of the session. A member with permission can
+still call `db.encryption.keys.rotate(space)`. See the
+[rotation refusal handling](https://github.com/garden-co/jazz/blob/94cd8e1e45/crates/jazz-e2ee-client/src/spaces/delivery.rs#L380-L403).
 
 ```ts
 db.encryption.onReport((report) => {

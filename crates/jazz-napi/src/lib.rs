@@ -1195,6 +1195,8 @@ fn settle_json_promises() {
 /// Node's half of the hooks: the tick and mutation-error callbacks.
 #[derive(Default)]
 struct Host {
+    /// Shared by the owner and its schema views until the owner closes.
+    encryption: RefCell<Option<Rc<encryption::Encryption>>>,
     tick_scheduler: RefCell<Option<ThreadsafeFunction<String, ()>>>,
     /// A tick is requested and not yet delivered: further requests coalesce.
     tick_requested: Arc<AtomicBool>,
@@ -1236,8 +1238,6 @@ struct Inner {
     /// backend's client for one (`serveThinTransaction`): taken while a
     /// request is served, so requests run one at a time.
     thin: Rc<RefCell<Option<ThinState>>>,
-    /// The end-to-end encryption runtime, when the app declares encryption.
-    encryption: Option<Rc<encryption::Encryption>>,
 }
 
 /// A thin session's transactions, made on the first request.
@@ -1284,7 +1284,6 @@ impl Inner {
             binding,
             host,
             thin: Rc::default(),
-            encryption: None,
         }
     }
 
@@ -2089,19 +2088,29 @@ impl Drop for NapiDb {
     fn drop(&mut self) {
         // Release the tick callback so it no longer keeps Node's event loop
         // alive once JavaScript dropped an unclosed database.
-        if self.owns_runtime
-            && let Some(inner) = self.inner.borrow_mut().take()
-        {
-            inner.host.tick_scheduler.borrow_mut().take();
-        }
+        self.take_inner();
     }
 }
 
 impl NapiDb {
+    fn take_inner(&self) -> Option<Inner> {
+        let inner = self.inner.borrow_mut().take()?;
+        if self.owns_runtime {
+            inner.host.tick_scheduler.borrow_mut().take();
+            if let Some(runtime) = inner.host.encryption.borrow_mut().take() {
+                runtime.stop();
+            }
+        }
+        Some(inner)
+    }
+
     /// The runtime of an encrypted app, or why there is none.
     fn encryption(&self) -> napi::Result<Rc<encryption::Encryption>> {
         self.open_inner()?
+            .host
             .encryption
+            .borrow()
+            .clone()
             .ok_or_else(|| napi::Error::from_reason("this database has no encryption runtime"))
     }
 
@@ -2203,11 +2212,15 @@ impl NapiDb {
         let binding = block_on(Binding::new(db, identity, trusted));
         let owner = Self::runtime_owner(binding);
         if let Some((built, store)) = runtime {
-            let mut inner = owner.inner.borrow_mut();
-            let inner = inner.as_mut().expect("just opened");
-            let host = Rc::clone(&inner.host);
-            store.set_wake(Box::new(move || host.request_tick()));
-            inner.encryption = Some(encryption::Encryption::new(
+            let inner = owner.inner.borrow();
+            let inner = inner.as_ref().expect("just opened");
+            let host = Rc::downgrade(&inner.host);
+            store.set_wake(Box::new(move || {
+                if let Some(host) = host.upgrade() {
+                    host.request_tick();
+                }
+            }));
+            *inner.host.encryption.borrow_mut() = Some(encryption::Encryption::new(
                 built,
                 store,
                 Rc::clone(&inner.binding.db),
@@ -3174,7 +3187,7 @@ impl NapiDb {
     #[napi]
     pub fn tick(&self) -> js::Result<()> {
         let result = block_on(self.binding()?.tick());
-        if let Some(encryption) = self.open_inner()?.encryption {
+        if let Some(encryption) = self.open_inner()?.host.encryption.borrow().clone() {
             encryption.drive();
         }
         settle_promises();
@@ -3485,11 +3498,10 @@ impl NapiDb {
     pub fn close(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
         // A close failure still consumes the binding: retrying a partially
         // failed close would re-enter an indeterminate runtime.
-        let Some(inner) = self.inner.borrow_mut().take() else {
+        let Some(inner) = self.take_inner() else {
             return Ok(Either::A(Vec::new().into()));
         };
         if self.owns_runtime {
-            inner.host.tick_scheduler.borrow_mut().take();
             inner.host.mutation_errors.borrow_mut().take();
             inner.host.upstream_mutation_errors.borrow_mut().take();
             block_on(inner.binding.close()).map_err(host_error)?;

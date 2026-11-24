@@ -20,7 +20,8 @@ export interface UnreadableRow {
   code: string;
 }
 
-const left = new WeakMap<readonly unknown[], readonly UnreadableRow[]>();
+// Bundlers can load more than one copy of jazz-tools in the same process.
+const UNREADABLE = Symbol.for("jazz-tools.unreadableRows");
 const NONE: readonly UnreadableRow[] = Object.freeze([]);
 
 /** @internal Records that `rows`, a read's result, is missing `unreadable`. */
@@ -28,7 +29,12 @@ export function withUnreadable<T extends readonly unknown[]>(
   rows: T,
   unreadable: readonly UnreadableRow[] | undefined,
 ): T {
-  if (unreadable && unreadable.length > 0) left.set(rows, Object.freeze([...unreadable]));
+  if (unreadable && unreadable.length > 0) {
+    Object.defineProperty(rows, UNREADABLE, {
+      value: Object.freeze([...unreadable]),
+      configurable: true,
+    });
+  }
   return rows;
 }
 
@@ -36,11 +42,11 @@ export function withUnreadable<T extends readonly unknown[]>(
  * The rows a read left out because this device could not decrypt them: an
  * empty array when the result is complete.
  *
- * Pass the array `db.all()` returned (or a subscription's result). A read
+ * Pass the array `db.all()` or `tx.all()` returned (or a subscription's result). A read
  * with `limit` counts these rows toward its page, so a page shorter than its
  * limit is not the last one when this is not empty. For a query on an
  * encrypted column, some of them may be rows it would not have matched.
  */
 export function unreadableRows(result: readonly unknown[]): readonly UnreadableRow[] {
-  return left.get(result) ?? NONE;
+  return (result as { [UNREADABLE]?: readonly UnreadableRow[] })[UNREADABLE] ?? NONE;
 }

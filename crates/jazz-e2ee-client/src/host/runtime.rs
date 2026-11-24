@@ -406,6 +406,9 @@ impl Encryption {
 
     /// Lets the loop run as far as it can without waiting.
     pub fn drive(&self) {
+        // The host gets reports through its listener. Discard the raw polling
+        // queue even when the app never asks for the listener's reports.
+        self.client.shared.reports.borrow_mut().clear();
         let mut main = self.main.borrow_mut();
         let Some(future) = main.as_mut() else {
             return;
@@ -1596,6 +1599,30 @@ mod tests {
             Err(crate::StoreError::Wiped) => (false, "wiped".to_owned()),
             Err(error) => (false, error.to_string()),
         }
+    }
+
+    /// Alice's host delivers each report once and drains the client's raw copy
+    /// on its next drive. Only the client can expose whether that copy survived.
+    #[test]
+    fn driving_the_host_drains_the_clients_report_queue() {
+        let runtime = native_runtime_with_catalogue(true);
+        runtime.client.shared.report(Report::SkippedRecord {
+            document: "device".into(),
+            reason: "invalid".into(),
+        });
+        runtime.drive();
+        assert!(runtime.client.take_reports().is_empty());
+        let reports = runtime.take_reports();
+        assert!(
+            reports.contains(
+                &json!({
+                    "type": "skipped-record", "document": "device", "reason": "invalid"
+                })
+                .to_string()
+            )
+        );
+        assert!(runtime.take_reports().is_empty());
+        runtime.stop();
     }
 
     /// Contract: the reports waiting for JS stay bounded when nothing takes

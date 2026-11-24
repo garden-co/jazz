@@ -72,9 +72,9 @@ Members are rows of `app.__e2ee_members`. Use `db.encryption.members.row` to add
 
 ## Give each device a private store
 
-A device keeps its private keys in a store that **your app supplies**: Jazz has no default, because
-protecting the keys is your decision. An app that declares encryption and opens without one fails,
-naming the option:
+On Node, supply a private store for the device's keys. An encrypted app opened without one fails
+and names the missing option. In the browser, Jazz provides an
+[IndexedDB private store](https://github.com/garden-co/jazz/blob/94cd8e1e45/packages/jazz-tools/src/encryption/browser-host.ts#L37-L47).
 
 ```ts
 import { createJazzClient } from "jazz-tools/backend";
@@ -232,13 +232,17 @@ React Native's and Expo's `useAll` return the same fields as React's.
 The runtime also reports each row it could not read, as it happens:
 
 ```ts
-session.db.encryption.onUnreadable((report) => {
-  console.warn(report.code, report.table, report.id);
+session.db.encryption.onReport((report) => {
+  if (report.type === "unreadable") console.warn(report.code, report.table, report.id);
+  if (report.type === "reports-dropped") console.warn(report.count, "reports dropped");
 });
 ```
 
-While no listener is registered, the runtime keeps up to 1,024 reports for the next listener. Past that
-the oldest are dropped, and the next listener first receives a `reports-dropped` report with their count.
+While no listener is registered, the runtime keeps up to 1,024 reports. When the queue fills, it
+drops the oldest report it can, giving device challenges priority. The next `onReport` listener first receives a `reports-dropped` report with
+their count. Use `onUnreadable` if you only need individual unreadable-row reports. See the
+[report listener implementation](https://github.com/garden-co/jazz/blob/94cd8e1e45/packages/jazz-tools/src/encryption/index.ts#L348-L368) and the
+[report overflow test](https://github.com/garden-co/jazz/blob/94cd8e1e45/crates/jazz-e2ee-client/src/host/runtime.rs#L1598-L1625).
 
 ### Before a device can read
 

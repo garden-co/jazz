@@ -316,8 +316,9 @@ impl WasmDb {
         let db = block_on(binding_host::open_memory(db_config)).map_err(super::to_js_error)?;
         let owner = Self::runtime_owner(block_on(Binding::new(db, identity, trusted)));
         let inner: WasmDbInner = owner.open_inner()?;
-        let host = Rc::clone(&inner.host);
+        let host = Rc::downgrade(&inner.host);
         runtime.store.set_wake(Box::new(move || {
+            let Some(host) = host.upgrade() else { return };
             let scheduler = host.tick_scheduler.borrow().clone();
             if let Some(scheduler) = scheduler {
                 let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
@@ -411,5 +412,88 @@ impl WasmDb {
     pub fn encryption_set_online(&self, online: bool) -> Result<(), JsValue> {
         self.encryption()?.set_online(online);
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+    use jazz::binding_host::{OpenConfig, OpenIdentity};
+    use jazz::ids::{AuthorSubject, NodeUuid};
+    use wasm_bindgen_futures::JsFuture;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    /// Alice's schema view can close independently. Closing or dropping the
+    /// owning database frees the runtime, database and host, even if JS keeps
+    /// the store bridge. Weak references observe the native lifetimes.
+    #[wasm_bindgen_test]
+    async fn the_encrypted_owner_releases_its_runtime_on_close_and_drop() {
+        let app =
+            include_bytes!("../../../packages/jazz-tools/tests/fixtures/encrypted/jazz.app.json");
+        let definition = jazz::tools::deployment::artifact::load_app(app).unwrap();
+        let schema = serde_json::to_vec(definition.current_schema()).unwrap();
+        let author = AuthorSubject::for_test_bytes([1; 16]);
+        let config = postcard::to_allocvec(&OpenConfig {
+            identity: OpenIdentity {
+                node: NodeUuid::from_bytes([2; 16]),
+                author,
+            },
+            row_id_seed: None,
+            history_complete: false,
+            initial_sync_flush_every: None,
+            migrations: None,
+            system_node: None,
+        })
+        .unwrap();
+        for close in [true, false] {
+            let store = Rc::new(JsStore::served_by(jazz_e2ee_client::host::bridge::serve(
+                Rc::new(jazz_e2ee_client::MemoryStore::new()),
+            )));
+            let account_id = author.account_id().unwrap().0.to_string();
+            let options = Options {
+                app_file: app.to_vec(),
+                from_bindings: false,
+                app_id: "test".into(),
+                environment: "test".into(),
+                device_account_secret: None,
+            };
+            let built = runtime::build(options, account_id.clone(), store.clone())
+                .await
+                .unwrap();
+            let bridge = WasmEncryptionRuntime {
+                store,
+                options: RefCell::new(None),
+                account_id,
+                app_id: "test".into(),
+                built: Rc::new(RefCell::new(Some(built))),
+            };
+            let owner = WasmDb::open_memory_encrypted(
+                schema.clone(),
+                config.clone(),
+                &bridge,
+                JsValue::UNDEFINED,
+            )
+            .unwrap();
+            let runtime = Rc::downgrade(&owner.encryption().unwrap());
+            let inner = owner.open_inner().unwrap();
+            let db = Rc::downgrade(&inner.binding.db);
+            let host = Rc::downgrade(&inner.host);
+            drop(inner);
+            let view = owner.register_schema(schema.clone(), None).unwrap();
+            JsFuture::from(view.close()).await.unwrap();
+            drop(view);
+            assert!(runtime.upgrade().is_some());
+            if close {
+                JsFuture::from(owner.close()).await.unwrap();
+            } else {
+                drop(owner);
+            }
+            assert!(
+                runtime.upgrade().is_none(),
+                "runtime retained (explicit close: {close})"
+            );
+            assert!(db.upgrade().is_none(), "database retained");
+            assert!(host.upgrade().is_none(), "store wake retained the host");
+        }
     }
 }

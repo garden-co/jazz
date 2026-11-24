@@ -272,8 +272,7 @@ export async function openBrowserSessionCore(
   // upgrade to local-first.
   const page = (globalThis as { window?: Window }).window;
   if (page && typeof page.document !== "undefined") warnWindowJazzConflict(page);
-  if (config.serverUrl === null) return createDeviceOnlySession(config);
-  const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
+  const deviceOnly = config.serverUrl === null;
   const {
     initial,
     clearOnSignOut,
@@ -287,10 +286,25 @@ export async function openBrowserSessionCore(
     store: _store,
     fetch: _fetch,
     bearer,
-    ...clientConfig
-  } = { ...config, serverUrl };
+    serverUrl = DEFAULT_SERVER_URL,
+    ...rest
+  } = config;
+  const clientConfig = serverUrl === null ? rest : { ...rest, serverUrl };
   refuseUnkeptOptions(clientConfig);
-  refuseLocalFirstTiming(localFirst, loadLocalFirst);
+  if (deviceOnly) {
+    if (!loadLocalFirst) {
+      throw new Error(
+        'serverUrl: null keeps Jazz on this device, which needs the local-first client: pass client: () => import("jazz-tools/local-first")',
+      );
+    }
+    if (coreInitial(initial) === "signed-out") {
+      throw new Error(
+        'serverUrl: null has no backend to sign in through, so it always opens this device\'s device account: leave out initial or set it to "device"',
+      );
+    }
+  } else {
+    refuseLocalFirstTiming(localFirst, loadLocalFirst);
+  }
   setNewerBuildHandler(onNewerBuild);
   const accounts = await createAccountManagerWithMinter(
     { ...config, serverUrl },
@@ -345,6 +359,7 @@ export async function openBrowserSessionCore(
       },
       deleteStore,
       backendUser: async () => {
+        if (deviceOnly) return null;
         const user = await signedInIdentity(registry, fetcher);
         return user ? { issuer: user.issuer, subject: user.subject } : null;
       },
@@ -410,6 +425,26 @@ export async function openBrowserSessionCore(
 
   const openLocalFirst = (createDb: CreateAccountDb, account: AccountHandle) =>
     createRegisteredJazzClient("web", { ...clientConfig, account }, createDb);
+
+  if (deviceOnly) {
+    const missing = deviceAccountStoreMissing(accounts, "serverUrl: null (a device-only client)");
+    if (missing) throw missing;
+    const { createClient } = await loadLocalFirst!();
+    session = await createJazzSessionOwner({
+      accounts,
+      initial: "local-first",
+      clearOnSignOut: wipesOnSignOut,
+      wipeSignedOut: replicas ? wipeSignedOut : undefined,
+      openClient: (account) =>
+        config.driver?.type === "memory"
+          ? openLocalFirst(createClient, account)
+          : openReplica(createClient, account),
+      // No backend says who is signed in: there is nothing to ask again.
+      decorate: () => ({ reauthenticate: async () => {} }),
+    });
+    if (replicas) watchReplicas(session, replicas);
+    return session;
+  }
 
   const upgrade = async (loader: LocalFirstLoader) => {
     let upgraded: AccountHandle | undefined;
@@ -643,53 +678,6 @@ function upgradableClient(thin: JazzClient): JazzClient {
     inner = next;
   });
   return client;
-}
-
-/**
- * `serverUrl: null`: Jazz on this device only. There is no backend to name a
- * user or to run a thin client against, so the session opens the local-first
- * client straight away, on this browser's local-first account.
- */
-async function createDeviceOnlySession(config: JazzClientConfig): Promise<BrowserJazzSession> {
-  const {
-    initial,
-    clearOnSignOut,
-    linkDeviceAccountOnSignUp: _linkDeviceAccountOnSignUp,
-    localFirst: _localFirst,
-    onSignedOut: _onSignedOut,
-    onNewerBuild,
-    client: loadLocalFirst,
-    store: _store,
-    fetch: _fetch,
-    ...rest
-  } = config;
-  setNewerBuildHandler(onNewerBuild);
-  if (!loadLocalFirst) {
-    throw new Error(
-      'serverUrl: null keeps Jazz on this device, which needs the local-first client: pass client: () => import("jazz-tools/local-first")',
-    );
-  }
-  if (coreInitial(initial) === "signed-out") {
-    throw new Error(
-      'serverUrl: null has no backend to sign in through, so it always opens this device\'s device account: leave out initial or set it to "device"',
-    );
-  }
-  const { serverUrl: _serverUrl, ...clientConfig } = rest;
-  refuseUnkeptOptions(clientConfig);
-  const accounts = await createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);
-  // Its one account is a device account: a host with nowhere to keep its key refuses.
-  const missing = deviceAccountStoreMissing(accounts, "serverUrl: null (a device-only client)");
-  if (missing) throw missing;
-  const { createClient } = await loadLocalFirst();
-  return createJazzSessionOwner({
-    accounts,
-    initial: "local-first",
-    clearOnSignOut: clearOnSignOut && (config.driver?.type ?? "persistent") === "persistent",
-    openClient: (account) =>
-      createRegisteredJazzClient("web", { ...clientConfig, account }, createClient),
-    // No backend says who is signed in: there is nothing to ask again.
-    decorate: () => ({ reauthenticate: async () => {} }),
-  });
 }
 
 /**

@@ -943,6 +943,7 @@ fn json_item_len(value: &Sql) -> Option<usize> {
 /// read: relations are keyed by address, valid while the run borrows the
 /// query that owns them.
 struct RelationRun<'q> {
+    namespace: Option<[u8; 16]>,
     owner: Rc<Schema>,
     prepared: &'q PreparedQuery,
     read: &'q ReadSpec,
@@ -1002,6 +1003,7 @@ impl RelationPlans {
 /// What a kept statement was compiled under. The schema is held, not just
 /// its address, so a schema built later cannot pass for it.
 pub(crate) struct PlanStamp {
+    namespace: Option<[u8; 16]>,
     schema: Rc<Schema>,
     sessions: (Option<Session>, Session),
     withheld: bool,
@@ -1015,6 +1017,7 @@ pub(crate) struct PlanStamp {
 /// ([`Store::plan_inputs`]): compared with a kept [`PlanStamp`] where it
 /// stands, and copied into one only when they differ.
 pub(crate) struct PlanInputs<'a> {
+    namespace: Option<[u8; 16]>,
     schema: Rc<Schema>,
     sessions: &'a (Option<Session>, Session),
     withheld: bool,
@@ -1027,6 +1030,7 @@ pub(crate) struct PlanInputs<'a> {
 impl PlanStamp {
     fn holds(&self, now: &PlanInputs<'_>) -> bool {
         Rc::ptr_eq(&self.schema, &now.schema)
+            && self.namespace == now.namespace
             && same_sessions(&self.sessions, now.sessions)
             && self.withheld == now.withheld
             && self.settled_only == now.settled_only
@@ -1043,6 +1047,7 @@ impl PlanStamp {
             return true;
         }
         *kept = Some(PlanStamp {
+            namespace: now.namespace,
             schema: now.schema.clone(),
             sessions: now.sessions.clone(),
             withheld: now.withheld,
@@ -1131,8 +1136,10 @@ impl<'q> RelationRun<'q> {
         prepared: &'q PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &'q ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> Self {
         Self {
+            namespace,
             prepared,
             read,
             owner: inner.owner(),
@@ -1155,6 +1162,7 @@ impl<'q> RelationRun<'q> {
             policy.as_ref(),
             claims,
             self.read,
+            self.namespace,
         )
     }
 }
@@ -2237,7 +2245,6 @@ impl Db {
                 staging_policy: Cell::default(),
                 unit_inserts: RefCell::default(),
                 account_registry: RefCell::default(),
-                known_namespace: Rc::default(),
                 #[cfg(feature = "e2ee-client")]
                 e2ee: config.e2ee,
                 #[cfg(feature = "e2ee-client")]
@@ -2341,7 +2348,7 @@ impl Db {
                 .pending
                 .replace(inner.client().map(|client| client.pending.clone()));
             inner.load_shard().await?;
-            // The policy compiler reads the namespace from memory.
+            // Validate persisted namespace metadata when opening the store.
             inner.stored_namespace().await?;
         }
         Ok(db)
@@ -3296,16 +3303,16 @@ impl Db {
     /// versions name `logical`, wherever the owner's schema stands.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
-    pub async fn holds_row_for_test(&self, logical: &str, row: RowUuid) -> bool {
+    pub async fn holds_row_for_test(&self, logical: &str, row: RowUuid) -> Result<bool, Error> {
         let _operation = self.write_operation().await;
         let inner = self.inner.without_overlay();
         let Some(stored) = inner.names().stored_table_of(logical).map(str::to_owned) else {
-            return false;
+            return Ok(false);
         };
-        matches!(
-            inner.existing(&stored, row, &[]).await,
-            Ok(Some((_, false)))
-        )
+        Ok(matches!(
+            inner.existing(&stored, row, &[]).await?,
+            Some((_, false))
+        ))
     }
 
     /// Diagnostics: stored large-value nodes, and roots referenced by cells.
@@ -3414,7 +3421,12 @@ impl Db {
     ) -> Result<(String, String), Error> {
         let _operation = self.write_operation().await;
         let inner = self.inner.without_overlay();
-        let compiled = inner.compile(prepared, identity, &ReadSpec::default())?;
+        let compiled = inner.compile(
+            prepared,
+            identity,
+            &ReadSpec::default(),
+            inner.read_namespace(prepared).await?,
+        )?;
         let mut statement = inner
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", compiled.sql))
@@ -3474,7 +3486,11 @@ impl Db {
         let session = Session::for_author(author, claims);
         let binding = BTreeMap::new();
         let none = Session::default();
-        let mut ctx = Ctx::new(&active_schema, None, &none, &binding).with_catalogue(inner);
+        let mut ctx = Ctx::new(&active_schema, None, &none, &binding).with_namespace(
+            inner
+                .identity_namespace(active_schema.policy_schema())
+                .await?,
+        );
         let mut columns = Vec::with_capacity(clauses.len());
         for clause in &clauses {
             let condition = ctx.policy_clause(Some(clause), table, "a", &session)?;
@@ -3789,7 +3805,13 @@ impl Db {
         let inner = self.inner.without_overlay();
         let read = ReadSpec::of(&opts, inner).await?;
         let roots = inner.run_for_reader(prepared, None, &read, false).await?;
-        let mut run = RelationRun::new(inner, prepared, None, &read);
+        let mut run = RelationRun::new(
+            inner,
+            prepared,
+            None,
+            &read,
+            inner.read_namespace(prepared).await?,
+        );
         let tree = inner
             .nest(
                 &mut run,
@@ -5676,15 +5698,28 @@ impl Store {
         (policy, claims)
     }
 
+    async fn read_namespace(&self, prepared: &PreparedQuery) -> Result<Option<[u8; 16]>, Error> {
+        self.identity_namespace(prepared.source_schema(&self.owner()).policy_schema())
+            .await
+    }
+
     fn compile(
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> Result<Compiled, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
         let compiled = self
-            .read_ctx(&self.owner(), prepared, policy.as_ref(), &claims, read)
+            .read_ctx(
+                &self.owner(),
+                prepared,
+                policy.as_ref(),
+                &claims,
+                read,
+                namespace,
+            )
             .compile_query(&prepared.query, read.include_deleted)?;
         self.refuse_latest_only_cut(&compiled, read)?;
         Ok(compiled)
@@ -5730,10 +5765,11 @@ impl Store {
         policy: Option<&'s Session>,
         claims: &'s Session,
         read: &ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> Ctx<'s> {
         let schema = prepared.source_schema(owner);
         Ctx::new(schema, policy, claims, &prepared.binding)
-            .with_catalogue(self)
+            .with_namespace(namespace)
             .with_view(read.view.clone())
             .with_withheld(self.withheld.get())
             .with_cut(read.cut.clone(), read.settled_only)
@@ -5804,7 +5840,7 @@ impl Store {
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let (compiled, _) = self.compile_visible(prepared, identity, read)?;
+        let (compiled, _) = self.compile_visible(prepared, identity, read).await?;
         let mut run = crate::slow::Run::default();
         let started = web_time::Instant::now();
         let rows = self
@@ -5829,26 +5865,27 @@ impl Store {
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
     ) -> Result<(Vec<CurrentRow>, BTreeSet<String>), Error> {
-        let (compiled, tables) = self.compile_visible(prepared, identity, read)?;
+        let (compiled, tables) = self.compile_visible(prepared, identity, read).await?;
         let rows = self.execute(&compiled, &prepared.query.table).await?;
         Ok((rows, tables))
     }
 
     /// `prepared` compiled for `read` as visible over its tables, and those
     /// tables (its root's and its array relations').
-    fn compile_visible(
+    async fn compile_visible(
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
     ) -> Result<(Compiled, BTreeSet<String>), Error> {
-        let mut compiled = self.compile(prepared, identity, read)?;
+        let namespace = self.read_namespace(prepared).await?;
+        let mut compiled = self.compile(prepared, identity, read, namespace)?;
         // Array relations are part of a subscription's dependencies, and
         // of the tables its cut is decided over.
         let tables = self.with_relation_tables(prepared, &compiled.tables)?;
         let visible = self.visible_read(read, &tables);
         if let std::borrow::Cow::Owned(visible) = &visible {
-            compiled = self.compile(prepared, identity, visible)?;
+            compiled = self.compile(prepared, identity, visible, namespace)?;
         }
         Ok((compiled, tables))
     }
@@ -6155,8 +6192,10 @@ impl Store {
         prepared: &'a PreparedQuery,
         sessions: &'a (Option<Session>, Session),
         read: &ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> PlanInputs<'a> {
         PlanInputs {
+            namespace,
             schema: prepared.schema.clone().unwrap_or_else(|| self.owner()),
             sessions,
             withheld: self.withheld.get(),
@@ -6180,23 +6219,24 @@ impl Store {
         }
         // Related rows read as of the cut the roots were read through (the
         // same decision, over the same tables; a cut read is its own).
+        let namespace = self.read_namespace(prepared).await?;
         let visible;
         let read = if read.position != Position::Current && read.cut.is_none() {
-            let compiled = self.compile(prepared, identity, read)?;
+            let compiled = self.compile(prepared, identity, read, namespace)?;
             let tables = self.with_relation_tables(prepared, &compiled.tables)?;
             visible = self.visible_read(read, &tables).into_owned();
             &visible
         } else {
             read
         };
-        let mut run = RelationRun::new(self, prepared, identity, read);
+        let mut run = RelationRun::new(self, prepared, identity, read, namespace);
         if let Some(plans) = plans
             && read.view.is_none()
             && read.cut.is_none()
         {
             if !PlanStamp::keep(
                 &mut plans.stamp,
-                &self.plan_inputs(prepared, &run.sessions, read),
+                &self.plan_inputs(prepared, &run.sessions, read, namespace),
             ) {
                 plans.by.clear();
             }
@@ -6280,6 +6320,7 @@ impl Store {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         staged: &BTreeMap<String, usize>,
+        namespace: Option<[u8; 16]>,
     ) -> Result<Option<PreparedQuery>, Error> {
         if staged.is_empty() || !has_window(&prepared.query) {
             return Ok(None);
@@ -6301,8 +6342,10 @@ impl Store {
         let mut touched: Option<Vec<String>> = None;
         let mut refuse = |window: &str| -> Result<(), Error> {
             if touched.is_none() {
-                let tables = self
-                    .with_relation_tables(prepared, &self.read_dependencies(prepared, identity)?)?;
+                let tables = self.with_relation_tables(
+                    prepared,
+                    &self.read_dependencies(prepared, identity, namespace)?,
+                )?;
                 touched = Some(
                     staged
                         .keys()
@@ -6398,7 +6441,13 @@ impl Store {
             }
         }
         if !prepared.query.array_subqueries.is_empty() {
-            let mut run = RelationRun::new(self, prepared, identity, read);
+            let mut run = RelationRun::new(
+                self,
+                prepared,
+                identity,
+                read,
+                self.read_namespace(prepared).await?,
+            );
             let nodes = self
                 .nest(
                     &mut run,
@@ -7126,8 +7175,9 @@ impl Store {
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<(bool, OverlayRead), Error> {
-        let (sql, params, read) =
-            self.policy_check_in(active_schema, table, row, key, cut, policy)?;
+        let (sql, params, read) = self
+            .policy_check_in(active_schema, table, row, key, cut, policy)
+            .await?;
         let value: i64 = self
             .conn
             .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
@@ -7139,7 +7189,7 @@ impl Store {
     /// The statement [`Store::holds_at`] runs: the policy SQL boolean for
     /// one stored row, its parameters, and what of the cut's overlay it
     /// reads.
-    fn policy_check_in(
+    async fn policy_check_in(
         &self,
         schema: &Schema,
         table: &Table,
@@ -7148,7 +7198,9 @@ impl Store {
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
-        let (condition, mut params, read) = self.policy_condition_in(schema, cut, policy)?;
+        let namespace = self.identity_namespace(schema.policy_schema()).await?;
+        let (condition, mut params, read) =
+            self.policy_condition_in(schema, namespace, cut, policy)?;
         let sql = policy_check_sql(table, &condition, params.len());
         params.push(Sql::Blob(row.0.as_bytes().to_vec()));
         params.push(Sql::Blob(key.to_vec()));
@@ -7161,6 +7213,7 @@ impl Store {
     fn policy_condition_in(
         &self,
         schema: &Schema,
+        namespace: Option<[u8; 16]>,
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
@@ -7168,7 +7221,7 @@ impl Store {
         let claims = Session::default();
         let mut ctx = Ctx::new(schema, None, &claims, &binding)
             .with_cut(cut, false)
-            .with_catalogue(self);
+            .with_namespace(namespace);
         let condition = policy(&mut ctx)?;
         let read = OverlayRead {
             rows: ctx.overlaid_rows,
@@ -7199,10 +7252,11 @@ impl Store {
             inserted: Arc::default(),
         };
         let session = self.session(author);
-        let (sql, params, _) =
-            self.policy_check_in(active_schema, table, row, &[], Some(cut), |ctx| {
+        let (sql, params, _) = self
+            .policy_check_in(active_schema, table, row, &[], Some(cut), |ctx| {
                 ctx.operation_policy(table, Operation::Insert, "a", &session)
-            })?;
+            })
+            .await?;
         let mut statement = self
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
@@ -7233,7 +7287,7 @@ impl Store {
         let claims = Session::default();
         let mut ctx = Ctx::new(schema, None, &claims, &binding)
             .with_cut(Some(cut), false)
-            .with_catalogue(self);
+            .with_namespace(self.identity_namespace(schema.policy_schema()).await?);
         let condition = policy(&mut ctx)?;
         let source = ctx.source(table)?;
         let mut params = ctx.params;
@@ -7299,7 +7353,7 @@ impl Store {
     /// [`Store::check`] by `schema`'s policies (`table` is `schema`'s).
     ///
     /// The statement is a function of the schema, the table, the operation,
-    /// the author with its claims, and the enum tags it was compiled under;
+    /// the confirmed namespace, the author and claims, and the current enum tags;
     /// only the row and branch parameters differ per call. So it is kept
     /// ([`CheckPlans`]) and compiled again only when one of those changed.
     pub(crate) async fn check_in(
@@ -7344,10 +7398,11 @@ impl Store {
         operation: Operation,
         existing: bool,
     ) -> Result<bool, Error> {
+        let namespace = self.identity_namespace(schema.policy_schema()).await?;
         let plan_key = self
             .check_plans
             .borrow()
-            .key(schema, table, operation, author);
+            .key(schema, table, operation, author, namespace);
         let plan = {
             let claims_by_author = self.claims.borrow();
             let claims = claims_by_author.get(&author);
@@ -7357,9 +7412,10 @@ impl Store {
                 Some(plan) => plan,
                 None => {
                     let session = self.session(author);
-                    let (condition, params, _) = self.policy_condition_in(schema, None, |ctx| {
-                        ctx.operation_policy(table, operation, "a", &session)
-                    })?;
+                    let (condition, params, _) =
+                        self.policy_condition_in(schema, namespace, None, |ctx| {
+                            ctx.operation_policy(table, operation, "a", &session)
+                        })?;
                     let plan = Rc::new(CheckPlan {
                         claims: claims.cloned(),
                         epoch,
@@ -7431,9 +7487,11 @@ impl Store {
         operation: Operation,
     ) -> Result<bool, Error> {
         let session = self.session(author);
-        let (sql, params, _) = self.policy_check_in(schema, table, row, key, None, |ctx| {
-            ctx.operation_policy(table, operation, "a", &session)
-        })?;
+        let (sql, params, _) = self
+            .policy_check_in(schema, table, row, key, None, |ctx| {
+                ctx.operation_policy(table, operation, "a", &session)
+            })
+            .await?;
         let value: i64 = self
             .conn
             .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
@@ -11304,12 +11362,6 @@ struct Store {
     /// Jazz's account registry, as the account-record checks beside the
     /// system tables' policies read it (see [`Db::set_account_registry`]).
     account_registry: RefCell<Option<Rc<dyn AccountRegistryView>>>,
-    /// The authority namespace as `_jazz_meta` holds it, kept in memory for
-    /// the policy compiler, which cannot await storage (see
-    /// [`Store::namespace`] and [`crate::values::namespace_set`]): set when
-    /// it is read or written, and put back to `None` if the savepoint that
-    /// wrote it rolls back.
-    pub(crate) known_namespace: Rc<Cell<Option<[u8; 16]>>>,
     /// The client's encryption hooks ([`crate::e2ee`]).
     #[cfg(feature = "e2ee-client")]
     e2ee: Option<Rc<dyn crate::e2ee::E2eeHooks>>,
@@ -13127,9 +13179,13 @@ impl Db {
         if staged.is_empty() {
             return Ok(None);
         }
-        self.inner
-            .without_overlay()
-            .recorded_window(prepared, identity, &staged)
+        let inner = self.inner.without_overlay();
+        inner.recorded_window(
+            prepared,
+            identity,
+            &staged,
+            inner.read_namespace(prepared).await?,
+        )
     }
 
     async fn record_read(
@@ -13910,6 +13966,7 @@ struct CheckPlan {
 /// ([`Store::clear_check_plans`] from `reset_everything`).
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct CheckKey {
+    namespace: Option<[u8; 16]>,
     schema: usize,
     version: crate::ids::SchemaVersionId,
     bundle: Option<crate::catalogue::BundleId>,
@@ -13925,8 +13982,15 @@ struct CheckKey {
 }
 
 impl CheckKey {
-    fn new(schema: &Schema, table: &Table, operation: Operation, author: AuthorSubject) -> Self {
+    fn new(
+        schema: &Schema,
+        table: &Table,
+        operation: Operation,
+        author: AuthorSubject,
+        namespace: Option<[u8; 16]>,
+    ) -> Self {
         Self {
+            namespace,
             schema: std::ptr::from_ref(schema) as usize,
             version: schema.version,
             bundle: schema.bundle,
@@ -13992,9 +14056,10 @@ impl CheckPlans {
         table: &Table,
         operation: Operation,
         author: AuthorSubject,
+        namespace: Option<[u8; 16]>,
     ) -> CheckKey {
         #[allow(unused_mut)]
-        let mut key = CheckKey::new(schema, table, operation, author);
+        let mut key = CheckKey::new(schema, table, operation, author, namespace);
         #[cfg(any(test, feature = "testing"))]
         if self.reused_addresses {
             key.schema = 0;
@@ -14141,8 +14206,113 @@ impl Db {
 mod check_plan_tests {
     use super::*;
 
+    async fn namespace_replica() -> (Db, RowUuid, AuthorSubject) {
+        use jazz_model::model::public_schema::{
+            ColumnType, PolicyValue, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+        };
+
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("scope", ColumnType::Uuid)
+                    .policies(TablePolicies::new().with_delete(PolicyExpr::Cmp {
+                        column: "scope".into(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::TableIdentity {
+                            table: "notes".into(),
+                        },
+                    })),
+            )
+            .build();
+        let alice = AuthorSubject::for_test_bytes([1; 16]);
+        let db = Db::open(DbConfig::new(
+            JazzSchema::new(&schema).unwrap(),
+            DbIdentity {
+                node: crate::ids::NodeUuid::from_bytes([2; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ))
+        .await
+        .unwrap();
+        let store = db.inner.as_ref();
+        let version = store.owner_version.get();
+        let digest = crate::names::names_digest(store.names().get(&version).unwrap());
+        store
+            .mirror_catalogue(
+                None,
+                vec![],
+                vec![],
+                vec![],
+                &[(*version.as_bytes(), digest)],
+            )
+            .await
+            .unwrap();
+        let row = RowUuid::from_bytes([3; 16]);
+        let scope =
+            crate::names::identity([7; 16], &store.owner().table("notes").unwrap().stored, None);
+        db.insert(
+            "notes",
+            BTreeMap::from([("scope".into(), Value::Uuid(scope))]),
+            InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        (db, row, alice)
+    }
+
+    /// Alice's replica denies a delete until the authority namespace arrives.
+    /// Comparing its kept check with a fresh compile requires the store's test oracle.
+    #[test]
+    fn kept_check_grants_after_the_namespace_arrives() {
+        block_on(async {
+            let (db, row, alice) = namespace_replica().await;
+            let check = || db.policy_check_for_test("notes", row, alice, Operation::Delete, false);
+            assert_eq!(check().await.unwrap(), [(false, false)]);
+            db.inner
+                .mirror_catalogue(Some([7; 16]), vec![], vec![], vec![], &[])
+                .await
+                .unwrap();
+            assert_eq!(check().await.unwrap(), [(true, true)]);
+        });
+    }
+
+    /// Rolling back Alice's first read of an already committed namespace preserves her grant.
+    /// The store-level test seeds the metadata independently and controls the read's savepoint.
+    #[test]
+    fn rolling_back_a_read_keeps_the_committed_namespace() {
+        block_on(async {
+            let (db, row, alice) = namespace_replica().await;
+            let store = db.inner.as_ref();
+            store
+                .exec(
+                    "INSERT INTO _jazz_meta (k, v) VALUES (?1, ?2)",
+                    crate::storage::params![sync::NAMESPACE_META, vec![7u8; 16]],
+                )
+                .await
+                .unwrap();
+            store
+                .conn
+                .db_scope_then("namespace", async || {
+                    assert_eq!(store.stored_namespace().await.unwrap(), Some([7; 16]));
+                    crate::storage::Scoped::Undo(())
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                db.policy_check_for_test("notes", row, alice, Operation::Delete, false)
+                    .await
+                    .unwrap(),
+                [(true, true)]
+            );
+        });
+    }
+
     fn key(table: &str) -> CheckKey {
         CheckKey {
+            namespace: None,
             schema: 0,
             version: crate::ids::SchemaVersionId::from_bytes([0; 16]),
             bundle: None,

@@ -488,6 +488,13 @@ struct WasmDbInner {
 }
 
 impl WasmDbInner {
+    #[cfg(feature = "e2ee-client")]
+    fn stop_encryption(&self) {
+        if let Some(runtime) = self.host.encryption.borrow_mut().take() {
+            runtime.stop();
+        }
+    }
+
     /// Resolve once every commit so far is in the browser store's backing
     /// storage (at once without one), then send the acks the database held
     /// for them; fail, with code `storage`, if they could not be written.
@@ -1053,6 +1060,17 @@ pub struct WasmDb {
     // engine.
     inner: Rc<RefCell<Option<WasmDbInner>>>,
     owns_runtime: bool,
+}
+
+#[cfg(feature = "e2ee-client")]
+impl Drop for WasmDb {
+    fn drop(&mut self) {
+        if self.owns_runtime {
+            if let Some(inner) = self.inner.borrow_mut().take() {
+                inner.stop_encryption();
+            }
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -2104,6 +2122,8 @@ impl WasmDb {
         let owns_runtime = self.owns_runtime;
         future_to_promise(async move {
             if owns_runtime {
+                #[cfg(feature = "e2ee-client")]
+                inner.stop_encryption();
                 inner.binding.close().await.map_err(host_error)?;
                 // A last save that fails still closes the store: what it
                 // could not write stays as IndexedDB last held it (whole),

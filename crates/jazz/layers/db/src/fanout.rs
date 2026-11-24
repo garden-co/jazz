@@ -1030,7 +1030,9 @@ impl Store {
             )))
         };
         self.check_splices(prepared, &read.splices)?;
-        let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
+        let namespace = self.read_namespace(prepared).await?;
+        let (compiled, session_used) =
+            self.compile_tracked(prepared, identity, &read, namespace)?;
         let key = self.group_key(prepared, identity, &read, &compiled, session_used, dormant);
         let now = settled.get();
         // `opened`: the member's queue starts with an opening.
@@ -1075,7 +1077,8 @@ impl Store {
             self.fan.borrow().stats.borrow_mut().shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
-        let (gid, handle) = self.register_read_watches(prepared, identity, read, &compiled, key)?;
+        let (gid, handle) =
+            self.register_read_watches(prepared, identity, read, &compiled, key, namespace)?;
         let mut group = handle.edit();
         if !dormant && let Err(error) = self.open_registered_read(&mut group, &compiled).await {
             drop(group);
@@ -1097,6 +1100,7 @@ impl Store {
         read: ReadSpec,
         compiled: &Compiled,
         key: GroupKey,
+        namespace: Option<[u8; 16]>,
     ) -> Result<(u64, Rc<GroupSlot>), Error> {
         let tables = self.with_relation_tables(prepared, &compiled.tables)?;
         let (watches, correlations, evidence) =
@@ -1124,7 +1128,7 @@ impl Store {
             watches.iter().map(Watch::table),
         );
         let projected = order_projected(&prepared.query, compiled);
-        let includes = self.output_only_includes(prepared, identity, &read, compiled)?;
+        let includes = self.output_only_includes(prepared, identity, &read, compiled, namespace)?;
         let gid = self.fan.borrow().next;
         self.fan.borrow_mut().next += 1;
         self.fan.borrow_mut().index(gid, &watches);
@@ -1186,7 +1190,12 @@ impl Store {
             Cow::Borrowed(_) => self.execute(compiled, &prepared.query.table).await,
             Cow::Owned(visible) => {
                 (async {
-                    let compiled = self.compile(prepared, identity, visible)?;
+                    let compiled = self.compile(
+                        prepared,
+                        identity,
+                        visible,
+                        self.read_namespace(prepared).await?,
+                    )?;
                     self.execute(&compiled, &prepared.query.table).await
                 })
                 .await
@@ -1230,6 +1239,7 @@ impl Store {
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
         compiled: &Compiled,
+        namespace: Option<[u8; 16]>,
     ) -> Result<Vec<(String, String)>, Error> {
         let query = &prepared.query;
         if query.includes.iter().all(|include| include.require) {
@@ -1240,7 +1250,10 @@ impl Store {
         let root = schema.table(&query.table)?;
         let mut bare = prepared.clone();
         bare.query.includes.retain(|include| include.require);
-        let others = self.compile_tracked(&bare, identity, read)?.0.tables;
+        let others = self
+            .compile_tracked(&bare, identity, read, namespace)?
+            .0
+            .tables;
         let mut out = Vec::new();
         for include in query.includes.iter().filter(|include| !include.require) {
             let column = include.path.split('.').next().unwrap_or_default();
@@ -1266,8 +1279,9 @@ impl Store {
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
+        namespace: Option<[u8; 16]>,
     ) -> Result<BTreeSet<String>, Error> {
-        self.read_dependencies_in(prepared, identity, &ReadSpec::default())
+        self.read_dependencies_in(prepared, identity, &ReadSpec::default(), namespace)
     }
 
     /// [`Self::read_dependencies`] of a read in `read`'s view.
@@ -1276,8 +1290,9 @@ impl Store {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> Result<BTreeSet<String>, Error> {
-        let (compiled, _) = self.compile_tracked(prepared, identity, read)?;
+        let (compiled, _) = self.compile_tracked(prepared, identity, read, namespace)?;
         let mut tables = compiled.tables.clone();
         for watch in self.watch_plan(prepared, identity, read, &compiled)?.0 {
             tables.insert(watch.table().clone());
@@ -1303,10 +1318,18 @@ impl Store {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
         let compiled = self
-            .read_ctx(&self.owner(), prepared, policy.as_ref(), &claims, read)
+            .read_ctx(
+                &self.owner(),
+                prepared,
+                policy.as_ref(),
+                &claims,
+                read,
+                namespace,
+            )
             .compile_query(&prepared.query, read.include_deleted)?;
         self.refuse_latest_only_cut(&compiled, read)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
@@ -1401,7 +1424,7 @@ impl Store {
         let mut bare = prepared.clone();
         bare.query.array_subqueries.clear();
         let bare = self
-            .read_ctx(&self.owner(), &bare, None, &claims, read)
+            .read_ctx(&self.owner(), &bare, None, &claims, read, None)
             .compile_query(&bare.query, read.include_deleted)?;
         structural.extend(bare.tables.iter().filter(|t| **t != root.stored).cloned());
         let root_reread = bare.sql.matches(&quote(&root.stored)).count() != 1;
@@ -2160,7 +2183,11 @@ impl Store {
                 self.fan.borrow_mut().by_key.remove(&group.key);
             }
             let (watches, correlations, evidence) = self
-                .compile_tracked(&group.prepared, group.identity, &group.read)
+                .read_namespace(&group.prepared)
+                .await
+                .and_then(|namespace| {
+                    self.compile_tracked(&group.prepared, group.identity, &group.read, namespace)
+                })
                 .and_then(|(compiled, session_used)| {
                     let plan =
                         self.watch_plan(&group.prepared, group.identity, &group.read, &compiled)?;
@@ -2315,13 +2342,14 @@ impl Store {
         identity: Option<AuthorSubject>,
         ids: &BTreeSet<RowUuid>,
         read: &ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> Option<Compiled> {
         // The sessions a compile would resolve anyway; the kept stamp is
         // compared with them where they stand.
         let sessions = self.read_sessions(prepared, identity);
         if !crate::db::PlanStamp::keep(
             &mut plans.stamp,
-            &self.plan_inputs(prepared, &sessions, read),
+            &self.plan_inputs(prepared, &sessions, read, namespace),
         ) {
             plans.by_count.clear();
         }
@@ -2335,7 +2363,7 @@ impl Store {
                 kept.clone()
             }
             None => {
-                let built = self.build_root_plan(prepared, identity, n, read);
+                let built = self.build_root_plan(prepared, identity, n, read, namespace);
                 if plans.by_count.len() >= ROOT_PLANS_MAX {
                     plans.by_count.clear();
                 }
@@ -2364,6 +2392,7 @@ impl Store {
         identity: Option<AuthorSubject>,
         n: usize,
         read: &ReadSpec,
+        namespace: Option<[u8; 16]>,
     ) -> Option<(Compiled, Vec<usize>)> {
         let sentinels = |tag: u8| -> Vec<[u8; 16]> {
             (0..n)
@@ -2379,7 +2408,7 @@ impl Store {
                 .iter()
                 .map(|id| Value::Uuid(uuid::Uuid::from_bytes(*id)))
                 .collect();
-            self.compile(&narrowed_to(prepared, &ids), identity, read)
+            self.compile(&narrowed_to(prepared, &ids), identity, read, namespace)
                 .ok()
         };
         let (a, b) = (sentinels(0xa5), sentinels(0x5a));
@@ -2449,6 +2478,10 @@ impl Store {
         // The same query narrowed to the changed ids, as a root filter, so
         // SQLite seeks them by primary key instead of sorting the view.
         let ids_as_values: Vec<Value> = ids.iter().map(|id| Value::Uuid(id.0)).collect();
+        let namespace = match self.read_namespace(&group.prepared).await {
+            Ok(namespace) => namespace,
+            Err(error) => return Some(Err(error)),
+        };
         let kept = if read.view.is_none() && read.cut.is_none() {
             self.root_plan(
                 &mut group.root_plans,
@@ -2456,6 +2489,7 @@ impl Store {
                 group.identity,
                 ids,
                 &read,
+                namespace,
             )
         } else {
             None
@@ -2468,6 +2502,7 @@ impl Store {
                             &narrowed_to(&group.prepared, &ids_as_values),
                             group.identity,
                             &read,
+                            namespace,
                         )
                         .ok();
                     assert!(
@@ -2482,6 +2517,7 @@ impl Store {
                 &narrowed_to(&group.prepared, &ids_as_values),
                 group.identity,
                 &read,
+                namespace,
             ) {
                 Ok(compiled) => compiled,
                 Err(error) => return Some(Err(error)),

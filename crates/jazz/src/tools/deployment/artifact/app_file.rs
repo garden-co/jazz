@@ -652,7 +652,10 @@ fn read_settings(value: &Json, path: &str) -> Result<EncryptionSettings, Refusal
     };
     Ok(EncryptionSettings {
         allow_account_reset,
-        mechanisms: value.get("mechanisms").map(to_serde),
+        mechanisms: value
+            .get("mechanisms")
+            .map(|value| to_serde(value, &format!("{path}.mechanisms")))
+            .transpose()?,
     })
 }
 
@@ -986,7 +989,7 @@ fn read_type(spec: &Json, path: &str) -> Result<(ColumnType, bool), Refusal> {
                     "json" => ColumnType::Json {
                         schema: match value {
                             Json::Bool(true) => None,
-                            other => Some(to_serde(other)),
+                            other => Some(to_serde(other, &sub)?),
                         },
                     },
                     _ => ColumnType::Array {
@@ -1032,9 +1035,7 @@ fn read_value(value: &Json, ty: &ColumnType, path: &str) -> Result<Value, Refusa
                 .decode(s)
                 .map_err(|_| refuse(path, "bytes are written as base64"))?,
         ),
-        (ColumnType::Json { .. }, other) => {
-            Value::Text(serde_json::to_string(&to_serde(other)).expect("JSON"))
-        }
+        (ColumnType::Json { .. }, other) => Value::Text(to_serde(other, path)?.to_string()),
         (ColumnType::Array { element }, Json::Array(items)) => Value::Array(
             items
                 .iter()
@@ -1168,21 +1169,29 @@ fn read_migration(
     Ok((from, to, lenses.into_values().collect()))
 }
 
-/// Our JSON as serde_json's, for JSON Schemas.
-pub fn to_serde(value: &Json) -> serde_json::Value {
-    match value {
+/// Convert an app-file value, reporting the path of any number that overflows.
+fn to_serde(value: &Json, path: &str) -> Result<serde_json::Value, Refusal> {
+    Ok(match value {
         Json::Null => serde_json::Value::Null,
         Json::Bool(b) => serde_json::Value::Bool(*b),
-        Json::Number(n) => serde_json::from_str(n).unwrap_or(serde_json::Value::Null),
+        Json::Number(n) => {
+            serde_json::from_str(n).map_err(|error| refuse(path, error.to_string()))?
+        }
         Json::String(s) => serde_json::Value::String(s.clone()),
-        Json::Array(items) => serde_json::Value::Array(items.iter().map(to_serde).collect()),
+        Json::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, value)| to_serde(value, &format!("{path}[{i}]")))
+                .collect::<Result<_, _>>()?,
+        ),
         Json::Object(entries) => serde_json::Value::Object(
             entries
                 .iter()
-                .map(|(k, v)| (k.clone(), to_serde(v)))
-                .collect(),
+                .map(|(key, value)| Ok((key.clone(), to_serde(value, &format!("{path}.{key}"))?)))
+                .collect::<Result<_, Refusal>>()?,
         ),
-    }
+    })
 }
 
 pub fn from_serde(value: &serde_json::Value) -> Json {
