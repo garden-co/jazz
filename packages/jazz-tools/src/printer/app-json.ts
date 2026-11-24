@@ -57,7 +57,7 @@ export interface AppJson {
   history?: Record<string, { tables: Record<string, TableJson>; $comment?: string }>;
   migrations?: MigrationJson[];
   transforms?: Record<string, { stored: ColumnJson; view: ColumnJson }>;
-  /** App-wide encryption settings; read only to refuse: the TS DSL can't declare them yet. */
+  /** App-wide encryption settings from the app file. */
   encryption?: Record<string, unknown>;
 }
 
