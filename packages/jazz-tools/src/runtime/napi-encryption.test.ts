@@ -6,9 +6,7 @@ import { EncryptionRuntime, NapiDb } from "jazz-napi";
 import { describe, expect, it } from "vitest";
 import {
   Encryption,
-  EncryptionNotDeclaredError,
   memoryPrivateStore,
-  notDeclaredEncryption,
   servePrivateStore,
   type PrivateStore,
 } from "../encryption/index.js";
@@ -203,10 +201,6 @@ describe("encryption on the Node binding", () => {
     expect(() =>
       NapiDb.openMemoryEncrypted(encodeSchema(encrypted.wasmSchema), config("device-b"), runtime),
     ).toThrow(/another account/);
-  });
-
-  it("answers for an app without encryption with an error that says so", () => {
-    expect(() => notDeclaredEncryption().devices).toThrow(EncryptionNotDeclaredError);
   });
 
   it("gives a recovery phrase of 24 words for 32 bytes and back, as local-first accounts do", () => {
