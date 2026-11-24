@@ -96,6 +96,11 @@ for artifact in "${artifacts[@]}"; do
   [ "$kmp" = true ] && [ "$artifact" = jazz-kotlin ] && root=true
   for file in "$artifact-$version.$main" "$artifact-$version-sources.jar" "$artifact-$version-javadoc.jar" \
     "$artifact-$version.pom" "$artifact-$version.module"; do
+    # The KMP root needs only its POM and Gradle module metadata; whatever
+    # else it publishes is checked too.
+    if [ "$root" = true ] && [ ! -e "$dir/$file" ]; then
+      case "$file" in *.pom | *.module) ;; *) continue ;; esac
+    fi
     [ -s "$dir/$file" ] || fail "$artifact lacks $file"
     gpg --homedir "$gnupg" --batch --quiet --verify "$dir/$file.asc" "$dir/$file" 2>/dev/null ||
       fail "$file's signature ($file.asc) doesn't verify"

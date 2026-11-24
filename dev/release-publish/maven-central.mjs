@@ -54,7 +54,9 @@ export function treeArtifacts(tree, version) {
   return names;
 }
 
-export function requiredFiles(artifact, version) {
+export function requiredFiles(artifact, version, kmp = false) {
+  // Kotlin Multiplatform's root jazz-kotlin is metadata: its POM and Gradle module metadata.
+  if (kmp && artifact === "jazz-kotlin") return [`${artifact}-${version}.pom`, `${artifact}-${version}.module`];
   const main = ARTIFACTS[artifact] ?? "jar";
   return [
     `${artifact}-${version}.${main}`,
@@ -101,14 +103,16 @@ function bundle(tree, version, out) {
       ],
       { input: key, stdio: ["pipe", "inherit", "inherit"] },
     );
-    for (const artifact of treeArtifacts(tree, version)) {
+    const artifacts = treeArtifacts(tree, version);
+    const kmp = artifacts.includes(KMP_JVM);
+    for (const artifact of artifacts) {
       const from = join(resolve(tree), artifact, version);
       const to = join(work, GROUP, artifact, version);
       if (!existsSync(from)) throw new Error(`${from} doesn't exist`);
       cpSync(from, to, { recursive: true });
       for (const name of readdirSync(to)) if (!isPayload(name)) rmSync(join(to, name));
       const files = readdirSync(to);
-      for (const name of requiredFiles(artifact, version))
+      for (const name of requiredFiles(artifact, version, kmp))
         if (!files.includes(name)) throw new Error(`${artifact} ${version} lacks ${name}`);
       for (const name of files) {
         const path = join(to, name);

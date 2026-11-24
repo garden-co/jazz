@@ -282,3 +282,8 @@ test("the Maven bundle takes jazz-kotlin-jvm only when the tree has it (Kotlin M
     rmSync(tree, { recursive: true, force: true });
   }
 });
+
+test("the KMP root needs only its POM and module metadata", () => {
+  assert.deepEqual(requiredFiles("jazz-kotlin", "1", true), ["jazz-kotlin-1.pom", "jazz-kotlin-1.module"]);
+  assert.equal(requiredFiles("jazz-kotlin", "1")[0], "jazz-kotlin-1.jar");
+});
