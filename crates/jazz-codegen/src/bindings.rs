@@ -230,39 +230,60 @@ fn only_path(
     from: SchemaHash,
     to: SchemaHash,
 ) -> Option<Vec<(&PublishMigrationRequest, bool)>> {
+    let mut adjacent = HashMap::<_, Vec<_>>::new();
+    for (index, migration) in compiled.migrations.iter().enumerate() {
+        let (source, target) = ends(migration)?;
+        adjacent
+            .entry(source)
+            .or_default()
+            .push((target, index, true));
+        adjacent
+            .entry(target)
+            .or_default()
+            .push((source, index, false));
+    }
+
     let mut reached = vec![from];
     let mut parent = HashMap::new();
     let mut next = 0;
     while let Some(&at) = reached.get(next) {
         next += 1;
-        for (index, migration) in compiled.migrations.iter().enumerate() {
-            let (other, forward) = match ends(migration) {
-                Some((source, target)) if source == at => (target, true),
-                Some((source, target)) if target == at => (source, false),
-                _ => continue,
-            };
-            if !reached.contains(&other) {
+        for &(other, index, forward) in adjacent.get(&at)? {
+            if other != from
+                && let std::collections::hash_map::Entry::Vacant(entry) = parent.entry(other)
+            {
+                entry.insert((at, index, forward));
                 reached.push(other);
-                parent.insert(other, (at, index, forward));
             }
         }
     }
-    // Connected versions with one migration fewer than versions form a tree.
-    let edges = compiled
-        .migrations
-        .iter()
-        .filter_map(ends)
-        .filter(|(source, _)| reached.contains(source))
-        .count();
-    if !reached.contains(&to) || edges + 1 != reached.len() {
-        return None;
-    }
+
     let mut path = Vec::new();
+    let mut path_edges = std::collections::HashSet::new();
+    let mut anchor = HashMap::from([(from, from)]);
     let mut at = to;
     while at != from {
-        let (previous, index, forward) = parent[&at];
+        let &(previous, index, forward) = parent.get(&at)?;
         path.push((&compiled.migrations[index], forward));
+        path_edges.insert(index);
+        anchor.insert(at, at);
         at = previous;
+    }
+
+    // Removing the path's edges from the search tree leaves one subtree
+    // per path vertex. An extra edge gives a second simple path exactly
+    // when it connects two different subtrees.
+    for at in reached.into_iter().skip(1) {
+        let (previous, _, _) = parent[&at];
+        let nearest = anchor[&previous];
+        anchor.entry(at).or_insert(nearest);
+    }
+    for (at, edges) in &adjacent {
+        for &(other, edge, _) in edges {
+            if !path_edges.contains(&edge) && anchor.get(at) != anchor.get(&other) {
+                return None;
+            }
+        }
     }
     path.reverse();
     Some(path)
@@ -287,13 +308,22 @@ fn check_unlinked(
     precedes: bool,
 ) -> Result<(), CodegenError> {
     let empty = Entries::new();
-    let check = encryption::check_unlinked_transition(
+    let check = encryption::check_unlinked_columns(
         recorded,
         entries.unwrap_or(&empty),
         old_table,
-        new_table,
         old_name,
-        new_name,
+        |table, was, old, new| {
+            // A lens cannot resolve a name introduced independently on both
+            // branches. Only the catalogue can compare its stored identity.
+            encryption::check_space_matches(
+                table,
+                old,
+                new,
+                new_table(&old.scope).is_none_or(|scope| scope == new.scope),
+                new_name(was, &old.space).is_none_or(|space| space == new.space),
+            )
+        },
         async || Ok::<_, Infallible>(precedes),
     );
     // Nothing in the check waits: its one callback answers at once.

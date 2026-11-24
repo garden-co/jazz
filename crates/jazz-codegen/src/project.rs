@@ -692,6 +692,84 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Alice's sibling migrations both add the same space reference to plain notes.
+    #[test]
+    fn sibling_branches_can_introduce_the_same_space() {
+        let dir = dir();
+        let langs = [Lang::Rust.into()];
+        let path = dir.join(APP_FILE);
+        let root = serde_json::json!({
+            "rooms": { "columns": { "name": "string" } }, "notes": { "columns": { "title": "string" } }
+        });
+        let mut shipped = root.clone();
+        shipped["notes"]["columns"]["roomId"] =
+            serde_json::json!({ "type": "uuid?", "references": "rooms" });
+        shipped["notes"]["columns"]["detail"] = "bytes".into();
+        shipped["notes"]["encryption"] = serde_json::json!({
+            "space": "roomId", "scope": "rooms", "columns": { "detail": "string?" }
+        });
+        let mut current = shipped.clone();
+        current["notes"]["indexes"] = serde_json::json!(["title"]);
+        let add = serde_json::json!({ "notes": {
+            "roomId": { "add": "uuid", "default": null }, "detail": { "add": "bytes", "default": "" }
+        } });
+        write_app(
+            &path,
+            serde_json::json!({
+                "format": 1, "tables": shipped, "history": { "root": { "tables": root } },
+                "migrations": [{ "from": "root", "migrate": add }]
+            }),
+        );
+        generate(&dir, &langs, false).unwrap();
+        write_app(
+            &path,
+            serde_json::json!({
+                "format": 1, "tables": current,
+                "history": { "root": { "tables": root }, "shipped": { "tables": shipped } },
+                "migrations": [{ "from": "root", "to": "shipped", "migrate": add }, { "from": "root", "migrate": add }]
+            }),
+        );
+        assert_accepted(&dir, &langs);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Alice's divergent sibling remains incompatible when another branch forks and rejoins.
+    #[test]
+    fn sibling_branches_are_checked_beside_a_diamond() {
+        let (dir, original) = branch_from_the_root(
+            "detail",
+            notes_tables("detail", sealed(&["a", "c"]), &["rank"]),
+        );
+        let path = dir.join(APP_FILE);
+        let mut app: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for (name, rank) in [("left", 1), ("right", 2), ("joined", 3)] {
+            let mut version = app["history"]["root"].clone();
+            version["tables"]["notes"]["columns"]["rank"] =
+                serde_json::json!({ "type": "int", "default": rank });
+            app["history"][name] = version;
+        }
+        for (from, to) in [
+            ("root", "left"),
+            ("root", "right"),
+            ("left", "joined"),
+            ("right", "joined"),
+        ] {
+            app["migrations"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({ "from": from, "to": to }));
+        }
+        write_app(&path, app);
+        assert_refused(
+            &dir,
+            &[Lang::Rust.into()],
+            "only appending enum variants",
+            &original,
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Alice keeps the shipped tables in history with no migration, so the
     /// file implies one, and retypes an encrypted column beside a new index.
     #[test]
