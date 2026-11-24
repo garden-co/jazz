@@ -1512,3 +1512,58 @@ fn the_system_tables_follow_the_migrations_not_the_order_of_the_file() {
     // A client of the plain current version opens it as a plain app.
     load_client_current(file.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// A version that declares no encryption follows the nearest earlier
+/// declarations, so it can't drop a space table they name. The deploy
+/// says so, instead of asking for a read rule on the dropped table.
+///
+/// ```text
+/// v1: rooms (its own space, name encrypted), notes
+/// current: notes only, no encryption        ✗ rooms is still a space table
+/// ```
+#[test]
+fn a_version_without_declarations_cannot_drop_a_space_table() {
+    let file = |current: &str, migration: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.app.v1.json",
+            "tables": {{ {current} }},
+            "history": {{ "v1": {{ "tables": {{
+                "rooms": {{ "columns": {{ "name": "bytes" }},
+                    "encryption": {{ "space": "id", "scope": "rooms", "columns": {{ "name": "string" }} }} }},
+                "notes": {{ "columns": {{ "done": "boolean" }} }} }} }} }},
+            "migrations": [{{ "from": "v1", {migration} }}] }}"#
+        )
+    };
+    let permissions = |tables: &str| {
+        format!(
+            r#"{{ "$schema": "https://jazz.tools/schemas/jazz.permissions.v1.json",
+            "tables": {{ {tables} }} }}"#
+        )
+    };
+    let rooms_rule = r#""rooms": { "read": "exists __e2ee_members(scopeId = table_id('rooms'), identifier = this.id, accountId = session.user)" }"#;
+    let notes_rule = r#""notes": { "read": "true" }"#;
+
+    let dropped = file(
+        r#""notes": { "columns": { "done": "boolean" } }"#,
+        r#""dropTables": ["rooms"]"#,
+    );
+    let error = refusal(load(dropped.as_bytes(), permissions(notes_rule).as_bytes()));
+    assert!(
+        error.contains("space table rooms is dropped in a version that declares no encryption")
+            && error.contains("keep rooms"),
+        "{error}"
+    );
+
+    // Keeping rooms, with its rule from the members table, deploys.
+    let kept = file(
+        r#""rooms": { "columns": { "label": "string?" } }, "notes": { "columns": { "done": "boolean" } }"#,
+        r#""migrate": { "rooms": {
+            "name": { "drop": "bytes", "backwardsDefault": "" },
+            "label": { "add": "string?", "default": null } } }"#,
+    );
+    load(
+        kept.as_bytes(),
+        permissions(&format!("{rooms_rule}, {notes_rule}")).as_bytes(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+}

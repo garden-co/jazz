@@ -423,7 +423,7 @@ fn with_system_policies(
     else {
         return Ok((permissions.clone(), Vec::new()));
     };
-    encryption::check_space_read_rules(permissions, entries)
+    encryption::check_space_read_rules(permissions, entries, history.current_schema())
         .map_err(|error| ArtifactError::in_file(PERMISSIONS_FILE, error))?;
     // A policy may read a column that is plaintext in this version: only the
     // columns this version itself declares encrypted are checked.

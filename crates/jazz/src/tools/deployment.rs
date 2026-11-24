@@ -706,7 +706,10 @@ fn check_encryption(
         }
         return Ok(Vec::new());
     };
-    declared::check_space_read_rules(&permissions, entries).map_err(refused)?;
+    let target_schema = schemas
+        .get(&target.0)
+        .ok_or(DeploymentError::MissingSchema { schema: target })?;
+    declared::check_space_read_rules(&permissions, entries, target_schema).map_err(refused)?;
     // Only the columns the target itself declares encrypted: one that is
     // plaintext in it (decrypted, say) may be read by a policy.
     if let Some(own) = encryption.entries(&target.to_string()) {

@@ -114,9 +114,9 @@ app encrypts data it already stores. References: the
   follow the declarations of the nearest earlier version that has them
   (see E2EE_CORE_HOOKS.md). The deploy then asks each space table in those
   declarations for a read rule that comes from the members table. If the
-  version has dropped that table, leaving the rule out fails that check, and
-  writing it fails because the permissions name a table the schema doesn't
-  have. Dropping the encrypted tables while their space table stays works.
+  version has dropped that table, the deploy refuses it with an error that
+  names the table and says to keep it. Dropping the encrypted tables while
+  their space table stays works.
   An app that stops encrypting keeps its space tables, with their read rules
   from the members table. Nothing is disclosed and no data is lost; the
   table just can't be removed.

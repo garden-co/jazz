@@ -961,8 +961,26 @@ fn scopes(entries: &Entries) -> BTreeMap<&str, bool> {
 /// table (protocol R13), naming it. Only space tables of an entry that
 /// encrypts a column are checked: an entry without encrypted columns lets
 /// an app write member rows first (E2EE_SCHEMA_CHANGES.md §4).
-pub fn check_space_read_rules(permissions: &Permissions, entries: &Entries) -> Result<(), String> {
+///
+/// `entries` may be an earlier version's, when `schema`'s version declares
+/// none. A space table they name that `schema` has dropped then gets its own
+/// error, since no read rule can be written for it.
+pub fn check_space_read_rules(
+    permissions: &Permissions,
+    entries: &Entries,
+    schema: &Schema,
+) -> Result<(), String> {
     for (scope, encrypts) in scopes(entries) {
+        if encrypts && schema.get(&TableName::from(scope)).is_none() {
+            return Err(format!(
+                "space table {scope} is dropped in a version that declares no encryption. \
+                 Such a version follows the encryption declarations of the nearest earlier \
+                 version, and those still use {scope} as a space table, so it can't be \
+                 dropped: keep {scope}, with its read rule from the members table \
+                 (`exists __e2ee_members(scopeId = table_id('{scope}'), identifier = this.id, \
+                 accountId = session.user)`)"
+            ));
+        }
         let rule = permissions
             .get(&TableName::from(scope))
             .and_then(TablePolicies::select_policy);
