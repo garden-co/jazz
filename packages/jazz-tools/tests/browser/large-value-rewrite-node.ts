@@ -1,4 +1,5 @@
-import { createTestJazz, remote, type Jazz } from "../../src/backend/create-jazz.js";
+import { createTestJazz, type Jazz } from "../../src/backend/create-jazz.js";
+import { remote } from "../../src/backend/remote-provider.js";
 import { readFileSync } from "node:fs";
 import { testApp } from "../../src/testing/test-app.js";
 import type { JazzServerInfo } from "./testing-server.js";

@@ -46,6 +46,7 @@ import {
   sqlite,
   vercel,
   type Jazz,
+  type JazzProvider,
   type RequestAuthenticationError,
   type WsLikeSocket,
 } from "./index.js";
@@ -3391,6 +3392,109 @@ describe("createJazz", () => {
       ).toThrow(/is not an origin/);
     }
   }, 60_000);
+
+  it("accepts Next.js upgrades on Vercel when the store is remote", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: core.adminSecret }),
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const upgradeWebSocket = vi.fn(() => new Response("Vercel upgrade"));
+    vi.doMock("@vercel/functions", () => ({ upgradeWebSocket, getDeadline: () => undefined }));
+    vi.stubEnv("VERCEL", "1");
+    vi.stubEnv("VERCEL_ENV", "production");
+    try {
+      const url = `http://app.test/jazz/apps/${appId}/ws`;
+      const request = new Request(url, { headers: { upgrade: "websocket" } });
+      expect((await jazz.handle(request)).headers.get("x-jazz-stream")).toBe("1");
+      expect(await (await jazz.next().GET(request)).text()).toBe("Vercel upgrade");
+      expect(upgradeWebSocket).toHaveBeenCalledWith(expect.any(Function), {
+        maxPayload: 2 * 1024 * 1024,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+      vi.doUnmock("@vercel/functions");
+    }
+  });
+
+  it("uses a provider's incoming upgrade only for an allowed sync request", async () => {
+    const upgrade = vi.fn(() => new Response("upgraded by the provider"));
+    const store: JazzProvider = {
+      open: (context) => memory().open(context),
+      getWebSocketUpgrade: (handler) => (handler === "fetch" ? upgrade : undefined),
+    };
+    const jazz = await createJazz({ app, permissions, store }).ready();
+    cleanups.push(() => jazz.close());
+    const path = `http://app.test/jazz/apps/${jazz.appId}/ws`;
+    const request = (url = path, origin = "http://app.test") =>
+      new Request(url, { headers: { origin, upgrade: "websocket" } });
+    expect((await jazz.handle(request("http://app.test/jazz/other/ws"))).status).toBe(404);
+    expect((await jazz.handle(request(path, "https://elsewhere.test"))).status).toBe(403);
+    expect((await jazz.handle(new Request(path))).headers.get("x-jazz-stream")).toBeNull();
+    expect((await jazz.next().GET(request())).headers.get("x-jazz-stream")).toBe("1");
+    expect(upgrade).not.toHaveBeenCalled();
+    const incoming = request();
+    expect(await (await jazz.handle(incoming)).text()).toBe("upgraded by the provider");
+    expect(upgrade).toHaveBeenCalledWith(incoming, expect.any(Function), {
+      maxPayload: 2 * 1024 * 1024,
+    });
+  });
+
+  it("releases an application core provider if publication fails", async () => {
+    const close = vi.fn(async () => {});
+    const openSocket = vi.fn(() => {
+      throw new Error("unexpected socket");
+    });
+    const jazz = createJazz({
+      app,
+      permissions,
+      store: {
+        open: async ({ connect }) =>
+          connect({
+            appId: randomUUID(),
+            close,
+            openSocket,
+            async handle() {
+              throw new Error("core unavailable during publication");
+            },
+          }),
+      },
+    });
+    cleanups.push(() => jazz.close());
+    await expect(jazz.ready()).rejects.toThrow(/core unavailable during publication/);
+    expect(openSocket).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens an application core provider on demand and releases it on close", async () => {
+    const close = vi.fn();
+    const open = vi.fn<JazzProvider["open"]>(async (context) => {
+      const core = await memory().open(context);
+      return {
+        ...core,
+        async close() {
+          await core.close();
+          close();
+        },
+      };
+    });
+    const jazz = createJazz({ app, permissions, store: { open } });
+    cleanups.push(() => jazz.close());
+    expect(open).not.toHaveBeenCalled();
+    await Promise.all([jazz.ready(), jazz.ready()]);
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(jazz.appId).toBe((await open.mock.results[0]!.value).appId);
+    const row = await jazz.db
+      .insert(app.todos, { title: "external", owner: randomUUID() })
+      .wait({ tier: "global" });
+    expect((await jazz.db.one(app.todos.where({ id: row.id })))?.title).toBe("external");
+    await jazz.close();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
 
   it("opens a sqlite directory in one core at a time, and not on serverless hosts", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-lock-"));

@@ -129,22 +129,13 @@ describe.skipIf(!hostBuilt && !process.env.CI)("createJazz in a Cloudflare Worke
     });
 
     it("a sync socket from another origin", async () => {
-      const { url } = await worker();
+      const { url, miniflare } = await worker();
       const appId = await (await fetch(`${url}/app-id`)).text();
-      const socket = new (globalThis.WebSocket as unknown as new (
-        url: string,
-        options: { headers: Record<string, string> },
-      ) => WebSocket)(`${url.replace(/^http/, "ws")}/jazz/apps/${appId}/ws`, {
-        headers: { origin: "https://elsewhere.example" },
+      const response = await miniflare.dispatchFetch(`${url}/jazz/apps/${appId}/ws`, {
+        headers: { Upgrade: "websocket", Origin: "https://elsewhere.example" },
       });
-      // The Worker has already upgraded the socket: createJazz's origin
-      // check closes it before any session starts (Node refuses the upgrade).
-      const closed = await new Promise<{ code: number; reason: string }>((resolve) =>
-        socket.addEventListener("close", (event) =>
-          resolve({ code: event.code, reason: event.reason }),
-        ),
-      );
-      expect(closed).toEqual({ code: 1008, reason: "origin not allowed" });
+      expect(response.status).toBe(403);
+      expect(await response.text()).toBe("origin not allowed");
     });
 
     it("a device account its authenticate doesn't accept: its write never reaches the core", async () => {

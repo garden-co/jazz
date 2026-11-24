@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { expect, it } from "vitest";
 import { betterAuth } from "better-auth";
 import { hashPassword } from "better-auth/crypto";
-import { createJazz, sqlite, type Jazz } from "../backend/create-jazz.js";
+import { createJazz, type Jazz } from "../backend/create-jazz.js";
+import { sqlite } from "../backend/native-provider.js";
 import { compileTestApp, testApp } from "../testing/test-app.js";
 import { jazzAdapter } from "./index.js";
 import {

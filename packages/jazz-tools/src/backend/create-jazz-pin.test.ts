@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { pinnedSocket, type CoreSocket } from "./create-jazz.js";
+import type { CoreSocket } from "./core-provider.js";
+import { pinnedSocket } from "./create-jazz.js";
 
 const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 const decode = (frame: Uint8Array) => JSON.parse(new TextDecoder().decode(frame));

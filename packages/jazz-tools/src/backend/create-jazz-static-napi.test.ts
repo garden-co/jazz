@@ -9,7 +9,8 @@
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { enginePermissions, replaceCodegenFallbackForTests } from "../dev/codegen-napi.js";
 import { testApp, type TestAppFile } from "../testing/test-app.js";
-import { createJazz, memory } from "./create-jazz.js";
+import { createJazz } from "./create-jazz.js";
+import { memory } from "./native-provider.js";
 
 const notes: TestAppFile = { format: 1, tables: { notes: { columns: { body: "string" } } } };
 const permissions = { format: 1, tables: { notes: { read: "true", insert: "true" } } };
