@@ -956,7 +956,10 @@ fn check_encryption_diff(
                 if has_column(new, &next, name) {
                     return Some(name.to_owned());
                 }
-                // A possible rename may preserve the declared space column.
+                if next == rename_table {
+                    return None;
+                }
+                // Before choosing renames, a candidate may preserve the space column.
                 let new_space = &after.get(&next)?.space;
                 if before.get(table)?.space != name {
                     return None;
@@ -981,52 +984,57 @@ fn check_encryption_diff(
     };
     check(before, &definite, "", &[]).map_err(refusal)?;
 
-    // For each possible encrypted rename, try that column as an addition
-    // and then with each candidate identity. The author can choose any
-    // viable interpretation when filling in the stub.
     for table in &diff.migrate {
         let name = &table.table;
         let Some(entry) = after.get(name) else {
             continue;
         };
-        let earlier = before.get(name);
-        let old_entries =
-            encryption::Entries::from_iter(earlier.map(|entry| (name.clone(), entry.clone())));
-        let mut new_entries = encryption::Entries::new();
-        for step in &table.steps {
-            let ColumnStep::MaybeRenamed { column, candidates } = step else {
-                continue;
-            };
-            let Some(declaration) = entry.columns.get(column) else {
-                continue;
-            };
-            let mut trial = definite[name].clone();
-            trial.columns.insert(column.clone(), declaration.clone());
-            let tagged = entry.equality.contains(column);
-            if tagged {
-                trial.equality.push(column.clone());
-            }
-            new_entries.insert(name.clone(), trial);
-            let Err(add_error) = check(&old_entries, &new_entries, name, &[]) else {
-                continue;
-            };
-            if !candidates.iter().any(|candidate| {
-                let mut renames = vec![(candidate.as_str(), column.as_str())];
-                let old_tag = encryption::equality_column(candidate);
-                let new_tag = encryption::equality_column(column);
-                if tagged
-                    && earlier.is_some_and(|entry| entry.equality.contains(candidate))
-                    && table.steps.iter().any(|step| {
-                        matches!(step, ColumnStep::MaybeRenamed { column, candidates }
-                            if *column == new_tag && candidates.contains(&old_tag))
-                    })
-                {
-                    renames.push((&old_tag, &new_tag));
+        const MAX_RENAMES: usize = 8;
+        let possible: Vec<_> = table
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                ColumnStep::MaybeRenamed { column, candidates } => Some(
+                    candidates
+                        .iter()
+                        .map(move |candidate| (candidate.as_str(), column.as_str())),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .take(MAX_RENAMES + 1)
+            .collect();
+        // The number of assignments grows exponentially with the number of
+        // candidate pairs. Let generate check the author's choices above the cap.
+        if possible.is_empty() || possible.len() > MAX_RENAMES {
+            continue;
+        }
+        let old_entries = encryption::Entries::from_iter(
+            before.get(name).map(|entry| (name.clone(), entry.clone())),
+        );
+        let new_entries = encryption::Entries::from([(name.clone(), entry.clone())]);
+        let Err(add_error) = check(&old_entries, &new_entries, name, &[]) else {
+            continue;
+        };
+
+        let viable = (1..(1 << possible.len())).any(|assignment| {
+            let mut renames = Vec::new();
+            for (index, &(from, to)) in possible.iter().enumerate() {
+                if assignment & (1 << index) == 0 {
+                    continue;
                 }
-                check(&old_entries, &new_entries, name, &renames).is_ok()
-            }) {
-                return Err(refusal(add_error));
+                if renames
+                    .iter()
+                    .any(|&(source, target)| source == from || target == to)
+                {
+                    return false;
+                }
+                renames.push((from, to));
             }
+            check(&old_entries, &new_entries, name, &renames).is_ok()
+        });
+        if !viable {
+            return Err(refusal(add_error));
         }
     }
     Ok(())
