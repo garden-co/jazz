@@ -348,20 +348,15 @@ impl StoreOwner<'_> {
             Err(Error::CryptoFailure) => return Err(ProtocolError::ProviderFailure),
             Err(_) => return Ok(Err(Rejection::Envelope)),
         };
-        let (context, verification) = match depth {
-            0 => (
-                space.root.marker_context(&space.application)?,
-                &space.root.verification,
-            ),
-            _ => {
-                let successor = &space.successors[depth - 1];
-                (
-                    successor.marker_context(&space.application, &space.scope)?,
-                    &successor.verification,
-                )
-            }
-        };
-        match marker(self.registry, &key, &context, verification)? {
+        let successor = depth.checked_sub(1).map(|at| &space.successors[at]);
+        match marker(
+            self.registry,
+            &key,
+            &space.application,
+            &space.scope,
+            &space.root,
+            successor,
+        )? {
             Outcome::Ok(()) => {}
             Outcome::Invalid => return Ok(Err(Rejection::Marker)),
             Outcome::Unsupported => return Ok(Err(Rejection::Unsupported)),

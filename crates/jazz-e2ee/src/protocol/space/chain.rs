@@ -166,6 +166,33 @@ pub struct SpaceVersion {
 }
 
 impl SpaceVersion {
+    pub(crate) fn record_id<'v>(&'v self, root: &'v SpaceRoot) -> &'v str {
+        self.successor
+            .as_ref()
+            .map_or(&root.id, |successor| &successor.row.id)
+    }
+
+    pub(crate) fn account_envelope<'v>(
+        &'v self,
+        chain: &'v SpaceChain,
+    ) -> ProtocolResult<(Vec<u8>, &'v [u8])> {
+        match &self.successor {
+            None => Ok((
+                chain
+                    .root
+                    .row
+                    .account_envelope_context(&chain.application)?,
+                &chain.root.row.account_envelope,
+            )),
+            Some(successor) => Ok((
+                successor
+                    .row
+                    .account_envelope_context(&chain.application, &chain.scope)?,
+                &successor.row.account_envelope,
+            )),
+        }
+    }
+
     /// The account that wrote this version's record, and the account epoch
     /// its `accountEnvelope` is sealed to.
     pub fn writer<'v>(&'v self, root: &'v SpaceRoot) -> (&'v str, &'v str) {

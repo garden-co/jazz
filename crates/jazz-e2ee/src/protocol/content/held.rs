@@ -156,8 +156,8 @@ impl HeldSpace {
             return Err(ProtocolError::InvalidRecord("empty creation transaction"));
         }
         let application = domain.account(&root.creator_account_id)?;
-        let context = root.marker_context(&application)?;
-        match marker(registry, &records.key, &context, &root.verification)? {
+        let scope = root.scope()?;
+        match marker(registry, &records.key, &application, &scope, root, None)? {
             Outcome::Ok(()) => {}
             Outcome::Invalid | Outcome::Unsupported => {
                 return Err(ProtocolError::InvalidRecord("key fails its root's marker"));
@@ -165,7 +165,7 @@ impl HeldSpace {
         }
         Ok(Self {
             application,
-            scope: root.scope()?,
+            scope,
             root: root.clone(),
             successors: Vec::new(),
             keys: BTreeMap::from([(
