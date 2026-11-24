@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
 use super::super::published::{PublishLensOp, PublishTableLens};
+use super::expr::OUTER_ROW;
 use crate::catalogue::Permissions;
 use crate::tools::public_schema::{
     CmpOp, ColumnDescriptor, ColumnType, EncryptionEntry, EncryptionSettings, HistoryRetention,
@@ -488,7 +489,7 @@ pub(in crate::tools::deployment) fn fragment_version(
             ));
         }
     }
-    if !schema.keys().any(|name| is_system_table(name.as_str())) {
+    if !super::has_system_tables(schema) {
         return Ok(None);
     }
     let system: Schema = schema
@@ -574,8 +575,6 @@ pub(in crate::tools::deployment) fn upgrade_lenses(
 // Derived policies
 // ---------------------------------------------------------------------------
 
-const OUTER_ROW: &str = "__jazz_outer_row";
-
 fn me() -> PolicyValue {
     PolicyValue::SessionRef(vec!["user".to_owned()])
 }
@@ -606,14 +605,6 @@ fn exists(table: &str, conditions: Vec<PolicyExpr>) -> PolicyExpr {
         table: table.to_owned(),
         condition: Box::new(PolicyExpr::And(conditions)),
     }
-}
-
-fn and(conditions: Vec<PolicyExpr>) -> PolicyExpr {
-    PolicyExpr::And(conditions)
-}
-
-fn or(conditions: Vec<PolicyExpr>) -> PolicyExpr {
-    PolicyExpr::Or(conditions)
 }
 
 /// The row was written by the session's account.
@@ -666,38 +657,40 @@ fn inherits_from(operation: Operation, tables: &[String]) -> PolicyExpr {
 
 /// `read(row) and update(row)` of protocol §1.4: the session may read the
 /// space row and save it unchanged.
-fn manages(tables: &[String]) -> PolicyExpr {
-    and(vec![
+fn manages(tables: &[String]) -> [PolicyExpr; 2] {
+    [
         inherits_from(Operation::Select, tables),
         inherits_from(Operation::Update, tables),
-    ])
+    ]
 }
 
 /// `creator(row)` of protocol §1.4: this very transaction inserts the
 /// space row, created by the session. It reads the space row as raw
 /// evidence, not through the space table's read policy.
 fn creator(tables: &[String]) -> PolicyExpr {
-    or(tables
-        .iter()
-        .map(|table| {
-            and(vec![
-                eq(
-                    "scopeId",
-                    PolicyValue::TableIdentity {
-                        table: table.clone(),
-                    },
-                ),
-                exists(
-                    table,
-                    vec![
-                        eq("id", this("identifier")),
-                        created_by_me(),
-                        PolicyExpr::InsertedByThisTransaction,
-                    ],
-                ),
-            ])
-        })
-        .collect())
+    PolicyExpr::Or(
+        tables
+            .iter()
+            .map(|table| {
+                PolicyExpr::And(vec![
+                    eq(
+                        "scopeId",
+                        PolicyValue::TableIdentity {
+                            table: table.clone(),
+                        },
+                    ),
+                    exists(
+                        table,
+                        vec![
+                            eq("id", this("identifier")),
+                            created_by_me(),
+                            PolicyExpr::InsertedByThisTransaction,
+                        ],
+                    ),
+                ])
+            })
+            .collect(),
+    )
 }
 
 /// Policies of a table whose rows are inserted and read only: no update
@@ -755,7 +748,8 @@ pub fn derive_e2ee_policies(
         return Err("encryption is declared but the schema lacks Jazz's system tables".to_owned());
     }
     let tables = space_tables(schema, entries)?;
-    let manages = manages(&tables);
+    let manages_conditions = manages(&tables);
+    let manages = PolicyExpr::And(manages_conditions.to_vec());
     let me_member = member(me());
     let mut policies = Permissions::new();
     let mut put = |name: &str, table: TablePolicies| {
@@ -766,24 +760,27 @@ pub fn derive_e2ee_policies(
     put(
         MEMBERS,
         TablePolicies {
-            select: OperationPolicy::using(or(vec![eq("accountId", me()), me_member.clone()])),
-            insert: OperationPolicy::with_check(or(vec![
+            select: OperationPolicy::using(PolicyExpr::Or(vec![
+                eq("accountId", me()),
+                me_member.clone(),
+            ])),
+            insert: OperationPolicy::with_check(PolicyExpr::Or(vec![
                 manages.clone(),
-                and(vec![eq("accountId", me()), creator(&tables)]),
+                PolicyExpr::And(vec![eq("accountId", me()), creator(&tables)]),
             ])),
             update: OperationPolicy::using_and_check(PolicyExpr::False, PolicyExpr::False),
-            delete: OperationPolicy::using(or(vec![eq("accountId", me()), manages.clone()])),
+            delete: OperationPolicy::using(PolicyExpr::Or(vec![
+                eq("accountId", me()),
+                manages.clone(),
+            ])),
         },
     );
     let create_or_rotate = |author: &str| {
         let mut conditions = vec![me_member.clone()];
-        conditions.extend(match &manages {
-            PolicyExpr::And(both) => both.clone(),
-            other => vec![other.clone()],
-        });
+        conditions.extend(manages_conditions.clone());
         conditions.push(eq(author, me()));
         conditions.push(created_by_me());
-        and(conditions)
+        PolicyExpr::And(conditions)
     };
     put(
         SPACES,
@@ -797,7 +794,7 @@ pub fn derive_e2ee_policies(
         SPACE_DELIVERIES,
         immutable(
             me_member.clone(),
-            and(vec![
+            PolicyExpr::And(vec![
                 me_member.clone(),
                 member(this("recipientAccountId")),
                 eq("senderAccountId", me()),
@@ -808,13 +805,12 @@ pub fn derive_e2ee_policies(
 
     // Account and device tables (R2–R11). They check access only; clients
     // authenticate every record on replay.
-    let private = created_by_me;
-    put(DEVICE_REQUESTS, immutable(private(), created_by_me()));
+    put(DEVICE_REQUESTS, immutable(created_by_me(), created_by_me()));
     put(
         DEVICE_KEYS,
         immutable(
             public(),
-            and(vec![
+            PolicyExpr::And(vec![
                 created_by_me(),
                 exists(
                     DEVICE_REQUESTS,
@@ -829,8 +825,8 @@ pub fn derive_e2ee_policies(
     put(
         ACCOUNT_IDENTITIES,
         immutable(
-            private(),
-            and(vec![
+            created_by_me(),
+            PolicyExpr::And(vec![
                 created_by_me(),
                 literal("ledgerVersion", Value::BigInt(1)),
                 own_request("deviceId"),
@@ -838,14 +834,14 @@ pub fn derive_e2ee_policies(
                     // The first identity is the account's own row id; a
                     // reset is a later generation, by a session that isn't
                     // a device-account session, when the app allows resets.
-                    let first = and(vec![
+                    let first = PolicyExpr::And(vec![
                         literal("generation", Value::BigInt(0)),
                         eq("id", me()),
                     ]);
                     if settings.allow_account_reset {
-                        or(vec![
+                        PolicyExpr::Or(vec![
                             first,
-                            and(vec![
+                            PolicyExpr::And(vec![
                                 PolicyExpr::Cmp {
                                     column: "generation".to_owned(),
                                     op: CmpOp::Gt,
@@ -869,7 +865,7 @@ pub fn derive_e2ee_policies(
         ACCOUNT_ROOTS,
         immutable(
             public(),
-            and(vec![
+            PolicyExpr::And(vec![
                 eq("accountId", me()),
                 created_by_me(),
                 exists(
@@ -889,8 +885,8 @@ pub fn derive_e2ee_policies(
     put(
         DEVICE_CHALLENGES,
         immutable(
-            private(),
-            and(vec![created_by_me(), own_request("deviceId")]),
+            created_by_me(),
+            PolicyExpr::And(vec![created_by_me(), own_request("deviceId")]),
         ),
     );
     let own_challenge = || {
@@ -899,23 +895,20 @@ pub fn derive_e2ee_policies(
             vec![eq("id", this("challengeId")), created_by_me()],
         )
     };
-    put(
-        DEVICE_PROOFS,
-        immutable(private(), and(vec![created_by_me(), own_challenge()])),
-    );
-    put(
-        DEVICE_APPROVALS,
-        immutable(private(), and(vec![created_by_me(), own_challenge()])),
-    );
-    put(
-        DEVICE_DELIVERIES,
-        immutable(private(), and(vec![created_by_me(), own_challenge()])),
-    );
+    for table in [DEVICE_PROOFS, DEVICE_APPROVALS, DEVICE_DELIVERIES] {
+        put(
+            table,
+            immutable(
+                created_by_me(),
+                PolicyExpr::And(vec![created_by_me(), own_challenge()]),
+            ),
+        );
+    }
     put(
         PUBLIC_DEVICE_APPROVALS,
         immutable(
             public(),
-            and(vec![
+            PolicyExpr::And(vec![
                 eq("accountId", me()),
                 created_by_me(),
                 // The private approval with the same row id, inserted with
@@ -930,7 +923,7 @@ pub fn derive_e2ee_policies(
                 ),
                 own_request("signerId"),
                 own_request("deviceId"),
-                or(vec![
+                PolicyExpr::Or(vec![
                     PolicyExpr::IsNull {
                         column: "recoveryRootId".to_owned(),
                     },
@@ -950,12 +943,12 @@ pub fn derive_e2ee_policies(
             eq("accountId", me()),
             created_by_me(),
             own_request("signerId"),
-            or(vec![
-                and(vec![
+            PolicyExpr::Or(vec![
+                PolicyExpr::And(vec![
                     literal("action", Value::Text("remove-device".to_owned())),
                     own_request("removedDeviceId"),
                 ]),
-                and(vec![
+                PolicyExpr::And(vec![
                     literal("action", Value::Text("retire-recovery-root".to_owned())),
                     PolicyExpr::IsNull {
                         column: "removedDeviceId".to_owned(),
@@ -964,42 +957,36 @@ pub fn derive_e2ee_policies(
             ]),
         ]
     };
-    put(ACCOUNT_SUCCESSORS, immutable(private(), and(successor())));
+    put(
+        ACCOUNT_SUCCESSORS,
+        immutable(created_by_me(), PolicyExpr::And(successor())),
+    );
     put(
         PUBLIC_ACCOUNT_SUCCESSORS,
         immutable(
             public(),
-            and(successor()
-                .into_iter()
-                // The private successor with the same row id, inserted
-                // with it (protocol R8).
-                .chain([exists(
-                    ACCOUNT_SUCCESSORS,
-                    vec![
-                        eq("id", this("id")),
-                        created_by_me(),
-                        PolicyExpr::InsertedByThisTransaction,
-                    ],
-                )])
-                .collect()),
-        ),
-    );
-    put(
-        RECOVERY_ROOTS,
-        immutable(
-            public(),
-            and(vec![
-                eq("accountId", me()),
-                created_by_me(),
-                own_request("signerId"),
-            ]),
+            PolicyExpr::And(
+                successor()
+                    .into_iter()
+                    // The private successor with the same row id, inserted
+                    // with it (protocol R8).
+                    .chain([exists(
+                        ACCOUNT_SUCCESSORS,
+                        vec![
+                            eq("id", this("id")),
+                            created_by_me(),
+                            PolicyExpr::InsertedByThisTransaction,
+                        ],
+                    )])
+                    .collect(),
+            ),
         ),
     );
     put(
         RECOVERY_DELIVERIES,
         immutable(
-            private(),
-            and(vec![
+            created_by_me(),
+            PolicyExpr::And(vec![
                 created_by_me(),
                 exists(
                     RECOVERY_ROOTS,
@@ -1008,28 +995,23 @@ pub fn derive_e2ee_policies(
             ]),
         ),
     );
-    put(
-        DEVICE_REMOVAL_REQUESTS,
-        immutable(
-            public(),
-            and(vec![
-                eq("accountId", me()),
-                created_by_me(),
-                own_request("deviceId"),
-            ]),
-        ),
-    );
-    put(
-        ACCOUNT_KEYS,
-        immutable(
-            public(),
-            and(vec![
-                eq("accountId", me()),
-                created_by_me(),
-                own_request("signerId"),
-            ]),
-        ),
-    );
+    for (table, requester) in [
+        (RECOVERY_ROOTS, "signerId"),
+        (DEVICE_REMOVAL_REQUESTS, "deviceId"),
+        (ACCOUNT_KEYS, "signerId"),
+    ] {
+        put(
+            table,
+            immutable(
+                public(),
+                PolicyExpr::And(vec![
+                    eq("accountId", me()),
+                    created_by_me(),
+                    own_request(requester),
+                ]),
+            ),
+        );
+    }
     #[cfg(feature = "testing")]
     if schema.contains_key(&TableName::from(TEST_EVENTS)) {
         put(TEST_EVENTS, immutable(PolicyExpr::False, PolicyExpr::False));

@@ -22,7 +22,7 @@ pub const GRAMMAR_URL: &str = "https://jazz.tools/docs/reference/app-files#expre
 
 /// The session path TS uses for a column of the row being checked, inside
 /// `exists`: `this.col` there.
-const OUTER_ROW: &str = "__jazz_outer_row";
+pub(super) const OUTER_ROW: &str = "__jazz_outer_row";
 
 /// Columns every table has, which policies may name.
 const MAGIC_COLUMNS: &[&str] = &[
@@ -2875,8 +2875,6 @@ fn outer_row_refusal(expr: &PolicyExpr, depth: usize) -> Option<&'static str> {
             items.iter().find_map(|i| outer_row_refusal(i, depth))
         }
         PolicyExpr::Not(inner) => outer_row_refusal(inner, depth),
-        // Names only the checked row's columns.
-        PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => None,
         _ => None,
     }
 }
@@ -2906,7 +2904,6 @@ pub fn too_deep(expr: &PolicyExpr, depth: usize) -> bool {
         PolicyExpr::SessionInList { values, .. } => {
             values.iter().any(|v| value_too_deep(v, depth + 1))
         }
-        PolicyExpr::InheritsFrom { .. } | PolicyExpr::InsertedByThisTransaction => false,
         _ => false,
     }
 }
