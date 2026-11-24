@@ -30,18 +30,35 @@ function repo({ omit = [], extra = {} } = {}) {
     writeFileSync(join(root, path), content);
   };
   const base = (a) => `tools/jazz/${a}/${V}/${a}-${V}`;
-  put(`${base("jazz-kotlin")}.module`, JSON.stringify({
-    variants: ["jazz-kotlin-jvm", "jazz-kotlin-android"].map((m) => ({
-      "available-at": { url: `../../${m}/${V}/${m}-${V}.module`, group: "tools.jazz", module: m, version: V },
-    })),
-  }, null, 2));
+  put(
+    `${base("jazz-kotlin")}.module`,
+    JSON.stringify(
+      {
+        variants: ["jazz-kotlin-jvm", "jazz-kotlin-android"].map((m) => ({
+          "available-at": {
+            url: `../../${m}/${V}/${m}-${V}.module`,
+            group: "tools.jazz",
+            module: m,
+            version: V,
+          },
+        })),
+      },
+      null,
+      2,
+    ),
+  );
   put(`${base("jazz-kotlin")}.pom`, "<project/>");
   put(`${base("jazz-kotlin")}.module.asc`, "throwaway");
   put(`${base("jazz-kotlin")}.module.asc.sha256`, "checksum of a throwaway signature");
   put(`tools/jazz/jazz-kotlin/maven-metadata-local.xml`, "<metadata/>");
   if (!omit.includes("root-sources"))
-    jar(join(root, `tools/jazz/jazz-kotlin/${V}`), `jazz-kotlin-${V}-sources.jar`, { "commonMain/tools/jazz/Db.kt": "x" });
-  for (const [a, main, set] of [["jazz-kotlin-jvm", "jar", "jvmMain"], ["jazz-kotlin-android", "aar", "androidMain"]]) {
+    jar(join(root, `tools/jazz/jazz-kotlin/${V}`), `jazz-kotlin-${V}-sources.jar`, {
+      "commonMain/tools/jazz/Db.kt": "x",
+    });
+  for (const [a, main, set] of [
+    ["jazz-kotlin-jvm", "jar", "jvmMain"],
+    ["jazz-kotlin-android", "aar", "androidMain"],
+  ]) {
     put(`${base(a)}.${main}`, "bin");
     put(`${base(a)}.pom`, "<project/>");
     put(`${base(a)}.module`, "{}");
@@ -101,7 +118,9 @@ for (const omit of [
 }
 
 test("a sources jar holding a native library fails", () => {
-  const root = repo({ extra: { "jazz-kotlin-android-sources": { "jni/arm64-v8a/libjazz_ffi.so": "elf" } } });
+  const root = repo({
+    extra: { "jazz-kotlin-android-sources": { "jni/arm64-v8a/libjazz_ffi.so": "elf" } },
+  });
   try {
     const { status, stderr } = packAndCheck(root);
     assert.notEqual(status, 0);
@@ -122,7 +141,10 @@ test("an optional overlay (iOS klibs) joins the zip, and the zip still passes", 
     execFileSync("bash", [pack, root, V, out, ios], { stdio: "pipe" });
     const r = spawnSync("bash", [checkScript, out, V], { encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(execFileSync("unzip", ["-Z1", out], { encoding: "utf8" }), /jazz-kotlin-iosarm64-.*\.klib/);
+    assert.match(
+      execFileSync("unzip", ["-Z1", out], { encoding: "utf8" }),
+      /jazz-kotlin-iosarm64-.*\.klib/,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(ios, { recursive: true, force: true });

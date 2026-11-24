@@ -289,7 +289,11 @@ test("the Maven bundle takes jazz-kotlin-jvm only when the tree has it (Kotlin M
   try {
     assert.deepEqual(treeArtifacts(tree, "1"), ["jazz-kotlin", "jazz-kotlin-android"]);
     mkdirSync(join(tree, "jazz-kotlin-jvm", "1"), { recursive: true });
-    assert.deepEqual(treeArtifacts(tree, "1"), ["jazz-kotlin", "jazz-kotlin-jvm", "jazz-kotlin-android"]);
+    assert.deepEqual(treeArtifacts(tree, "1"), [
+      "jazz-kotlin",
+      "jazz-kotlin-jvm",
+      "jazz-kotlin-android",
+    ]);
     assert.equal(requiredFiles("jazz-kotlin-jvm", "1")[0], "jazz-kotlin-jvm-1.jar");
   } finally {
     rmSync(tree, { recursive: true, force: true });
@@ -297,6 +301,9 @@ test("the Maven bundle takes jazz-kotlin-jvm only when the tree has it (Kotlin M
 });
 
 test("the KMP root needs only its POM and module metadata", () => {
-  assert.deepEqual(requiredFiles("jazz-kotlin", "1", true), ["jazz-kotlin-1.pom", "jazz-kotlin-1.module"]);
+  assert.deepEqual(requiredFiles("jazz-kotlin", "1", true), [
+    "jazz-kotlin-1.pom",
+    "jazz-kotlin-1.module",
+  ]);
   assert.equal(requiredFiles("jazz-kotlin", "1")[0], "jazz-kotlin-1.jar");
 });

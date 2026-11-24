@@ -57,7 +57,13 @@ test("a jar without the generated bindings fails", () => {
 });
 
 test("Kotlin Multiplatform sources jars keep the bindings under their source set", () => {
-  assert.equal(check({ "jvmMain/uniffi/jazz_ffi/jazz_ffi.kt": "package uniffi.jazz_ffi" }).status, 0);
-  assert.equal(check({ "androidMain/uniffi/jazz_ffi/jazz_ffi.kt": "package uniffi.jazz_ffi" }).status, 0);
+  assert.equal(
+    check({ "jvmMain/uniffi/jazz_ffi/jazz_ffi.kt": "package uniffi.jazz_ffi" }).status,
+    0,
+  );
+  assert.equal(
+    check({ "androidMain/uniffi/jazz_ffi/jazz_ffi.kt": "package uniffi.jazz_ffi" }).status,
+    0,
+  );
   assert.notEqual(check({ "jvmMain/other/jazz_ffi.kt": "x" }).status, 0);
 });

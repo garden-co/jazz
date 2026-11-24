@@ -56,7 +56,8 @@ export function treeArtifacts(tree, version) {
 
 export function requiredFiles(artifact, version, kmp = false) {
   // Kotlin Multiplatform's root jazz-kotlin is metadata: its POM and Gradle module metadata.
-  if (kmp && artifact === "jazz-kotlin") return [`${artifact}-${version}.pom`, `${artifact}-${version}.module`];
+  if (kmp && artifact === "jazz-kotlin")
+    return [`${artifact}-${version}.pom`, `${artifact}-${version}.module`];
   const main = ARTIFACTS[artifact] ?? "jar";
   return [
     `${artifact}-${version}.${main}`,
