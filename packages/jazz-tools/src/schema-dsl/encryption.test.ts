@@ -358,6 +358,21 @@ describe("later versions of an encrypted app", () => {
     expect((await readdir(migrationsDir, { recursive: true })).sort()).toEqual(before);
   });
 
+  it("refuses two required encrypted renames sharing one source before writing files", async () => {
+    const root = await firstVersion();
+    const migrationsDir = join(root, "migrations");
+    const before = (await readdir(migrationsDir, { recursive: true })).sort();
+    await writeFile(
+      join(root, "schema.ts"),
+      chat({ messages: ", subject: s.string().encrypted()" }).replace("text:", "body:"),
+    );
+
+    await expect(createAppMigration({ cwd: root, name: "replace-text" })).rejects.toThrow(
+      /messages\.(body|subject): the migration adds a required encrypted column/,
+    );
+    expect((await readdir(migrationsDir, { recursive: true })).sort()).toEqual(before);
+  });
+
   it("leaves a possible encrypted rename to the author and checks it at generate", async () => {
     const root = await firstVersion();
     await writeFile(join(root, "schema.ts"), chat().replace("text:", "subject:"));
