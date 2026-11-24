@@ -244,7 +244,7 @@ A call the hooks refuse for want of a key (`NeedsKey`, `SpacePending`, here and 
 
 - **Need.** The space table's read rule compares the member row's `scopeId` with the space table's own catalogue identity (spec R13), which the app cannot write as a literal: it is minted by the authority. Without that comparison, an updater of any space table could add a member row naming a row of another table with the same ID.
 - **Value (to be built).** A new `PolicyValue` variant `TableIdentity { table }`, written `table_id('projects')` in `jazz.permissions.json`. Like `InheritsFrom`'s `tables`, the bundle stores the stored table name, and the authority resolves it to the `GlobalPhysicalTableId` when it compiles the policy; the deploy refuses an unknown table. Every match on `PolicyValue` gains an arm (the outer-row helpers in public_schema_convert.rs:162 among them).
-- **Encoding.** An additive variant of `jazz-bundle-v1`, emitted only into bundles of encrypted apps, with the same compatibility as `InheritsFrom` (below). Serde writes `{"type":"TableIdentity","table":"projects"}`; that string is to be pinned in `policy_expr_json_is_pinned` with the bundle's canonical form and digest, as for `InheritsFrom`.
+- **Encoding.** An additive variant of `jazz-bundle-v1`, emitted only into bundles of encrypted apps, with the same compatibility as `InheritsFrom` (below). The [address policy JSON test](../layers/model/src/model/public_api/policy.rs#L639-L676) pins the Serde form of a comparison containing `{"type":"TableIdentity","table":"projects"}`. The [bundle encoding test](../tests/address_policy_encoding.rs#L27-L61) pins the comparison's canonical bytes and digest.
 
 #### Core representation of `TableIdentity` and `InheritsFrom` (to be built)
 
@@ -287,7 +287,7 @@ Multi-column correlation applies to the support of every application's read poli
   `{"type":"InheritsFrom","operation":"Select","table_column":"scopeId","id_column":"identifier","tables":["projects"]}`,
   and the bundle stores its canonical form, 116 bytes of UTF-8,
   `{"id_column":"identifier","operation":"Select","table_column":"scopeId","tables":["projects"],"type":"InheritsFrom"}`,
-  with SHA-256 `c2aead25ca360dafc60aed57ce264c42ec8ae17e8f52ee70e5a01dc17c05bd4b`. Both strings are to be added to `policy_expr_json_is_pinned`, whose expected unknown-variant message gains `` `InheritsFrom` ``.
+  with SHA-256 `c2aead25ca360dafc60aed57ce264c42ec8ae17e8f52ee70e5a01dc17c05bd4b`. The [address policy JSON test](../layers/model/src/model/public_api/policy.rs#L639-L676) pins the Serde bytes. The [bundle encoding test](../tests/address_policy_encoding.rs#L27-L61) pins the canonical bytes and digest, and [the policy JSON test](../layers/model/src/model/public_api/policy.rs#L695-L752) pins the unknown-variant message, which includes `InheritsFrom`.
 - **Compatibility.**
   - Sync wire: unchanged. Catalogue sync carries schemas without permissions, so clients never decode a bundle definition.
   - Row storage: unchanged. The node is policy, not data.
@@ -348,9 +348,22 @@ Multi-column correlation applies to the support of every application's read poli
 - **Built (exists).**
   - A feature `e2ee-client` on `jazz-db`, re-exported by `jazz` (jazz-core). It gates the `E2eeHooks` trait, the installation of hooks and every call site; with it off, each site compiles to nothing.
   - `jazz-e2ee-client` enables it. Client bindings depend on `jazz-e2ee-client`. jazz-server never does.
-  - Opening an app that declares encryption (its schema holds Jazz's system tables) is refused on every client open path (`binding_host::open_memory` and `open_file`, so the NAPI, FFI, wasm and React Native relay hosts, the wasm browser open, `JazzClient::connect`) unless `DbConfig::with_e2ee` installs hooks built from an encrypted app's declarations on that same open (`binding_host::refuse_encrypted_app`; the hooks say so through `E2eeHooks::built_from_encrypted_app`, true by default when they declare a table, and returned true by a runtime whose declarations are empty because the version declares no encrypted column, so plain empty hooks are refused); a version that declares no encryption but keeps the tables is still an encrypted app, opened with hooks that declare nothing. The open path checks only that the hooks say they were built from an encrypted app's declarations: the schema carries no declarations to compare, so the caller's contract is that the hooks are built from the app's own declarations (`load_client_encrypted` returns them with the schema); hooks built from others would leave declared columns unsealed. A build without the feature cannot install hooks and always refuses; so do `load_client_current` and the React Native relay, which builds its `DbConfig` without a way to install hooks and so keeps refusing an encrypted app. A backend does not refuse: it holds no keys and opens its own database with keyless hooks built from the app's declarations (`jazz-e2ee-client`'s `KeylessHooks`, installed by the Node binding's backend open, and saying `built_from_encrypted_app` too): encrypted writes are refused, encrypted cells are never returned, equality on an encrypted column is refused, and plain tables and columns work as usual (spec §1.4).
+  - The [binding-host open guard](../layers/db/src/binding_host.rs#L685-L715)
+    refuses an encrypted schema unless the open installs hooks built from an
+    encrypted app's declarations. A build without `e2ee-client` cannot install
+    those hooks. The guard checks the hooks' declaration flag. The caller
+    must build them from the app's own declarations, which
+    [`load_client_encrypted`](../src/tools/deployment/artifact.rs#L937-L960)
+    returns with the schema. The flag also covers versions that keep the
+    system tables but declare no encrypted columns. The
+    [declarations test](../tests/e2ee_declarations.rs#L998-L1093) covers the
+    guard. The [React Native relay](../../jazz-native-relay/src/lib.rs#L1690-L1714)
+    has an encrypted open path when built with the feature. A backend can open
+    with [keyless hooks](../../jazz-napi/src/lib.rs#L2648-L2668): plain tables
+    and columns work as usual, encrypted cells are omitted, and encrypted
+    writes and equality filters are refused (spec §1.4).
   - The deploy-side code (system tables, the write guard, `derive_e2ee_policies`, the `InheritsFrom` node) is **not** gated: the server needs it.
-- **Feature unification caveat.** A workspace build that compiles a client binding and the server together unifies `e2ee-client` into the server's jazz-core. That is harmless, since there is no crypto dependency and the hooks are only installed by client openers, but it is not a hard exclusion. Runtime guard (exists): `Db::set_authority` returns an error for a `Db` with hooks installed, and the authority refuses hooks. CI check (exists): `dev/gates/server-excludes-e2ee-client.mjs`, in the lint partition, fails if `cargo tree -p jazz-server -e features -i jazz-db` lists `e2ee-client`. The rust-workspace partition runs jazz-core's integration tests again with the feature.
+- **Feature unification caveat.** A workspace build that compiles a client binding and the server together unifies `e2ee-client` into the server's jazz-core. That is harmless, since there is no crypto dependency and the hooks are only installed by client openers, but it is not a hard exclusion. Runtime guard (exists): `Db::set_authority` returns an error for a `Db` with hooks installed, and the authority refuses hooks. CI check (exists): `dev/gates/server-excludes-e2ee-client.mjs`, in the lint partition, fails if `cargo tree -p jazz-server -e features -i jazz-db` lists `e2ee-client`. The workspace test build also gets `e2ee-client` through its binding crates. The [dedicated jazz-core integration run](../../../dev/gates/local-ci-equivalent.mjs#L367-L384) explicitly requests that same feature.
 
 ### H11. Deliveries, creation and rotation
 

@@ -49,19 +49,27 @@ db.encryption.onChallenge(async () => {
 // On a trusted device:
 const waiting = (await db.encryption.devices.list()).filter((d) => d.status === "waiting");
 const session = await db.encryption.devices.challenge(waiting[0].id);
-const code = await session.code(); // null until the new device answered
-await session.approve(code); // after the user confirmed both screens show the same code
+// Check again after the new device answers if this returns "waiting".
+async function approveWhenAnswered() {
+  const code = await session.code();
+  if (code === null) return "waiting";
+  if (await confirmMatchingCodes(code)) await session.approve(code);
+}
 ```
 
-A wrong code approves nothing. The code is how a server that substituted keys is caught.
+`confirmMatchingCodes` is your UI prompt. Show the code on the trusted device and ask the user to
+confirm it matches the new device's screen. A wrong code approves nothing. See the
+[BandChat approval flow](https://github.com/garden-co/jazz/blob/94cd8e1e45/examples/band-chat/apps/react-hono-betterauth-e2ee/src/components/DevicesPanel.tsx#L342-L386).
 
 ## Remove a device and recover with a phrase
 
 `devices.remove(id)` removes a device and rotates the account; `devices.requestRemoval()` asks another
 device to remove this one. On a device account, removal does not revoke access from anyone who holds the
-account secret (see above). On an account your own sign-in manages, removal ends that device's access unless it also holds the
-recovery secret: a removed device that knows it can still restore. To close that, retire the recovery
-credential and register a new secret. The account keeps a 24-word recovery phrase, shown once:
+account secret (see above). On an account your own sign-in manages, the same rotation retires the
+recovery credentials the removed device registered or used to recover. If that device may have copied
+a different recovery phrase, retire that credential separately and register a new secret. See the
+[device-removal test](https://github.com/garden-co/jazz/blob/94cd8e1e45/crates/jazz-e2ee/tests/protocol_account.rs#L1379-L1454).
+The account keeps a 24-word recovery phrase, shown once:
 
 ```ts
 const phrase = db.encryption.recovery.create(); // keep it; registers nothing

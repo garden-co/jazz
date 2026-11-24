@@ -85,7 +85,7 @@
           "description": "Whether an account may be reset. Off by default."
         },
         "mechanisms": {
-          "description": "The mechanism selection and allow-list, read by the client runtime."
+          "description": "The mechanism selection and allow-list. The client runtime requires an object when this setting is present. See configure in crates/jazz-e2ee-client/src/mechanisms.rs."
         },
         "$comment": {
           "type": "string"
