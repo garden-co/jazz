@@ -363,7 +363,7 @@ fn resign(
         .registry
         .signer(device.signing.public.mechanism.as_mechanism())
         .unwrap();
-    successor.signature = signing::sign(signer, &device.signing, &bytes).unwrap();
+    successor.signature = signer.sign(&device.signing, &bytes).unwrap();
 }
 
 /// The chain rule (§3.3): only the first valid successor of the current
@@ -2722,7 +2722,7 @@ fn non_derived_account_epoch(
             .registry
             .signer(phone.signing.public.mechanism.as_mechanism())
             .unwrap();
-        record.signature = signing::sign(signer, &phone.signing, &bytes).unwrap();
+        record.signature = signer.sign(&phone.signing, &bytes).unwrap();
         let at = entry.ledger.next();
         entry.ledger.accept_rotation(at, &rotation);
         (rotation.account_key.clone(), phone)

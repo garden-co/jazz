@@ -21,7 +21,6 @@ use jazz_e2ee::protocol::ProtocolError;
 use jazz_e2ee::protocol::derive::account_sealing_key_pair;
 use jazz_e2ee::protocol::domain::AppDomain;
 use jazz_e2ee::protocol::error::{RefusalCode, UnsupportedCapability};
-use jazz_e2ee::protocol::signing::sign;
 use jazz_e2ee::registry::Registry;
 use jazz_e2ee_client::{AccountStatus, ClientError, MemoryStore, Report};
 
@@ -141,12 +140,9 @@ fn a_conflicting_account_key_is_reported_and_ignored_for_sealing() {
     let signer = registry
         .signer(device.signing.public.mechanism.as_mechanism())
         .unwrap();
-    conflict.signature = sign(
-        signer,
-        &device.signing,
-        &conflict.signed_bytes(&domain).unwrap(),
-    )
-    .unwrap();
+    conflict.signature = signer
+        .sign(&device.signing, &conflict.signed_bytes(&domain).unwrap())
+        .unwrap();
     let table = "__e2ee_account_keys";
     let original = all(&server, Query::from(table)).unwrap().pop().unwrap();
     let mut cells: BTreeMap<_, _> = original

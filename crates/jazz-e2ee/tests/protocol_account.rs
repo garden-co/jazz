@@ -9,6 +9,7 @@ use common::mechanisms::{OTHER_SEAL, UNROUTED_SEAL, custom_registry, relabelled}
 use common::protocol::{ALICE, Env, Ledger};
 use jazz_e2ee::agility::MechanismId;
 use jazz_e2ee::mechanisms::key_seal;
+use jazz_e2ee::agility::Signer as _;
 use jazz_e2ee::mechanisms::signature;
 use jazz_e2ee::protocol::account::build::{self, LocalDevice, ResetPolicy, RotationTarget};
 use jazz_e2ee::protocol::account::{AccountKeyEvidence, PrivateAccountLedger, verify_private};
@@ -483,7 +484,7 @@ fn recovery_restores_a_new_device() {
     let mut keeps_root = removal.public.clone();
     keeps_root.retired_recovery_root_ids = b"[]".to_vec();
     let bytes = keeps_root.signed_bytes(&env.application()).unwrap();
-    keeps_root.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    keeps_root.signature = signature::Builtin.sign(&laptop.signing, &bytes).unwrap();
     let mut view = before_removal;
     view.through = at;
     view.successors.push(Accepted::new(at, keeps_root));
@@ -653,8 +654,8 @@ fn retired_recovery_root_no_longer_approves() {
         .signed_bytes(&env.application(), &replacement.keys())
         .unwrap();
     let signer = env.registry.signer(signature::MECHANISM).unwrap();
-    current.signature = signing::sign(signer, &replacement.signing, &bytes).unwrap();
-    current.recovery_signature = Some(signing::sign(signer, &recovery.signing, &bytes).unwrap());
+    current.signature = signer.sign(&replacement.signing, &bytes).unwrap();
+    current.recovery_signature = Some(signer.sign(&recovery.signing, &bytes).unwrap());
     let at = ledger.next();
     ledger
         .public
@@ -1330,7 +1331,7 @@ fn private_evidence_is_bound_to_its_state() {
     let row = &mut public.approvals[0].row;
     row.id = ids::random_v4(&mut rng).unwrap();
     let bytes = row.signed_bytes(&env.application(), &phone.keys()).unwrap();
-    row.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    row.signature = signature::Builtin.sign(&laptop.signing, &bytes).unwrap();
     let replay =
         jazz_e2ee::protocol::account::AccountReplay::new(&public, &env.domain, &env.registry)
             .unwrap();
@@ -1425,7 +1426,7 @@ fn removing_a_registering_device_retires_its_roots() {
     partial.retired_recovery_root_ids =
         jazz_e2ee::protocol::json::encode_root_id_list([&second.root_id]).unwrap();
     let bytes = partial.signed_bytes(&env.application()).unwrap();
-    partial.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    partial.signature = signature::Builtin.sign(&laptop.signing, &bytes).unwrap();
     let mut view = before;
     view.through = at;
     view.successors.push(Accepted::new(at, partial));
@@ -1717,7 +1718,7 @@ fn re_sign(
 ) {
     successor.signer_id = device.id.clone();
     let bytes = successor.signed_bytes(&env.application()).unwrap();
-    successor.signature = signing::sign(&signature::Builtin, &device.signing, &bytes).unwrap();
+    successor.signature = signature::Builtin.sign(&device.signing, &bytes).unwrap();
 }
 
 /// Accepts `successor` alone at the next position and replays.
@@ -2027,12 +2028,12 @@ fn only_a_valid_removal_request_is_pending() {
     let mut by_laptop = valid.clone();
     by_laptop.id = ids::random_v4(&mut rng).unwrap();
     let bytes = by_laptop.signed_bytes(&env.application()).unwrap();
-    by_laptop.signature = signing::sign(&signature::Builtin, &laptop.signing, &bytes).unwrap();
+    by_laptop.signature = signature::Builtin.sign(&laptop.signing, &bytes).unwrap();
     let mut other_epoch = valid.clone();
     other_epoch.id = ids::random_v4(&mut rng).unwrap();
     other_epoch.epoch_id = ids::random_v4(&mut rng).unwrap();
     let bytes = other_epoch.signed_bytes(&env.application()).unwrap();
-    other_epoch.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
+    other_epoch.signature = signature::Builtin.sign(&phone.signing, &bytes).unwrap();
     for invalid in [tampered, by_laptop, other_epoch] {
         let mut with = ledger.clone();
         accept_request(&mut with, invalid.clone());
@@ -2248,7 +2249,7 @@ fn approval_codes_match_and_neither_nonce_can_be_changed() {
         &by_stranger.nonce,
     )
     .unwrap();
-    by_stranger.signature = signing::sign(&signature::Builtin, &stranger.signing, &bytes).unwrap();
+    by_stranger.signature = signature::Builtin.sign(&stranger.signing, &bytes).unwrap();
     for (name, bad) in [
         ("altered nonce", other_nonce),
         ("altered signature", tampered),
@@ -2278,7 +2279,7 @@ fn approval_codes_match_and_neither_nonce_can_be_changed() {
         &swapped.nonce,
     )
     .unwrap();
-    swapped.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
+    swapped.signature = signature::Builtin.sign(&phone.signing, &bytes).unwrap();
     assert_eq!(
         build::verify_possession(
             &writer,
@@ -2332,7 +2333,7 @@ fn private_verification_requires_the_signed_challenge_and_the_nonce() {
         &challenge.nonce,
     )
     .unwrap();
-    challenge.signature = signing::sign(&signature::Builtin, &tablet.signing, &bytes).unwrap();
+    challenge.signature = signature::Builtin.sign(&tablet.signing, &bytes).unwrap();
     assert_eq!(count(&resigned), 1, "only the tablet's approval verifies");
 
     let mut tampered = ledger.clone();
@@ -2367,7 +2368,7 @@ fn private_verification_requires_the_signed_challenge_and_the_nonce() {
         &proof.nonce,
     )
     .unwrap();
-    proof.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
+    proof.signature = signature::Builtin.sign(&phone.signing, &bytes).unwrap();
     assert_eq!(count(&renonced), 1);
 }
 
@@ -2438,7 +2439,7 @@ fn approve_refuses_a_request_other_than_the_challenged_one() {
         &reproof.nonce,
     )
     .unwrap();
-    reproof.signature = signing::sign(&signature::Builtin, &phone.signing, &bytes).unwrap();
+    reproof.signature = signature::Builtin.sign(&phone.signing, &bytes).unwrap();
     assert_eq!(
         build::approve(
             &writer, &state, &laptop, &challenge, &reproof, &swapped, &key, &mut rng

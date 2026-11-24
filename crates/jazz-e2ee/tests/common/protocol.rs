@@ -15,7 +15,7 @@ use jazz_e2ee::protocol::derive::{RecoveryKeys, RecoverySecret};
 use jazz_e2ee::protocol::device_account::DeviceAccountIdentity;
 use jazz_e2ee::protocol::domain::{AccountDomain, AppDomain};
 use jazz_e2ee::protocol::records::account::{AccountSealingKey, RecoveryRoot};
-use jazz_e2ee::protocol::{Accepted, Position, ProtocolResult, ids, signing};
+use jazz_e2ee::protocol::{Accepted, Position, ProtocolResult, ids};
 use jazz_e2ee::registry::Registry;
 
 use super::TestRandom;
@@ -116,7 +116,7 @@ pub fn sealing_key_record(
         .registry
         .signer(signer.signing.public.mechanism.as_mechanism())
         .unwrap();
-    record.signature = signing::sign(signer_impl, &signer.signing, &bytes).unwrap();
+    record.signature = signer_impl.sign(&signer.signing, &bytes).unwrap();
     record
 }
 

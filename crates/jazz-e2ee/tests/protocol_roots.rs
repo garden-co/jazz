@@ -7,6 +7,7 @@ mod common;
 
 use common::TestRandom;
 use common::protocol::{ALICE, Env, Ledger};
+use jazz_e2ee::agility::Signer as _;
 use jazz_e2ee::mechanisms::signature;
 use jazz_e2ee::protocol::account::build::{
     self, LocalDevice, ResetPolicy, RootAuthority, RotationTarget,
@@ -19,7 +20,7 @@ use jazz_e2ee::protocol::error::{
     IntrinsicContradiction, ProtocolError, RefusalCode, RootRejection,
 };
 use jazz_e2ee::protocol::records::account::{AccountKind, AccountRoot, PublicAccountSuccessor};
-use jazz_e2ee::protocol::{Accepted, Position, ids, signing};
+use jazz_e2ee::protocol::{Accepted, Position, ids};
 
 const SECRET: [u8; 32] = [7; 32];
 
@@ -542,7 +543,7 @@ fn invalid_rows_in_the_same_transaction_do_not_block_a_successor() {
 
     let sign = |row: &mut PublicAccountSuccessor, author: &LocalDevice| {
         let bytes = row.signed_bytes(&env.application()).unwrap();
-        row.signature = signing::sign(&signature::Builtin, &author.signing, &bytes).unwrap();
+        row.signature = signature::Builtin.sign(&author.signing, &bytes).unwrap();
     };
     let mut control = records.public.clone();
     control.id = ids::random_v4(&mut rng).unwrap();

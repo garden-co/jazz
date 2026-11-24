@@ -149,7 +149,7 @@ pub(super) fn check_sealed(
 
 pub(super) fn sign(registry: &Registry, key: &KeyPair, bytes: &[u8]) -> ProtocolResult<Vec<u8>> {
     let signer = registry.signer(key.public.mechanism.as_mechanism())?;
-    let signature = signing::sign(signer, key, bytes)?;
+    let signature = signer.sign(key, bytes)?;
     provider_check(read_back(signing::verify(
         registry,
         &key.public,
