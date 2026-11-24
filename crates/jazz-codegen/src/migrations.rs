@@ -8,8 +8,10 @@
 //! The diff is the one `jazz-tools migrations create` ran in TS
 //! (`dev/migrations.ts`), moved here so every language shares it.
 
-use jazz::tools::deployment::artifact::{self, json::Json};
-use jazz::tools::public_schema::{ColumnDescriptor, ColumnType, Schema, SchemaHash, TableSchema};
+use jazz::tools::deployment::artifact::{self, encryption, json::Json};
+use jazz::tools::public_schema::{
+    ColumnDescriptor, ColumnType, Schema, SchemaHash, TableName, TableSchema,
+};
 
 use crate::bindings;
 use crate::model::App;
@@ -837,6 +839,110 @@ pub fn diff_steps_json(from_json: &[u8], to_json: &[u8]) -> Result<String, Codeg
     };
     let steps = diff_steps(&read(from_json)?, &read(to_json)?)?;
     Ok(serde_json::to_string(&steps).expect("plain data"))
+}
+
+/// Check the encryption changes a migration stub can resolve before the
+/// author supplies defaults and chooses whether to rename columns.
+pub fn check_encryption_migration(from_json: &[u8], to_json: &[u8]) -> Result<(), CodegenError> {
+    let from = artifact::load_app(from_json).map_err(CodegenError::from_artifact)?;
+    let to = artifact::load_app(to_json).map_err(CodegenError::from_artifact)?;
+    let entries = |app: &artifact::AppDefinition| {
+        app.encryption()
+            .entries(&app.current_hash().to_string())
+            .cloned()
+    };
+    let before = entries(&from).unwrap_or_default();
+    let mut after = entries(&to).unwrap_or_default();
+    let (old, new) = (from.current_schema(), to.current_schema());
+    let refusal = |reason| CodegenError::new(format!("{}: {reason}", artifact::APP_FILE));
+    if from.current_hash() == to.current_hash() {
+        return encryption::check_redeclaration(old, &before, &after).map_err(refusal);
+    }
+    if bindings::differs_only_in_indexes(old, new) {
+        return encryption::check_index_transition((old, &before), &after).map_err(refusal);
+    }
+
+    let diff = diff_steps(old, new)?;
+    // The author decides these identities in the stub. The loader checks
+    // those columns once the author chooses a rename or an add/drop.
+    for table in &diff.migrate {
+        if let Some(entry) = after.get_mut(&table.table) {
+            for step in &table.steps {
+                if let ColumnStep::MaybeRenamed { column, .. } = step {
+                    entry.columns.remove(column);
+                    entry.equality.retain(|name| name != column);
+                }
+            }
+        }
+    }
+
+    let old_table = |name: &str| {
+        diff.rename_tables
+            .iter()
+            .find(|rename| rename.to == name)
+            .map(|rename| rename.from.clone())
+            .or_else(|| {
+                old.contains_key(&TableName::from(name))
+                    .then(|| name.to_owned())
+            })
+    };
+    let new_table = |name: &str| {
+        diff.rename_tables
+            .iter()
+            .find(|rename| rename.from == name)
+            .map(|rename| rename.to.clone())
+            .or_else(|| {
+                new.contains_key(&TableName::from(name))
+                    .then(|| name.to_owned())
+            })
+    };
+    let has_column = |schema: &Schema, table: &str, column: &str| {
+        schema.get(&TableName::from(table)).is_some_and(|table| {
+            table
+                .columns
+                .columns
+                .iter()
+                .any(|candidate| candidate.name_str() == column)
+        })
+    };
+    encryption::check_mapped_columns(
+        (old, &before),
+        &after,
+        old_table,
+        new_table,
+        |table, name| {
+            old_table(table)
+                .filter(|table| has_column(old, table, name))
+                .map(|_| name.to_owned())
+        },
+        |table, name| {
+            let next = new_table(table)?;
+            if has_column(new, &next, name) {
+                return Some(name.to_owned());
+            }
+            // A possible rename may preserve the declared space column.
+            let new_space = &after.get(&next)?.space;
+            if before.get(table)?.space != name {
+                return None;
+            }
+            diff.migrate
+                .iter()
+                .find(|t| t.table == next)?
+                .steps
+                .iter()
+                .find_map(|step| match step {
+                    ColumnStep::MaybeRenamed { column, candidates }
+                        if column == new_space
+                            && candidates.iter().any(|candidate| candidate == name) =>
+                    {
+                        Some(column.clone())
+                    }
+                    _ => None,
+                })
+        },
+        false,
+    )
+    .map_err(refusal)
 }
 
 /// The fields of the migration from `from` to `to`, after `name` and

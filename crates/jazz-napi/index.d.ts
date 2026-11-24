@@ -567,6 +567,9 @@ export declare function captureTextRange(text: string, version: number | undefin
  */
 export declare function checkClientMigrations(migrations: string, target: string): void
 
+/** Check encryption changes before writing a migration stub. */
+export declare function checkEncryptionMigration(fromJson: string, toJson: string): void
+
 /**
  * The options the generated TS bindings pass to `bindApp` (`{ source,
  * schema, relations }`, without the computed and transform callbacks), as

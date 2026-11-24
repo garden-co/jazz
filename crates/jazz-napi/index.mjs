@@ -11,6 +11,7 @@ export const {
   captureTextAnchor,
   captureTextRange,
   checkClientMigrations,
+  checkEncryptionMigration,
   compileApp,
   detachStore,
   EncryptionRuntime,

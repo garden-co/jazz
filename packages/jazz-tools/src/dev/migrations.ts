@@ -4,7 +4,6 @@ import { structuralBigInt } from "../runtime/structural-values.js";
 import { isDefinedMigration, witnessColumns, type DefinedMigration } from "../migrations.js";
 import { isDefinedTable } from "../schema-dsl/table.js";
 import {
-  EQUALITY_PREFIX,
   readableColumn,
   type ReadableJson,
   type ReadableTable,
@@ -17,6 +16,7 @@ async function jazzNapi(): Promise<{
   schemasAreCompatible(leftJson: string, rightJson: string): boolean;
   migrationDiff(fromJson: string, toJson: string): string;
   versionTables(engineSchemaJson: string): string;
+  checkEncryptionMigration(fromJson: string, toJson: string): void;
 }> {
   // A specifier bundlers can't follow: this module is Node tooling only.
   const specifier = "jazz-napi";
@@ -320,20 +320,6 @@ function renderTableSteps(
         break;
       case "add": {
         const descriptor = column(toTable, step.column);
-        const indexed = step.column.startsWith(EQUALITY_PREFIX)
-          ? step.column.slice(EQUALITY_PREFIX.length)
-          : undefined;
-        if (indexed !== undefined && encrypted.has(indexed)) {
-          // Its token column would be empty in the rows stored before it,
-          // so finding them by its value needs their tokens written first.
-          throw new Error(
-            `${table.table}.${indexed}: finding rows by an encrypted column's value ` +
-              "(.encrypted({ equality: true })) on a table that already has rows isn't supported yet. " +
-              "The rows stored before it have no equality tokens, and writing theirs needs their " +
-              "spaces' keys, which a migration doesn't hold. Declare it without equality, or put it " +
-              "on a new table.",
-          );
-        }
         if (encrypted.has(step.column)) {
           // Stored as required bytes. The empty ciphertext is what a cell no
           // writer sealed holds: the rows stored before the column read it
@@ -769,11 +755,13 @@ export async function listSnapshots(migrationsDir: string): Promise<SnapshotEntr
  */
 type EncryptionEntries = Record<string, ReadableJson>;
 
-function entriesOf(tables: Record<string, ReadableTable>): EncryptionEntries {
-  const out: EncryptionEntries = {};
+export function encryptionEntries<T>(
+  tables: Record<string, { encryption?: T }>,
+): Record<string, T> {
+  const entries: Record<string, T> = {};
   for (const [name, table] of Object.entries(tables))
-    if (table.encryption !== undefined) out[name] = table.encryption;
-  return out;
+    if (table.encryption !== undefined) entries[name] = table.encryption;
+  return entries;
 }
 
 /** The encrypted columns of `table` in `entries`. */
@@ -782,50 +770,11 @@ function encryptedColumns(entries: EncryptionEntries, table: string): Set<string
   return new Set(Object.keys(entry?.columns ?? {}));
 }
 
-/**
- * Refuse a required encrypted column without a default that `to` adds to a
- * table `from` already has: the rows stored before it would hold nothing it
- * could read as, and sealing a value for them needs their spaces' keys.
- * `fromColumns(table)` is the earlier version's columns of `table`, or
- * undefined when it has no such table.
- */
-function refuseRequiredEncryptedAdditions(
-  fromColumns: (table: string) => ReadonlySet<string> | undefined,
-  to: EncryptionEntries,
-  version: string,
-): void {
-  const refused: string[] = [];
-  for (const [table, entry] of Object.entries(to)) {
-    const before = fromColumns(table);
-    if (!before) continue;
-    const columns = ((entry as { columns?: Record<string, ReadableJson> }).columns ?? {}) as Record<
-      string,
-      ReadableJson
-    >;
-    for (const [column, declared] of Object.entries(columns)) {
-      if (before.has(column)) continue;
-      const optional =
-        typeof declared === "string"
-          ? declared.endsWith("?")
-          : (declared as { optional?: unknown } | null)?.optional === true;
-      const defaulted = typeof declared === "object" && declared !== null && "default" in declared;
-      if (!optional && !defaulted) refused.push(`${table}.${column}`);
-    }
-  }
-  if (refused.length === 0) return;
-  throw new Error(
-    `${refused.join(", ")}: a new encrypted column on a table that already has rows in version ${version} ` +
-      "must be optional or declare a default. Sealing a value for the rows stored before it needs their " +
-      "spaces' keys, which a migration doesn't hold. Make it optional (those rows read it as null) or give " +
-      "it a default (they read the default).",
-  );
-}
-
 function entriesFile(snapshotFile: string): string {
   return snapshotFile.replace(/\.json$/i, ".encryption.json");
 }
 
-function entriesText(entries: EncryptionEntries): string {
+export function encryptionEntriesText(entries: Record<string, unknown>): string {
   return `${JSON.stringify({ tables: entries }, null, 2)}\n`;
 }
 
@@ -904,66 +853,22 @@ function withEntries(
   return out;
 }
 
-/** JSON with object keys sorted, and an entry's `equality` list sorted: a declaration's identity. */
-function canonical(value: unknown, key?: string): string {
-  if (Array.isArray(value))
-    return `[${(key === "equality" ? [...value].sort() : value).map((item) => canonical(item)).join(",")}]`;
-  if (value && typeof value === "object")
-    return `{${Object.keys(value)
-      .sort()
-      .map((k) => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k], k)}`)
-      .join(",")}}`;
-  return JSON.stringify(value);
-}
-
-/**
- * How `current`'s encryption declarations change `previous`'s in ways no
- * version can express yet: an encrypted column's plaintext type (or its
- * default, or whether it is optional), or a table's space. When the stored
- * schema is the same (`sameStorage`), any change at all, since it would
- * otherwise reuse the version's hash unnoticed.
- */
-function encryptionChanges(
-  previous: EncryptionEntries,
-  current: EncryptionEntries,
-  sameStorage: boolean,
-): string[] {
-  const changes: string[] = [];
-  const shown = (entry: unknown, column: string) =>
-    JSON.stringify((entry as { columns?: Record<string, unknown> }).columns?.[column]);
-  for (const table of [...new Set([...Object.keys(previous), ...Object.keys(current)])].sort()) {
-    const before = previous[table] as Record<string, unknown> | undefined;
-    const after = current[table] as Record<string, unknown> | undefined;
-    if (before && after) {
-      if (before.space !== after.space || before.scope !== after.scope)
-        changes.push(
-          `${table}: its space changed (${before.scope} through ${before.space} to ${after.scope} through ${after.space})`,
-        );
-      const columns = (entry: Record<string, unknown>) =>
-        (entry.columns ?? {}) as Record<string, unknown>;
-      for (const column of Object.keys(columns(before)))
-        if (
-          column in columns(after) &&
-          canonical(columns(before)[column]) !== canonical(columns(after)[column])
-        )
-          changes.push(
-            `${table}.${column}: its plaintext type changed from ${shown(before, column)} to ${shown(after, column)}`,
-          );
-    }
-    if (sameStorage && changes.length === 0 && canonical(before) !== canonical(after))
-      changes.push(`${table}: its encryption declaration changed`);
-  }
-  return changes;
-}
-
-function refuseEncryptionChanges(changes: string[], version: string, sameStorage: boolean): void {
-  if (changes.length === 0) return;
-  throw new Error(
-    `The schema's encryption declarations differ from version ${version}'s` +
-      (sameStorage ? ", which stores the same columns" : "") +
-      `: ${changes.join("; ")}. Keep the declaration or copy the data into a new encrypted table ` +
-      "(docs/e2ee/encrypting-existing-data).",
-  );
+async function checkSnapshotEncryption(
+  migrationsDir: string,
+  previous: SnapshotEntry,
+  currentTables: Record<string, ReadableTable>,
+  currentEntries: EncryptionEntries,
+): Promise<void> {
+  const previousEntries = await snapshotEntries(migrationsDir, previous);
+  if (Object.keys(previousEntries).length === 0 && Object.keys(currentEntries).length === 0) return;
+  const { tables } = await snapshotToVersion(previous.schema);
+  const previousTables = withEntries(tables, previousEntries, shortSchemaHash(previous.hash));
+  const app = (tables: Record<string, ReadableTable>) =>
+    JSON.stringify({
+      $schema: "https://jazz.tools/schemas/jazz.app.v1.json",
+      tables: withoutTransforms(tables),
+    });
+  (await jazzNapi()).checkEncryptionMigration(app(previousTables), app(currentTables));
 }
 
 export interface MigrationHistory {
@@ -990,20 +895,17 @@ export async function loadMigrationHistory(options: {
 }): Promise<MigrationHistory> {
   const current = await snapshotFromVersion(options.currentTables);
   const currentShort = shortSchemaHash(current.hash);
-  const currentEntries = entriesOf(options.currentTables);
+  const currentEntries = encryptionEntries<ReadableJson>(options.currentTables);
   const snapshots = await listSnapshots(options.migrationsDir);
   // The current version's snapshot must declare what schema.ts declares:
   // the hash doesn't cover a plaintext type.
   const currentSnapshot = snapshots.filter((snapshot) => snapshot.hash === current.hash).at(-1);
   if (currentSnapshot)
-    refuseEncryptionChanges(
-      encryptionChanges(
-        await snapshotEntries(options.migrationsDir, currentSnapshot),
-        currentEntries,
-        true,
-      ),
-      currentShort,
-      true,
+    await checkSnapshotEncryption(
+      options.migrationsDir,
+      currentSnapshot,
+      options.currentTables,
+      currentEntries,
     );
   const files = await loadMigrationFiles(options.migrationsDir, options.loadModule);
   if (files.length === 0) return { history: {}, migrations: [], current: current.hash };
@@ -1083,20 +985,6 @@ export async function loadMigrationHistory(options: {
         progress = true;
       }
     }
-  }
-
-  for (const entry of files) {
-    const from = versions.get(entry.fromHash);
-    const to = versions.get(entry.toHash);
-    if (!from || !to) continue;
-    refuseRequiredEncryptedAdditions(
-      (table) =>
-        from[table]
-          ? new Set(Object.keys((from[table]!.columns ?? {}) as Record<string, unknown>))
-          : undefined,
-      entriesOf(to),
-      entry.fromHash,
-    );
   }
 
   const history: Record<string, ReadableVersion> = {};
@@ -1196,7 +1084,7 @@ export async function createMigration(options: {
 }): Promise<CreateMigrationResult> {
   const { migrationsDir } = options;
   const current = await snapshotFromVersion(options.currentTables);
-  const currentEntries = entriesOf(options.currentTables);
+  const currentEntries = encryptionEntries<ReadableJson>(options.currentTables);
   const snapshots = await listSnapshots(migrationsDir);
   const timestamped = snapshots
     .filter((entry) => entry.timestamp)
@@ -1222,7 +1110,7 @@ export async function createMigration(options: {
     if (Object.keys(currentEntries).length > 0)
       await writeFile(
         join(migrationsDir, "snapshots", entriesFile(snapshotFile)),
-        entriesText(currentEntries),
+        encryptionEntriesText(currentEntries),
       );
     return `snapshots/${snapshotFile}`;
   };
@@ -1230,24 +1118,8 @@ export async function createMigration(options: {
   if (!baseline) {
     return { changed: true, initial: true, toHash: current.hash, snapshot: await writeSnapshot() };
   }
-  refuseEncryptionChanges(
-    encryptionChanges(
-      await snapshotEntries(migrationsDir, baseline),
-      currentEntries,
-      baseline.hash === current.hash,
-    ),
-    shortSchemaHash(baseline.hash),
-    baseline.hash === current.hash,
-  );
+  await checkSnapshotEncryption(migrationsDir, baseline, options.currentTables, currentEntries);
   if (baseline.hash === current.hash) return { changed: false };
-  refuseRequiredEncryptedAdditions(
-    (table) =>
-      baseline.schema[table]
-        ? new Set(baseline.schema[table]!.columns.map((column) => column.name))
-        : undefined,
-    currentEntries,
-    shortSchemaHash(baseline.hash),
-  );
   if (!(await requiresMigration(baseline.schema, current.schema))) {
     return {
       changed: true,

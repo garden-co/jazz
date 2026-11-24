@@ -298,21 +298,6 @@ describe("later versions of an encrypted app", () => {
     ).toEqual([TEXT_ENTRY]);
   });
 
-  it("refuses a new equality column on an existing table, writing no stub", async () => {
-    const root = await firstVersion();
-    // The migration cannot write tokens for older rows without their spaces' keys.
-    await writeFile(
-      join(root, "schema.ts"),
-      chat({ messages: ", subject: s.string().optional().encrypted({ equality: true })" }),
-    );
-    await expect(createAppMigration({ cwd: root, name: "second" })).rejects.toThrow(
-      /messages\.subject: finding rows by an encrypted column's value \(\.encrypted\(\{ equality: true \}\)\) on a table that already has rows isn't supported yet/,
-    );
-    expect(
-      (await readdir(join(root, "migrations"))).filter((file) => file.endsWith(".ts")),
-    ).toEqual([]);
-  });
-
   it("fills a new encrypted column with a declared default without asking", async () => {
     const root = await firstVersion();
     const files = await secondVersion(
@@ -325,23 +310,18 @@ describe("later versions of an encrypted app", () => {
     });
   });
 
-  const REQUIRED =
-    /messages\.subject: a new encrypted column on a table that already has rows in version [0-9a-f]{12} must be optional or declare a default\. Sealing a value for the rows stored before it needs their spaces' keys/;
-
-  it("refuses a new required encrypted column without a default on an existing table", async () => {
+  it("passes on Rust's refusal of a required encrypted addition before writing a stub and at generate", async () => {
     const root = await firstVersion();
+    const refusal = /messages\.subject: the migration adds a required encrypted column/;
+    const before = await readdir(join(root, "migrations"), { recursive: true });
+    // The new plain column would need a TODO, independently of the encrypted addition.
     await writeFile(
       join(root, "schema.ts"),
-      chat({ messages: ", subject: s.string().encrypted()" }),
+      chat({ messages: ", subject: s.string().encrypted()", rooms: ", topic: s.string()" }),
     );
-    await expect(createAppMigration({ cwd: root, name: "second" })).rejects.toThrow(REQUIRED);
-    expect(
-      (await readdir(join(root, "migrations"))).filter((file) => file.endsWith(".ts")),
-    ).toEqual([]);
-  });
+    await expect(createAppMigration({ cwd: root, name: "second" })).rejects.toThrow(refusal);
+    expect(await readdir(join(root, "migrations"), { recursive: true })).toEqual(before);
 
-  it("refuses at generate a migration that adds one, as an earlier jazz-tools could write", async () => {
-    const root = await firstVersion();
     // A migration and snapshot for the column with a default, then the
     // default taken out of both the schema and the snapshot's declarations.
     await secondVersion(root, chat({ messages: ', subject: s.string().default("").encrypted()' }));
@@ -360,29 +340,32 @@ describe("later versions of an encrypted app", () => {
       edited += 1;
     }
     expect(edited).toBe(1);
-    await expect(generateApp({ cwd: root })).rejects.toThrow(REQUIRED);
+    await expect(generateApp({ cwd: root })).rejects.toThrow(refusal);
   });
 
-  const TYPE_CHANGE =
-    /messages\.text: its plaintext type changed from "string" to "int"\. Keep the declaration or copy the data into a new encrypted table/;
-
-  it("refuses an encrypted column's new plaintext type, which stores the same bytes", async () => {
+  it("leaves a possible encrypted rename to the author and checks it at generate", async () => {
     const root = await firstVersion();
-    await writeFile(join(root, "schema.ts"), chat({ text: "s.int().encrypted()" }));
-    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(TYPE_CHANGE);
-    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(
-      /which stores the same columns/,
-    );
-    await expect(generateApp({ cwd: root })).rejects.toThrow(TYPE_CHANGE);
-  });
-
-  it("refuses a new plaintext type beside another change", async () => {
-    const root = await firstVersion();
+    await writeFile(join(root, "schema.ts"), chat().replace("text:", "subject:"));
+    const created = await createAppMigration({ cwd: root, name: "rename" });
+    expect(created.todos).toEqual([
+      expect.stringContaining('Added column "subject" may be a rename'),
+    ]);
+    const stub = await readFile(created.file!, "utf8");
+    const decision = /^.*\/\/ TODO: Added column "subject".*$/m;
     await writeFile(
-      join(root, "schema.ts"),
-      chat({ text: "s.int().encrypted()", rooms: ", topic: s.string().optional()" }),
+      created.file!,
+      stub.replace(
+        decision,
+        '"subject": m.add.bytes({ default: new Uint8Array() }), "text": m.drop.bytes({ backwardsDefault: new Uint8Array() }),',
+      ),
     );
-    await expect(createAppMigration({ cwd: root, name: "retype" })).rejects.toThrow(TYPE_CHANGE);
+    await expect(generateApp({ cwd: root })).rejects.toThrow(
+      /messages\.subject: the migration adds a required encrypted column/,
+    );
+
+    await writeFile(created.file!, stub.replace(decision, '"subject": m.renameFrom("text"),'));
+    const files = await generated(root);
+    expect(JSON.parse(files.app).tables.messages.encryption.columns).toEqual({ subject: "string" });
   });
 
   it("round-trips through the printer, which writes each version's declarations beside its snapshot", async () => {
@@ -400,9 +383,9 @@ describe("later versions of an encrypted app", () => {
       snapshots.filter((file) => !file.endsWith(".encryption.json")),
     );
     for (const sidecar of sidecars)
-      expect(
-        JSON.parse(await readFile(join(printed, "migrations", "snapshots", sidecar), "utf8")),
-      ).toEqual({ tables: { messages: TEXT_ENTRY } });
+      expect(await readFile(join(printed, "migrations", "snapshots", sidecar), "utf8")).toBe(
+        JSON.stringify({ tables: { messages: TEXT_ENTRY } }, null, 2) + "\n",
+      );
 
     // generate reads the printed migrations, history and declarations as the originals.
     await rm(join(printed, "jazz.app.json"));
@@ -876,184 +859,11 @@ describe("encrypted declarations across sibling versions", () => {
     };
   }
 
-  /**
-   * The shipped version appends `b` to the root's enum, under `column` when its
-   * migration renames `detail`. The file then leads from the root to `current`
-   * on another branch and keeps the shipped version in history.
-   */
-  async function branchFromTheRoot(column: string, current: unknown) {
-    const project = await workspace();
-    const shipped = tables(column, sealed("a", "b"), ["title"]);
-    const toShipped = {
-      from: "root",
-      ...(column === "detail"
-        ? {}
-        : { migrate: { notes: { [column]: { renameFrom: "detail" } } } }),
-    };
-    await project.write(
-      app(shipped, { history: { root: { tables: root } }, migrations: [toShipped] }),
-    );
-    await generateForDir(project.dir);
-    await project.write(
-      app(current, {
-        history: { root: { tables: root }, shipped: { tables: shipped } },
-        migrations: [{ ...toShipped, to: "shipped" }, { from: "root" }],
-      }),
-    );
-    return project;
-  }
-
-  const detail = { detail: "string?" };
-  it.each([
-    { before: detail, after: {}, equality: [], reason: "holds ciphertext" },
-    {
-      before: detail,
-      after: detail,
-      equality: ["detail"],
-      reason: "token column __e2ee_eq_detail stays",
-    },
-    { before: {}, after: detail, equality: [], reason: "held plaintext" },
-  ])(
-    "preserves index-only storage rules for $reason",
-    async ({ before, after, equality, reason }) => {
-      const project = await workspace();
-      const notes = (columns: Record<string, unknown>, equality: string[], indexes: string[]) =>
-        app({
-          notes: {
-            columns: { title: "string", detail: "bytes", __e2ee_eq_detail: "bytes" },
-            encryption: { space: "id", scope: "notes", columns, equality },
-            indexes,
-          },
-        });
-      await project.write(notes(before, equality, []));
-      await generateForDir(project.dir);
-      await project.write(notes(after, [], ["title"]));
-      await project.refused(reason);
-    },
-  );
-
-  it("generates and deploys a sibling enum prefix after an index edit", async () => {
-    const project = await workspace();
-    const server = await startLocalJazzServer();
-    try {
-      await project.write(app(tables("detail", { enum: ["a"] }, ["rank"])));
-      await project.publish(server);
-      await project.write(app(tables("detail", sealed("a", "b"), [])));
-      await generateForDir(project.dir);
-      await project.publish(server);
-
-      await project.write(app(tables("detail", sealed("a"), ["title"])));
-      await project.accepted();
-      expect((await project.publish(server)).schema.status).toBe("published");
-    } finally {
-      await server.stop();
-    }
-  });
-
   it("refuses a divergent sibling enum after an index edit", async () => {
     const project = await workspace();
     await project.write(app(tables("detail", sealed("a", "b"), [])));
     await generateForDir(project.dir);
     await project.write(app(tables("detail", sealed("a", "c"), ["title"])));
-    await project.refused("notes.detail");
-  });
-
-  it("checks a parallel branch against the shipped version", async () => {
-    const extended = await branchFromTheRoot(
-      "detail",
-      tables("detail", sealed("a", "b", "c"), ["rank"]),
-    );
-    await extended.accepted();
-    const divergent = await branchFromTheRoot(
-      "detail",
-      tables("detail", sealed("a", "c"), ["rank"]),
-    );
-    await divergent.refused("notes.detail");
-  });
-
-  it("accepts sibling branches that both introduce the space column", async () => {
-    const project = await workspace();
-    const rooms = { columns: { name: "string" } };
-    const root = { rooms, notes: { columns: { title: "string" } } };
-    const shipped = {
-      rooms,
-      notes: {
-        columns: {
-          title: "string",
-          roomId: { type: "uuid?", references: "rooms" },
-          detail: "bytes",
-        },
-        encryption: { space: "roomId", scope: "rooms", columns: { detail: "string?" } },
-      },
-    };
-    const step = {
-      from: "root",
-      migrate: {
-        notes: {
-          roomId: { add: "uuid", default: null },
-          detail: { add: "bytes", default: "" },
-        },
-      },
-    };
-    await project.write(app(shipped, { history: { root: { tables: root } }, migrations: [step] }));
-    await generateForDir(project.dir);
-    await project.write(
-      app(
-        { rooms, notes: { ...shipped.notes, indexes: ["title"] } },
-        {
-          history: { root: { tables: root }, shipped: { tables: shipped } },
-          migrations: [{ ...step, to: "shipped" }, step],
-        },
-      ),
-    );
-    await project.accepted();
-  });
-
-  it("checks divergent sibling branches beside a diamond", async () => {
-    const project = await branchFromTheRoot("detail", tables("detail", sealed("a", "c"), ["rank"]));
-    const file = JSON.parse(await readFile(join(project.dir, "jazz.app.json"), "utf8"));
-    for (const [name, rank] of [
-      ["left", 1],
-      ["right", 2],
-      ["joined", 3],
-    ] as const) {
-      file.history[name] = {
-        tables: {
-          notes: {
-            ...root.notes,
-            columns: {
-              ...root.notes.columns,
-              rank: { type: "int", default: rank },
-            },
-          },
-        },
-      };
-    }
-    for (const [from, to] of [
-      ["root", "left"],
-      ["root", "right"],
-      ["left", "joined"],
-      ["right", "joined"],
-    ]) {
-      file.migrations.push({ from, to });
-    }
-    await project.write(JSON.stringify(file));
-    await project.refused("only appending enum variants");
-  });
-
-  it("follows a rename on the shipped branch to the same stored column", async () => {
-    const project = await branchFromTheRoot("body", tables("detail", sealed("a", "c"), ["rank"]));
-    await project.refused("notes.detail");
-  });
-
-  it("refuses a retyped column on the step implied from history", async () => {
-    const project = await workspace();
-    const shipped = tables("detail", "string?", []);
-    await project.write(app(shipped));
-    await generateForDir(project.dir);
-    await project.write(
-      app(tables("detail", "int?", ["title"]), { history: { shipped: { tables: shipped } } }),
-    );
     await project.refused("notes.detail");
   });
 

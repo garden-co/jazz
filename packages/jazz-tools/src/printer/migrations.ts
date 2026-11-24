@@ -5,6 +5,7 @@
  * with `<snapshot>.encryption.json` beside the snapshot of each version that
  * declares encryption: a snapshot holds only what is stored.
  */
+import { encryptionEntries, encryptionEntriesText } from "../dev/migrations.js";
 import type { AppJson, ColumnJson, MigrateOpJson, MigrationJson, TableJson } from "./app-json.js";
 import { jsLiteral, member, propKey } from "./names.js";
 import type { Unsupported } from "./permissions.js";
@@ -71,7 +72,7 @@ export async function printMigrations(
     files[`${file}.json`] = JSON.stringify(snapshot.schema, null, 2) + "\n";
     const entries = encryptionEntries(tablesOf(name || undefined)!);
     if (Object.keys(entries).length > 0)
-      files[`${file}.encryption.json`] = JSON.stringify({ tables: entries }, null, 2) + "\n";
+      files[`${file}.encryption.json`] = encryptionEntriesText(entries);
   }
 
   migrations.forEach((migration, index) => {
@@ -102,20 +103,6 @@ export async function printMigrations(
     );
   });
   return { files, unsupported };
-}
-
-/**
- * A version's encryption entries, by table, as `migrations create` writes
- * them beside its snapshot: the hash doesn't cover a plaintext type, so
- * `migrations` refuses a version that has Jazz's system tables without them.
- */
-function encryptionEntries(
-  tables: Record<string, TableJson>,
-): Record<string, NonNullable<TableJson["encryption"]>> {
-  const out: Record<string, NonNullable<TableJson["encryption"]>> = {};
-  for (const [name, table] of Object.entries(tables))
-    if (table.encryption !== undefined) out[name] = table.encryption;
-  return out;
 }
 
 function printStub(
