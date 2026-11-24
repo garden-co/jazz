@@ -369,7 +369,7 @@ export const ciPartitions = Object.freeze({
     ]),
     command("jazz-wasm encryption tests", "bash", [
       "-lc",
-      "unset RUSTC_WRAPPER; exec wasm-pack test --node crates/jazz-wasm",
+      "unset RUSTC_WRAPPER; exec dev/ci/wasm-pack-test.sh --node crates/jazz-wasm",
     ]),
     // Run jazz-core's integration tests without the client encryption hooks,
     // which the workspace run above unifies on through its binding crates.

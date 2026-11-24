@@ -338,7 +338,7 @@ test("Rust partition runs the NAPI and wasm encryption tests", () => {
   assert.equal(wasm.executable, "bash");
   assert.match(
     wasm.args.join(" "),
-    /unset RUSTC_WRAPPER;.*wasm-pack test --node crates\/jazz-wasm/,
+    /unset RUSTC_WRAPPER;.*dev\/ci\/wasm-pack-test.sh --node crates\/jazz-wasm/,
   );
 });
 

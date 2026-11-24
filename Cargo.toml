@@ -99,6 +99,13 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# The browser SQLite is C built by sqlite-wasm-rs. At -O0 its VDBE loop
+# (sqlite3VdbeExec) needs over 50,000 wasm locals, more than wasm-bindgen's
+# parser and V8 accept, so a dev-profile wasm test build cannot load. cc-rs
+# follows this opt-level.
+[profile.dev.package.sqlite-wasm-rs]
+opt-level = 1
+
 # Opt into full debugger metadata with `--profile debugging`.
 [profile.debugging]
 inherits = "dev"
