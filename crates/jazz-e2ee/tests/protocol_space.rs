@@ -16,6 +16,7 @@ use common::mechanisms::{
     FLAKY_SEAL, FLAKY_SIGN, FlakyWrapper, OTHER_SEAL, OTHER_SIGN, UNROUTED_SEAL, UNROUTED_WRAP,
     custom_registry, flaky_registry, relabelled, sealing_with,
 };
+use common::protocol::sealing_key_record;
 use common::space::*;
 use jazz_e2ee::agility::{KeySealer, KeyWrapper, MechanismConfig};
 use jazz_e2ee::context::{CryptoContext, frame_record};
@@ -31,7 +32,7 @@ use jazz_e2ee::protocol::records::space::{SpaceAddress, SpaceDelivery};
 use jazz_e2ee::protocol::space::build::{self, Author};
 use jazz_e2ee::protocol::space::chain::select_root;
 use jazz_e2ee::protocol::space::members::{
-    self, DELIVERY_BATCH, EnvelopeSource, ReplayedSpaceChain, lacking, rotation_mark,
+    self, DELIVERY_BATCH, EnvelopeSource, ReplayedSpaceChain, lacking_held, rotation_mark,
     rotation_recipients,
 };
 use jazz_e2ee::protocol::space::{
@@ -64,12 +65,17 @@ fn space(seed: u64, members: &[&str]) -> World {
 fn lacking_of(world: &World) -> Vec<(String, Vec<String>)> {
     let read = world.read();
     let chain = read.chain(world).unwrap();
-    lacking(&chain, &read.space, &read.directory(world))
-        .unwrap()
-        .lacking
-        .into_iter()
-        .map(|entry| (entry.account_id, entry.epoch_ids))
-        .collect()
+    lacking_held(
+        &chain,
+        &read.space,
+        &read.directory(world),
+        &world.acquire(ALICE).keys,
+    )
+    .unwrap()
+    .lacking
+    .into_iter()
+    .map(|entry| (entry.account_id, entry.epoch_ids))
+    .collect()
 }
 
 fn mark_of(world: &World) -> members::RotationMark {
@@ -591,9 +597,14 @@ fn a_reset_member_receives_the_current_version_again() {
     assert_eq!(world.space, space_rows, "no space table changed");
     let read = world.read();
     let chain = read.chain(&world).unwrap();
-    let missing = lacking(&chain, &read.space, &read.directory(&world))
-        .unwrap()
-        .lacking;
+    let missing = lacking_held(
+        &chain,
+        &read.space,
+        &read.directory(&world),
+        &world.acquire(ALICE).keys,
+    )
+    .unwrap()
+    .lacking;
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0].account_id, BOB);
     assert_eq!(missing[0].generation, Some(1));
@@ -717,27 +728,18 @@ fn a_member_receives_the_version_once_its_sealing_key_appears() {
     let space_rows = world.space.clone();
     let own = world.own(BOB);
     world.with_account(BOB, |entry, rng| {
-        let builtin = common::protocol::Env::with(
-            entry.env.registry.clone(),
-            MechanismConfig::default(),
-            BOB,
-        );
-        let sealing = entry
-            .ledger
-            .replay(&entry.env)
-            .sealing_keys()
+        let public_key = derive::account_sealing_key_pair(&key_seal::Builtin, own.key.key())
             .unwrap()
-            .unwrap();
-        let record = jazz_e2ee::protocol::account::build::later_account_sealing_key(
-            &builtin.writer(),
-            &sealing,
-            &own.state,
+            .public
+            .bytes;
+        let record = sealing_key_record(
+            &entry.env,
             &entry.device,
-            &own.key,
+            own.state.epoch_id(),
+            BUILTIN,
+            public_key,
             rng,
-        )
-        .unwrap()
-        .unwrap();
+        );
         let at = entry.ledger.next();
         entry
             .ledger
@@ -1408,7 +1410,10 @@ fn assert_inconsistent(
         inconsistent
     );
     assert_eq!(members::holders(chain, ledger, 0).err(), inconsistent);
-    assert_eq!(lacking(chain, ledger, directory).err(), inconsistent);
+    assert_eq!(
+        lacking_held(chain, ledger, directory, &SpaceKeys::new(chain)).err(),
+        inconsistent
+    );
     assert_eq!(rotation_mark(chain, ledger, directory).err(), inconsistent);
     assert_eq!(
         rotation_recipients(chain, ledger, directory, ALICE, BUILTIN, &mut rng).err(),
@@ -1449,10 +1454,15 @@ fn a_chain_ledger_and_directory_of_different_reads_are_inconsistent_evidence() {
             .needs_rotation()
     );
     assert!(
-        lacking(&new_chain, &new.space, &new_directory)
-            .unwrap()
-            .lacking
-            .is_empty()
+        lacking_held(
+            &new_chain,
+            &new.space,
+            &new_directory,
+            &world.acquire(ALICE).keys
+        )
+        .unwrap()
+        .lacking
+        .is_empty()
     );
     let recipients = rotation_recipients(
         &new_chain,
@@ -1495,7 +1505,10 @@ fn a_chain_ledger_and_directory_of_different_reads_are_inconsistent_evidence() {
         (&old_chain, &old.space, &new_directory),
     ] {
         assert_eq!(rotation_mark(chain, ledger, directory).err(), inconsistent);
-        assert_eq!(lacking(chain, ledger, directory).err(), inconsistent);
+        assert_eq!(
+            lacking_held(chain, ledger, directory, &SpaceKeys::new(chain)).err(),
+            inconsistent
+        );
         assert_eq!(
             rotation_recipients(chain, ledger, directory, ALICE, BUILTIN, &mut rng).err(),
             inconsistent
@@ -1549,7 +1562,7 @@ fn a_row_beyond_the_cut_is_inconsistent_evidence() {
     let chain = read.chain(&world).unwrap();
     let directory = read.directory(&world);
     assert_eq!(
-        lacking(&chain, &read.space, &directory)
+        lacking_held(&chain, &read.space, &directory, &world.acquire(ALICE).keys)
             .unwrap()
             .lacking
             .into_iter()
@@ -1580,7 +1593,7 @@ fn duplicate_rows_are_inconsistent_evidence_for_the_member_helpers() {
     let chain = read.chain(&world).unwrap();
     let directory = read.directory(&world);
     assert!(
-        lacking(&chain, &read.space, &directory)
+        lacking_held(&chain, &read.space, &directory, &world.acquire(ALICE).keys)
             .unwrap()
             .lacking
             .is_empty()
@@ -2227,29 +2240,20 @@ fn sealing_key_records_at_one_position_are_ordered_by_id() {
     let v0 = world.current();
     let own = world.own(BOB);
     let ids = world.with_account(BOB, |entry, rng| {
-        let builtin = common::protocol::Env::with(
-            entry.env.registry.clone(),
-            MechanismConfig::default(),
-            BOB,
-        );
-        let sealing = entry
-            .ledger
-            .replay(&entry.env)
-            .sealing_keys()
+        let public_key = derive::account_sealing_key_pair(&key_seal::Builtin, own.key.key())
             .unwrap()
-            .unwrap();
+            .public
+            .bytes;
         let mut records: Vec<_> = (0..2)
             .map(|_| {
-                jazz_e2ee::protocol::account::build::later_account_sealing_key(
-                    &builtin.writer(),
-                    &sealing,
-                    &own.state,
+                sealing_key_record(
+                    &entry.env,
                     &entry.device,
-                    &own.key,
+                    own.state.epoch_id(),
+                    BUILTIN,
+                    public_key.clone(),
                     rng,
                 )
-                .unwrap()
-                .unwrap()
             })
             .collect();
         records.sort_by(|a, b| a.id.cmp(&b.id));
@@ -2309,7 +2313,7 @@ fn helpers(world: &World, registry: &Registry, left_out: Option<&str>) -> Helper
         .unwrap();
     let mut rng = TestRandom(1);
     Helpers {
-        lacking: lacking(&chain, &read.space, &directory),
+        lacking: lacking_held(&chain, &read.space, &directory, &world.acquire(ALICE).keys),
         mark: rotation_mark(&chain, &read.space, &directory),
         recipients: rotation_recipients(&chain, &read.space, &directory, ALICE, BUILTIN, &mut rng),
     }
@@ -2495,14 +2499,17 @@ fn a_read_for_one_account_serves_only_that_accounts_acquisition() {
         members::envelopes(&chain, &bobs, 0, false).err(),
         inconsistent
     );
-    assert_eq!(lacking(&chain, &bobs, &directory).err(), inconsistent);
+    assert_eq!(
+        lacking_held(&chain, &bobs, &directory, &SpaceKeys::new(&chain)).err(),
+        inconsistent
+    );
     assert_eq!(rotation_mark(&chain, &bobs, &directory).err(), inconsistent);
     assert_eq!(
         rotation_recipients(&chain, &bobs, &directory, ALICE, BUILTIN, &mut rng).err(),
         inconsistent
     );
     // The whole space's read serves every helper.
-    assert!(lacking(&chain, &whole.space, &directory).is_ok());
+    assert!(lacking_held(&chain, &whole.space, &directory, &world.acquire(ALICE).keys).is_ok());
     assert!(
         acquire(&chain, &whole.space, &directory, &alice.epoch_keys)
             .unwrap()
@@ -2758,13 +2765,6 @@ fn a_delivery_sealed_to_a_non_derived_record_is_reported_against_the_record() {
         own.epoch_keys.non_derived_sealing_keys(),
         std::slice::from_ref(&reported.sealing_key)
     );
-    // A self-delivery never seals to the record.
-    assert_eq!(
-        read.directory(&world)
-            .own_recipient(&own.epoch_keys, BUILTIN)
-            .unwrap(),
-        None
-    );
 
     // A delivery damaged in transit to the same record is not the
     // sender's either; to a record that derives, it would be.
@@ -2813,38 +2813,18 @@ fn a_record_published_after_the_keys_were_taken_still_takes_the_blame() {
     // select it.
     let own = world.own(BOB);
     let record = world.with_account(BOB, |entry, rng| {
-        let builtin = common::protocol::Env::with(
-            entry.env.registry.clone(),
-            MechanismConfig::default(),
-            BOB,
-        );
-        let sealing = entry
-            .ledger
-            .replay(&entry.env)
-            .sealing_keys()
-            .unwrap()
-            .unwrap();
-        let mut record = jazz_e2ee::protocol::account::build::later_account_sealing_key(
-            &builtin.writer(),
-            &sealing,
-            &own.state,
-            &entry.device,
-            &own.key,
-            rng,
-        )
-        .unwrap()
-        .unwrap();
-        record.public_key = derive::account_sealing_key_pair(&key_seal::Builtin, &[9; 32])
+        let public_key = derive::account_sealing_key_pair(&key_seal::Builtin, &[9; 32])
             .unwrap()
             .public
             .bytes;
-        let bytes = record.signed_bytes(&entry.env.application()).unwrap();
-        let signer = entry
-            .env
-            .registry
-            .signer(entry.device.signing.public.mechanism.as_mechanism())
-            .unwrap();
-        record.signature = signing::sign(signer, &entry.device.signing, &bytes).unwrap();
+        let record = sealing_key_record(
+            &entry.env,
+            &entry.device,
+            own.state.epoch_id(),
+            BUILTIN,
+            public_key,
+            rng,
+        );
         let at = entry.ledger.next();
         entry
             .ledger

@@ -326,29 +326,6 @@ impl<'a> AccountReplay<'a> {
         Ok(state)
     }
 
-    /// Whether `device_id` was active with account epoch `epoch_id` at
-    /// `position`.
-    pub fn author_active_at(
-        &self,
-        position: Position,
-        device_id: &str,
-        epoch_id: &str,
-    ) -> ProtocolResult<bool> {
-        Ok(self
-            .as_of(position)?
-            .is_some_and(|state| state.is_active_in(device_id, epoch_id)))
-    }
-
-    /// The account's generation as of `position`, if it had a root then.
-    pub fn generation_at(&self, position: Position) -> ProtocolResult<Option<u64>> {
-        Ok(self.as_of(position)?.map(|state| state.generation))
-    }
-
-    /// The canonical root at the cut, if the account has a counting root.
-    pub fn canonical_root(&self) -> ProtocolResult<Option<Accepted<AccountRoot>>> {
-        Ok(self.select_roots(self.ledger)?.chain.pop())
-    }
-
     /// The roots at the cut that do not count, with their reasons.
     pub fn rejected_roots(&self) -> ProtocolResult<Vec<RejectedRoot>> {
         Ok(self.select_roots(self.ledger)?.rejected)
