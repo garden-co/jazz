@@ -15,7 +15,7 @@ between external stores are separate decisions.
 Every persistent core requires a `blobs` destination. Choose `"sqlite"` to keep
 large-value bytes inline. For Cloudflare,
 configure the Worker that exports `JazzCore`; every connecting backend uses
-that core's configuration. Native SQLite supports this configuration. The Sandbox and DO changes are listed below.
+that core's configuration. Native SQLite and Vercel Sandbox support explicit bucket credentials. The remaining changes apply to Durable Objects.
 
 **Native SQLite with Vercel Blob.** The Node backend reads the token from its
 environment and passes its value to `vercelBlob()`.
@@ -96,12 +96,6 @@ export const JazzCore = createJazzCore({
   Bucket credentials are separate from the credential admitting a backend to Jazz.
 
 ## Remaining work
-
-### 3. Complete Vercel Sandbox support
-
-Preserve OIDC defaults for AWS S3 and
-Vercel Blob and allow explicit credentials for services such as R2's S3
-endpoint. Verify external destinations across a Sandbox restart.
 
 ### 4. Separate DO chunk handling from R2 access
 

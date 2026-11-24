@@ -15,7 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { testApp } from "../testing/index.js";
 import { startLocalJazzServer } from "../dev/dev-server.js";
 import { fetchFor } from "../runtime/in-process-transport.js";
-import { createJazz, files, memory, remote, vercel, vercelBlob } from "./index.js";
+import { createJazz, files, memory, remote, s3, vercel, vercelBlob } from "./index.js";
 import { HANDSHAKE_TIMEOUT_MS } from "../runtime/native-runtime/websocket.js";
 import {
   newerVersion,
@@ -94,6 +94,7 @@ async function startTrustedCore(appId: string) {
  */
 function fakeVercel(core: { appId: string; url: string }) {
   const calls: string[] = [];
+  const launches: Parameters<SandboxHandle["runCommand"]>[0][] = [];
   const state = {
     exists: false,
     status: "stopped",
@@ -138,7 +139,9 @@ function fakeVercel(core: { appId: string; url: string }) {
         state.timeout += ms;
       },
     }),
-    runCommand: async ({ args }) => {
+    runCommand: async (command) => {
+      launches.push(command);
+      const { args } = command;
       const scriptPath = /exec bash (\S+)/.exec(args.at(-1)!)![1]!;
       const script = files.get(scriptPath)!.toString();
       const startId = scriptPath.replace(/^.*\//, "").replace(/\.sh$/, "");
@@ -225,7 +228,7 @@ function fakeVercel(core: { appId: string; url: string }) {
       },
     },
   };
-  return { sdk, calls, state, files };
+  return { sdk, calls, state, files, launches };
 }
 
 function onVercel(env: Record<string, string>) {
@@ -245,6 +248,85 @@ function onVercel(env: Record<string, string>) {
 }
 
 describe("vercel() store", () => {
+  it.each([
+    {
+      blobs: s3({
+        bucket: "chunks",
+        region: "auto",
+        endpoint: "https://bucket.example",
+        credentials: {
+          accessKeyId: "test-key",
+          secretAccessKey: "test-secret",
+          sessionToken: "test-session",
+        },
+      }),
+      expectedEnv: {
+        AWS_ACCESS_KEY_ID: "test-key",
+        AWS_SECRET_ACCESS_KEY: "test-secret",
+        AWS_SESSION_TOKEN: "test-session",
+      },
+      mode: { kind: "s3", roleFromWorkload: false, endpoint: "https://bucket.example" },
+    },
+    {
+      blobs: vercelBlob({ credentials: { readWriteToken: "vercel_blob_rw_Example_test" } }),
+      expectedEnv: { BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_Example_test", VERCEL_OIDC_TOKEN: "" },
+      mode: { kind: "vercel-blob", tokenFromWorkload: false, storeId: "Example" },
+    },
+  ])(
+    "supplies $mode.kind credentials on first start and resume",
+    async ({ blobs, expectedEnv, mode }) => {
+      const core = await startTrustedCore(randomUUID());
+      const fake = fakeVercel(core);
+      const checks: { url: string; authorization: string | null }[] = [];
+      const open = () =>
+        openVercelCore({
+          options: {
+            sdk: fake.sdk,
+            backendCredential: core.credential,
+            namespace: "test",
+            region: "iad1",
+            blobs,
+          },
+          openRemote: ({ url }) => ({ serverUrl: url, close: async () => {} }) as never,
+          version: "1.2.3",
+          env: { VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test", BLOB_STORE_ID: "other" },
+          fetch: async (input, init) => {
+            checks.push({
+              url: String(input),
+              authorization: new Headers(init?.headers).get("authorization"),
+            });
+            return new Response("production");
+          },
+        });
+      await (await open()).close();
+      fake.state.status = "stopped";
+      fake.state.running = undefined;
+      await (await open()).close();
+      expect(fake.calls).toContain("resume jazz-prj-test-test");
+      if (blobs.kind === "vercel-blob") {
+        const claim = {
+          url: "https://example.private.blob.vercel-storage.com/.jazz-environment?cache=0",
+          authorization: "Bearer vercel_blob_rw_Example_test",
+        };
+        expect(checks).toEqual([claim, claim]);
+      }
+      expect(fake.launches).toHaveLength(2);
+      for (const { env, args } of fake.launches) {
+        expect(env).toEqual(expectedEnv);
+        const path = /exec bash (\S+)/.exec(args.at(-1)!)![1]!;
+        const script = fake.files.get(path)!.toString();
+        expect(JSON.parse(script.match(/"\$app_id" '(.*)'\s*$/)![1]!).blobs).toMatchObject({
+          ...mode,
+          environment: "production",
+        });
+        for (const secret of Object.values(expectedEnv).filter(Boolean)) {
+          expect(script + args.join(" ")).not.toContain(secret);
+        }
+      }
+    },
+    60000,
+  );
+
   it("reopens large values from files on the same Drive after restarting the Sandbox core", async () => {
     const root = await mkdtemp(join(tmpdir(), "jazz-sandbox-drive-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));

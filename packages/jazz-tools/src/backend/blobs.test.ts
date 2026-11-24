@@ -8,6 +8,31 @@ import {
   vercelBlob,
 } from "./blobs.js";
 import { environmentOf, resolveCoreBlobs } from "./vercel-store.js";
+import { vercel } from "./vercel-provider.js";
+
+describe("Sandbox blob credentials", () => {
+  const options = { namespace: "test", region: "iad1" };
+  it("accepts explicit credentials and refuses incomplete ones before opening", () => {
+    expect(() =>
+      vercel({
+        ...options,
+        blobs: s3({ credentials: { accessKeyId: "id", secretAccessKey: "secret" } }),
+      }),
+    ).not.toThrow();
+    expect(() =>
+      vercel({ ...options, blobs: vercelBlob({ credentials: { readWriteToken: "token" } }) }),
+    ).not.toThrow();
+    expect(() =>
+      vercel({
+        ...options,
+        blobs: s3({ credentials: { accessKeyId: "id", secretAccessKey: "" } }),
+      }),
+    ).toThrow(/credentials.secretAccessKey/);
+    expect(() =>
+      vercel({ ...options, blobs: vercelBlob({ credentials: { readWriteToken: "" } }) }),
+    ).toThrow(/credentials.readWriteToken/);
+  });
+});
 
 describe("s3()", () => {
   it("keeps only the options given", () => {

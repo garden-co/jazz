@@ -156,6 +156,13 @@ warning suggesting you set `AWS_REGION` to it. Putting the bucket in the core's 
 keeps latency and transfer costs down, and the backend warns when it knows the bucket is elsewhere. Its options are the same
 as for [your own server](/docs/setup/deployment/own-server#large-values).
 
+To use an existing S3-compatible bucket with its own keys, pass
+`s3({ bucket, region, endpoint, credentials: { accessKeyId, secretAccessKey } })`.
+Include `sessionToken` for temporary AWS keys. For private Vercel Blob, pass
+`vercelBlob({ credentials: { readWriteToken } })`. Read these values from your
+project secrets. The provider supplies them to the core process on start and
+wake. The function still uses workload OIDC to connect to the Jazz core.
+
 Each Blob store or bucket serves one Vercel environment. A store you connect spans every
 environment unless you limit it, so create one store per environment, connect each to its own
 environment only, and enable OIDC for each environment in the project's settings. With the CLI,
@@ -266,8 +273,8 @@ each server its own `path`.
 | `maxDriveBytes`  | 10 GiB                                                                | The most data the environment's Drive holds                                                                                                                          |
 | `idleMs`         | 5 minutes                                                             | How long the Sandbox stays up with no requests or clients                                                                                                            |
 | `coreTarballUrl` | the Linux `jazz-napi` package for your installed `jazz-tools` version | Which Jazz core build the Sandbox runs                                                                                                                               |
-| `blobs`          | required     | Where large values go; see [Large values](#large-values)                                                                                                             |
-| `local`          | `sqlite({ path: ".jazz/local", blobs: files() })`                                     | The store used outside Vercel                                                                                                                                        |
+| `blobs`          | required                                                              | Where large values go; see [Large values](#large-values)                                                                                                             |
+| `local`          | `sqlite({ path: ".jazz/local", blobs: files() })`                     | The store used outside Vercel                                                                                                                                        |
 
 `vercel()` without `namespace` throws when it's called, in `next dev` too, and names the usual
 choices. The namespace is lowercased, other characters become `-`, and the whole Sandbox name may be

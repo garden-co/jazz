@@ -2,7 +2,7 @@ import type { JazzCoreSocket } from "jazz-napi";
 import { randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { resolve } from "node:path";
-import type { BlobStore } from "./blobs.js";
+import { validateBlobCredentials, type BlobStore } from "./blobs.js";
 import { inProcessCore } from "./backend-native.js";
 import { onVercelHost, vercelWebSocketUpgrade } from "./vercel-host.js";
 import { newTokenSecret } from "./inspect.js";
@@ -82,17 +82,7 @@ export function sqlite(options: { path: string; blobs: BlobStore }): SqliteProvi
       'sqlite(): blobs is required and must be files(), s3(), vercelBlob() or "sqlite"',
     );
   }
-  if (blobs !== "sqlite" && blobs.kind !== "files" && blobs.credentials !== undefined) {
-    if (blobs.kind === "s3") {
-      requireCredential("accessKeyId", blobs.credentials?.accessKeyId);
-      requireCredential("secretAccessKey", blobs.credentials?.secretAccessKey);
-      if (blobs.credentials.sessionToken !== undefined) {
-        requireCredential("sessionToken", blobs.credentials.sessionToken);
-      }
-    } else {
-      requireCredential("readWriteToken", blobs.credentials?.readWriteToken);
-    }
-  }
+  validateBlobCredentials(blobs);
   return new SqliteProvider(options.path, blobs);
 }
 
@@ -111,12 +101,6 @@ function refuseStoreAppId(store: string, options: unknown): void {
     throw new Error(
       `${store}(): appId is not an option: the store keeps its own app id. To keep an alpha.59 app's id, import its data with \`jazz-alpha59-alpha60-import import --app-id\` from the v2.0.0-alpha.65 release.`,
     );
-  }
-}
-
-function requireCredential(field: string, value: unknown) {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`sqlite(): blobs.credentials.${field} must be a nonempty string`);
   }
 }
 

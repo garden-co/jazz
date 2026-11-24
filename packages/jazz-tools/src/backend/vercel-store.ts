@@ -2,10 +2,9 @@ import type { JazzCore } from "./core-provider.js";
 // The `vercel()` store: the app's core runs in a persistent Vercel Sandbox
 // in the app's own Vercel project, with its data on a Drive. The backend
 // creates the Sandbox on first use, wakes it when a request needs it and lets
-// it stop when the app goes quiet. The function's own Vercel OIDC token is
-// the only credential: the Sandbox SDK authenticates with it, and the core
-// trusts exactly that workload (its issuer, audience and subject) and admits
-// nothing else, so the app sets no Jazz env vars and no secret exists.
+// it stop when the app goes quiet. The function's Vercel OIDC token authenticates
+// Sandbox SDK calls by default. The core trusts the pinned workload (issuer,
+// audience and subject) independently of its bucket credentials.
 // Wake handling is adapted from garden-co/infra's v2 sync proxy (ADR 0004).
 
 import { posix } from "node:path";
@@ -144,7 +143,12 @@ export interface SandboxHandle {
     timeout: number;
     extendTimeout(ms: number): Promise<void>;
   };
-  runCommand(params: { cmd: string; args: string[]; detached?: boolean }): Promise<unknown>;
+  runCommand(params: {
+    cmd: string;
+    args: string[];
+    env?: Record<string, string>;
+    detached?: boolean;
+  }): Promise<unknown>;
   writeFiles(files: { path: string; content: Buffer }[]): Promise<void>;
   readFileToBuffer(file: { path: string }): Promise<Buffer | null>;
   stop(): Promise<void>;
@@ -444,22 +448,24 @@ exec node -e ${q(CORE_LAUNCHER)} "$addon" "$app_id" ${q(
 `;
 }
 
-/**
- * The environment a core with `s3()` starts with: it assumes the
- * Marketplace's role with the function's OIDC token, which every request
- * carries. With `vercelBlob()` that token is the Blob credential itself.
- */
 function blobsSetup(blobs: SandboxBlobs | undefined, q: (s: string) => string): string {
-  if (!blobs) {
-    return "\n# Large values stay in its SQLite file (they can move to Vercel Blob or S3 later).";
+  if (!blobs || !("bucket" in blobs)) return "";
+  const role = blobs.roleArn ? ` AWS_ROLE_ARN=${q(blobs.roleArn)}` : "";
+  return `\nexport S3_BUCKET_NAME=${q(blobs.bucket)} AWS_REGION=${q(blobs.region)}${role}`;
+}
+
+/** Only the launch environment carries secrets, including when waking a stopped Sandbox. */
+function blobCredentialEnv(blobs: BlobStore): Record<string, string> | undefined {
+  if (blobs === "sqlite" || blobs.kind === "files" || !blobs.credentials) return undefined;
+  if (blobs.kind === "vercel-blob") {
+    // The native resolver prefers ambient OIDC to BLOB_READ_WRITE_TOKEN.
+    return { BLOB_READ_WRITE_TOKEN: blobs.credentials.readWriteToken, VERCEL_OIDC_TOKEN: "" };
   }
-  if ("kind" in blobs) return "";
-  if ("storeId" in blobs) {
-    return "\n# Large values go to the project's Blob store, with the function's own OIDC token.";
-  }
-  return `
-# Large values go to S3, under the role this project's functions assume.
-export S3_BUCKET_NAME=${q(blobs.bucket)} AWS_REGION=${q(blobs.region)} AWS_ROLE_ARN=${q(blobs.roleArn)}`;
+  return {
+    AWS_ACCESS_KEY_ID: blobs.credentials.accessKeyId,
+    AWS_SECRET_ACCESS_KEY: blobs.credentials.secretAccessKey,
+    AWS_SESSION_TOKEN: blobs.credentials.sessionToken ?? "",
+  };
 }
 
 /**
@@ -491,14 +497,14 @@ function coreOptions(
         : "storeId" in blobs
           ? {
               kind: "vercel-blob",
-              tokenFromWorkload: true,
+              tokenFromWorkload: !blobs.useReadWriteToken,
               storeId: blobs.storeId,
               ...claim,
               ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
             }
           : {
               kind: "s3",
-              roleFromWorkload: true,
+              roleFromWorkload: !!blobs.roleArn,
               ...claim,
               ...(blobs.endpoint === undefined ? {} : { endpoint: blobs.endpoint }),
               ...(blobs.prefix === undefined ? {} : { prefix: blobs.prefix }),
@@ -972,6 +978,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Jaz
   if (!options.backendCredential) refuseOtherEnvironment(trust, env);
   const trustLine = `${trust.issuer} ${trust.audience} ${trust.subject}`;
   const blobs = resolveCoreBlobs(options, env);
+  const credentialEnv = blobCredentialEnv(options.blobs);
   if (blobs && !("kind" in blobs) && environmentOf(trust) === undefined) {
     console.warn(
       `vercel(): the core's workload ${trust.subject} names no Vercel environment, so its blob store is not claimed for one; make sure no other environment uses that store`,
@@ -980,7 +987,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Jaz
   // Read while the core wakes; refused before anything is served.
   const storeChecked =
     blobs && "storeId" in blobs
-      ? refuseOtherEnvironmentsBlobStore(blobs.storeId, environmentOf(trust), token, params.fetch)
+      ? refuseOtherEnvironmentsBlobStore(
+          blobs.storeId,
+          environmentOf(trust),
+          credentialEnv?.BLOB_READ_WRITE_TOKEN ?? token,
+          params.fetch,
+        )
       : undefined;
   void storeChecked?.catch(() => {});
   const script = Buffer.from(startScript(version, tarballUrl, trust, blobs));
@@ -998,6 +1010,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Jaz
     await sbx.runCommand({
       cmd: "bash",
       args: ["-lc", `exec bash ${path} >>/data/server.log 2>&1`],
+      ...(credentialEnv && { env: credentialEnv }),
       detached: true,
     });
   };

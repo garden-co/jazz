@@ -1,4 +1,4 @@
-import { files } from "./blobs.js";
+import { files, validateBlobCredentials } from "./blobs.js";
 import { isDeepStrictEqual } from "node:util";
 import { vercelWebSocketUpgrade } from "./vercel-host.js";
 import {
@@ -31,8 +31,8 @@ import type { JazzCoreOpenContext, JazzProvider } from "./core-provider.js";
  * `namespace: ({ environment, branch }) => environment === "production" ? "production" : perBranch(branch)`.
  * It is created on first use, wakes when a request needs it (about a second)
  * and stops after `idleMs` without requests or sockets. The function's Vercel
- * OIDC token is its only credential, so there are no secrets and no env vars:
- * the core admits only tokens naming the workload its first start pinned
+ * OIDC token authenticates the function to the core. Bucket credentials are
+ * configured separately. The core admits only tokens naming the workload its first start pinned
  * (team, project and environment by name), and a deployment of another
  * environment refuses to start or retarget it. All previews share one
  * workload, so preview branches' cores are kept apart, not secured from each
@@ -58,13 +58,7 @@ export function vercel(
   checkNamespaceOption(options ?? {});
   checkRegionOption(options ?? {});
   if (!options.blobs) throw new Error("vercel(): blobs is required");
-  if (
-    options.blobs !== "sqlite" &&
-    "credentials" in options.blobs &&
-    options.blobs.credentials !== undefined
-  ) {
-    throw new Error("vercel(): explicit blob credentials are currently supported only by sqlite()");
-  }
+  validateBlobCredentials(options.blobs);
   const { local, ...rest } = options;
   if (backendNative().host === "node" && !serverlessHost()) {
     return local ?? sqlite({ path: ".jazz/local", blobs: files() });
